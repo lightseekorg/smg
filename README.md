@@ -1026,6 +1026,9 @@ The repository uses [pre-commit](https://pre-commit.com/) to ensure code quality
 # Install pre-commit (if not already installed)
 pip install pre-commit
 
+# Install nightly Rust toolchain (required for rustfmt with advanced features)
+rustup toolchain install nightly --profile minimal --component rustfmt
+
 # Install the git hooks
 pre-commit install
 

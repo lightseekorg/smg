@@ -40,7 +40,7 @@ repos:
       - id: rustfmt
         name: rustfmt
         description: Format Rust code with rustfmt
-        entry: cargo fmt --all --
+        entry: cargo +nightly fmt --all --
         language: system
         types: [rust]
         pass_filenames: false
