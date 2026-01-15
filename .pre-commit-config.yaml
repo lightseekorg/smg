@@ -25,7 +25,7 @@ repos:
     hooks:
       - id: codespell
         additional_dependencies: ['tomli']
-        args: ['-L', 'cann,thi,makro,wil,rouge,PRIS']
+        args: ['-L', 'cann,thi,makro,wil,rouge,PRIS,hel,te,ans']
         exclude: |
           (?x)^(
             src/proto/.*\.proto$|
