@@ -208,9 +208,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Clone SGLang repository
+        run: |
+          git clone https://github.com/sgl-project/sglang.git
+
       - name: Install SGLang dependencies
         run: |
-          pip install "sglang[all]"
+          cd sglang
+          sudo --preserve-env=PATH bash scripts/ci/ci_install_dependency.sh
 
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
