@@ -1010,6 +1010,59 @@ python3 -m sglang_router.launch_router \
 ```
 
 ## Development & Testing
+
+### Pre-commit Hooks
+
+The repository uses [pre-commit](https://pre-commit.com/) to ensure code quality and consistency. The configuration includes:
+
+- **General Checks**: Trailing whitespace, end-of-file fixing, YAML/TOML validation, merge conflict detection, large file prevention
+- **Rust Formatting**: `rustfmt` with workspace-wide formatting
+- **Rust Linting**: `clippy` with all warnings treated as errors
+- **Spell Checking**: `codespell` for catching typos across all text files
+
+**Setup:**
+
+```bash
+# Install pre-commit (if not already installed)
+pip install pre-commit
+
+# Install nightly Rust toolchain (required for rustfmt with advanced features)
+rustup toolchain install nightly --profile minimal --component rustfmt
+
+# Install the git hooks
+pre-commit install
+
+# (Optional) Run against all files to verify setup
+pre-commit run --all-files
+```
+
+**Usage:**
+
+Pre-commit hooks run automatically on `git commit`. To run manually:
+
+```bash
+# Run all hooks on staged files
+pre-commit run
+
+# Run all hooks on all files
+pre-commit run --all-files
+
+# Run specific hook
+pre-commit run rustfmt --all-files
+pre-commit run clippy --all-files
+```
+
+**Bypass (use sparingly):**
+
+```bash
+# Skip hooks for a specific commit (not recommended)
+git commit --no-verify
+```
+
+**Note:** The first `clippy` run may take several minutes as it downloads and compiles dependencies. Subsequent runs will be much faster.
+
+### Building and Testing
+
 ```bash
 # Build Rust components (debug mode, fast)
 cargo build
