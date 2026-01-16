@@ -1,0 +1,59 @@
+# Label configuration for actions/labeler
+# See: https://github.com/actions/labeler
+
+rust:
+  - changed-files:
+      - any-glob-to-any-file: 'src/**/*.rs'
+
+python-bindings:
+  - changed-files:
+      - any-glob-to-any-file: 'bindings/python/**/*'
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'docs/**/*'
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/Cargo.toml'
+          - '**/Cargo.lock'
+          - '**/pyproject.toml'
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file: '.github/**/*'
+
+grpc:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'src/proto/**/*'
+          - 'src/grpc_client/**/*'
+
+mcp:
+  - changed-files:
+      - any-glob-to-any-file: 'src/mcp/**/*'
+
+tokenizer:
+  - changed-files:
+      - any-glob-to-any-file: 'src/tokenizer/**/*'
+
+tool-parser:
+  - changed-files:
+      - any-glob-to-any-file: 'src/tool_parser/**/*'
+
+wasm:
+  - changed-files:
+      - any-glob-to-any-file: 'src/wasm/**/*'
+
+benchmarks:
+  - changed-files:
+      - any-glob-to-any-file: 'benches/**/*'
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'tests/**/*'
+          - 'e2e_test/**/*'
