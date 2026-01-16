@@ -113,7 +113,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          bash scripts/ci/ci_install_rust.sh
+          bash scripts/ci_install_rust.sh
 
       - name: Configure sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -210,7 +210,7 @@ jobs:
 
       - name: Install SGLang dependencies
         run: |
-          sudo --preserve-env=PATH bash scripts/ci/ci_install_dependency.sh
+          sudo --preserve-env=PATH bash scripts/ci_install_dependency.sh
 
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
@@ -275,7 +275,7 @@ jobs:
 
       - name: Run E2E tests
         run: |
-          bash scripts/killall_sglang.sh "nuk_gpus"
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.test_dirs }} -s -vv -o log_cli=true --log-cli-level=INFO
 
       - name: Upload benchmark results
