@@ -314,7 +314,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: docker/gateway.Dockerfile
+          file: docker/Dockerfile
           push: false
           tags: sgl-model-gateway:test
           cache-from: type=gha
