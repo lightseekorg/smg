@@ -134,7 +134,7 @@ jobs:
           save-if: true
 
       - name: Run benchmark
-        timeout-minutes: 30
+        timeout-minutes: 40
         run: |
           source "$HOME/.cargo/env"
           if command -v sccache &> /dev/null; then
