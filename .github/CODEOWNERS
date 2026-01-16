@@ -1,4 +1,4 @@
-/ @slin1237 @CatherineSue
+* @slin1237 @CatherineSue
 /benches @slin1237
 /bindings/python @CatherineSue @key4ng @slin1237
 /e2e_test @CatherineSue @key4ng
@@ -7,7 +7,7 @@
 /src/data_connector @key4ng
 /src/grpc_client @CatherineSue @slin1237
 /src/mcp @key4ng @slin1237
-/src/policies @slin1237 @ByronHsu
+/src/policies @slin1237
 /src/proto @CatherineSue @slin1237
 /src/protocols @CatherineSue @key4ng
 /src/reasoning_parser @CatherineSue
