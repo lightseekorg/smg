@@ -40,6 +40,10 @@ tokenizer:
   - changed-files:
       - any-glob-to-any-file: 'src/tokenizer/**/*'
 
+tool-parser:
+  - changed-files:
+      - any-glob-to-any-file: 'src/tool_parser/**/*'
+
 wasm:
   - changed-files:
       - any-glob-to-any-file: 'src/wasm/**/*'
