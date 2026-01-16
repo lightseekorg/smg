@@ -567,41 +567,43 @@ impl Tree {
 
         // Try cached tenant first (O(1)) before falling back to O(shards) DashMap iteration.
         // The cache is valid if the tenant still exists in tenant_last_access_time.
-        let tenant: TenantId = {
+        // Track whether we found a real tenant (vs fallback) to avoid inserting phantom tenants.
+        let (tenant, found_real_tenant): (TenantId, bool) = {
             let cached = curr.last_tenant.read();
             if let Some(ref t) = *cached {
                 if curr.tenant_last_access_time.contains_key(t.as_ref()) {
-                    Arc::clone(t)
+                    (Arc::clone(t), true)
                 } else {
                     drop(cached);
                     // Cache stale, fall back to iteration and update cache
-                    let t = curr
+                    let found = curr
                         .tenant_last_access_time
                         .iter()
                         .next()
-                        .map(|kv| Arc::clone(kv.key()))
-                        .unwrap_or_else(|| Arc::from("empty"));
+                        .map(|kv| Arc::clone(kv.key()));
+                    let t = found.clone().unwrap_or_else(|| Arc::from("empty"));
                     *curr.last_tenant.write() = Some(Arc::clone(&t));
-                    t
+                    (t, found.is_some())
                 }
             } else {
                 drop(cached);
                 // No cache, iterate and populate cache
-                let t = curr
+                let found = curr
                     .tenant_last_access_time
                     .iter()
                     .next()
-                    .map(|kv| Arc::clone(kv.key()))
-                    .unwrap_or_else(|| Arc::from("empty"));
+                    .map(|kv| Arc::clone(kv.key()));
+                let t = found.clone().unwrap_or_else(|| Arc::from("empty"));
                 *curr.last_tenant.write() = Some(Arc::clone(&t));
-                t
+                (t, found.is_some())
             }
         };
 
         // Update timestamp probabilistically (1 in 8 matches) to reduce DashMap contention.
         // LRU eviction doesn't need perfect accuracy - approximate timestamps suffice.
+        // Only update for real tenants to avoid inserting phantom "empty" tenants.
         let epoch = get_epoch();
-        if epoch & 0x7 == 0 {
+        if found_real_tenant && epoch & 0x7 == 0 {
             curr.tenant_last_access_time
                 .insert(Arc::clone(&tenant), epoch);
         }
