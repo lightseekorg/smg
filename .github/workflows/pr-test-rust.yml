@@ -210,7 +210,7 @@ jobs:
 
       - name: Install SGLang dependencies
         run: |
-          sudo --preserve-env=PATH bash scripts/ci_install_dependency.sh
+          pip install "sglang[all]"
 
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
