@@ -572,29 +572,34 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(2)).await;
         log::info!("================================================");
 
-        // 5. wait for node status to sync
-        tokio::time::sleep(Duration::from_secs(8)).await;
-        log::info!("================================================");
-
-        // 6. verify node status, status of all nodes should be same, and node E should be down
+        // 5. Poll until expected state is reached (with timeout)
+        // Note: D stays in Leaving status because gracefully shutdown nodes are not pinged anymore (by design)
+        //       E transitions Alive → Suspected → Down because it was abruptly shutdown
         let final_state = String::from("A: Alive - {\"hello\": [119, 111, 114, 108, 100]}, B: Alive - {}, C: Alive - {}, D: Leaving - {}, E: Down - {}");
-        assert_eq!(
-            print_state(&handler_a),
-            final_state,
-            "State A: {:?}",
-            print_state(&handler_a)
-        );
-        assert_eq!(
-            print_state(&handler_b),
-            final_state,
-            "State B: {:?}",
-            print_state(&handler_b)
-        );
-        assert_eq!(
-            print_state(&handler_c),
-            final_state,
-            "State C: {:?}",
-            print_state(&handler_c)
-        );
+
+        let max_wait = Duration::from_secs(30);
+        let poll_interval = Duration::from_millis(500);
+        let start = std::time::Instant::now();
+
+        loop {
+            let state_a = print_state(&handler_a);
+            let state_b = print_state(&handler_b);
+            let state_c = print_state(&handler_c);
+
+            if state_a == final_state && state_b == final_state && state_c == final_state {
+                log::info!("All nodes converged to expected state");
+                break;
+            }
+
+            if start.elapsed() > max_wait {
+                log::info!("================================================");
+                panic!(
+                    "Timeout waiting for state convergence.\nExpected: {:?}\nState A: {:?}\nState B: {:?}\nState C: {:?}",
+                    final_state, state_a, state_b, state_c
+                );
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
     }
 }
