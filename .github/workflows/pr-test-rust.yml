@@ -4,12 +4,12 @@ on:
   push:
     branches: [ main ]
     paths:
-      - "sgl-model-gateway/**"
+      - "**"
   pull_request:
     branches: [ main ]
     types: [opened, synchronize, reopened, labeled]
     paths:
-      - "sgl-model-gateway/**"
+      - "**"
   workflow_dispatch:
 
 concurrency:
@@ -44,7 +44,7 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: sgl-model-gateway
+          workspaces: .
           shared-key: "rust-cache"
           cache-all-crates: true
           cache-on-failure: true
@@ -54,23 +54,23 @@ jobs:
         run: |
           source "$HOME/.cargo/env"
           export RUSTC_WRAPPER=sccache
-          cd sgl-model-gateway/bindings/python
+          cd bindings/python
           python3 -m pip install --upgrade pip maturin
           maturin build --profile ci --features vendored-openssl --out dist
 
       - name: List built wheel
-        run: ls -lh sgl-model-gateway/bindings/python/dist/
+        run: ls -lh bindings/python/dist/
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
           name: smg-wheel
-          path: sgl-model-gateway/bindings/python/dist/*.whl
+          path: bindings/python/dist/*.whl
           retention-days: 1
 
       - name: Test wheel install
         run: |
-          pip install sgl-model-gateway/bindings/python/dist/*.whl
+          pip install bindings/python/dist/*.whl
           python3 -c "import sglang_router; print('Python package: OK')"
           python3 -c "from sglang_router.sglang_router_rs import Router; print('Rust extension: OK')"
           python3 -m sglang_router.launch_router --help > /dev/null && echo "Entry point: OK"
@@ -80,13 +80,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: sglang-repo
-
-      - name: Move sgl-model-gateway folder to root
-        run: |
-          mv sglang-repo/sgl-model-gateway/* .
-          rm -rf sglang-repo
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -131,7 +124,7 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: sgl-model-gateway
+          workspaces: .
           shared-key: "rust-cache"
           cache-all-crates: true
           cache-on-failure: true
@@ -140,14 +133,12 @@ jobs:
       - name: Run lint
         run: |
           source "$HOME/.cargo/env"
-          cd sgl-model-gateway/
           rustup component add clippy
           cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run fmt
         run: |
           source "$HOME/.cargo/env"
-          cd sgl-model-gateway/
           rustup component add --toolchain nightly-x86_64-unknown-linux-gnu rustfmt
           rustup toolchain install nightly --profile minimal
           cargo +nightly fmt -- --check
@@ -157,15 +148,12 @@ jobs:
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
           pip install transformers pillow numpy scipy
-          pip install transformers pillow numpy
-          cd sgl-model-gateway/
           python scripts/generate_vision_golden.py
 
       - name: Run Rust tests
         timeout-minutes: 20
         run: |
           source "$HOME/.cargo/env"
-          cd sgl-model-gateway/
           cargo test
 
       - name: Show sccache stats
@@ -288,7 +276,6 @@ jobs:
       - name: Run E2E tests
         run: |
           bash scripts/killall_sglang.sh "nuk_gpus"
-          cd sgl-model-gateway
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.test_dirs }} -s -vv -o log_cli=true --log-cli-level=INFO
 
       - name: Upload benchmark results
@@ -296,7 +283,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: genai-bench-results-all-policies
-          path: sgl-model-gateway/benchmark_**/
+          path: benchmark_**/
 
       - name: Cleanup Brave MCP Server
         if: always() && matrix.setup_brave
@@ -355,4 +342,4 @@ jobs:
         name: genai-bench-results-all-policies
 
     - name: Create benchmark summary
-      run: python3 sgl-model-gateway/e2e_test/benchmarks/summarize.py .
+      run: python3 e2e_test/benchmarks/summarize.py .
