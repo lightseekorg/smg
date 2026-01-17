@@ -16,7 +16,7 @@ use super::{
 };
 use crate::routers::{
     header_utils::{apply_provider_headers, extract_auth_header},
-    mcp_utils::{ensure_request_mcp_client, McpLoopConfig},
+    mcp_utils::McpLoopConfig,
     openai::context::{PayloadState, RequestContext},
     persistence_utils::persist_conversation_items,
 };
@@ -50,19 +50,13 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         }
     };
 
-    let server_keys = match original_body.tools.as_ref() {
-        Some(tools) => match ensure_request_mcp_client(mcp_manager, tools.as_slice()).await {
-            Some((_manager, keys)) => keys,
-            None => Vec::new(),
-        },
-        None => Vec::new(),
-    };
-
-    let active_mcp = if mcp_manager.list_tools_for_servers(&server_keys).is_empty() {
-        None
-    } else {
-        Some(mcp_manager)
-    };
+    let active_mcp = mcp_manager
+        .create_request_context(original_body.tools.as_deref())
+        .await;
+    let server_keys = active_mcp
+        .as_ref()
+        .map(|ctx| ctx.server_keys())
+        .unwrap_or_default();
 
     let mut response_json: Value;
 
@@ -71,7 +65,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             server_keys: server_keys.clone(),
             ..McpLoopConfig::default()
         };
-        prepare_mcp_tools_as_functions(&mut payload, mcp, &server_keys);
+        prepare_mcp_tools_as_functions(&mut payload, &mcp, &server_keys);
 
         match execute_tool_loop(
             ctx.components.client(),
@@ -79,7 +73,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             ctx.headers(),
             payload,
             original_body,
-            mcp,
+            &mcp,
             &config,
         )
         .await

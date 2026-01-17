@@ -1,9 +1,15 @@
 //! MCP client management and orchestration.
 //!
-//! Manages both static MCP servers (from config) and dynamic MCP servers (from requests).
-//! Static clients are never evicted; dynamic clients use LRU eviction via connection pool.
+//! Manages static MCP servers (from config) and dynamic MCP servers (from requests).
+//! Static clients are never evicted; dynamic clients use LRU eviction via the connection pool.
+//! Request-scoped tools are handled by `RequestMcpContext` and do not use the pool.
 
-use std::{borrow::Cow, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use backoff::ExponentialBackoffBuilder;
 use dashmap::DashMap;
@@ -23,12 +29,17 @@ use rmcp::{
 use serde_json::Map;
 use tracing::{debug, error, info, warn};
 
-use crate::mcp::{
-    config::{McpConfig, McpProxyConfig, McpServerConfig, McpTransport, Prompt, RawResource, Tool},
-    connection_pool::McpConnectionPool,
-    error::{McpError, McpResult},
-    inventory::ToolInventory,
-    tool_args::ToolArgs,
+use crate::{
+    mcp::{
+        config::{
+            McpConfig, McpProxyConfig, McpServerConfig, McpTransport, Prompt, RawResource, Tool,
+        },
+        connection_pool::McpConnectionPool,
+        error::{McpError, McpResult},
+        inventory::ToolInventory,
+        tool_args::ToolArgs,
+    },
+    protocols::responses::{ResponseTool, ResponseToolType},
 };
 
 /// Type alias for MCP client
@@ -109,6 +120,15 @@ impl McpManager {
         self.connection_pool.get(server_name)
     }
 
+    /// Connect to an MCP server for a single request without using the pool.
+    pub async fn connect_request_client(
+        &self,
+        server_config: &McpServerConfig,
+    ) -> McpResult<Arc<McpClient>> {
+        let client = Self::connect_server(server_config, self._config.proxy.as_ref()).await?;
+        Ok(Arc::new(client))
+    }
+
     pub async fn get_or_create_client(
         &self,
         server_config: McpServerConfig,
@@ -134,6 +154,94 @@ impl McpManager {
         self.inventory.clear_server_tools(&server_key);
         Self::load_server_inventory(&self.inventory, &server_key, &client).await;
         Ok(client)
+    }
+
+    pub async fn create_request_context(
+        &self,
+        tools: Option<&[ResponseTool]>,
+    ) -> Option<Arc<RequestMcpContext>> {
+        let tools = tools?;
+        let mut clients = HashMap::new();
+        let inventory = Arc::new(ToolInventory::new());
+        let mut has_valid_mcp_tools = false;
+
+        for tool in tools {
+            let Some(server_config) = self.parse_tool_server_config(tool) else {
+                continue;
+            };
+
+            has_valid_mcp_tools = true;
+            let server_key = Self::server_key(&server_config);
+
+            if clients.contains_key(&server_key) {
+                continue;
+            }
+
+            match self.connect_request_client(&server_config).await {
+                Ok(client) => {
+                    Self::load_server_inventory(&inventory, &server_key, &client).await;
+                    clients.insert(server_key, client);
+                }
+                Err(err) => {
+                    warn!(
+                        "Failed to connect MCP request server {}: {}",
+                        server_key, err
+                    );
+                }
+            }
+        }
+
+        if !has_valid_mcp_tools {
+            return None;
+        }
+
+        if clients.is_empty() {
+            warn!("All MCP request tools failed to connect");
+            return None;
+        }
+
+        Some(Arc::new(RequestMcpContext::new(inventory, clients)))
+    }
+
+    fn parse_tool_server_config(&self, tool: &ResponseTool) -> Option<McpServerConfig> {
+        if !matches!(tool.r#type, ResponseToolType::Mcp) {
+            return None;
+        }
+
+        let server_url = tool.server_url.as_ref().map(|s| s.trim().to_string())?;
+
+        if !(server_url.starts_with("http://") || server_url.starts_with("https://")) {
+            warn!(
+                "Ignoring MCP server_url with unsupported scheme: {}",
+                server_url
+            );
+            return None;
+        }
+
+        let name = tool
+            .server_label
+            .clone()
+            .unwrap_or_else(|| "request-mcp".to_string());
+        let token = tool.authorization.clone();
+
+        let transport = if server_url.ends_with("/sse") {
+            McpTransport::Sse {
+                url: server_url,
+                token,
+            }
+        } else {
+            McpTransport::Streamable {
+                url: server_url,
+                token,
+            }
+        };
+
+        Some(McpServerConfig {
+            name,
+            transport,
+            proxy: None,
+            required: false,
+        })
     }
 
     pub fn list_static_servers(&self) -> Vec<String> {
@@ -778,6 +886,104 @@ impl McpManager {
     }
 }
 
+/// Request-scoped MCP context for Responses API.
+///
+/// Holds per-request clients and a private tool inventory, while still
+/// allowing access to static tools managed by `McpManager`.
+pub struct RequestMcpContext {
+    inventory: Arc<ToolInventory>,
+    clients: HashMap<String, Arc<McpClient>>,
+}
+
+impl RequestMcpContext {
+    pub(crate) fn new(
+        inventory: Arc<ToolInventory>,
+        clients: HashMap<String, Arc<McpClient>>,
+    ) -> Self {
+        Self { inventory, clients }
+    }
+
+    pub fn server_keys(&self) -> Vec<String> {
+        self.clients.keys().cloned().collect()
+    }
+
+    pub fn list_tools_for_servers(&self, server_keys: &[String]) -> Vec<Tool> {
+        let server_keys_set: HashSet<&str> = server_keys.iter().map(String::as_str).collect();
+
+        self.inventory
+            .list_tools()
+            .into_iter()
+            .filter_map(|(_tool_name, server_key, tool_info)| {
+                if server_keys_set.contains(server_key.as_str()) {
+                    Some(tool_info)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    pub async fn call_tool(
+        &self,
+        tool_name: &str,
+        args: impl Into<ToolArgs>,
+    ) -> McpResult<CallToolResult> {
+        let (server_key, tool_info) = self
+            .inventory
+            .get_tool(tool_name)
+            .ok_or_else(|| McpError::ToolNotFound(tool_name.to_string()))?;
+
+        let tool_schema = Some(serde_json::Value::Object((*tool_info.input_schema).clone()));
+        let args_map = args
+            .into()
+            .into_map(tool_schema.as_ref())
+            .map_err(McpError::InvalidArguments)?;
+
+        let client = self
+            .clients
+            .get(&server_key)
+            .ok_or_else(|| McpError::ServerNotFound(server_key.clone()))?;
+
+        let request = CallToolRequestParam {
+            name: Cow::Owned(tool_name.to_string()),
+            arguments: args_map,
+        };
+
+        client
+            .call_tool(request)
+            .await
+            .map_err(|e| McpError::ToolExecution(format!("Failed to call tool: {}", e)))
+    }
+}
+
+impl Drop for RequestMcpContext {
+    /// Best-effort cleanup for request-scoped clients.
+    fn drop(&mut self) {
+        if self.clients.is_empty() {
+            return;
+        }
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            for (_, client) in self.clients.drain() {
+                match Arc::try_unwrap(client) {
+                    Ok(client) => {
+                        handle.spawn(async move {
+                            if let Err(err) = client.cancel().await {
+                                warn!("Error closing request client: {}", err);
+                            }
+                        });
+                    }
+                    Err(_) => {
+                        warn!("Request MCP client still has active references on drop");
+                    }
+                }
+            }
+        } else {
+            warn!("No tokio runtime available for MCP client cleanup");
+        }
+    }
+}
+
 /// Statistics about the MCP manager
 #[derive(Debug, Clone)]
 pub struct McpManagerStats {
@@ -795,7 +1001,40 @@ pub struct McpManagerStats {
 
 #[cfg(test)]
 mod tests {
+    use std::{borrow::Cow, sync::Arc};
+
+    use dashmap::DashMap;
+    use rmcp::model::Tool;
+    use serde_json::Map;
+
     use super::*;
+
+    fn test_manager() -> McpManager {
+        McpManager {
+            static_clients: Arc::new(DashMap::new()),
+            inventory: Arc::new(ToolInventory::new()),
+            connection_pool: Arc::new(McpConnectionPool::new()),
+            _config: McpConfig {
+                servers: vec![],
+                pool: Default::default(),
+                proxy: None,
+                warmup: vec![],
+                inventory: Default::default(),
+            },
+        }
+    }
+
+    fn test_tool(name: &str) -> Tool {
+        Tool {
+            name: Cow::Owned(name.to_string()),
+            title: None,
+            description: None,
+            input_schema: Arc::new(Map::new()),
+            output_schema: None,
+            annotations: None,
+            icons: None,
+        }
+    }
 
     #[tokio::test]
     async fn test_manager_creation() {
@@ -809,5 +1048,72 @@ mod tests {
 
         let manager = McpManager::new(config, 100).await.unwrap();
         assert_eq!(manager.list_static_servers().len(), 0);
+    }
+
+    #[test]
+    fn test_parse_tool_server_config_rejects_invalid_scheme() {
+        let manager = test_manager();
+        let tool = ResponseTool {
+            r#type: ResponseToolType::Mcp,
+            server_url: Some("ftp://example.com/sse".to_string()),
+            ..ResponseTool::default()
+        };
+
+        assert!(manager.parse_tool_server_config(&tool).is_none());
+    }
+
+    #[test]
+    fn test_parse_tool_server_config_detects_sse_transport() {
+        let manager = test_manager();
+        let tool = ResponseTool {
+            r#type: ResponseToolType::Mcp,
+            server_url: Some("https://example.com/sse".to_string()),
+            authorization: Some("token".to_string()),
+            ..ResponseTool::default()
+        };
+
+        let config = manager.parse_tool_server_config(&tool).unwrap();
+        match config.transport {
+            McpTransport::Sse { url, token } => {
+                assert_eq!(url, "https://example.com/sse");
+                assert_eq!(token.as_deref(), Some("token"));
+            }
+            _ => panic!("expected SSE transport"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_request_context_returns_none_without_valid_mcp_tools() {
+        let manager = test_manager();
+        let tools = vec![ResponseTool {
+            r#type: ResponseToolType::Function,
+            ..ResponseTool::default()
+        }];
+
+        let ctx = manager.create_request_context(Some(&tools)).await;
+        assert!(ctx.is_none());
+    }
+
+    #[test]
+    fn test_list_tools_for_servers_filters() {
+        let manager = test_manager();
+        manager.inventory.insert_tool(
+            "tool-a".to_string(),
+            "server-a".to_string(),
+            test_tool("tool-a"),
+        );
+        manager.inventory.insert_tool(
+            "tool-b".to_string(),
+            "server-b".to_string(),
+            test_tool("tool-b"),
+        );
+
+        let filtered = manager.list_tools_for_servers(&["server-a".to_string()]);
+        let names: Vec<String> = filtered
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+
+        assert_eq!(names, vec!["tool-a".to_string()]);
     }
 }

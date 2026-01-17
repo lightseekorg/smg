@@ -32,6 +32,7 @@ use super::{
     utils::{mask_tools_as_mcp, patch_response_with_request_metadata, rewrite_streaming_block},
 };
 use crate::{
+    mcp::RequestMcpContext,
     protocols::{
         event_types::{
             is_function_call_type, is_response_event, FunctionCallEvent, ItemType, McpEvent,
@@ -41,7 +42,7 @@ use crate::{
     },
     routers::{
         header_utils::{apply_request_headers, preserve_response_headers},
-        mcp_utils::{ensure_request_mcp_client, McpLoopConfig},
+        mcp_utils::McpLoopConfig,
         openai::context::{RequestContext, StreamingEventContext, StreamingRequest},
         persistence_utils::persist_conversation_items,
     },
@@ -424,7 +425,7 @@ pub(super) fn send_final_response_event(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     sequence_number: &mut u64,
     state: &ToolLoopState,
-    active_mcp: Option<&Arc<crate::mcp::McpManager>>,
+    active_mcp: Option<&Arc<RequestMcpContext>>,
     ctx: &StreamingEventContext<'_>,
 ) -> bool {
     let mut final_response = match handler.snapshot_final_response() {
@@ -637,7 +638,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
     client: &reqwest::Client,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
-    active_mcp: &Arc<crate::mcp::McpManager>,
+    active_mcp: &Arc<RequestMcpContext>,
     server_keys: Vec<String>,
 ) -> Response {
     // Transform MCP tools to function tools in payload
@@ -991,19 +992,13 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     let original_body = ctx.responses_request();
     let mcp_manager = ctx.components.mcp_manager().expect("MCP manager required");
 
-    let server_keys = match original_body.tools.as_ref() {
-        Some(tools) => match ensure_request_mcp_client(mcp_manager, tools.as_slice()).await {
-            Some((_manager, keys)) => keys,
-            None => Vec::new(),
-        },
-        None => Vec::new(),
-    };
-
-    let active_mcp = if mcp_manager.list_tools_for_servers(&server_keys).is_empty() {
-        None
-    } else {
-        Some(mcp_manager.clone())
-    };
+    let active_mcp = mcp_manager
+        .create_request_context(original_body.tools.as_deref())
+        .await;
+    let server_keys = active_mcp
+        .as_ref()
+        .map(|ctx| ctx.server_keys())
+        .unwrap_or_default();
 
     let client = ctx.components.client().clone();
     let req = ctx.into_streaming_context();

@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
-    mcp,
+    mcp::RequestMcpContext,
     protocols::{
         event_types::{is_function_call_type, ItemType, McpEvent, OutputItemEvent},
         responses::{generate_id, ResponseInput, ResponsesRequest},
@@ -122,7 +122,7 @@ impl FunctionCallInProgress {
 /// Returns false if client disconnected during execution
 pub(super) async fn execute_streaming_tool_calls(
     pending_calls: Vec<FunctionCallInProgress>,
-    active_mcp: &Arc<mcp::McpManager>,
+    active_mcp: &Arc<RequestMcpContext>,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     state: &mut ToolLoopState,
     server_label: &str,
@@ -201,7 +201,7 @@ pub(super) async fn execute_streaming_tool_calls(
 /// Transform payload to replace MCP tools with function tools
 pub(super) fn prepare_mcp_tools_as_functions(
     payload: &mut Value,
-    active_mcp: &Arc<mcp::McpManager>,
+    active_mcp: &Arc<RequestMcpContext>,
     server_keys: &[String],
 ) {
     if let Some(obj) = payload.as_object_mut() {
@@ -307,7 +307,7 @@ pub(super) fn build_resume_payload(
 /// Returns false if client disconnected
 pub(super) fn send_mcp_list_tools_events(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-    mcp: &Arc<mcp::McpManager>,
+    mcp: &Arc<RequestMcpContext>,
     server_label: &str,
     output_index: usize,
     sequence_number: &mut u64,
@@ -464,7 +464,7 @@ pub(super) fn send_mcp_call_completion_events_with_error(
 pub(super) fn inject_mcp_metadata_streaming(
     response: &mut Value,
     state: &ToolLoopState,
-    mcp: &Arc<mcp::McpManager>,
+    mcp: &Arc<RequestMcpContext>,
     server_label: &str,
     server_keys: &[String],
 ) {
@@ -505,7 +505,7 @@ pub(super) async fn execute_tool_loop(
     headers: Option<&HeaderMap>,
     initial_payload: Value,
     original_body: &ResponsesRequest,
-    active_mcp: &Arc<mcp::McpManager>,
+    active_mcp: &Arc<RequestMcpContext>,
     config: &McpLoopConfig,
 ) -> Result<Value, String> {
     let mut state = ToolLoopState::new(original_body.input.clone());
@@ -671,7 +671,7 @@ pub(super) fn build_incomplete_response(
     mut response: Value,
     state: ToolLoopState,
     reason: &str,
-    active_mcp: &Arc<mcp::McpManager>,
+    active_mcp: &Arc<RequestMcpContext>,
     original_body: &ResponsesRequest,
     server_keys: &[String],
 ) -> Result<Value, String> {
@@ -765,7 +765,7 @@ pub(super) fn build_incomplete_response(
 
 /// Build a mcp_list_tools output item
 pub(super) fn build_mcp_list_tools_item(
-    mcp: &Arc<mcp::McpManager>,
+    mcp: &Arc<RequestMcpContext>,
     server_label: &str,
     server_keys: &[String],
 ) -> Value {

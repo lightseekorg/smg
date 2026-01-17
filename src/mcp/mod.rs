@@ -14,4 +14,4 @@ pub mod tool_args;
 
 // Re-export types used outside this module
 pub use config::{McpConfig, McpServerConfig, McpTransport, Tool};
-pub use manager::McpManager;
+pub use manager::{McpManager, RequestMcpContext};
