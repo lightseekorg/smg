@@ -1,0 +1,21 @@
+[package]
+name = "tool-parser"
+version = "0.1.0"
+edition = "2021"
+description = "Tool/function call parser for LLM model outputs"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+keywords = ["llm", "tool-calling", "function-calling", "parser"]
+categories = ["parsing", "api-bindings"]
+
+[dependencies]
+openai-protocol.workspace = true
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+regex = "1.10"
+thiserror = "2.0.12"
+tokio = { version = "1.42.0", features = ["sync", "rt-multi-thread", "macros"] }
+tracing = "0.1"
+rustpython-parser = "0.4.0"
+num-traits = "0.2"
