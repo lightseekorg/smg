@@ -4,7 +4,15 @@
 
 use std::collections::HashMap;
 
+#[cfg(feature = "axum")]
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "axum")]
+use serde_json::{json, Value};
 
 use super::UNKNOWN_MODEL_ID;
 
@@ -214,6 +222,50 @@ pub struct JobStatus {
     pub timestamp: u64,
 }
 
+impl JobStatus {
+    /// Create a pending job status
+    pub fn pending(job_type: &str, worker_url: &str) -> Self {
+        Self {
+            job_type: job_type.to_string(),
+            worker_url: worker_url.to_string(),
+            status: "pending".to_string(),
+            message: None,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        }
+    }
+
+    /// Create a processing job status
+    pub fn processing(job_type: &str, worker_url: &str) -> Self {
+        Self {
+            job_type: job_type.to_string(),
+            worker_url: worker_url.to_string(),
+            status: "processing".to_string(),
+            message: None,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        }
+    }
+
+    /// Create a failed job status
+    pub fn failed(job_type: &str, worker_url: &str, error: String) -> Self {
+        Self {
+            job_type: job_type.to_string(),
+            worker_url: worker_url.to_string(),
+            status: "failed".to_string(),
+            message: Some(error),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        }
+    }
+}
+
 /// Worker list response
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkerListResponse {
@@ -372,4 +424,46 @@ pub struct WorkerLoadInfo {
     pub worker_type: Option<String>,
     /// Current load (-1 indicates failure to fetch)
     pub load: isize,
+}
+
+#[cfg(feature = "axum")]
+impl IntoResponse for FlushCacheResult {
+    fn into_response(self) -> Response {
+        let status = if self.failed.is_empty() {
+            StatusCode::OK
+        } else {
+            StatusCode::PARTIAL_CONTENT
+        };
+
+        let mut body = json!({
+            "status": if self.failed.is_empty() { "success" } else { "partial_success" },
+            "message": self.message,
+            "workers_flushed": self.successful.len(),
+            "total_http_workers": self.http_workers,
+            "total_workers": self.total_workers
+        });
+
+        if !self.failed.is_empty() {
+            body["successful"] = json!(self.successful);
+            body["failed"] = json!(self
+                .failed
+                .into_iter()
+                .map(|(url, err)| json!({"worker": url, "error": err}))
+                .collect::<Vec<_>>());
+        }
+
+        (status, Json(body)).into_response()
+    }
+}
+
+#[cfg(feature = "axum")]
+impl IntoResponse for WorkerLoadsResult {
+    fn into_response(self) -> Response {
+        let loads: Vec<Value> = self
+            .loads
+            .iter()
+            .map(|info| json!({"worker": &info.worker, "load": info.load}))
+            .collect();
+        Json(json!({"workers": loads})).into_response()
+    }
 }

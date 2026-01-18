@@ -3,16 +3,6 @@
 // This module provides a ValidatedJson extractor that automatically validates
 // requests using the validator crate's Validate trait.
 
-use axum::{
-    extract::{rejection::JsonRejection, FromRequest, Request},
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    Json,
-};
-use serde::de::DeserializeOwned;
-use serde_json::json;
-use validator::Validate;
-
 /// Trait for request types that need post-deserialization normalization
 pub trait Normalizable {
     /// Normalize the request by applying defaults and transformations
@@ -20,6 +10,20 @@ pub trait Normalizable {
         // Default: no-op
     }
 }
+
+#[cfg(feature = "axum")]
+use axum::{
+    extract::{rejection::JsonRejection, FromRequest, Request},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
+#[cfg(feature = "axum")]
+use serde::de::DeserializeOwned;
+#[cfg(feature = "axum")]
+use serde_json::json;
+#[cfg(feature = "axum")]
+use validator::Validate;
 
 /// A JSON extractor that automatically validates and normalizes the request body
 ///
@@ -37,8 +41,10 @@ pub trait Normalizable {
 ///     process_request(request).await
 /// }
 /// ```
+#[cfg(feature = "axum")]
 pub struct ValidatedJson<T>(pub T);
 
+#[cfg(feature = "axum")]
 impl<S, T> FromRequest<S> for ValidatedJson<T>
 where
     T: DeserializeOwned + Validate + Normalizable + Send,
@@ -101,6 +107,7 @@ where
 }
 
 // Implement Deref to allow transparent access to the inner value
+#[cfg(feature = "axum")]
 impl<T> std::ops::Deref for ValidatedJson<T> {
     type Target = T;
 
@@ -109,13 +116,14 @@ impl<T> std::ops::Deref for ValidatedJson<T> {
     }
 }
 
+#[cfg(feature = "axum")]
 impl<T> std::ops::DerefMut for ValidatedJson<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "axum"))]
 mod tests {
     use serde::{Deserialize, Serialize};
     use validator::Validate;
