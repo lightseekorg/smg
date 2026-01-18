@@ -1,5 +1,5 @@
 [workspace]
-members = ["protocols"]
+members = ["protocols", "reasoning-parser"]
 exclude = ["bindings/python"]
 resolver = "2"
 
@@ -117,6 +117,7 @@ arc-swap = "1.7.1"
 
 # Workspace crates
 openai-protocol = { path = "protocols", features = ["axum"] }
+reasoning-parser = { path = "reasoning-parser" }
 
 # gRPC and Protobuf dependencies
 tonic = { version = "0.14.2", features = ["gzip", "transport"] }

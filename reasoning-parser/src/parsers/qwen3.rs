@@ -2,7 +2,7 @@
 // This parser starts with in_reasoning=false, requiring an explicit
 // start token to enter reasoning mode.
 
-use crate::reasoning_parser::{
+use crate::{
     parsers::BaseReasoningParser,
     traits::{ParseError, ParserConfig, ParserResult, ReasoningParser},
 };

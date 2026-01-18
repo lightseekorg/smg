@@ -1,7 +1,7 @@
 // Kimi specific reasoning parser.
 // This parser uses Unicode tokens and starts with in_reasoning=false.
 
-use crate::reasoning_parser::{
+use crate::{
     parsers::BaseReasoningParser,
     traits::{ParseError, ParserConfig, ParserResult, ReasoningParser},
 };

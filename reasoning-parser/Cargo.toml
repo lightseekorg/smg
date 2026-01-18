@@ -1,0 +1,16 @@
+[package]
+name = "reasoning-parser"
+version = "0.1.0"
+edition = "2021"
+description = "Parser for AI model reasoning/thinking outputs (chain-of-thought, etc.)"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+keywords = ["llm", "reasoning", "parser", "chain-of-thought"]
+categories = ["parsing", "text-processing"]
+
+[dependencies]
+thiserror = "2.0.12"
+tokio = { version = "1.42.0", features = ["sync"] }
+
+[dev-dependencies]
+tokio = { version = "1.42.0", features = ["full", "test-util", "macros", "rt-multi-thread"] }

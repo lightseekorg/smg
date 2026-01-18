@@ -11,7 +11,7 @@ pub mod multimodal;
 pub mod observability;
 pub mod policies;
 pub use openai_protocol as protocols;
-pub mod reasoning_parser;
+pub use reasoning_parser;
 pub mod routers;
 pub mod server;
 pub mod service_discovery;

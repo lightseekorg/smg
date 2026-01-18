@@ -2,7 +2,7 @@
 // This parser automatically appends <think> token at the beginning of text,
 // similar to the Python MiniMaxAppendThinkDetector.
 
-use crate::reasoning_parser::{
+use crate::{
     parsers::BaseReasoningParser,
     traits::{ParseError, ParserConfig, ParserResult, ReasoningParser},
 };

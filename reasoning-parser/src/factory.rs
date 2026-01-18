@@ -8,7 +8,7 @@ use std::{
 
 use tokio::sync::Mutex;
 
-use crate::reasoning_parser::{
+use crate::{
     parsers::{
         BaseReasoningParser, DeepSeekR1Parser, Glm45Parser, KimiParser, MiniMaxParser, Qwen3Parser,
         QwenThinkingParser, Step3Parser,

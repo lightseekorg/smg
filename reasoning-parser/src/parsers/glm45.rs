@@ -1,7 +1,7 @@
 // GLM45 specific reasoning parser.
 // Uses the same format as Qwen3 but has its own implementation for debugging.
 
-use crate::reasoning_parser::{
+use crate::{
     parsers::BaseReasoningParser,
     traits::{ParseError, ParserConfig, ParserResult, ReasoningParser},
 };

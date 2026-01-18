@@ -1,7 +1,7 @@
 // Base implementation of reasoning parser that handles common logic
 // for detecting and extracting reasoning blocks from text.
 
-use crate::reasoning_parser::traits::{ParseError, ParserConfig, ParserResult, ReasoningParser};
+use crate::traits::{ParseError, ParserConfig, ParserResult, ReasoningParser};
 
 /// Base reasoning parser implementation.
 ///
