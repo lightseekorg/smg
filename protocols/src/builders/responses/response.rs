@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::protocols::responses::*;
+use crate::responses::*;
 
 /// Builder for ResponsesResponse
 ///

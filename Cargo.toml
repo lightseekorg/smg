@@ -1,3 +1,8 @@
+[workspace]
+members = ["protocols"]
+exclude = ["bindings/python"]
+resolver = "2"
+
 [package]
 name = "sgl-model-gateway"
 version = "0.3.2"
@@ -109,6 +114,9 @@ base64 = "0.22"
 openai-harmony = { git = "https://github.com/openai/harmony", tag = "v0.0.4" }
 openmetrics-parser = "0.4.4"
 arc-swap = "1.7.1"
+
+# Workspace crates
+openai-protocol = { path = "protocols", features = ["axum"] }
 
 # gRPC and Protobuf dependencies
 tonic = { version = "0.14.2", features = ["gzip", "transport"] }

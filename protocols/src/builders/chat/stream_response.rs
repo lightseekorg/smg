@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use crate::protocols::{
+use crate::{
     chat::*,
     common::{FunctionCallDelta, ToolCallDelta, Usage},
 };
@@ -124,7 +124,7 @@ impl ChatCompletionStreamResponseBuilder {
         index: u32,
         role: impl Into<String>,
         content: impl Into<String>,
-        logprobs: Option<crate::protocols::common::ChatLogProbs>,
+        logprobs: Option<crate::common::ChatLogProbs>,
     ) -> Self {
         self.choices.push(ChatStreamChoice {
             index,

@@ -2,7 +2,7 @@
 //!
 //! Provides an ergonomic fluent API for constructing chat completion responses.
 
-use crate::protocols::{chat::*, common::Usage};
+use crate::{chat::*, common::Usage};
 
 /// Builder for ChatCompletionResponse
 ///

@@ -14,7 +14,7 @@ use super::{
     },
     sampling_params::{validate_top_k_value, validate_top_p_value},
 };
-use crate::protocols::{builders::ResponsesResponseBuilder, validated::Normalizable};
+use crate::{builders::ResponsesResponseBuilder, validated::Normalizable};
 
 // ============================================================================
 // Response Tools (MCP and others)

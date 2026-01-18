@@ -8,7 +8,7 @@ use super::{
     common::{default_true, GenerationRequest, InputIds},
     sampling_params::SamplingParams,
 };
-use crate::protocols::validated::Normalizable;
+use crate::validated::Normalizable;
 
 // ============================================================================
 // SGLang Generate API (native format)

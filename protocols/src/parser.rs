@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::protocols::common::Tool;
+use crate::common::Tool;
 
 /// Request to parse function calls from model output text
 #[derive(Deserialize)]
