@@ -347,25 +347,18 @@ impl CacheAwarePolicy {
 
     /// Select worker with minimum load (used when load is imbalanced)
     /// Handles both HTTP (text-based) and gRPC (token-based) requests.
-    #[allow(clippy::too_many_arguments)]
     fn select_worker_min_load(
         &self,
         workers: &[Arc<dyn Worker>],
-        request_text: Option<&str>,
-        request_tokens: Option<&[u32]>,
+        info: &SelectWorkerInfo,
         healthy_indices: &[usize],
         model_id: &str,
-        max_load: usize,
-        min_load: usize,
     ) -> Option<usize> {
         // Log load balancing trigger (only compute worker loads if debug enabled)
         if tracing::enabled!(tracing::Level::DEBUG) {
             let worker_loads: Vec<(&str, usize)> =
                 workers.iter().map(|w| (w.url(), w.load())).collect();
-            debug!(
-                "Load balancing triggered | max: {} | min: {} | workers: {:?}",
-                max_load, min_load, worker_loads
-            );
+            debug!("Load balancing triggered | workers: {:?}", worker_loads);
         }
 
         // Use shortest queue when imbalanced
@@ -378,7 +371,7 @@ impl CacheAwarePolicy {
 
         // Even in imbalanced mode, update the appropriate tree to maintain cache state
         // Prefer token tree for gRPC requests, fall back to string tree for HTTP
-        if let Some(tokens) = request_tokens {
+        if let Some(tokens) = info.tokens {
             // gRPC request: update token tree
             let tree = self
                 .token_trees
@@ -387,7 +380,7 @@ impl CacheAwarePolicy {
             if let Some(tree) = tree {
                 tree.insert_tokens(tokens, worker_url);
             }
-        } else if let Some(text) = request_text {
+        } else if let Some(text) = info.request_text {
             // HTTP request: update string tree
             let tree = self
                 .string_trees
@@ -450,15 +443,7 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
             && (max_load as f32) > (min_load as f32 * self.config.balance_rel_threshold);
 
         if is_imbalanced {
-            return self.select_worker_min_load(
-                workers,
-                request_text,
-                request_tokens,
-                &healthy_indices,
-                model_id,
-                max_load,
-                min_load,
-            );
+            return self.select_worker_min_load(workers, info, &healthy_indices, model_id);
         }
 
         // Use cache-aware routing when balanced
