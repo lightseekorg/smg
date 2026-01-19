@@ -12,12 +12,13 @@ categories = ["asynchronous"]
 name = "wfaas"
 
 [dependencies]
-async-trait = "0.1"
+async-trait.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+parking_lot.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros", "time"] }
+tracing.workspace = true
+uuid = { workspace = true, features = ["v4", "serde"] }
+# Only used by workflow
 backoff = "0.4"
-chrono = { version = "0.4", features = ["serde"] }
-parking_lot = "0.12.4"
-serde = { version = "1.0", features = ["derive"] }
-thiserror = "2.0.12"
-tokio = { version = "1.42.0", features = ["sync", "rt-multi-thread", "macros", "time"] }
-tracing = "0.1"
-uuid = { version = "1.10", features = ["v4", "serde"] }
