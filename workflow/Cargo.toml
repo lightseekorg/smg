@@ -1,0 +1,23 @@
+[package]
+name = "workflow"
+version = "0.1.0"
+edition = "2021"
+description = "Workflow-as-a-Service engine for managing multi-step operations"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+keywords = ["workflow", "orchestration", "dag", "state-machine"]
+categories = ["asynchronous"]
+
+[lib]
+name = "wfaas"
+
+[dependencies]
+async-trait = "0.1"
+backoff = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+parking_lot = "0.12.4"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0.12"
+tokio = { version = "1.42.0", features = ["sync", "rt-multi-thread", "macros", "time"] }
+tracing = "0.1"
+uuid = { version = "1.10", features = ["v4", "serde"] }

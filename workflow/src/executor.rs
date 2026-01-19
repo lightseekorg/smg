@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use super::types::{StepResult, WorkflowContext, WorkflowData, WorkflowError, WorkflowResult};
+use crate::types::{StepResult, WorkflowContext, WorkflowData, WorkflowError, WorkflowResult};
 
 /// Trait for executing individual workflow steps
 #[async_trait]
@@ -90,10 +90,13 @@ where
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use serde::{Deserialize, Serialize};
 
-    use super::*;
-    use crate::workflow::types::WorkflowInstanceId;
+    use crate::{
+        StepExecutor, StepId, StepResult, WorkflowContext, WorkflowData, WorkflowError,
+        WorkflowInstanceId, WorkflowResult,
+    };
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestData {
@@ -120,7 +123,7 @@ mod tests {
                 Ok(StepResult::Success)
             } else {
                 Err(WorkflowError::StepFailed {
-                    step_id: crate::workflow::types::StepId::new("test"),
+                    step_id: StepId::new("test"),
                     message: "test error".to_string(),
                 })
             }

@@ -22,7 +22,7 @@ use tokio::{
     time::timeout,
 };
 
-use super::{
+use crate::{
     definition::{StepDefinition, WorkflowDefinition},
     event::{EventBus, WorkflowEvent},
     state::{InMemoryStore, StateStore},

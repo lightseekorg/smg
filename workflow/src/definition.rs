@@ -9,7 +9,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 
-use super::{
+use crate::{
     executor::StepExecutor,
     types::{FailureAction, RetryPolicy, StepId, WorkflowContext, WorkflowData, WorkflowId},
 };

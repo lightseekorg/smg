@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-use super::types::{StepId, WorkflowId, WorkflowInstanceId};
+use crate::types::{StepId, WorkflowId, WorkflowInstanceId};
 
 /// Default timeout for subscriber event handlers
 const DEFAULT_SUBSCRIBER_TIMEOUT: Duration = Duration::from_secs(30);

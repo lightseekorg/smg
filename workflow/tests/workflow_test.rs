@@ -9,8 +9,12 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use smg::workflow::*;
 use tokio::time::sleep;
+use wfaas::{
+    BackoffStrategy, FailureAction, LoggingSubscriber, RetryPolicy, StepDefinition, StepExecutor,
+    StepId, StepResult, StepStatus, ValidationError, WorkflowContext, WorkflowData,
+    WorkflowDefinition, WorkflowEngine, WorkflowError, WorkflowResult, WorkflowStatus,
+};
 
 /// Test workflow data type for integration tests.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

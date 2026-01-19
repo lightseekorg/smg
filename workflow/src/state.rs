@@ -5,7 +5,7 @@ use std::{collections::HashMap, marker::PhantomData, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 
-use super::types::{
+use crate::types::{
     WorkflowContext, WorkflowData, WorkflowError, WorkflowInstanceId, WorkflowResult,
     WorkflowState, WorkflowStatus,
 };
