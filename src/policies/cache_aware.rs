@@ -62,7 +62,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use kv_index::{Tree, TokenTree};
+use kv_index::{TokenTree, Tree};
 use rand::Rng;
 use tracing::{debug, warn};
 
@@ -197,33 +197,34 @@ impl CacheAwarePolicy {
 
     /// Add a single worker to the trees (incremental update)
     pub fn add_worker(&self, worker: &dyn Worker) {
-        let tree_key = normalize_model_key(worker.model_id());
+        let tree_key = normalize_model_key(worker.model_id()).to_string();
         // Add to string tree (HTTP)
         let string_tree = self
             .string_trees
-            .entry(tree_key.to_string())
+            .entry(tree_key.clone())
             .or_insert_with(|| Arc::new(Tree::new()));
         string_tree.insert_text("", worker.url());
         // Add to token tree (gRPC)
         let token_tree = self
             .token_trees
-            .entry(tree_key.to_string())
+            .entry(tree_key)
             .or_insert_with(|| Arc::new(TokenTree::new()));
         token_tree.insert_tokens(&[], worker.url());
     }
 
     /// Add a worker by URL and model (for backward compatibility)
     pub fn add_worker_by_url(&self, url: &str, model_id: &str) {
+        let model_id_string = model_id.to_string();
         // Add to string tree (HTTP)
         let string_tree = self
             .string_trees
-            .entry(model_id.to_string())
+            .entry(model_id_string.clone())
             .or_insert_with(|| Arc::new(Tree::new()));
         string_tree.insert_text("", url);
         // Add to token tree (gRPC)
         let token_tree = self
             .token_trees
-            .entry(model_id.to_string())
+            .entry(model_id_string)
             .or_insert_with(|| Arc::new(TokenTree::new()));
         token_tree.insert_tokens(&[], url);
     }
@@ -346,6 +347,7 @@ impl CacheAwarePolicy {
 
     /// Select worker with minimum load (used when load is imbalanced)
     /// Handles both HTTP (text-based) and gRPC (token-based) requests.
+    #[allow(clippy::too_many_arguments)]
     fn select_worker_min_load(
         &self,
         workers: &[Arc<dyn Worker>],

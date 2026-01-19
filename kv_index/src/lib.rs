@@ -16,12 +16,12 @@ mod string_tree;
 mod token_tree;
 
 pub use common::{MatchResult, TenantId};
-pub use string_tree::{PrefixMatchResult as StringMatchResult, Tree as StringTree};
-pub use token_tree::{PrefixMatchResult as TokenMatchResult, TokenTree};
-
 // Re-export under names matching old tree.rs API for easier migration
 pub use string_tree::Tree;
-pub use string_tree::PrefixMatchResult;
+pub use string_tree::{
+    PrefixMatchResult as StringMatchResult, PrefixMatchResult, Tree as StringTree,
+};
+pub use token_tree::{PrefixMatchResult as TokenMatchResult, TokenTree};
 
 /// Trait for radix tree implementations.
 ///
