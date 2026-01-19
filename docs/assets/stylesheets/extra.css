@@ -121,20 +121,27 @@
   margin-bottom: 0.5rem;
   font-size: 1rem;
   font-weight: 600;
-  display: flex;
-  align-items: baseline;
-  gap: 0.4rem;
   color: var(--md-default-fg-color);
+  line-height: 1.4;
 }
 
+/* Material icons alignment - target the span wrapper */
 .md-typeset .card h3 .twemoji,
-.md-typeset .card h3 .emojione,
-.md-typeset .card h3 svg {
-  flex-shrink: 0;
-  height: 1.1em;
-  width: 1.1em;
-  align-self: center;
+.md-typeset .card h3 .emojione {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: text-bottom;
+  margin-right: 0.35em;
+}
+
+.md-typeset .card h3 .twemoji svg,
+.md-typeset .card h3 .emojione svg,
+.md-typeset .card h3 > svg {
+  height: 1.125em;
+  width: 1.125em;
+  vertical-align: text-bottom;
   color: var(--smg-primary);
+  fill: currentColor;
 }
 
 .md-typeset .card p {

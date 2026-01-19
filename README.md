@@ -2,6 +2,10 @@
 
 High-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
 
+<p align="center">
+  <img src="docs/assets/images/architecture-animated.svg" alt="SMG Architecture" width="100%">
+</p>
+
 ## Key Features
 
 - **Unified Control Plane** - Register, monitor, and orchestrate workers across heterogeneous model fleets
@@ -15,7 +19,7 @@ High-performance model-routing gateway for large-scale LLM deployments. Centrali
 ### Docker
 
 ```bash
-docker pull lmsysorg/sgl-model-gateway:latest
+docker pull lightseekorg/smg:latest
 ```
 
 ### Build from Source
@@ -52,13 +56,13 @@ curl http://localhost:30000/v1/chat/completions \
 
 ## Documentation
 
-Full documentation is available at [docs/](docs/index.md):
+Full documentation available at [lightseekorg.github.io/smg](https://lightseekorg.github.io/smg):
 
 - [Installation](docs/getting-started/installation.md)
 - [Quick Start](docs/getting-started/quickstart.md)
-- [Configuration](docs/getting-started/configuration.md)
-- [API Reference](docs/api/openai-compatible.md)
-- [Deployment Guide](docs/deployment/kubernetes.md)
+- [Architecture](docs/concepts/architecture/overview.md)
+- [API Reference](docs/reference/api/openai.md)
+- [Deployment Guide](docs/tasks/deployment/kubernetes.md)
 
 ## Load Balancing Policies
 

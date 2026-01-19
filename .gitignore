@@ -141,3 +141,6 @@ outputs/
 *.nsys-rep
 *.ncu-rep
 *.nvcudmp
+
+# MkDocs build output
+site/

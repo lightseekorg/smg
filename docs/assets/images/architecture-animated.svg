@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 380">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 420">
   <defs>
     <linearGradient id="primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" style="stop-color:#6366f1"/>
@@ -16,151 +16,235 @@
       <stop offset="0%" style="stop-color:#f59e0b"/>
       <stop offset="100%" style="stop-color:#fbbf24"/>
     </linearGradient>
+    <linearGradient id="pinkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ec4899"/>
+      <stop offset="100%" style="stop-color:#f472b6"/>
+    </linearGradient>
     <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" style="stop-color:#0f172a"/>
       <stop offset="100%" style="stop-color:#1e293b"/>
     </linearGradient>
     <filter id="glow">
-      <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
       <feMerge>
         <feMergeNode in="coloredBlur"/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
     <filter id="softGlow">
-      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feGaussianBlur stdDeviation="6" result="blur"/>
       <feMerge>
         <feMergeNode in="blur"/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
+    <clipPath id="clipFlow1">
+      <rect x="130" y="180" width="80" height="20"/>
+    </clipPath>
+    <clipPath id="clipFlow2">
+      <rect x="350" y="180" width="80" height="20"/>
+    </clipPath>
+    <clipPath id="clipFlowOut">
+      <rect x="570" y="75" width="95" height="250"/>
+    </clipPath>
   </defs>
 
   <style>
     .label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
     .sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
-    .feature { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #94a3b8; }
+    .feature { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 9px; fill: #94a3b8; }
+    .layer-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 9px; fill: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
 
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
-    @keyframes flow1 { 0% { transform: translateX(0); opacity: 0; } 5% { opacity: 1; } 95% { opacity: 1; } 100% { transform: translateX(155px); opacity: 0; } }
-    @keyframes flow2 { 0% { transform: translateX(0); opacity: 0; } 5% { opacity: 1; } 95% { opacity: 1; } 100% { transform: translateX(120px); opacity: 0; } }
-    @keyframes flowUp { 0% { transform: translate(0, 0); opacity: 0; } 5% { opacity: 1; } 95% { opacity: 1; } 100% { transform: translate(120px, -70px); opacity: 0; } }
-    @keyframes flowDown { 0% { transform: translate(0, 0); opacity: 0; } 5% { opacity: 1; } 95% { opacity: 1; } 100% { transform: translate(120px, 70px); opacity: 0; } }
+    @keyframes flow1 { 0% { transform: translateX(0); opacity: 0; } 5% { opacity: 1; } 95% { opacity: 1; } 100% { transform: translateX(65px); opacity: 0; } }
+    @keyframes flow2 { 0% { transform: translateX(0); opacity: 0; } 5% { opacity: 1; } 95% { opacity: 1; } 100% { transform: translateX(65px); opacity: 0; } }
+    @keyframes flowUp { 0% { transform: translate(0, 0); opacity: 0; } 5% { opacity: 1; } 95% { opacity: 1; } 100% { transform: translate(80px, -75px); opacity: 0; } }
+    @keyframes flowMid { 0% { transform: translate(0, 0); opacity: 0; } 5% { opacity: 1; } 95% { opacity: 1; } 100% { transform: translate(80px, 0); opacity: 0; } }
+    @keyframes flowDown { 0% { transform: translate(0, 0); opacity: 0; } 5% { opacity: 1; } 95% { opacity: 1; } 100% { transform: translate(80px, 75px); opacity: 0; } }
 
-    .packet-in1 { animation: flow1 0.5s linear infinite; }
-    .packet-in2 { animation: flow1 0.5s linear infinite 0.15s; }
-    .packet-in3 { animation: flow1 0.5s linear infinite 0.3s; }
-    .packet-out1 { animation: flowUp 0.4s linear infinite 0.1s; }
-    .packet-out2 { animation: flow2 0.4s linear infinite 0.2s; }
-    .packet-out3 { animation: flowDown 0.4s linear infinite 0.3s; }
+    .packet-in1 { animation: flow1 0.4s linear infinite; }
+    .packet-in2 { animation: flow1 0.4s linear infinite 0.13s; }
+    .packet-in3 { animation: flow1 0.4s linear infinite 0.26s; }
+    .packet-mid1 { animation: flow2 0.4s linear infinite 0.05s; }
+    .packet-mid2 { animation: flow2 0.4s linear infinite 0.18s; }
+    .packet-mid3 { animation: flow2 0.4s linear infinite 0.31s; }
+    .packet-out1 { animation: flowUp 0.3s linear infinite; }
+    .packet-out2 { animation: flowMid 0.3s linear infinite; }
+    .packet-out3 { animation: flowDown 0.3s linear infinite; }
+    .packet-out1b { animation: flowUp 0.3s linear infinite 0.15s; }
+    .packet-out2b { animation: flowMid 0.3s linear infinite 0.15s; }
+    .packet-out3b { animation: flowDown 0.3s linear infinite 0.15s; }
     .pulse { animation: pulse 1.5s ease-in-out infinite; }
   </style>
 
   <!-- Background -->
-  <rect width="900" height="380" rx="16" fill="url(#bgGrad)"/>
+  <rect width="920" height="420" rx="16" fill="url(#bgGrad)"/>
 
   <!-- Subtle grid pattern -->
   <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
     <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
   </pattern>
-  <rect width="900" height="380" fill="url(#grid)" rx="16"/>
+  <rect width="920" height="420" fill="url(#grid)" rx="16"/>
 
-  <!-- Glow effects behind main elements -->
-  <ellipse cx="170" cy="190" rx="60" ry="80" fill="#6366f1" opacity="0.1" filter="url(#softGlow)"/>
-  <ellipse cx="450" cy="190" rx="120" ry="100" fill="#8b5cf6" opacity="0.15" filter="url(#softGlow)"/>
-  <ellipse cx="730" cy="190" rx="80" ry="120" fill="#0ea5e9" opacity="0.1" filter="url(#softGlow)"/>
+  <!-- Glow effects -->
+  <ellipse cx="85" cy="190" rx="50" ry="70" fill="#6366f1" opacity="0.08" filter="url(#softGlow)"/>
+  <ellipse cx="280" cy="190" rx="70" ry="90" fill="#ec4899" opacity="0.08" filter="url(#softGlow)"/>
+  <ellipse cx="500" cy="190" rx="80" ry="100" fill="#8b5cf6" opacity="0.1" filter="url(#softGlow)"/>
+  <ellipse cx="750" cy="190" rx="70" ry="110" fill="#0ea5e9" opacity="0.08" filter="url(#softGlow)"/>
 
-  <!-- Connection lines with gradient -->
-  <line x1="220" y1="190" x2="300" y2="190" stroke="url(#primaryGrad)" stroke-width="2" opacity="0.6"/>
-  <line x1="600" y1="110" x2="660" y2="110" stroke="url(#greenGrad)" stroke-width="2" opacity="0.6"/>
-  <line x1="600" y1="190" x2="660" y2="190" stroke="url(#blueGrad)" stroke-width="2" opacity="0.6"/>
-  <line x1="600" y1="270" x2="660" y2="270" stroke="url(#amberGrad)" stroke-width="2" opacity="0.6"/>
+  <!-- Connection lines -->
+  <line x1="135" y1="190" x2="205" y2="190" stroke="#475569" stroke-width="2" opacity="0.5"/>
+  <line x1="355" y1="190" x2="425" y2="190" stroke="#475569" stroke-width="2" opacity="0.5"/>
+  <line x1="575" y1="115" x2="660" y2="115" stroke="url(#greenGrad)" stroke-width="2" opacity="0.5"/>
+  <line x1="575" y1="190" x2="660" y2="190" stroke="url(#blueGrad)" stroke-width="2" opacity="0.5"/>
+  <line x1="575" y1="265" x2="660" y2="265" stroke="url(#amberGrad)" stroke-width="2" opacity="0.5"/>
 
   <!-- Clients -->
   <g class="pulse">
-    <rect x="70" y="120" width="150" height="140" rx="12" fill="#1e293b" stroke="#334155" stroke-width="1"/>
-    <rect x="70" y="120" width="150" height="36" rx="12" fill="url(#primaryGrad)"/>
-    <rect x="70" y="144" width="150" height="12" fill="url(#primaryGrad)"/>
-    <text x="145" y="145" text-anchor="middle" class="label" font-size="14" fill="white">Clients</text>
-    <text x="145" y="178" text-anchor="middle" class="feature">Your Applications</text>
-    <text x="145" y="194" text-anchor="middle" class="feature">AI Agents</text>
-    <text x="145" y="210" text-anchor="middle" class="feature">Chat Interfaces</text>
-    <text x="145" y="226" text-anchor="middle" class="feature">API Services</text>
+    <rect x="20" y="115" width="115" height="150" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+    <rect x="20" y="115" width="115" height="30" rx="10" fill="url(#primaryGrad)"/>
+    <rect x="20" y="135" width="115" height="10" fill="url(#primaryGrad)"/>
+    <text x="77" y="137" text-anchor="middle" class="label" font-size="12" fill="white">Clients</text>
+    <text x="77" y="165" text-anchor="middle" class="feature">Applications</text>
+    <text x="77" y="180" text-anchor="middle" class="feature">AI Agents</text>
+    <text x="77" y="195" text-anchor="middle" class="feature">Chat UIs</text>
+    <text x="77" y="210" text-anchor="middle" class="feature">API Services</text>
   </g>
 
-  <!-- SMG Gateway -->
-  <rect x="300" y="60" width="300" height="260" rx="16" fill="#1e293b" stroke="#475569" stroke-width="2"/>
-  <rect x="300" y="60" width="300" height="44" rx="16" fill="url(#primaryGrad)"/>
-  <rect x="300" y="88" width="300" height="16" fill="url(#primaryGrad)"/>
-  <text x="450" y="90" text-anchor="middle" class="label" font-size="16" fill="white">SMG Gateway</text>
+  <!-- Gateway Layer -->
+  <text x="280" y="55" text-anchor="middle" class="layer-label">Gateway Layer</text>
+  <rect x="205" y="65" width="150" height="250" rx="12" fill="#1e293b" stroke="#ec4899" stroke-width="2"/>
+  <rect x="205" y="65" width="150" height="32" rx="12" fill="url(#pinkGrad)"/>
+  <rect x="205" y="85" width="150" height="12" fill="url(#pinkGrad)"/>
+  <text x="280" y="88" text-anchor="middle" class="label" font-size="12" fill="white">Gateway</text>
 
   <!-- Gateway features -->
   <g>
-    <rect x="320" y="120" width="260" height="28" rx="8" fill="#334155"/>
-    <circle cx="338" cy="134" r="4" fill="#10b981"/>
-    <text x="352" y="139" class="sublabel" font-size="11" fill="#e2e8f0">Tokenization &amp; Caching</text>
+    <rect x="215" y="110" width="130" height="24" rx="6" fill="#334155"/>
+    <circle cx="228" cy="122" r="3" fill="#f472b6"/>
+    <text x="240" y="126" class="feature" font-size="9" fill="#e2e8f0">Rate Limiter</text>
   </g>
   <g>
-    <rect x="320" y="154" width="260" height="28" rx="8" fill="#334155"/>
-    <circle cx="338" cy="168" r="4" fill="#0ea5e9"/>
-    <text x="352" y="173" class="sublabel" font-size="11" fill="#e2e8f0">Chat Templates &amp; Routing</text>
+    <rect x="215" y="140" width="130" height="24" rx="6" fill="#334155"/>
+    <circle cx="228" cy="152" r="3" fill="#a78bfa"/>
+    <text x="240" y="156" class="feature" font-size="9" fill="#e2e8f0">OIDC Auth</text>
   </g>
   <g>
-    <rect x="320" y="188" width="260" height="28" rx="8" fill="#334155"/>
-    <circle cx="338" cy="202" r="4" fill="#8b5cf6"/>
-    <text x="352" y="207" class="sublabel" font-size="11" fill="#e2e8f0">Tool Parsing &amp; MCP Loops</text>
+    <rect x="215" y="170" width="130" height="24" rx="6" fill="#334155"/>
+    <circle cx="228" cy="182" r="3" fill="#38bdf8"/>
+    <text x="240" y="186" class="feature" font-size="9" fill="#e2e8f0">WebAssembly</text>
   </g>
   <g>
-    <rect x="320" y="222" width="260" height="28" rx="8" fill="#334155"/>
-    <circle cx="338" cy="236" r="4" fill="#f59e0b"/>
-    <text x="352" y="241" class="sublabel" font-size="11" fill="#e2e8f0">Load Balancing &amp; PD Routing</text>
+    <rect x="215" y="200" width="130" height="24" rx="6" fill="#334155"/>
+    <circle cx="228" cy="212" r="3" fill="#34d399"/>
+    <text x="240" y="216" class="feature" font-size="9" fill="#e2e8f0">Metrics</text>
   </g>
   <g>
-    <rect x="320" y="256" width="260" height="28" rx="8" fill="#334155"/>
-    <circle cx="338" cy="270" r="4" fill="#ef4444"/>
-    <text x="352" y="275" class="sublabel" font-size="11" fill="#e2e8f0">Circuit Breakers &amp; Rate Limits</text>
+    <rect x="215" y="230" width="130" height="24" rx="6" fill="#334155"/>
+    <circle cx="228" cy="242" r="3" fill="#fbbf24"/>
+    <text x="240" y="246" class="feature" font-size="9" fill="#e2e8f0">OpenTelemetry</text>
   </g>
   <g>
-    <rect x="320" y="290" width="260" height="22" rx="8" fill="#334155"/>
-    <circle cx="338" cy="301" r="4" fill="#a855f7"/>
-    <text x="352" y="306" class="sublabel" font-size="11" fill="#e2e8f0">Reasoning &amp; Detokenization</text>
+    <rect x="215" y="260" width="130" height="24" rx="6" fill="#334155"/>
+    <circle cx="228" cy="272" r="3" fill="#fb7185"/>
+    <text x="240" y="276" class="feature" font-size="9" fill="#e2e8f0">Multi-Tenant</text>
+  </g>
+
+  <!-- Router Layer -->
+  <text x="500" y="55" text-anchor="middle" class="layer-label">Router Layer</text>
+  <rect x="425" y="65" width="150" height="250" rx="12" fill="#1e293b" stroke="#8b5cf6" stroke-width="2"/>
+  <rect x="425" y="65" width="150" height="32" rx="12" fill="url(#primaryGrad)"/>
+  <rect x="425" y="85" width="150" height="12" fill="url(#primaryGrad)"/>
+  <text x="500" y="88" text-anchor="middle" class="label" font-size="12" fill="white">Router</text>
+
+  <!-- Router features -->
+  <g>
+    <rect x="435" y="110" width="130" height="24" rx="6" fill="#334155"/>
+    <circle cx="448" cy="122" r="3" fill="#10b981"/>
+    <text x="460" y="126" class="feature" font-size="9" fill="#e2e8f0">Tokenization</text>
+  </g>
+  <g>
+    <rect x="435" y="140" width="130" height="24" rx="6" fill="#334155"/>
+    <circle cx="448" cy="152" r="3" fill="#0ea5e9"/>
+    <text x="460" y="156" class="feature" font-size="9" fill="#e2e8f0">Chat History</text>
+  </g>
+  <g>
+    <rect x="435" y="170" width="130" height="24" rx="6" fill="#334155"/>
+    <circle cx="448" cy="182" r="3" fill="#8b5cf6"/>
+    <text x="460" y="186" class="feature" font-size="9" fill="#e2e8f0">Function Calls</text>
+  </g>
+  <g>
+    <rect x="435" y="200" width="130" height="24" rx="6" fill="#334155"/>
+    <circle cx="448" cy="212" r="3" fill="#f59e0b"/>
+    <text x="460" y="216" class="feature" font-size="9" fill="#e2e8f0">Reasoning</text>
+  </g>
+  <g>
+    <rect x="435" y="230" width="130" height="24" rx="6" fill="#334155"/>
+    <circle cx="448" cy="242" r="3" fill="#ef4444"/>
+    <text x="460" y="246" class="feature" font-size="9" fill="#e2e8f0">MCP Execution</text>
+  </g>
+  <g>
+    <rect x="435" y="260" width="130" height="24" rx="6" fill="#334155"/>
+    <circle cx="448" cy="272" r="3" fill="#14b8a6"/>
+    <text x="460" y="276" class="feature" font-size="9" fill="#e2e8f0">Load Balancing</text>
+  </g>
+  <g>
+    <rect x="435" y="290" width="130" height="22" rx="6" fill="#334155"/>
+    <circle cx="448" cy="301" r="3" fill="#f472b6"/>
+    <text x="460" y="305" class="feature" font-size="9" fill="#e2e8f0">Circuit Breaker</text>
   </g>
 
   <!-- gRPC Workers -->
-  <rect x="660" y="65" width="170" height="90" rx="12" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
-  <rect x="660" y="65" width="170" height="26" rx="12" fill="url(#greenGrad)"/>
-  <rect x="660" y="79" width="170" height="12" fill="url(#greenGrad)"/>
-  <text x="745" y="84" text-anchor="middle" class="label" font-size="11" fill="white">gRPC Workers</text>
-  <text x="745" y="108" text-anchor="middle" class="feature">vLLM / SGLang / TRT-LLM</text>
-  <text x="745" y="122" text-anchor="middle" class="feature">Raw Inference + PD Support</text>
-  <text x="745" y="136" text-anchor="middle" class="feature">Maximum Performance</text>
+  <rect x="660" y="70" width="145" height="90" rx="10" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+  <rect x="660" y="70" width="145" height="24" rx="10" fill="url(#greenGrad)"/>
+  <rect x="660" y="82" width="145" height="12" fill="url(#greenGrad)"/>
+  <text x="732" y="88" text-anchor="middle" class="label" font-size="10" fill="white">gRPC Workers</text>
+  <text x="732" y="110" text-anchor="middle" class="feature">vLLM / SGLang / TRT-LLM</text>
+  <text x="732" y="124" text-anchor="middle" class="feature">Raw Inference + PD</text>
+  <text x="732" y="138" text-anchor="middle" class="feature">Max Performance</text>
 
   <!-- HTTP Workers -->
-  <rect x="660" y="165" width="170" height="75" rx="12" fill="#1e293b" stroke="#0ea5e9" stroke-width="2"/>
-  <rect x="660" y="165" width="170" height="26" rx="12" fill="url(#blueGrad)"/>
-  <rect x="660" y="179" width="170" height="12" fill="url(#blueGrad)"/>
-  <text x="745" y="184" text-anchor="middle" class="label" font-size="11" fill="white">HTTP Workers</text>
-  <text x="745" y="206" text-anchor="middle" class="feature">vLLM / SGLang / TRT-LLM</text>
-  <text x="745" y="220" text-anchor="middle" class="feature">OpenAI-Compatible Servers</text>
+  <rect x="660" y="170" width="145" height="75" rx="10" fill="#1e293b" stroke="#0ea5e9" stroke-width="2"/>
+  <rect x="660" y="170" width="145" height="24" rx="10" fill="url(#blueGrad)"/>
+  <rect x="660" y="182" width="145" height="12" fill="url(#blueGrad)"/>
+  <text x="732" y="188" text-anchor="middle" class="label" font-size="10" fill="white">HTTP Workers</text>
+  <text x="732" y="210" text-anchor="middle" class="feature">vLLM / SGLang / TRT-LLM</text>
+  <text x="732" y="224" text-anchor="middle" class="feature">OpenAI-Compatible</text>
 
   <!-- External APIs -->
-  <rect x="660" y="250" width="170" height="75" rx="12" fill="#1e293b" stroke="#f59e0b" stroke-width="2"/>
-  <rect x="660" y="250" width="170" height="26" rx="12" fill="url(#amberGrad)"/>
-  <rect x="660" y="264" width="170" height="12" fill="url(#amberGrad)"/>
-  <text x="745" y="269" text-anchor="middle" class="label" font-size="11" fill="#1e293b">External APIs</text>
-  <text x="745" y="291" text-anchor="middle" class="feature">OpenAI / Claude / Gemini</text>
-  <text x="745" y="305" text-anchor="middle" class="feature">Groq / Together / Bedrock</text>
+  <rect x="660" y="255" width="145" height="75" rx="10" fill="#1e293b" stroke="#f59e0b" stroke-width="2"/>
+  <rect x="660" y="255" width="145" height="24" rx="10" fill="url(#amberGrad)"/>
+  <rect x="660" y="267" width="145" height="12" fill="url(#amberGrad)"/>
+  <text x="732" y="273" text-anchor="middle" class="label" font-size="10" fill="#1e293b">External APIs</text>
+  <text x="732" y="295" text-anchor="middle" class="feature">OpenAI / Claude / Gemini</text>
+  <text x="732" y="309" text-anchor="middle" class="feature">Groq / Together / Bedrock</text>
 
-  <!-- Animated packets - Client to Gateway (FAST) -->
-  <circle cx="230" cy="190" r="5" fill="#a78bfa" class="packet-in1" filter="url(#glow)"/>
-  <circle cx="230" cy="190" r="5" fill="#818cf8" class="packet-in2" filter="url(#glow)"/>
-  <circle cx="230" cy="190" r="5" fill="#c4b5fd" class="packet-in3" filter="url(#glow)"/>
+  <!-- Animated packets - Client to Gateway (clipped) -->
+  <g clip-path="url(#clipFlow1)">
+    <circle cx="140" cy="190" r="4" fill="#f472b6" class="packet-in1" filter="url(#glow)"/>
+    <circle cx="140" cy="190" r="4" fill="#a78bfa" class="packet-in2" filter="url(#glow)"/>
+    <circle cx="140" cy="190" r="4" fill="#ec4899" class="packet-in3" filter="url(#glow)"/>
+  </g>
 
-  <!-- Animated packets - Gateway to Workers (FAST) -->
-  <circle cx="610" cy="190" r="4" fill="#34d399" class="packet-out1" filter="url(#glow)"/>
-  <circle cx="610" cy="190" r="4" fill="#38bdf8" class="packet-out2" filter="url(#glow)"/>
-  <circle cx="610" cy="190" r="4" fill="#fbbf24" class="packet-out3" filter="url(#glow)"/>
+  <!-- Animated packets - Gateway to Router (clipped) -->
+  <g clip-path="url(#clipFlow2)">
+    <circle cx="360" cy="190" r="4" fill="#818cf8" class="packet-mid1" filter="url(#glow)"/>
+    <circle cx="360" cy="190" r="4" fill="#a78bfa" class="packet-mid2" filter="url(#glow)"/>
+    <circle cx="360" cy="190" r="4" fill="#6366f1" class="packet-mid3" filter="url(#glow)"/>
+  </g>
+
+  <!-- Animated packets - Router to Workers (clipped) - parallel burst -->
+  <g clip-path="url(#clipFlowOut)">
+    <!-- First wave - simultaneous -->
+    <circle cx="580" cy="190" r="3" fill="#34d399" class="packet-out1" filter="url(#glow)"/>
+    <circle cx="580" cy="190" r="3" fill="#38bdf8" class="packet-out2" filter="url(#glow)"/>
+    <circle cx="580" cy="190" r="3" fill="#fbbf24" class="packet-out3" filter="url(#glow)"/>
+    <!-- Second wave - simultaneous, offset -->
+    <circle cx="580" cy="190" r="3" fill="#34d399" class="packet-out1b" filter="url(#glow)"/>
+    <circle cx="580" cy="190" r="3" fill="#38bdf8" class="packet-out2b" filter="url(#glow)"/>
+    <circle cx="580" cy="190" r="3" fill="#fbbf24" class="packet-out3b" filter="url(#glow)"/>
+  </g>
 
   <!-- Bottom tagline -->
-  <text x="450" y="360" text-anchor="middle" class="sublabel" font-size="13" fill="#64748b">One API  •  Any Backend  •  Enterprise Reliability</text>
+  <text x="460" y="400" text-anchor="middle" class="sublabel" font-size="12" fill="#64748b">One API  •  Any Backend  •  Enterprise Reliability</text>
 </svg>
