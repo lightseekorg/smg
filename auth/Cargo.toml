@@ -12,20 +12,21 @@ categories = ["authentication", "web-programming"]
 name = "smg_auth"
 
 [dependencies]
-axum = { version = "0.8.1", features = ["macros"] }
-chrono = { version = "0.4", features = ["serde"] }
-http = "1.2"
-jsonwebtoken = "9.3"
-lru = "0.16.2"
-parking_lot = "0.12.4"
-reqwest = { version = "0.12.8", default-features = false, features = ["rustls-tls", "json"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+axum = { workspace = true, features = ["macros"] }
+chrono = { workspace = true, features = ["serde"] }
+http.workspace = true
+lru.workspace = true
+parking_lot.workspace = true
+reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Only used by auth
+jsonwebtoken = { version = "9.3", default-features = false, features = ["use_pem"] }
 sha2 = "0.10"
-subtle = "2.6"
-thiserror = "2.0.12"
-tracing = "0.1"
 url = "2.5"
 
 [dev-dependencies]
-tokio = { version = "1.42.0", features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

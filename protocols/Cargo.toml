@@ -13,11 +13,12 @@ default = []
 axum = ["dep:axum"]
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["preserve_order"] }
+axum = { workspace = true, optional = true }
+chrono.workspace = true
+rand.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
+tokio.workspace = true
+tracing.workspace = true
+# Only used by protocols
 validator = { version = "0.20.0", features = ["derive"] }
-axum = { version = "0.8.6", optional = true }
-rand = "0.9.2"
-tracing = "0.1"
-chrono = "0.4"
-tokio = "1.49.0"

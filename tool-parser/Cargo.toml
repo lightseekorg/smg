@@ -10,12 +10,13 @@ categories = ["parsing", "api-bindings"]
 
 [dependencies]
 openai-protocol.workspace = true
-async-trait = "0.1"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["preserve_order"] }
+async-trait.workspace = true
+num-traits.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros"] }
+tracing.workspace = true
+# Only used by tool-parser
 regex = "1.10"
-thiserror = "2.0.12"
-tokio = { version = "1.42.0", features = ["sync", "rt-multi-thread", "macros"] }
-tracing = "0.1"
 rustpython-parser = "0.4.0"
-num-traits = "0.2"

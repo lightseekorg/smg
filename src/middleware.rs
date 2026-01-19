@@ -177,9 +177,8 @@ fn generate_request_id(path: &str) -> String {
     format!("{}{}", prefix, random_part)
 }
 
-/// Extension type for storing request ID
-#[derive(Clone, Debug)]
-pub struct RequestId(pub String);
+// Re-export RequestId from auth crate for backward compatibility
+pub use smg_auth::RequestId;
 
 /// Tower Layer for request ID middleware
 #[derive(Clone)]
