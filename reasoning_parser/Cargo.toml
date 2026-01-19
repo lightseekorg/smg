@@ -5,6 +5,10 @@ edition = "2021"
 description = "Parser for AI model reasoning/thinking outputs (chain-of-thought, etc.)"
 license = "Apache-2.0"
 repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+]
 keywords = ["llm", "reasoning", "parser", "chain-of-thought"]
 categories = ["parsing", "text-processing"]
 

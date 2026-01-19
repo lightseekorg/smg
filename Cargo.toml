@@ -135,7 +135,7 @@ wfaas = { path = "workflow", package = "workflow" }
 llm-tokenizer = { path = "tokenizer", package = "tokenizer" }
 smg-auth = { path = "auth", package = "auth" }
 smg-mcp = { path = "mcp", package = "mcp" }
-kv_index = { path = "kv_index" }
+kv-index = { path = "kv_index", package = "kv-index" }
 smg-data-connector = { path = "data_connector", package = "data-connector" }
 llm-multimodal = { path = "multimodal" }
 
@@ -184,7 +184,7 @@ serial_test = "3.0"
 rsa = { version = "0.9", features = ["sha2"] }
 jsonwebtoken = "9.3"
 validator = "0.20.0"
-kv_index = { path = "kv_index" }
+kv-index = { path = "kv_index", package = "kv-index" }
 
 [[bench]]
 name = "wasm_middleware_latency"

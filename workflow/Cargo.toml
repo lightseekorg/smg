@@ -5,6 +5,11 @@ edition = "2021"
 description = "Workflow-as-a-Service engine for managing multi-step operations"
 license = "Apache-2.0"
 repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+    "Keyang Ru <rukeyang@gmail.com>",
+]
 keywords = ["workflow", "orchestration", "dag", "state-machine"]
 categories = ["asynchronous"]
 

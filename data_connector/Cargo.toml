@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Storage backends for conversations and responses"
 license = "Apache-2.0"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+    "Keyang Ru <rukeyang@gmail.com>",
+]
 
 [dependencies]
 async-trait.workspace = true

@@ -1,8 +1,17 @@
 [package]
-name = "kv_index"
+name = "kv-index"
 version = "0.1.0"
 edition = "2021"
 description = "Radix tree implementations for prefix matching and cache-aware routing"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+    "Keyang Ru <rukeyang@gmail.com>",
+]
+keywords = ["radix-tree", "prefix-matching", "cache-routing", "llm"]
+categories = ["data-structures", "caching"]
 
 [dependencies]
 dashmap = { workspace = true }

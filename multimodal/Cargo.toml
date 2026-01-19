@@ -5,6 +5,10 @@ edition = "2021"
 description = "Multimodal processing for vision and other modalities"
 license = "Apache-2.0"
 repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+]
 keywords = ["vision", "multimodal", "image-processing", "llm"]
 categories = ["multimedia::images", "science"]
 

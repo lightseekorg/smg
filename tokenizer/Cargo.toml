@@ -5,6 +5,11 @@ edition = "2021"
 description = "LLM tokenizer library with caching and chat template support"
 license = "Apache-2.0"
 repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+    "Keyang Ru <rukeyang@gmail.com>",
+]
 keywords = ["tokenizer", "llm", "huggingface", "tiktoken", "chat-template"]
 categories = ["text-processing", "parsing"]
 
