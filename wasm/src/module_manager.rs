@@ -10,7 +10,7 @@ use std::{
 
 use uuid::Uuid;
 
-use crate::wasm::{
+use crate::{
     config::WasmRuntimeConfig,
     errors::{Result, WasmError, WasmManagerError, WasmModuleError},
     module::{WasmModule, WasmModuleAttachPoint},
@@ -48,7 +48,7 @@ impl WasmModuleManager {
     }
 
     /// Register a module (for workflow steps)
-    pub(crate) fn register_module_internal(&self, module: WasmModule) -> Result<()> {
+    pub fn register_module_internal(&self, module: WasmModule) -> Result<()> {
         let mut modules = self
             .modules
             .write()
@@ -58,7 +58,7 @@ impl WasmModuleManager {
     }
 
     /// Remove a module (for workflow steps)
-    pub(crate) fn remove_module_internal(&self, module_uuid: Uuid) -> Result<()> {
+    pub fn remove_module_internal(&self, module_uuid: Uuid) -> Result<()> {
         let mut modules = self
             .modules
             .write()
@@ -70,7 +70,7 @@ impl WasmModuleManager {
         Ok(())
     }
 
-    pub(crate) fn check_duplicate_sha256_hash(&self, sha256_hash: &[u8; 32]) -> Result<()> {
+    pub fn check_duplicate_sha256_hash(&self, sha256_hash: &[u8; 32]) -> Result<()> {
         let modules = self
             .modules
             .read()
@@ -232,7 +232,7 @@ impl WasmModuleManager {
         module: &WasmModule,
         attach_point: WasmModuleAttachPoint,
         input: WasmComponentInput,
-    ) -> Option<crate::wasm::spec::sgl::model_gateway::middleware_types::Action> {
+    ) -> Option<crate::spec::sgl::model_gateway::middleware_types::Action> {
         use tracing::error;
 
         let action_result = self

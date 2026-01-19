@@ -27,7 +27,7 @@ use wasmtime_wasi::WasiCtx;
 /// A smaller interval gives finer-grained timeout control but slightly more overhead.
 const EPOCH_INTERVAL_MS: u64 = 100;
 
-use crate::wasm::{
+use crate::{
     config::WasmRuntimeConfig,
     errors::{Result, WasmError, WasmRuntimeError},
     module::{MiddlewareAttachPoint, WasmModuleAttachPoint},
@@ -494,7 +494,7 @@ mod tests {
     use lru::LruCache;
 
     use super::*;
-    use crate::wasm::config::WasmRuntimeConfig;
+    use crate::config::WasmRuntimeConfig;
 
     #[test]
     fn test_get_cpu_info() {

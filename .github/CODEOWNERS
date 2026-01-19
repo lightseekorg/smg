@@ -14,5 +14,6 @@
 /src/routers @CatherineSue @key4ng @slin1237
 /src/tokenizer @slin1237 @CatherineSue
 /src/tool_parser @slin1237 @CatherineSue
-/src/wasm @slin1237
-/examples/wasm @slin1237
+/src/wasm @slin1237 @tonyluj
+/wasm @slin1237 @tonyluj
+/examples/wasm @slin1237 @tonyluj

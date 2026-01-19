@@ -1,5 +1,5 @@
 [workspace]
-members = ["protocols", "reasoning_parser", "tool_parser", "workflow", "tokenizer", "auth", "mcp", "kv_index", "data_connector", "multimodal"]
+members = ["protocols", "reasoning_parser", "tool_parser", "workflow", "tokenizer", "auth", "mcp", "kv_index", "data_connector", "multimodal", "wasm"]
 exclude = ["bindings/python", "bindings/golang"]
 resolver = "2"
 
@@ -8,6 +8,7 @@ openai-protocol = { path = "protocols" }
 smg-auth = { path = "auth", package = "auth" }
 smg-mcp = { path = "mcp", package = "mcp" }
 smg-data-connector = { path = "data_connector", package = "data-connector" }
+smg-wasm = { path = "wasm", package = "smg-wasm" }
 
 # Shared dependencies
 anyhow = "1.0"
@@ -138,6 +139,7 @@ smg-mcp = { path = "mcp", package = "mcp" }
 kv-index = { path = "kv_index", package = "kv-index" }
 smg-data-connector = { path = "data_connector", package = "data-connector" }
 llm-multimodal = { path = "multimodal" }
+smg-wasm = { path = "wasm", package = "smg-wasm" }
 
 # gRPC and Protobuf dependencies
 tonic = { version = "0.14.2", features = ["gzip", "transport"] }

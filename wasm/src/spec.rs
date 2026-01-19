@@ -6,7 +6,7 @@
 use axum::http::{header, HeaderMap, HeaderValue};
 
 wasmtime::component::bindgen!({
-    path: "src/wasm/interface",
+    path: "src/interface",
     world: "sgl-model-gateway",
     imports: { default: async | trappable },
     exports: { default: async },
