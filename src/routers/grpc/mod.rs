@@ -11,11 +11,11 @@ pub(crate) mod pipeline;
 pub(crate) mod proto_wrapper;
 pub(crate) mod regular;
 pub(crate) mod router; // Used by routers/factory
-pub(crate) mod utils; // Used by routers/http
+pub mod utils; // Used by routers/http and bindings/golang
 
 /// Processed chat messages ready for gRPC generation
 #[derive(Debug)]
-pub(crate) struct ProcessedMessages {
+pub struct ProcessedMessages {
     pub text: String,
     pub multimodal_inputs: Option<MultimodalInputs>,
     #[allow(dead_code)]

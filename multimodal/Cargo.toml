@@ -29,6 +29,7 @@ url = "2.5.4"
 
 # Workspace crates
 llm-tokenizer = { path = "../tokenizer", package = "tokenizer" }
+anyhow = "1.0.100"
 
 [dev-dependencies]
 npyz = { version = "0.8", features = ["npz"] }

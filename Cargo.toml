@@ -1,6 +1,6 @@
 [workspace]
 members = ["protocols", "reasoning_parser", "tool_parser", "workflow", "tokenizer", "auth", "mcp", "kv_index", "data_connector", "multimodal"]
-exclude = ["bindings/python"]
+exclude = ["bindings/python", "bindings/golang"]
 resolver = "2"
 
 [workspace.dependencies]
