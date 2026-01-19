@@ -332,6 +332,16 @@ pub struct TokenTree {
     page_size: usize,
 }
 
+impl std::fmt::Debug for TokenTree {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenTree")
+            .field("tenant_count", &self.tenant_token_count.len())
+            .field("eviction_policy", &self.eviction_policy)
+            .field("page_size", &self.page_size)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for TokenTree {
     fn default() -> Self {
         Self::new()
@@ -986,6 +996,29 @@ impl TokenTree {
         self.root.children.clear();
         self.root.tenant_last_access_time.clear();
         self.tenant_token_count.clear();
+    }
+
+    // TODO: Implement efficient remove_tenant with reverse index.
+    // See lib.rs for design options. Current naive O(n) traversal removed.
+    // For now, stale entries are cleaned up by LRU eviction.
+
+    /// Evict cache entries by total token count to reduce memory usage.
+    /// Convenience method matching the StringTree API.
+    ///
+    /// For each tenant, reduces their token usage to `max_size` if they exceed it.
+    pub fn evict_tenant_by_size(&self, max_size: usize) {
+        // Collect tenants that exceed the max size
+        let tenants_to_evict: Vec<TenantId> = self
+            .tenant_token_count
+            .iter()
+            .filter(|entry| *entry.value() > max_size)
+            .map(|entry| Arc::clone(entry.key()))
+            .collect();
+
+        // Evict each tenant
+        for tenant_id in tenants_to_evict {
+            self.evict_tenant(&tenant_id, max_size);
+        }
     }
 }
 

@@ -62,12 +62,13 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use kv_index::{TokenTree, Tree};
 use rand::Rng;
 use tracing::{debug, warn};
 
 use super::{
-    get_healthy_worker_indices, normalize_model_key, tree::Tree, utils::PeriodicTask,
-    CacheAwareConfig, LoadBalancingPolicy, SelectWorkerInfo,
+    get_healthy_worker_indices, normalize_model_key, utils::PeriodicTask, CacheAwareConfig,
+    LoadBalancingPolicy, SelectWorkerInfo,
 };
 use crate::{
     core::{Worker, UNKNOWN_MODEL_ID},
@@ -81,10 +82,17 @@ use crate::{
 /// Maintains separate trees per model for multi-model support.
 /// Supports mesh synchronization of tree operations across cluster nodes.
 /// When mesh is not enabled, the policy works independently without synchronization.
+///
+/// Supports both HTTP (string-based) and gRPC (token-based) connections:
+/// - HTTP requests use StringTree (character-based prefix matching)
+/// - gRPC requests use TokenTree (token-based prefix matching, page-aligned)
 #[derive(Debug)]
 pub struct CacheAwarePolicy {
     config: CacheAwareConfig,
-    trees: Arc<DashMap<String, Arc<Tree>>>,
+    /// String-based trees for HTTP connections (text input)
+    string_trees: Arc<DashMap<String, Arc<Tree>>>,
+    /// Token-based trees for gRPC connections (pre-tokenized input)
+    token_trees: Arc<DashMap<String, Arc<TokenTree>>>,
     mesh_sync: OptionalMeshSyncManager,
     _eviction_task: Option<PeriodicTask>,
 }
@@ -95,24 +103,38 @@ impl CacheAwarePolicy {
     }
 
     pub fn with_config(config: CacheAwareConfig) -> Self {
-        let trees = Arc::new(DashMap::<String, Arc<Tree>>::new());
+        let string_trees = Arc::new(DashMap::<String, Arc<Tree>>::new());
+        let token_trees = Arc::new(DashMap::<String, Arc<TokenTree>>::new());
 
         // Start background eviction thread if configured
         let eviction_task = if config.eviction_interval_secs > 0 {
-            let trees_clone = Arc::clone(&trees);
+            let string_trees_clone = Arc::clone(&string_trees);
+            let token_trees_clone = Arc::clone(&token_trees);
             let max_tree_size = config.max_tree_size;
 
             Some(PeriodicTask::spawn(
                 config.eviction_interval_secs,
                 "Eviction",
                 move || {
-                    for tree_ref in trees_clone.iter() {
+                    // Evict string trees (HTTP)
+                    for tree_ref in string_trees_clone.iter() {
                         let model_id = tree_ref.key();
                         let tree = tree_ref.value();
                         tree.evict_tenant_by_size(max_tree_size);
 
                         debug!(
-                            "Cache eviction completed for model {}, max_size: {}",
+                            "String tree eviction completed for model {}, max_size: {}",
+                            model_id, max_tree_size
+                        );
+                    }
+                    // Evict token trees (gRPC)
+                    for tree_ref in token_trees_clone.iter() {
+                        let model_id = tree_ref.key();
+                        let tree = tree_ref.value();
+                        tree.evict_tenant_by_size(max_tree_size);
+
+                        debug!(
+                            "Token tree eviction completed for model {}, max_size: {}",
                             model_id, max_tree_size
                         );
                     }
@@ -124,7 +146,8 @@ impl CacheAwarePolicy {
 
         Self {
             config,
-            trees,
+            string_trees,
+            token_trees,
             mesh_sync: None,
             _eviction_task: eviction_task,
         }
@@ -138,7 +161,8 @@ impl CacheAwarePolicy {
         }
     }
 
-    /// Initialize the tree with worker URLs (used only during initial setup)
+    /// Initialize the trees with worker URLs (used only during initial setup)
+    /// Initializes both string trees (HTTP) and token trees (gRPC) for each model.
     pub fn init_workers(&self, workers: &[Arc<dyn Worker>]) {
         // Group workers by model
         let mut model_workers: std::collections::HashMap<String, Vec<&Arc<dyn Worker>>> =
@@ -151,55 +175,80 @@ impl CacheAwarePolicy {
                 .push(worker);
         }
 
-        // Initialize tree for each model
+        // Initialize trees for each model (both string and token trees)
         for (tree_key, model_workers) in model_workers {
-            let tree = self
-                .trees
-                .entry(tree_key)
+            // Initialize string tree (HTTP)
+            let string_tree = self
+                .string_trees
+                .entry(tree_key.clone())
                 .or_insert_with(|| Arc::new(Tree::new()));
+            // Initialize token tree (gRPC)
+            let token_tree = self
+                .token_trees
+                .entry(tree_key)
+                .or_insert_with(|| Arc::new(TokenTree::new()));
+
             for worker in model_workers {
-                tree.insert("", worker.url());
+                string_tree.insert_text("", worker.url());
+                token_tree.insert_tokens(&[], worker.url());
             }
         }
     }
 
-    /// Add a single worker to the tree (incremental update)
+    /// Add a single worker to the trees (incremental update)
     pub fn add_worker(&self, worker: &dyn Worker) {
-        let tree_key = normalize_model_key(worker.model_id());
-        let tree = self
-            .trees
-            .entry(tree_key.to_string())
+        let tree_key = normalize_model_key(worker.model_id()).to_string();
+        // Add to string tree (HTTP)
+        let string_tree = self
+            .string_trees
+            .entry(tree_key.clone())
             .or_insert_with(|| Arc::new(Tree::new()));
-        tree.insert("", worker.url());
+        string_tree.insert_text("", worker.url());
+        // Add to token tree (gRPC)
+        let token_tree = self
+            .token_trees
+            .entry(tree_key)
+            .or_insert_with(|| Arc::new(TokenTree::new()));
+        token_tree.insert_tokens(&[], worker.url());
     }
 
     /// Add a worker by URL and model (for backward compatibility)
     pub fn add_worker_by_url(&self, url: &str, model_id: &str) {
-        let tree = self
-            .trees
-            .entry(model_id.to_string())
+        let model_id_string = model_id.to_string();
+        // Add to string tree (HTTP)
+        let string_tree = self
+            .string_trees
+            .entry(model_id_string.clone())
             .or_insert_with(|| Arc::new(Tree::new()));
-        tree.insert("", url);
+        string_tree.insert_text("", url);
+        // Add to token tree (gRPC)
+        let token_tree = self
+            .token_trees
+            .entry(model_id_string)
+            .or_insert_with(|| Arc::new(TokenTree::new()));
+        token_tree.insert_tokens(&[], url);
     }
 
-    /// Remove a worker from the tree
-    pub fn remove_worker(&self, worker: &dyn Worker) {
-        let tree_key = normalize_model_key(worker.model_id());
-        if let Some(tree) = self.trees.get(tree_key) {
-            tree.remove_tenant(worker.url());
-        }
+    /// Remove a worker from the trees
+    ///
+    /// Note: Currently a no-op. Stale entries are cleaned up by LRU eviction.
+    /// Worker registry removes workers first, so routing will skip them anyway.
+    /// TODO: Implement efficient remove_tenant in kv_index with reverse index.
+    pub fn remove_worker(&self, _worker: &dyn Worker) {
+        // No-op: rely on LRU eviction to clean up stale entries
     }
 
     /// Remove a worker by URL (removes from all model trees for backward compatibility)
-    pub fn remove_worker_by_url(&self, url: &str) {
-        // Remove from all trees since we don't know which model it belongs to
-        for tree_ref in self.trees.iter() {
-            tree_ref.value().remove_tenant(url);
-        }
+    ///
+    /// Note: Currently a no-op. Stale entries are cleaned up by LRU eviction.
+    /// TODO: Implement efficient remove_tenant in kv_index with reverse index.
+    pub fn remove_worker_by_url(&self, _url: &str) {
+        // No-op: rely on LRU eviction to clean up stale entries
     }
 
     /// Restore tree state from mesh store
     /// This is called during initialization to rebuild trees from synchronized state
+    /// Note: Mesh sync currently only supports text-based operations (HTTP string trees)
     fn restore_tree_state_from_mesh(&self) {
         if let Some(ref mesh_sync) = self.mesh_sync {
             // Get all tree states from mesh
@@ -207,7 +256,7 @@ impl CacheAwarePolicy {
             // For now, we'll restore trees for models that are already in our trees map
             // In a full implementation, we might want to query mesh for all tree states
 
-            for tree_ref in self.trees.iter() {
+            for tree_ref in self.string_trees.iter() {
                 let model_id = tree_ref.key();
                 if let Some(tree_state) = mesh_sync.get_tree_state(model_id) {
                     debug!(
@@ -221,10 +270,10 @@ impl CacheAwarePolicy {
                     for operation in &tree_state.operations {
                         match operation {
                             TreeOperation::Insert(insert_op) => {
-                                tree.insert(&insert_op.text, &insert_op.tenant);
+                                tree.insert_text(&insert_op.text, &insert_op.tenant);
                             }
-                            TreeOperation::Remove(remove_op) => {
-                                tree.remove_tenant(&remove_op.tenant);
+                            TreeOperation::Remove(_) => {
+                                // No-op: rely on LRU eviction for cleanup
                             }
                         }
                     }
@@ -245,26 +294,27 @@ impl CacheAwarePolicy {
 
     /// Apply remote tree operation from mesh
     /// This is called when receiving tree state updates from other nodes
+    /// Note: Mesh sync currently only supports text-based operations (HTTP string trees)
     pub fn apply_remote_tree_operation(&self, model_id: &str, operation: &TreeOperation) {
         let tree_key = Self::normalize_mesh_model_id(model_id);
 
         let tree = self
-            .trees
+            .string_trees
             .entry(tree_key.to_string())
             .or_insert_with(|| Arc::new(Tree::new()));
 
         match operation {
             TreeOperation::Insert(insert_op) => {
-                tree.insert(&insert_op.text, &insert_op.tenant);
+                tree.insert_text(&insert_op.text, &insert_op.tenant);
                 debug!(
                     "Applied remote tree insert: model={}, text={}, tenant={}",
                     model_id, insert_op.text, insert_op.tenant
                 );
             }
             TreeOperation::Remove(remove_op) => {
-                tree.remove_tenant(&remove_op.tenant);
+                // No-op: rely on LRU eviction for cleanup
                 debug!(
-                    "Applied remote tree remove: model={}, tenant={}",
+                    "Skipping remote tree remove (LRU will clean up): model={}, tenant={}",
                     model_id, remove_op.tenant
                 );
             }
@@ -273,34 +323,42 @@ impl CacheAwarePolicy {
 
     /// Run cache eviction to prevent unbounded growth
     pub fn evict_cache(&self, max_size: usize) {
-        for tree_ref in self.trees.iter() {
+        // Evict string trees (HTTP)
+        for tree_ref in self.string_trees.iter() {
             let model_id = tree_ref.key();
             let tree = tree_ref.value();
             tree.evict_tenant_by_size(max_size);
             debug!(
-                "Cache eviction for model {}, max_size: {}",
+                "String tree eviction for model {}, max_size: {}",
+                model_id, max_size
+            );
+        }
+        // Evict token trees (gRPC)
+        for tree_ref in self.token_trees.iter() {
+            let model_id = tree_ref.key();
+            let tree = tree_ref.value();
+            tree.evict_tenant_by_size(max_size);
+            debug!(
+                "Token tree eviction for model {}, max_size: {}",
                 model_id, max_size
             );
         }
     }
 
+    /// Select worker with minimum load (used when load is imbalanced)
+    /// Handles both HTTP (text-based) and gRPC (token-based) requests.
     fn select_worker_min_load(
         &self,
         workers: &[Arc<dyn Worker>],
-        request_text: &Option<&str>,
+        info: &SelectWorkerInfo,
         healthy_indices: &[usize],
         model_id: &str,
-        max_load: usize,
-        min_load: usize,
     ) -> Option<usize> {
         // Log load balancing trigger (only compute worker loads if debug enabled)
         if tracing::enabled!(tracing::Level::DEBUG) {
             let worker_loads: Vec<(&str, usize)> =
                 workers.iter().map(|w| (w.url(), w.load())).collect();
-            debug!(
-                "Load balancing triggered | max: {} | min: {} | workers: {:?}",
-                max_load, min_load, worker_loads
-            );
+            debug!("Load balancing triggered | workers: {:?}", worker_loads);
         }
 
         // Use shortest queue when imbalanced
@@ -309,18 +367,30 @@ impl CacheAwarePolicy {
             .min_by_key(|&&idx| workers[idx].load())
             .copied()?;
 
-        // Even in imbalanced mode, update the tree to maintain cache state
-        if let Some(text) = request_text {
-            // Get the tree reference without locking the entire HashMap
-            // DashMap only locks the specific shard containing this key
-            let tree = self.trees.get(model_id).map(|entry| entry.value().clone());
+        let worker_url = workers[min_load_idx].url();
+
+        // Even in imbalanced mode, update the appropriate tree to maintain cache state
+        // Prefer token tree for gRPC requests, fall back to string tree for HTTP
+        if let Some(tokens) = info.tokens {
+            // gRPC request: update token tree
+            let tree = self
+                .token_trees
+                .get(model_id)
+                .map(|entry| entry.value().clone());
+            if let Some(tree) = tree {
+                tree.insert_tokens(tokens, worker_url);
+            }
+        } else if let Some(text) = info.request_text {
+            // HTTP request: update string tree
+            let tree = self
+                .string_trees
+                .get(model_id)
+                .map(|entry| entry.value().clone());
 
             if let Some(tree) = tree {
-                let worker_url = workers[min_load_idx].url();
-                // Now we can work with the tree without holding the HashMap lock
-                tree.insert(text, worker_url);
+                tree.insert_text(text, worker_url);
 
-                // Sync insert operation to mesh if enabled (no-op if mesh is not enabled)
+                // Sync insert operation to mesh if enabled (only for text operations)
                 if let Some(ref mesh_sync) = self.mesh_sync {
                     use crate::mesh::tree_ops::TreeInsertOp;
                     let op = TreeOperation::Insert(TreeInsertOp {
@@ -334,7 +404,7 @@ impl CacheAwarePolicy {
                 }
             } else {
                 debug!(
-                    "Warning: No tree found for model '{}', skipping cache update",
+                    "Warning: No string tree found for model '{}', skipping cache update",
                     model_id
                 );
             }
@@ -350,6 +420,7 @@ impl CacheAwarePolicy {
 impl LoadBalancingPolicy for CacheAwarePolicy {
     fn select_worker(&self, workers: &[Arc<dyn Worker>], info: &SelectWorkerInfo) -> Option<usize> {
         let request_text = info.request_text;
+        let request_tokens = info.tokens;
         let healthy_indices = get_healthy_worker_indices(workers);
 
         if healthy_indices.is_empty() {
@@ -372,103 +443,18 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
             && (max_load as f32) > (min_load as f32 * self.config.balance_rel_threshold);
 
         if is_imbalanced {
-            return self.select_worker_min_load(
-                workers,
-                &request_text,
-                &healthy_indices,
-                model_id,
-                max_load,
-                min_load,
-            );
+            return self.select_worker_min_load(workers, info, &healthy_indices, model_id);
         }
 
         // Use cache-aware routing when balanced
-        let text = request_text.unwrap_or("");
-
-        // Get the tree reference without locking the entire HashMap
-        // DashMap only locks the specific shard containing this key
-        let tree = self.trees.get(model_id).map(|entry| entry.value().clone());
-
-        if let Some(tree) = tree {
-            // Now we work with the tree without holding the HashMap lock
-            // Use prefix_match_with_counts to avoid redundant chars().count() calls
-            let result = tree.prefix_match_with_counts(text);
-            let match_rate = if result.input_char_count == 0 {
-                0.0
-            } else {
-                result.matched_char_count as f32 / result.input_char_count as f32
-            };
-
-            // Select worker without String allocation
-            let selected_idx = if match_rate > self.config.cache_threshold {
-                // Cache hit path: find worker by URL (compare &str directly, no allocation)
-                let tenant_url: &str = &result.tenant;
-                workers
-                    .iter()
-                    .position(|w| w.url() == tenant_url)
-                    .filter(|&idx| workers[idx].is_healthy())
-            } else {
-                // Low cache match: use worker with minimum load
-                healthy_indices
-                    .iter()
-                    .min_by_key(|&&idx| workers[idx].load())
-                    .copied()
-            };
-
-            if let Some(idx) = selected_idx {
-                // Update the tree with this request (use worker URL directly, no allocation)
-                tree.insert(text, workers[idx].url());
-
-                // Sync insert operation to mesh if enabled (no-op if mesh is not enabled)
-                if let Some(ref mesh_sync) = self.mesh_sync {
-                    use crate::mesh::tree_ops::TreeInsertOp;
-                    let op = TreeOperation::Insert(TreeInsertOp {
-                        text: text.to_string(),
-                        tenant: workers[idx].url().to_string(),
-                    });
-                    let mesh_model_id = Self::normalize_mesh_model_id(model_id);
-                    if let Err(e) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
-                        warn!("Failed to sync tree insert operation to mesh: {}", e);
-                    }
-                }
-
-                // Increment processed counter
-                workers[idx].increment_processed();
-
-                return Some(idx);
-            }
-
-            // Selected worker no longer exists or unhealthy, remove stale tenant from tree
-            if match_rate > self.config.cache_threshold {
-                let tenant_url: &str = &result.tenant;
-                tree.remove_tenant(tenant_url);
-                debug!("Removed stale worker {} from cache tree", tenant_url);
-
-                // Sync removal to mesh if enabled (no-op if mesh is not enabled)
-                if let Some(ref mesh_sync) = self.mesh_sync {
-                    use crate::mesh::tree_ops::TreeRemoveOp;
-                    let op = TreeOperation::Remove(TreeRemoveOp {
-                        tenant: tenant_url.to_string(),
-                    });
-                    let mesh_model_id = Self::normalize_mesh_model_id(model_id);
-                    if let Err(e) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
-                        warn!("Failed to sync tree remove operation to mesh: {}", e);
-                    }
-                }
-            }
-
-            // Fallback to first healthy worker
-            healthy_indices.first().copied()
+        // gRPC requests use token tree, HTTP requests use string tree
+        if let Some(tokens) = request_tokens {
+            // gRPC path: use token-based tree
+            self.select_worker_with_tokens(workers, tokens, &healthy_indices, model_id)
         } else {
-            // No tree for this model, log warning and use random selection
-            debug!(
-                "Warning: No tree found for model '{}', using random worker selection",
-                model_id
-            );
-            // Return a random healthy worker
-            let mut rng = rand::rng();
-            let random_idx = rng.random_range(0..healthy_indices.len());
-            Some(healthy_indices[random_idx])
+            // HTTP path: use string-based tree
+            let text = request_text.unwrap_or("");
+            self.select_worker_with_text(workers, text, &healthy_indices, model_id)
         }
     }
 
@@ -494,6 +480,131 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+// Private helper methods for select_worker
+impl CacheAwarePolicy {
+    /// Select worker using token-based tree (gRPC path)
+    fn select_worker_with_tokens(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        tokens: &[u32],
+        healthy_indices: &[usize],
+        model_id: &str,
+    ) -> Option<usize> {
+        let tree = self
+            .token_trees
+            .get(model_id)
+            .map(|entry| entry.value().clone());
+
+        if let Some(tree) = tree {
+            let result = tree.match_prefix_with_counts(tokens);
+            let match_rate = if result.input_token_count == 0 {
+                0.0
+            } else {
+                result.matched_token_count as f32 / result.input_token_count as f32
+            };
+
+            let selected_idx = if match_rate > self.config.cache_threshold {
+                let tenant_url: &str = &result.tenant;
+                workers
+                    .iter()
+                    .position(|w| w.url() == tenant_url)
+                    .filter(|&idx| workers[idx].is_healthy())
+            } else {
+                healthy_indices
+                    .iter()
+                    .min_by_key(|&&idx| workers[idx].load())
+                    .copied()
+            };
+
+            if let Some(idx) = selected_idx {
+                tree.insert_tokens(tokens, workers[idx].url());
+                workers[idx].increment_processed();
+                return Some(idx);
+            }
+
+            // Selected worker no longer exists or unhealthy - fall back to first healthy
+            // Stale entries will be cleaned up by LRU eviction
+            healthy_indices.first().copied()
+        } else {
+            debug!(
+                "Warning: No token tree found for model '{}', using random worker selection",
+                model_id
+            );
+            let mut rng = rand::rng();
+            let random_idx = rng.random_range(0..healthy_indices.len());
+            Some(healthy_indices[random_idx])
+        }
+    }
+
+    /// Select worker using string-based tree (HTTP path)
+    fn select_worker_with_text(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        text: &str,
+        healthy_indices: &[usize],
+        model_id: &str,
+    ) -> Option<usize> {
+        let tree = self
+            .string_trees
+            .get(model_id)
+            .map(|entry| entry.value().clone());
+
+        if let Some(tree) = tree {
+            let result = tree.match_prefix_with_counts(text);
+            let match_rate = if result.input_char_count == 0 {
+                0.0
+            } else {
+                result.matched_char_count as f32 / result.input_char_count as f32
+            };
+
+            let selected_idx = if match_rate > self.config.cache_threshold {
+                let tenant_url: &str = &result.tenant;
+                workers
+                    .iter()
+                    .position(|w| w.url() == tenant_url)
+                    .filter(|&idx| workers[idx].is_healthy())
+            } else {
+                healthy_indices
+                    .iter()
+                    .min_by_key(|&&idx| workers[idx].load())
+                    .copied()
+            };
+
+            if let Some(idx) = selected_idx {
+                tree.insert_text(text, workers[idx].url());
+
+                // Sync insert operation to mesh if enabled (only for text operations)
+                if let Some(ref mesh_sync) = self.mesh_sync {
+                    use crate::mesh::tree_ops::TreeInsertOp;
+                    let op = TreeOperation::Insert(TreeInsertOp {
+                        text: text.to_string(),
+                        tenant: workers[idx].url().to_string(),
+                    });
+                    let mesh_model_id = Self::normalize_mesh_model_id(model_id);
+                    if let Err(e) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
+                        warn!("Failed to sync tree insert operation to mesh: {}", e);
+                    }
+                }
+
+                workers[idx].increment_processed();
+                return Some(idx);
+            }
+
+            // Selected worker no longer exists or unhealthy - fall back to first healthy
+            // Stale entries will be cleaned up by LRU eviction
+            healthy_indices.first().copied()
+        } else {
+            debug!(
+                "Warning: No string tree found for model '{}', using random worker selection",
+                model_id
+            );
+            let mut rng = rand::rng();
+            let random_idx = rng.random_range(0..healthy_indices.len());
+            Some(healthy_indices[random_idx])
+        }
     }
 }
 
@@ -752,7 +863,7 @@ mod tests {
 
         // Create a tree entry for model1 to trigger restore
         let _tree = policy
-            .trees
+            .string_trees
             .entry("model1".to_string())
             .or_insert_with(|| Arc::new(Tree::new()));
 
@@ -792,8 +903,8 @@ mod tests {
 
         policy.apply_remote_tree_operation("model1", &remote_op);
 
-        // Verify the tree was updated
-        let tree = policy.trees.get("model1");
+        // Verify the string tree was updated (mesh sync only affects string trees)
+        let tree = policy.string_trees.get("model1");
         assert!(tree.is_some());
     }
 

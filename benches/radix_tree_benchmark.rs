@@ -1,6 +1,6 @@
 //! Benchmarks for the radix tree implementations used in cache-aware routing.
 //!
-//! This benchmark compares both implementations:
+//! This benchmark tests both implementations:
 //! - StringTree: Character-based tree for HTTP router (text input)
 //! - TokenTree: Token-based tree for gRPC router (pre-tokenized input)
 //!
@@ -24,8 +24,6 @@ use rand::{
     distr::{Alphanumeric, SampleString},
     rng as thread_rng, Rng,
 };
-// Import both old and new tree implementations
-use smg::policies::tree::Tree as OldTree;
 
 // Global results storage for summary
 lazy_static::lazy_static! {
@@ -95,7 +93,7 @@ fn generate_worker_endpoints(count: usize) -> Vec<String> {
 // Benchmark Macros
 // ============================================================================
 
-/// Macro for INSERT benchmarks with string-based trees (OldTree, StringTree)
+/// Macro for INSERT benchmarks with string-based trees (StringTree)
 macro_rules! bench_string_insert {
     ($group:expr, $num_workers:expr, $char_size:expr, $workers:expr, $strings:expr,
      $prefix:literal, $category:literal, $tree_new:expr, $insert_method:ident) => {{
@@ -393,7 +391,7 @@ macro_rules! bench_token_concurrent {
 // Main Benchmark
 // ============================================================================
 
-/// Main benchmark comparing StringTree vs TokenTree
+/// Main benchmark for StringTree and TokenTree
 fn bench_summary(c: &mut Criterion) {
     let mut group = c.benchmark_group("benchmark_summary");
 
@@ -414,60 +412,7 @@ fn bench_summary(c: &mut Criterion) {
     const CHAR_SIZES: [usize; 3] = [4096, 16384, 65536];
 
     // ========================================================================
-    // OLD StringTree Benchmark
-    // ========================================================================
-    for &num_workers in &WORKER_COUNTS {
-        let workers = generate_worker_endpoints(num_workers);
-
-        for &char_size in &CHAR_SIZES {
-            let fixed_strings = generate_fixed_char_strings(INSERT_POOL_SIZE, char_size);
-
-            // Pre-populate tree for MATCH
-            let old_tree = Arc::new(OldTree::new());
-            for (i, s) in fixed_strings.iter().take(TREE_SIZE).enumerate() {
-                let tenant = &workers[i % workers.len()];
-                old_tree.insert(s, tenant);
-            }
-
-            bench_string_insert!(
-                group,
-                num_workers,
-                char_size,
-                workers,
-                fixed_strings,
-                "old",
-                "old",
-                OldTree::new(),
-                insert
-            );
-            bench_string_match!(
-                group,
-                num_workers,
-                char_size,
-                old_tree,
-                fixed_strings,
-                "old",
-                "old",
-                prefix_match
-            );
-        }
-
-        bench_string_concurrent!(
-            group,
-            num_workers,
-            workers,
-            NUM_THREADS,
-            OPS_PER_THREAD,
-            "old",
-            "old",
-            OldTree::new(),
-            insert,
-            prefix_match
-        );
-    }
-
-    // ========================================================================
-    // NEW StringTree Benchmark
+    // StringTree Benchmark
     // ========================================================================
     for &num_workers in &WORKER_COUNTS {
         let workers = generate_worker_endpoints(num_workers);
@@ -554,14 +499,12 @@ fn print_summary() {
     let results = BENCHMARK_RESULTS.lock().unwrap();
 
     // Collect results by category
-    let mut old_results = Vec::new();
     let mut string_results = Vec::new();
     let mut token_results = Vec::new();
 
     for (key, value) in results.iter() {
         let category = key.split('_').skip(1).collect::<Vec<_>>().join("_");
         match category.as_str() {
-            "old" => old_results.push(value.clone()),
             "string" => string_results.push(value.clone()),
             "token" => token_results.push(value.clone()),
             _ => {}
@@ -569,19 +512,7 @@ fn print_summary() {
     }
 
     eprintln!("\n{}", "=".repeat(90));
-    eprintln!("OLD STRINGTREE (policies::tree)");
-    eprintln!("{}", "=".repeat(90));
-    eprintln!(
-        "{:>4} | {:>12} | {:>6} | {:>10} | {:>8} | {:>12}",
-        "Work", "Size", "Op", "Throughput", "Latency", "Bandwidth"
-    );
-    eprintln!("{}", "-".repeat(90));
-    for v in &old_results {
-        eprintln!("{}", v);
-    }
-
-    eprintln!("\n{}", "=".repeat(90));
-    eprintln!("NEW STRINGTREE (radix_tree::StringTree)");
+    eprintln!("STRINGTREE (kv_index::StringTree)");
     eprintln!("{}", "=".repeat(90));
     eprintln!(
         "{:>4} | {:>12} | {:>6} | {:>10} | {:>8} | {:>12}",
@@ -593,7 +524,7 @@ fn print_summary() {
     }
 
     eprintln!("\n{}", "=".repeat(90));
-    eprintln!("TOKENTREE (radix_tree::TokenTree)");
+    eprintln!("TOKENTREE (kv_index::TokenTree)");
     eprintln!("{}", "=".repeat(90));
     eprintln!(
         "{:>4} | {:>12} | {:>6} | {:>10} | {:>8} | {:>12}",
