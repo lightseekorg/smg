@@ -1,29 +1,22 @@
-// factory.rs
-//
-// Factory function to create storage backends based on configuration.
+//! Factory function to create storage backends based on configuration.
 
 use std::sync::Arc;
 
 use tracing::info;
 use url::Url;
 
-use super::{
+use crate::{
+    config::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig},
     core::{ConversationItemStorage, ConversationStorage, ResponseStorage},
     memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage},
     noop::{NoOpConversationItemStorage, NoOpConversationStorage, NoOpResponseStorage},
     oracle::{OracleConversationItemStorage, OracleConversationStorage, OracleResponseStorage},
-};
-use crate::{
-    config::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig, RouterConfig},
-    data_connector::{
-        postgres::{
-            PostgresConversationItemStorage, PostgresConversationStorage, PostgresResponseStorage,
-            PostgresStore,
-        },
-        redis::{
-            RedisConversationItemStorage, RedisConversationStorage, RedisResponseStorage,
-            RedisStore,
-        },
+    postgres::{
+        PostgresConversationItemStorage, PostgresConversationStorage, PostgresResponseStorage,
+        PostgresStore,
+    },
+    redis::{
+        RedisConversationItemStorage, RedisConversationStorage, RedisResponseStorage, RedisStore,
     },
 };
 
@@ -35,18 +28,26 @@ pub type StorageTuple = (
     Arc<dyn ConversationItemStorage>,
 );
 
-/// Create all three storage backends based on router configuration.
+/// Configuration for creating storage backends
+pub struct StorageFactoryConfig<'a> {
+    pub backend: &'a HistoryBackend,
+    pub oracle: Option<&'a OracleConfig>,
+    pub postgres: Option<&'a PostgresConfig>,
+    pub redis: Option<&'a RedisConfig>,
+}
+
+/// Create all three storage backends based on configuration.
 ///
 /// # Arguments
-/// * `config` - Router configuration containing history_backend and oracle settings
+/// * `config` - Storage factory configuration
 ///
 /// # Returns
 /// Tuple of (response_storage, conversation_storage, conversation_item_storage)
 ///
 /// # Errors
-/// Returns error string if Oracle configuration is missing or initialization fails
-pub fn create_storage(config: &RouterConfig) -> Result<StorageTuple, String> {
-    match config.history_backend {
+/// Returns error string if required configuration is missing or initialization fails
+pub fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageTuple, String> {
+    match config.backend {
         HistoryBackend::Memory => {
             info!("Initializing data connector: Memory");
             Ok((
@@ -66,7 +67,6 @@ pub fn create_storage(config: &RouterConfig) -> Result<StorageTuple, String> {
         HistoryBackend::Oracle => {
             let oracle_cfg = config
                 .oracle
-                .clone()
                 .ok_or("oracle configuration is required when history_backend=oracle")?;
 
             info!(
@@ -74,7 +74,7 @@ pub fn create_storage(config: &RouterConfig) -> Result<StorageTuple, String> {
                 oracle_cfg.pool_min, oracle_cfg.pool_max
             );
 
-            let storages = create_oracle_storage(&oracle_cfg)?;
+            let storages = create_oracle_storage(oracle_cfg)?;
 
             info!("Data connector initialized successfully: Oracle ATP");
             Ok(storages)
@@ -82,7 +82,6 @@ pub fn create_storage(config: &RouterConfig) -> Result<StorageTuple, String> {
         HistoryBackend::Postgres => {
             let postgres_cfg = config
                 .postgres
-                .clone()
                 .ok_or("Postgres configuration is required when history_backend=postgres")?;
 
             let log_db_url = match Url::parse(&postgres_cfg.db_url) {
@@ -100,7 +99,7 @@ pub fn create_storage(config: &RouterConfig) -> Result<StorageTuple, String> {
                 log_db_url, postgres_cfg.pool_max
             );
 
-            let storages = create_postgres_storage(&postgres_cfg)?;
+            let storages = create_postgres_storage(postgres_cfg)?;
 
             info!("Data connector initialized successfully: Postgres");
 
@@ -109,7 +108,6 @@ pub fn create_storage(config: &RouterConfig) -> Result<StorageTuple, String> {
         HistoryBackend::Redis => {
             let redis_cfg = config
                 .redis
-                .clone()
                 .ok_or("Redis configuration is required when history_backend=redis")?;
 
             let log_redis_url = match Url::parse(&redis_cfg.url) {
@@ -127,7 +125,7 @@ pub fn create_storage(config: &RouterConfig) -> Result<StorageTuple, String> {
                 log_redis_url, redis_cfg.pool_max
             );
 
-            let storages = create_redis_storage(&redis_cfg)?;
+            let storages = create_redis_storage(redis_cfg)?;
 
             info!("Data connector initialized successfully: Redis");
 

@@ -1,5 +1,5 @@
 [workspace]
-members = ["protocols", "reasoning-parser", "tool-parser", "workflow", "tokenizer", "auth", "mcp", "kv_index"]
+members = ["protocols", "reasoning_parser", "tool_parser", "workflow", "tokenizer", "auth", "mcp", "kv_index", "data_connector"]
 exclude = ["bindings/python"]
 resolver = "2"
 
@@ -7,6 +7,7 @@ resolver = "2"
 openai-protocol = { path = "protocols" }
 smg-auth = { path = "auth", package = "auth" }
 smg-mcp = { path = "mcp", package = "mcp" }
+smg-data-connector = { path = "data_connector", package = "data-connector" }
 
 # Shared dependencies
 anyhow = "1.0"
@@ -128,13 +129,14 @@ arc-swap = "1.7.1"
 
 # Workspace crates
 openai-protocol = { path = "protocols", features = ["axum"] }
-reasoning-parser = { path = "reasoning-parser" }
-tool-parser = { path = "tool-parser" }
+reasoning-parser = { path = "reasoning_parser" }
+tool-parser = { path = "tool_parser" }
 wfaas = { path = "workflow", package = "workflow" }
 llm-tokenizer = { path = "tokenizer", package = "tokenizer" }
 smg-auth = { path = "auth", package = "auth" }
 smg-mcp = { path = "mcp", package = "mcp" }
 kv_index = { path = "kv_index" }
+smg-data-connector = { path = "data_connector", package = "data-connector" }
 
 # gRPC and Protobuf dependencies
 tonic = { version = "0.14.2", features = ["gzip", "transport"] }

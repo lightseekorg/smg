@@ -2,7 +2,7 @@ pub mod app_context;
 pub use smg_auth as auth;
 pub mod config;
 pub mod core;
-pub mod data_connector;
+pub use smg_data_connector as data_connector;
 pub mod grpc_client;
 pub use smg_mcp as mcp;
 pub mod mesh;

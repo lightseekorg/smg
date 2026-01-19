@@ -1,0 +1,32 @@
+[package]
+name = "data-connector"
+version = "0.1.0"
+edition = "2021"
+description = "Storage backends for conversations and responses"
+license = "Apache-2.0"
+
+[dependencies]
+async-trait.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+dashmap.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "rt-multi-thread"] }
+tracing.workspace = true
+ulid = "1.2.1"
+url = "2.5"
+
+# Database backends
+deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"] }
+deadpool-postgres = "0.14.1"
+deadpool-redis = "0.18.0"
+futures = "0.3"
+oracle = { version = "0.6.3", features = ["chrono"] }
+redis = { version = "0.27.6", features = ["tokio-comp", "json", "connection-manager"] }
+tokio-postgres = { version = "0.7.15", features = ["runtime", "with-chrono-0_4", "with-serde_json-1", "array-impls"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
