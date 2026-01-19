@@ -1,6 +1,6 @@
 use std::{
     cmp::Reverse,
-    collections::{BinaryHeap, HashMap, VecDeque},
+    collections::{BinaryHeap, HashMap},
     hash::{BuildHasherDefault, Hasher},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -850,79 +850,9 @@ impl Tree {
         }
     }
 
-    pub fn remove_tenant(&self, tenant: &str) {
-        // Intern tenant ID once for efficient lookups
-        let tenant_id = intern_tenant(tenant);
-
-        // 1. Find all the leaves for the tenant
-        // A leaf is a node that has this tenant but no children have it
-        let mut stack = vec![Arc::clone(&self.root)];
-        let mut queue = VecDeque::new();
-
-        while let Some(curr) = stack.pop() {
-            for child in curr.children.iter() {
-                stack.push(Arc::clone(child.value()));
-            }
-
-            // Check if this node is a leaf for the tenant
-            if curr
-                .tenant_last_access_time
-                .contains_key(tenant_id.as_ref())
-            {
-                let has_child_with_tenant = curr.children.iter().any(|child| {
-                    child
-                        .value()
-                        .tenant_last_access_time
-                        .contains_key(tenant_id.as_ref())
-                });
-                if !has_child_with_tenant {
-                    queue.push_back(Arc::clone(&curr));
-                }
-            }
-        }
-
-        // 2. Start from the leaves and traverse up to the root, removing the tenant from each node
-        while let Some(curr) = queue.pop_front() {
-            // Remove tenant from node
-            curr.tenant_last_access_time.remove(tenant_id.as_ref());
-
-            // Get parent reference outside of the borrow scope
-            // Use Weak::upgrade() to get a strong reference if the parent still exists
-            let parent_opt = curr.parent.read().as_ref().and_then(Weak::upgrade);
-
-            // Remove empty nodes
-            if curr.children.is_empty() && curr.tenant_last_access_time.is_empty() {
-                if let Some(ref parent) = parent_opt {
-                    if let Some(fc) = curr.text.read().first_char() {
-                        parent.children.remove(&fc);
-                    }
-                }
-            }
-
-            // If parent has this tenant and no other children have it,
-            // parent becomes a new leaf - add to queue
-            if let Some(ref parent) = parent_opt {
-                if parent
-                    .tenant_last_access_time
-                    .contains_key(tenant_id.as_ref())
-                {
-                    let has_child_with_tenant = parent.children.iter().any(|child| {
-                        child
-                            .value()
-                            .tenant_last_access_time
-                            .contains_key(tenant_id.as_ref())
-                    });
-
-                    if !has_child_with_tenant {
-                        queue.push_back(Arc::clone(parent));
-                    }
-                }
-            }
-        }
-
-        // 3. Remove the tenant from the tenant_char_count map
-        self.tenant_char_count.remove(tenant_id.as_ref());
-    }
+    // TODO: Implement efficient remove_tenant with reverse index.
+    // See lib.rs for design options. Current naive O(n) traversal removed.
+    // For now, stale entries are cleaned up by LRU eviction.
 
     #[allow(dead_code)]
     pub fn get_tenant_char_count(&self) -> HashMap<String, usize> {
@@ -1796,82 +1726,9 @@ mod tests {
         assert_eq!(tree.prefix_match_tenant("help", "tenant3"), ""); // Non-existent tenant
     }
 
-    #[test]
-    fn test_simple_tenant_eviction() {
-        let tree = Tree::new();
-
-        // Insert data for multiple tenants
-        tree.insert_text("hello", "tenant1");
-        tree.insert_text("world", "tenant1");
-        tree.insert_text("hello", "tenant2");
-        tree.insert_text("help", "tenant2");
-
-        let initial_sizes = tree.get_used_size_per_tenant();
-        assert_eq!(initial_sizes.get("tenant1").unwrap(), &10); // "hello" + "world"
-        assert_eq!(initial_sizes.get("tenant2").unwrap(), &6); // "hello" + "p"
-
-        // Evict tenant1
-        tree.remove_tenant("tenant1");
-
-        let final_sizes = tree.get_used_size_per_tenant();
-        assert!(
-            !final_sizes.contains_key("tenant1"),
-            "tenant1 should be completely removed"
-        );
-        assert_eq!(
-            final_sizes.get("tenant2").unwrap(),
-            &6,
-            "tenant2 should be unaffected"
-        );
-
-        assert_eq!(tree.prefix_match_tenant("hello", "tenant1"), "");
-        assert_eq!(tree.prefix_match_tenant("world", "tenant1"), "");
-
-        assert_eq!(tree.prefix_match_tenant("hello", "tenant2"), "hello");
-        assert_eq!(tree.prefix_match_tenant("help", "tenant2"), "help");
-    }
-
-    #[test]
-    fn test_complex_tenant_eviction() {
-        let tree = Tree::new();
-
-        // Create a more complex tree structure with shared prefixes
-        tree.insert_text("apple", "tenant1");
-        tree.insert_text("application", "tenant1");
-        tree.insert_text("apple", "tenant2");
-        tree.insert_text("appetite", "tenant2");
-        tree.insert_text("banana", "tenant1");
-        tree.insert_text("banana", "tenant2");
-        tree.insert_text("ball", "tenant2");
-
-        let initial_sizes = tree.get_used_size_per_tenant();
-        println!("Initial sizes: {:?}", initial_sizes);
-        tree.pretty_print();
-
-        // Evict tenant1
-        tree.remove_tenant("tenant1");
-
-        let final_sizes = tree.get_used_size_per_tenant();
-        println!("Final sizes: {:?}", final_sizes);
-        tree.pretty_print();
-
-        assert!(
-            !final_sizes.contains_key("tenant1"),
-            "tenant1 should be completely removed"
-        );
-
-        assert_eq!(tree.prefix_match_tenant("apple", "tenant1"), "");
-        assert_eq!(tree.prefix_match_tenant("application", "tenant1"), "");
-        assert_eq!(tree.prefix_match_tenant("banana", "tenant1"), "");
-
-        assert_eq!(tree.prefix_match_tenant("apple", "tenant2"), "apple");
-        assert_eq!(tree.prefix_match_tenant("appetite", "tenant2"), "appetite");
-        assert_eq!(tree.prefix_match_tenant("banana", "tenant2"), "banana");
-        assert_eq!(tree.prefix_match_tenant("ball", "tenant2"), "ball");
-
-        let tenant2_size = final_sizes.get("tenant2").unwrap();
-        assert_eq!(tenant2_size, &(5 + 5 + 6 + 2)); // "apple" + "etite" + "banana" + "ll"
-    }
+    // NOTE: test_simple_tenant_eviction and test_complex_tenant_eviction removed
+    // because remove_tenant was removed (inefficient O(n) implementation).
+    // TODO: Re-add these tests when efficient remove_tenant is implemented.
 
     // ==================== Edge Case Tests ====================
 
@@ -2121,33 +1978,8 @@ mod tests {
         assert!(!sizes.is_empty(), "Tree should have entries");
     }
 
-    #[test]
-    fn test_rapid_insert_remove_cycles() {
-        let tree = Arc::new(Tree::new());
-        let num_cycles = 50;
-
-        for cycle in 0..num_cycles {
-            let tenant = format!("tenant{}", cycle % 5);
-
-            // Insert several entries
-            for i in 0..10 {
-                let text = format!("cycle{}entry{}", cycle, i);
-                tree.insert_text(&text, &tenant);
-            }
-
-            // Remove the tenant
-            tree.remove_tenant(&tenant);
-
-            // Verify tenant is gone
-            let sizes = tree.get_used_size_per_tenant();
-            assert!(
-                !sizes.contains_key(&tenant),
-                "Tenant {} should be removed after cycle {}",
-                tenant,
-                cycle
-            );
-        }
-    }
+    // NOTE: test_rapid_insert_remove_cycles removed because remove_tenant was removed.
+    // TODO: Re-add this test when efficient remove_tenant is implemented.
 
     // ==================== ASCII/UTF-8 Consistency Tests ====================
 
@@ -2280,24 +2112,8 @@ mod tests {
         assert_eq!(matched, "hello");
     }
 
-    #[test]
-    fn test_stale_cache_after_tenant_removal() {
-        let tree = Tree::new();
-
-        tree.insert_text("hello", "tenant1");
-        tree.insert_text("hello", "tenant2");
-
-        // Access to populate cache
-        let _ = tree.prefix_match_legacy("hello");
-
-        // Remove tenant1
-        tree.remove_tenant("tenant1");
-
-        // Should still work with tenant2
-        let (matched, tenant) = tree.prefix_match_legacy("hello");
-        assert_eq!(matched, "hello");
-        assert_eq!(tenant, "tenant2");
-    }
+    // NOTE: test_stale_cache_after_tenant_removal removed because remove_tenant was removed.
+    // TODO: Re-add this test when efficient remove_tenant is implemented.
 
     // ==================== Consistency Verification Tests ====================
 
@@ -2332,9 +2148,8 @@ mod tests {
         tree.evict_tenant_by_size(100);
         verify_consistency(&tree);
 
-        // Tenant removal
-        tree.remove_tenant("tenant1");
-        verify_consistency(&tree);
+        // NOTE: Tenant removal test removed because remove_tenant was removed.
+        // TODO: Re-add when efficient remove_tenant is implemented.
     }
 
     #[test]

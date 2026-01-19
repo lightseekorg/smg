@@ -20,8 +20,8 @@ mod prefix_hash;
 mod random;
 mod registry;
 mod round_robin;
-pub mod tree;
 pub(crate) mod utils;
+
 pub use bucket::BucketPolicy;
 pub use cache_aware::CacheAwarePolicy;
 pub use consistent_hashing::ConsistentHashingPolicy;
@@ -32,7 +32,9 @@ pub use prefix_hash::{PrefixHashConfig, PrefixHashPolicy};
 pub use random::RandomPolicy;
 pub use registry::PolicyRegistry;
 pub use round_robin::RoundRobinPolicy;
-pub use tree::PrefixMatchResult;
+
+// Re-export PrefixMatchResult from kv_index for production use
+pub use kv_index::PrefixMatchResult;
 
 /// Core trait for load balancing policies
 ///

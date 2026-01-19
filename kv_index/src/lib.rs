@@ -19,6 +19,10 @@ pub use common::{MatchResult, TenantId};
 pub use string_tree::{PrefixMatchResult as StringMatchResult, Tree as StringTree};
 pub use token_tree::{PrefixMatchResult as TokenMatchResult, TokenTree};
 
+// Re-export under names matching old tree.rs API for easier migration
+pub use string_tree::Tree;
+pub use string_tree::PrefixMatchResult;
+
 /// Trait for radix tree implementations.
 ///
 /// This trait provides a unified interface for both string-based and token-based
@@ -55,6 +59,13 @@ pub trait RadixTree: Send + Sync {
     /// * `tenant` - The tenant whose entries should be evicted
     /// * `max_units` - Maximum units (chars/tokens) to retain for this tenant
     fn evict(&self, tenant: &TenantId, max_units: usize);
+
+    // TODO: Add remove_tenant(&self, tenant: &str) with efficient implementation.
+    // Current naive approach requires O(n) full tree traversal.
+    // Efficient implementation options:
+    // 1. Maintain reverse index: DashMap<TenantId, Vec<Weak<Node>>> for O(k) removal
+    // 2. Lazy tombstone marking with background cleanup
+    // For now, rely on LRU eviction to clean up stale entries.
 
     /// Get the current size (in units) for a tenant.
     fn tenant_size(&self, tenant: &TenantId) -> usize;
