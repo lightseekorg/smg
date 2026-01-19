@@ -1,5 +1,5 @@
 [package]
-name = "kv-index"
+name = "kv_index"
 version = "0.1.0"
 edition = "2021"
 description = "Radix tree implementations for prefix matching and cache-aware routing"

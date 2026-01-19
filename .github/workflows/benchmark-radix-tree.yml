@@ -5,13 +5,13 @@ on:
     branches: [ main ]
     paths:
       - 'benches/radix_tree_benchmark.rs'
-      - 'kv-index/**'
+      - 'kv_index/**'
       - 'src/policies/tree.rs'
   pull_request:
     branches: [ main ]
     paths:
       - 'benches/radix_tree_benchmark.rs'
-      - 'kv-index/**'
+      - 'kv_index/**'
       - 'src/policies/tree.rs'
   workflow_dispatch:
   schedule:

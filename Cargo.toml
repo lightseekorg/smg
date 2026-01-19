@@ -1,5 +1,5 @@
 [workspace]
-members = ["protocols", "reasoning-parser", "tool-parser", "workflow", "tokenizer", "auth", "mcp", "kv-index"]
+members = ["protocols", "reasoning-parser", "tool-parser", "workflow", "tokenizer", "auth", "mcp", "kv_index"]
 exclude = ["bindings/python"]
 resolver = "2"
 
@@ -134,7 +134,7 @@ wfaas = { path = "workflow", package = "workflow" }
 llm-tokenizer = { path = "tokenizer", package = "tokenizer" }
 smg-auth = { path = "auth", package = "auth" }
 smg-mcp = { path = "mcp", package = "mcp" }
-kv-index = { path = "kv-index" }
+kv_index = { path = "kv_index" }
 
 # gRPC and Protobuf dependencies
 tonic = { version = "0.14.2", features = ["gzip", "transport"] }
@@ -181,7 +181,7 @@ serial_test = "3.0"
 rsa = { version = "0.9", features = ["sha2"] }
 jsonwebtoken = "9.3"
 validator = "0.20.0"
-kv-index = { path = "kv-index" }
+kv_index = { path = "kv_index" }
 
 [[bench]]
 name = "wasm_middleware_latency"
