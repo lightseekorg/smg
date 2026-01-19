@@ -7,7 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/lightseekorg/smg"
 authors = [
     "Simo Lin <linsimo.mark@gmail.com>",
-    "Chang Su <mckvtl@gmail.com>",
+    "Tony Lu <tonyluj@gmail.com>",
 ]
 keywords = ["wasm", "wasmtime", "middleware", "component-model"]
 categories = ["wasm", "web-programming"]
