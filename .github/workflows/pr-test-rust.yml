@@ -114,7 +114,7 @@ jobs:
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
           pip install transformers pillow numpy scipy
-          python scripts/generate_vision_golden.py
+          python multimodal/scripts/generate_vision_golden.py
 
       - name: Run Rust tests
         timeout-minutes: 30

@@ -6,13 +6,13 @@ that are used to verify the Rust image preprocessors produce identical results.
 
 Usage:
     # Generate all golden outputs
-    python scripts/generate_vision_golden.py
+    python multimodal/scripts/generate_vision_golden.py
 
     # Generate for specific model
-    python scripts/generate_vision_golden.py --model llava
+    python multimodal/scripts/generate_vision_golden.py --model llava
 
     # Use specific image
-    python scripts/generate_vision_golden.py --image tests/fixtures/images/square.jpg
+    python multimodal/scripts/generate_vision_golden.py --image multimodal/tests/fixtures/images/square.jpg
 """
 
 import argparse
@@ -75,16 +75,16 @@ MODELS = {
 
 # Default test images
 DEFAULT_IMAGES = [
-    "tests/fixtures/images/square.jpg",
-    "tests/fixtures/images/tall.jpg",
-    "tests/fixtures/images/wide.jpg",
-    "tests/fixtures/images/small.jpg",
-    "tests/fixtures/images/tiny.jpg",
-    "tests/fixtures/images/very_tall.jpg",
-    "tests/fixtures/images/very_wide.jpg",
-    "tests/fixtures/images/large.jpg",
-    "tests/fixtures/images/odd_dims.jpg",
-    "tests/fixtures/images/grayscale.jpg",
+    "multimodal/tests/fixtures/images/square.jpg",
+    "multimodal/tests/fixtures/images/tall.jpg",
+    "multimodal/tests/fixtures/images/wide.jpg",
+    "multimodal/tests/fixtures/images/small.jpg",
+    "multimodal/tests/fixtures/images/tiny.jpg",
+    "multimodal/tests/fixtures/images/very_tall.jpg",
+    "multimodal/tests/fixtures/images/very_wide.jpg",
+    "multimodal/tests/fixtures/images/large.jpg",
+    "multimodal/tests/fixtures/images/odd_dims.jpg",
+    "multimodal/tests/fixtures/images/grayscale.jpg",
 ]
 
 
@@ -661,7 +661,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         "-o",
-        default="tests/fixtures/golden",
+        default="multimodal/tests/fixtures/golden",
         help="Output directory for golden files",
     )
     args = parser.parse_args()

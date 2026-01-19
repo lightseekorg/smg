@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use image::{imageops::FilterType, DynamicImage};
 use ndarray::{Array4, IxDyn};
 
-use crate::multimodal::vision::{
+use crate::vision::{
     image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
     transforms::{self, TransformError},
@@ -382,7 +382,7 @@ mod tests {
 
         let config = PreProcessorConfig {
             size: Some(size),
-            patch_size: Some(crate::multimodal::vision::preprocessor_config::PatchSize {
+            patch_size: Some(crate::vision::preprocessor_config::PatchSize {
                 height: Some(14),
                 width: Some(14),
             }),

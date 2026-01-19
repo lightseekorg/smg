@@ -124,8 +124,8 @@ target/
 # Rust lib
 Cargo.lock
 
-# Generated vision test fixtures (regenerate with: python scripts/generate_vision_golden.py)
-tests/fixtures/golden/
+# Generated vision test fixtures (regenerate with: python multimodal/scripts/generate_vision_golden.py)
+multimodal/tests/fixtures/golden/
 
 lmms-eval
 

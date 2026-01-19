@@ -37,7 +37,7 @@
 use image::{DynamicImage, GenericImageView};
 use ndarray::Array3;
 
-use crate::multimodal::vision::{
+use crate::vision::{
     image_processor::{ImagePreProcessor, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
     transforms::{

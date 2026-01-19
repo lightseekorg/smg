@@ -31,7 +31,7 @@ repos:
             src/proto/.*\.proto$|
             src/mesh/proto/.*\.proto$|
             src/tokenizer/chat_template\.rs|
-            tests/fixtures/.*|
+            multimodal/tests/fixtures/.*|
             target/.*
           )$
 
