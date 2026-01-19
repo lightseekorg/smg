@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tracing::{info, span, Level};
 
-use super::config::Role;
+use crate::config::Role;
 
 /// Maximum length for sanitized strings to prevent log flooding
 const MAX_SANITIZED_LENGTH: usize = 1024;

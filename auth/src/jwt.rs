@@ -28,7 +28,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::{
+use crate::{
     config::{JwtConfig, Role},
     jwks::{JwksError, JwksProvider},
 };

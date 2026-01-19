@@ -1,10 +1,11 @@
 [workspace]
-members = ["protocols", "reasoning-parser", "tool-parser", "workflow", "tokenizer"]
+members = ["protocols", "reasoning-parser", "tool-parser", "workflow", "tokenizer", "auth"]
 exclude = ["bindings/python"]
 resolver = "2"
 
 [workspace.dependencies]
 openai-protocol = { path = "protocols" }
+smg-auth = { path = "auth", package = "auth" }
 
 [package]
 name = "sgl-model-gateway"
@@ -124,6 +125,7 @@ reasoning-parser = { path = "reasoning-parser" }
 tool-parser = { path = "tool-parser" }
 wfaas = { path = "workflow", package = "workflow" }
 llm-tokenizer = { path = "tokenizer", package = "tokenizer" }
+smg-auth = { path = "auth", package = "auth" }
 
 # gRPC and Protobuf dependencies
 tonic = { version = "0.14.2", features = ["gzip", "transport"] }

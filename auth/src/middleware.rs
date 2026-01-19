@@ -14,12 +14,12 @@ use axum::{
 };
 use tracing::{debug, error, info, warn};
 
-use super::{
+use crate::{
     audit::{AuditContext, AuditLogger},
     config::{ControlPlaneAuthConfig, Role},
     jwt::JwtValidator,
+    RequestId,
 };
-use crate::middleware::RequestId;
 
 /// Authenticated principal information.
 #[derive(Debug, Clone)]
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn test_control_plane_auth_state_with_api_keys() {
-        use super::super::config::ApiKeyEntry;
+        use crate::config::ApiKeyEntry;
 
         let config = ControlPlaneAuthConfig {
             jwt: None,
