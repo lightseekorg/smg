@@ -183,7 +183,8 @@ impl TokenizerTrait for TiktokenTokenizer {
 
 #[cfg(test)]
 mod tests {
-    use crate::*;
+    use super::{TiktokenModel, TiktokenTokenizer};
+    use crate::traits::{Decoder, Encoder, Tokenizer};
 
     #[test]
     fn test_tiktoken_creation() {

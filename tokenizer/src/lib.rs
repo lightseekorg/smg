@@ -20,9 +20,8 @@ pub mod huggingface;
 
 pub mod tiktoken;
 
-// TODO: Fix tests after crate extraction - many use glob imports that need updating
-// #[cfg(test)]
-// mod tests;
+#[cfg(test)]
+mod tests;
 
 // Re-export types used outside this module
 pub use cache::{CacheConfig, CacheStats, CachedTokenizer, L0Cache, L1Cache, TokenizerFingerprint};

@@ -291,7 +291,12 @@ impl StopSequenceDecoderBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::{mock::MockTokenizer, *};
+    use std::sync::Arc;
+
+    use super::StopSequenceDecoderBuilder;
+    use crate::{
+        mock::MockTokenizer, SequenceDecoderOutput, StopSequenceConfig, StopSequenceDecoder,
+    };
 
     #[test]
     fn test_stop_token_detection() {

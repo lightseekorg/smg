@@ -422,7 +422,9 @@ pub fn get_tokenizer_info(file_path: &str) -> Result<TokenizerType> {
 
 #[cfg(test)]
 mod tests {
-    use crate::*;
+    use super::{
+        create_tokenizer, create_tokenizer_async, create_tokenizer_from_file, is_likely_json,
+    };
 
     #[test]
     fn test_json_detection() {

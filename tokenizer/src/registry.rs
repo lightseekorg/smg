@@ -342,11 +342,11 @@ impl Default for TokenizerRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use tokio::time::sleep;
 
-    use crate::{mock::MockTokenizer, *};
+    use crate::{mock::MockTokenizer, traits::Tokenizer, LoadError, TokenizerRegistry};
 
     #[tokio::test]
     async fn test_basic_operations() {

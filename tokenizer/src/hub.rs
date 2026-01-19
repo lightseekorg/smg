@@ -281,7 +281,7 @@ fn resolve_model_cache_dir(path: &Path, model_name: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use crate::*;
+    use super::{is_chat_template_file, is_tokenizer_file, is_weight_file};
 
     #[test]
     fn test_is_tokenizer_file() {
