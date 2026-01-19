@@ -4,7 +4,7 @@ use anyhow::{Error, Result};
 use tokenizers::{processors::template::TemplateProcessing, tokenizer::Tokenizer as HfTokenizer};
 use tracing::debug;
 
-use super::{
+use crate::{
     chat_template::{
         detect_chat_template_content_format, ChatTemplateContentFormat, ChatTemplateParams,
         ChatTemplateProcessor,
@@ -30,7 +30,7 @@ impl HuggingFaceTokenizer {
         let path = std::path::Path::new(file_path);
         let chat_template_path = path
             .parent()
-            .and_then(crate::tokenizer::factory::discover_chat_template_in_dir);
+            .and_then(crate::factory::discover_chat_template_in_dir);
         Self::from_file_with_chat_template(file_path, chat_template_path.as_deref())
     }
 

@@ -1,11 +1,11 @@
-# Tokenizer Module
+# llm-tokenizer
 
 ## Overview
-The `sgl-model-gateway` tokenizer subsystem exposes a single `Tokenizer` facade around multiple backends
-(Hugging Face JSON tokenizers, OpenAI/tiktoken models, and an in-memory mock).  It packages the
-shared behaviours needed by the router–encoding user text, incrementally decoding streamed tokens,
-tracking per-request state, and detecting stop conditions—behind trait objects so the rest of the
-router can remain backend-agnostic.
+The `llm-tokenizer` crate exposes a single `Tokenizer` facade around multiple backends
+(Hugging Face JSON tokenizers, OpenAI/tiktoken models, and an in-memory mock). It packages the
+shared behaviours needed by LLM applications—encoding user text, incrementally decoding streamed tokens,
+tracking per-request state, and detecting stop conditions—behind trait objects so consuming code
+can remain backend-agnostic.
 
 Key capabilities:
 - trait-based split between `Encoder`, `Decoder`, and `Tokenizer` for shared APIs across backends
@@ -16,11 +16,11 @@ Key capabilities:
 - optional Jinja2 chat-template rendering that matches Hugging Face semantics
 
 The implementation deliberately keeps the surface area small—metrics, batching, or SentencePiece
-support mentioned in earlier drafts do **not** exist today.  This document reflects the actual code
-as of `sgl-model-gateway/src/tokenizer/*`.
+support mentioned in earlier drafts do **not** exist today. This document reflects the actual code
+as of `tokenizer/src/*`.
 
 ## Source Map
-- `mod.rs` – module exports and the `Tokenizer` wrapper around `Arc<dyn Tokenizer>`
+- `lib.rs` – module exports and the `Tokenizer` wrapper around `Arc<dyn Tokenizer>`
 - `traits.rs` – shared traits and the `Encoding`/`SpecialTokens` helper types
 - `factory.rs` – backend discovery, file/model heuristics, and tokio-aware creation helpers
 - `hub.rs` – Hugging Face Hub downloads via `hf_hub`
@@ -32,17 +32,18 @@ as of `sgl-model-gateway/src/tokenizer/*`.
 - `stop.rs` – stop-sequence detection with "jail" buffering and a builder API
 - `mock.rs` – lightweight tokenizer used by unit tests
 - `tests.rs` – smoke tests covering the trait facade and helpers (largely with the mock backend)
+- `cache/` – multi-level caching infrastructure (L0 in-memory, L1 prefix-based)
 
 ## Core Traits and Types (`traits.rs`)
 - `Encoder`, `Decoder`, and `Tokenizer` traits stay `Send + Sync` so instances can be shared across
-  threads.  Concrete backends implement the minimal methods: `encode`, `encode_batch`, `decode`,
+  threads. Concrete backends implement the minimal methods: `encode`, `encode_batch`, `decode`,
   `vocab_size`, special-token lookup, and optional token↔id conversions.
 - `Encoding` wraps backend-specific results: `Hf` holds the Hugging Face encoding object,
   `Sp` is a plain ID vector reserved for future SentencePiece support, and `Tiktoken` stores u32 IDs
-  from `tiktoken-rs`.  `Encoding::token_ids()` is the zero-copy accessor used everywhere.
+  from `tiktoken-rs`. `Encoding::token_ids()` is the zero-copy accessor used everywhere.
 - `SpecialTokens` collects optional BOS/EOS/etc. markers so upstream code can make backend-agnostic
   decisions.
-- `Tokenizer` (in `mod.rs`) is a thin `Arc<dyn Tokenizer>` newtype that exposes convenience methods
+- `Tokenizer` (in `lib.rs`) is a thin `Arc<dyn Tokenizer>` newtype that exposes convenience methods
   (`encode`, `decode`, `decode_stream`, etc.) while keeping cloning cheap.
 
 ## Backend Implementations
@@ -60,7 +61,7 @@ as of `sgl-model-gateway/src/tokenizer/*`.
 - `from_model_name` heuristically maps OpenAI model IDs (e.g. `gpt-4`, `text-davinci-003`) to those
   bases. Unknown model names return an error rather than silently defaulting.
 - Implements encode/decode operations; batch encode simply iterates sequentially.
-- Provides approximate vocab sizes and common GPT special tokens.  Direct token↔id lookup is not
+- Provides approximate vocab sizes and common GPT special tokens. Direct token↔id lookup is not
   implemented—the underlying library does not expose that mapping.
 
 ### MockTokenizer (`mock.rs`)
@@ -68,7 +69,7 @@ as of `sgl-model-gateway/src/tokenizer/*`.
 - Implements the same trait surface so helpers can be exercised without pulling real tokenizer data.
 
 ## Factory and Backend Discovery (`factory.rs`)
-- `create_tokenizer{,_async}` accept either a filesystem path or a model identifier.  Logic:
+- `create_tokenizer{,_async}` accept either a filesystem path or a model identifier. Logic:
    1. Paths are loaded directly; the file extension (or JSON autodetection) selects the backend.
    2. Strings that look like OpenAI model names (`gpt-*`, `davinci`, `curie`, `babbage`, `ada`) use
       `TiktokenTokenizer`.
@@ -84,15 +85,15 @@ as of `sgl-model-gateway/src/tokenizer/*`.
   (`tokenizer.json`, `merges.txt`, `.model`, etc.), filtering out weights and docs.
 - The helper returns the HF cache directory containing the fetched files; the factory then loads
   from disk using standard file paths.
-- Honour the `HF_TOKEN` environment variable for private or rate-limited models.  Without it the
+- Honour the `HF_TOKEN` environment variable for private or rate-limited models. Without it the
   download may fail with an authorization error.
 
 ## Chat Template Support (`chat_template.rs`)
 - Detects whether a template expects raw string content or the structured OpenAI-style `content`
-  list by walking the minijinja AST.  This matches the Python-side detection logic used elsewhere in
+  list by walking the minijinja AST. This matches the Python-side detection logic used elsewhere in
   SGLang.
 - `ChatTemplateProcessor` (constructed per call) renders templates against JSON `messages` and
-  `ChatTemplateParams` (system prompt, tools, EOS token handling, etc.).  Errors surface as
+  `ChatTemplateParams` (system prompt, tools, EOS token handling, etc.). Errors surface as
   `anyhow::Error`, keeping parity with Hugging Face error messages.
 - The tokenizer wrapper stores both the template string and its detected content format so callers
   can pre-transform message content correctly.
@@ -102,7 +103,7 @@ as of `sgl-model-gateway/src/tokenizer/*`.
 - Maintains a sliding window (`prefix_offset`, `read_offset`) over accumulated token IDs.
 - Each `step` decodes the known prefix and the new slice; when the new slice produces additional
   UTF-8 text (and does not end in the replacement character `�`), it returns the incremental chunk
-  and updates offsets.  Otherwise it returns `None` and waits for more tokens.
+  and updates offsets. Otherwise it returns `None` and waits for more tokens.
 - `step_batch` and `flush` offer convenience for batching and draining remaining text.
 
 ### `Sequence` (`sequence.rs`)
@@ -114,18 +115,25 @@ as of `sgl-model-gateway/src/tokenizer/*`.
 ### `StopSequenceDecoder` (`stop.rs`)
 - Extends the incremental decoding approach with a "jail" buffer that holds potential partial
   matches against configured stop sequences.
-- Supports both token-level stops (visible or hidden) and arbitrary string sequences.  When a string
+- Supports both token-level stops (visible or hidden) and arbitrary string sequences. When a string
   stop is configured, the decoder emits only the safe prefix and keeps a suffix jailed until it can
   decide whether it completes a stop sequence.
 - Provides `StopSequenceDecoderBuilder` for ergonomic configuration and exposes `process_token`,
   `process_tokens`, `flush`, `reset`, and `is_stopped` helpers.
 
+## Caching (`cache/`)
+The caching subsystem provides multi-level caching for tokenizer results:
+- `L0Cache`: In-memory LRU cache for exact-match token ID lookups
+- `L1Cache`: Prefix-based cache that can reuse partial encoding results
+- `CachedTokenizer`: Wrapper that adds caching to any tokenizer implementation
+- `TokenizerFingerprint`: Content-based fingerprinting for cache key generation
+
 ## Testing
 - Unit tests cover the mock tokenizer, the `Tokenizer` wrapper, incremental decoding helpers, and
   stop-sequence behaviour (`tests.rs`, `sequence.rs`, `stop.rs`, `tiktoken.rs`, `factory.rs`,
-  `hub.rs`).  Network-dependent Hugging Face downloads are exercised behind a best-effort async test
+  `hub.rs`). Network-dependent Hugging Face downloads are exercised behind a best-effort async test
   that skips in CI without credentials.
-- Use `cargo test -p sgl-model-gateway tokenizer` to run the module’s test suite.
+- Use `cargo test -p tokenizer` to run the crate's test suite.
 
 ## Known Limitations & Future Work
 - SentencePiece (`.model`) and GGUF tokenizers are detected but deliberately unimplemented.
@@ -138,13 +146,13 @@ as of `sgl-model-gateway/src/tokenizer/*`.
 ## Usage Examples
 ```rust
 use std::sync::Arc;
-use smg::tokenizer::{
+use llm_tokenizer::{
     create_tokenizer, SequenceDecoderOutput, StopSequenceDecoderBuilder, Tokenizer,
 };
 
 // Load a tokenizer from disk (Hugging Face JSON)
 let tokenizer = Tokenizer::from_file("/path/to/tokenizer.json")?;
-let encoding = tokenizer.encode("Hello, world!")?;
+let encoding = tokenizer.encode("Hello, world!", false)?;
 assert!(!encoding.token_ids().is_empty());
 
 // Auto-detect OpenAI GPT tokenizer
@@ -172,7 +180,7 @@ for &token in encoding.token_ids() {
 
 ```rust
 // Apply a chat template when one is bundled with the tokenizer
-use smg::tokenizer::{chat_template::ChatTemplateParams, HuggingFaceTokenizer};
+use llm_tokenizer::{chat_template::ChatTemplateParams, HuggingFaceTokenizer};
 
 let mut hf = HuggingFaceTokenizer::from_file_with_chat_template(
     "./tokenizer.json",

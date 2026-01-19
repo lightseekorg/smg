@@ -23,14 +23,19 @@ pub mod tiktoken;
 #[cfg(test)]
 mod tests;
 
-// Internal imports for Tokenizer struct
-use factory::{create_tokenizer_from_file, create_tokenizer_with_chat_template};
 // Re-export types used outside this module
+pub use cache::{CacheConfig, CacheStats, CachedTokenizer, L0Cache, L1Cache, TokenizerFingerprint};
+pub use factory::{create_tokenizer_from_file, create_tokenizer_with_chat_template, TokenizerType};
 pub use huggingface::HuggingFaceTokenizer;
+pub use mock::MockTokenizer;
 pub use registry::{LoadError, LoadOutcome, TokenizerRegistry};
-pub use stop::StopSequenceDecoder;
+pub use sequence::Sequence;
+pub use stop::{SequenceDecoderOutput, StopSequenceConfig, StopSequenceDecoder};
 pub use stream::DecodeStream;
-pub use traits::{Decoder, Encoder, Encoding, SpecialTokens};
+pub use tiktoken::TiktokenModel;
+pub use traits::{
+    Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait,
+};
 
 /// Main tokenizer wrapper that provides a unified interface for different tokenizer implementations
 #[derive(Clone)]

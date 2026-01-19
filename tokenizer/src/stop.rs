@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Result;
 
-use super::{
+use crate::{
     sequence::Sequence,
     traits::{self, TokenIdType},
 };
@@ -291,8 +291,12 @@ impl StopSequenceDecoderBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tokenizer::mock::MockTokenizer;
+    use std::sync::Arc;
+
+    use super::StopSequenceDecoderBuilder;
+    use crate::{
+        mock::MockTokenizer, SequenceDecoderOutput, StopSequenceConfig, StopSequenceDecoder,
+    };
 
     #[test]
     fn test_stop_token_detection() {
@@ -481,7 +485,7 @@ mod tests {
         // This test verifies the fix for the UTF-8 boundary panic
         // The panic occurred when trying to slice jail_buffer at a byte index
         // that was in the middle of a multi-byte UTF-8 character (e.g., '×')
-        use crate::tokenizer::mock::MockTokenizer;
+        use crate::mock::MockTokenizer;
 
         let tokenizer = Arc::new(MockTokenizer::new());
 

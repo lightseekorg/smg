@@ -2,10 +2,8 @@
 mod tests {
     use std::fs;
 
-    use smg::{
-        protocols::chat::{ChatMessage, MessageContent},
-        tokenizer::{chat_template::ChatTemplateParams, huggingface::HuggingFaceTokenizer},
-    };
+    use llm_tokenizer::{chat_template::ChatTemplateParams, huggingface::HuggingFaceTokenizer};
+    use openai_protocol::chat::{ChatMessage, MessageContent};
     use tempfile::TempDir;
 
     #[test]
@@ -78,7 +76,7 @@ mod tests {
             .map(|msg| serde_json::to_value(msg).unwrap())
             .collect();
 
-        use smg::tokenizer::chat_template::ChatTemplateParams;
+        use llm_tokenizer::chat_template::ChatTemplateParams;
         let params = ChatTemplateParams {
             add_generation_prompt: true,
             ..Default::default()

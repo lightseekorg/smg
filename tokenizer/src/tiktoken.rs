@@ -1,7 +1,7 @@
 use anyhow::{Error, Result};
 use tiktoken_rs::{cl100k_base, p50k_base, p50k_edit, r50k_base, CoreBPE};
 
-use super::traits::{
+use crate::traits::{
     Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait,
 };
 
@@ -183,7 +183,8 @@ impl TokenizerTrait for TiktokenTokenizer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{TiktokenModel, TiktokenTokenizer};
+    use crate::traits::{Decoder, Encoder, Tokenizer};
 
     #[test]
     fn test_tiktoken_creation() {

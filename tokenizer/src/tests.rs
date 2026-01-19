@@ -1,8 +1,10 @@
-#[cfg(test)]
 use std::sync::Arc;
 
-#[cfg(test)]
-use super::*;
+use crate::{
+    mock,
+    traits::{Decoder, Encoder},
+    Tokenizer,
+};
 
 #[test]
 fn test_mock_tokenizer_encode() {

@@ -8,7 +8,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use super::super::traits::Tokenizer;
+use crate::traits::Tokenizer;
 
 /// A fingerprint of a tokenizer's configuration
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -77,8 +77,7 @@ impl TokenizerFingerprint {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tokenizer::mock::MockTokenizer;
+    use crate::{mock::MockTokenizer, *};
 
     #[test]
     fn test_fingerprint_equality() {

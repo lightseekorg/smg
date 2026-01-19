@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use smg::tokenizer::{
+use llm_tokenizer::{
     cache::{CacheConfig, CachedTokenizer},
     hub::download_tokenizer_from_hf,
     huggingface::HuggingFaceTokenizer,
