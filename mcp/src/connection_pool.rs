@@ -7,7 +7,7 @@ use lru::LruCache;
 use parking_lot::Mutex;
 use rmcp::{service::RunningService, RoleClient};
 
-use crate::mcp::{
+use crate::{
     config::{McpProxyConfig, McpServerConfig},
     error::McpResult,
 };
@@ -221,7 +221,7 @@ pub struct PoolStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::config::McpTransport;
+    use crate::config::McpTransport;
 
     // Helper to create test server config
     fn create_test_config(url: &str) -> McpServerConfig {
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_pool_with_global_proxy() {
-        use crate::mcp::config::McpProxyConfig;
+        use crate::config::McpProxyConfig;
 
         // Create proxy config
         let proxy = McpProxyConfig {

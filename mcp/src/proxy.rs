@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use crate::mcp::{
+use crate::{
     config::{McpProxyConfig, McpServerConfig},
     error::{McpError, McpResult},
 };
@@ -115,7 +115,7 @@ pub(crate) fn create_http_client(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::config::McpTransport;
+    use crate::config::McpTransport;
 
     #[test]
     fn test_resolve_proxy_no_config() {

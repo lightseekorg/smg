@@ -14,7 +14,7 @@ use rmcp::transport::auth::OAuthState;
 use serde::Deserialize;
 use tokio::sync::{oneshot, Mutex};
 
-use crate::mcp::error::{McpError, McpResult};
+use crate::error::{McpError, McpResult};
 
 /// OAuth callback parameters
 #[derive(Debug, Deserialize)]

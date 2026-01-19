@@ -1,11 +1,12 @@
 [workspace]
-members = ["protocols", "reasoning-parser", "tool-parser", "workflow", "tokenizer", "auth"]
+members = ["protocols", "reasoning-parser", "tool-parser", "workflow", "tokenizer", "auth", "mcp"]
 exclude = ["bindings/python"]
 resolver = "2"
 
 [workspace.dependencies]
 openai-protocol = { path = "protocols" }
 smg-auth = { path = "auth", package = "auth" }
+smg-mcp = { path = "mcp", package = "mcp" }
 
 # Shared dependencies
 anyhow = "1.0"
@@ -112,14 +113,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls-pemfile = "2.2"
 openssl = "0.10.73"
-rmcp = { version = "0.8.3", features = ["client", "server",
-    "transport-child-process",
-    "transport-sse-client-reqwest",
-    "transport-streamable-http-client-reqwest",
-    "transport-streamable-http-server",
-    "transport-streamable-http-server-session",
-    "reqwest",
-    "auth"] }
+rmcp = { version = "0.8.3", features = ["client"] }  # Only for type references, MCP logic is in smg-mcp crate
 serde_yaml = "0.9"
 oracle = { version = "0.6.3", features = ["chrono"] }
 subtle = "2.6"
@@ -139,6 +133,7 @@ tool-parser = { path = "tool-parser" }
 wfaas = { path = "workflow", package = "workflow" }
 llm-tokenizer = { path = "tokenizer", package = "tokenizer" }
 smg-auth = { path = "auth", package = "auth" }
+smg-mcp = { path = "mcp", package = "mcp" }
 
 # gRPC and Protobuf dependencies
 tonic = { version = "0.14.2", features = ["gzip", "transport"] }
@@ -183,6 +178,8 @@ opentelemetry-proto = { version = "0.27", features = ["gen-tonic"] }
 tonic-v12 = { version = "0.12.3", package = "tonic" }
 serial_test = "3.0"
 rsa = { version = "0.9", features = ["sha2"] }
+jsonwebtoken = "9.3"
+validator = "0.20.0"
 
 [[bench]]
 name = "wasm_middleware_latency"

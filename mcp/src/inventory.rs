@@ -4,7 +4,7 @@
 
 use dashmap::DashMap;
 
-use crate::mcp::config::{Prompt, RawResource, Tool};
+use crate::config::{Prompt, RawResource, Tool};
 
 /// Cached tool with metadata
 #[derive(Clone)]
@@ -216,7 +216,7 @@ impl ToolInventory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::config::{Prompt, RawResource, Tool};
+    use crate::config::{Prompt, RawResource, Tool};
 
     // Helper to create a test tool
     fn create_test_tool(name: &str) -> Tool {
