@@ -6,7 +6,7 @@
 use wasmtime::{component::ResourceTable, StoreLimits};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
-use crate::wasm::{
+use crate::{
     module::{MiddlewareAttachPoint, WasmModuleAttachPoint},
     spec::sgl::model_gateway::middleware_types,
 };

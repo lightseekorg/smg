@@ -1,0 +1,33 @@
+[package]
+name = "smg-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly runtime and module management for sgl-model-gateway"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+]
+keywords = ["wasm", "wasmtime", "middleware", "component-model"]
+categories = ["wasm", "web-programming"]
+
+[lib]
+name = "smg_wasm"
+
+[dependencies]
+async-channel = "2.5"
+axum = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+lru = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+sha2 = "0.10"
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt-multi-thread", "time"] }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+wasmtime = { version = "38.0", features = ["component-model", "async"] }
+wasmtime-wasi = "38.0"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
