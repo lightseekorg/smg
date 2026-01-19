@@ -229,7 +229,7 @@ fn transform_content_field(content_value: &mut Value, content_format: ChatTempla
 
 /// Generate tool constraints for structured generation
 /// Note: tools should already be filtered if needed (by allowed_tools or specific function)
-pub(crate) fn generate_tool_constraints(
+pub fn generate_tool_constraints(
     tools: &[Tool],
     tool_choice: &Option<ToolChoice>,
     _model: &str,
@@ -396,7 +396,7 @@ pub(crate) fn filter_chat_request_by_tool_choice(
 
 /// Process chat messages and apply template (shared by both routers)
 /// Requires HuggingFace tokenizer with chat template support
-pub(crate) fn process_chat_messages(
+pub fn process_chat_messages(
     request: &ChatCompletionRequest,
     tokenizer: &dyn Tokenizer,
 ) -> Result<ProcessedMessages, String> {
@@ -517,7 +517,7 @@ pub(crate) fn process_chat_messages(
 }
 
 /// Create a StopSequenceDecoder from stop parameters
-pub(crate) fn create_stop_decoder(
+pub fn create_stop_decoder(
     tokenizer: &Arc<dyn Tokenizer>,
     stop: Option<&StringOrArray>,
     stop_token_ids: Option<&Vec<u32>>,
