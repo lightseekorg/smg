@@ -1,5 +1,5 @@
 [workspace]
-members = ["protocols", "reasoning-parser", "tool-parser", "workflow", "tokenizer", "auth", "mcp"]
+members = ["protocols", "reasoning-parser", "tool-parser", "workflow", "tokenizer", "auth", "mcp", "kv-index"]
 exclude = ["bindings/python"]
 resolver = "2"
 
@@ -134,6 +134,7 @@ wfaas = { path = "workflow", package = "workflow" }
 llm-tokenizer = { path = "tokenizer", package = "tokenizer" }
 smg-auth = { path = "auth", package = "auth" }
 smg-mcp = { path = "mcp", package = "mcp" }
+kv-index = { path = "kv-index" }
 
 # gRPC and Protobuf dependencies
 tonic = { version = "0.14.2", features = ["gzip", "transport"] }
@@ -180,6 +181,7 @@ serial_test = "3.0"
 rsa = { version = "0.9", features = ["sha2"] }
 jsonwebtoken = "9.3"
 validator = "0.20.0"
+kv-index = { path = "kv-index" }
 
 [[bench]]
 name = "wasm_middleware_latency"
@@ -205,14 +207,14 @@ harness = false
 path = "benches/tool_parser_benchmark.rs"
 
 [[bench]]
-name = "tree_benchmark"
-harness = false
-path = "benches/tree_benchmark.rs"
-
-[[bench]]
 name = "manual_policy_benchmark"
 harness = false
 path = "benches/manual_policy_benchmark.rs"
+
+[[bench]]
+name = "radix_tree_benchmark"
+harness = false
+path = "benches/radix_tree_benchmark.rs"
 
 [profile.release]
 opt-level = "z"     # Optimize for size

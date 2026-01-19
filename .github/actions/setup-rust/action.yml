@@ -1,0 +1,37 @@
+name: 'Setup Rust Environment'
+description: 'Install Rust, configure sccache and caching. Requires checkout to be done first.'
+
+inputs:
+  sccache-version:
+    description: 'sccache version to use'
+    required: false
+    default: 'v0.12.0'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install Rust dependencies
+      shell: bash
+      run: bash scripts/ci_install_rust.sh
+
+    - name: Configure sccache
+      uses: mozilla-actions/sccache-action@v0.0.9
+      with:
+        version: ${{ inputs.sccache-version }}
+        disable_annotations: true
+
+    - name: Rust cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: .
+        shared-key: "rust-cache"
+        cache-all-crates: true
+        cache-on-failure: true
+        save-if: true
+
+    - name: Start sccache
+      shell: bash
+      run: |
+        if command -v sccache &> /dev/null; then
+          sccache --start-server 2>/dev/null || true
+        fi

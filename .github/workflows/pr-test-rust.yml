@@ -28,27 +28,10 @@ jobs:
       (github.event.action == 'labeled' && github.event.label.name == 'run-ci')
     runs-on: 4-gpu-a10
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install rust dependencies
-        run: |
-          bash scripts/ci_install_rust.sh
-
-      - name: Configure sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-        with:
-          version: "v0.12.0"
-          disable_annotations: true
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-          shared-key: "rust-cache"
-          cache-all-crates: true
-          cache-on-failure: true
-          save-if: true
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
 
       - name: Build python binding
         run: |
@@ -108,27 +91,10 @@ jobs:
       (github.event.action == 'labeled' && github.event.label.name == 'run-ci')
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          bash scripts/ci_install_rust.sh
-
-      - name: Configure sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-        with:
-          version: "v0.12.0"
-          disable_annotations: true
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-          shared-key: "rust-cache"
-          cache-all-crates: true
-          cache-on-failure: true
-          save-if: true
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
 
       - name: Run lint
         run: |
