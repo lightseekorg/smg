@@ -13,7 +13,6 @@ use chrono::{DateTime, Utc};
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use serde_json::Value;
 use tokio_postgres::{NoTls, Row};
-use tracing;
 
 use crate::{
     common::{parse_json_value, parse_metadata, parse_raw_response, parse_tool_calls},

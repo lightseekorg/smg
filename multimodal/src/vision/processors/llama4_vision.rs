@@ -33,7 +33,7 @@ use std::collections::HashSet;
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage};
 use ndarray::{s, Array3, Array4, IxDyn};
 
-use crate::multimodal::vision::{
+use crate::vision::{
     image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
     transforms::{self, TransformError},

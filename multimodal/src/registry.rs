@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
+use llm_tokenizer::TokenizerTrait;
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 use thiserror::Error;
 
 use super::types::{ImageSize, Modality, PromptReplacement, TokenId};
-use crate::tokenizer::traits::Tokenizer as TokenizerTrait;
 
 #[derive(Debug, Error)]
 pub enum ModelRegistryError {
@@ -322,12 +322,10 @@ impl ModelProcessorSpec for Phi3VisionSpec {
 mod tests {
     use std::collections::HashMap;
 
+    use llm_tokenizer::{Decoder, Encoder, Encoding, SpecialTokens, TokenizerTrait};
     use serde_json::json;
 
     use super::*;
-    use crate::tokenizer::traits::{
-        Decoder, Encoder, Encoding, SpecialTokens, Tokenizer as TokenizerTrait,
-    };
 
     struct TestTokenizer {
         vocab: HashMap<String, u32>,

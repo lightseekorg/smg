@@ -481,7 +481,7 @@ mod tests {
         // Create a mock processor using LlavaProcessor
         registry.register(
             "test-model",
-            Box::new(crate::multimodal::vision::processors::LlavaProcessor::new()),
+            Box::new(crate::vision::processors::LlavaProcessor::new()),
         );
 
         assert!(registry.has_processor("test-model-7b"));

@@ -24,7 +24,7 @@
 use image::{DynamicImage, GenericImageView};
 use ndarray::Array3;
 
-use crate::multimodal::vision::{
+use crate::vision::{
     image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
     transforms::{normalize, pil_to_filter, resize, stack_batch, to_tensor, TransformError},
