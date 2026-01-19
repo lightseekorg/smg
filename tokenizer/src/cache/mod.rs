@@ -26,7 +26,7 @@ pub use l0::{CacheStats, L0Cache};
 pub use l1::{L1Cache, L1CacheStats};
 use rayon::prelude::*;
 
-use super::traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer};
+use crate::traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer};
 
 /// Configuration for the tokenizer cache
 #[derive(Debug, Clone)]
@@ -272,8 +272,7 @@ impl Tokenizer for CachedTokenizer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tokenizer::mock::MockTokenizer;
+    use crate::{mock::MockTokenizer, *};
 
     #[test]
     fn test_cache_hit() {

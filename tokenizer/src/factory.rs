@@ -3,8 +3,10 @@ use std::{fs::File, io::Read, path::Path, sync::Arc};
 use anyhow::{Error, Result};
 use tracing::debug;
 
-use super::{huggingface::HuggingFaceTokenizer, tiktoken::TiktokenTokenizer, traits};
-use crate::tokenizer::hub::download_tokenizer_from_hf;
+use crate::{
+    hub::download_tokenizer_from_hf, huggingface::HuggingFaceTokenizer,
+    tiktoken::TiktokenTokenizer, traits,
+};
 
 /// Represents the type of tokenizer being used
 #[derive(Debug, Clone)]
@@ -420,7 +422,7 @@ pub fn get_tokenizer_info(file_path: &str) -> Result<TokenizerType> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::*;
 
     #[test]
     fn test_json_detection() {

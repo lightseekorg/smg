@@ -1,0 +1,37 @@
+[package]
+name = "tokenizer"
+version = "0.1.0"
+edition = "2021"
+description = "LLM tokenizer library with caching and chat template support"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+keywords = ["tokenizer", "llm", "huggingface", "tiktoken", "chat-template"]
+categories = ["text-processing", "parsing"]
+
+[lib]
+name = "llm_tokenizer"
+
+[dependencies]
+anyhow = "1.0"
+blake3 = "1.5"
+bytemuck = { version = "1.21", features = ["derive"] }
+dashmap = "6.1.0"
+hf-hub = { version = "0.4.3", features = ["tokio"] }
+lru = "0.16.2"
+minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins"] }
+minijinja-contrib = { version = "2.0", features = ["pycompat"] }
+parking_lot = "0.12.4"
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0.12"
+tiktoken-rs = "0.7.0"
+tokenizers = "0.22.0"
+tokio = { version = "1.42.0", features = ["sync", "rt-multi-thread", "macros"] }
+tracing = "0.1"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+
+[dev-dependencies]
+openai-protocol.workspace = true
+reqwest = { version = "0.12.8", features = ["blocking"] }
+tempfile = "3.8"

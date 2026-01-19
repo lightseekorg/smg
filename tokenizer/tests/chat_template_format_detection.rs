@@ -1,10 +1,8 @@
-use smg::{
-    protocols::chat::{ChatMessage, MessageContent},
-    tokenizer::chat_template::{
-        detect_chat_template_content_format, ChatTemplateContentFormat, ChatTemplateParams,
-        ChatTemplateProcessor,
-    },
+use llm_tokenizer::chat_template::{
+    detect_chat_template_content_format, ChatTemplateContentFormat, ChatTemplateParams,
+    ChatTemplateProcessor,
 };
+use openai_protocol::chat::{ChatMessage, MessageContent};
 
 #[test]
 fn test_detect_string_format_deepseek() {

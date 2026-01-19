@@ -24,7 +24,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use super::traits::Tokenizer;
+use crate::traits::Tokenizer;
 
 /// Outcome of a tokenizer load operation
 #[derive(Debug, Clone)]
@@ -222,7 +222,7 @@ impl TokenizerRegistry {
     /// * `Some(id)` - If the tokenizer was successfully registered
     /// * `None` - If a tokenizer with this name already existed
     #[cfg(test)]
-    pub(crate) fn register(
+    pub fn register(
         &self,
         id: &str,
         name: &str,
@@ -346,8 +346,7 @@ mod tests {
 
     use tokio::time::sleep;
 
-    use super::*;
-    use crate::tokenizer::mock::MockTokenizer;
+    use crate::{mock::MockTokenizer, *};
 
     #[tokio::test]
     async fn test_basic_operations() {

@@ -30,7 +30,7 @@ use std::{
 use blake3;
 use dashmap::DashMap;
 
-use super::super::traits::TokenIdType;
+use crate::traits::TokenIdType;
 
 /// Hash type for cache keys
 type Blake3Hash = [u8; 32];
@@ -357,8 +357,7 @@ pub struct L1CacheStats {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tokenizer::mock::MockTokenizer;
+    use crate::{mock::MockTokenizer, *};
 
     #[test]
     fn test_basic_prefix_match() {

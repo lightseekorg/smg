@@ -12,7 +12,7 @@ use std::sync::{
 
 use dashmap::DashMap;
 
-use super::super::traits::Encoding;
+use crate::traits::Encoding;
 
 /// L0 cache implementation using DashMap for lock-free reads
 /// Uses Arc<Encoding> internally to provide zero-copy cache hits
@@ -135,8 +135,7 @@ pub struct CacheStats {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tokenizer::traits::Encoding;
+    use crate::{traits::Encoding, *};
 
     fn mock_encoding(tokens: Vec<u32>) -> Encoding {
         Encoding::Sp(tokens)

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::traits::{TokenIdType, Tokenizer as TokenizerTrait};
+use crate::traits::{TokenIdType, Tokenizer as TokenizerTrait};
 
 /// Maintains state for an ongoing sequence of tokens and their decoded text
 /// This provides a cleaner abstraction for managing token sequences
@@ -209,8 +209,7 @@ impl Sequence {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tokenizer::mock::MockTokenizer;
+    use crate::{mock::MockTokenizer, *};
 
     #[test]
     fn test_sequence_new() {

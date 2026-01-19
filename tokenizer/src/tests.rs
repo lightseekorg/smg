@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 #[cfg(test)]
-use super::*;
+use crate::*;
 
 #[test]
 fn test_mock_tokenizer_encode() {

@@ -1,12 +1,10 @@
-use smg::{
-    protocols::{
-        chat::{ChatMessage, MessageContent},
-        common::{ContentPart, ImageUrl},
-    },
-    tokenizer::chat_template::{
-        detect_chat_template_content_format, ChatTemplateContentFormat, ChatTemplateParams,
-        ChatTemplateProcessor,
-    },
+use llm_tokenizer::chat_template::{
+    detect_chat_template_content_format, ChatTemplateContentFormat, ChatTemplateParams,
+    ChatTemplateProcessor,
+};
+use openai_protocol::{
+    chat::{ChatMessage, MessageContent},
+    common::{ContentPart, ImageUrl},
 };
 
 #[test]

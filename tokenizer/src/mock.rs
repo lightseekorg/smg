@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use super::traits::{Decoder, Encoder, Encoding, SpecialTokens, Tokenizer as TokenizerTrait};
+use crate::traits::{Decoder, Encoder, Encoding, SpecialTokens, Tokenizer as TokenizerTrait};
 
 /// Mock tokenizer for testing purposes
 pub struct MockTokenizer {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::traits::{self, TokenIdType};
+use crate::traits::{self, TokenIdType};
 
 const INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET: usize = 5;
 
