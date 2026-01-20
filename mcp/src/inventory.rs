@@ -97,6 +97,7 @@ impl ToolInventory {
             .map(|entry| (entry.server_key.clone(), entry.tool.clone()))
     }
 
+    /// Check if a tool with the given simple name is registered.
     pub fn has_tool(&self, tool_name: &str) -> bool {
         self.tools_by_simple_name.contains_key(tool_name)
     }
@@ -104,11 +105,10 @@ impl ToolInventory {
     /// Insert a tool. On collision, both are stored; first registered is "primary".
     pub fn insert_tool(&self, tool_name: String, server_key: String, tool: Tool) {
         let qualified = QualifiedToolName::new(&server_key, &tool_name);
-        let is_new_collision = self.tools_by_simple_name.get(&tool_name).is_some()
-            && !self.tools_by_qualified.contains_key(&qualified);
 
-        if is_new_collision {
-            if let Some(existing) = self.tools_by_simple_name.get(&tool_name) {
+        // Log collision warning (single lookup)
+        if let Some(existing) = self.tools_by_simple_name.get(&tool_name) {
+            if !self.tools_by_qualified.contains_key(&qualified) {
                 let existing_servers: Vec<&str> =
                     existing.iter().map(|q| q.server_key.as_str()).collect();
                 warn!(
@@ -164,11 +164,13 @@ impl ToolInventory {
             .map(|entry| entry.tool.clone())
     }
 
+    /// Check if a tool exists by qualified name.
     pub fn has_tool_qualified(&self, server_key: &str, tool_name: &str) -> bool {
         let qualified = QualifiedToolName::new(server_key, tool_name);
         self.tools_by_qualified.contains_key(&qualified)
     }
 
+    /// List all tools with their qualified names.
     pub fn list_tools_qualified(&self) -> Vec<(QualifiedToolName, Tool)> {
         self.tools_by_qualified
             .iter()
@@ -179,6 +181,7 @@ impl ToolInventory {
             .collect()
     }
 
+    /// Get all servers that have registered a tool with the given name.
     pub fn get_tool_servers(&self, tool_name: &str) -> Vec<String> {
         self.tools_by_simple_name
             .get(tool_name)
@@ -191,16 +194,19 @@ impl ToolInventory {
             .unwrap_or_default()
     }
 
+    /// Get a prompt by name, returning the server and prompt info.
     pub fn get_prompt(&self, prompt_name: &str) -> Option<(String, Prompt)> {
         self.prompts
             .get(prompt_name)
             .map(|entry| (entry.server_name.clone(), entry.prompt.clone()))
     }
 
+    /// Check if a prompt with the given name is registered.
     pub fn has_prompt(&self, prompt_name: &str) -> bool {
         self.prompts.contains_key(prompt_name)
     }
 
+    /// Insert or update a prompt.
     pub fn insert_prompt(&self, prompt_name: String, server_name: String, prompt: Prompt) {
         self.prompts.insert(
             prompt_name,
@@ -211,6 +217,7 @@ impl ToolInventory {
         );
     }
 
+    /// List all prompts as (name, server, prompt) tuples.
     pub fn list_prompts(&self) -> Vec<(String, String, Prompt)> {
         self.prompts
             .iter()
@@ -225,16 +232,19 @@ impl ToolInventory {
             .collect()
     }
 
+    /// Get a resource by URI, returning the server and resource info.
     pub fn get_resource(&self, resource_uri: &str) -> Option<(String, RawResource)> {
         self.resources
             .get(resource_uri)
             .map(|entry| (entry.server_name.clone(), entry.resource.clone()))
     }
 
+    /// Check if a resource with the given URI is registered.
     pub fn has_resource(&self, resource_uri: &str) -> bool {
         self.resources.contains_key(resource_uri)
     }
 
+    /// Insert or update a resource.
     pub fn insert_resource(
         &self,
         resource_uri: String,
@@ -250,6 +260,7 @@ impl ToolInventory {
         );
     }
 
+    /// List all resources as (uri, server, resource) tuples.
     pub fn list_resources(&self) -> Vec<(String, String, RawResource)> {
         self.resources
             .iter()
@@ -299,6 +310,7 @@ impl ToolInventory {
         self.tools_by_simple_name.len()
     }
 
+    /// Clear all cached tools, prompts, and resources.
     pub fn clear_all(&self) {
         self.tools_by_qualified.clear();
         self.tools_by_simple_name.clear();
