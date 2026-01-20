@@ -79,5 +79,5 @@ Reference documentation provides detailed specifications for SMG's APIs, CLI, co
 | [CLI Options](cli.md#options) | All command-line flags |
 | [Environment Variables](cli.md#environment-variables) | Configurable environment variables |
 | [Chat Completions API](api/openai.md#chat-completions) | `/v1/chat/completions` endpoint |
-| [Request Metrics](metrics.md#request-metrics) | HTTP request metrics |
-| [Worker Metrics](metrics.md#worker-metrics) | Worker health and performance metrics |
+| [HTTP Metrics](metrics.md#layer-1-http-metrics) | HTTP request metrics |
+| [Worker Metrics](metrics.md#layer-3-worker-metrics) | Worker health and performance metrics |

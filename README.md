@@ -8,11 +8,30 @@ High-performance model-routing gateway for large-scale LLM deployments. Centrali
 
 ## Key Features
 
-- **Unified Control Plane** - Register, monitor, and orchestrate workers across heterogeneous model fleets
-- **Multi-Protocol Data Plane** - Route traffic across HTTP, gRPC, and OpenAI-compatible backends
-- **High-Performance gRPC Pipeline** - Native Rust tokenization, reasoning parsers, and tool-call execution
-- **Enterprise Privacy** - Conversation history and MCP sessions operate within the router boundary
-- **Comprehensive Observability** - 40+ Prometheus metrics, OpenTelemetry tracing, structured logging
+### Performance & Routing
+- **Cache-Aware Load Balancing** - Native integration with vLLM, SGLang, and TensorRT-LLM KV cache schedulers for optimal prefix reuse
+- **High-Performance gRPC Pipeline** - Native Rust tokenization, chat templates, reasoning parsers, and tool-call execution
+- **Sub-millisecond Routing** - Intelligent request distribution with circuit breakers and automatic failover
+
+### Universal Backend Support
+- **Self-Hosted Inference** - vLLM, SGLang, TensorRT-LLM via HTTP or gRPC
+- **Third-Party Providers** - OpenAI, Anthropic, Google Gemini, xAI Grok, Together AI, OpenRouter, AWS Bedrock, OCI Generative AI, and more
+- **Unified API** - One endpoint for all backends with automatic protocol translation
+
+### Complete API Coverage
+- **Full OpenAI Compatibility** - Chat, Completions, Embeddings, and Responses API for agentic workflows
+- **Anthropic Messages API** - Native support for Claude models
+- **MCP Tool Execution** - Model Context Protocol for function calling and tool use
+
+### Enterprise Ready
+- **WebAssembly Plugins** - Write custom request/response transformations in any language that compiles to WASM
+- **Multi-Tenant Rate Limiting** - Per-tenant quotas with OIDC authentication
+- **Privacy Boundary** - Conversation history and MCP sessions stay within the gateway
+
+### Observability
+- **40+ Prometheus Metrics** - Request latency, token throughput, cache hit rates, circuit breaker states
+- **OpenTelemetry Tracing** - Distributed tracing across the entire request lifecycle
+- **Structured Logging** - JSON logs with request correlation IDs
 
 ## Quick Start
 
