@@ -1,0 +1,231 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420">
+  <defs>
+    <linearGradient id="ma-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="ma-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="ma-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="ma-pinkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ec4899"/>
+      <stop offset="100%" style="stop-color:#f472b6"/>
+    </linearGradient>
+    <linearGradient id="ma-amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="ma-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <filter id="ma-glow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="ma-softGlow">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="ma-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+  </defs>
+
+  <style>
+    .ma-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .ma-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .ma-feature { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 9px; fill: #94a3b8; }
+    .ma-layer-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+    .ma-badge { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 8px; fill: white; font-weight: 600; }
+
+    @keyframes ma-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    @keyframes ma-heartbeat { 0%, 100% { r: 4; opacity: 0.8; } 50% { r: 6; opacity: 1; } }
+    @keyframes ma-meshFlow { 0% { stroke-dashoffset: 20; } 100% { stroke-dashoffset: 0; } }
+
+    .ma-pulse { animation: ma-pulse 2s ease-in-out infinite; }
+    .ma-heartbeat { animation: ma-heartbeat 1s ease-in-out infinite; }
+    .ma-mesh-line { stroke-dasharray: 5,5; animation: ma-meshFlow 1s linear infinite; }
+  </style>
+
+  <!-- Background -->
+  <rect width="900" height="420" rx="16" fill="url(#ma-bgGrad)"/>
+  <rect width="900" height="420" fill="url(#ma-grid)" rx="16"/>
+
+  <!-- Glow effects -->
+  <ellipse cx="100" cy="210" rx="60" ry="80" fill="#6366f1" opacity="0.08" filter="url(#ma-softGlow)"/>
+  <ellipse cx="450" cy="210" rx="200" ry="150" fill="#ec4899" opacity="0.06" filter="url(#ma-softGlow)"/>
+  <ellipse cx="800" cy="210" rx="60" ry="80" fill="#10b981" opacity="0.08" filter="url(#ma-softGlow)"/>
+
+  <!-- Mesh connection lines (between gateways) -->
+  <line x1="305" y1="120" x2="455" y2="120" stroke="#475569" stroke-width="1.5" class="ma-mesh-line" opacity="0.6"/>
+  <line x1="305" y1="120" x2="380" y2="230" stroke="#475569" stroke-width="1.5" class="ma-mesh-line" opacity="0.6"/>
+  <line x1="305" y1="120" x2="305" y2="300" stroke="#475569" stroke-width="1.5" class="ma-mesh-line" opacity="0.6"/>
+  <line x1="455" y1="120" x2="520" y2="230" stroke="#475569" stroke-width="1.5" class="ma-mesh-line" opacity="0.6"/>
+  <line x1="455" y1="120" x2="595" y2="300" stroke="#475569" stroke-width="1.5" class="ma-mesh-line" opacity="0.6"/>
+  <line x1="380" y1="230" x2="520" y2="230" stroke="#475569" stroke-width="1.5" class="ma-mesh-line" opacity="0.6"/>
+  <line x1="380" y1="230" x2="305" y2="300" stroke="#475569" stroke-width="1.5" class="ma-mesh-line" opacity="0.6"/>
+  <line x1="380" y1="230" x2="595" y2="300" stroke="#475569" stroke-width="1.5" class="ma-mesh-line" opacity="0.6"/>
+  <line x1="520" y1="230" x2="595" y2="300" stroke="#475569" stroke-width="1.5" class="ma-mesh-line" opacity="0.6"/>
+  <line x1="520" y1="230" x2="305" y2="300" stroke="#475569" stroke-width="1.5" class="ma-mesh-line" opacity="0.6"/>
+  <line x1="305" y1="300" x2="595" y2="300" stroke="#475569" stroke-width="1.5" class="ma-mesh-line" opacity="0.6"/>
+
+  <!-- Load Balancer -->
+  <g class="ma-pulse">
+    <rect x="30" y="140" width="120" height="140" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+    <rect x="30" y="140" width="120" height="28" rx="10" fill="url(#ma-primaryGrad)"/>
+    <rect x="30" y="158" width="120" height="10" fill="url(#ma-primaryGrad)"/>
+    <text x="90" y="160" text-anchor="middle" class="ma-label" font-size="10" fill="white">Load Balancer</text>
+    <text x="90" y="188" text-anchor="middle" class="ma-feature">Round Robin</text>
+    <text x="90" y="203" text-anchor="middle" class="ma-feature">Health Checks</text>
+    <text x="90" y="218" text-anchor="middle" class="ma-feature">SSL Termination</text>
+    <text x="90" y="233" text-anchor="middle" class="ma-feature">Sticky Sessions</text>
+  </g>
+
+  <!-- Connection to mesh -->
+  <line x1="150" y1="210" x2="250" y2="120" stroke="#475569" stroke-width="2" opacity="0.5"/>
+  <line x1="150" y1="210" x2="250" y2="230" stroke="#475569" stroke-width="2" opacity="0.5"/>
+  <line x1="150" y1="210" x2="250" y2="300" stroke="#475569" stroke-width="2" opacity="0.5"/>
+
+  <!-- Mesh Area Label -->
+  <text x="450" y="50" text-anchor="middle" class="ma-layer-label">SMG Gateway Mesh</text>
+  <rect x="235" y="60" width="430" height="305" rx="12" fill="none" stroke="#ec4899" stroke-width="1" stroke-dasharray="8,4" opacity="0.4"/>
+
+  <!-- Gateway 1 (Leader) -->
+  <g>
+    <rect x="250" y="80" width="110" height="80" rx="8" fill="#1e293b" stroke="#ec4899" stroke-width="2" filter="url(#ma-glow)"/>
+    <rect x="250" y="80" width="110" height="24" rx="8" fill="url(#ma-pinkGrad)"/>
+    <rect x="250" y="96" width="110" height="8" fill="url(#ma-pinkGrad)"/>
+    <text x="305" y="96" text-anchor="middle" class="ma-label" font-size="10" fill="white">Gateway 1</text>
+    <!-- Leader badge -->
+    <rect x="325" y="72" width="42" height="16" rx="4" fill="#ec4899"/>
+    <text x="346" y="83" text-anchor="middle" class="ma-badge">LEADER</text>
+    <text x="305" y="125" text-anchor="middle" class="ma-feature">State Coordinator</text>
+    <text x="305" y="140" text-anchor="middle" class="ma-feature">Worker Registry</text>
+    <!-- Heartbeat indicator -->
+    <circle cx="268" cy="137" r="4" fill="#34d399" class="ma-heartbeat"/>
+  </g>
+
+  <!-- Gateway 2 -->
+  <g>
+    <rect x="400" y="80" width="110" height="80" rx="8" fill="#1e293b" stroke="#8b5cf6" stroke-width="2"/>
+    <rect x="400" y="80" width="110" height="24" rx="8" fill="url(#ma-primaryGrad)"/>
+    <rect x="400" y="96" width="110" height="8" fill="url(#ma-primaryGrad)"/>
+    <text x="455" y="96" text-anchor="middle" class="ma-label" font-size="10" fill="white">Gateway 2</text>
+    <text x="455" y="125" text-anchor="middle" class="ma-feature">State Replica</text>
+    <text x="455" y="140" text-anchor="middle" class="ma-feature">Failover Ready</text>
+    <circle cx="418" cy="137" r="4" fill="#34d399" class="ma-heartbeat"/>
+  </g>
+
+  <!-- Gateway 3 -->
+  <g>
+    <rect x="325" y="190" width="110" height="80" rx="8" fill="#1e293b" stroke="#8b5cf6" stroke-width="2"/>
+    <rect x="325" y="190" width="110" height="24" rx="8" fill="url(#ma-primaryGrad)"/>
+    <rect x="325" y="206" width="110" height="8" fill="url(#ma-primaryGrad)"/>
+    <text x="380" y="206" text-anchor="middle" class="ma-label" font-size="10" fill="white">Gateway 3</text>
+    <text x="380" y="235" text-anchor="middle" class="ma-feature">State Replica</text>
+    <text x="380" y="250" text-anchor="middle" class="ma-feature">Failover Ready</text>
+    <circle cx="343" cy="247" r="4" fill="#34d399" class="ma-heartbeat"/>
+  </g>
+
+  <!-- Gateway 4 -->
+  <g>
+    <rect x="465" y="190" width="110" height="80" rx="8" fill="#1e293b" stroke="#8b5cf6" stroke-width="2"/>
+    <rect x="465" y="190" width="110" height="24" rx="8" fill="url(#ma-primaryGrad)"/>
+    <rect x="465" y="206" width="110" height="8" fill="url(#ma-primaryGrad)"/>
+    <text x="520" y="206" text-anchor="middle" class="ma-label" font-size="10" fill="white">Gateway 4</text>
+    <text x="520" y="235" text-anchor="middle" class="ma-feature">State Replica</text>
+    <text x="520" y="250" text-anchor="middle" class="ma-feature">Failover Ready</text>
+    <circle cx="483" cy="247" r="4" fill="#34d399" class="ma-heartbeat"/>
+  </g>
+
+  <!-- Gateway 5 -->
+  <g>
+    <rect x="250" y="260" width="110" height="80" rx="8" fill="#1e293b" stroke="#8b5cf6" stroke-width="2"/>
+    <rect x="250" y="260" width="110" height="24" rx="8" fill="url(#ma-primaryGrad)"/>
+    <rect x="250" y="276" width="110" height="8" fill="url(#ma-primaryGrad)"/>
+    <text x="305" y="276" text-anchor="middle" class="ma-label" font-size="10" fill="white">Gateway 5</text>
+    <text x="305" y="305" text-anchor="middle" class="ma-feature">State Replica</text>
+    <text x="305" y="320" text-anchor="middle" class="ma-feature">Failover Ready</text>
+    <circle cx="268" cy="317" r="4" fill="#34d399" class="ma-heartbeat"/>
+  </g>
+
+  <!-- Gateway 6 -->
+  <g>
+    <rect x="540" y="260" width="110" height="80" rx="8" fill="#1e293b" stroke="#8b5cf6" stroke-width="2"/>
+    <rect x="540" y="260" width="110" height="24" rx="8" fill="url(#ma-primaryGrad)"/>
+    <rect x="540" y="276" width="110" height="8" fill="url(#ma-primaryGrad)"/>
+    <text x="595" y="276" text-anchor="middle" class="ma-label" font-size="10" fill="white">Gateway 6</text>
+    <text x="595" y="305" text-anchor="middle" class="ma-feature">State Replica</text>
+    <text x="595" y="320" text-anchor="middle" class="ma-feature">Failover Ready</text>
+    <circle cx="558" cy="317" r="4" fill="#34d399" class="ma-heartbeat"/>
+  </g>
+
+  <!-- Workers -->
+  <g>
+    <rect x="720" y="100" width="155" height="220" rx="10" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+    <rect x="720" y="100" width="155" height="28" rx="10" fill="url(#ma-greenGrad)"/>
+    <rect x="720" y="118" width="155" height="10" fill="url(#ma-greenGrad)"/>
+    <text x="797" y="120" text-anchor="middle" class="ma-label" font-size="11" fill="white">Worker Pool</text>
+
+    <!-- Worker boxes -->
+    <rect x="732" y="140" width="65" height="40" rx="6" fill="#334155" stroke="#34d399" stroke-width="1"/>
+    <text x="764" y="157" text-anchor="middle" class="ma-feature" fill="#e2e8f0">Worker 1</text>
+    <text x="764" y="170" text-anchor="middle" class="ma-feature">vLLM</text>
+
+    <rect x="803" y="140" width="65" height="40" rx="6" fill="#334155" stroke="#34d399" stroke-width="1"/>
+    <text x="835" y="157" text-anchor="middle" class="ma-feature" fill="#e2e8f0">Worker 2</text>
+    <text x="835" y="170" text-anchor="middle" class="ma-feature">vLLM</text>
+
+    <rect x="732" y="188" width="65" height="40" rx="6" fill="#334155" stroke="#34d399" stroke-width="1"/>
+    <text x="764" y="205" text-anchor="middle" class="ma-feature" fill="#e2e8f0">Worker 3</text>
+    <text x="764" y="218" text-anchor="middle" class="ma-feature">SGLang</text>
+
+    <rect x="803" y="188" width="65" height="40" rx="6" fill="#334155" stroke="#34d399" stroke-width="1"/>
+    <text x="835" y="205" text-anchor="middle" class="ma-feature" fill="#e2e8f0">Worker 4</text>
+    <text x="835" y="218" text-anchor="middle" class="ma-feature">SGLang</text>
+
+    <rect x="732" y="236" width="65" height="40" rx="6" fill="#334155" stroke="#38bdf8" stroke-width="1"/>
+    <text x="764" y="253" text-anchor="middle" class="ma-feature" fill="#e2e8f0">Worker 5</text>
+    <text x="764" y="266" text-anchor="middle" class="ma-feature">TRT-LLM</text>
+
+    <rect x="803" y="236" width="65" height="40" rx="6" fill="#334155" stroke="#38bdf8" stroke-width="1"/>
+    <text x="835" y="253" text-anchor="middle" class="ma-feature" fill="#e2e8f0">Worker 6</text>
+    <text x="835" y="266" text-anchor="middle" class="ma-feature">TRT-LLM</text>
+
+    <text x="797" y="298" text-anchor="middle" class="ma-feature">Shared Worker Pool</text>
+    <text x="797" y="310" text-anchor="middle" class="ma-feature">Consistent View</text>
+  </g>
+
+  <!-- Connection from mesh to workers -->
+  <line x1="650" y1="120" x2="720" y2="180" stroke="url(#ma-greenGrad)" stroke-width="2" opacity="0.5"/>
+  <line x1="650" y1="230" x2="720" y2="220" stroke="url(#ma-greenGrad)" stroke-width="2" opacity="0.5"/>
+  <line x1="650" y1="300" x2="720" y2="260" stroke="url(#ma-greenGrad)" stroke-width="2" opacity="0.5"/>
+
+  <!-- Legend -->
+  <rect x="25" y="310" width="180" height="95" rx="8" fill="#1e293b" stroke="#334155"/>
+  <text x="115" y="330" text-anchor="middle" class="ma-layer-label">Mesh Features</text>
+
+  <circle cx="45" cy="348" r="4" fill="#34d399" class="ma-heartbeat"/>
+  <text x="60" y="352" class="ma-feature" fill="#e2e8f0">Heartbeat (1s interval)</text>
+
+  <rect x="40" y="362" width="10" height="3" fill="#ec4899"/>
+  <text x="60" y="370" class="ma-feature" fill="#e2e8f0">Leader Election</text>
+
+  <line x1="40" y1="385" x2="50" y2="385" stroke="#475569" stroke-width="2" stroke-dasharray="3,2"/>
+  <text x="60" y="389" class="ma-feature" fill="#e2e8f0">State Replication</text>
+
+  <!-- Bottom tagline -->
+  <text x="450" y="405" text-anchor="middle" class="ma-sublabel" font-size="11" fill="#64748b">Zero-Downtime Failover  •  Automatic Leader Election  •  Consistent Worker State</text>
+</svg>

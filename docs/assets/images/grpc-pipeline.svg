@@ -1,0 +1,355 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 380">
+  <defs>
+    <linearGradient id="gp-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="gp-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="gp-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="gp-pinkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ec4899"/>
+      <stop offset="100%" style="stop-color:#f472b6"/>
+    </linearGradient>
+    <linearGradient id="gp-amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="gp-tealGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#14b8a6"/>
+      <stop offset="100%" style="stop-color:#2dd4bf"/>
+    </linearGradient>
+    <linearGradient id="gp-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <filter id="gp-glow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="gp-softGlow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <clipPath id="gp-clipFlow">
+      <rect x="0" y="0" width="920" height="380"/>
+    </clipPath>
+    <pattern id="gp-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+  </defs>
+
+  <style>
+    .gp-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .gp-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .gp-feature { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 9px; fill: #94a3b8; }
+    .gp-stage-num { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 11px; fill: #64748b; font-weight: 600; }
+    .gp-layer-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+
+    @keyframes gp-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    @keyframes gp-flowRight { 0% { transform: translateX(0); opacity: 0; } 10% { opacity: 1; } 90% { opacity: 1; } 100% { transform: translateX(40px); opacity: 0; } }
+    @keyframes gp-flowDown { 0% { transform: translateY(0); opacity: 0; } 10% { opacity: 1; } 90% { opacity: 1; } 100% { transform: translateY(30px); opacity: 0; } }
+    @keyframes gp-streamToken { 0% { transform: translateX(0); opacity: 0; } 5% { opacity: 1; } 95% { opacity: 1; } 100% { transform: translateX(60px); opacity: 0; } }
+
+    .gp-pulse { animation: gp-pulse 2s ease-in-out infinite; }
+    .gp-flow1 { animation: gp-flowRight 0.6s linear infinite; }
+    .gp-flow2 { animation: gp-flowRight 0.6s linear infinite 0.2s; }
+    .gp-flow3 { animation: gp-flowRight 0.6s linear infinite 0.4s; }
+    .gp-stream1 { animation: gp-streamToken 0.4s linear infinite; }
+    .gp-stream2 { animation: gp-streamToken 0.4s linear infinite 0.13s; }
+    .gp-stream3 { animation: gp-streamToken 0.4s linear infinite 0.26s; }
+  </style>
+
+  <!-- Background -->
+  <rect width="920" height="380" rx="16" fill="url(#gp-bgGrad)"/>
+  <rect width="920" height="380" fill="url(#gp-grid)" rx="16"/>
+
+  <!-- Glow effects -->
+  <ellipse cx="80" cy="180" rx="50" ry="70" fill="#6366f1" opacity="0.08" filter="url(#gp-softGlow)"/>
+  <ellipse cx="220" cy="180" rx="60" ry="80" fill="#10b981" opacity="0.08" filter="url(#gp-softGlow)"/>
+  <ellipse cx="380" cy="180" rx="60" ry="80" fill="#0ea5e9" opacity="0.08" filter="url(#gp-softGlow)"/>
+  <ellipse cx="540" cy="180" rx="60" ry="80" fill="#f59e0b" opacity="0.08" filter="url(#gp-softGlow)"/>
+  <ellipse cx="700" cy="180" rx="60" ry="80" fill="#14b8a6" opacity="0.08" filter="url(#gp-softGlow)"/>
+  <ellipse cx="850" cy="180" rx="50" ry="70" fill="#ec4899" opacity="0.08" filter="url(#gp-softGlow)"/>
+
+  <!-- Pipeline flow arrows -->
+  <line x1="130" y1="180" x2="155" y2="180" stroke="#475569" stroke-width="2" opacity="0.6"/>
+  <line x1="285" y1="180" x2="310" y2="180" stroke="#475569" stroke-width="2" opacity="0.6"/>
+  <line x1="445" y1="180" x2="470" y2="180" stroke="#475569" stroke-width="2" opacity="0.6"/>
+  <line x1="605" y1="180" x2="630" y2="180" stroke="#475569" stroke-width="2" opacity="0.6"/>
+  <line x1="765" y1="180" x2="790" y2="180" stroke="#475569" stroke-width="2" opacity="0.6"/>
+
+  <!-- Stage 1: Request -->
+  <g class="gp-pulse">
+    <text x="80" y="65" text-anchor="middle" class="gp-stage-num">1</text>
+    <rect x="25" y="80" width="110" height="200" rx="10" fill="#1e293b" stroke="#6366f1" stroke-width="2"/>
+    <rect x="25" y="80" width="110" height="28" rx="10" fill="url(#gp-primaryGrad)"/>
+    <rect x="25" y="98" width="110" height="10" fill="url(#gp-primaryGrad)"/>
+    <text x="80" y="100" text-anchor="middle" class="gp-label" font-size="10" fill="white">Request</text>
+
+    <g>
+      <rect x="35" y="120" width="90" height="20" rx="4" fill="#334155"/>
+      <circle cx="47" cy="130" r="2.5" fill="#818cf8"/>
+      <text x="57" y="134" class="gp-feature" fill="#e2e8f0">HTTP POST</text>
+    </g>
+    <g>
+      <rect x="35" y="145" width="90" height="20" rx="4" fill="#334155"/>
+      <circle cx="47" cy="155" r="2.5" fill="#34d399"/>
+      <text x="57" y="159" class="gp-feature" fill="#e2e8f0">JSON Body</text>
+    </g>
+    <g>
+      <rect x="35" y="170" width="90" height="20" rx="4" fill="#334155"/>
+      <circle cx="47" cy="180" r="2.5" fill="#38bdf8"/>
+      <text x="57" y="184" class="gp-feature" fill="#e2e8f0">Messages[]</text>
+    </g>
+    <g>
+      <rect x="35" y="195" width="90" height="20" rx="4" fill="#334155"/>
+      <circle cx="47" cy="205" r="2.5" fill="#fbbf24"/>
+      <text x="57" y="209" class="gp-feature" fill="#e2e8f0">Tools[]</text>
+    </g>
+    <g>
+      <rect x="35" y="220" width="90" height="20" rx="4" fill="#334155"/>
+      <circle cx="47" cy="230" r="2.5" fill="#f472b6"/>
+      <text x="57" y="234" class="gp-feature" fill="#e2e8f0">Parameters</text>
+    </g>
+    <g>
+      <rect x="35" y="245" width="90" height="20" rx="4" fill="#334155"/>
+      <circle cx="47" cy="255" r="2.5" fill="#a78bfa"/>
+      <text x="57" y="259" class="gp-feature" fill="#e2e8f0">Stream: true</text>
+    </g>
+  </g>
+
+  <!-- Stage 2: Tokenization -->
+  <g>
+    <text x="220" y="65" text-anchor="middle" class="gp-stage-num">2</text>
+    <rect x="155" y="80" width="130" height="200" rx="10" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+    <rect x="155" y="80" width="130" height="28" rx="10" fill="url(#gp-greenGrad)"/>
+    <rect x="155" y="98" width="130" height="10" fill="url(#gp-greenGrad)"/>
+    <text x="220" y="100" text-anchor="middle" class="gp-label" font-size="10" fill="white">Tokenization</text>
+
+    <g>
+      <rect x="165" y="120" width="110" height="20" rx="4" fill="#334155"/>
+      <circle cx="177" cy="130" r="2.5" fill="#34d399"/>
+      <text x="187" y="134" class="gp-feature" fill="#e2e8f0">Chat Template</text>
+    </g>
+    <g>
+      <rect x="165" y="145" width="110" height="20" rx="4" fill="#334155"/>
+      <circle cx="177" cy="155" r="2.5" fill="#10b981"/>
+      <text x="187" y="159" class="gp-feature" fill="#e2e8f0">Tool Formatting</text>
+    </g>
+    <g>
+      <rect x="165" y="170" width="110" height="20" rx="4" fill="#334155"/>
+      <circle cx="177" cy="180" r="2.5" fill="#38bdf8"/>
+      <text x="187" y="184" class="gp-feature" fill="#e2e8f0">L1 Cache Check</text>
+    </g>
+    <g>
+      <rect x="165" y="195" width="110" height="20" rx="4" fill="#334155"/>
+      <circle cx="177" cy="205" r="2.5" fill="#fbbf24"/>
+      <text x="187" y="209" class="gp-feature" fill="#e2e8f0">HF Tokenizer</text>
+    </g>
+    <g>
+      <rect x="165" y="220" width="110" height="20" rx="4" fill="#334155"/>
+      <circle cx="177" cy="230" r="2.5" fill="#f472b6"/>
+      <text x="187" y="234" class="gp-feature" fill="#e2e8f0">Token IDs</text>
+    </g>
+    <g>
+      <rect x="165" y="245" width="110" height="20" rx="4" fill="#334155"/>
+      <circle cx="177" cy="255" r="2.5" fill="#a78bfa"/>
+      <text x="187" y="259" class="gp-feature" fill="#e2e8f0">Attention Mask</text>
+    </g>
+  </g>
+
+  <!-- Stage 3: Routing -->
+  <g>
+    <text x="380" y="65" text-anchor="middle" class="gp-stage-num">3</text>
+    <rect x="310" y="80" width="135" height="200" rx="10" fill="#1e293b" stroke="#0ea5e9" stroke-width="2"/>
+    <rect x="310" y="80" width="135" height="28" rx="10" fill="url(#gp-blueGrad)"/>
+    <rect x="310" y="98" width="135" height="10" fill="url(#gp-blueGrad)"/>
+    <text x="377" y="100" text-anchor="middle" class="gp-label" font-size="10" fill="white">Routing</text>
+
+    <g>
+      <rect x="320" y="120" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="332" cy="130" r="2.5" fill="#38bdf8"/>
+      <text x="342" y="134" class="gp-feature" fill="#e2e8f0">Policy Selection</text>
+    </g>
+    <g>
+      <rect x="320" y="145" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="332" cy="155" r="2.5" fill="#0ea5e9"/>
+      <text x="342" y="159" class="gp-feature" fill="#e2e8f0">Cache-Aware</text>
+    </g>
+    <g>
+      <rect x="320" y="170" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="332" cy="180" r="2.5" fill="#34d399"/>
+      <text x="342" y="184" class="gp-feature" fill="#e2e8f0">Health Check</text>
+    </g>
+    <g>
+      <rect x="320" y="195" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="332" cy="205" r="2.5" fill="#fbbf24"/>
+      <text x="342" y="209" class="gp-feature" fill="#e2e8f0">Circuit Breaker</text>
+    </g>
+    <g>
+      <rect x="320" y="220" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="332" cy="230" r="2.5" fill="#f472b6"/>
+      <text x="342" y="234" class="gp-feature" fill="#e2e8f0">Load Balance</text>
+    </g>
+    <g>
+      <rect x="320" y="245" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="332" cy="255" r="2.5" fill="#a78bfa"/>
+      <text x="342" y="259" class="gp-feature" fill="#e2e8f0">Worker Select</text>
+    </g>
+  </g>
+
+  <!-- Stage 4: gRPC Inference -->
+  <g>
+    <text x="540" y="65" text-anchor="middle" class="gp-stage-num">4</text>
+    <rect x="470" y="80" width="135" height="200" rx="10" fill="#1e293b" stroke="#f59e0b" stroke-width="2"/>
+    <rect x="470" y="80" width="135" height="28" rx="10" fill="url(#gp-amberGrad)"/>
+    <rect x="470" y="98" width="135" height="10" fill="url(#gp-amberGrad)"/>
+    <text x="537" y="100" text-anchor="middle" class="gp-label" font-size="10" fill="#1e293b">gRPC Stream</text>
+
+    <g>
+      <rect x="480" y="120" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="492" cy="130" r="2.5" fill="#fbbf24"/>
+      <text x="502" y="134" class="gp-feature" fill="#e2e8f0">GenerateStream</text>
+    </g>
+    <g>
+      <rect x="480" y="145" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="492" cy="155" r="2.5" fill="#f59e0b"/>
+      <text x="502" y="159" class="gp-feature" fill="#e2e8f0">Token Chunks</text>
+    </g>
+    <g>
+      <rect x="480" y="170" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="492" cy="180" r="2.5" fill="#34d399"/>
+      <text x="502" y="184" class="gp-feature" fill="#e2e8f0">Backpressure</text>
+    </g>
+    <g>
+      <rect x="480" y="195" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="492" cy="205" r="2.5" fill="#38bdf8"/>
+      <text x="502" y="209" class="gp-feature" fill="#e2e8f0">Flow Control</text>
+    </g>
+    <g>
+      <rect x="480" y="220" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="492" cy="230" r="2.5" fill="#f472b6"/>
+      <text x="502" y="234" class="gp-feature" fill="#e2e8f0">Cancellation</text>
+    </g>
+    <g>
+      <rect x="480" y="245" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="492" cy="255" r="2.5" fill="#a78bfa"/>
+      <text x="502" y="259" class="gp-feature" fill="#e2e8f0">Finish Reason</text>
+    </g>
+  </g>
+
+  <!-- Stage 5: Parsing -->
+  <g>
+    <text x="700" y="65" text-anchor="middle" class="gp-stage-num">5</text>
+    <rect x="630" y="80" width="135" height="200" rx="10" fill="#1e293b" stroke="#14b8a6" stroke-width="2"/>
+    <rect x="630" y="80" width="135" height="28" rx="10" fill="url(#gp-tealGrad)"/>
+    <rect x="630" y="98" width="135" height="10" fill="url(#gp-tealGrad)"/>
+    <text x="697" y="100" text-anchor="middle" class="gp-label" font-size="10" fill="white">Parsing</text>
+
+    <g>
+      <rect x="640" y="120" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="652" cy="130" r="2.5" fill="#2dd4bf"/>
+      <text x="662" y="134" class="gp-feature" fill="#e2e8f0">Detokenization</text>
+    </g>
+    <g>
+      <rect x="640" y="145" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="652" cy="155" r="2.5" fill="#14b8a6"/>
+      <text x="662" y="159" class="gp-feature" fill="#e2e8f0">Tool Call Parse</text>
+    </g>
+    <g>
+      <rect x="640" y="170" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="652" cy="180" r="2.5" fill="#34d399"/>
+      <text x="662" y="184" class="gp-feature" fill="#e2e8f0">Reasoning Parse</text>
+    </g>
+    <g>
+      <rect x="640" y="195" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="652" cy="205" r="2.5" fill="#38bdf8"/>
+      <text x="662" y="209" class="gp-feature" fill="#e2e8f0">MCP Execution</text>
+    </g>
+    <g>
+      <rect x="640" y="220" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="652" cy="230" r="2.5" fill="#fbbf24"/>
+      <text x="662" y="234" class="gp-feature" fill="#e2e8f0">Content Build</text>
+    </g>
+    <g>
+      <rect x="640" y="245" width="115" height="20" rx="4" fill="#334155"/>
+      <circle cx="652" cy="255" r="2.5" fill="#f472b6"/>
+      <text x="662" y="259" class="gp-feature" fill="#e2e8f0">Delta Chunks</text>
+    </g>
+  </g>
+
+  <!-- Stage 6: Response -->
+  <g>
+    <text x="855" y="65" text-anchor="middle" class="gp-stage-num">6</text>
+    <rect x="790" y="80" width="110" height="200" rx="10" fill="#1e293b" stroke="#ec4899" stroke-width="2"/>
+    <rect x="790" y="80" width="110" height="28" rx="10" fill="url(#gp-pinkGrad)"/>
+    <rect x="790" y="98" width="110" height="10" fill="url(#gp-pinkGrad)"/>
+    <text x="845" y="100" text-anchor="middle" class="gp-label" font-size="10" fill="white">Response</text>
+
+    <g>
+      <rect x="800" y="120" width="90" height="20" rx="4" fill="#334155"/>
+      <circle cx="812" cy="130" r="2.5" fill="#f472b6"/>
+      <text x="822" y="134" class="gp-feature" fill="#e2e8f0">SSE Stream</text>
+    </g>
+    <g>
+      <rect x="800" y="145" width="90" height="20" rx="4" fill="#334155"/>
+      <circle cx="812" cy="155" r="2.5" fill="#ec4899"/>
+      <text x="822" y="159" class="gp-feature" fill="#e2e8f0">OpenAI Format</text>
+    </g>
+    <g>
+      <rect x="800" y="170" width="90" height="20" rx="4" fill="#334155"/>
+      <circle cx="812" cy="180" r="2.5" fill="#34d399"/>
+      <text x="822" y="184" class="gp-feature" fill="#e2e8f0">Tool Calls</text>
+    </g>
+    <g>
+      <rect x="800" y="195" width="90" height="20" rx="4" fill="#334155"/>
+      <circle cx="812" cy="205" r="2.5" fill="#38bdf8"/>
+      <text x="822" y="209" class="gp-feature" fill="#e2e8f0">Reasoning</text>
+    </g>
+    <g>
+      <rect x="800" y="220" width="90" height="20" rx="4" fill="#334155"/>
+      <circle cx="812" cy="230" r="2.5" fill="#fbbf24"/>
+      <text x="822" y="234" class="gp-feature" fill="#e2e8f0">Usage Stats</text>
+    </g>
+    <g>
+      <rect x="800" y="245" width="90" height="20" rx="4" fill="#334155"/>
+      <circle cx="812" cy="255" r="2.5" fill="#a78bfa"/>
+      <text x="822" y="259" class="gp-feature" fill="#e2e8f0">[DONE]</text>
+    </g>
+  </g>
+
+  <!-- Animated flow packets -->
+  <g clip-path="url(#gp-clipFlow)">
+    <circle cx="140" cy="180" r="3" fill="#818cf8" class="gp-flow1" filter="url(#gp-glow)"/>
+    <circle cx="295" cy="180" r="3" fill="#34d399" class="gp-flow1" filter="url(#gp-glow)"/>
+    <circle cx="455" cy="180" r="3" fill="#38bdf8" class="gp-flow1" filter="url(#gp-glow)"/>
+    <circle cx="615" cy="180" r="3" fill="#fbbf24" class="gp-flow2" filter="url(#gp-glow)"/>
+    <circle cx="775" cy="180" r="3" fill="#2dd4bf" class="gp-flow3" filter="url(#gp-glow)"/>
+  </g>
+
+  <!-- Protocol labels -->
+  <text x="142" y="200" text-anchor="middle" class="gp-feature" fill="#64748b">HTTP</text>
+  <text x="297" y="200" text-anchor="middle" class="gp-feature" fill="#64748b">Internal</text>
+  <text x="457" y="200" text-anchor="middle" class="gp-feature" fill="#64748b">Select</text>
+  <text x="617" y="200" text-anchor="middle" class="gp-feature" fill="#64748b">gRPC</text>
+  <text x="777" y="200" text-anchor="middle" class="gp-feature" fill="#64748b">SSE</text>
+
+  <!-- Loop indicator for MCP/Tool calls -->
+  <path d="M 697 295 Q 697 330 540 330 Q 377 330 377 295" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.5"/>
+  <text x="540" y="350" text-anchor="middle" class="gp-feature" fill="#64748b">MCP / Tool Call Loop</text>
+
+  <!-- Bottom tagline -->
+  <text x="460" y="370" text-anchor="middle" class="gp-sublabel" font-size="11" fill="#64748b">Token-Level Streaming  •  Full OpenAI Compatibility  •  Built-in MCP Execution</text>
+</svg>

@@ -343,6 +343,35 @@
   background: var(--md-footer-bg-color);
 }
 
+/* Wider content area - only for pages with sidebars */
+@media screen and (min-width: 76.25em) {
+  /* Expand the overall grid */
+  .md-grid {
+    max-width: 1440px;
+  }
+
+  /* When navigation sidebar exists, allow content to expand */
+  .md-sidebar--primary ~ .md-content {
+    max-width: none;
+  }
+
+  /* Slightly narrower sidebars to give more room to content */
+  .md-sidebar--primary {
+    width: 11rem;
+  }
+
+  .md-sidebar--secondary {
+    width: 11rem;
+  }
+}
+
+/* Extra wide screens */
+@media screen and (min-width: 100em) {
+  .md-grid {
+    max-width: 1600px;
+  }
+}
+
 /* Responsive */
 @media screen and (max-width: 76.25em) {
   .md-typeset .hero h1 {

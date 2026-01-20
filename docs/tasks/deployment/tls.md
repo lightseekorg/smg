@@ -19,19 +19,22 @@ This task shows you how to secure SMG communications with TLS and mTLS.
 
 ## Overview
 
-SMG supports two TLS configurations:
+SMG supports TLS configurations for securing communications:
 
-| Configuration | Purpose |
-|---------------|---------|
-| **Server TLS** | HTTPS for client → gateway communication |
-| **Client mTLS** | Mutual TLS for gateway → worker communication |
+| Configuration | Purpose | Status |
+|---------------|---------|--------|
+| **Server TLS** | HTTPS for client → gateway communication | Available |
+| **Client mTLS** | Mutual TLS for gateway → worker communication | Planned |
 
 ```mermaid
 flowchart LR
     C[Client] -->|"HTTPS"| G[SMG Gateway]
-    G -->|"mTLS"| W1[Worker 1]
-    G -->|"mTLS"| W2[Worker 2]
+    G -->|"HTTP/HTTPS"| W1[Worker 1]
+    G -->|"HTTP/HTTPS"| W2[Worker 2]
 ```
+
+!!! info "Client mTLS"
+    Client mTLS for gateway-to-worker communication is planned but not yet implemented via CLI. See the [Client mTLS section](#client-mtls-planned) below for details.
 
 ---
 
@@ -66,7 +69,10 @@ openssl x509 -req -days 365 -in server.csr \
   -out server.crt
 ```
 
-### Step 3: Create client certificate
+### Step 3: Create client certificate (for future mTLS)
+
+!!! note "For future use"
+    Client certificates are not currently used by SMG CLI. This step is documented for when client mTLS support is added.
 
 ```bash
 # Generate client private key
@@ -107,13 +113,17 @@ curl --cacert ca.crt https://smg.example.com/health
 
 ---
 
-## Enable Client mTLS
+## Client mTLS (Planned)
 
-Secure communication with workers.
+!!! note "Not yet implemented via CLI"
+    Client mTLS for gateway-to-worker communication is not yet available via CLI arguments. The `--client-cert-path`, `--client-key-path`, and `--ca-cert-path` flags are planned but not currently implemented.
 
-### Configuration
+    For now, gateway-to-worker communication uses plain HTTP/HTTPS without mutual TLS. If your workers require mTLS, consider using a service mesh (like Istio) or a sidecar proxy to handle the mTLS termination.
+
+When implemented, client mTLS will secure communication between the gateway and workers:
 
 ```bash
+# Planned - not yet available
 smg \
   --worker-urls https://worker1:8443 https://worker2:8443 \
   --client-cert-path /path/to/client.crt \
@@ -121,31 +131,17 @@ smg \
   --ca-cert-path /path/to/ca.crt
 ```
 
-### Multiple CA certificates
-
-```bash
-smg \
-  --worker-urls https://worker:8443 \
-  --client-cert-path /path/to/client.crt \
-  --client-key-path /path/to/client.key \
-  --ca-cert-path /path/to/ca1.crt \
-  --ca-cert-path /path/to/ca2.crt
-```
-
 ---
 
 ## Full TLS Configuration
 
-Enable both server TLS and client mTLS:
+Currently, only server TLS is supported via CLI:
 
 ```bash
 smg \
-  --worker-urls https://worker1:8443 https://worker2:8443 \
+  --worker-urls http://worker1:8000 http://worker2:8000 \
   --tls-cert-path /etc/certs/server.crt \
   --tls-key-path /etc/certs/server.key \
-  --client-cert-path /etc/certs/client.crt \
-  --client-key-path /etc/certs/client.key \
-  --ca-cert-path /etc/certs/ca.crt \
   --api-key "${API_KEY}" \
   --host 0.0.0.0 \
   --port 443
@@ -215,13 +211,13 @@ curl --cacert ca.crt https://smg.example.com/health
 openssl s_client -connect smg.example.com:443 -showcerts
 ```
 
-### Test client mTLS
+### Test worker connectivity
 
 ```bash
-# From SMG logs
-kubectl logs -n inference -l app=smg | grep -i tls
+# Check SMG logs for worker connections
+kubectl logs -n inference -l app=smg | grep -i worker
 
-# Verify worker connection
+# Verify worker connection via control plane API
 curl https://localhost:30000/workers
 ```
 
