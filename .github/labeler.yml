@@ -1,10 +1,6 @@
 # Label configuration for actions/labeler
 # See: https://github.com/actions/labeler
 
-rust:
-  - changed-files:
-      - any-glob-to-any-file: '**/*.rs'
-
 python-bindings:
   - changed-files:
       - any-glob-to-any-file: 'bindings/python/**/*'
