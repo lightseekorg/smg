@@ -1,9 +1,11 @@
-//! Mesh management endpoints
+//! Mesh management HTTP handlers
 //!
 //! Provides REST API for mesh cluster management:
 //! - Configuration CRUD operations
 //! - Health checks
 //! - Cluster status
+
+use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
@@ -13,7 +15,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use smg_mesh::{RateLimitConfig, GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY};
 use tracing::{info, warn};
+
+use crate::server::AppState;
 
 /// Mesh cluster status response
 #[derive(Debug, Serialize, Deserialize)]
@@ -434,9 +439,3 @@ pub async fn trigger_graceful_shutdown(State(app_state): State<Arc<AppState>>) -
     )
         .into_response()
 }
-
-use std::sync::Arc;
-
-use smg_mesh::{RateLimitConfig, GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY};
-
-use crate::server::AppState;

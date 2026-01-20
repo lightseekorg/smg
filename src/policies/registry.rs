@@ -391,7 +391,7 @@ impl PolicyRegistry {
     pub fn apply_remote_tree_operation(
         &self,
         model_id: &str,
-        operation: &crate::mesh::tree_ops::TreeOperation,
+        operation: &smg_mesh::tree_ops::TreeOperation,
     ) {
         // Try to find the policy for this model
         if let Some(policy) = self.get_policy(model_id) {
