@@ -211,7 +211,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::mesh::service::gossip::{NodeState, NodeStatus};
+    use crate::service::gossip::{NodeState, NodeStatus};
 
     fn create_test_cluster_state(nodes: Vec<(String, String, i32)>) -> ClusterState {
         let mut state = BTreeMap::new();

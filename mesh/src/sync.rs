@@ -440,7 +440,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::mesh::stores::{
+    use crate::stores::{
         AppState, MembershipState, RateLimitConfig, StateStores, GLOBAL_RATE_LIMIT_COUNTER_KEY,
         GLOBAL_RATE_LIMIT_KEY,
     };
@@ -1075,7 +1075,7 @@ mod tests {
     fn test_sync_tree_operation() {
         let manager = create_test_manager("node1".to_string());
 
-        use crate::mesh::tree_ops::{TreeInsertOp, TreeOperation};
+        use crate::tree_ops::{TreeInsertOp, TreeOperation};
 
         let op = TreeOperation::Insert(TreeInsertOp {
             text: "test_text".to_string(),
@@ -1101,7 +1101,7 @@ mod tests {
         assert!(manager.get_tree_state("model1").is_none());
 
         // Sync an operation
-        use crate::mesh::tree_ops::{TreeInsertOp, TreeOperation};
+        use crate::tree_ops::{TreeInsertOp, TreeOperation};
         let op = TreeOperation::Insert(TreeInsertOp {
             text: "test_text".to_string(),
             tenant: "http://localhost:8000".to_string(),
@@ -1118,7 +1118,7 @@ mod tests {
     fn test_apply_remote_tree_operation() {
         let manager = create_test_manager("node1".to_string());
 
-        use crate::mesh::tree_ops::{TreeInsertOp, TreeOperation, TreeState};
+        use crate::tree_ops::{TreeInsertOp, TreeOperation, TreeState};
 
         let mut tree_state = TreeState::new("model1".to_string());
         tree_state.version = 5;

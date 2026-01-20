@@ -49,7 +49,7 @@ mod tests {
     use tokio::time::sleep;
 
     use super::*;
-    use crate::mesh::stores::{
+    use crate::stores::{
         RateLimitConfig, StateStores, GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
     };
 
@@ -108,14 +108,14 @@ mod tests {
         stores.rate_limit.update_membership(&["node1".to_string()]);
 
         // Setup config
-        let key = crate::mesh::crdt::SKey::new(GLOBAL_RATE_LIMIT_KEY.to_string());
+        let key = crate::crdt::SKey::new(GLOBAL_RATE_LIMIT_KEY.to_string());
         let config = RateLimitConfig {
             limit_per_second: 100,
         };
         let serialized = serde_json::to_vec(&config).unwrap();
         stores.app.insert(
             key,
-            crate::mesh::stores::AppState {
+            crate::stores::AppState {
                 key: GLOBAL_RATE_LIMIT_KEY.to_string(),
                 value: serialized,
                 version: 1,
@@ -152,7 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limit_window_reset_with_counter() {
-        use crate::mesh::{crdt::SKey, stores::MembershipState};
+        use crate::{crdt::SKey, stores::MembershipState};
 
         // Use with_self_name to ensure RateLimitStore uses the same self_name
         let stores = Arc::new(StateStores::with_self_name("test_node".to_string()));

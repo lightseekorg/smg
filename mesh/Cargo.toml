@@ -1,0 +1,54 @@
+[package]
+name = "smg-mesh"
+version = "0.1.0"
+edition = "2021"
+description = "Mesh gossip protocol and distributed state synchronization for sgl-model-gateway"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Tony Lu <tonyluj@gmail.com>",
+]
+keywords = ["mesh", "gossip", "crdt", "distributed", "cluster"]
+categories = ["network-programming", "data-structures"]
+
+[dependencies]
+# Workspace dependencies
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+http.workspace = true
+num-traits.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["full", "sync", "time"] }
+tracing.workspace = true
+
+# Mesh-specific dependencies
+crdts = "7.3"
+futures = "0.3"
+metrics = "0.24.2"
+num-bigint = "0.4"
+prost = "0.14.1"
+prost-types = "0.14.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2.2"
+tokio-stream = "0.1"
+tonic = { version = "0.14.2", features = ["gzip", "transport"] }
+tonic-prost = "0.14.2"
+
+# Workspace crates
+kv-index = { path = "../kv_index", package = "kv-index" }
+
+[build-dependencies]
+tonic-prost-build = "0.14.2"
+prost-build = "0.14.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber.workspace = true

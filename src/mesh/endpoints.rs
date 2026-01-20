@@ -392,7 +392,7 @@ pub async fn get_global_rate_limit_stats(State(app_state): State<Arc<AppState>>)
 
     // Get current counter value
     let current_count = sync_manager
-        .get_rate_limit_value(crate::mesh::stores::GLOBAL_RATE_LIMIT_COUNTER_KEY)
+        .get_rate_limit_value(GLOBAL_RATE_LIMIT_COUNTER_KEY)
         .unwrap_or(0);
 
     (
@@ -437,7 +437,6 @@ pub async fn trigger_graceful_shutdown(State(app_state): State<Arc<AppState>>) -
 
 use std::sync::Arc;
 
-use crate::{
-    mesh::stores::{RateLimitConfig, GLOBAL_RATE_LIMIT_KEY},
-    server::AppState,
-};
+use smg_mesh::{RateLimitConfig, GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY};
+
+use crate::server::AppState;

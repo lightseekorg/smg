@@ -1,5 +1,5 @@
 [workspace]
-members = ["protocols", "reasoning_parser", "tool_parser", "workflow", "tokenizer", "auth", "mcp", "kv_index", "data_connector", "multimodal", "wasm"]
+members = ["protocols", "reasoning_parser", "tool_parser", "workflow", "tokenizer", "auth", "mcp", "kv_index", "data_connector", "multimodal", "wasm", "mesh"]
 exclude = ["bindings/python", "bindings/golang"]
 resolver = "2"
 
@@ -9,6 +9,7 @@ smg-auth = { path = "auth", package = "auth" }
 smg-mcp = { path = "mcp", package = "mcp" }
 smg-data-connector = { path = "data_connector", package = "data-connector" }
 smg-wasm = { path = "wasm", package = "smg-wasm" }
+smg-mesh = { path = "mesh", package = "smg-mesh" }
 
 # Shared dependencies
 anyhow = "1.0"
@@ -30,6 +31,7 @@ subtle = "2.6"
 thiserror = "2.0.12"
 tokio = { version = "1.42.0" }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chrono"] }
 uuid = { version = "1.10" }
 
 [package]
@@ -90,7 +92,7 @@ http = "1.1.0"
 tokio = { version = "1.42.0", features = ["full"] }
 async-trait = "0.1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chrono"] }
+tracing-subscriber.workspace = true
 tracing-log = "0.2"
 tracing-appender = "0.2.3"
 opentelemetry = "0.27"
@@ -140,6 +142,7 @@ kv-index = { path = "kv_index", package = "kv-index" }
 smg-data-connector = { path = "data_connector", package = "data-connector" }
 llm-multimodal = { path = "multimodal" }
 smg-wasm = { path = "wasm", package = "smg-wasm" }
+smg-mesh = { path = "mesh", package = "smg-mesh" }
 
 # gRPC and Protobuf dependencies
 tonic = { version = "0.14.2", features = ["gzip", "transport"] }

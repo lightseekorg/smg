@@ -262,7 +262,7 @@ mod tests {
     use std::{thread, time::Duration};
 
     use super::*;
-    use crate::mesh::stores::{AppState, MembershipState, PolicyState, StateStores, WorkerState};
+    use crate::stores::{AppState, MembershipState, PolicyState, StateStores, WorkerState};
 
     fn create_test_collector(self_name: String) -> IncrementalUpdateCollector {
         let stores = Arc::new(StateStores::with_self_name(self_name.clone()));
