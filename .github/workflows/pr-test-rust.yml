@@ -54,9 +54,9 @@ jobs:
       - name: Test wheel install
         run: |
           pip install bindings/python/dist/*.whl
-          python3 -c "import sglang_router; print('Python package: OK')"
-          python3 -c "from sglang_router.sglang_router_rs import Router; print('Rust extension: OK')"
-          python3 -m sglang_router.launch_router --help > /dev/null && echo "Entry point: OK"
+          python3 -c "import smg; print('Python package: OK')"
+          python3 -c "from smg.smg_rs import Router; print('Rust extension: OK')"
+          python3 -m smg.launch_router --help > /dev/null && echo "Entry point: OK"
 
   python-unit-tests:
     needs: build-wheel
@@ -82,7 +82,7 @@ jobs:
         run: |
           cd bindings/python
           python3 -m pip install pytest pytest-cov pytest-xdist
-          pytest -q tests --cov=sglang_router --cov-config=.coveragerc --cov-report=term-missing --cov-fail-under=80
+          pytest -q tests --cov=smg --cov-config=.coveragerc --cov-report=term-missing --cov-fail-under=80
 
   unit-tests:
     if: |
@@ -234,7 +234,7 @@ jobs:
 
       - name: Install wheel
         run: |
-          pip uninstall -y sglang-router || true
+          pip uninstall -y smg || true
           pip install wheel/*.whl
 
       - name: Install e2e test dependencies

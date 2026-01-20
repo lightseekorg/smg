@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Dict, List, Optional
 
-from sglang_router.sglang_router_rs import get_available_tool_call_parsers
+from smg.smg_rs import get_available_tool_call_parsers
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,6 @@ class RouterArgs:
     port: int = 30000
 
     # PD-specific configuration
-    mini_lb: bool = False
     pd_disaggregation: bool = False  # Enable PD disaggregated mode
     prefill_urls: List[tuple] = dataclasses.field(
         default_factory=list
@@ -337,11 +336,6 @@ class RouterArgs:
         )
 
         # PD-specific arguments
-        pd_group.add_argument(
-            f"--{prefix}mini-lb",
-            action="store_true",
-            help="Enable MiniLB",
-        )
         pd_group.add_argument(
             f"--{prefix}pd-disaggregation",
             action="store_true",

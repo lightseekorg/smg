@@ -1,5 +1,5 @@
 """
-Unit tests for argument parsing functionality in sglang_router.
+Unit tests for argument parsing functionality in smg.
 
 These tests focus on testing the argument parsing logic in isolation,
 without starting actual router instances.
@@ -8,8 +8,8 @@ without starting actual router instances.
 from types import SimpleNamespace
 
 import pytest
-from sglang_router.launch_router import RouterArgs, parse_router_args
-from sglang_router.router import policy_from_str
+from smg.launch_router import RouterArgs, parse_router_args
+from smg.router import policy_from_str
 
 
 class TestRouterArgs:
@@ -406,7 +406,7 @@ class TestPolicyFromStr:
 
     def test_valid_policies(self):
         """Test conversion of valid policy strings."""
-        from sglang_router.sglang_router_rs import PolicyType
+        from smg.smg_rs import PolicyType
 
         assert policy_from_str("random") == PolicyType.Random
         assert policy_from_str("round_robin") == PolicyType.RoundRobin

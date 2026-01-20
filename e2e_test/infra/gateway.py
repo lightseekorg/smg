@@ -338,7 +338,7 @@ class Gateway:
         return [
             "python3",
             "-m",
-            "sglang_router.launch_router",
+            "smg.launch_router",
             "--host",
             self.host,
             "--port",

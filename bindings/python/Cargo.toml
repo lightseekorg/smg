@@ -4,7 +4,7 @@ version = "0.3.2"
 edition = "2021"
 
 [lib]
-name = "sglang_router_rs"
+name = "smg_rs"
 crate-type = ["cdylib"]
 
 [dependencies]

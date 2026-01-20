@@ -131,7 +131,7 @@ if str(_E2E_TEST) not in sys.path:
     sys.path.insert(0, str(_E2E_TEST))
 
 # Add bindings/python to path if the wheel is not installed (for local development)
-_wheel_installed = find_spec("sglang_router.sglang_router_rs") is not None
+_wheel_installed = find_spec("smg.smg_rs") is not None
 
 if not _wheel_installed and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))

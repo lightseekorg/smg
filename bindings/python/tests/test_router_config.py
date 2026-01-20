@@ -8,9 +8,9 @@ including validation of configuration parameters and their interactions.
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sglang_router.launch_router import RouterArgs, launch_router
-from sglang_router.router import policy_from_str
-from sglang_router.sglang_router_rs import PolicyType
+from smg.launch_router import RouterArgs, launch_router
+from smg.router import policy_from_str
+from smg.smg_rs import PolicyType
 
 
 class TestRouterConfigValidation:
@@ -63,7 +63,7 @@ class TestRouterConfigValidation:
         )
 
         # Should not raise validation error - URLs are now optional
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
             router_mod.from_args = MagicMock(return_value=mock_router_instance)
 
@@ -81,7 +81,7 @@ class TestRouterConfigValidation:
         )
 
         # Should not raise validation error when service discovery is enabled
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
             router_mod.from_args = MagicMock(return_value=mock_router_instance)
 
@@ -95,7 +95,7 @@ class TestRouterConfigValidation:
         args = RouterArgs(worker_urls=[], service_discovery=False)
 
         # Should not raise validation error
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
             router_mod.from_args = MagicMock(return_value=mock_router_instance)
 
@@ -292,7 +292,7 @@ class TestRouterConfigValidation:
         )
 
         # Should not raise validation error
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
             router_mod.from_args = MagicMock(return_value=mock_router_instance)
 
@@ -314,7 +314,7 @@ class TestRouterConfigValidation:
         )
 
         # Should not raise validation error
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
             router_mod.from_args = MagicMock(return_value=mock_router_instance)
 
