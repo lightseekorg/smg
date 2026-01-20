@@ -1,7 +1,17 @@
-# Shepherd Model Gateway (SMG)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/images/logos/amg-logomark-white.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/images/logos/amg-logomark-dark.svg">
+    <img alt="SMG Logo" src="docs/assets/images/logos/amg-logomark-dark.svg" width="80">
+  </picture>
+</p>
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-latest-brightgreen.svg)](https://lightseekorg.github.io/smg)
+<h1 align="center">Shepherd Model Gateway</h1>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
+  <a href="https://lightseekorg.github.io/smg"><img src="https://img.shields.io/badge/docs-latest-brightgreen.svg" alt="Docs"></a>
+</p>
 
 High-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
 
