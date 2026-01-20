@@ -1,19 +1,36 @@
+# Default owners for everything
 * @slin1237 @CatherineSue
+
+# Benchmarks
 /benches @slin1237
+
+# Python bindings
 /bindings/python @CatherineSue @key4ng @slin1237
+
+# E2E tests
 /e2e_test @CatherineSue @key4ng
+
+# Main source code
 /src/config @slin1237
 /src/core @slin1237
-/src/data_connector @key4ng
 /src/grpc_client @CatherineSue @slin1237
-/src/mcp @key4ng @slin1237
 /src/policies @slin1237
 /src/proto @CatherineSue @slin1237
-/src/protocols @CatherineSue @key4ng
-/src/reasoning_parser @CatherineSue
 /src/routers @CatherineSue @key4ng @slin1237
-/src/tokenizer @slin1237 @CatherineSue
-/src/tool_parser @slin1237 @CatherineSue
-/src/wasm @slin1237 @tonyluj
+
+# Workspace crates
+/auth @slin1237
+/data_connector @key4ng
+/kv_index @slin1237
+/mcp @key4ng @slin1237
+/mesh @slin1237 @tonyluj
+/multimodal @slin1237 @CatherineSue
+/protocols @CatherineSue @key4ng
+/reasoning_parser @CatherineSue
+/tokenizer @slin1237 @CatherineSue
+/tool_parser @slin1237 @CatherineSue
 /wasm @slin1237 @tonyluj
+/workflow @slin1237 @CatherineSue
+
+# Examples
 /examples/wasm @slin1237 @tonyluj
