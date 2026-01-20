@@ -4,7 +4,6 @@ import sys
 from typing import List, Optional
 
 import setproctitle
-from smg.mini_lb import MiniLoadBalancer
 from smg.router_args import RouterArgs
 
 logger = logging.getLogger("router")
@@ -13,14 +12,12 @@ try:
     from smg.router import Router
 except ImportError:
     Router = None
-    logger.warning(
-        "Rust Router is not installed, only python MiniLB (debugging only) is available"
-    )
+    logger.warning("Rust Router is not installed")
 
 
 def launch_router(args: argparse.Namespace) -> Optional[Router]:
     """
-    Launch the SGLang router with the configuration from parsed arguments.
+    Launch the SMG router with the configuration from parsed arguments.
 
     Args:
         args: Namespace object containing router configuration
@@ -29,7 +26,7 @@ def launch_router(args: argparse.Namespace) -> Optional[Router]:
     Returns:
         Router instance if successful, None if failed
     """
-    setproctitle.setproctitle("sglang::router")
+    setproctitle.setproctitle("smg::router")
     try:
         # Convert to RouterArgs if needed
         if not isinstance(args, RouterArgs):
@@ -37,15 +34,11 @@ def launch_router(args: argparse.Namespace) -> Optional[Router]:
         else:
             router_args = args
 
-        if router_args.mini_lb:
-            mini_lb = MiniLoadBalancer(router_args)
-            mini_lb.start()
-        else:
-            if Router is None:
-                raise RuntimeError("Rust Router is not installed")
-            router_args._validate_router_args()
-            router = Router.from_args(router_args)
-            router.start()
+        if Router is None:
+            raise RuntimeError("Rust Router is not installed")
+        router_args._validate_router_args()
+        router = Router.from_args(router_args)
+        router.start()
 
     except Exception as e:
         logger.error(f"Error starting router: {e}")
@@ -63,7 +56,7 @@ class CustomHelpFormatter(
 def parse_router_args(args: List[str]) -> RouterArgs:
     """Parse command line arguments and return RouterArgs instance."""
     parser = argparse.ArgumentParser(
-        description="""SGLang Router - High-performance request distribution across worker nodes
+        description="""SMG Router - High-performance request distribution across worker nodes
 
 Usage:
 This launcher enables starting a router with individual worker instances. It is useful for
