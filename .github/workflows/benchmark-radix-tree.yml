@@ -4,15 +4,15 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'benches/radix_tree_benchmark.rs'
+      - 'model_gateway/benches/radix_tree_benchmark.rs'
       - 'kv_index/**'
-      - 'src/policies/tree.rs'
+      - 'model_gateway/src/policies/tree.rs'
   pull_request:
     branches: [ main ]
     paths:
-      - 'benches/radix_tree_benchmark.rs'
+      - 'model_gateway/benches/radix_tree_benchmark.rs'
       - 'kv_index/**'
-      - 'src/policies/tree.rs'
+      - 'model_gateway/src/policies/tree.rs'
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * 0'

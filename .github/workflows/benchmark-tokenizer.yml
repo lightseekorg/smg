@@ -4,12 +4,12 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'benches/tokenizer_benchmark.rs'
+      - 'model_gateway/benches/tokenizer_benchmark.rs'
       - 'tokenizer/**'
   pull_request:
     branches: [ main ]
     paths:
-      - 'benches/tokenizer_benchmark.rs'
+      - 'model_gateway/benches/tokenizer_benchmark.rs'
       - 'tokenizer/**'
   workflow_dispatch:
   schedule:

@@ -13,7 +13,7 @@ tokio = { version = "1.42.0", features = ["full"] }
 once_cell = "1.19"
 
 [dependencies.smg]
-path = "../.."
+path = "../../model_gateway"
 default-features = true
 
 [features]

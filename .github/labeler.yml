@@ -3,7 +3,7 @@
 
 rust:
   - changed-files:
-      - any-glob-to-any-file: 'src/**/*.rs'
+      - any-glob-to-any-file: 'model_gateway/src/**/*.rs'
 
 python-bindings:
   - changed-files:
@@ -29,31 +29,32 @@ ci:
 grpc:
   - changed-files:
       - any-glob-to-any-file:
-          - 'src/proto/**/*'
-          - 'src/grpc_client/**/*'
+          - 'grpc_client/**/*'
 
 mcp:
   - changed-files:
-      - any-glob-to-any-file: 'src/mcp/**/*'
+      - any-glob-to-any-file: 'mcp/**/*'
 
 tokenizer:
   - changed-files:
-      - any-glob-to-any-file: 'src/tokenizer/**/*'
+      - any-glob-to-any-file: 'tokenizer/**/*'
 
 tool-parser:
   - changed-files:
-      - any-glob-to-any-file: 'src/tool_parser/**/*'
+      - any-glob-to-any-file: 'tool_parser/**/*'
 
 wasm:
   - changed-files:
-      - any-glob-to-any-file: 'src/wasm/**/*'
+      - any-glob-to-any-file:
+          - 'wasm/**/*'
+          - 'model_gateway/src/wasm/**/*'
 
 benchmarks:
   - changed-files:
-      - any-glob-to-any-file: 'benches/**/*'
+      - any-glob-to-any-file: 'model_gateway/benches/**/*'
 
 tests:
   - changed-files:
       - any-glob-to-any-file:
-          - 'tests/**/*'
+          - 'model_gateway/tests/**/*'
           - 'e2e_test/**/*'

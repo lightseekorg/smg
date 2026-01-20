@@ -4,13 +4,13 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'benches/manual_policy_benchmark.rs'
-      - 'src/policies/**'
+      - 'model_gateway/benches/manual_policy_benchmark.rs'
+      - 'model_gateway/src/policies/**'
   pull_request:
     branches: [ main ]
     paths:
-      - 'benches/manual_policy_benchmark.rs'
-      - 'src/policies/**'
+      - 'model_gateway/benches/manual_policy_benchmark.rs'
+      - 'model_gateway/src/policies/**'
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * 0'

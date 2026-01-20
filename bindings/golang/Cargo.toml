@@ -20,7 +20,7 @@ tracing = "0.1"
 libc = "0.2.179"
 
 [dependencies.smg]
-path = "../.."
+path = "../../model_gateway"
 default-features = true
 
 [features]

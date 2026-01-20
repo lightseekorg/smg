@@ -72,6 +72,6 @@ pytest tests/
 
 - The Rust bindings source code is located in `src/lib.rs`
 - The bindings have their own `Cargo.toml` in this directory
-- The main SMG library is located in `../../` and is used as a dependency
+- The main SMG library is located in `../../model_gateway/` and is used as a dependency
 - The package includes both Python code and Rust extensions built with PyO3
 - PyO3 types are prefixed with `Py` in Rust but exposed to Python without the prefix using the `name` attribute

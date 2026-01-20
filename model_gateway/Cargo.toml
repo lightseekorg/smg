@@ -1,0 +1,163 @@
+[package]
+name = "smg"
+version = "0.3.2"
+edition = "2021"
+
+[features]
+default = ["grpc-client"]
+grpc-client = []
+grpc-server = []
+
+vendored-openssl = ["openssl/vendored"]
+
+[lints.rust]
+unused_qualifications = "warn"
+
+[lib]
+name = "smg"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "smg"
+path = "src/main.rs"
+
+[[bin]]
+name = "amg"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace dependencies (simple)
+anyhow.workspace = true
+async-trait.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+futures.workspace = true
+http.workspace = true
+parking_lot.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+rand.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Workspace dependencies (with extra features)
+axum = { workspace = true, features = ["macros", "ws", "tracing"] }
+bytemuck = { workspace = true, features = ["derive"] }
+reqwest = { workspace = true, features = ["stream", "blocking", "json", "rustls-tls"] }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["full"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+# Workspace crates
+openai-protocol = { path = "../protocols", features = ["axum"] }
+reasoning-parser = { path = "../reasoning_parser" }
+tool-parser = { path = "../tool_parser" }
+wfaas = { path = "../workflow", package = "workflow" }
+llm-tokenizer = { path = "../tokenizer", package = "tokenizer" }
+smg-auth.workspace = true
+smg-mcp.workspace = true
+kv-index = { path = "../kv_index", package = "kv-index" }
+smg-data-connector.workspace = true
+llm-multimodal = { path = "../multimodal" }
+smg-wasm.workspace = true
+smg-mesh.workspace = true
+smg-grpc-client.workspace = true
+
+# External dependencies (not in workspace)
+clap = { version = "4", features = ["derive", "env"] }
+axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["trace", "compression-gzip", "cors", "timeout", "limit", "request-id", "util"] }
+serde_json = { version = "1.0", default-features = false, features = ["std", "preserve_order"] }
+bytes = "1.8.0"
+http-body = "1.0"
+futures-util = "0.3"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+tracing-log = "0.2"
+tracing-appender = "0.2.3"
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["trace", "grpc-tonic"] }
+tracing-opentelemetry = "0.28"
+kube = { version = "1.1.0", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.25.0", features = ["v1_33"] }
+metrics = "0.24.2"
+metrics-exporter-prometheus = "0.17.0"
+regex = "1.10"
+memchr = "2.7"
+url = "2.5.4"
+tokio-stream = { version = "0.1", features = ["sync"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+rustls-pemfile = "2.2"
+openssl = "0.10.73"
+rmcp = { version = "0.8.3", features = ["client"] }
+serde_yaml = "0.9"
+openai-harmony = { git = "https://github.com/openai/harmony", tag = "v0.0.4" }
+openmetrics-parser = "0.4.4"
+arc-swap = "1.7.1"
+bitflags = "2.10.0"
+once_cell = "1.21.3"
+sha2 = "0.10"
+wasmtime = { version = "38.0", features = ["component-model", "async"] }
+
+[build-dependencies]
+chrono = { version = "0.4", features = ["clock"] }
+toml = "0.9"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+portpicker = "0.1"
+tempfile = "3.8"
+lazy_static = "1.4"
+wasm-encoder = "0.242"
+npyz = { version = "0.8", features = ["npz"] }
+opentelemetry-proto = { version = "0.27", features = ["gen-tonic"] }
+tonic-v12 = { version = "0.12.3", package = "tonic" }
+serial_test = "3.0"
+rsa = { version = "0.9", features = ["sha2"] }
+jsonwebtoken = "9.3"
+validator = "0.20.0"
+base64 = "0.22"
+kv-index = { path = "../kv_index", package = "kv-index" }
+
+[[bench]]
+name = "wasm_middleware_latency"
+harness = false
+path = "benches/wasm_middleware_latency.rs"
+
+[[bench]]
+name = "request_processing"
+harness = false
+path = "benches/request_processing.rs"
+
+[[bench]]
+name = "router_registry_bench"
+harness = false
+
+[[bench]]
+name = "tokenizer_benchmark"
+harness = false
+path = "benches/tokenizer_benchmark.rs"
+
+[[bench]]
+name = "tool_parser_benchmark"
+harness = false
+path = "benches/tool_parser_benchmark.rs"
+
+[[bench]]
+name = "manual_policy_benchmark"
+harness = false
+path = "benches/manual_policy_benchmark.rs"
+
+[[bench]]
+name = "radix_tree_benchmark"
+harness = false
+path = "benches/radix_tree_benchmark.rs"

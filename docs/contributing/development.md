@@ -62,22 +62,38 @@ cargo build --release
 
 ```
 smg/
-├── src/
-│   ├── main.rs           # Entry point
-│   ├── lib.rs            # Library root
-│   ├── config/           # Configuration handling
-│   ├── routing/          # Load balancing policies
-│   ├── health/           # Health checking
-│   ├── rate_limit/       # Rate limiting
-│   ├── circuit_breaker/  # Circuit breaker
-│   ├── metrics/          # Prometheus metrics
-│   └── api/              # HTTP API handlers
-├── tests/
-│   ├── integration/      # Integration tests
-│   └── e2e/              # End-to-end tests
-├── docs/                 # Documentation (MkDocs)
-├── examples/             # Example configurations
-└── Cargo.toml            # Project manifest
+├── model_gateway/            # Main gateway binary
+│   ├── src/
+│   │   ├── main.rs           # Entry point
+│   │   ├── lib.rs            # Library root
+│   │   ├── config/           # Configuration handling
+│   │   ├── core/             # Core routing logic
+│   │   ├── policies/         # Load balancing policies
+│   │   ├── routers/          # HTTP/gRPC routers
+│   │   └── observability/    # Metrics and tracing
+│   ├── benches/              # Benchmarks
+│   ├── tests/                # Integration tests
+│   └── Cargo.toml            # Gateway package manifest
+├── protocols/                # OpenAI protocol definitions
+├── tokenizer/                # LLM tokenization
+├── tool_parser/              # Tool call parsing
+├── reasoning_parser/         # Reasoning extraction
+├── mcp/                      # MCP integration
+├── auth/                     # Authentication
+├── mesh/                     # HA mesh networking
+├── wasm/                     # WebAssembly plugins
+├── grpc_client/              # gRPC client
+├── data_connector/           # Storage backends
+├── kv_index/                 # KV cache indexing
+├── multimodal/               # Multimodal support
+├── workflow/                 # Workflow automation
+├── bindings/
+│   ├── python/               # Python bindings
+│   └── golang/               # Go SDK
+├── docs/                     # Documentation (MkDocs)
+├── e2e_test/                 # End-to-end tests
+├── examples/                 # Example configurations
+└── Cargo.toml                # Workspace manifest
 ```
 
 ---
@@ -135,7 +151,7 @@ cargo clippy --fix
 Unit tests are co-located with source code:
 
 ```rust
-// src/routing/round_robin.rs
+// model_gateway/src/policies/round_robin.rs
 
 #[cfg(test)]
 mod tests {
@@ -156,10 +172,10 @@ mod tests {
 
 ### Integration Tests
 
-Integration tests are in `tests/integration/`:
+Integration tests are in `model_gateway/tests/`:
 
 ```rust
-// tests/integration/routing_test.rs
+// model_gateway/tests/routing/routing_test.rs
 
 #[tokio::test]
 async fn test_routing_with_failing_worker() {
@@ -193,7 +209,7 @@ E2E tests use Docker Compose:
 1. **Create the policy module**:
 
 ```rust
-// src/routing/weighted.rs
+// model_gateway/src/policies/weighted.rs
 
 use super::{Policy, Worker};
 
@@ -210,10 +226,10 @@ impl Policy for WeightedRoundRobin {
 }
 ```
 
-2. **Add to routing module**:
+2. **Add to policies module**:
 
 ```rust
-// src/routing/mod.rs
+// model_gateway/src/policies/mod.rs
 
 mod weighted;
 pub use weighted::WeightedRoundRobin;
@@ -222,7 +238,7 @@ pub use weighted::WeightedRoundRobin;
 3. **Add CLI option**:
 
 ```rust
-// src/config/mod.rs
+// model_gateway/src/config/mod.rs
 
 #[derive(Clone, Debug, ValueEnum)]
 pub enum RoutingPolicy {
@@ -237,7 +253,7 @@ pub enum RoutingPolicy {
 4. **Write tests**:
 
 ```rust
-// src/routing/weighted.rs
+// model_gateway/src/policies/weighted.rs
 
 #[cfg(test)]
 mod tests {

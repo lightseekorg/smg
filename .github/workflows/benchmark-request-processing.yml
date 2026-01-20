@@ -4,17 +4,17 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'benches/request_processing.rs'
-      - 'src/routers/**'
-      - 'src/core/**'
-      - 'src/middleware.rs'
+      - 'model_gateway/benches/request_processing.rs'
+      - 'model_gateway/src/routers/**'
+      - 'model_gateway/src/core/**'
+      - 'model_gateway/src/middleware.rs'
   pull_request:
     branches: [ main ]
     paths:
-      - 'benches/request_processing.rs'
-      - 'src/routers/**'
-      - 'src/core/**'
-      - 'src/middleware.rs'
+      - 'model_gateway/benches/request_processing.rs'
+      - 'model_gateway/src/routers/**'
+      - 'model_gateway/src/core/**'
+      - 'model_gateway/src/middleware.rs'
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * 0'

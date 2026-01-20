@@ -4,13 +4,13 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'benches/tool_parser_benchmark.rs'
-      - 'tool-parser/**'
+      - 'model_gateway/benches/tool_parser_benchmark.rs'
+      - 'tool_parser/**'
   pull_request:
     branches: [ main ]
     paths:
-      - 'benches/tool_parser_benchmark.rs'
-      - 'tool-parser/**'
+      - 'model_gateway/benches/tool_parser_benchmark.rs'
+      - 'tool_parser/**'
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * 0'
