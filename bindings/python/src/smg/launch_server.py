@@ -12,7 +12,7 @@ from typing import List
 
 import requests
 from setproctitle import setproctitle
-from sglang_router.launch_router import RouterArgs, launch_router
+from smg.launch_router import RouterArgs, launch_router
 
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import is_port_available

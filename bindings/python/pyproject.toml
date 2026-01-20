@@ -3,9 +3,9 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "sglang-router"
+name = "smg"
 version = "0.3.2"
-description = "High-performance Rust-based load balancer for SGLang with multiple routing algorithms and prefill-decode disaggregation support"
+description = "High-performance Rust-based inference gateway for large-scale LLM deployments"
 authors = [
     {name = "Simo Lin", email = "linsimo.mark@gmail.com"},
     {name = "Chang Su", email = "mckvtl@gmail.com"},
@@ -42,14 +42,11 @@ dev = [
 ]
 
 [project.scripts]
-smg = "sglang_router.cli:main"
-amg = "sglang_router.cli:main"
-sglang-router = "sglang_router.cli:main"
-
+smg = "smg.cli:main"
 
 [tool.maturin]
 python-source = "src"
-module-name = "sglang_router.sglang_router_rs"
+module-name = "smg.smg_rs"
 # Exclude bindings/python/README.md to use root README only
 exclude = ["README.md"]
 

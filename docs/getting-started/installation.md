@@ -142,8 +142,8 @@ pip install dist/*.whl
 ### Verify the installation
 
 ```python
-import sglang_router
-print(sglang_router.__version__)
+import smg
+print(smg.__version__)
 ```
 
 ---

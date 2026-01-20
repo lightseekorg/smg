@@ -1,7 +1,7 @@
 from typing import Optional
 
-from sglang_router.router_args import RouterArgs
-from sglang_router.sglang_router_rs import (
+from smg.router_args import RouterArgs
+from smg.smg_rs import (
     BackendType,
     HistoryBackendType,
     PolicyType,
@@ -13,7 +13,7 @@ from sglang_router.sglang_router_rs import (
     PyRedisConfig,
     PyRole,
 )
-from sglang_router.sglang_router_rs import Router as _Router
+from smg.smg_rs import Router as _Router
 
 
 def policy_from_str(policy_str: Optional[str]) -> PolicyType:

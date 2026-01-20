@@ -15,7 +15,7 @@ import os
 import sys
 from typing import List, Optional
 
-from sglang_router.sglang_router_rs import (
+from smg.smg_rs import (
     get_verbose_version_string,
     get_version_string,
 )
@@ -75,7 +75,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     if args.command == "launch":
         # Import and call launch_router functions directly
-        from sglang_router.launch_router import launch_router, parse_router_args
+        from smg.launch_router import launch_router, parse_router_args
 
         # All router args are in unknown
         router_args = parse_router_args(unknown)
@@ -85,7 +85,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         # Import and call launch_server main with proper argv
         # Note: launch_server.main() uses argparse internally which reads sys.argv
         # We need to temporarily set sys.argv for compatibility
-        import sglang_router.launch_server as launch_server_module
+        import smg.launch_server as launch_server_module
 
         # Preserve original sys.argv
         original_argv = sys.argv

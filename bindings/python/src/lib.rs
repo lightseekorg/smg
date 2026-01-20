@@ -1005,7 +1005,7 @@ fn get_available_tool_call_parsers() -> Vec<String> {
 }
 
 #[pymodule]
-fn sglang_router_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn smg_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PolicyType>()?;
     m.add_class::<BackendType>()?;
     m.add_class::<HistoryBackendType>()?;

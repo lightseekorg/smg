@@ -1,5 +1,5 @@
 """
-Unit tests for startup sequence logic in sglang_router.
+Unit tests for startup sequence logic in smg.
 
 These tests focus on testing the startup sequence logic in isolation,
 including router initialization, configuration validation, and startup flow.
@@ -9,8 +9,8 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sglang_router.launch_router import RouterArgs, launch_router
-from sglang_router.router import policy_from_str
+from smg.launch_router import RouterArgs, launch_router
+from smg.router import policy_from_str
 
 
 # Local helper mirroring the router logger setup used in production
@@ -28,7 +28,7 @@ def setup_logger():
     return logger
 
 
-from sglang_router.sglang_router_rs import PolicyType
+from smg.smg_rs import PolicyType
 
 
 class TestSetupLogger:
@@ -105,7 +105,7 @@ class TestRouterInitialization:
             policy="cache_aware",
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             captured_args = {}
 
             mock_router_instance = MagicMock()
@@ -147,7 +147,7 @@ class TestRouterInitialization:
             policy="power_of_two",
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             captured_args = {}
             mock_router_instance = MagicMock()
 
@@ -187,7 +187,7 @@ class TestRouterInitialization:
             service_discovery_namespace="default",
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             captured_args = {}
             mock_router_instance = MagicMock()
 
@@ -229,7 +229,7 @@ class TestRouterInitialization:
             disable_retries=False,
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             captured_args = {}
             mock_router_instance = MagicMock()
 
@@ -274,7 +274,7 @@ class TestRouterInitialization:
             disable_circuit_breaker=False,
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             captured_args = {}
             mock_router_instance = MagicMock()
 
@@ -316,7 +316,7 @@ class TestRouterInitialization:
             rate_limit_tokens_per_second=100,
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             captured_args = {}
             mock_router_instance = MagicMock()
 
@@ -357,7 +357,7 @@ class TestRouterInitialization:
             health_check_endpoint="/healthz",
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             captured_args = {}
             mock_router_instance = MagicMock()
 
@@ -394,7 +394,7 @@ class TestRouterInitialization:
         """Test router initialization with Prometheus configuration."""
         args = RouterArgs(prometheus_port=29000, prometheus_host="127.0.0.1")
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             captured_args = {}
             mock_router_instance = MagicMock()
 
@@ -427,7 +427,7 @@ class TestRouterInitialization:
             cors_allowed_origins=["http://localhost:3000", "https://example.com"]
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             captured_args = {}
             mock_router_instance = MagicMock()
 
@@ -473,7 +473,7 @@ class TestStartupValidation:
         )
 
         # Should not raise validation error - URLs are now optional
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
             router_mod.from_args = MagicMock(return_value=mock_router_instance)
 
@@ -491,7 +491,7 @@ class TestStartupValidation:
         )
 
         # Should not raise validation error
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
 
             router_mod.from_args = MagicMock(return_value=mock_router_instance)
@@ -512,12 +512,12 @@ class TestStartupValidation:
             decode_policy="round_robin",
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
             router_mod.from_args = MagicMock(return_value=mock_router_instance)
 
             # The policy messages are emitted by router_args logger
-            with patch("sglang_router.router_args.logger") as mock_logger:
+            with patch("smg.router_args.logger") as mock_logger:
                 result = launch_router(args)
 
                 # Should log warning about policy usage
@@ -543,12 +543,12 @@ class TestStartupValidation:
             decode_policy=None,
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
             router_mod.from_args = MagicMock(return_value=mock_router_instance)
 
             # The policy messages are emitted by router_args logger
-            with patch("sglang_router.router_args.logger") as mock_logger:
+            with patch("smg.router_args.logger") as mock_logger:
                 result = launch_router(args)
 
                 # Should log info about policy usage
@@ -571,12 +571,12 @@ class TestStartupValidation:
             decode_policy="round_robin",
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
             router_mod.from_args = MagicMock(return_value=mock_router_instance)
 
             # The policy messages are emitted by router_args logger
-            with patch("sglang_router.router_args.logger") as mock_logger:
+            with patch("smg.router_args.logger") as mock_logger:
                 result = launch_router(args)
 
                 # Should log info about policy usage
@@ -598,13 +598,13 @@ class TestStartupErrorHandling:
             host="127.0.0.1", port=30000, worker_urls=["http://worker1:8000"]
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             # Simulate router creation failure in from_args
             router_mod.from_args = MagicMock(
                 side_effect=Exception("Router creation failed")
             )
 
-            with patch("sglang_router.launch_router.logger") as mock_logger:
+            with patch("smg.launch_router.logger") as mock_logger:
                 with pytest.raises(Exception, match="Router creation failed"):
                     launch_router(args)
 
@@ -619,14 +619,14 @@ class TestStartupErrorHandling:
             host="127.0.0.1", port=30000, worker_urls=["http://worker1:8000"]
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
             router_mod.from_args = MagicMock(return_value=mock_router_instance)
 
             # Simulate router start failure
             mock_router_instance.start.side_effect = Exception("Router start failed")
 
-            with patch("sglang_router.launch_router.logger") as mock_logger:
+            with patch("smg.launch_router.logger") as mock_logger:
                 with pytest.raises(Exception, match="Router start failed"):
                     launch_router(args)
 
@@ -713,7 +713,7 @@ def test_router_defaults_and_start(monkeypatch):
 
     Mocks the Rust-backed _Router to avoid native deps.
     """
-    from sglang_router import router as router_mod
+    from smg import router as router_mod
 
     captured = {}
 
@@ -726,7 +726,7 @@ def test_router_defaults_and_start(monkeypatch):
 
     monkeypatch.setattr(router_mod, "_Router", FakeRouter, raising=True)
 
-    from sglang_router.router_args import RouterArgs as _RouterArgs
+    from smg.router_args import RouterArgs as _RouterArgs
 
     Router = router_mod.Router
     args = _RouterArgs(
@@ -746,7 +746,7 @@ def test_router_defaults_and_start(monkeypatch):
     assert captured["decode_selector"] is None
     assert captured["cors_allowed_origins"] is None
     assert captured["worker_urls"] == ["http://w1:8000"]
-    from sglang_router.sglang_router_rs import PolicyType
+    from smg.smg_rs import PolicyType
 
     assert captured["policy"] == PolicyType.RoundRobin
 
@@ -759,7 +759,7 @@ def test_find_available_ports_and_wait_health(monkeypatch):
     _install_sglang_stubs(monkeypatch)
     import importlib
 
-    ls = importlib.import_module("sglang_router.launch_server")
+    ls = importlib.import_module("smg.launch_server")
 
     # Deterministic increments
     monkeypatch.setattr(ls.random, "randint", lambda a, b: 100)
@@ -794,7 +794,7 @@ def test_launch_server_process_and_cleanup(monkeypatch):
     _install_sglang_stubs(monkeypatch)
     import importlib
 
-    ls = importlib.import_module("sglang_router.launch_server")
+    ls = importlib.import_module("smg.launch_server")
 
     created = {}
 
@@ -860,7 +860,7 @@ def test_launch_server_process_and_cleanup(monkeypatch):
             service_discovery=False,
         )
 
-        with patch("sglang_router.launch_router.logger") as mock_logger:
+        with patch("smg.launch_router.logger") as mock_logger:
 
             with pytest.raises(
                 ValueError, match="PD disaggregation mode requires --prefill"
@@ -886,7 +886,7 @@ class TestStartupFlow:
             balance_rel_threshold=1.5,
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
             router_mod.from_args = MagicMock(return_value=mock_router_instance)
 
@@ -910,11 +910,11 @@ class TestStartupFlow:
             decode_policy="round_robin",
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
             router_mod.from_args = MagicMock(return_value=mock_router_instance)
 
-            with patch("sglang_router.router_args.logger") as mock_logger:
+            with patch("smg.router_args.logger") as mock_logger:
                 result = launch_router(args)
 
                 # Verify complete flow
@@ -964,7 +964,7 @@ class TestStartupFlow:
             health_check_endpoint="/healthz",
         )
 
-        with patch("sglang_router.launch_router.Router") as router_mod:
+        with patch("smg.launch_router.Router") as router_mod:
             captured_args = {}
             mock_router_instance = MagicMock()
 

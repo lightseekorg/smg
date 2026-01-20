@@ -111,7 +111,7 @@ maturin develop
 ```
 
 ```bash
-python -m sglang_router.launch_router \
+python -m smg.launch_router \
   --worker-urls http://worker1:8000 \
   --policy cache_aware
 ```

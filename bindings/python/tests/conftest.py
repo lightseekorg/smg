@@ -1,5 +1,5 @@
 """
-Pytest configuration for sglang_router Python binding tests.
+Pytest configuration for smg Python binding tests.
 
 These are unit tests that run without GPU resources or external dependencies.
 """

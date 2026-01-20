@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Dict, List, Optional
 
-from sglang_router.sglang_router_rs import get_available_tool_call_parsers
+from smg.smg_rs import get_available_tool_call_parsers
 
 logger = logging.getLogger(__name__)
 
