@@ -36,19 +36,11 @@ Reference documentation provides detailed specifications for SMG's APIs, CLI, co
 
 <div class="grid cards" markdown>
 
--   :material-console:{ .lg .middle } **CLI Reference**
+-   :material-cog:{ .lg .middle } **Configuration Reference**
 
     ---
 
-    Complete command-line interface reference with all options and environment variables.
-
-    [:octicons-arrow-right-24: CLI Reference](cli.md)
-
--   :material-cog:{ .lg .middle } **Configuration**
-
-    ---
-
-    Configuration options for tuning SMG behavior including routing, rate limiting, and reliability.
+    Complete CLI options, environment variables, and configuration for tuning SMG behavior.
 
     [:octicons-arrow-right-24: Configuration](configuration.md)
 
@@ -76,8 +68,8 @@ Reference documentation provides detailed specifications for SMG's APIs, CLI, co
 
 | Reference | Description |
 |-----------|-------------|
-| [CLI Options](cli.md#options) | All command-line flags |
-| [Environment Variables](cli.md#environment-variables) | Configurable environment variables |
+| [CLI Options](configuration.md#worker-configuration) | All command-line flags |
+| [Environment Variables](configuration.md#environment-variable-reference) | Configurable environment variables |
 | [Chat Completions API](api/openai.md#chat-completions) | `/v1/chat/completions` endpoint |
 | [HTTP Metrics](metrics.md#layer-1-http-metrics) | HTTP request metrics |
 | [Worker Metrics](metrics.md#layer-3-worker-metrics) | Worker health and performance metrics |

@@ -76,8 +76,7 @@ In-depth guides for configuring specific SMG features and subsystems.
 
 For a complete list of all configuration options, see:
 
-- [CLI Reference](../reference/cli.md) - All command-line flags
-- [Configuration Reference](../reference/configuration.md) - Configuration options by category
+- [Configuration Reference](../reference/configuration.md) - All CLI options, environment variables, and configuration by category
 
 ---
 
