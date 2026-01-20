@@ -9,19 +9,17 @@ use std::{
     time::Duration,
 };
 
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    common::{ResponseFormat, StringOrArray, ToolChoice, ToolChoiceValue},
+    generate::GenerateRequest,
+    responses::ResponsesRequest,
+    sampling_params::SamplingParams as GenerateSamplingParams,
+};
 use tonic::{transport::Channel, Request, Streaming};
 use tracing::{debug, warn};
 
-use crate::{
-    observability::otel_trace::inject_trace_context_grpc,
-    protocols::{
-        chat::ChatCompletionRequest,
-        common::{ResponseFormat, StringOrArray, ToolChoice, ToolChoiceValue},
-        generate::GenerateRequest,
-        responses::ResponsesRequest,
-        sampling_params::SamplingParams as GenerateSamplingParams,
-    },
-};
+use crate::{BoxedTraceInjector, NoopTraceInjector};
 
 // Include the generated protobuf code
 #[allow(clippy::all)]
@@ -123,11 +121,20 @@ impl futures::Stream for AbortOnDropStream {
 #[derive(Clone)]
 pub struct SglangSchedulerClient {
     client: proto::sglang_scheduler_client::SglangSchedulerClient<Channel>,
+    trace_injector: BoxedTraceInjector,
 }
 
 impl SglangSchedulerClient {
     /// Create a new client and connect to the scheduler
     pub async fn connect(endpoint: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::connect_with_trace_injector(endpoint, Arc::new(NoopTraceInjector)).await
+    }
+
+    /// Create a new client with a custom trace injector
+    pub async fn connect_with_trace_injector(
+        endpoint: &str,
+        trace_injector: BoxedTraceInjector,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         debug!("Connecting to SGLang scheduler at {}", endpoint);
 
         // Convert grpc:// to http:// for tonic
@@ -151,7 +158,17 @@ impl SglangSchedulerClient {
 
         let client = proto::sglang_scheduler_client::SglangSchedulerClient::new(channel);
 
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            trace_injector,
+        })
+    }
+
+    /// Set or replace the trace injector
+    #[must_use]
+    pub fn with_trace_injector(mut self, trace_injector: BoxedTraceInjector) -> Self {
+        self.trace_injector = trace_injector;
+        self
     }
 
     /// Submit a generation request (returns auto-aborting streaming response)
@@ -169,7 +186,9 @@ impl SglangSchedulerClient {
         let mut request = Request::new(req);
 
         // Inject W3C trace context into gRPC metadata for distributed tracing
-        inject_trace_context_grpc(request.metadata_mut());
+        if let Err(e) = self.trace_injector.inject(request.metadata_mut()) {
+            warn!("Failed to inject trace context: {}", e);
+        }
 
         let response = client.generate(request).await?;
 
@@ -189,7 +208,9 @@ impl SglangSchedulerClient {
         let mut request = Request::new(req);
 
         // Inject W3C trace context into gRPC metadata
-        inject_trace_context_grpc(request.metadata_mut());
+        if let Err(e) = self.trace_injector.inject(request.metadata_mut()) {
+            warn!("Failed to inject trace context: {}", e);
+        }
 
         let response = client.embed(request).await?;
         Ok(response.into_inner())

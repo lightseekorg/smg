@@ -260,3 +260,20 @@ pub fn inject_trace_context_grpc(metadata: &mut MetadataMap) {
         propagator.inject_context(&context, &mut MetadataInjector(metadata));
     });
 }
+
+/// OpenTelemetry-based trace injector for gRPC clients.
+///
+/// This implements the `TraceInjector` trait from `smg_grpc_client`,
+/// enabling distributed tracing across gRPC calls.
+#[derive(Clone, Default)]
+pub struct OtelTraceInjector;
+
+impl smg_grpc_client::TraceInjector for OtelTraceInjector {
+    fn inject(
+        &self,
+        metadata: &mut MetadataMap,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        inject_trace_context_grpc(metadata);
+        Ok(())
+    }
+}

@@ -13,14 +13,13 @@
 # Main source code
 /src/config @slin1237
 /src/core @slin1237
-/src/grpc_client @CatherineSue @slin1237
 /src/policies @slin1237
-/src/proto @CatherineSue @slin1237
 /src/routers @CatherineSue @key4ng @slin1237
 
 # Workspace crates
 /auth @slin1237
 /data_connector @key4ng
+/grpc_client @CatherineSue @slin1237
 /kv_index @slin1237
 /mcp @key4ng @slin1237
 /mesh @slin1237 @tonyluj

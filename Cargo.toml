@@ -1,5 +1,5 @@
 [workspace]
-members = ["protocols", "reasoning_parser", "tool_parser", "workflow", "tokenizer", "auth", "mcp", "kv_index", "data_connector", "multimodal", "wasm", "mesh"]
+members = ["protocols", "reasoning_parser", "tool_parser", "workflow", "tokenizer", "auth", "mcp", "kv_index", "data_connector", "multimodal", "wasm", "mesh", "grpc_client"]
 exclude = ["bindings/python", "bindings/golang"]
 resolver = "2"
 
@@ -10,10 +10,16 @@ smg-mcp = { path = "mcp" }
 smg-data-connector = { path = "data_connector", package = "data-connector" }
 smg-wasm = { path = "wasm", package = "smg-wasm" }
 smg-mesh = { path = "mesh", package = "smg-mesh" }
+smg-grpc-client = { path = "grpc_client" }
 
 # Shared dependencies
 anyhow = "1.0"
 async-trait = "0.1"
+futures = "0.3"
+prost = "0.14.1"
+prost-types = "0.14.1"
+tonic = { version = "0.14.2", features = ["gzip", "transport"] }
+tonic-prost = "0.14.2"
 axum = { version = "0.8.6" }
 blake3 = "1.5"
 bytemuck = { version = "1.21" }
@@ -143,6 +149,7 @@ smg-data-connector = { path = "data_connector", package = "data-connector" }
 llm-multimodal = { path = "multimodal" }
 smg-wasm = { path = "wasm", package = "smg-wasm" }
 smg-mesh = { path = "mesh", package = "smg-mesh" }
+smg-grpc-client = { path = "grpc_client" }
 
 # gRPC and Protobuf dependencies
 tonic = { version = "0.14.2", features = ["gzip", "transport"] }
@@ -169,8 +176,6 @@ wasmtime-wasi = "38.0"
 async-channel = "2.5"
 
 [build-dependencies]
-tonic-prost-build = "0.14.2"
-prost-build = "0.14.1"
 chrono = { version = "0.4", features = ["clock"] }
 toml = "0.9"
 
