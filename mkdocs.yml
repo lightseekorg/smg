@@ -152,6 +152,17 @@ nav:
       - Reliability:
           - Circuit Breakers: concepts/reliability/circuit-breakers.md
           - Rate Limiting: concepts/reliability/rate-limiting.md
+  - Configuration:
+      - configuration/index.md
+      - gRPC Pipeline: configuration/grpc-pipeline.md
+      - Tokenization: configuration/tokenization.md
+      - Routing Policies: configuration/routing.md
+      - Chat History Backend: configuration/storage.md
+      - MCP Integration: configuration/mcp.md
+      - Authentication: configuration/authentication.md
+      - High Availability: configuration/high-availability.md
+      - Resilience: configuration/resilience.md
+      - WASM Plugins: configuration/wasm-plugins.md
   - Tasks:
       - tasks/index.md
       - Deployment:
@@ -170,8 +181,8 @@ nav:
       - reference/index.md
       - API:
           - OpenAI Compatible: reference/api/openai.md
+          - Responses API: reference/api/responses.md
           - Gateway Extensions: reference/api/extensions.md
-      - CLI: reference/cli.md
       - Configuration: reference/configuration.md
       - Metrics: reference/metrics.md
   - Contributing:
