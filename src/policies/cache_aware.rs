@@ -64,16 +64,17 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use kv_index::{TokenTree, Tree};
 use rand::Rng;
+use smg_mesh::{
+    tree_ops::{TreeInsertOp, TreeOperation},
+    OptionalMeshSyncManager,
+};
 use tracing::{debug, warn};
 
 use super::{
     get_healthy_worker_indices, normalize_model_key, utils::PeriodicTask, CacheAwareConfig,
     LoadBalancingPolicy, SelectWorkerInfo,
 };
-use crate::{
-    core::{Worker, UNKNOWN_MODEL_ID},
-    mesh::{tree_ops::TreeOperation, OptionalMeshSyncManager},
-};
+use crate::core::{Worker, UNKNOWN_MODEL_ID};
 
 /// Cache-aware routing policy
 ///
@@ -392,7 +393,6 @@ impl CacheAwarePolicy {
 
                 // Sync insert operation to mesh if enabled (only for text operations)
                 if let Some(ref mesh_sync) = self.mesh_sync {
-                    use smg_mesh::tree_ops::TreeInsertOp;
                     let op = TreeOperation::Insert(TreeInsertOp {
                         text: text.to_string(),
                         tenant: worker_url.to_string(),
@@ -578,7 +578,6 @@ impl CacheAwarePolicy {
 
                 // Sync insert operation to mesh if enabled (only for text operations)
                 if let Some(ref mesh_sync) = self.mesh_sync {
-                    use smg_mesh::tree_ops::TreeInsertOp;
                     let op = TreeOperation::Insert(TreeInsertOp {
                         text: text.to_string(),
                         tenant: workers[idx].url().to_string(),

@@ -17,7 +17,8 @@ use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use smg_mesh::{
-    rate_limit_window::RateLimitWindow, MeshServerConfig, MeshServerHandler, MeshSyncManager,
+    partition::PartitionDetector, rate_limit_window::RateLimitWindow, service::MeshServerBuilder,
+    MeshServerConfig, MeshServerHandler, MeshSyncManager, StateStores,
 };
 use tokio::{signal, spawn};
 use tracing::{debug, error, info, warn, Level};
@@ -741,7 +742,6 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     let (mesh_handler, mesh_sync_manager) =
         if let Some(mesh_server_config) = &config.mesh_server_config {
             // Create HA sync manager with stores first
-            use smg_mesh::{partition::PartitionDetector, MeshSyncManager, StateStores};
             let stores = Arc::new(StateStores::with_self_name(
                 mesh_server_config.self_name.clone(),
             ));
@@ -763,7 +763,6 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
             });
 
             // Create mesh server builder and build with stores
-            use smg_mesh::service::MeshServerBuilder;
             let builder = MeshServerBuilder::new(
                 mesh_server_config.self_name.clone(),
                 mesh_server_config.self_addr,
