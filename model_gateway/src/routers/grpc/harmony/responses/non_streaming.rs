@@ -17,6 +17,7 @@ use super::{
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools, ToolResult},
 };
 use crate::{
+    mcp::RequestMcpContext,
     observability::metrics::Metrics,
     protocols::{
         common::{ToolCall, Usage},
@@ -58,17 +59,11 @@ pub(crate) async fn serve_harmony_responses(
     let current_request = load_previous_messages(ctx, request).await?;
 
     // Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) =
+    let active_mcp =
         ensure_mcp_connection(&ctx.mcp_manager, current_request.tools.as_deref()).await?;
 
-    // Set the server keys in the context
-    {
-        let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = server_keys;
-    }
-
-    let response = if has_mcp_tools {
-        execute_with_mcp_loop(ctx, current_request).await?
+    let response = if let Some(active_mcp) = active_mcp {
+        execute_with_mcp_loop(ctx, current_request, &active_mcp).await?
     } else {
         // No MCP tools - execute pipeline once (may have function tools or no tools)
         execute_without_mcp_loop(ctx, current_request).await?
@@ -93,6 +88,7 @@ pub(crate) async fn serve_harmony_responses(
 async fn execute_with_mcp_loop(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
+    active_mcp: &Arc<RequestMcpContext>,
 ) -> Result<ResponsesResponse, Response> {
     let mut iteration_count = 0;
 
@@ -103,11 +99,8 @@ async fn execute_with_mcp_loop(
     // Extract user's max_tool_calls limit (if set)
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
 
-    // Add filtered MCP tools (static + requested dynamic) to the request
-    let mcp_tools = {
-        let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_manager.list_tools_for_servers(&servers)
-    };
+    // Add request-scoped MCP tools to the request
+    let mcp_tools = active_mcp.list_tools_for_servers(active_mcp.server_keys());
     if !mcp_tools.is_empty() {
         let mcp_response_tools = convert_mcp_tools_to_response_tools(&mcp_tools);
 
@@ -235,7 +228,7 @@ async fn execute_with_mcp_loop(
                 // Execute MCP tools (if any)
                 let mcp_results = if !mcp_tool_calls.is_empty() {
                     execute_mcp_tools(
-                        &ctx.mcp_manager,
+                        active_mcp,
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,

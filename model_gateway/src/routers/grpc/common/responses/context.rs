@@ -2,7 +2,7 @@
 //!
 //! This context is used by both regular and harmony response implementations.
 
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::Arc;
 
 use crate::{
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
@@ -33,9 +33,6 @@ pub(crate) struct ResponsesContext {
 
     /// MCP manager for tool support
     pub mcp_manager: Arc<McpManager>,
-
-    /// Server keys for MCP tools requested in this context
-    pub requested_servers: Arc<StdRwLock<Vec<String>>>,
 }
 
 impl ResponsesContext {
@@ -55,7 +52,6 @@ impl ResponsesContext {
             conversation_storage,
             conversation_item_storage,
             mcp_manager,
-            requested_servers: Arc::new(StdRwLock::new(Vec::new())),
         }
     }
 }

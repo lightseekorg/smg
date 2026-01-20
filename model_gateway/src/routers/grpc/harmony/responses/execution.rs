@@ -8,7 +8,7 @@ use tracing::{debug, error, warn};
 
 use super::common::McpCallTracking;
 use crate::{
-    mcp::{self, McpManager},
+    mcp::{self, RequestMcpContext},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         common::{Function, ToolCall},
@@ -43,7 +43,7 @@ pub(crate) struct ToolResult {
 ///
 /// Vector of tool results (one per tool call)
 pub(super) async fn execute_mcp_tools(
-    mcp_manager: &Arc<McpManager>,
+    mcp_manager: &Arc<RequestMcpContext>,
     tool_calls: &[ToolCall],
     tracking: &mut McpCallTracking,
     model_id: &str,

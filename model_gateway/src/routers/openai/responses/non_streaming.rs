@@ -55,7 +55,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         .await;
     let server_keys = active_mcp
         .as_ref()
-        .map(|ctx| ctx.server_keys())
+        .map(|ctx| ctx.server_keys().to_vec())
         .unwrap_or_default();
 
     let mut response_json: Value;

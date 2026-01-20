@@ -997,7 +997,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         .await;
     let server_keys = active_mcp
         .as_ref()
-        .map(|ctx| ctx.server_keys())
+        .map(|ctx| ctx.server_keys().to_vec())
         .unwrap_or_default();
 
     let client = ctx.components.client().clone();

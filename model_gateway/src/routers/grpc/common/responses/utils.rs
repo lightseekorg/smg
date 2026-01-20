@@ -9,25 +9,23 @@ use tracing::{debug, error, warn};
 use crate::{
     core::WorkerRegistry,
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::McpManager,
+    mcp::{McpManager, RequestMcpContext},
     protocols::{
         common::Tool,
         responses::{ResponseTool, ResponseToolType, ResponsesRequest, ResponsesResponse},
     },
-    routers::{
-        error, mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
-    },
+    routers::{error, persistence_utils::persist_conversation_items},
 };
 
 /// Ensure MCP connection succeeds if MCP tools are declared
 ///
 /// Checks if request declares MCP tools, and if so, validates that
 /// the MCP clients can be created and connected.
-/// Returns Ok((has_mcp_tools, server_keys)) on success.
+/// Returns Ok(Some(context)) on success.
 pub(crate) async fn ensure_mcp_connection(
     mcp_manager: &Arc<McpManager>,
     tools: Option<&[ResponseTool]>,
-) -> Result<(bool, Vec<String>), Response> {
+) -> Result<Option<Arc<RequestMcpContext>>, Response> {
     let has_mcp_tools = tools
         .map(|t| {
             t.iter()
@@ -35,27 +33,27 @@ pub(crate) async fn ensure_mcp_connection(
         })
         .unwrap_or(false);
 
-    if has_mcp_tools {
-        if let Some(tools) = tools {
-            match ensure_request_mcp_client(mcp_manager, tools).await {
-                Some((_manager, server_keys)) => {
-                    return Ok((true, server_keys));
-                }
-                None => {
-                    error!(
-                        function = "ensure_mcp_connection",
-                        "Failed to connect to MCP servers"
-                    );
-                    return Err(error::failed_dependency(
-                        "connect_mcp_server_failed",
-                        "Failed to connect to MCP servers. Check server_url and authorization.",
-                    ));
-                }
-            }
-        }
+    if !has_mcp_tools {
+        return Ok(None);
     }
 
-    Ok((false, Vec::new()))
+    let Some(tools) = tools else {
+        return Ok(None);
+    };
+
+    match mcp_manager.create_request_context(Some(tools)).await {
+        Some(context) => Ok(Some(context)),
+        None => {
+            error!(
+                function = "ensure_mcp_connection",
+                "Failed to connect to MCP servers"
+            );
+            Err(error::failed_dependency(
+                "connect_mcp_server_failed",
+                "Failed to connect to MCP servers. Check server_url and authorization.",
+            ))
+        }
+    }
 }
 
 /// Validate that workers are available for the requested model

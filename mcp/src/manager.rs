@@ -889,6 +889,7 @@ impl McpManager {
 pub struct RequestMcpContext {
     inventory: Arc<ToolInventory>,
     clients: HashMap<String, Arc<McpClient>>,
+    server_keys: Vec<String>,
 }
 
 impl RequestMcpContext {
@@ -896,11 +897,16 @@ impl RequestMcpContext {
         inventory: Arc<ToolInventory>,
         clients: HashMap<String, Arc<McpClient>>,
     ) -> Self {
-        Self { inventory, clients }
+        let server_keys = clients.keys().cloned().collect();
+        Self {
+            inventory,
+            clients,
+            server_keys,
+        }
     }
 
-    pub fn server_keys(&self) -> Vec<String> {
-        self.clients.keys().cloned().collect()
+    pub fn server_keys(&self) -> &[String] {
+        &self.server_keys
     }
 
     pub fn list_tools_for_servers(&self, server_keys: &[String]) -> Vec<Tool> {

@@ -33,6 +33,7 @@ use super::{
 };
 use crate::{
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
+    mcp::RequestMcpContext,
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         chat::{
@@ -422,6 +423,7 @@ pub(super) async fn execute_tool_loop_streaming(
     original_request: &ResponsesRequest,
     headers: Option<http::HeaderMap>,
     model_id: Option<String>,
+    active_mcp: &Arc<RequestMcpContext>,
 ) -> Response {
     // Create SSE channel for client
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
@@ -429,6 +431,7 @@ pub(super) async fn execute_tool_loop_streaming(
     // Clone data for background task
     let ctx_clone = ctx.clone();
     let original_request_clone = original_request.clone();
+    let active_mcp = active_mcp.clone();
 
     // Spawn background task for tool loop
     tokio::spawn(async move {
@@ -438,6 +441,7 @@ pub(super) async fn execute_tool_loop_streaming(
             &original_request_clone,
             headers,
             model_id,
+            &active_mcp,
             tx.clone(),
         )
         .await;
@@ -489,6 +493,7 @@ async fn execute_tool_loop_streaming_internal(
     original_request: &ResponsesRequest,
     headers: Option<http::HeaderMap>,
     model_id: Option<String>,
+    active_mcp: &Arc<RequestMcpContext>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
     // Extract server label from original request tools
@@ -514,7 +519,7 @@ async fn execute_tool_loop_streaming_internal(
     emitter.send_event(&event, &tx)?;
 
     // Get MCP tools and convert to chat format (do this once before loop)
-    let mcp_tools = ctx.mcp_manager.list_tools();
+    let mcp_tools = active_mcp.list_tools_for_servers(active_mcp.server_keys());
     let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&mcp_tools);
     trace!(
         "Streaming: Converted {} MCP tools to chat format",
@@ -716,8 +721,7 @@ async fn execute_tool_loop_streaming_internal(
                     tool_call.arguments
                 );
                 let tool_start = Instant::now();
-                let (output_str, success, error) = match ctx
-                    .mcp_manager
+                let (output_str, success, error) = match active_mcp
                     .call_tool(tool_call.name.as_str(), tool_call.arguments.as_str())
                     .await
                 {

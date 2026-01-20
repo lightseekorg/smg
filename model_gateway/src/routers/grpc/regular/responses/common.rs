@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     data_connector::{self, ConversationId, ResponseId},
-    mcp::{self, McpManager},
+    mcp::{self, RequestMcpContext},
     protocols::{
         chat::ChatCompletionRequest,
         common::{Function, Tool, ToolChoice, ToolChoiceValue},
@@ -178,7 +178,7 @@ pub(super) fn generate_mcp_id(prefix: &str) -> String {
 
 /// Build mcp_list_tools output item
 pub(super) fn build_mcp_list_tools_item(
-    mcp: &Arc<McpManager>,
+    mcp: &Arc<RequestMcpContext>,
     server_label: &str,
     server_keys: &[String],
 ) -> ResponseOutputItem {
