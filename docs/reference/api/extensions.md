@@ -264,6 +264,205 @@ GET /config
 
 ---
 
+## Tokenization Endpoints
+
+Direct tokenization and detokenization operations.
+
+### Tokenize
+
+```
+POST /v1/tokenize
+```
+
+Converts text to token IDs.
+
+#### Request Body
+
+```json
+{
+  "model": "llama3",
+  "prompt": "Hello, world!"
+}
+```
+
+#### Request Body (batch)
+
+```json
+{
+  "model": "llama3",
+  "prompt": ["Hello, world!", "How are you?"]
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `model` | string | No | Model/tokenizer name |
+| `prompt` | string or string[] | Yes | Text to tokenize |
+
+#### Response
+
+```json
+{
+  "tokens": [15496, 11, 1917, 0],
+  "count": 4,
+  "char_count": 13
+}
+```
+
+#### Response (batch)
+
+```json
+{
+  "tokens": [[15496, 11, 1917, 0], [2437, 527, 499, 30]],
+  "count": [4, 4],
+  "char_count": [13, 12]
+}
+```
+
+---
+
+### Detokenize
+
+```
+POST /v1/detokenize
+```
+
+Converts token IDs back to text.
+
+#### Request Body
+
+```json
+{
+  "model": "llama3",
+  "tokens": [15496, 11, 1917, 0],
+  "skip_special_tokens": true
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `model` | string | Yes | Model/tokenizer name |
+| `tokens` | int[] or int[][] | Yes | Token IDs to decode |
+| `skip_special_tokens` | boolean | No | Skip special tokens (default: true) |
+
+#### Response
+
+```json
+{
+  "text": "Hello, world!"
+}
+```
+
+---
+
+## Parser Endpoints
+
+Parse model outputs for tool calls and reasoning chains.
+
+### Parse Function Call
+
+```
+POST /parse/function_call
+```
+
+Extracts tool/function calls from model output.
+
+#### Request Body
+
+```json
+{
+  "text": "<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"city\": \"London\"}}</tool_call>",
+  "tool_call_parser": "json",
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get weather for a city",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "city": {"type": "string"}
+        }
+      }
+    }
+  ]
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `text` | string | Yes | Model output to parse |
+| `tool_call_parser` | string | Yes | Parser type (see below) |
+| `tools` | array | No | Tool definitions for validation |
+
+#### Supported Parsers
+
+| Parser | Description |
+|--------|-------------|
+| `json` | Generic JSON tool call format |
+| `pythonic` | Python function call syntax |
+| `mistral` | Mistral tool call format |
+| `qwen` | Qwen tool call format |
+| `llama` | Llama tool call format |
+| `deepseek` | DeepSeek tool call format |
+
+#### Response
+
+```json
+{
+  "remaining_text": "",
+  "tool_calls": [
+    {
+      "name": "get_weather",
+      "arguments": {"city": "London"}
+    }
+  ],
+  "success": true
+}
+```
+
+---
+
+### Parse Reasoning
+
+```
+POST /parse/reasoning
+```
+
+Separates reasoning/thinking from model output.
+
+#### Request Body
+
+```json
+{
+  "text": "<think>Let me analyze this step by step...</think>The answer is 42.",
+  "reasoning_parser": "deepseek_r1"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `text` | string | Yes | Model output to parse |
+| `reasoning_parser` | string | Yes | Parser type (see below) |
+
+#### Supported Parsers
+
+| Parser | Description |
+|--------|-------------|
+| `deepseek_r1` | DeepSeek-R1 thinking format |
+| `qwen3` | Qwen3 reasoning format |
+
+#### Response
+
+```json
+{
+  "normal_text": "The answer is 42.",
+  "reasoning_text": "Let me analyze this step by step...",
+  "success": true
+}
+```
+
+---
+
 ## Metrics Endpoint
 
 ### Prometheus Metrics

@@ -182,6 +182,7 @@ nav:
       - API:
           - OpenAI Compatible: reference/api/openai.md
           - Responses API: reference/api/responses.md
+          - Admin API: reference/api/admin.md
           - Gateway Extensions: reference/api/extensions.md
       - Configuration: reference/configuration.md
       - Metrics: reference/metrics.md
