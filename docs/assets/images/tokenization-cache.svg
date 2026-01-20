@@ -1,0 +1,213 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 420">
+  <defs>
+    <linearGradient id="tc-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="tc-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="tc-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="tc-amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="tc-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <filter id="tc-glow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="tc-softGlow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <clipPath id="tc-clipFlow1">
+      <rect x="180" y="165" width="55" height="30"/>
+    </clipPath>
+    <clipPath id="tc-clipFlow2">
+      <rect x="305" y="165" width="55" height="30"/>
+    </clipPath>
+    <clipPath id="tc-clipFlow3">
+      <rect x="530" y="165" width="55" height="30"/>
+    </clipPath>
+    <pattern id="tc-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+  </defs>
+
+  <style>
+    .tc-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .tc-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .tc-feature { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #94a3b8; }
+    .tc-layer-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+    .tc-stat { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 11px; fill: #cbd5e1; }
+    .tc-stat-value { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 12px; fill: #34d399; font-weight: 600; }
+
+    @keyframes tc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    @keyframes tc-flow { 0% { transform: translateX(0); opacity: 0; } 10% { opacity: 1; } 90% { opacity: 1; } 100% { transform: translateX(45px); opacity: 0; } }
+
+    .tc-packet1 { animation: tc-flow 0.5s linear infinite; }
+    .tc-packet2 { animation: tc-flow 0.5s linear infinite 0.17s; }
+    .tc-packet3 { animation: tc-flow 0.5s linear infinite 0.34s; }
+    .tc-pulse { animation: tc-pulse 2s ease-in-out infinite; }
+  </style>
+
+  <!-- Background -->
+  <rect width="800" height="420" rx="16" fill="url(#tc-bgGrad)"/>
+  <rect width="800" height="420" fill="url(#tc-grid)" rx="16"/>
+
+  <!-- Glow effects -->
+  <ellipse cx="95" cy="180" rx="55" ry="75" fill="#6366f1" opacity="0.08" filter="url(#tc-softGlow)"/>
+  <ellipse cx="245" cy="180" rx="45" ry="60" fill="#64748b" opacity="0.06" filter="url(#tc-softGlow)"/>
+  <ellipse cx="430" cy="180" rx="80" ry="100" fill="#10b981" opacity="0.1" filter="url(#tc-softGlow)"/>
+  <ellipse cx="610" cy="180" rx="50" ry="70" fill="#8b5cf6" opacity="0.08" filter="url(#tc-softGlow)"/>
+  <ellipse cx="730" cy="180" rx="45" ry="60" fill="#f59e0b" opacity="0.08" filter="url(#tc-softGlow)"/>
+
+  <!-- Connection lines -->
+  <line x1="170" y1="180" x2="195" y2="180" stroke="#475569" stroke-width="2" opacity="0.6"/>
+  <line x1="295" y1="180" x2="345" y2="180" stroke="#475569" stroke-width="2" opacity="0.6"/>
+  <line x1="520" y1="180" x2="555" y2="180" stroke="#475569" stroke-width="2" opacity="0.6"/>
+  <line x1="665" y1="180" x2="680" y2="180" stroke="#475569" stroke-width="2" opacity="0.6"/>
+
+  <!-- Request Input -->
+  <g class="tc-pulse">
+    <rect x="20" y="115" width="150" height="130" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+    <rect x="20" y="115" width="150" height="28" rx="10" fill="url(#tc-primaryGrad)"/>
+    <rect x="20" y="133" width="150" height="10" fill="url(#tc-primaryGrad)"/>
+    <text x="95" y="135" text-anchor="middle" class="tc-label" font-size="11" fill="white">Request</text>
+    <text x="95" y="160" text-anchor="middle" class="tc-feature">{"messages": [...]}</text>
+    <text x="95" y="177" text-anchor="middle" class="tc-feature">Chat Template</text>
+    <text x="95" y="194" text-anchor="middle" class="tc-feature">Tool Definitions</text>
+    <text x="95" y="211" text-anchor="middle" class="tc-feature">System Prompt</text>
+    <text x="95" y="228" text-anchor="middle" class="tc-feature">Multi-Turn History</text>
+  </g>
+
+  <!-- L0 Cache (Simple Exact Match) -->
+  <rect x="195" y="130" width="100" height="100" rx="8" fill="#1e293b" stroke="#64748b" stroke-width="1.5" opacity="0.8"/>
+  <rect x="195" y="130" width="100" height="24" rx="8" fill="#475569"/>
+  <rect x="195" y="146" width="100" height="8" fill="#475569"/>
+  <text x="245" y="147" text-anchor="middle" class="tc-label" font-size="10" fill="#e2e8f0">L0 Cache</text>
+  <text x="245" y="110" text-anchor="middle" class="tc-layer-label" fill="#64748b">Simple</text>
+
+  <g>
+    <rect x="203" y="162" width="84" height="18" rx="4" fill="#334155"/>
+    <circle cx="212" cy="171" r="2.5" fill="#64748b"/>
+    <text x="221" y="175" class="tc-feature" font-size="9" fill="#94a3b8">Exact Match</text>
+  </g>
+  <g>
+    <rect x="203" y="184" width="84" height="18" rx="4" fill="#334155"/>
+    <circle cx="212" cy="193" r="2.5" fill="#64748b"/>
+    <text x="221" y="197" class="tc-feature" font-size="9" fill="#94a3b8">Worker-Local</text>
+  </g>
+  <text x="245" y="218" text-anchor="middle" class="tc-feature" font-size="8" fill="#64748b">Rare Hit →</text>
+
+  <!-- L1 Cache (The Star - Special Token Boundaries) -->
+  <rect x="345" y="90" width="175" height="180" rx="12" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+  <rect x="345" y="90" width="175" height="32" rx="12" fill="url(#tc-greenGrad)"/>
+  <rect x="345" y="110" width="175" height="12" fill="url(#tc-greenGrad)"/>
+  <text x="432" y="112" text-anchor="middle" class="tc-label" font-size="12" fill="white">L1 Cache</text>
+  <text x="432" y="70" text-anchor="middle" class="tc-layer-label" fill="#10b981">Router Level • High Hit Rate</text>
+
+  <g>
+    <rect x="358" y="135" width="149" height="22" rx="5" fill="#334155"/>
+    <circle cx="371" cy="146" r="3" fill="#34d399"/>
+    <text x="383" y="150" class="tc-feature" fill="#e2e8f0">Special Token Boundaries</text>
+  </g>
+  <g>
+    <rect x="358" y="162" width="149" height="22" rx="5" fill="#334155"/>
+    <circle cx="371" cy="173" r="3" fill="#38bdf8"/>
+    <text x="383" y="177" class="tc-feature" fill="#e2e8f0">Incremental Hashing</text>
+  </g>
+  <g>
+    <rect x="358" y="189" width="149" height="22" rx="5" fill="#334155"/>
+    <circle cx="371" cy="200" r="3" fill="#fbbf24"/>
+    <text x="383" y="204" class="tc-feature" fill="#e2e8f0">Multi-Turn Optimization</text>
+  </g>
+  <g>
+    <rect x="358" y="216" width="149" height="22" rx="5" fill="#334155"/>
+    <circle cx="371" cy="227" r="3" fill="#a78bfa"/>
+    <text x="383" y="231" class="tc-feature" fill="#e2e8f0">System Prompt Reuse</text>
+  </g>
+  <g>
+    <rect x="358" y="243" width="149" height="22" rx="5" fill="#334155"/>
+    <circle cx="371" cy="254" r="3" fill="#f472b6"/>
+    <text x="383" y="258" class="tc-feature" fill="#e2e8f0">Cross-Request Dedup</text>
+  </g>
+
+  <!-- Tokenizer -->
+  <rect x="555" y="125" width="110" height="110" rx="10" fill="#1e293b" stroke="#8b5cf6" stroke-width="2"/>
+  <rect x="555" y="125" width="110" height="28" rx="10" fill="url(#tc-primaryGrad)"/>
+  <rect x="555" y="143" width="110" height="10" fill="url(#tc-primaryGrad)"/>
+  <text x="610" y="145" text-anchor="middle" class="tc-label" font-size="11" fill="white">Tokenizer</text>
+  <text x="610" y="105" text-anchor="middle" class="tc-layer-label">On Miss</text>
+
+  <g>
+    <rect x="563" y="163" width="94" height="20" rx="4" fill="#334155"/>
+    <circle cx="573" cy="173" r="2.5" fill="#818cf8"/>
+    <text x="583" y="177" class="tc-feature" font-size="9" fill="#e2e8f0">HuggingFace</text>
+  </g>
+  <g>
+    <rect x="563" y="188" width="94" height="20" rx="4" fill="#334155"/>
+    <circle cx="573" cy="198" r="2.5" fill="#34d399"/>
+    <text x="583" y="202" class="tc-feature" font-size="9" fill="#e2e8f0">Chat Templates</text>
+  </g>
+
+  <!-- Output Tokens -->
+  <rect x="680" y="135" width="100" height="90" rx="10" fill="#1e293b" stroke="#f59e0b" stroke-width="2"/>
+  <rect x="680" y="135" width="100" height="24" rx="10" fill="url(#tc-amberGrad)"/>
+  <rect x="680" y="151" width="100" height="8" fill="url(#tc-amberGrad)"/>
+  <text x="730" y="152" text-anchor="middle" class="tc-label" font-size="10" fill="#1e293b">Token IDs</text>
+  <text x="730" y="177" text-anchor="middle" class="tc-feature">[1, 5234, 892,</text>
+  <text x="730" y="192" text-anchor="middle" class="tc-feature">4521, 7834, ...]</text>
+  <text x="730" y="212" text-anchor="middle" class="tc-feature">Ready for GPU</text>
+
+  <!-- Performance Stats -->
+  <rect x="555" y="295" width="225" height="90" rx="10" fill="#1e293b" stroke="#10b981" stroke-width="1"/>
+  <text x="667" y="318" text-anchor="middle" class="tc-layer-label" fill="#10b981">L1 Cache Performance</text>
+
+  <text x="575" y="345" class="tc-stat">Hit Rate:</text>
+  <text x="760" y="345" text-anchor="end" class="tc-stat-value">~85%</text>
+
+  <text x="575" y="370" class="tc-stat">Latency Saved:</text>
+  <text x="760" y="370" text-anchor="end" class="tc-stat-value">60-80%</text>
+
+  <!-- Use Case callout -->
+  <rect x="20" y="295" width="200" height="90" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="120" y="318" text-anchor="middle" class="tc-layer-label">Ideal For</text>
+  <text x="120" y="342" text-anchor="middle" class="tc-feature" fill="#e2e8f0">• Multi-Turn Conversations</text>
+  <text x="120" y="360" text-anchor="middle" class="tc-feature" fill="#e2e8f0">• Agents with Tool Calls</text>
+  <text x="120" y="378" text-anchor="middle" class="tc-feature" fill="#e2e8f0">• Long System Prompts</text>
+
+  <!-- Animated packets - Request to L0 -->
+  <g clip-path="url(#tc-clipFlow1)">
+    <circle cx="180" cy="180" r="4" fill="#818cf8" class="tc-packet1" filter="url(#tc-glow)"/>
+    <circle cx="180" cy="180" r="4" fill="#a78bfa" class="tc-packet2" filter="url(#tc-glow)"/>
+  </g>
+
+  <!-- Animated packets - L0 to L1 -->
+  <g clip-path="url(#tc-clipFlow2)">
+    <circle cx="305" cy="180" r="4" fill="#64748b" class="tc-packet1" filter="url(#tc-glow)"/>
+    <circle cx="305" cy="180" r="4" fill="#94a3b8" class="tc-packet2" filter="url(#tc-glow)"/>
+  </g>
+
+  <!-- Animated packets - L1 to Tokenizer (fewer - most hit L1) -->
+  <g clip-path="url(#tc-clipFlow3)">
+    <circle cx="530" cy="180" r="3" fill="#34d399" class="tc-packet1" filter="url(#tc-glow)"/>
+  </g>
+
+  <!-- Bottom tagline -->
+  <text x="400" y="405" text-anchor="middle" class="tc-sublabel" font-size="11" fill="#64748b">Special Token Boundary Splitting  •  Incremental Hash Lookup  •  Sub-Millisecond Cache Hits</text>
+</svg>

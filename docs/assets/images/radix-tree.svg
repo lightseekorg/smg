@@ -1,0 +1,232 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 540">
+  <defs>
+    <linearGradient id="rt-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="rt-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="rt-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="rt-amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="rt-pinkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ec4899"/>
+      <stop offset="100%" style="stop-color:#f472b6"/>
+    </linearGradient>
+    <linearGradient id="rt-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <filter id="rt-glow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="rt-softGlow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="rt-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+    <marker id="rt-arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+      <path d="M 0 0 L 6 3 L 0 6 Z" fill="#10b981"/>
+    </marker>
+  </defs>
+
+  <style>
+    .rt-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .rt-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .rt-feature { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #94a3b8; }
+    .rt-layer-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+    .rt-code { font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace; font-size: 9px; fill: #a5b4fc; }
+    .rt-node { font-family: 'SF Mono', Monaco, monospace; font-size: 8px; fill: #e2e8f0; }
+    .rt-tenant { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 7px; }
+  </style>
+
+  <!-- Background -->
+  <rect width="1000" height="540" rx="16" fill="url(#rt-bgGrad)"/>
+  <rect width="1000" height="540" fill="url(#rt-grid)" rx="16"/>
+
+  <!-- Glow effects -->
+  <ellipse cx="215" cy="270" rx="130" ry="160" fill="#6366f1" opacity="0.06" filter="url(#rt-softGlow)"/>
+  <ellipse cx="805" cy="270" rx="130" ry="160" fill="#10b981" opacity="0.08" filter="url(#rt-softGlow)"/>
+
+  <!-- Title -->
+  <text x="500" y="35" text-anchor="middle" class="rt-label" font-size="14" fill="#f1f5f9">Multi-Tenant Radix Tree: Cache-Aware Routing</text>
+
+  <!-- Left side: SMG Gateway Radix Tree -->
+  <rect x="50" y="55" width="330" height="420" rx="12" fill="#1e293b" stroke="#6366f1" stroke-width="1.5" opacity="0.9"/>
+  <rect x="50" y="55" width="330" height="32" rx="12" fill="url(#rt-primaryGrad)"/>
+  <rect x="50" y="75" width="330" height="12" fill="url(#rt-primaryGrad)"/>
+  <text x="215" y="77" text-anchor="middle" class="rt-label" font-size="12" fill="white">SMG Gateway Radix Tree</text>
+
+  <!-- Tree visualization -->
+  <!-- Root node -->
+  <circle cx="215" cy="120" r="16" fill="#334155" stroke="#8b5cf6" stroke-width="2"/>
+  <text x="215" y="124" text-anchor="middle" class="rt-node" font-size="10">root</text>
+
+  <!-- Level 1 branches -->
+  <line x1="215" y1="136" x2="135" y2="175" stroke="#475569" stroke-width="1.5"/>
+  <line x1="215" y1="136" x2="295" y2="175" stroke="#475569" stroke-width="1.5"/>
+
+  <!-- Page node: "You are a helpful" (16 tokens) -->
+  <rect x="70" y="175" width="130" height="55" rx="6" fill="#334155" stroke="#10b981" stroke-width="1.5"/>
+  <text x="135" y="195" text-anchor="middle" class="rt-code">"You are a helpful"</text>
+  <text x="135" y="210" text-anchor="middle" class="rt-feature" font-size="8">Page 1: 16 tokens</text>
+  <!-- Tenant badges -->
+  <rect x="80" y="218" width="45" height="10" rx="3" fill="#3b82f6" opacity="0.8"/>
+  <text x="102" y="225" text-anchor="middle" class="rt-tenant" fill="white">Worker A</text>
+  <rect x="130" y="218" width="45" height="10" rx="3" fill="#f59e0b" opacity="0.8"/>
+  <text x="152" y="225" text-anchor="middle" class="rt-tenant" fill="white">Worker B</text>
+
+  <!-- Page node: "What is the capital" -->
+  <rect x="230" y="175" width="130" height="55" rx="6" fill="#334155" stroke="#0ea5e9" stroke-width="1.5"/>
+  <text x="295" y="195" text-anchor="middle" class="rt-code">"What is the capital"</text>
+  <text x="295" y="210" text-anchor="middle" class="rt-feature" font-size="8">Page 1: 16 tokens</text>
+  <rect x="262" y="218" width="45" height="10" rx="3" fill="#ec4899" opacity="0.8"/>
+  <text x="284" y="225" text-anchor="middle" class="rt-tenant" fill="white">Worker C</text>
+
+  <!-- Level 2 branches from left node -->
+  <line x1="105" y1="230" x2="85" y2="265" stroke="#475569" stroke-width="1.5"/>
+  <line x1="165" y1="230" x2="195" y2="265" stroke="#475569" stroke-width="1.5"/>
+
+  <!-- Sub-page: "assistant. You help" -->
+  <rect x="55" y="265" width="100" height="50" rx="6" fill="#334155" stroke="#34d399" stroke-width="1"/>
+  <text x="105" y="285" text-anchor="middle" class="rt-code" font-size="8">"assistant. You"</text>
+  <text x="105" y="300" text-anchor="middle" class="rt-feature" font-size="7">Page 2: 16 tokens</text>
+  <rect x="77" y="305" width="35" height="8" rx="2" fill="#3b82f6" opacity="0.8"/>
+  <text x="94" y="311" text-anchor="middle" class="rt-tenant" font-size="6" fill="white">Worker A</text>
+
+  <!-- Sub-page: "coder who writes" -->
+  <rect x="165" y="265" width="100" height="50" rx="6" fill="#334155" stroke="#38bdf8" stroke-width="1"/>
+  <text x="215" y="285" text-anchor="middle" class="rt-code" font-size="8">"coder who writes"</text>
+  <text x="215" y="300" text-anchor="middle" class="rt-feature" font-size="7">Page 2: 16 tokens</text>
+  <rect x="187" y="305" width="35" height="8" rx="2" fill="#f59e0b" opacity="0.8"/>
+  <text x="204" y="311" text-anchor="middle" class="rt-tenant" font-size="6" fill="white">Worker B</text>
+
+  <!-- Level 3 -->
+  <line x1="105" y1="315" x2="105" y2="345" stroke="#475569" stroke-width="1"/>
+  <rect x="65" y="345" width="80" height="35" rx="5" fill="#334155" stroke="#a78bfa" stroke-width="1"/>
+  <text x="105" y="360" text-anchor="middle" class="rt-code" font-size="7">"with code and..."</text>
+  <text x="105" y="372" text-anchor="middle" class="rt-feature" font-size="6">Page 3</text>
+
+  <!-- Key features box -->
+  <rect x="60" y="395" width="145" height="70" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+  <text x="132" y="412" text-anchor="middle" class="rt-layer-label" fill="#a5b4fc">Token-Based (gRPC)</text>
+  <text x="132" y="430" text-anchor="middle" class="rt-feature" fill="#e2e8f0">• Page-aligned (16 tok)</text>
+  <text x="132" y="445" text-anchor="middle" class="rt-feature" fill="#e2e8f0">• Multi-tenant tracking</text>
+  <text x="132" y="460" text-anchor="middle" class="rt-feature" fill="#e2e8f0">• LRU/LFU/FIFO evict</text>
+
+  <!-- Eviction policy box -->
+  <rect x="215" y="395" width="155" height="70" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+  <text x="292" y="412" text-anchor="middle" class="rt-layer-label" fill="#fbbf24">Eviction Policies</text>
+  <text x="292" y="430" text-anchor="middle" class="rt-feature" fill="#e2e8f0">LRU • LFU • FIFO</text>
+  <text x="292" y="445" text-anchor="middle" class="rt-feature" fill="#e2e8f0">MRU • FILO • Priority</text>
+  <text x="292" y="460" text-anchor="middle" class="rt-feature" fill="#34d399">Mirrors backend exactly</text>
+
+  <!-- Center: Sync box (60px gap on each side) -->
+  <rect x="440" y="180" width="140" height="140" rx="10" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+  <text x="510" y="210" text-anchor="middle" class="rt-label" font-size="13" fill="#10b981">100% Sync</text>
+
+  <text x="510" y="240" text-anchor="middle" class="rt-feature" font-size="11" fill="#e2e8f0">Same tokens</text>
+  <text x="510" y="260" text-anchor="middle" class="rt-feature" font-size="11" fill="#e2e8f0">Same page size</text>
+  <text x="510" y="280" text-anchor="middle" class="rt-feature" font-size="11" fill="#e2e8f0">Same eviction</text>
+  <text x="510" y="300" text-anchor="middle" class="rt-feature" font-size="11" fill="#e2e8f0">Same state</text>
+
+  <!-- Sync arrows - equal length (45px each) -->
+  <line x1="387" y1="250" x2="432" y2="250" stroke="#10b981" stroke-width="2" marker-end="url(#rt-arrow)"/>
+  <line x1="588" y1="250" x2="633" y2="250" stroke="#10b981" stroke-width="2" marker-end="url(#rt-arrow)"/>
+
+  <!-- Arrow labels -->
+  <text x="410" y="240" text-anchor="middle" class="rt-feature" font-size="8" fill="#10b981">sync</text>
+  <text x="610" y="240" text-anchor="middle" class="rt-feature" font-size="8" fill="#10b981">sync</text>
+
+  <!-- Right side: Backend Worker KV Cache -->
+  <rect x="640" y="55" width="330" height="420" rx="12" fill="#1e293b" stroke="#10b981" stroke-width="1.5" opacity="0.9"/>
+  <rect x="640" y="55" width="330" height="32" rx="12" fill="url(#rt-greenGrad)"/>
+  <rect x="640" y="75" width="330" height="12" fill="url(#rt-greenGrad)"/>
+  <text x="805" y="77" text-anchor="middle" class="rt-label" font-size="12" fill="white">Backend Worker KV Cache</text>
+
+  <!-- Worker A -->
+  <rect x="655" y="100" width="145" height="120" rx="8" fill="#334155" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="655" y="100" width="145" height="22" rx="8" fill="#3b82f6"/>
+  <rect x="655" y="114" width="145" height="8" fill="#3b82f6"/>
+  <text x="727" y="115" text-anchor="middle" class="rt-label" font-size="10" fill="white">Worker A</text>
+  <text x="727" y="135" text-anchor="middle" class="rt-feature" fill="#e2e8f0">KV Cache (RadixTree)</text>
+
+  <!-- KV blocks -->
+  <rect x="665" y="148" width="55" height="16" rx="3" fill="#1e293b" stroke="#3b82f6" stroke-width="1"/>
+  <text x="692" y="159" text-anchor="middle" class="rt-code" font-size="7">"You are..."</text>
+  <rect x="665" y="167" width="55" height="16" rx="3" fill="#1e293b" stroke="#3b82f6" stroke-width="1"/>
+  <text x="692" y="178" text-anchor="middle" class="rt-code" font-size="7">"assistant"</text>
+  <rect x="665" y="186" width="55" height="16" rx="3" fill="#1e293b" stroke="#3b82f6" stroke-width="1"/>
+  <text x="692" y="197" text-anchor="middle" class="rt-code" font-size="7">"with code"</text>
+
+  <!-- GPU memory indicator -->
+  <rect x="730" y="148" width="60" height="55" rx="4" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+  <text x="760" y="165" text-anchor="middle" class="rt-feature" font-size="8" fill="#fbbf24">GPU Mem</text>
+  <rect x="740" y="173" width="40" height="6" rx="2" fill="#334155"/>
+  <rect x="740" y="173" width="28" height="6" rx="2" fill="#3b82f6"/>
+  <text x="760" y="193" text-anchor="middle" class="rt-feature" font-size="7">70% used</text>
+
+  <!-- Worker B -->
+  <rect x="810" y="100" width="145" height="120" rx="8" fill="#334155" stroke="#f59e0b" stroke-width="1.5"/>
+  <rect x="810" y="100" width="145" height="22" rx="8" fill="#f59e0b"/>
+  <rect x="810" y="114" width="145" height="8" fill="#f59e0b"/>
+  <text x="882" y="115" text-anchor="middle" class="rt-label" font-size="10" fill="#1e293b">Worker B</text>
+  <text x="882" y="135" text-anchor="middle" class="rt-feature" fill="#e2e8f0">KV Cache (RadixTree)</text>
+
+  <rect x="820" y="148" width="55" height="16" rx="3" fill="#1e293b" stroke="#f59e0b" stroke-width="1"/>
+  <text x="847" y="159" text-anchor="middle" class="rt-code" font-size="7">"You are..."</text>
+  <rect x="820" y="167" width="55" height="16" rx="3" fill="#1e293b" stroke="#f59e0b" stroke-width="1"/>
+  <text x="847" y="178" text-anchor="middle" class="rt-code" font-size="7">"coder who"</text>
+
+  <rect x="885" y="148" width="60" height="55" rx="4" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+  <text x="915" y="165" text-anchor="middle" class="rt-feature" font-size="8" fill="#fbbf24">GPU Mem</text>
+  <rect x="895" y="173" width="40" height="6" rx="2" fill="#334155"/>
+  <rect x="895" y="173" width="20" height="6" rx="2" fill="#f59e0b"/>
+  <text x="915" y="193" text-anchor="middle" class="rt-feature" font-size="7">50% used</text>
+
+  <!-- Worker C -->
+  <rect x="730" y="235" width="145" height="100" rx="8" fill="#334155" stroke="#ec4899" stroke-width="1.5"/>
+  <rect x="730" y="235" width="145" height="22" rx="8" fill="#ec4899"/>
+  <rect x="730" y="249" width="145" height="8" fill="#ec4899"/>
+  <text x="802" y="250" text-anchor="middle" class="rt-label" font-size="10" fill="white">Worker C</text>
+  <text x="802" y="272" text-anchor="middle" class="rt-feature" fill="#e2e8f0">KV Cache (RadixTree)</text>
+
+  <rect x="740" y="285" width="55" height="16" rx="3" fill="#1e293b" stroke="#ec4899" stroke-width="1"/>
+  <text x="767" y="296" text-anchor="middle" class="rt-code" font-size="7">"What is..."</text>
+
+  <rect x="805" y="285" width="60" height="30" rx="4" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+  <text x="835" y="304" text-anchor="middle" class="rt-feature" font-size="7" fill="#fbbf24">30% used</text>
+
+  <!-- Backend scheduler info -->
+  <rect x="655" y="350" width="300" height="115" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+  <text x="805" y="372" text-anchor="middle" class="rt-layer-label" fill="#10b981">SGLang / vLLM / TensorRT-LLM</text>
+
+  <text x="735" y="395" text-anchor="middle" class="rt-feature" fill="#e2e8f0">• Token-based scheduling</text>
+  <text x="735" y="412" text-anchor="middle" class="rt-feature" fill="#e2e8f0">• Page-aligned KV cache</text>
+  <text x="735" y="429" text-anchor="middle" class="rt-feature" fill="#e2e8f0">• Kernel: flashinfer/mamba</text>
+
+  <text x="875" y="395" text-anchor="middle" class="rt-feature" fill="#e2e8f0">• RadixAttention</text>
+  <text x="875" y="412" text-anchor="middle" class="rt-feature" fill="#e2e8f0">• Prefix caching</text>
+  <text x="875" y="429" text-anchor="middle" class="rt-feature" fill="#e2e8f0">• LRU eviction</text>
+
+  <!-- Bottom: Request routing example -->
+  <rect x="175" y="485" width="650" height="45" rx="8" fill="#1e293b" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="500" y="503" text-anchor="middle" class="rt-sublabel" font-size="10" fill="#a5b4fc">Request: "You are a helpful assistant. You help with code..."</text>
+  <text x="500" y="520" text-anchor="middle" class="rt-feature" fill="#34d399">→ Route to Worker A (32 tokens cached = 100% prefix hit)</text>
+</svg>
