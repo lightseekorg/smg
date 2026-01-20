@@ -2,7 +2,7 @@
 name = "smg-wasm"
 version = "0.1.0"
 edition = "2021"
-description = "WebAssembly runtime and module management for sgl-model-gateway"
+description = "WebAssembly runtime and module management for Shepherd Model Gateway"
 license = "Apache-2.0"
 repository = "https://github.com/lightseekorg/smg"
 authors = [

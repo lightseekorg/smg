@@ -122,7 +122,7 @@ from pathlib import Path
 # Path setup (must happen before other imports)
 # ---------------------------------------------------------------------------
 
-_ROOT = Path(__file__).resolve().parents[1]  # sgl-model-gateway/
+_ROOT = Path(__file__).resolve().parents[1]  # smg/
 _E2E_TEST = Path(__file__).resolve().parent  # e2e_test/
 _SRC = _ROOT / "bindings" / "python"
 

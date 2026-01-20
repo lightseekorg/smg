@@ -1,6 +1,6 @@
-# WASM Logging Example for sgl-model-gateway
+# WASM Logging Example for Shepherd Model Gateway
 
-This example demonstrates logging and tracing middleware for sgl-model-gateway using the WebAssembly Component Model.
+This example demonstrates logging and tracing middleware for Shepherd Model Gateway (SMG) using the WebAssembly Component Model.
 
 ## Overview
 

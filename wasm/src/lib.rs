@@ -1,4 +1,4 @@
-//! WebAssembly (WASM) module support for sgl-model-gateway
+//! WebAssembly (WASM) module support for Shepherd Model Gateway
 //!
 //! This crate provides WASM component execution capabilities using the WebAssembly Component Model.
 //! It supports middleware execution at various attach points (OnRequest, OnResponse) with async support.
@@ -21,7 +21,5 @@ pub use module::{
 };
 pub use module_manager::WasmModuleManager;
 pub use runtime::WasmRuntime;
-pub use spec::{
-    apply_modify_action_to_headers, build_wasm_headers_from_axum_headers, sgl, SglModelGateway,
-};
+pub use spec::{apply_modify_action_to_headers, build_wasm_headers_from_axum_headers, smg, Smg};
 pub use types::{WasiState, WasmComponentInput, WasmComponentOutput};

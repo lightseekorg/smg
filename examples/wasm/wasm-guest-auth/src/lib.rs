@@ -1,21 +1,21 @@
-//! WASM Guest Auth Example for sgl-model-gateway
+//! WASM Guest Auth Example for Shepherd Model Gateway
 //!
 //! This example demonstrates API key authentication middleware
-//! for sgl-model-gateway using the WebAssembly Component Model.
+//! for Shepherd Model Gateway using the WebAssembly Component Model.
 //!
 //! Features:
 //! - API Key authentication
 
 wit_bindgen::generate!({
-    path: "../../../src/wasm/interface",
-    world: "sgl-model-gateway",
+    path: "../../../wasm/src/interface",
+    world: "smg",
 });
 
-use exports::sgl::model_gateway::{
+use exports::smg::gateway::{
     middleware_on_request::Guest as OnRequestGuest,
     middleware_on_response::Guest as OnResponseGuest,
 };
-use sgl::model_gateway::middleware_types::{Action, Request, Response};
+use smg::gateway::middleware_types::{Action, Request, Response};
 
 /// Expected API Key (in production, this should be passed as configuration)
 const EXPECTED_API_KEY: &str = "secret-api-key-12345";
@@ -25,7 +25,7 @@ struct Middleware;
 
 // Helper function to find header value
 fn find_header_value(
-    headers: &[sgl::model_gateway::middleware_types::Header],
+    headers: &[smg::gateway::middleware_types::Header],
     name: &str,
 ) -> Option<String> {
     headers

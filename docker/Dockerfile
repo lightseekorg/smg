@@ -49,10 +49,10 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     && rustc --version && cargo --version && protoc --version
 
 # copy source code
-COPY --from=local_src /src /opt/sgl-model-gateway
+COPY --from=local_src /src /opt/smg
 
 # working directory
-WORKDIR /opt/sgl-model-gateway
+WORKDIR /opt/smg
 
 # install maturin and build the wheel with vendored OpenSSL
 RUN uv pip install maturin \
@@ -66,7 +66,7 @@ RUN uv pip install maturin \
 FROM base AS router-image
 
 # Copy the built package from the build image
-COPY --from=build-image /opt/sgl-model-gateway/bindings/python/dist/*.whl dist/
+COPY --from=build-image /opt/smg/bindings/python/dist/*.whl dist/
 
 # Build the package and install
 RUN uv pip install --force-reinstall dist/*.whl
@@ -76,4 +76,4 @@ RUN rm -rf /root/.cache dist/ \
     && apt purge -y --auto-remove curl
 
 # Set the entrypoint to the main command
-ENTRYPOINT ["python3", "-m", "sglang_router.launch_router"]
+ENTRYPOINT ["python3", "-m", "smg.launch_router"]

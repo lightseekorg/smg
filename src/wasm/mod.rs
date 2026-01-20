@@ -1,4 +1,4 @@
-//! WebAssembly (WASM) module support for sgl-model-gateway
+//! WebAssembly (WASM) module support for Shepherd Model Gateway
 //!
 //! This module re-exports the smg-wasm crate and provides HTTP API routes.
 

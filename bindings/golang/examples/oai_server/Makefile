@@ -15,7 +15,7 @@ BINARY := $(BUILD_DIR)/$(APP_NAME)
 
 # Rust FFI library paths
 LIB_DIR := $(BINDINGS_DIR)/lib
-LIB_NAME = libsgl_model_gateway_go
+LIB_NAME = libsmg_go
 
 # Detect OS
 UNAME_S := $(shell uname -s)

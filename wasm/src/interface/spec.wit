@@ -1,4 +1,4 @@
-package sgl:model-gateway;
+package smg:gateway;
 
 interface middleware-types {
   record header { name: string, value: string }
@@ -48,7 +48,7 @@ interface middleware-on-response {
   on-response: func(resp: response) -> action;
 }
 
-world sgl-model-gateway {
+world smg {
   export middleware-on-request;
   export middleware-on-response;
 }

@@ -1,6 +1,6 @@
-# WASM Auth Example for sgl-model-gateway
+# WASM Auth Example for Shepherd Model Gateway
 
-This example demonstrates API key authentication middleware for sgl-model-gateway using the WebAssembly Component Model.
+This example demonstrates API key authentication middleware for Shepherd Model Gateway (SMG) using the WebAssembly Component Model.
 
 ## Overview
 

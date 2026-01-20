@@ -1,7 +1,6 @@
 [run]
-source = sglang_router
+source = smg
 omit =
-    */mini_lb.py
     */cli.py
     */__main__.py
 

@@ -30,7 +30,7 @@ help: ## Show this help message
 	@echo ""
 
 build: ## Build the project in release mode
-	@echo "Building SGLang Model Gateway..."
+	@echo "Building Shepherd Model Gateway..."
 	@cargo build --release
 
 test: ## Run all tests
@@ -112,8 +112,8 @@ python-clean: ## Clean Python build artifacts
 	@echo "Cleaning Python build artifacts..."
 	@rm -rf $(PYTHON_DIR)/dist/
 	@rm -rf $(PYTHON_DIR)/target/
-	@rm -rf $(PYTHON_DIR)/sglang_router.egg-info/
-	@rm -rf $(PYTHON_DIR)/sglang_router/__pycache__/
+	@rm -rf $(PYTHON_DIR)/smg.egg-info/
+	@rm -rf $(PYTHON_DIR)/smg/__pycache__/
 	@find $(PYTHON_DIR) -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	@find $(PYTHON_DIR) -name "*.pyc" -delete 2>/dev/null || true
 	@echo "Python build artifacts cleaned!"
@@ -139,7 +139,7 @@ VERSION_FILES := Cargo.toml \
                  bindings/golang/Cargo.toml \
                  bindings/python/Cargo.toml \
                  bindings/python/pyproject.toml \
-                 bindings/python/src/sglang_router/version.py
+                 bindings/python/src/smg/version.py
 
 show-version: ## Show current version across all files
 	@echo "Current versions:"
@@ -147,7 +147,7 @@ show-version: ## Show current version across all files
 	@echo "  bindings/golang/Cargo.toml: $$(grep -m1 '^version = ' bindings/golang/Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
 	@echo "  bindings/python/Cargo.toml: $$(grep -m1 '^version = ' bindings/python/Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
 	@echo "  bindings/python/pyproject.toml: $$(grep -m1 '^version = ' bindings/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')"
-	@echo "  bindings/python/.../version.py: $$(grep '__version__' bindings/python/src/sglang_router/version.py | sed 's/__version__ = "\(.*\)"/\1/')"
+	@echo "  bindings/python/.../version.py: $$(grep '__version__' bindings/python/src/smg/version.py | sed 's/__version__ = "\(.*\)"/\1/')"
 
 bump-version: ## Bump version across all files (usage: make bump-version VERSION=0.3.3)
 	@if [ -z "$(VERSION)" ]; then \
@@ -168,13 +168,13 @@ bump-version: ## Bump version across all files (usage: make bump-version VERSION
 	@# Update pyproject.toml
 	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' bindings/python/pyproject.toml && rm -f bindings/python/pyproject.toml.bak
 	@# Update version.py
-	@sed -i.bak 's/__version__ = ".*"/__version__ = "$(VERSION)"/' bindings/python/src/sglang_router/version.py && rm -f bindings/python/src/sglang_router/version.py.bak
+	@sed -i.bak 's/__version__ = ".*"/__version__ = "$(VERSION)"/' bindings/python/src/smg/version.py && rm -f bindings/python/src/smg/version.py.bak
 	@echo "Version updated to $(VERSION) in all files:"
 	@echo "  - Cargo.toml"
 	@echo "  - bindings/golang/Cargo.toml"
 	@echo "  - bindings/python/Cargo.toml"
 	@echo "  - bindings/python/pyproject.toml"
-	@echo "  - bindings/python/src/sglang_router/version.py"
+	@echo "  - bindings/python/src/smg/version.py"
 	@echo ""
 	@echo "Verify with: make show-version"
 

@@ -1,7 +1,8 @@
+// Package ffi provides Go bindings for SMG's Rust FFI (Foreign Function Interface).
 package ffi
 
 /*
-#cgo LDFLAGS: -lsgl_model_gateway_go -ldl
+#cgo LDFLAGS: -lsmg_go -ldl
 #include <stdlib.h>
 #include <stdint.h>
 

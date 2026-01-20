@@ -1,22 +1,22 @@
-//! WASM Guest Logging Example for sgl-model-gateway
+//! WASM Guest Logging Example for Shepherd Model Gateway
 //!
 //! This example demonstrates logging and tracing middleware
-//! for sgl-model-gateway using the WebAssembly Component Model.
+//! for Shepherd Model Gateway using the WebAssembly Component Model.
 //!
 //! Features:
 //! - Request tracking and tracing headers
 //! - Response status code conversion
 
 wit_bindgen::generate!({
-    path: "../../../src/wasm/interface",
-    world: "sgl-model-gateway",
+    path: "../../../wasm/src/interface",
+    world: "smg",
 });
 
-use exports::sgl::router::{
+use exports::smg::gateway::{
     middleware_on_request::Guest as OnRequestGuest,
     middleware_on_response::Guest as OnResponseGuest,
 };
-use sgl::router::middleware_types::{Action, Header, ModifyAction, Request, Response};
+use smg::gateway::middleware_types::{Action, Header, ModifyAction, Request, Response};
 
 /// Main middleware implementation
 struct Middleware;

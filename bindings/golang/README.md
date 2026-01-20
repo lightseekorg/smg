@@ -1,8 +1,8 @@
-# SGLang Go gRPC SDK
+# SMG Go gRPC SDK
 
-A high-level Go SDK for interacting with SGLang gRPC API, designed with an OpenAI-style API for familiarity and ease of use.
+A high-level Go SDK for interacting with Shepherd Model Gateway (SMG) gRPC API, designed with an OpenAI-style API for familiarity and ease of use.
 
-**Location**: `sgl-model-gateway/bindings/golang/`
+**Location**: `smg/bindings/golang/`
 
 ## Table of Contents
 
@@ -37,13 +37,13 @@ A high-level Go SDK for interacting with SGLang gRPC API, designed with an OpenA
 ## Installation
 
 ```bash
-go get github.com/sglang/sglang-go-grpc-sdk
+go get github.com/lightseekorg/smg-go-grpc-sdk
 ```
 
 ### Sync Dependencies
 
 ```bash
-cd sgl-model-gateway/bindings/golang
+cd smg/bindings/golang
 go mod tidy
 ```
 
@@ -105,12 +105,12 @@ import (
     "fmt"
     "log"
 
-    "github.com/sglang/sglang-go-grpc-sdk"
+    "github.com/lightseekorg/smg-go-grpc-sdk"
 )
 
 func main() {
     // Create client
-    client, err := sglang.NewClient(sglang.ClientConfig{
+    client, err := smg.NewClient(smg.ClientConfig{
         Endpoint:      "grpc://localhost:20000",
         TokenizerPath: "/path/to/tokenizer",
     })
@@ -120,9 +120,9 @@ func main() {
     defer client.Close()
 
     // Create completion
-    resp, err := client.CreateChatCompletion(context.Background(), sglang.ChatCompletionRequest{
+    resp, err := client.CreateChatCompletion(context.Background(), smg.ChatCompletionRequest{
         Model: "default",
-        Messages: []sglang.ChatMessage{
+        Messages: []smg.ChatMessage{
             {Role: "user", Content: "Hello!"},
         },
         Stream: false,
@@ -150,12 +150,12 @@ import (
     "io"
     "log"
 
-    "github.com/sglang/sglang-go-grpc-sdk"
+    "github.com/lightseekorg/smg-go-grpc-sdk"
 )
 
 func main() {
     // Create client
-    client, err := sglang.NewClient(sglang.ClientConfig{
+    client, err := smg.NewClient(smg.ClientConfig{
         Endpoint:      "grpc://localhost:20000",
         TokenizerPath: "/path/to/tokenizer",
     })
@@ -166,9 +166,9 @@ func main() {
 
     // Create streaming completion
     ctx := context.Background()
-    stream, err := client.CreateChatCompletionStream(ctx, sglang.ChatCompletionRequest{
+    stream, err := client.CreateChatCompletionStream(ctx, smg.ChatCompletionRequest{
         Model: "default",
-        Messages: []sglang.ChatMessage{
+        Messages: []smg.ChatMessage{
             {Role: "user", Content: "Tell me a story"},
         },
         Stream:              true,
@@ -315,11 +315,11 @@ go tool cover -html=coverage.out -o coverage.html
 
 ### Integration Tests
 
-Integration tests require a running SGLang server and test the full client-server interaction.
+Integration tests require a running SMG server and test the full client-server interaction.
 
 #### Prerequisites
 
-1. Start SGLang server: `python -m sglang.launch_server --model-path <model_path>`
+1. Start SMG server: `smg --model-path <model_path>`
 2. Set environment variables:
    ```bash
    export SGL_GRPC_ENDPOINT=grpc://localhost:20000
@@ -375,7 +375,7 @@ All public types and functions include comprehensive documentation with usage ex
 
 ```bash
 godoc -http=:6060
-# Visit: http://localhost:6060/pkg/github.com/sglang/sglang-go-grpc-sdk/
+# Visit: http://localhost:6060/pkg/github.com/lightseekorg/smg-go-grpc-sdk/
 ```
 
 ## Development
@@ -418,7 +418,7 @@ Run `go mod tidy` to sync dependencies.
 
 ### Connection Errors
 
-Ensure SGLang server is running and check `SGL_GRPC_ENDPOINT`.
+Ensure SMG server is running and check `SGL_GRPC_ENDPOINT`.
 
 ### Tokenizer Not Found
 
@@ -428,11 +428,11 @@ Set `SGL_TOKENIZER_PATH` environment variable.
 
 ### Build Failures
 
-**Error**: `library 'sgl_model_gateway_go' not found`
+**Error**: `library 'smg_go' not found`
 
 **Solution**:
-1. Rebuild Rust library: `cd sgl-model-gateway/bindings/golang && make build`
-2. Or manually with cargo: `cd sgl-model-gateway/bindings/golang && cargo build --release`
+1. Rebuild Rust library: `cd smg/bindings/golang && make build`
+2. Or manually with cargo: `cd smg/bindings/golang && cargo build --release`
 3. Set `CARGO_BUILD_DIR` if using non-standard build location
 4. Ensure Rust toolchain is installed: `rustup toolchain list`
 

@@ -1,4 +1,4 @@
-//! FFI module for exposing sgl-model-gateway preprocessing and postprocessing functions
+//! FFI module for exposing Shepherd Model Gateway preprocessing and postprocessing functions
 //! to C-compatible languages (e.g., Golang via cgo)
 //!
 //! This module provides C-compatible function signatures for:

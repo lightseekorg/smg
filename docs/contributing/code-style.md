@@ -40,7 +40,7 @@ cargo clippy -- -D warnings
 
 | Item | Convention | Example |
 |------|------------|---------|
-| Crates | `snake_case` | `sgl_model_gateway` |
+| Crates | `snake_case` | `smg` |
 | Modules | `snake_case` | `load_balancer` |
 | Types | `PascalCase` | `CircuitBreaker` |
 | Functions | `snake_case` | `get_healthy_workers` |

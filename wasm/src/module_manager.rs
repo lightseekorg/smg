@@ -232,7 +232,7 @@ impl WasmModuleManager {
         module: &WasmModule,
         attach_point: WasmModuleAttachPoint,
         input: WasmComponentInput,
-    ) -> Option<crate::spec::sgl::model_gateway::middleware_types::Action> {
+    ) -> Option<crate::spec::smg::gateway::middleware_types::Action> {
         use tracing::error;
 
         let action_result = self

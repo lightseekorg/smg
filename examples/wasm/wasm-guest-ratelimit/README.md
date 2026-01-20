@@ -1,6 +1,6 @@
-# WASM Rate Limit Example for sgl-model-gateway
+# WASM Rate Limit Example for Shepherd Model Gateway
 
-This example demonstrates rate limiting middleware for sgl-model-gateway using the WebAssembly Component Model.
+This example demonstrates rate limiting middleware for Shepherd Model Gateway (SMG) using the WebAssembly Component Model.
 
 ## Overview
 

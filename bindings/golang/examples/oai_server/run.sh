@@ -22,7 +22,7 @@ fi
 PYTHON_LDFLAGS=$(python3-config --ldflags --embed 2>/dev/null || python3-config --ldflags 2>/dev/null || echo "")
 
 # Set CGO_LDFLAGS to link with the Rust library
-# Note: -lsgl_model_gateway_go and -ldl are already in the #cgo directive in internal/ffi/client.go
+# Note: -lsmg_go and -ldl are already in the #cgo directive in internal/ffi/client.go
 # We only need to add the library path (-L) and Python flags
 export CGO_LDFLAGS="-L${LIB_DIR} ${PYTHON_LDFLAGS}"
 

@@ -41,7 +41,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chron
 uuid = { version = "1.10" }
 
 [package]
-name = "sgl-model-gateway"
+name = "smg"
 version = "0.3.2"
 edition = "2021"
 
@@ -58,10 +58,6 @@ unused_qualifications = "warn"
 [lib]
 name = "smg"
 crate-type = ["rlib"]
-
-[[bin]]
-name = "sgl-model-gateway"
-path = "src/main.rs"
 
 [[bin]]
 name = "smg"

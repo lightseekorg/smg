@@ -1,6 +1,6 @@
-# WASM Guest Examples for sgl-model-gateway
+# WASM Guest Examples for Shepherd Model Gateway
 
-This directory contains example WASM middleware components demonstrating how to implement custom middleware for sgl-model-gateway using the WebAssembly Component Model.
+This directory contains example WASM middleware components demonstrating how to implement custom middleware for Shepherd Model Gateway (SMG) using the WebAssembly Component Model.
 
 ## Examples Overview
 
@@ -56,7 +56,7 @@ All examples require:
 - Rust toolchain (latest stable)
 - `wasm32-wasip2` target: `rustup target add wasm32-wasip2`
 - `wasm-tools`: `cargo install wasm-tools`
-- sgl-model-gateway running with WASM enabled (`--enable-wasm`)
+- SMG running with WASM enabled (`--enable-wasm`)
 
 ## Building All Examples
 

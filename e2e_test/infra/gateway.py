@@ -1,4 +1,4 @@
-"""Gateway class for managing sgl-model-gateway router instances."""
+"""Gateway class for managing Shepherd Model Gateway router instances."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class WorkerInfo:
 
 
 class Gateway:
-    """Manages a sgl-model-gateway router instance.
+    """Manages a Shepherd Model Gateway router instance.
 
     Provides lifecycle management and API access for:
     - Starting/stopping the router

@@ -1,17 +1,17 @@
-// Package ffi provides Go bindings for SGLang's Rust FFI (Foreign Function Interface).
+// Package ffi provides Go bindings for SMG's Rust FFI (Foreign Function Interface).
 //
-// This package wraps the Rust FFI layer of SGLang, providing low-level access to:
+// This package wraps the Rust FFI layer of Shepherd Model Gateway, providing low-level access to:
 // - Client creation and connection management
 // - Chat completion streaming
 // - Stream reading and response conversion
 // - Memory management for C strings
 //
-// Internal use only: This package is intended for internal use by the sglang package.
-// End users should use the public sglang package instead.
+// Internal use only: This package is intended for internal use by the smg package.
+// End users should use the public smg package instead.
 package ffi
 
 /*
-#cgo LDFLAGS: -lsgl_model_gateway_go -ldl
+#cgo LDFLAGS: -lsmg_go -ldl
 #include <stdlib.h>
 #include <stdint.h>
 
@@ -87,13 +87,13 @@ func (e ErrorCode) Error() string {
 
 // SglangClientHandle wraps the Rust client SDK FFI handle.
 //
-// This struct maintains a connection to the SGLang gRPC server and is used
+// This struct maintains a connection to the SMG gRPC server and is used
 // to create streams and manage the underlying Rust client resources.
 type SglangClientHandle struct {
 	handle *C.SglangClientHandle
 }
 
-// NewClient creates a new SGLang client handle via FFI.
+// NewClient creates a new SMG client handle via FFI.
 //
 // This function initializes the Rust client with the given endpoint and tokenizer path.
 //

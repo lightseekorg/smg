@@ -1,10 +1,10 @@
 [package]
-name = "sgl-model-gateway-golang"
+name = "smg-golang"
 version = "0.3.2"
 edition = "2021"
 
 [lib]
-name = "sgl_model_gateway_go"
+name = "smg_go"
 crate-type = ["cdylib"]
 
 [dependencies]
@@ -19,13 +19,13 @@ futures-util = "0.3"
 tracing = "0.1"
 libc = "0.2.179"
 
-[dependencies.sgl-model-gateway]
+[dependencies.smg]
 path = "../.."
 default-features = true
 
 [features]
 default = []
-vendored-openssl = ["sgl-model-gateway/vendored-openssl"]
+vendored-openssl = ["smg/vendored-openssl"]
 
 [profile.release]
 opt-level = "z"     # Optimize for size

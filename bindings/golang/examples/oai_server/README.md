@@ -1,6 +1,6 @@
-# Go SGLang Router - OpenAI Compatible API Server
+# Go SMG Router - OpenAI Compatible API Server
 
-Go SGLang Router is a high-performance OpenAI-compatible API server that communicates with the SGLang backend via gRPC and performs efficient preprocessing and postprocessing through Rust FFI.
+Go SMG Router is a high-performance OpenAI-compatible API server that communicates with the SMG backend via gRPC and performs efficient preprocessing and postprocessing through Rust FFI.
 
 ## Features
 
@@ -17,7 +17,7 @@ Go SGLang Router is a high-performance OpenAI-compatible API server that communi
 - **Preprocessing**: chat_template and tokenization (request phase)
 - **Postprocessing**: token decoding and tool parsing (response phase)
 
-gRPC is only used for communication with the SGLang backend, while input/output processing completely relies on Rust FFI.
+gRPC is only used for communication with the SMG backend, while input/output processing completely relies on Rust FFI.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -233,7 +233,7 @@ type Timeouts struct {
 ## File Structure
 
 ```
-sgl-model-gateway/bindings/golang/
+smg/bindings/golang/
 ├── client.go                          # High-level client API
 ├── internal/
 │   ├── grpc/

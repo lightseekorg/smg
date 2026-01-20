@@ -8,7 +8,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::{
     module::{MiddlewareAttachPoint, WasmModuleAttachPoint},
-    spec::sgl::model_gateway::middleware_types,
+    spec::smg::gateway::middleware_types,
 };
 
 /// Generic input type for WASM component execution

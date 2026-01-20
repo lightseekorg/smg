@@ -1,7 +1,7 @@
-//! WASM Guest Rate Limit Example for sgl-model-gateway
+//! WASM Guest Rate Limit Example for Shepherd Model Gateway
 //!
 //! This example demonstrates rate limiting middleware
-//! for sgl-model-gateway using the WebAssembly Component Model.
+//! for Shepherd Model Gateway using the WebAssembly Component Model.
 //!
 //! Features:
 //! - Rate limiting based on API Key or IP address
@@ -13,17 +13,17 @@
 //! implementing rate limiting at the host/router level with shared state.
 
 wit_bindgen::generate!({
-    path: "../../../src/wasm/interface",
-    world: "sgl-model-gateway",
+    path: "../../../wasm/src/interface",
+    world: "smg",
 });
 
 use std::cell::RefCell;
 
-use exports::sgl::router::{
+use exports::smg::gateway::{
     middleware_on_request::Guest as OnRequestGuest,
     middleware_on_response::Guest as OnResponseGuest,
 };
-use sgl::router::middleware_types::{Action, Request, Response};
+use smg::gateway::middleware_types::{Action, Request, Response};
 
 /// Main middleware implementation
 struct Middleware;
@@ -87,7 +87,7 @@ thread_local! {
 fn get_identifier(req: &Request) -> String {
     // Helper function to find header value
     let find_header_value =
-        |headers: &[sgl::router::middleware_types::Header], name: &str| -> Option<String> {
+        |headers: &[smg::gateway::middleware_types::Header], name: &str| -> Option<String> {
             headers
                 .iter()
                 .find(|h| h.name.eq_ignore_ascii_case(name))

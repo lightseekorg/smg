@@ -1,7 +1,7 @@
 [project]
-name = "sgl-model-gateway-e2e-tests"
+name = "smg-e2e-tests"
 version = "0.1.0"
-description = "E2E tests for sgl-model-gateway"
+description = "E2E tests for Shepherd Model Gateway"
 requires-python = ">=3.9"
 
 dependencies = [

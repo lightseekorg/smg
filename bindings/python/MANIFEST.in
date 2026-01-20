@@ -6,4 +6,4 @@ include ../../LICENSE
 recursive-include src *.rs      # Python bindings wrapper
 recursive-include ../../src *.rs  # Main Rust source files
 recursive-include ../../src/proto *.proto  # Protobuf definitions
-recursive-include sglang_router *.py  # Python source files
+recursive-include smg *.py  # Python source files
