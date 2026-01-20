@@ -32,7 +32,7 @@ tracing.workspace = true
 url = "2.5.4"
 
 # Workspace crates
-llm-tokenizer = { path = "../tokenizer", package = "tokenizer" }
+llm-tokenizer = { path = "../tokenizer" }
 anyhow = "1.0.100"
 
 [dev-dependencies]

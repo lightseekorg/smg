@@ -1,5 +1,5 @@
 [package]
-name = "workflow"
+name = "wfaas"
 version = "0.1.0"
 edition = "2021"
 description = "Workflow-as-a-Service engine for managing multi-step operations"

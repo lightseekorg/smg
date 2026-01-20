@@ -57,8 +57,8 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 openai-protocol = { path = "../protocols", features = ["axum"] }
 reasoning-parser = { path = "../reasoning_parser" }
 tool-parser = { path = "../tool_parser" }
-wfaas = { path = "../workflow", package = "workflow" }
-llm-tokenizer = { path = "../tokenizer", package = "tokenizer" }
+wfaas = { path = "../workflow" }
+llm-tokenizer = { path = "../tokenizer" }
 smg-auth.workspace = true
 smg-mcp.workspace = true
 kv-index = { path = "../kv_index", package = "kv-index" }
