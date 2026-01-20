@@ -6,115 +6,56 @@ High-performance model-routing gateway for large-scale LLM deployments. Centrali
   <img src="docs/assets/images/architecture-animated.svg" alt="SMG Architecture" width="100%">
 </p>
 
-## Key Features
+## Why SMG?
 
-### Performance & Routing
-- **Cache-Aware Load Balancing** - Native integration with vLLM, SGLang, and TensorRT-LLM KV cache schedulers for optimal prefix reuse
-- **High-Performance gRPC Pipeline** - Native Rust tokenization, chat templates, reasoning parsers, and tool-call execution
-- **Sub-millisecond Routing** - Intelligent request distribution with circuit breakers and automatic failover
+| | |
+|:--|:--|
+| **🚀 Maximize GPU Utilization** | Cache-aware routing understands your inference engine's KV cache state—whether vLLM, SGLang, or TensorRT-LLM—to reuse prefixes and reduce redundant computation. |
+| **🔌 One API, Any Backend** | Route to self-hosted models (vLLM, SGLang, TensorRT-LLM) or cloud providers (OpenAI, Anthropic, Gemini, Bedrock, and more) through a single unified endpoint. |
+| **⚡ Built for Speed** | Native Rust with gRPC pipelines, sub-millisecond routing decisions, and zero-copy tokenization. Circuit breakers and automatic failover keep things running. |
+| **🔒 Enterprise Control** | Multi-tenant rate limiting with OIDC, WebAssembly plugins for custom logic, and a privacy boundary that keeps conversation history within your infrastructure. |
+| **📊 Full Observability** | 40+ Prometheus metrics, OpenTelemetry tracing, and structured JSON logs with request correlation—know exactly what's happening at every layer. |
 
-### Universal Backend Support
-- **Self-Hosted Inference** - vLLM, SGLang, TensorRT-LLM via HTTP or gRPC
-- **Third-Party Providers** - OpenAI, Anthropic, Google Gemini, xAI Grok, Together AI, OpenRouter, AWS Bedrock, OCI Generative AI, and more
-- **Unified API** - One endpoint for all backends with automatic protocol translation
-
-### Complete API Coverage
-- **Full OpenAI Compatibility** - Chat, Completions, Embeddings, and Responses API for agentic workflows
-- **Anthropic Messages API** - Native support for Claude models
-- **MCP Tool Execution** - Model Context Protocol for function calling and tool use
-
-### Enterprise Ready
-- **WebAssembly Plugins** - Write custom request/response transformations in any language that compiles to WASM
-- **Multi-Tenant Rate Limiting** - Per-tenant quotas with OIDC authentication
-- **Privacy Boundary** - Conversation history and MCP sessions stay within the gateway
-
-### Observability
-- **40+ Prometheus Metrics** - Request latency, token throughput, cache hit rates, circuit breaker states
-- **OpenTelemetry Tracing** - Distributed tracing across the entire request lifecycle
-- **Structured Logging** - JSON logs with request correlation IDs
+**API Coverage:** OpenAI Chat/Completions/Embeddings, Responses API for agents, Anthropic Messages, and MCP tool execution.
 
 ## Quick Start
 
-### Docker
+**Install** — pick your preferred method:
 
 ```bash
+# Docker
 docker pull lightseekorg/smg:latest
+
+# Python
+pip install smg
+
+# Rust
+cargo install smg
 ```
 
-### Build from Source
+**Run** — point SMG at your inference workers:
 
 ```bash
-cargo build --release
+smg --worker-urls http://localhost:8000 --policy cache_aware
 ```
 
-### Run
-
-```bash
-# HTTP workers
-./target/release/smg \
-  --worker-urls http://worker1:8000 http://worker2:8000 \
-  --policy cache_aware
-
-# gRPC workers (highest performance)
-./target/release/smg \
-  --worker-urls grpc://127.0.0.1:20000 \
-  --model-path meta-llama/Llama-3.1-8B-Instruct \
-  --reasoning-parser deepseek-r1
-```
-
-### Test
+**Use** — send requests to the gateway:
 
 ```bash
 curl http://localhost:30000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "meta-llama/Llama-3.1-8B-Instruct",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
+  -d '{"model": "llama3", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
+
+That's it. SMG is now load-balancing requests across your workers with cache-aware routing.
 
 ## Documentation
 
-Full documentation available at [lightseekorg.github.io/smg](https://lightseekorg.github.io/smg):
-
-- [Installation](docs/getting-started/installation.md)
-- [Quick Start](docs/getting-started/quickstart.md)
-- [Architecture](docs/concepts/architecture/overview.md)
-- [API Reference](docs/reference/api/openai.md)
-- [Deployment Guide](docs/tasks/deployment/kubernetes.md)
-
-## Load Balancing Policies
-
-| Policy | Description |
-|--------|-------------|
-| `random` | Uniform random selection |
-| `round_robin` | Cycles through workers |
-| `power_of_two` | Samples two, picks lighter |
-| `cache_aware` | Cache locality + load balancing (default) |
-
-## API Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `POST /v1/chat/completions` | OpenAI-compatible chat |
-| `POST /v1/completions` | Text completions |
-| `POST /v1/embeddings` | Embedding generation |
-| `POST /v1/responses` | Agentic response flows |
-| `GET /v1/models` | List available models |
-
-## Python Bindings
-
-```bash
-pip install maturin
-cd bindings/python
-maturin develop
-```
-
-```bash
-python -m smg.launch_router \
-  --worker-urls http://worker1:8000 \
-  --policy cache_aware
-```
+- [Installation](docs/getting-started/installation.md) — all installation options and requirements
+- [Architecture](docs/concepts/architecture/overview.md) — how SMG routes and balances requests
+- [Configuration](docs/reference/configuration.md) — full reference for all options
+- [API Reference](docs/reference/api/openai.md) — endpoint specs and examples
+- [Deployment Guide](docs/tasks/deployment/kubernetes.md) — production deployment on Kubernetes
 
 ## License
 
