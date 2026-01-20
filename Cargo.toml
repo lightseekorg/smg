@@ -6,7 +6,7 @@ resolver = "2"
 [workspace.dependencies]
 openai-protocol = { path = "protocols" }
 smg-auth = { path = "auth", package = "auth" }
-smg-mcp = { path = "mcp", package = "mcp" }
+smg-mcp = { path = "mcp" }
 smg-data-connector = { path = "data_connector", package = "data-connector" }
 smg-wasm = { path = "wasm", package = "smg-wasm" }
 smg-mesh = { path = "mesh", package = "smg-mesh" }
@@ -137,7 +137,7 @@ tool-parser = { path = "tool_parser" }
 wfaas = { path = "workflow", package = "workflow" }
 llm-tokenizer = { path = "tokenizer", package = "tokenizer" }
 smg-auth = { path = "auth", package = "auth" }
-smg-mcp = { path = "mcp", package = "mcp" }
+smg-mcp = { path = "mcp" }
 kv-index = { path = "kv_index", package = "kv-index" }
 smg-data-connector = { path = "data_connector", package = "data-connector" }
 llm-multimodal = { path = "multimodal" }

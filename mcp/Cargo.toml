@@ -1,5 +1,5 @@
 [package]
-name = "mcp"
+name = "smg-mcp"
 version = "0.1.0"
 edition = "2021"
 description = "Model Context Protocol (MCP) client implementation"
@@ -10,7 +10,7 @@ authors = [
     "Chang Su <mckvtl@gmail.com>",
     "Keyang Ru <rukeyang@gmail.com>",
 ]
-keywords = ["mcp", "model-context-protocol", "llm", "tools"]
+keywords = ["mcp", "smg", "llm", "tools"]
 categories = ["api-bindings"]
 
 [lib]
