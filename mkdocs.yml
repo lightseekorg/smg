@@ -11,7 +11,7 @@ theme:
   name: material
   custom_dir: docs/overrides
   logo: assets/images/logo.svg
-  favicon: assets/images/favicon.ico
+  favicon: assets/images/favicon.svg
   palette:
     - scheme: slate
       primary: custom
