@@ -1,19 +1,8 @@
 name: Documentation
 
+# Disabled: Docs are private (view in repo). Re-enable when repo goes public.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'docs/**'
-      - 'mkdocs.yml'
-      - '.github/workflows/docs.yml'
-  pull_request:
-    paths:
-      - 'docs/**'
-      - 'mkdocs.yml'
-      - '.github/workflows/docs.yml'
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger only
 
 permissions:
   contents: read
