@@ -1,5 +1,8 @@
 # Shepherd Model Gateway (SMG)
 
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-latest-brightgreen.svg)](https://lightseekorg.github.io/smg)
+
 High-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
 
 <p align="center">
@@ -36,7 +39,14 @@ cargo install smg
 **Run** — point SMG at your inference workers:
 
 ```bash
-smg --worker-urls http://localhost:8000 --policy cache_aware
+# Single worker
+smg --worker-urls http://localhost:8000
+
+# Multiple workers with cache-aware routing
+smg --worker-urls http://gpu1:8000 http://gpu2:8000 --policy cache_aware
+
+# With high availability mesh
+smg --worker-urls http://gpu1:8000 --ha-mesh --seeds 10.0.0.2:30001,10.0.0.3:30001
 ```
 
 **Use** — send requests to the gateway:
@@ -47,16 +57,44 @@ curl http://localhost:30000/v1/chat/completions \
   -d '{"model": "llama3", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
 
-That's it. SMG is now load-balancing requests across your workers with cache-aware routing.
+That's it. SMG is now load-balancing requests across your workers.
+
+## Supported Backends
+
+| Self-Hosted | Cloud Providers |
+|-------------|-----------------|
+| vLLM | OpenAI |
+| SGLang | Anthropic |
+| TensorRT-LLM | Google Gemini |
+| Ollama | AWS Bedrock |
+| Any OpenAI-compatible server | Azure OpenAI |
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| **[8 Routing Policies](docs/configuration/routing.md)** | cache_aware, round_robin, power_of_two, consistent_hashing, prefix_hash, manual, random, bucket |
+| **[gRPC Pipeline](docs/configuration/grpc-pipeline.md)** | Native gRPC with streaming, reasoning extraction, and tool call parsing |
+| **[MCP Integration](docs/configuration/mcp.md)** | Connect external tool servers via Model Context Protocol |
+| **[High Availability](docs/configuration/high-availability.md)** | Mesh networking with SWIM protocol for multi-node deployments |
+| **[Chat History](docs/configuration/storage.md)** | Pluggable storage: PostgreSQL, Oracle, Redis, or in-memory |
+| **[WASM Plugins](docs/configuration/wasm-plugins.md)** | Extend with custom WebAssembly logic |
+| **[Resilience](docs/configuration/resilience.md)** | Circuit breakers, retries with backoff, rate limiting |
 
 ## Documentation
 
-- [Installation](docs/getting-started/installation.md) — all installation options and requirements
-- [Architecture](docs/concepts/architecture/overview.md) — how SMG routes and balances requests
-- [Configuration](docs/reference/configuration.md) — full reference for all options
-- [API Reference](docs/reference/api/openai.md) — endpoint specs and examples
-- [Deployment Guide](docs/tasks/deployment/kubernetes.md) — production deployment on Kubernetes
+| | |
+|:--|:--|
+| [Getting Started](docs/getting-started/quickstart.md) | Installation and first steps |
+| [Architecture](docs/concepts/architecture/overview.md) | How SMG works |
+| [Configuration](docs/reference/configuration.md) | CLI reference and options |
+| [API Reference](docs/reference/api/openai.md) | OpenAI-compatible endpoints |
+| [Deployment](docs/tasks/deployment/kubernetes.md) | Production setup |
 
-## License
+## Contributing
 
-Apache 2.0
+We welcome contributions! See [Contributing Guide](docs/contributing/index.md) for details.
+
+- [Development Setup](docs/contributing/development.md)
+- [Code Style](docs/contributing/code-style.md)
+
