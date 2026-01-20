@@ -4,217 +4,233 @@ title: Architecture Overview
 
 # Architecture Overview
 
-This page describes the high-level architecture of Shepherd Model Gateway.
-
-<div class="objectives" markdown>
-
-#### What you'll learn
-
-- How SMG adapts to different worker types
-- The role of registries, control plane, and data plane
-- Request flow through the gateway
-
-</div>
+SMG is a high-performance inference gateway that sits between your applications and LLM workers. It provides unified routing, enterprise features, and full observability across heterogeneous model deployments.
 
 ---
 
 ## System Architecture
 
-```mermaid
-flowchart LR
-    subgraph SMG["SMG Gateway"]
-        API["API"]
-        Router["Router"]
-        API --> Router
-    end
-
-    Client([Clients]) --> API
-    Router --> gRPC([gRPC Workers])
-    Router --> HTTP([HTTP Workers])
-    Router --> Ext([External APIs])
-```
-
-SMG adapts its behavior based on worker type:
-
-| Worker Type | Gateway Behavior |
-|-------------|------------------|
-| **gRPC** | Full server — tokenization, chat templates, tool parsing, MCP, detokenization |
-| **HTTP** | Proxy — load balancing, health checks, PD disaggregation |
-| **External** | Router — model discovery, provider abstraction |
+<div class="architecture-diagram">
+  <img src="../../../assets/images/architecture-detailed.svg" alt="SMG Architecture">
+</div>
 
 ---
 
-## Internal Components
+## Registries & State
 
-### Registries
+Registries hold the configuration and state needed for request processing.
 
-| Registry | Purpose |
-|----------|---------|
-| **Model** | Available models and backend mappings |
-| **Tokenizer** | Tokenizers for gateway-side processing (gRPC mode) |
-| **LB Policy** | Load balancing configurations |
-| **Chat History** | Multi-turn conversation context |
-| **WASM Plugins** | Custom logic extensions |
+| Registry | Purpose | Used By |
+|----------|---------|---------|
+| **Model Registry** | Maps model names to backends and capabilities | Router Manager |
+| **LB Policy Registry** | Load balancing configurations per model | All routing paths |
+| **Tokenizer Registry** | Tokenizers for gateway-side processing | gRPC path |
+| **Chat History** | Multi-turn conversation context | Responses API |
+| **WASM Plugins** | Custom request/response transformations | Middleware |
 
 ---
 
-## Control Plane
+## API Endpoints
 
-The control plane manages the **operational state** of the system. It doesn't handle user requests directly but maintains the information needed for routing decisions.
+SMG exposes three categories of endpoints:
+
+### Inference APIs
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v1/chat/completions` | OpenAI-compatible chat completions |
+| `POST /v1/completions` | Text completions |
+| `POST /v1/responses` | Agentic workflows with tool execution |
+| `POST /v1/embeddings` | Embedding generation |
+| `POST /v1/rerank` | Reranking API |
+| `POST /messages` | Anthropic Messages API |
+
+### Utility APIs
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /tokenize` | Tokenize text using model's tokenizer |
+| `POST /detokenize` | Convert token IDs back to text |
+| `POST /v1/parser/tool` | Parse tool calls from text |
+| `POST /v1/parser/reasoning` | Parse reasoning chains |
+
+### Admin APIs
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET/POST /workers` | Worker management |
+| `GET/POST /tokenizers` | Tokenizer management |
+| `GET/POST /wasm` | WASM plugin management |
+| `GET/POST /mcp` | MCP server management |
+
+---
+
+## Gateway Layer
+
+The gateway layer handles cross-cutting concerns before requests reach the router.
+
+### Middleware Pipeline
+
+| Component | Function |
+|-----------|----------|
+| **Rate Limiter** | Multi-tenant token bucket with per-user quotas |
+| **OIDC Auth** | JWT validation and tenant extraction |
+| **WASM Plugins** | Custom request transformation logic |
+| **Request ID** | Assigns unique ID for tracing |
+| **Metrics** | Records latency, throughput, error rates |
+| **OpenTelemetry** | Distributed tracing spans |
+
+---
+
+## Router Layer
+
+The router layer handles LLM-specific request processing. It selects one of three routing paths based on worker type.
+
+### Router Manager
+
+| Worker Type | Path Selected | Gateway Behavior |
+|-------------|---------------|------------------|
+| gRPC workers | gRPC Path | Full server - tokenization, chat templates, tool parsing |
+| HTTP workers | HTTP Path | Smart proxy - load balancing, PD disaggregation |
+| External APIs | 3rd Party Path | Unified router - provider abstraction |
+
+---
+
+## gRPC Path (Token-Level Streaming)
+
+The gRPC path provides maximum performance by handling all text processing at the gateway.
+
+### Pipeline Stages
+
+| Stage | Function |
+|-------|----------|
+| **Chat Template** | Apply model-specific chat template (Jinja2) |
+| **Tokenization** | Convert text to token IDs using model tokenizer |
+| **Token Cache** | Cache tokenized prefixes for reuse |
+| **Load Balance** | Select worker using cache-aware policy |
+| **Detokenize** | Convert streaming tokens back to text |
+| **Reasoning Parser** | Extract thinking/reasoning from output (DeepSeek-R1, etc.) |
+| **Tool Parser** | Parse function/tool calls from output |
+
+### Supported Backends
+
+- SGLang (gRPC)
+- vLLM (gRPC)
+- TensorRT-LLM (gRPC)
+
+---
+
+## HTTP Path (OpenAI Compatible)
+
+The HTTP path supports two modes for OpenAI-compatible backends.
+
+### Regular HTTP Mode
+
+Standard load balancing across HTTP workers running full inference.
+
+### PD (Prefill-Decode) Mode
+
+Disaggregated inference with separate prefill and decode workers:
+
+1. **Find P/D Pair** - Select a prefill worker and decode worker pair
+2. **Mutate Headers** - Add routing headers for KV cache transfer
+3. **Prefill Worker** - Processes prompt, transfers KV cache
+4. **Decode Worker** - Generates tokens using transferred KV cache
+
+### Supported Backends
+
+- SGLang (HTTP)
+- vLLM (HTTP)
+- TensorRT-LLM (HTTP)
+
+---
+
+## 3rd Party Path
+
+The 3rd party path routes to external LLM providers through a unified interface.
+
+### Model Discovery
+
+The gateway discovers available models from external providers and exposes them through `/v1/models`.
+
+### Supported Providers
+
+| Provider | API Style |
+|----------|-----------|
+| OpenAI | OpenAI |
+| Anthropic | Messages |
+| Google Gemini | Gemini |
+| xAI Grok | OpenAI |
+| Together AI | OpenAI |
+| OpenRouter | OpenAI |
+| AWS Bedrock | Bedrock |
+| OCI Generative AI | OCI |
+
+---
+
+## Response Processing
+
+All paths converge at response processing for tool handling and MCP execution.
 
 ### Components
 
 | Component | Function |
 |-----------|----------|
-| **Worker Manager** | Registers workers, tracks capabilities, manages lifecycle |
-| **Health Checker** | Probes workers periodically, updates health status |
-| **Service Discovery** | Discovers workers in Kubernetes via pod selectors |
-| **Load Monitor** | Tracks active requests and queue depths per worker |
+| **Tool Parser** | Extracts function/tool calls from model output |
+| **MCP Handler** | Executes tools via Model Context Protocol servers |
+| **Response Builder** | Assembles final response with tool results |
 
-The control plane answers questions like:
+### MCP Loop
 
-- Which workers are available?
-- How healthy is each worker?
-- What's the current load on each worker?
+When the model requests tool execution:
 
-[Learn more about the Control Plane →](control-plane.md)
+1. Tool parser extracts the tool call
+2. MCP handler executes the tool
+3. Result is re-routed through the router for continued generation
+4. Loop continues until model produces final response
 
 ---
 
-## Data Plane
+## Load Balancing
 
-The data plane handles **every user request**. It must be fast, reliable, and correct.
+All paths use the same load balancing infrastructure with multiple policies.
 
-### Routing Paths
+| Policy | Algorithm | Best For |
+|--------|-----------|----------|
+| `random` | Uniform random | Simple deployments |
+| `round_robin` | Sequential cycling | Even distribution |
+| `power_of_two` | Sample two, pick lighter | Balanced load |
+| `cache_aware` | Prefix locality + load | Production (default) |
 
-| Path | Protocol | Use Case |
-|------|----------|----------|
-| **gRPC Router** | gRPC | Token-level streaming with gateway-side tokenization |
-| **HTTP Router** | HTTP | OpenAI-compatible passthrough |
-| **3rd Party Router** | HTTP | External provider routing (OpenAI, Anthropic, etc.) |
+### Cache-Aware Routing
 
-### Middleware Components
+The cache-aware policy optimizes for KV cache reuse:
 
-| Component | Function |
-|-----------|----------|
-| **Rate Limiter** | Enforces request limits with token bucket algorithm |
-| **Circuit Breaker** | Prevents routing to failing workers |
+1. Hash the tokenized prefix
+2. Find workers with cached prefix
+3. Among matches, select by current load
+4. Falls back to least-loaded if no cache hit
+
+This integrates with vLLM, SGLang, and TensorRT-LLM's native KV cache management.
+
+---
+
+## Resilience
+
+Built-in resilience features protect against failures.
+
+| Feature | Function |
+|---------|----------|
+| **Circuit Breaker** | Stops routing to failing workers |
 | **Retry Handler** | Retries failed requests with exponential backoff |
-| **Metrics Collector** | Records latency, throughput, and error rates |
-
-### Response Processing
-
-| Component | Function |
-|-----------|----------|
-| **Tool Parser** | Extracts function/tool calls from model outputs |
-| **Reasoning Parser** | Parses chain-of-thought and structured reasoning |
-| **MCP Handler** | Model Context Protocol for tool execution loops |
-
-The data plane answers questions like:
-
-- Which routing path should this request use?
-- Which worker should handle this request?
-- Should this request be retried?
-- Is the client within rate limits?
-
-[Learn more about the Data Plane →](data-plane.md)
-
----
-
-## Request Flow
-
-Here's how a typical request flows through SMG:
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant MW as Middleware
-    participant RM as Router Manager
-    participant PATH as Routing Path
-    participant W as Worker/Provider
-
-    C->>MW: POST /v1/chat/completions
-    MW->>MW: Rate limit, assign ID
-    MW->>RM: Route request
-    RM->>RM: Select routing path
-    RM->>PATH: Forward to path
-    PATH->>PATH: Path-specific processing
-    PATH->>W: Forward to backend
-    W-->>PATH: Response
-    PATH->>PATH: Parse tools, handle MCP
-    PATH-->>C: Stream response
-```
-
-### Step by Step
-
-1. **Middleware Processing**: Request passes through rate limiting, gets assigned a request ID, and metrics are recorded.
-
-2. **Path Selection**: Router manager determines which routing path to use (gRPC, HTTP, or 3rd Party).
-
-3. **Path-Specific Processing**:
-   - **gRPC**: Apply chat template, tokenize, cache tokens, load balance
-   - **HTTP**: Regular or Prefill-Decode mode, load balance
-   - **3rd Party**: Model discovery, provider routing
-
-4. **Backend Communication**: Request is forwarded to the appropriate backend or external provider.
-
-5. **Response Processing**: Tools are parsed, MCP handlers execute if needed, response is built and streamed.
-
----
-
-## Deployment Topologies
-
-SMG supports several deployment patterns:
-
-### Single Gateway
-
-The simplest topology with one SMG instance routing to multiple workers.
-
-```mermaid
-flowchart LR
-    C[Clients] --> G[SMG]
-    G --> W1[Worker 1]
-    G --> W2[Worker 2]
-    G --> W3[Worker 3]
-```
-
-**Best for**: Development, small deployments
-
-### High Availability
-
-Multiple SMG instances behind a load balancer.
-
-```mermaid
-flowchart LR
-    C[Clients] --> LB[Load Balancer]
-    LB --> G1[SMG 1]
-    LB --> G2[SMG 2]
-    G1 --> W1[Worker 1]
-    G1 --> W2[Worker 2]
-    G2 --> W1
-    G2 --> W2
-```
-
-**Best for**: Production deployments requiring HA
-
-### Prefill-Decode Disaggregation
-
-Separate workers for prefill and decode phases.
-
-```mermaid
-flowchart LR
-    C[Clients] --> G[SMG]
-    G --> P[Prefill Workers]
-    P --> D[Decode Workers]
-    D --> G
-```
-
-**Best for**: High-throughput deployments optimizing for TTFT and TPOT
+| **Health Checker** | Periodic worker health probes |
+| **Timeout Manager** | Request and connection timeouts |
 
 ---
 
 ## What's Next?
 
-- [Control Plane](control-plane.md) — Deep dive into worker management
-- [Data Plane](data-plane.md) — Deep dive into request routing
-- [Load Balancing](../routing/load-balancing.md) — Understand routing policies
+- [Control Plane](control-plane.md) - Worker management and service discovery
+- [Data Plane](data-plane.md) - Request routing implementation details
+- [Load Balancing](../routing/load-balancing.md) - Routing policy deep dive
+- [Cache-Aware Routing](../routing/cache-aware.md) - KV cache optimization
