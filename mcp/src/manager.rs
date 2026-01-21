@@ -160,6 +160,7 @@ impl McpManager {
         let mut clients = HashMap::new();
         let inventory = Arc::new(ToolInventory::new());
         let mut has_valid_mcp_tools = false;
+        let mut allowed_tools_by_server: HashMap<String, HashSet<String>> = HashMap::new();
 
         for tool in tools {
             let Some(server_config) = self.parse_tool_server_config(tool) else {
@@ -168,6 +169,12 @@ impl McpManager {
 
             has_valid_mcp_tools = true;
             let server_key = Self::server_key(&server_config);
+
+            // Extract allowed_tools filter for this server
+            if let Some(allowed) = &tool.allowed_tools {
+                allowed_tools_by_server
+                    .insert(server_key.clone(), allowed.iter().cloned().collect());
+            }
 
             if clients.contains_key(&server_key) {
                 continue;
@@ -196,7 +203,11 @@ impl McpManager {
             return None;
         }
 
-        Some(Arc::new(RequestMcpContext::new(inventory, clients)))
+        Some(Arc::new(RequestMcpContext::new(
+            inventory,
+            clients,
+            allowed_tools_by_server,
+        )))
     }
 
     fn parse_tool_server_config(&self, tool: &ResponseTool) -> Option<McpServerConfig> {
@@ -925,14 +936,21 @@ impl McpManager {
 pub struct RequestMcpContext {
     inventory: Arc<ToolInventory>,
     clients: HashMap<String, Arc<McpClient>>,
+    /// Per-server allowed tools filter. If None for a server, all tools are allowed.
+    allowed_tools_by_server: HashMap<String, HashSet<String>>,
 }
 
 impl RequestMcpContext {
     pub(crate) fn new(
         inventory: Arc<ToolInventory>,
         clients: HashMap<String, Arc<McpClient>>,
+        allowed_tools_by_server: HashMap<String, HashSet<String>>,
     ) -> Self {
-        Self { inventory, clients }
+        Self {
+            inventory,
+            clients,
+            allowed_tools_by_server,
+        }
     }
 
     pub fn server_keys(&self) -> Vec<String> {
@@ -945,12 +963,20 @@ impl RequestMcpContext {
         self.inventory
             .list_tools()
             .into_iter()
-            .filter_map(|(_tool_name, server_key, tool_info)| {
-                if server_keys_set.contains(server_key.as_str()) {
-                    Some(tool_info)
-                } else {
-                    None
+            .filter_map(|(tool_name, server_key, tool_info)| {
+                // First check if tool belongs to requested servers
+                if !server_keys_set.contains(server_key.as_str()) {
+                    return None;
                 }
+
+                // Then check allowed_tools filter for this server
+                if let Some(allowed) = self.allowed_tools_by_server.get(&server_key) {
+                    if !allowed.contains(&tool_name) {
+                        return None;
+                    }
+                }
+
+                Some(tool_info)
             })
             .collect()
     }
@@ -964,6 +990,16 @@ impl RequestMcpContext {
             .inventory
             .get_tool(tool_name)
             .ok_or_else(|| McpError::ToolNotFound(tool_name.to_string()))?;
+
+        // Validate against allowed_tools filter
+        if let Some(allowed) = self.allowed_tools_by_server.get(&server_key) {
+            if !allowed.contains(tool_name) {
+                return Err(McpError::ToolNotFound(format!(
+                    "tool '{}' is not in allowed_tools for server '{}'",
+                    tool_name, server_key
+                )));
+            }
+        }
 
         let tool_schema = Some(serde_json::Value::Object((*tool_info.input_schema).clone()));
         let args_map = args
@@ -1147,5 +1183,162 @@ mod tests {
             .collect();
 
         assert_eq!(names, vec!["tool-a".to_string()]);
+    }
+
+    fn test_request_context(
+        inventory: Arc<ToolInventory>,
+        allowed_tools_by_server: HashMap<String, HashSet<String>>,
+    ) -> RequestMcpContext {
+        RequestMcpContext::new(inventory, HashMap::new(), allowed_tools_by_server)
+    }
+
+    #[test]
+    fn test_list_tools_for_servers_with_allowed_tools() {
+        let inventory = Arc::new(ToolInventory::new());
+        inventory.insert_tool(
+            "tool-a".to_string(),
+            "server-a".to_string(),
+            test_tool("tool-a"),
+        );
+        inventory.insert_tool(
+            "tool-b".to_string(),
+            "server-a".to_string(),
+            test_tool("tool-b"),
+        );
+        inventory.insert_tool(
+            "tool-c".to_string(),
+            "server-a".to_string(),
+            test_tool("tool-c"),
+        );
+
+        // Only allow tool-a and tool-c
+        let mut allowed = HashMap::new();
+        allowed.insert(
+            "server-a".to_string(),
+            HashSet::from(["tool-a".to_string(), "tool-c".to_string()]),
+        );
+
+        let ctx = test_request_context(inventory, allowed);
+        let tools = ctx.list_tools_for_servers(&["server-a".to_string()]);
+        let names: HashSet<String> = tools.into_iter().map(|t| t.name.to_string()).collect();
+
+        assert_eq!(names.len(), 2);
+        assert!(names.contains("tool-a"));
+        assert!(names.contains("tool-c"));
+        assert!(!names.contains("tool-b"));
+    }
+
+    #[test]
+    fn test_list_tools_for_servers_no_filter_allows_all() {
+        let inventory = Arc::new(ToolInventory::new());
+        inventory.insert_tool(
+            "tool-a".to_string(),
+            "server-a".to_string(),
+            test_tool("tool-a"),
+        );
+        inventory.insert_tool(
+            "tool-b".to_string(),
+            "server-a".to_string(),
+            test_tool("tool-b"),
+        );
+
+        // No allowed_tools filter
+        let ctx = test_request_context(inventory, HashMap::new());
+        let tools = ctx.list_tools_for_servers(&["server-a".to_string()]);
+        let names: HashSet<String> = tools.into_iter().map(|t| t.name.to_string()).collect();
+
+        assert_eq!(names.len(), 2);
+        assert!(names.contains("tool-a"));
+        assert!(names.contains("tool-b"));
+    }
+
+    #[test]
+    fn test_list_tools_for_servers_allowed_tools_not_exist() {
+        let inventory = Arc::new(ToolInventory::new());
+        inventory.insert_tool(
+            "tool-a".to_string(),
+            "server-a".to_string(),
+            test_tool("tool-a"),
+        );
+
+        // allowed_tools contains non-existent tool
+        let mut allowed = HashMap::new();
+        allowed.insert(
+            "server-a".to_string(),
+            HashSet::from([
+                "tool-a".to_string(),
+                "non-existent-tool".to_string(), // doesn't exist
+            ]),
+        );
+
+        let ctx = test_request_context(inventory, allowed);
+        let tools = ctx.list_tools_for_servers(&["server-a".to_string()]);
+        let names: Vec<String> = tools.into_iter().map(|t| t.name.to_string()).collect();
+
+        // Should only return tool-a, silently ignore non-existent
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0], "tool-a");
+    }
+
+    #[test]
+    fn test_call_tool_blocked_by_allowed_tools() {
+        let inventory = Arc::new(ToolInventory::new());
+        inventory.insert_tool(
+            "tool-a".to_string(),
+            "server-a".to_string(),
+            test_tool("tool-a"),
+        );
+        inventory.insert_tool(
+            "tool-b".to_string(),
+            "server-a".to_string(),
+            test_tool("tool-b"),
+        );
+
+        // Only allow tool-a
+        let mut allowed = HashMap::new();
+        allowed.insert(
+            "server-a".to_string(),
+            HashSet::from(["tool-a".to_string()]),
+        );
+
+        let ctx = test_request_context(inventory, allowed);
+
+        // Try to call tool-b which is not in allowed_tools
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(ctx.call_tool("tool-b", "{}"));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, McpError::ToolNotFound(_)));
+        assert!(err.to_string().contains("not in allowed_tools"));
+    }
+
+    #[test]
+    fn test_call_tool_allowed_when_in_filter() {
+        let inventory = Arc::new(ToolInventory::new());
+        inventory.insert_tool(
+            "tool-a".to_string(),
+            "server-a".to_string(),
+            test_tool("tool-a"),
+        );
+
+        // Allow tool-a
+        let mut allowed = HashMap::new();
+        allowed.insert(
+            "server-a".to_string(),
+            HashSet::from(["tool-a".to_string()]),
+        );
+
+        let ctx = test_request_context(inventory, allowed);
+
+        // Try to call tool-a - should pass allowed_tools check
+        // but fail at client lookup (no actual client connected)
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(ctx.call_tool("tool-a", "{}"));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Should fail at ServerNotFound, not ToolNotFound (allowed_tools check passed)
+        assert!(matches!(err, McpError::ServerNotFound(_)));
     }
 }

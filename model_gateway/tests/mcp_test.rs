@@ -12,6 +12,7 @@ mod common;
 use std::collections::HashMap;
 
 use common::mock_mcp_server::MockMCPServer;
+use openai_protocol::responses::{ResponseTool, ResponseToolType};
 use serde_json::json;
 use smg::mcp::{error::McpError, McpConfig, McpManager, McpServerConfig, McpTransport};
 
@@ -540,4 +541,111 @@ async fn test_complete_workflow() {
     ];
 
     assert_eq!(capabilities.len(), 8);
+}
+
+// allowed_tools Filter Tests
+
+#[tokio::test]
+async fn test_request_context_allowed_tools_filter() {
+    let mock_server = create_mock_server().await;
+
+    let config = McpConfig {
+        servers: vec![],
+        pool: Default::default(),
+        proxy: None,
+        warmup: Vec::new(),
+        inventory: Default::default(),
+    };
+
+    let manager = McpManager::with_defaults(config).await.unwrap();
+
+    // Create request with allowed_tools filter - only allow brave_web_search
+    let tools = vec![ResponseTool {
+        r#type: ResponseToolType::Mcp,
+        function: None,
+        server_url: Some(mock_server.url()),
+        authorization: None,
+        server_label: Some("mock".to_string()),
+        server_description: None,
+        require_approval: None,
+        allowed_tools: Some(vec!["brave_web_search".to_string()]),
+    }];
+
+    let ctx = manager
+        .create_request_context(Some(&tools))
+        .await
+        .expect("Should create request context");
+
+    let server_keys = ctx.server_keys();
+    let filtered_tools = ctx.list_tools_for_servers(&server_keys);
+
+    // Should only have brave_web_search, not brave_local_search
+    assert_eq!(filtered_tools.len(), 1);
+    assert_eq!(filtered_tools[0].name, "brave_web_search");
+}
+
+#[tokio::test]
+async fn test_request_context_call_blocked_tool() {
+    let mock_server = create_mock_server().await;
+
+    let config = McpConfig {
+        servers: vec![],
+        pool: Default::default(),
+        proxy: None,
+        warmup: Vec::new(),
+        inventory: Default::default(),
+    };
+
+    let manager = McpManager::with_defaults(config).await.unwrap();
+
+    // Create request with allowed_tools filter - only allow brave_web_search
+    let tools = vec![ResponseTool {
+        r#type: ResponseToolType::Mcp,
+        function: None,
+        server_url: Some(mock_server.url()),
+        authorization: None,
+        server_label: Some("mock".to_string()),
+        server_description: None,
+        require_approval: None,
+        allowed_tools: Some(vec!["brave_web_search".to_string()]),
+    }];
+
+    let ctx = manager
+        .create_request_context(Some(&tools))
+        .await
+        .expect("Should create request context");
+
+    // Try to call brave_local_search which is NOT in allowed_tools
+    let result = ctx
+        .call_tool(
+            "brave_local_search",
+            Some(json!({"query": "test"}).as_object().unwrap().clone()),
+        )
+        .await;
+
+    assert!(result.is_err(), "Should fail for blocked tool");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, McpError::ToolNotFound(_)),
+        "Should be ToolNotFound error"
+    );
+    assert!(
+        err.to_string().contains("not in allowed_tools"),
+        "Error should mention allowed_tools"
+    );
+
+    // But calling brave_web_search should work
+    let result = ctx
+        .call_tool(
+            "brave_web_search",
+            Some(
+                json!({"query": "test", "count": 1})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await;
+
+    assert!(result.is_ok(), "Should succeed for allowed tool");
 }
