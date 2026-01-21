@@ -59,7 +59,7 @@ jobs:
         run: ls -lh bindings/python/dist/
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: smg-wheel
           path: bindings/python/dist/*.whl
@@ -266,7 +266,7 @@ jobs:
 
       - name: Upload benchmark results
         if: matrix.upload_benchmarks && success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: genai-bench-results-all-policies
           path: benchmark_**/
