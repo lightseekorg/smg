@@ -1,5 +1,8 @@
 name: Publish smg-wasm
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]

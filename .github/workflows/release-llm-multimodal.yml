@@ -1,5 +1,8 @@
 name: Publish llm-multimodal
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]

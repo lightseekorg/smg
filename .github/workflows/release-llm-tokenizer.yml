@@ -1,5 +1,8 @@
 name: Publish llm-tokenizer
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]

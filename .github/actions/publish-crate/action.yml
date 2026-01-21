@@ -27,16 +27,17 @@ runs:
       id: check
       shell: bash
       run: |
-        LOCAL=$(grep '^version = ' ${{ inputs.path }}/Cargo.toml | head -1 | cut -d'"' -f2)
+        LOCAL=$(grep -E '^[[:space:]]*version[[:space:]]*=' ${{ inputs.path }}/Cargo.toml | head -1 | cut -d'"' -f2)
         PUBLISHED=$(curl -s "https://crates.io/api/v1/crates/${{ inputs.crate }}" | jq -r '.crate.max_version // "0.0.0"')
         echo "local=${LOCAL}" >> $GITHUB_OUTPUT
         echo "published=${PUBLISHED}" >> $GITHUB_OUTPUT
         echo "${{ inputs.crate }}: local=${LOCAL}, published=${PUBLISHED}"
-        if [ "${LOCAL}" != "${PUBLISHED}" ]; then
+        # Use sort -V for proper semver comparison (publish only if local is newer)
+        if [ "$(printf '%s\n' "$PUBLISHED" "$LOCAL" | sort -V | tail -n1)" = "$LOCAL" ] && [ "$LOCAL" != "$PUBLISHED" ]; then
           echo "changed=true" >> $GITHUB_OUTPUT
         else
           echo "changed=false" >> $GITHUB_OUTPUT
-          echo "Version unchanged, skipping publish"
+          echo "Version unchanged or older, skipping publish"
         fi
 
     - name: Setup Rust

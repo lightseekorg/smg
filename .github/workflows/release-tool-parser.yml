@@ -1,5 +1,8 @@
 name: Publish tool-parser
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]

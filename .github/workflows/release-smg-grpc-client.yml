@@ -1,5 +1,8 @@
 name: Publish smg-grpc-client
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
