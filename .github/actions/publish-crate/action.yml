@@ -44,6 +44,12 @@ runs:
       if: steps.check.outputs.changed == 'true'
       uses: dtolnay/rust-toolchain@stable
 
+    - name: Install protoc
+      if: steps.check.outputs.changed == 'true'
+      uses: arduino/setup-protoc@v3
+      with:
+        repo-token: ${{ github.token }}
+
     - name: Publish to crates.io
       if: steps.check.outputs.changed == 'true'
       shell: bash

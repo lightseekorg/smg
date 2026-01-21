@@ -5,7 +5,7 @@ resolver = "2"
 
 [workspace.dependencies]
 openai-protocol = { version = "1.0.0", path = "protocols" }
-smg-auth = { version = "1.0.0", path = "auth", package = "auth" }
+smg-auth = { version = "1.0.0", path = "auth" }
 smg-mcp = { version = "1.0.0", path = "mcp" }
 smg-data-connector = { version = "1.0.0", path = "data_connector", package = "data-connector" }
 smg-wasm = { version = "1.0.0", path = "wasm", package = "smg-wasm" }
