@@ -34,7 +34,7 @@ jobs:
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           sparse-checkout: .github/actions/check-ci
       - id: check
@@ -50,7 +50,7 @@ jobs:
        contains(github.event.pull_request.labels.*.name, 'router-benchmark'))
     runs-on: 4-gpu-a10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 100
 

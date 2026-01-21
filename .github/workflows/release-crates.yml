@@ -38,7 +38,7 @@ jobs:
           - crate: llm-tokenizer
             path: tokenizer
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/publish-crate
         with:
           crate: ${{ matrix.crate }}
@@ -64,7 +64,7 @@ jobs:
           - crate: smg-mesh
             path: mesh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/publish-crate
         with:
           crate: ${{ matrix.crate }}
@@ -76,7 +76,7 @@ jobs:
     needs: tier2
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/publish-crate
         with:
           crate: smg
