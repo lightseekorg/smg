@@ -97,7 +97,7 @@ tracing-opentelemetry = "0.28"
 kube = { version = "1.1.0", features = ["runtime", "derive"] }
 k8s-openapi = { version = "0.25.0", features = ["v1_33"] }
 metrics = "0.24.2"
-metrics-exporter-prometheus = "0.17.0"
+metrics-exporter-prometheus = "0.18.1"
 regex = "1.10"
 memchr = "2.7"
 url = "2.5.4"
