@@ -21,7 +21,7 @@
 /data_connector @key4ng
 /grpc_client @CatherineSue @slin1237
 /kv_index @slin1237
-/mcp @key4ng @slin1237
+/mcp @key4ng @CatherineSue @slin1237
 /mesh @slin1237 @tonyluj
 /multimodal @slin1237 @CatherineSue
 /protocols @CatherineSue @key4ng
