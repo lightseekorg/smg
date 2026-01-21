@@ -24,6 +24,8 @@ env:
 jobs:
   check-ci:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
     steps:
@@ -37,6 +39,8 @@ jobs:
     needs: check-ci
     if: needs.check-ci.outputs.should_run == 'true'
     runs-on: 4-gpu-a10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,6 +77,8 @@ jobs:
   python-unit-tests:
     needs: build-wheel
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -102,6 +108,8 @@ jobs:
     needs: check-ci
     if: needs.check-ci.outputs.should_run == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -144,6 +152,8 @@ jobs:
     name: ${{ matrix.name }}
     needs: [check-ci, build-wheel]
     if: needs.check-ci.outputs.should_run == 'true'
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -285,6 +295,8 @@ jobs:
     needs: check-ci
     if: needs.check-ci.outputs.should_run == 'true'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -308,6 +320,7 @@ jobs:
     needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e, docker-build-test]
     if: always()
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       - name: Check CI result
         run: |
@@ -325,7 +338,8 @@ jobs:
     needs: gateway-e2e
     runs-on: ubuntu-latest
     if: success()
-
+    permissions:
+      contents: read
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
