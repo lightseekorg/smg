@@ -26,8 +26,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt-multi-thread", "time"] }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
-wasmtime = { version = "38.0", features = ["component-model", "async"] }
-wasmtime-wasi = "38.0"
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
