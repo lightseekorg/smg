@@ -1,7 +1,17 @@
 [package]
 name = "smg"
-version = "0.3.2"
+version = "1.0.0"
 edition = "2021"
+description = "High-performance model-routing gateway for large-scale LLM deployments"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+    "Keyang Ru <rukeyang@gmail.com>",
+]
+keywords = ["llm", "inference", "gateway", "load-balancer", "openai"]
+categories = ["web-programming", "network-programming"]
 
 [features]
 default = ["grpc-client"]

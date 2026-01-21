@@ -1,6 +1,6 @@
 [package]
 name = "tool-parser"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Tool/function call parser for LLM model outputs"
 license = "Apache-2.0"

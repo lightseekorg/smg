@@ -1,14 +1,17 @@
 [package]
 name = "data-connector"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Storage backends for conversations and responses"
 license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
 authors = [
     "Simo Lin <linsimo.mark@gmail.com>",
     "Chang Su <mckvtl@gmail.com>",
     "Keyang Ru <rukeyang@gmail.com>",
 ]
+keywords = ["storage", "database", "postgres", "redis", "oracle"]
+categories = ["database", "asynchronous"]
 
 [dependencies]
 async-trait.workspace = true
