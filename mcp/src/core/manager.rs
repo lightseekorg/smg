@@ -30,12 +30,13 @@ use rmcp::{
 use serde_json::Map;
 use tracing::{debug, error, info, warn};
 
-use crate::{
+use super::{
     config::{McpConfig, McpProxyConfig, McpServerConfig, McpTransport, Prompt, RawResource, Tool},
-    connection_pool::McpConnectionPool,
+    pool::McpConnectionPool,
+};
+use crate::{
     error::{McpError, McpResult},
-    inventory::ToolInventory,
-    tool_args::ToolArgs,
+    inventory::{ToolArgs, ToolInventory},
 };
 
 /// Type alias for MCP client
@@ -829,7 +830,7 @@ impl McpManager {
 
             McpTransport::Sse { url, token } => {
                 // Resolve proxy configuration
-                let proxy_config = crate::proxy::resolve_proxy_config(config, global_proxy);
+                let proxy_config = super::proxy::resolve_proxy_config(config, global_proxy);
 
                 // Create HTTP client with proxy support
                 let client = if token.is_some() {
@@ -838,7 +839,7 @@ impl McpManager {
 
                     // Apply proxy configuration using proxy.rs helper
                     if let Some(proxy_cfg) = proxy_config {
-                        builder = crate::proxy::apply_proxy_to_builder(builder, proxy_cfg)?;
+                        builder = super::proxy::apply_proxy_to_builder(builder, proxy_cfg)?;
                     }
 
                     // Add Authorization header
@@ -857,7 +858,7 @@ impl McpManager {
                         .build()
                         .map_err(|e| McpError::Transport(format!("build HTTP client: {}", e)))?
                 } else {
-                    crate::proxy::create_http_client(proxy_config)?
+                    super::proxy::create_http_client(proxy_config)?
                 };
 
                 let cfg = SseClientConfig {
@@ -879,7 +880,7 @@ impl McpManager {
 
             McpTransport::Streamable { url, token } => {
                 // Note: Streamable transport doesn't support proxy yet
-                let _proxy_config = crate::proxy::resolve_proxy_config(config, global_proxy);
+                let _proxy_config = super::proxy::resolve_proxy_config(config, global_proxy);
                 if _proxy_config.is_some() {
                     warn!(
                         "Proxy configuration detected but not supported for Streamable transport on server '{}'",
@@ -1022,7 +1023,7 @@ pub struct McpManagerStats {
     /// Number of static servers registered
     pub static_server_count: usize,
     /// Connection pool statistics
-    pub pool_stats: crate::connection_pool::PoolStats,
+    pub pool_stats: super::pool::PoolStats,
     /// Number of cached tools
     pub tool_count: usize,
     /// Number of cached prompts

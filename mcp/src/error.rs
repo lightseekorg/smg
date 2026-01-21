@@ -1,7 +1,7 @@
 //! MCP error types.
 //!
 //! Defines error variants for MCP operations including connection, tool execution,
-//! and configuration errors.
+//! configuration errors, and approval errors.
 
 use thiserror::Error;
 
@@ -39,6 +39,18 @@ pub enum McpError {
     #[error("Invalid arguments: {0}")]
     InvalidArguments(String),
 
+    #[error("Approval error: {0}")]
+    Approval(#[from] ApprovalError),
+
+    #[error("Server access denied: {0}")]
+    ServerAccessDenied(String),
+
+    #[error("Tool execution denied: {0}")]
+    ToolDenied(String),
+
+    #[error("Rate limit exceeded: {0}")]
+    RateLimitExceeded(String),
+
     #[error(transparent)]
     Sdk(#[from] Box<rmcp::RmcpError>),
 
@@ -47,4 +59,28 @@ pub enum McpError {
 
     #[error(transparent)]
     Http(#[from] reqwest::Error),
+}
+
+/// Approval-specific errors.
+#[derive(Debug, Error)]
+pub enum ApprovalError {
+    /// Approval request not found (already resolved or expired).
+    #[error("Approval not found: {0}")]
+    NotFound(String),
+
+    /// Approval request already pending.
+    #[error("Approval already pending: {0}")]
+    AlreadyPending(String),
+
+    /// Response channel was closed.
+    #[error("Approval channel closed")]
+    ChannelClosed,
+
+    /// Approval request timed out.
+    #[error("Approval timed out: {0}")]
+    Timeout(String),
+
+    /// Policy evaluation failed.
+    #[error("Policy evaluation failed: {0}")]
+    PolicyError(String),
 }
