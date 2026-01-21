@@ -18,22 +18,30 @@ runs:
         LABEL="${{ github.event.label.name }}"
         HAS_RUN_CI="${{ contains(github.event.pull_request.labels.*.name, 'run-ci') }}"
 
-        if [[ "$EVENT" != "pull_request" ]]; then
-          echo "should_run=true" >> $GITHUB_OUTPUT
-          echo "✅ CI allowed: not a pull request ($EVENT)"
+        should_run="false"
+        reason=""
+
+        if [[ "$EVENT" != "pull_request" && "$EVENT" != "pull_request_target" ]]; then
+          should_run="true"
+          reason="not a pull request ($EVENT)"
         elif [[ "$ACTOR" == "dependabot[bot]" ]]; then
-          echo "should_run=true" >> $GITHUB_OUTPUT
-          echo "✅ CI allowed: Dependabot"
+          should_run="true"
+          reason="Dependabot"
         elif [[ "$AUTHOR" =~ ^(OWNER|MEMBER|COLLABORATOR)$ ]]; then
-          echo "should_run=true" >> $GITHUB_OUTPUT
-          echo "✅ CI allowed: trusted contributor ($AUTHOR)"
+          should_run="true"
+          reason="trusted contributor ($AUTHOR)"
         elif [[ "${{ github.event.action }}" == "labeled" && "$LABEL" == "run-ci" ]]; then
-          echo "should_run=true" >> $GITHUB_OUTPUT
-          echo "✅ CI allowed: run-ci label added"
+          should_run="true"
+          reason="run-ci label added"
         elif [[ "$HAS_RUN_CI" == "true" ]]; then
-          echo "should_run=true" >> $GITHUB_OUTPUT
-          echo "✅ CI allowed: has run-ci label"
+          should_run="true"
+          reason="has run-ci label"
+        fi
+
+        echo "should_run=${should_run}" >> $GITHUB_OUTPUT
+
+        if [[ "$should_run" == "true" ]]; then
+          echo "✅ CI allowed: $reason"
         else
-          echo "should_run=false" >> $GITHUB_OUTPUT
           echo "::notice::CI skipped for external contributor ($AUTHOR). Add 'run-ci' label to run."
         fi

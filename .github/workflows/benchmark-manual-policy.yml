@@ -6,11 +6,9 @@ on:
     paths:
       - 'model_gateway/benches/manual_policy_benchmark.rs'
       - 'model_gateway/src/policies/**'
-  pull_request:
+  pull_request_target:
     branches: [ main ]
-    paths:
-      - 'model_gateway/benches/manual_policy_benchmark.rs'
-      - 'model_gateway/src/policies/**'
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * 0'
@@ -44,12 +42,13 @@ jobs:
     if: |
       github.repository == 'lightseekorg/smg' &&
       needs.check-ci.outputs.should_run == 'true' &&
-      (github.event_name != 'pull_request' ||
+      (github.event_name != 'pull_request_target' ||
        contains(github.event.pull_request.labels.*.name, 'router-benchmark'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 100
 
       - name: Setup Rust

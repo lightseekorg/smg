@@ -5,11 +5,9 @@ on:
     branches: [ main ]
     paths:
       - "**"
-  pull_request:
+  pull_request_target:
     branches: [ main ]
     types: [opened, synchronize, reopened, labeled]
-    paths:
-      - "**"
   workflow_dispatch:
 
 concurrency:
@@ -38,6 +36,8 @@ jobs:
     runs-on: 4-gpu-a10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
@@ -72,6 +72,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -99,6 +101,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
@@ -177,6 +181,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Clone SGLang repository
         run: |
@@ -279,6 +285,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -318,6 +326,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
     - name: Download benchmark results
       uses: actions/download-artifact@v4
