@@ -1,0 +1,18 @@
+name: Publish auth
+
+on:
+  push:
+    branches: [main]
+    paths: [auth/Cargo.toml]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/publish-crate
+        with:
+          crate: auth
+          path: auth
+          token: ${{ secrets.CARGO_REGISTRY_TOKEN }}

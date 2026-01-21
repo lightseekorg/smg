@@ -1,0 +1,18 @@
+name: Publish data-connector
+
+on:
+  push:
+    branches: [main]
+    paths: [data_connector/Cargo.toml]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/publish-crate
+        with:
+          crate: data-connector
+          path: data_connector
+          token: ${{ secrets.CARGO_REGISTRY_TOKEN }}

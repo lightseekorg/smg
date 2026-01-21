@@ -1,0 +1,54 @@
+name: 'Publish Crate'
+description: 'Check version and publish a Rust crate to crates.io'
+
+inputs:
+  crate:
+    description: 'Crate name on crates.io'
+    required: true
+  path:
+    description: 'Path to crate directory'
+    required: true
+  token:
+    description: 'Crates.io registry token'
+    required: true
+
+outputs:
+  published:
+    description: 'Whether the crate was published'
+    value: ${{ steps.check.outputs.changed }}
+  version:
+    description: 'The published version'
+    value: ${{ steps.check.outputs.local }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check if version changed
+      id: check
+      shell: bash
+      run: |
+        LOCAL=$(grep '^version = ' ${{ inputs.path }}/Cargo.toml | head -1 | cut -d'"' -f2)
+        PUBLISHED=$(curl -s "https://crates.io/api/v1/crates/${{ inputs.crate }}" | jq -r '.crate.max_version // "0.0.0"')
+        echo "local=${LOCAL}" >> $GITHUB_OUTPUT
+        echo "published=${PUBLISHED}" >> $GITHUB_OUTPUT
+        echo "${{ inputs.crate }}: local=${LOCAL}, published=${PUBLISHED}"
+        if [ "${LOCAL}" != "${PUBLISHED}" ]; then
+          echo "changed=true" >> $GITHUB_OUTPUT
+        else
+          echo "changed=false" >> $GITHUB_OUTPUT
+          echo "Version unchanged, skipping publish"
+        fi
+
+    - name: Setup Rust
+      if: steps.check.outputs.changed == 'true'
+      uses: dtolnay/rust-action@stable
+
+    - name: Publish to crates.io
+      if: steps.check.outputs.changed == 'true'
+      shell: bash
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ inputs.token }}
+      run: |
+        cd ${{ inputs.path }}
+        cargo publish
+        echo "Published ${{ inputs.crate }}@${{ steps.check.outputs.local }}"
