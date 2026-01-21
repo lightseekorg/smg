@@ -64,16 +64,16 @@ tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 
 # Workspace crates
-openai-protocol = { path = "../protocols", features = ["axum"] }
-reasoning-parser = { path = "../reasoning_parser" }
-tool-parser = { path = "../tool_parser" }
-wfaas = { path = "../workflow" }
-llm-tokenizer = { path = "../tokenizer" }
+openai-protocol = { version = "1.0.0", path = "../protocols", features = ["axum"] }
+reasoning-parser = { version = "1.0.0", path = "../reasoning_parser" }
+tool-parser = { version = "1.0.0", path = "../tool_parser" }
+wfaas = { version = "1.0.0", path = "../workflow" }
+llm-tokenizer = { version = "1.0.0", path = "../tokenizer" }
 smg-auth.workspace = true
 smg-mcp.workspace = true
-kv-index = { path = "../kv_index", package = "kv-index" }
+kv-index = { version = "1.0.0", path = "../kv_index", package = "kv-index" }
 smg-data-connector.workspace = true
-llm-multimodal = { path = "../multimodal" }
+llm-multimodal = { version = "1.0.0", path = "../multimodal" }
 smg-wasm.workspace = true
 smg-mesh.workspace = true
 smg-grpc-client.workspace = true

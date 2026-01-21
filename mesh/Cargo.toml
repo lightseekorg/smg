@@ -43,7 +43,7 @@ tonic = { version = "0.14.2", features = ["gzip", "transport"] }
 tonic-prost = "0.14.2"
 
 # Workspace crates
-kv-index = { path = "../kv_index", package = "kv-index" }
+kv-index = { version = "1.0.0", path = "../kv_index", package = "kv-index" }
 
 [build-dependencies]
 tonic-prost-build = "0.14.2"

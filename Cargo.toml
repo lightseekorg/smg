@@ -4,13 +4,13 @@ exclude = ["bindings/python", "bindings/golang"]
 resolver = "2"
 
 [workspace.dependencies]
-openai-protocol = { path = "protocols" }
-smg-auth = { path = "auth", package = "auth" }
-smg-mcp = { path = "mcp" }
-smg-data-connector = { path = "data_connector", package = "data-connector" }
-smg-wasm = { path = "wasm", package = "smg-wasm" }
-smg-mesh = { path = "mesh", package = "smg-mesh" }
-smg-grpc-client = { path = "grpc_client" }
+openai-protocol = { version = "1.0.0", path = "protocols" }
+smg-auth = { version = "1.0.0", path = "auth", package = "auth" }
+smg-mcp = { version = "1.0.0", path = "mcp" }
+smg-data-connector = { version = "1.0.0", path = "data_connector", package = "data-connector" }
+smg-wasm = { version = "1.0.0", path = "wasm", package = "smg-wasm" }
+smg-mesh = { version = "1.0.0", path = "mesh", package = "smg-mesh" }
+smg-grpc-client = { version = "1.0.0", path = "grpc_client" }
 
 # Shared dependencies
 anyhow = "1.0"
