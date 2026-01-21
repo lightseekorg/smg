@@ -8,9 +8,13 @@ on:
       - 'model_gateway/src/routers/**'
       - 'model_gateway/src/core/**'
       - 'model_gateway/src/middleware.rs'
-  pull_request_target:
+  pull_request:
     branches: [ main ]
-    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - 'model_gateway/benches/request_processing.rs'
+      - 'model_gateway/src/routers/**'
+      - 'model_gateway/src/core/**'
+      - 'model_gateway/src/middleware.rs'
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * 0'
@@ -44,13 +48,12 @@ jobs:
     if: |
       github.repository == 'lightseekorg/smg' &&
       needs.check-ci.outputs.should_run == 'true' &&
-      (github.event_name != 'pull_request_target' ||
+      (github.event_name != 'pull_request' ||
        contains(github.event.pull_request.labels.*.name, 'router-benchmark'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 100
 
       - name: Setup Rust

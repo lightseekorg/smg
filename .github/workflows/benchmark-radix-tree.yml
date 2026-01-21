@@ -7,9 +7,12 @@ on:
       - 'model_gateway/benches/radix_tree_benchmark.rs'
       - 'kv_index/**'
       - 'model_gateway/src/policies/tree.rs'
-  pull_request_target:
+  pull_request:
     branches: [ main ]
-    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - 'model_gateway/benches/radix_tree_benchmark.rs'
+      - 'kv_index/**'
+      - 'model_gateway/src/policies/tree.rs'
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * 0'
@@ -43,13 +46,12 @@ jobs:
     if: |
       github.repository == 'lightseekorg/smg' &&
       needs.check-ci.outputs.should_run == 'true' &&
-      (github.event_name != 'pull_request_target' ||
+      (github.event_name != 'pull_request' ||
        contains(github.event.pull_request.labels.*.name, 'router-benchmark'))
     runs-on: 4-gpu-a10
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 100
 
       - name: Setup Rust

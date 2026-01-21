@@ -21,7 +21,7 @@ runs:
         should_run="false"
         reason=""
 
-        if [[ "$EVENT" != "pull_request" && "$EVENT" != "pull_request_target" ]]; then
+        if [[ "$EVENT" != "pull_request" ]]; then
           should_run="true"
           reason="not a pull request ($EVENT)"
         elif [[ "$ACTOR" == "dependabot[bot]" ]]; then
