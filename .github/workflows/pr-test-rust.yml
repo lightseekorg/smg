@@ -21,11 +21,20 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
+  check-ci:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions/check-ci
+      - id: check
+        uses: ./.github/actions/check-ci
+
   build-wheel:
-    if: |
-      github.event_name != 'pull_request' ||
-      (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'run-ci')) ||
-      (github.event.action == 'labeled' && github.event.label.name == 'run-ci')
+    needs: check-ci
+    if: needs.check-ci.outputs.should_run == 'true'
     runs-on: 4-gpu-a10
     steps:
       - uses: actions/checkout@v4
@@ -85,10 +94,8 @@ jobs:
           pytest -q tests --cov=smg --cov-config=.coveragerc --cov-report=term-missing --cov-fail-under=80
 
   unit-tests:
-    if: |
-      github.event_name != 'pull_request' ||
-      (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'run-ci')) ||
-      (github.event.action == 'labeled' && github.event.label.name == 'run-ci')
+    needs: check-ci
+    if: needs.check-ci.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -128,11 +135,8 @@ jobs:
 
   gateway-e2e:
     name: ${{ matrix.name }}
-    needs: build-wheel
-    if: |
-      github.event_name != 'pull_request' ||
-      (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'run-ci')) ||
-      (github.event.action == 'labeled' && github.event.label.name == 'run-ci')
+    needs: [check-ci, build-wheel]
+    if: needs.check-ci.outputs.should_run == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -269,10 +273,8 @@ jobs:
           docker rm oracle-db || true
 
   docker-build-test:
-    if: |
-      github.event_name != 'pull_request' ||
-      (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'run-ci')) ||
-      (github.event.action == 'labeled' && github.event.label.name == 'run-ci')
+    needs: check-ci
+    if: needs.check-ci.outputs.should_run == 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -292,11 +294,21 @@ jobs:
           cache-to: type=gha,mode=max
 
   finish:
-    needs: [build-wheel, python-unit-tests, unit-tests, gateway-e2e, docker-build-test]
+    needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e, docker-build-test]
+    if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Finish
-        run: echo "This is an empty step to ensure that all jobs are completed."
+      - name: Check CI result
+        run: |
+          if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
+            echo "CI was skipped (external contributor without run-ci label)"
+            exit 0
+          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.docker-build-test.result }}" == "failure" ]]; then
+            echo "One or more jobs failed"
+            exit 1
+          else
+            echo "All jobs completed successfully"
+          fi
 
   summarize-benchmarks:
     needs: gateway-e2e

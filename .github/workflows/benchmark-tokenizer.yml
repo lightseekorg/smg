@@ -27,16 +27,25 @@ permissions:
   contents: read
 
 jobs:
+  check-ci:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/actions/check-ci
+      - id: check
+        uses: ./.github/actions/check-ci
+
   benchmark:
     name: Tokenizer
+    needs: check-ci
     if: |
       github.repository == 'lightseekorg/smg' &&
-      (github.event_name == 'push' ||
-       github.event_name == 'schedule' ||
-       github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'pull_request' &&
-        contains(github.event.pull_request.labels.*.name, 'router-benchmark') &&
-        contains(github.event.pull_request.labels.*.name, 'run-ci')))
+      needs.check-ci.outputs.should_run == 'true' &&
+      (github.event_name != 'pull_request' ||
+       contains(github.event.pull_request.labels.*.name, 'router-benchmark'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

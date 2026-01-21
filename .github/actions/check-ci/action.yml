@@ -1,0 +1,39 @@
+name: 'Check CI Gate'
+description: 'Determine if CI should run based on author association and labels'
+
+outputs:
+  should_run:
+    description: 'Whether CI should run'
+    value: ${{ steps.check.outputs.should_run }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: check
+      shell: bash
+      run: |
+        EVENT="${{ github.event_name }}"
+        AUTHOR="${{ github.event.pull_request.author_association }}"
+        ACTOR="${{ github.actor }}"
+        LABEL="${{ github.event.label.name }}"
+        HAS_RUN_CI="${{ contains(github.event.pull_request.labels.*.name, 'run-ci') }}"
+
+        if [[ "$EVENT" != "pull_request" ]]; then
+          echo "should_run=true" >> $GITHUB_OUTPUT
+          echo "✅ CI allowed: not a pull request ($EVENT)"
+        elif [[ "$ACTOR" == "dependabot[bot]" ]]; then
+          echo "should_run=true" >> $GITHUB_OUTPUT
+          echo "✅ CI allowed: Dependabot"
+        elif [[ "$AUTHOR" =~ ^(OWNER|MEMBER|COLLABORATOR)$ ]]; then
+          echo "should_run=true" >> $GITHUB_OUTPUT
+          echo "✅ CI allowed: trusted contributor ($AUTHOR)"
+        elif [[ "${{ github.event.action }}" == "labeled" && "$LABEL" == "run-ci" ]]; then
+          echo "should_run=true" >> $GITHUB_OUTPUT
+          echo "✅ CI allowed: run-ci label added"
+        elif [[ "$HAS_RUN_CI" == "true" ]]; then
+          echo "should_run=true" >> $GITHUB_OUTPUT
+          echo "✅ CI allowed: has run-ci label"
+        else
+          echo "should_run=false" >> $GITHUB_OUTPUT
+          echo "::notice::CI skipped for external contributor ($AUTHOR). Add 'run-ci' label to run."
+        fi
