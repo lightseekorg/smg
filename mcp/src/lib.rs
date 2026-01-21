@@ -15,6 +15,7 @@
 pub mod annotations;
 pub mod error;
 pub mod tenant;
+pub mod transform;
 
 // Subsystems
 pub mod approval;
@@ -44,3 +45,5 @@ pub use inventory::{
     AliasTarget, ArgMapping, QualifiedToolName, ToolCategory, ToolEntry, ToolInventory,
 };
 pub use tenant::{SessionId, TenantContext, TenantId};
+// Re-export from transform
+pub use transform::{ResponseFormat, ResponseTransformer};
