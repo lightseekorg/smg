@@ -42,7 +42,7 @@ runs:
 
     - name: Setup Rust
       if: steps.check.outputs.changed == 'true'
-      uses: dtolnay/rust-action@stable
+      uses: dtolnay/rust-toolchain@stable
 
     - name: Publish to crates.io
       if: steps.check.outputs.changed == 'true'
