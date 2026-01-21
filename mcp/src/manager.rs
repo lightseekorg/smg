@@ -298,35 +298,78 @@ impl McpManager {
         self.static_clients.contains_key(server_key)
     }
 
-    /// Call a tool by name with automatic type coercion
-    ///
-    /// Accepts either JSON string or parsed Map as arguments.
-    /// Automatically converts string numbers to actual numbers based on tool schema.
+    /// Call a tool by name with automatic type coercion.
+    /// On collision, calls the first registered server's tool.
     pub async fn call_tool(
         &self,
         tool_name: &str,
         args: impl Into<ToolArgs>,
     ) -> McpResult<CallToolResult> {
-        // Get tool info for schema and server
-        let (server_name, tool_info) = self
+        let (server_key, tool_info) = self
             .inventory
             .get_tool(tool_name)
             .ok_or_else(|| McpError::ToolNotFound(tool_name.to_string()))?;
 
-        // Convert args with type coercion based on schema
+        self.call_tool_impl(&server_key, tool_name, &tool_info, args)
+            .await
+    }
+
+    /// Get a tool by name.
+    pub fn get_tool(&self, tool_name: &str) -> Option<Tool> {
+        self.inventory
+            .get_tool(tool_name)
+            .map(|(_server_name, tool_info)| tool_info)
+    }
+
+    /// Get a tool by qualified name (server + tool name).
+    pub fn get_tool_qualified(&self, server_key: &str, tool_name: &str) -> Option<Tool> {
+        self.inventory.get_tool_qualified(server_key, tool_name)
+    }
+
+    /// Call a tool by qualified name (no ambiguity from name collisions).
+    pub async fn call_tool_qualified(
+        &self,
+        server_key: &str,
+        tool_name: &str,
+        args: impl Into<ToolArgs>,
+    ) -> McpResult<CallToolResult> {
+        let tool_info = self
+            .inventory
+            .get_tool_qualified(server_key, tool_name)
+            .ok_or_else(|| McpError::ToolNotFound(format!("{}:{}", server_key, tool_name)))?;
+
+        self.call_tool_impl(server_key, tool_name, &tool_info, args)
+            .await
+    }
+
+    /// Check if a tool exists by qualified name.
+    pub fn has_tool_qualified(&self, server_key: &str, tool_name: &str) -> bool {
+        self.inventory.has_tool_qualified(server_key, tool_name)
+    }
+
+    /// Get all servers that have a tool with the given name.
+    pub fn get_tool_servers(&self, tool_name: &str) -> Vec<String> {
+        self.inventory.get_tool_servers(tool_name)
+    }
+
+    async fn call_tool_impl(
+        &self,
+        server_key: &str,
+        tool_name: &str,
+        tool_info: &Tool,
+        args: impl Into<ToolArgs>,
+    ) -> McpResult<CallToolResult> {
         let tool_schema = Some(serde_json::Value::Object((*tool_info.input_schema).clone()));
         let args_map = args
             .into()
             .into_map(tool_schema.as_ref())
             .map_err(McpError::InvalidArguments)?;
 
-        // Get client for that server
         let client = self
-            .get_client(&server_name)
+            .get_client(server_key)
             .await
-            .ok_or_else(|| McpError::ServerNotFound(server_name.clone()))?;
+            .ok_or_else(|| McpError::ServerNotFound(server_key.to_string()))?;
 
-        // Call the tool
         let request = CallToolRequestParam {
             name: Cow::Owned(tool_name.to_string()),
             arguments: args_map,
@@ -336,13 +379,6 @@ impl McpManager {
             .call_tool(request)
             .await
             .map_err(|e| McpError::ToolExecution(format!("Failed to call tool: {}", e)))
-    }
-
-    /// Get a tool by name
-    pub fn get_tool(&self, tool_name: &str) -> Option<Tool> {
-        self.inventory
-            .get_tool(tool_name)
-            .map(|(_server_name, tool_info)| tool_info)
     }
 
     /// Get a prompt by name
