@@ -10,6 +10,9 @@ on:
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: gateway-tests-${{ github.ref }}
   cancel-in-progress: true

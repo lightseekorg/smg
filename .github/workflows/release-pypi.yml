@@ -8,6 +8,9 @@ on:
       - bindings/python/pyproject.toml
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: build on ${{ matrix.platform || matrix.os }} (${{ matrix.target }} - ${{ matrix.manylinux || 'auto' }})
