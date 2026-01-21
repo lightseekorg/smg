@@ -1,45 +1,23 @@
-//! MCP tool, prompt, and resource inventory.
+//! Qualified tool index with multi-key lookup.
 //!
 //! Thread-safe cache for MCP capabilities across all connected servers.
-//! Supports qualified tool names to handle tool name collisions across servers.
+//! Provides multiple indices for efficient lookup:
+//! - By qualified name (server + tool)
+//! - By simple name (with collision handling)
+//! - By server (for bulk operations)
+//! - By tenant (for multi-tenant isolation)
+//! - By category (for filtering)
 
-use std::{collections::HashSet, fmt};
+use std::collections::HashSet;
 
 use dashmap::DashMap;
 use tracing::warn;
 
-use crate::config::{Prompt, RawResource, Tool};
-
-/// Qualified tool name combining server key and tool name.
-///
-/// Uniquely identifies a tool across multiple MCP servers, preventing
-/// collisions when different servers expose tools with the same name.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct QualifiedToolName {
-    pub server_key: String,
-    pub tool_name: String,
-}
-
-impl QualifiedToolName {
-    pub fn new(server_key: impl Into<String>, tool_name: impl Into<String>) -> Self {
-        Self {
-            server_key: server_key.into(),
-            tool_name: tool_name.into(),
-        }
-    }
-}
-
-impl fmt::Display for QualifiedToolName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.server_key, self.tool_name)
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct ToolEntry {
-    pub tool: Tool,
-    pub server_key: String,
-}
+use super::types::{QualifiedToolName, ToolCategory, ToolEntry};
+use crate::{
+    core::config::{Prompt, RawResource, Tool},
+    tenant::TenantId,
+};
 
 /// Cached prompt with metadata
 #[derive(Clone)]
@@ -57,14 +35,29 @@ pub(crate) struct CachedResource {
 
 /// Thread-safe cache for MCP tools, prompts, and resources.
 ///
-/// Handles tool name collisions: when multiple servers register the same tool name,
-/// both are stored. Simple lookups return the first registered; qualified lookups
-/// can access any specific server's tool.
+/// Provides multiple indices for efficient lookup:
+/// - By qualified name (server + tool): O(1) primary lookup
+/// - By simple name (with collision handling): O(1) with first-registered priority
+/// - By server: O(tools_per_server) for bulk operations
+/// - By tenant: O(tools_per_tenant) for multi-tenant isolation
+/// - By category: O(tools_per_category) for filtering
+/// - By alias: O(1) for alias resolution
 pub struct ToolInventory {
+    /// Primary index: qualified name → tool entry
     tools_by_qualified: DashMap<QualifiedToolName, ToolEntry>,
+    /// Simple name → list of qualified names (first is primary)
     tools_by_simple_name: DashMap<String, Vec<QualifiedToolName>>,
+    /// Server key → set of tool names
     tools_by_server: DashMap<String, HashSet<String>>,
+    /// Tenant ID → set of qualified names
+    tools_by_tenant: DashMap<TenantId, HashSet<QualifiedToolName>>,
+    /// Category → set of qualified names
+    tools_by_category: DashMap<ToolCategory, HashSet<QualifiedToolName>>,
+    /// Alias name → target qualified name
+    aliases: DashMap<String, QualifiedToolName>,
+    /// Prompts by name
     prompts: DashMap<String, CachedPrompt>,
+    /// Resources by URI
     resources: DashMap<String, CachedResource>,
 }
 
@@ -75,6 +68,9 @@ impl ToolInventory {
             tools_by_qualified: DashMap::new(),
             tools_by_simple_name: DashMap::new(),
             tools_by_server: DashMap::new(),
+            tools_by_tenant: DashMap::new(),
+            tools_by_category: DashMap::new(),
+            aliases: DashMap::new(),
             prompts: DashMap::new(),
             resources: DashMap::new(),
         }
@@ -94,7 +90,7 @@ impl ToolInventory {
         let qualified = qualified_names.first()?;
         self.tools_by_qualified
             .get(qualified)
-            .map(|entry| (entry.server_key.clone(), entry.tool.clone()))
+            .map(|entry| (entry.server_key().to_string(), entry.tool.clone()))
     }
 
     /// Check if a tool with the given simple name is registered.
@@ -103,8 +99,19 @@ impl ToolInventory {
     }
 
     /// Insert a tool. On collision, both are stored; first registered is "primary".
-    pub fn insert_tool(&self, tool_name: String, server_key: String, tool: Tool) {
-        let qualified = QualifiedToolName::new(&server_key, &tool_name);
+    ///
+    /// Note: The `tool_name` parameter is kept for API compatibility but the tool's
+    /// internal name field is used. They should match for consistency.
+    pub fn insert_tool(&self, _tool_name: String, server_key: String, tool: Tool) {
+        let entry = ToolEntry::from_server_tool(&server_key, tool);
+        self.insert_entry(entry);
+    }
+
+    /// Insert a full tool entry with all metadata.
+    pub fn insert_entry(&self, entry: ToolEntry) {
+        let qualified = entry.qualified_name.clone();
+        let tool_name = qualified.tool_name.clone();
+        let server_key = qualified.server_key.clone();
 
         // Log collision warning (single lookup)
         if let Some(existing) = self.tools_by_simple_name.get(&tool_name) {
@@ -118,14 +125,24 @@ impl ToolInventory {
             }
         }
 
-        self.tools_by_qualified.insert(
-            qualified.clone(),
-            ToolEntry {
-                tool,
-                server_key: server_key.clone(),
-            },
-        );
+        // Update category index
+        self.tools_by_category
+            .entry(entry.category)
+            .or_default()
+            .insert(qualified.clone());
 
+        // Update tenant index if present
+        if let Some(ref tenant_id) = entry.tenant_id {
+            self.tools_by_tenant
+                .entry(tenant_id.clone())
+                .or_default()
+                .insert(qualified.clone());
+        }
+
+        // Insert into primary index
+        self.tools_by_qualified.insert(qualified.clone(), entry);
+
+        // Update simple name index
         self.tools_by_simple_name
             .entry(tool_name.clone())
             .and_modify(|v| {
@@ -135,10 +152,76 @@ impl ToolInventory {
             })
             .or_insert_with(|| vec![qualified]);
 
+        // Update server index
         self.tools_by_server
             .entry(server_key)
             .or_default()
             .insert(tool_name);
+    }
+
+    /// Get the full tool entry by qualified name.
+    pub fn get_entry(&self, server_key: &str, tool_name: &str) -> Option<ToolEntry> {
+        let qualified = QualifiedToolName::new(server_key, tool_name);
+        self.tools_by_qualified.get(&qualified).map(|e| e.clone())
+    }
+
+    /// Register an alias for a tool.
+    pub fn register_alias(&self, alias_name: String, target: QualifiedToolName) {
+        self.aliases.insert(alias_name, target);
+    }
+
+    /// Resolve an alias to its target qualified name.
+    pub fn resolve_alias(&self, alias_name: &str) -> Option<QualifiedToolName> {
+        self.aliases.get(alias_name).map(|e| e.clone())
+    }
+
+    /// Get a tool by name, resolving aliases if necessary.
+    pub fn get_tool_or_alias(&self, name: &str) -> Option<(String, Tool)> {
+        // First try direct lookup
+        if let Some(result) = self.get_tool(name) {
+            return Some(result);
+        }
+        // Then try alias resolution
+        if let Some(target) = self.resolve_alias(name) {
+            return self
+                .get_tool_qualified(&target.server_key, &target.tool_name)
+                .map(|tool| (target.server_key.clone(), tool));
+        }
+        None
+    }
+
+    /// List all tools for a specific tenant.
+    pub fn list_by_tenant(&self, tenant_id: &TenantId) -> Vec<ToolEntry> {
+        self.tools_by_tenant
+            .get(tenant_id)
+            .map(|qualified_names| {
+                qualified_names
+                    .iter()
+                    .filter_map(|q| self.tools_by_qualified.get(q).map(|e| e.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// List all tools in a specific category.
+    pub fn list_by_category(&self, category: ToolCategory) -> Vec<ToolEntry> {
+        self.tools_by_category
+            .get(&category)
+            .map(|qualified_names| {
+                qualified_names
+                    .iter()
+                    .filter_map(|q| self.tools_by_qualified.get(q).map(|e| e.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// List all registered aliases.
+    pub fn list_aliases(&self) -> Vec<(String, QualifiedToolName)> {
+        self.aliases
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect()
     }
 
     /// Returns all tools. If collisions exist, all versions are included.
@@ -149,7 +232,7 @@ impl ToolInventory {
                 let (qualified, tool_entry) = entry.pair();
                 (
                     qualified.tool_name.clone(),
-                    tool_entry.server_key.clone(),
+                    tool_entry.server_key().to_string(),
                     tool_entry.tool.clone(),
                 )
             })
@@ -280,8 +363,22 @@ impl ToolInventory {
         if let Some((_, tool_names)) = self.tools_by_server.remove(server_key) {
             for tool_name in tool_names {
                 let qualified = QualifiedToolName::new(server_key, &tool_name);
-                self.tools_by_qualified.remove(&qualified);
 
+                // Get entry before removing to access metadata
+                if let Some((_, entry)) = self.tools_by_qualified.remove(&qualified) {
+                    // Remove from category index
+                    if let Some(mut cat_set) = self.tools_by_category.get_mut(&entry.category) {
+                        cat_set.remove(&qualified);
+                    }
+                    // Remove from tenant index
+                    if let Some(ref tenant_id) = entry.tenant_id {
+                        if let Some(mut tenant_set) = self.tools_by_tenant.get_mut(tenant_id) {
+                            tenant_set.remove(&qualified);
+                        }
+                    }
+                }
+
+                // Remove from simple name index
                 if let Some(mut entry) = self.tools_by_simple_name.get_mut(&tool_name) {
                     entry.retain(|q| q != &qualified);
                 }
@@ -289,6 +386,10 @@ impl ToolInventory {
                     .remove_if(&tool_name, |_, v| v.is_empty());
             }
         }
+
+        // Remove aliases that point to this server
+        self.aliases
+            .retain(|_, target| target.server_key != server_key);
 
         self.prompts
             .retain(|_, cached| cached.server_name != server_key);
@@ -315,15 +416,45 @@ impl ToolInventory {
         self.tools_by_qualified.clear();
         self.tools_by_simple_name.clear();
         self.tools_by_server.clear();
+        self.tools_by_tenant.clear();
+        self.tools_by_category.clear();
+        self.aliases.clear();
         self.prompts.clear();
         self.resources.clear();
     }
+
+    /// Get counts for all indices (for diagnostics).
+    pub fn index_counts(&self) -> IndexCounts {
+        IndexCounts {
+            tools: self.tools_by_qualified.len(),
+            unique_names: self.tools_by_simple_name.len(),
+            servers: self.tools_by_server.len(),
+            tenants: self.tools_by_tenant.len(),
+            categories: self.tools_by_category.len(),
+            aliases: self.aliases.len(),
+            prompts: self.prompts.len(),
+            resources: self.resources.len(),
+        }
+    }
+}
+
+/// Index statistics for diagnostics.
+#[derive(Debug, Clone)]
+pub struct IndexCounts {
+    pub tools: usize,
+    pub unique_names: usize,
+    pub servers: usize,
+    pub tenants: usize,
+    pub categories: usize,
+    pub aliases: usize,
+    pub prompts: usize,
+    pub resources: usize,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Prompt, RawResource, Tool};
+    use crate::core::config::{Prompt, RawResource, Tool};
 
     // Helper to create a test tool
     fn create_test_tool(name: &str) -> Tool {
@@ -766,5 +897,196 @@ mod tests {
         // Simple name list shouldn't have duplicates
         let servers = inventory.get_tool_servers("my_tool");
         assert_eq!(servers.len(), 1);
+    }
+
+    #[test]
+    fn test_insert_entry_with_category() {
+        use crate::inventory::ToolCategory;
+
+        let inventory = ToolInventory::new();
+        let tool = create_test_tool("dynamic_tool");
+        let entry = ToolEntry::from_server_tool("dynamic_server", tool)
+            .with_category(ToolCategory::Dynamic);
+
+        inventory.insert_entry(entry);
+
+        let dynamic_tools = inventory.list_by_category(ToolCategory::Dynamic);
+        assert_eq!(dynamic_tools.len(), 1);
+        assert_eq!(dynamic_tools[0].tool_name(), "dynamic_tool");
+
+        let static_tools = inventory.list_by_category(ToolCategory::Static);
+        assert_eq!(static_tools.len(), 0);
+    }
+
+    #[test]
+    fn test_insert_entry_with_tenant() {
+        use crate::tenant::TenantId;
+
+        let inventory = ToolInventory::new();
+        let tenant = TenantId::new("tenant-123");
+
+        let tool = create_test_tool("tenant_tool");
+        let entry = ToolEntry::from_server_tool("server", tool).with_tenant(tenant.clone());
+
+        inventory.insert_entry(entry);
+
+        let tenant_tools = inventory.list_by_tenant(&tenant);
+        assert_eq!(tenant_tools.len(), 1);
+        assert_eq!(tenant_tools[0].tool_name(), "tenant_tool");
+
+        let other_tenant = TenantId::new("other-tenant");
+        let other_tools = inventory.list_by_tenant(&other_tenant);
+        assert_eq!(other_tools.len(), 0);
+    }
+
+    #[test]
+    fn test_alias_registration_and_resolution() {
+        let inventory = ToolInventory::new();
+
+        // Register a tool
+        inventory.insert_tool(
+            "brave_web_search".to_string(),
+            "brave".to_string(),
+            create_test_tool("brave_web_search"),
+        );
+
+        // Register an alias
+        let target = QualifiedToolName::new("brave", "brave_web_search");
+        inventory.register_alias("web_search".to_string(), target.clone());
+
+        // Resolve alias
+        let resolved = inventory.resolve_alias("web_search");
+        assert!(resolved.is_some());
+        assert_eq!(resolved.unwrap(), target);
+
+        // Non-existent alias returns None
+        assert!(inventory.resolve_alias("unknown").is_none());
+    }
+
+    #[test]
+    fn test_get_tool_or_alias() {
+        let inventory = ToolInventory::new();
+
+        // Register a tool
+        inventory.insert_tool(
+            "brave_web_search".to_string(),
+            "brave".to_string(),
+            create_test_tool("brave_web_search"),
+        );
+
+        // Register an alias
+        let target = QualifiedToolName::new("brave", "brave_web_search");
+        inventory.register_alias("search".to_string(), target);
+
+        // Direct lookup works
+        let (server, _) = inventory.get_tool_or_alias("brave_web_search").unwrap();
+        assert_eq!(server, "brave");
+
+        // Alias lookup works
+        let (server, _) = inventory.get_tool_or_alias("search").unwrap();
+        assert_eq!(server, "brave");
+
+        // Unknown returns None
+        assert!(inventory.get_tool_or_alias("unknown").is_none());
+    }
+
+    #[test]
+    fn test_list_aliases() {
+        let inventory = ToolInventory::new();
+
+        inventory.register_alias(
+            "alias1".to_string(),
+            QualifiedToolName::new("server1", "tool1"),
+        );
+        inventory.register_alias(
+            "alias2".to_string(),
+            QualifiedToolName::new("server2", "tool2"),
+        );
+
+        let aliases = inventory.list_aliases();
+        assert_eq!(aliases.len(), 2);
+    }
+
+    #[test]
+    fn test_index_counts() {
+        let inventory = ToolInventory::new();
+
+        inventory.insert_tool(
+            "tool1".to_string(),
+            "server1".to_string(),
+            create_test_tool("tool1"),
+        );
+        inventory.register_alias(
+            "alias1".to_string(),
+            QualifiedToolName::new("server1", "tool1"),
+        );
+
+        let counts = inventory.index_counts();
+        assert_eq!(counts.tools, 1);
+        assert_eq!(counts.unique_names, 1);
+        assert_eq!(counts.servers, 1);
+        assert_eq!(counts.aliases, 1);
+    }
+
+    #[test]
+    fn test_clear_server_removes_from_category_index() {
+        use crate::inventory::ToolCategory;
+
+        let inventory = ToolInventory::new();
+
+        // Insert a dynamic tool
+        let tool = create_test_tool("dyn_tool");
+        let entry =
+            ToolEntry::from_server_tool("dyn_server", tool).with_category(ToolCategory::Dynamic);
+        inventory.insert_entry(entry);
+
+        assert_eq!(inventory.list_by_category(ToolCategory::Dynamic).len(), 1);
+
+        // Clear server
+        inventory.clear_server_tools("dyn_server");
+
+        assert_eq!(inventory.list_by_category(ToolCategory::Dynamic).len(), 0);
+    }
+
+    #[test]
+    fn test_clear_server_removes_aliases_to_server() {
+        let inventory = ToolInventory::new();
+
+        inventory.insert_tool(
+            "tool1".to_string(),
+            "server1".to_string(),
+            create_test_tool("tool1"),
+        );
+
+        inventory.register_alias(
+            "alias1".to_string(),
+            QualifiedToolName::new("server1", "tool1"),
+        );
+
+        assert_eq!(inventory.list_aliases().len(), 1);
+
+        inventory.clear_server_tools("server1");
+
+        // Alias should be removed since it points to cleared server
+        assert_eq!(inventory.list_aliases().len(), 0);
+    }
+
+    #[test]
+    fn test_get_entry() {
+        let inventory = ToolInventory::new();
+
+        inventory.insert_tool(
+            "my_tool".to_string(),
+            "my_server".to_string(),
+            create_test_tool("my_tool"),
+        );
+
+        let entry = inventory.get_entry("my_server", "my_tool");
+        assert!(entry.is_some());
+        let entry = entry.unwrap();
+        assert_eq!(entry.server_key(), "my_server");
+        assert_eq!(entry.tool_name(), "my_tool");
+
+        assert!(inventory.get_entry("other", "my_tool").is_none());
     }
 }
