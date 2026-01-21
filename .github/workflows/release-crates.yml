@@ -1,0 +1,84 @@
+name: Publish Crates
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/Cargo.toml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Tier 1: Crates with no internal dependencies
+  tier1:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: openai-protocol
+            path: protocols
+          - crate: reasoning-parser
+            path: reasoning_parser
+          - crate: kv-index
+            path: kv_index
+          - crate: data-connector
+            path: data_connector
+          - crate: wfaas
+            path: workflow
+          - crate: smg-wasm
+            path: wasm
+          - crate: smg-auth
+            path: auth
+          - crate: llm-tokenizer
+            path: tokenizer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/publish-crate
+        with:
+          crate: ${{ matrix.crate }}
+          path: ${{ matrix.path }}
+          token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Tier 2: Crates depending on tier 1
+  tier2:
+    needs: tier1
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: tool-parser
+            path: tool_parser
+          - crate: smg-mcp
+            path: mcp
+          - crate: smg-grpc-client
+            path: grpc_client
+          - crate: llm-multimodal
+            path: multimodal
+          - crate: smg-mesh
+            path: mesh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/publish-crate
+        with:
+          crate: ${{ matrix.crate }}
+          path: ${{ matrix.path }}
+          token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Tier 3: Main crate depending on all others
+  tier3:
+    needs: tier2
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/publish-crate
+        with:
+          crate: smg
+          path: model_gateway
+          token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
