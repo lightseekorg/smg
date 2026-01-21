@@ -54,7 +54,6 @@ Per-tenant isolation:
 TenantContext {
     tenant_id: TenantId,
     session_id: SessionId,
-    rate_limits: RateLimits,
 }
 ```
 
@@ -123,8 +122,8 @@ let result = manager.call_tool("read_file", json!({"path": "/tmp/test"})).await?
 
 ```rust
 use smg_mcp::{
-    ApprovalManager, PolicyEngine, TenantContext,
-    ApprovalMode, PolicyDecision, TrustLevel, ServerPolicy,
+    ApprovalManager, PolicyEngine, TenantContext, ApprovalParams,
+    ApprovalMode, PolicyDecision, TrustLevel, ServerPolicy, ToolAnnotations,
 };
 
 let policy_engine = PolicyEngine::new(audit_log.clone())
@@ -140,12 +139,21 @@ let approval_manager = ApprovalManager::new(
 );
 
 let tenant_ctx = TenantContext::new("customer-123");
+let hints = ToolAnnotations::new().with_destructive(true);
+
+let params = ApprovalParams {
+    request_id: "req-1",
+    server_key: "server",
+    elicitation_id: "elicit-1",
+    tool_name: "delete_user",
+    hints: &hints,
+    message: "Delete user?",
+    tenant_ctx: &tenant_ctx,
+};
 
 let outcome = approval_manager.handle_approval(
     ApprovalMode::PolicyOnly,
-    "req-1", "server", "elicit-1",
-    "delete_user", &hints, "Delete user?",
-    &tenant_ctx,
+    params,
 ).await?;
 ```
 
@@ -155,23 +163,24 @@ let outcome = approval_manager.handle_approval(
 mcp/src/
 ├── lib.rs              # Public exports
 ├── error.rs            # Error types
-├── annotations.rs      # ToolAnnotations (shared)
-├── tenant.rs           # TenantContext (shared)
+├── annotations.rs      # ToolAnnotations
+├── tenant.rs           # TenantContext
 │
 ├── core/               # MCP client infrastructure
-│   ├── mod.rs
 │   ├── manager.rs      # McpManager
-│   ├── config.rs       # Configuration
-│   └── pool.rs         # LRU connection pool
+│   ├── config.rs       # Configuration types
+│   ├── pool.rs         # LRU connection pool
+│   ├── handler.rs      # SmgClientHandler (RMCP ClientHandler impl)
+│   ├── metrics.rs      # Connection and call metrics
+│   ├── proxy.rs        # HTTP proxy resolution
+│   └── oauth.rs        # OAuth token refresh
 │
 ├── inventory/          # Tool storage and indexing
-│   ├── mod.rs
-│   ├── index.rs        # ToolInventory
-│   ├── types.rs        # QualifiedToolName, ToolEntry, etc.
-│   └── args.rs         # ToolArgs
+│   ├── index.rs        # ToolInventory (multi-index cache)
+│   ├── types.rs        # QualifiedToolName, ToolEntry
+│   └── args.rs         # Argument utilities
 │
 └── approval/           # Approval system
-    ├── mod.rs
     ├── manager.rs      # ApprovalManager
     ├── policy.rs       # PolicyEngine
     └── audit.rs        # AuditLog

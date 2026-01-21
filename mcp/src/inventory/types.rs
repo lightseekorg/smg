@@ -1,6 +1,6 @@
 //! Core types for the tool inventory.
 
-use std::{fmt, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
@@ -18,17 +18,19 @@ pub enum ToolCategory {
 }
 
 /// Unique tool identifier: `server_key:tool_name`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Uses `Arc<str>` internally for cheap cloning in hot paths.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QualifiedToolName {
-    pub server_key: String,
-    pub tool_name: String,
+    server_key: Arc<str>,
+    tool_name: Arc<str>,
 }
 
 impl QualifiedToolName {
-    pub fn new(server_key: impl Into<String>, tool_name: impl Into<String>) -> Self {
+    pub fn new(server_key: impl AsRef<str>, tool_name: impl AsRef<str>) -> Self {
         Self {
-            server_key: server_key.into(),
-            tool_name: tool_name.into(),
+            server_key: Arc::from(server_key.as_ref()),
+            tool_name: Arc::from(tool_name.as_ref()),
         }
     }
 
@@ -37,11 +39,32 @@ impl QualifiedToolName {
         let (server, tool) = s.split_once(':')?;
         Some(Self::new(server, tool))
     }
+
+    pub fn server_key(&self) -> &str {
+        &self.server_key
+    }
+
+    pub fn tool_name(&self) -> &str {
+        &self.tool_name
+    }
 }
 
 impl fmt::Display for QualifiedToolName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.server_key, self.tool_name)
+    }
+}
+
+impl Serialize for QualifiedToolName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for QualifiedToolName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).ok_or_else(|| serde::de::Error::custom("expected format: server:tool"))
     }
 }
 
@@ -119,7 +142,7 @@ impl ToolEntry {
         }
     }
 
-    pub fn from_server_tool(server_key: impl Into<String>, tool: Tool) -> Self {
+    pub fn from_server_tool(server_key: impl AsRef<str>, tool: Tool) -> Self {
         let name = tool.name.to_string();
         Self::new(QualifiedToolName::new(server_key, name), tool)
     }
@@ -201,16 +224,16 @@ mod tests {
     #[test]
     fn test_qualified_tool_name() {
         let name = QualifiedToolName::new("server", "tool");
-        assert_eq!(name.server_key, "server");
-        assert_eq!(name.tool_name, "tool");
+        assert_eq!(name.server_key(), "server");
+        assert_eq!(name.tool_name(), "tool");
         assert_eq!(format!("{}", name), "server:tool");
     }
 
     #[test]
     fn test_qualified_tool_name_parse() {
         let parsed = QualifiedToolName::parse("brave:web_search").unwrap();
-        assert_eq!(parsed.server_key, "brave");
-        assert_eq!(parsed.tool_name, "web_search");
+        assert_eq!(parsed.server_key(), "brave");
+        assert_eq!(parsed.tool_name(), "web_search");
 
         assert!(QualifiedToolName::parse("no_colon").is_none());
     }
@@ -235,7 +258,7 @@ mod tests {
         assert_eq!(entry.category, ToolCategory::Alias);
         assert!(entry.alias_target.is_some());
         assert_eq!(
-            entry.alias_target.unwrap().target.tool_name,
+            entry.alias_target.unwrap().target.tool_name(),
             "brave_web_search"
         );
     }

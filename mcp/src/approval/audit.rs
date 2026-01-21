@@ -1,15 +1,15 @@
 //! Audit logging for MCP approval decisions.
 
-use std::{collections::VecDeque, sync::RwLock};
+use std::{collections::VecDeque, sync::Arc};
 
 use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::{inventory::QualifiedToolName, tenant::TenantId};
 
 const DEFAULT_MAX_ENTRIES: usize = 10000;
 
-/// Source of an approval decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecisionSource {
     UserInteractive,
@@ -22,7 +22,6 @@ pub enum DecisionSource {
     Timeout,
 }
 
-/// Result of an approval decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecisionResult {
     Approved,
@@ -41,15 +40,14 @@ impl DecisionResult {
     }
 }
 
-/// A single audit log entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
-    pub id: String,
+    pub id: Arc<str>,
     pub timestamp: DateTime<Utc>,
     pub tenant_id: TenantId,
-    pub request_id: String,
-    pub server_key: String,
-    pub tool_name: String,
+    pub request_id: Arc<str>,
+    pub server_key: Arc<str>,
+    pub tool_name: Arc<str>,
     pub result: DecisionResult,
     pub source: DecisionSource,
 }
@@ -57,14 +55,14 @@ pub struct AuditEntry {
 impl AuditEntry {
     pub fn new(
         tenant_id: TenantId,
-        request_id: String,
-        server_key: String,
-        tool_name: String,
+        request_id: Arc<str>,
+        server_key: Arc<str>,
+        tool_name: Arc<str>,
         result: DecisionResult,
         source: DecisionSource,
     ) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: Arc::from(uuid::Uuid::new_v4().to_string()),
             timestamp: Utc::now(),
             tenant_id,
             request_id,
@@ -76,11 +74,10 @@ impl AuditEntry {
     }
 
     pub fn qualified_name(&self) -> QualifiedToolName {
-        QualifiedToolName::new(&self.server_key, &self.tool_name)
+        QualifiedToolName::new(self.server_key.as_ref(), self.tool_name.as_ref())
     }
 }
 
-/// Thread-safe audit log for approval decisions.
 #[derive(Debug)]
 pub struct AuditLog {
     entries: RwLock<VecDeque<AuditEntry>>,
@@ -106,7 +103,7 @@ impl AuditLog {
     }
 
     pub fn record(&self, entry: AuditEntry) {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write();
         if entries.len() >= self.max_entries {
             entries.pop_front();
         }
@@ -123,21 +120,21 @@ impl AuditLog {
     ) {
         self.record(AuditEntry::new(
             tenant_id.clone(),
-            request_id.to_string(),
-            qualified_name.server_key.clone(),
-            qualified_name.tool_name.clone(),
+            Arc::from(request_id),
+            Arc::from(qualified_name.server_key()),
+            Arc::from(qualified_name.tool_name()),
             result,
             source,
         ));
     }
 
     pub fn recent(&self, limit: usize) -> Vec<AuditEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         entries.iter().rev().take(limit).cloned().collect()
     }
 
     pub fn for_tenant(&self, tenant_id: &TenantId, limit: usize) -> Vec<AuditEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         entries
             .iter()
             .rev()
@@ -148,24 +145,24 @@ impl AuditLog {
     }
 
     pub fn for_request(&self, request_id: &str) -> Vec<AuditEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read();
         entries
             .iter()
-            .filter(|e| e.request_id == request_id)
+            .filter(|e| e.request_id.as_ref() == request_id)
             .cloned()
             .collect()
     }
 
     pub fn len(&self) -> usize {
-        self.entries.read().unwrap().len()
+        self.entries.read().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.read().unwrap().is_empty()
+        self.entries.read().is_empty()
     }
 
     pub fn clear(&self) {
-        self.entries.write().unwrap().clear();
+        self.entries.write().clear();
     }
 }
 
@@ -189,7 +186,7 @@ mod tests {
         assert_eq!(log.len(), 1);
         let recent = log.recent(10);
         assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].tool_name, "tool");
+        assert_eq!(recent[0].tool_name.as_ref(), "tool");
     }
 
     #[test]
@@ -209,8 +206,8 @@ mod tests {
 
         assert_eq!(log.len(), 5);
         let recent = log.recent(10);
-        assert_eq!(recent[0].tool_name, "tool-9");
-        assert_eq!(recent[4].tool_name, "tool-5");
+        assert_eq!(recent[0].tool_name.as_ref(), "tool-9");
+        assert_eq!(recent[4].tool_name.as_ref(), "tool-5");
     }
 
     #[test]

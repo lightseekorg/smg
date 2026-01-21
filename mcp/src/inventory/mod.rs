@@ -2,9 +2,8 @@
 //!
 //! This module provides tool storage and lookup with support for:
 //! - Qualified tool names (handling collisions across servers)
-//! - Multi-tenant isolation
 //! - Tool aliasing
-//! - Cache management with TTL
+//! - Category-based filtering
 
 pub mod args;
 pub mod index;

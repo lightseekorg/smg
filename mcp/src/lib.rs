@@ -25,7 +25,10 @@ pub mod inventory;
 // These allow `mcp::config::*` and `mcp::manager::*` to continue working
 pub use core::{config, manager, pool as connection_pool};
 // Re-export from core
-pub use core::{McpConfig, McpManager, McpServerConfig, McpTransport, RequestMcpContext, Tool};
+pub use core::{
+    HandlerRequestContext, LatencySnapshot, McpConfig, McpManager, McpMetrics, McpServerConfig,
+    McpTransport, MetricsSnapshot, RefreshRequest, RequestMcpContext, SmgClientHandler, Tool,
+};
 
 // Re-export shared types
 pub use annotations::ToolAnnotations;
@@ -40,4 +43,4 @@ pub use error::{ApprovalError, McpError, McpResult};
 pub use inventory::{
     AliasTarget, ArgMapping, QualifiedToolName, ToolCategory, ToolEntry, ToolInventory,
 };
-pub use tenant::{RateLimits, SessionId, TenantContext, TenantId};
+pub use tenant::{SessionId, TenantContext, TenantId};

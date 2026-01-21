@@ -24,22 +24,16 @@ use crate::{
     tenant::TenantContext,
 };
 
-/// Default timeout for pending approvals (5 minutes).
 const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Key for tracking pending approvals.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct ApprovalKey {
-    /// Inference request ID.
     pub request_id: String,
-    /// MCP server key.
     pub server_key: String,
-    /// MCP elicitation request ID.
     pub elicitation_id: String,
 }
 
 impl ApprovalKey {
-    /// Create a new approval key.
     pub fn new(
         request_id: impl Into<String>,
         server_key: impl Into<String>,
@@ -74,45 +68,35 @@ pub struct PendingApproval {
     response_tx: oneshot::Sender<ApprovalDecision>,
 }
 
-/// User's decision on an approval request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ApprovalDecision {
-    /// Approved for execution.
     Approved,
-    /// Denied with optional reason.
     Denied { reason: String },
 }
 
 impl ApprovalDecision {
-    /// Create an approved decision.
     pub fn approved() -> Self {
         Self::Approved
     }
 
-    /// Create a denied decision.
     pub fn denied(reason: impl Into<String>) -> Self {
         Self::Denied {
             reason: reason.into(),
         }
     }
 
-    /// Check if this decision allows execution.
     pub fn is_approved(&self) -> bool {
         matches!(self, ApprovalDecision::Approved)
     }
 }
 
-/// Approval mode determines how approvals are handled.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApprovalMode {
-    /// Interactive - return approval request, await user response.
     Interactive,
-    /// Policy-only - auto-decide using PolicyEngine.
     #[default]
     PolicyOnly,
 }
 
-/// Parameters for requesting tool approval.
 #[derive(Debug, Clone)]
 pub struct ApprovalParams<'a> {
     pub request_id: &'a str,
@@ -124,61 +108,41 @@ pub struct ApprovalParams<'a> {
     pub tenant_ctx: &'a TenantContext,
 }
 
-/// Approval request to be sent to the client (matches OpenAI format).
+/// Approval request sent to the client (matches OpenAI format).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpApprovalRequest {
-    /// MCP server key.
     pub server_key: String,
-    /// Tool name.
     pub tool_name: String,
-    /// Human-readable message explaining the request.
     pub message: String,
-    /// Elicitation ID for correlation.
     pub elicitation_id: String,
 }
 
 /// Approval response from the client (matches OpenAI format).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpApprovalResponse {
-    /// Whether the user approved.
     pub approve: bool,
-    /// Optional reason for denial.
     pub reason: Option<String>,
 }
 
-/// Result of handling an approval request.
 #[derive(Debug)]
 pub enum ApprovalOutcome {
-    /// Immediate decision (policy-only mode or cached).
     Decided(PolicyDecision),
-    /// Pending user approval (interactive mode).
     Pending {
-        /// The approval key for resolving later.
         key: ApprovalKey,
-        /// Receiver to await the user's decision.
         rx: oneshot::Receiver<ApprovalDecision>,
-        /// The approval request to send to the client.
         approval_request: McpApprovalRequest,
     },
 }
 
-/// Coordinates approval flow - supports both interactive and policy-only modes.
+/// Coordinates approval flow for interactive and policy-only modes.
 pub struct ApprovalManager {
-    /// Policy engine for auto-decisions.
     policy_engine: Arc<PolicyEngine>,
-
-    /// Pending interactive approvals awaiting user response.
     pending: DashMap<ApprovalKey, PendingApproval>,
-
-    /// Audit log for all decisions.
     audit_log: Arc<AuditLog>,
-
-    /// Timeout for pending approvals.
     approval_timeout: Duration,
 }
 
 impl ApprovalManager {
-    /// Create a new approval manager with the given policy engine.
     pub fn new(policy_engine: Arc<PolicyEngine>, audit_log: Arc<AuditLog>) -> Self {
         Self {
             policy_engine,
@@ -188,15 +152,13 @@ impl ApprovalManager {
         }
     }
 
-    /// Set the approval timeout.
+    #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.approval_timeout = timeout;
         self
     }
 
-    /// Handle an approval request based on the mode.
-    ///
-    /// Automatically evicts expired pending approvals on each call.
+    /// Evicts expired pending approvals on each call.
     pub async fn handle_approval(
         &self,
         mode: ApprovalMode,
@@ -262,7 +224,6 @@ impl ApprovalManager {
         })
     }
 
-    /// Resolve a pending approval with the user's response.
     pub async fn resolve(
         &self,
         request_id: &str,
@@ -316,31 +277,25 @@ impl ApprovalManager {
         Ok(())
     }
 
-    /// Check if there's a pending approval for the given key.
     pub fn has_pending(&self, key: &ApprovalKey) -> bool {
         self.pending.contains_key(key)
     }
 
-    /// Get the count of pending approvals.
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
 
-    /// Clean up expired pending approvals.
     pub fn evict_expired(&self) {
         let now = Instant::now();
         let timeout = self.approval_timeout;
-
         self.pending
             .retain(|_, pending| now.duration_since(pending.created_at) < timeout);
     }
 
-    /// Get the policy engine.
     pub fn policy_engine(&self) -> &Arc<PolicyEngine> {
         &self.policy_engine
     }
 
-    /// Get the audit log.
     pub fn audit_log(&self) -> &Arc<AuditLog> {
         &self.audit_log
     }
