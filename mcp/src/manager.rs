@@ -853,7 +853,7 @@ impl McpManager {
 
                 let transport = if let Some(tok) = token {
                     let mut cfg = StreamableHttpClientTransportConfig::with_uri(url.as_str());
-                    cfg.auth_header = Some(format!("Bearer {}", tok));
+                    cfg.auth_header = Some(tok.to_string());
                     StreamableHttpClientTransport::from_config(cfg)
                 } else {
                     StreamableHttpClientTransport::from_uri(url.as_str())
