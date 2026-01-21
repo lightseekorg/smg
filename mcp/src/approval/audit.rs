@@ -100,7 +100,7 @@ impl AuditLog {
 
     pub fn with_capacity(max_entries: usize) -> Self {
         Self {
-            entries: RwLock::new(VecDeque::with_capacity(max_entries.min(1000))),
+            entries: RwLock::new(VecDeque::with_capacity(max_entries)),
             max_entries,
         }
     }

@@ -195,11 +195,16 @@ impl ApprovalManager {
     }
 
     /// Handle an approval request based on the mode.
+    ///
+    /// Automatically evicts expired pending approvals on each call.
     pub async fn handle_approval(
         &self,
         mode: ApprovalMode,
         params: ApprovalParams<'_>,
     ) -> McpResult<ApprovalOutcome> {
+        // Lazy cleanup of expired approvals
+        self.evict_expired();
+
         match mode {
             ApprovalMode::Interactive => self.request_interactive(&params).await,
             ApprovalMode::PolicyOnly => {

@@ -82,7 +82,7 @@ impl RulePattern {
             RulePattern::Server(re) => re.is_match(server_key),
             RulePattern::Tool(re) => re.is_match(tool_name),
             RulePattern::Qualified(re) => {
-                let qualified = format!("{}/{}", server_key, tool_name);
+                let qualified = format!("{}:{}", server_key, tool_name);
                 re.is_match(&qualified)
             }
             RulePattern::Any => true,
