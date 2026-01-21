@@ -463,8 +463,7 @@ impl McpManager {
             .ok_or_else(|| McpError::ServerNotFound(server_name.to_string()))?;
 
         info!("Refreshing inventory for server: {}", server_name);
-        self.load_server_inventory_internal(server_name, &client)
-            .await;
+        Self::load_server_inventory(&self.inventory, server_name, &client).await;
         Ok(())
     }
 
@@ -681,45 +680,6 @@ impl McpManager {
                 }
             }
             Err(e) => debug!("No resources or failed to list on '{}': {}", server_key, e),
-        }
-    }
-
-    /// Discover and cache tools/prompts/resources for a connected server (internal wrapper)
-    async fn load_server_inventory_internal(&self, server_name: &str, client: &McpClient) {
-        // Tools
-        match client.peer().list_all_tools().await {
-            Ok(ts) => {
-                info!("Discovered {} tools from '{}'", ts.len(), server_name);
-                for t in ts {
-                    self.inventory
-                        .insert_tool(t.name.to_string(), server_name.to_string(), t);
-                }
-            }
-            Err(e) => warn!("Failed to list tools from '{}': {}", server_name, e),
-        }
-
-        // Prompts
-        match client.peer().list_all_prompts().await {
-            Ok(ps) => {
-                info!("Discovered {} prompts from '{}'", ps.len(), server_name);
-                for p in ps {
-                    self.inventory
-                        .insert_prompt(p.name.clone(), server_name.to_string(), p);
-                }
-            }
-            Err(e) => debug!("No prompts or failed to list on '{}': {}", server_name, e),
-        }
-
-        // Resources
-        match client.peer().list_all_resources().await {
-            Ok(rs) => {
-                info!("Discovered {} resources from '{}'", rs.len(), server_name);
-                for r in rs {
-                    self.inventory
-                        .insert_resource(r.uri.clone(), server_name.to_string(), r.raw);
-                }
-            }
-            Err(e) => debug!("No resources or failed to list on '{}': {}", server_name, e),
         }
     }
 

@@ -13,15 +13,19 @@ use crate::{
 };
 
 /// Result of a policy evaluation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PolicyDecision {
     #[default]
     Allow,
     Deny,
-    DenyWithReason(String),
+    DenyWithReason(Arc<str>),
 }
 
 impl PolicyDecision {
+    pub fn deny_with_reason(reason: impl AsRef<str>) -> Self {
+        Self::DenyWithReason(Arc::from(reason.as_ref()))
+    }
+
     pub fn is_allowed(&self) -> bool {
         matches!(self, PolicyDecision::Allow)
     }
@@ -35,6 +39,57 @@ impl PolicyDecision {
     }
 }
 
+impl Serialize for PolicyDecision {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            PolicyDecision::Allow => serializer.serialize_str("allow"),
+            PolicyDecision::Deny => serializer.serialize_str("deny"),
+            PolicyDecision::DenyWithReason(r) => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("deny_with_reason", r.as_ref())?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PolicyDecision {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{self, MapAccess, Visitor};
+
+        struct PolicyDecisionVisitor;
+
+        impl<'de> Visitor<'de> for PolicyDecisionVisitor {
+            type Value = PolicyDecision;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("\"allow\", \"deny\", or {\"deny_with_reason\": \"...\"}")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v {
+                    "allow" => Ok(PolicyDecision::Allow),
+                    "deny" => Ok(PolicyDecision::Deny),
+                    _ => Err(E::unknown_variant(v, &["allow", "deny"])),
+                }
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                if let Some(key) = map.next_key::<&str>()? {
+                    if key == "deny_with_reason" {
+                        let reason: String = map.next_value()?;
+                        return Ok(PolicyDecision::DenyWithReason(Arc::from(reason)));
+                    }
+                }
+                Err(de::Error::custom("expected deny_with_reason key"))
+            }
+        }
+
+        deserializer.deserialize_any(PolicyDecisionVisitor)
+    }
+}
+
 /// Trust level for an MCP server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TrustLevel {
@@ -45,7 +100,6 @@ pub enum TrustLevel {
     Sandboxed,
 }
 
-/// Server-level policy configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerPolicy {
     pub default: PolicyDecision,
@@ -61,7 +115,6 @@ impl Default for ServerPolicy {
     }
 }
 
-/// Tool-level policy configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolPolicy {
     pub decision: PolicyDecision,
@@ -146,7 +199,6 @@ impl PolicyRule {
     }
 }
 
-/// Policy engine configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PolicyConfig {
     #[serde(default = "default_policy")]
@@ -295,8 +347,8 @@ impl PolicyEngine {
             TrustLevel::Standard => server_default.clone(),
             TrustLevel::Untrusted => {
                 if hints.destructive && !hints.read_only {
-                    PolicyDecision::DenyWithReason(
-                        "Untrusted server: destructive operation denied".into(),
+                    PolicyDecision::deny_with_reason(
+                        "Untrusted server: destructive operation denied",
                     )
                 } else {
                     server_default.clone()
@@ -304,15 +356,11 @@ impl PolicyEngine {
             }
             TrustLevel::Sandboxed => {
                 if hints.open_world {
-                    PolicyDecision::DenyWithReason(
-                        "Sandboxed server: external access denied".into(),
-                    )
+                    PolicyDecision::deny_with_reason("Sandboxed server: external access denied")
                 } else if hints.read_only {
                     PolicyDecision::Allow
                 } else {
-                    PolicyDecision::DenyWithReason(
-                        "Sandboxed server: write operations denied".into(),
-                    )
+                    PolicyDecision::deny_with_reason("Sandboxed server: write operations denied")
                 }
             }
         }
@@ -322,7 +370,7 @@ impl PolicyEngine {
         if hints.read_only {
             PolicyDecision::Allow
         } else if hints.destructive {
-            PolicyDecision::DenyWithReason("Destructive operation requires explicit policy".into())
+            PolicyDecision::deny_with_reason("Destructive operation requires explicit policy")
         } else {
             self.default_policy.clone()
         }
@@ -342,7 +390,7 @@ impl PolicyEngine {
                 reason: "Policy denied".to_string(),
             },
             PolicyDecision::DenyWithReason(reason) => DecisionResult::Denied {
-                reason: reason.clone(),
+                reason: reason.to_string(),
             },
         };
         self.audit_log.record_decision(

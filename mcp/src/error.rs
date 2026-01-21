@@ -48,9 +48,6 @@ pub enum McpError {
     #[error("Tool execution denied: {0}")]
     ToolDenied(String),
 
-    #[error("Rate limit exceeded: {0}")]
-    RateLimitExceeded(String),
-
     #[error(transparent)]
     Sdk(#[from] Box<rmcp::RmcpError>),
 
