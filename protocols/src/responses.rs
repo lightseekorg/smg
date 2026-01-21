@@ -251,6 +251,116 @@ pub enum ResponseOutputItem {
         output: String,
         server_label: String,
     },
+    #[serde(rename = "web_search_call")]
+    WebSearchCall {
+        id: String,
+        status: WebSearchCallStatus,
+        action: WebSearchAction,
+    },
+    #[serde(rename = "code_interpreter_call")]
+    CodeInterpreterCall {
+        id: String,
+        status: CodeInterpreterCallStatus,
+        container_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        outputs: Option<Vec<CodeInterpreterOutput>>,
+    },
+    #[serde(rename = "file_search_call")]
+    FileSearchCall {
+        id: String,
+        status: FileSearchCallStatus,
+        queries: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        results: Option<Vec<FileSearchResult>>,
+    },
+}
+
+// ============================================================================
+// Built-in Tool Call Types
+// ============================================================================
+
+/// Status for web search tool calls.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchCallStatus {
+    InProgress,
+    Searching,
+    Completed,
+    Failed,
+}
+
+/// Action performed during a web search.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WebSearchAction {
+    Search {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        queries: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sources: Vec<WebSearchSource>,
+    },
+    OpenPage {
+        url: String,
+    },
+    Find {
+        url: String,
+        pattern: String,
+    },
+}
+
+/// A source returned from web search.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WebSearchSource {
+    #[serde(rename = "type")]
+    pub source_type: String,
+    pub url: String,
+}
+
+/// Status for code interpreter tool calls.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeInterpreterCallStatus {
+    InProgress,
+    Completed,
+    Incomplete,
+    Interpreting,
+    Failed,
+}
+
+/// Output from code interpreter execution.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CodeInterpreterOutput {
+    Logs { logs: String },
+    Image { url: String },
+}
+
+/// Status for file search tool calls.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileSearchCallStatus {
+    InProgress,
+    Searching,
+    Completed,
+    Incomplete,
+    Failed,
+}
+
+/// A result from file search.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FileSearchResult {
+    pub file_id: String,
+    pub filename: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<Value>,
 }
 
 // ============================================================================

@@ -5,7 +5,9 @@ use std::{fmt, sync::Arc, time::Duration};
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
-use crate::{annotations::ToolAnnotations, core::config::Tool, tenant::TenantId};
+use crate::{
+    annotations::ToolAnnotations, core::config::Tool, tenant::TenantId, transform::ResponseFormat,
+};
 
 /// Category of a tool for filtering and visibility control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -15,6 +17,8 @@ pub enum ToolCategory {
     Alias,
     Dynamic,
     Custom,
+    /// Built-in tools (web_search, code_interpreter, file_search) exposed via aliasing.
+    Builtin,
 }
 
 /// Unique tool identifier: `server_key:tool_name`.
@@ -126,6 +130,8 @@ pub struct ToolEntry {
     pub alias_target: Option<AliasTarget>,
     pub cached_at: Instant,
     pub ttl: Option<Duration>,
+    /// Response format for transforming MCP results to API-specific formats.
+    pub response_format: ResponseFormat,
 }
 
 impl ToolEntry {
@@ -139,6 +145,7 @@ impl ToolEntry {
             alias_target: None,
             cached_at: Instant::now(),
             ttl: None,
+            response_format: ResponseFormat::default(),
         }
     }
 
@@ -175,6 +182,12 @@ impl ToolEntry {
     #[must_use]
     pub fn with_ttl(mut self, ttl: Duration) -> Self {
         self.ttl = Some(ttl);
+        self
+    }
+
+    #[must_use]
+    pub fn with_response_format(mut self, response_format: ResponseFormat) -> Self {
+        self.response_format = response_format;
         self
     }
 

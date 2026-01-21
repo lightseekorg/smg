@@ -1,0 +1,49 @@
+//! Response transformation types.
+
+use serde::{Deserialize, Serialize};
+
+/// Format for transforming MCP responses to API-specific formats.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFormat {
+    /// Pass through MCP result unchanged as mcp_call output
+    #[default]
+    Passthrough,
+    /// Transform to OpenAI web_search_call format
+    WebSearchCall,
+    /// Transform to OpenAI code_interpreter_call format
+    CodeInterpreterCall,
+    /// Transform to OpenAI file_search_call format
+    FileSearchCall,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_response_format_serde() {
+        let formats = vec![
+            (ResponseFormat::Passthrough, "\"passthrough\""),
+            (ResponseFormat::WebSearchCall, "\"web_search_call\""),
+            (
+                ResponseFormat::CodeInterpreterCall,
+                "\"code_interpreter_call\"",
+            ),
+            (ResponseFormat::FileSearchCall, "\"file_search_call\""),
+        ];
+
+        for (format, expected) in formats {
+            let serialized = serde_json::to_string(&format).unwrap();
+            assert_eq!(serialized, expected);
+
+            let deserialized: ResponseFormat = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, format);
+        }
+    }
+
+    #[test]
+    fn test_response_format_default() {
+        assert_eq!(ResponseFormat::default(), ResponseFormat::Passthrough);
+    }
+}
