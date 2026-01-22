@@ -231,6 +231,7 @@ mod tests {
             },
             proxy: None,
             required: false,
+            tools: None,
         }
     }
 

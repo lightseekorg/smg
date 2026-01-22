@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::config::ResponseFormatConfig;
+
 /// Format for transforming MCP responses to API-specific formats.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -15,6 +17,17 @@ pub enum ResponseFormat {
     CodeInterpreterCall,
     /// Transform to OpenAI file_search_call format
     FileSearchCall,
+}
+
+impl From<ResponseFormatConfig> for ResponseFormat {
+    fn from(config: ResponseFormatConfig) -> Self {
+        match config {
+            ResponseFormatConfig::Passthrough => ResponseFormat::Passthrough,
+            ResponseFormatConfig::WebSearchCall => ResponseFormat::WebSearchCall,
+            ResponseFormatConfig::CodeInterpreterCall => ResponseFormat::CodeInterpreterCall,
+            ResponseFormatConfig::FileSearchCall => ResponseFormat::FileSearchCall,
+        }
+    }
 }
 
 #[cfg(test)]

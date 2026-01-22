@@ -7,7 +7,7 @@ use std::{collections::HashMap, fmt};
 pub use rmcp::model::{Prompt, RawResource, Tool};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct McpConfig {
     /// Static MCP servers (loaded at startup)
     pub servers: Vec<McpServerConfig>,
@@ -28,6 +28,144 @@ pub struct McpConfig {
     /// Tool inventory refresh settings
     #[serde(default)]
     pub inventory: InventoryConfig,
+
+    /// Approval policy configuration
+    /// Default: allow all tools
+    #[serde(default)]
+    pub policy: PolicyConfig,
+}
+
+/// Policy configuration for tool approval decisions.
+///
+/// Evaluation order:
+/// 1. Explicit tool policies (server:tool → decision)
+/// 2. Server policies with trust levels
+/// 3. Default policy (fallback)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PolicyConfig {
+    /// Default policy when no other rules match.
+    /// Default: "allow"
+    #[serde(default = "default_allow")]
+    pub default: PolicyDecisionConfig,
+
+    /// Per-server policies with trust levels.
+    #[serde(default)]
+    pub servers: HashMap<String, ServerPolicyConfig>,
+
+    /// Explicit per-tool policies (qualified name: "server:tool").
+    #[serde(default)]
+    pub tools: HashMap<String, PolicyDecisionConfig>,
+}
+
+/// Server-level policy configuration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServerPolicyConfig {
+    /// Trust level for this server.
+    /// - trusted: Allow all tools unconditionally
+    /// - standard: Use default policy (default)
+    /// - untrusted: Deny destructive operations
+    /// - sandboxed: Only allow read-only, no external access
+    #[serde(default)]
+    pub trust_level: TrustLevelConfig,
+
+    /// Default policy for tools on this server.
+    #[serde(default = "default_allow")]
+    pub default: PolicyDecisionConfig,
+}
+
+/// Trust level for an MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustLevelConfig {
+    Trusted,
+    #[default]
+    Standard,
+    Untrusted,
+    Sandboxed,
+}
+
+/// Policy decision configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PolicyDecisionConfig {
+    #[default]
+    Allow,
+    Deny,
+    /// Deny with a specific reason message.
+    DenyWithReason(String),
+}
+
+impl Serialize for PolicyDecisionConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            PolicyDecisionConfig::Allow => serializer.serialize_str("allow"),
+            PolicyDecisionConfig::Deny => serializer.serialize_str("deny"),
+            PolicyDecisionConfig::DenyWithReason(reason) => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("deny_with_reason", reason)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PolicyDecisionConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{self, MapAccess, Visitor};
+
+        struct PolicyDecisionVisitor;
+
+        impl<'de> Visitor<'de> for PolicyDecisionVisitor {
+            type Value = PolicyDecisionConfig;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("\"allow\", \"deny\", or {\"deny_with_reason\": \"...\"}")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                match v {
+                    "allow" => Ok(PolicyDecisionConfig::Allow),
+                    "deny" => Ok(PolicyDecisionConfig::Deny),
+                    _ => Err(E::unknown_variant(v, &["allow", "deny"])),
+                }
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                if let Some(key) = map.next_key::<&str>()? {
+                    if key == "deny_with_reason" {
+                        let reason: String = map.next_value()?;
+                        return Ok(PolicyDecisionConfig::DenyWithReason(reason));
+                    }
+                }
+                Err(de::Error::custom("expected deny_with_reason key"))
+            }
+        }
+
+        deserializer.deserialize_any(PolicyDecisionVisitor)
+    }
+}
+
+fn default_allow() -> PolicyDecisionConfig {
+    PolicyDecisionConfig::Allow
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            default: PolicyDecisionConfig::Allow,
+            servers: HashMap::new(),
+            tools: HashMap::new(),
+        }
+    }
+}
+
+impl Default for ServerPolicyConfig {
+    fn default() -> Self {
+        Self {
+            trust_level: TrustLevelConfig::Standard,
+            default: PolicyDecisionConfig::Allow,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -46,6 +184,49 @@ pub struct McpServerConfig {
     /// - false: Log warning but continue (default)
     #[serde(default)]
     pub required: bool,
+
+    /// Tool-level configuration (aliases, response formats, arg mappings)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<HashMap<String, ToolConfig>>,
+}
+
+/// Configuration for a specific tool on an MCP server.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ToolConfig {
+    /// Optional alias name (e.g., "web_search" for "brave_web_search")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+
+    /// Response format for transformation (default: passthrough)
+    #[serde(default)]
+    pub response_format: ResponseFormatConfig,
+
+    /// Argument mapping configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arg_mapping: Option<ArgMappingConfig>,
+}
+
+/// Response format configuration (mirrors ResponseFormat but for config).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFormatConfig {
+    #[default]
+    Passthrough,
+    WebSearchCall,
+    CodeInterpreterCall,
+    FileSearchCall,
+}
+
+/// Argument mapping configuration for tool aliases.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ArgMappingConfig {
+    /// Rename arguments: from -> to
+    #[serde(default)]
+    pub renames: HashMap<String, String>,
+
+    /// Default values for arguments
+    #[serde(default)]
+    pub defaults: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -524,5 +705,258 @@ url: "http://localhost:3000"
             }
             _ => panic!("Expected Streamable transport"),
         }
+    }
+
+    #[test]
+    fn test_tool_config_with_alias() {
+        let yaml = r#"
+name: "brave"
+protocol: sse
+url: "https://mcp.brave.com/sse"
+tools:
+  brave_web_search:
+    alias: web_search
+    response_format: web_search_call
+    arg_mapping:
+      renames:
+        q: query
+      defaults:
+        count: 10
+"#;
+
+        let config: McpServerConfig = serde_yaml::from_str(yaml).expect("Failed to parse");
+        assert_eq!(config.name, "brave");
+        let tools = config.tools.as_ref().unwrap();
+        assert_eq!(tools.len(), 1);
+
+        let tool_config = tools.get("brave_web_search").unwrap();
+        assert_eq!(tool_config.alias, Some("web_search".to_string()));
+        assert_eq!(
+            tool_config.response_format,
+            ResponseFormatConfig::WebSearchCall
+        );
+
+        let arg_mapping = tool_config.arg_mapping.as_ref().unwrap();
+        assert_eq!(arg_mapping.renames.get("q").unwrap(), "query");
+        assert_eq!(
+            arg_mapping.defaults.get("count").unwrap(),
+            &serde_json::json!(10)
+        );
+    }
+
+    #[test]
+    fn test_tool_config_format_only() {
+        let yaml = r#"
+name: "filesystem"
+protocol: stdio
+command: "npx"
+args: ["-y", "@anthropic/mcp-server-filesystem"]
+tools:
+  search:
+    response_format: file_search_call
+"#;
+
+        let config: McpServerConfig = serde_yaml::from_str(yaml).expect("Failed to parse");
+        let tools = config.tools.as_ref().unwrap();
+        assert_eq!(tools.len(), 1);
+
+        let tool_config = tools.get("search").unwrap();
+        assert!(tool_config.alias.is_none());
+        assert_eq!(
+            tool_config.response_format,
+            ResponseFormatConfig::FileSearchCall
+        );
+        assert!(tool_config.arg_mapping.is_none());
+    }
+
+    #[test]
+    fn test_tool_config_defaults() {
+        let yaml = r#"
+name: "test"
+protocol: sse
+url: "http://localhost:3000/sse"
+tools:
+  my_tool: {}
+"#;
+
+        let config: McpServerConfig = serde_yaml::from_str(yaml).expect("Failed to parse");
+        let tools = config.tools.as_ref().unwrap();
+        let tool_config = tools.get("my_tool").unwrap();
+        assert!(tool_config.alias.is_none());
+        assert_eq!(
+            tool_config.response_format,
+            ResponseFormatConfig::Passthrough
+        );
+        assert!(tool_config.arg_mapping.is_none());
+    }
+
+    #[test]
+    fn test_response_format_config_serde() {
+        let formats = vec![
+            (ResponseFormatConfig::Passthrough, "\"passthrough\""),
+            (ResponseFormatConfig::WebSearchCall, "\"web_search_call\""),
+            (
+                ResponseFormatConfig::CodeInterpreterCall,
+                "\"code_interpreter_call\"",
+            ),
+            (ResponseFormatConfig::FileSearchCall, "\"file_search_call\""),
+        ];
+
+        for (format, expected) in formats {
+            let serialized = serde_json::to_string(&format).unwrap();
+            assert_eq!(serialized, expected);
+
+            let deserialized: ResponseFormatConfig = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, format);
+        }
+    }
+
+    #[test]
+    fn test_multiple_tools_config() {
+        let yaml = r#"
+name: "multi-tool-server"
+protocol: sse
+url: "https://example.com/sse"
+tools:
+  tool_a:
+    alias: a
+    response_format: web_search_call
+  tool_b:
+    response_format: file_search_call
+  tool_c:
+    alias: c
+"#;
+
+        let config: McpServerConfig = serde_yaml::from_str(yaml).expect("Failed to parse");
+        let tools = config.tools.as_ref().unwrap();
+        assert_eq!(tools.len(), 3);
+
+        let tool_a = tools.get("tool_a").unwrap();
+        assert_eq!(tool_a.alias, Some("a".to_string()));
+        assert_eq!(tool_a.response_format, ResponseFormatConfig::WebSearchCall);
+
+        let tool_b = tools.get("tool_b").unwrap();
+        assert!(tool_b.alias.is_none());
+        assert_eq!(tool_b.response_format, ResponseFormatConfig::FileSearchCall);
+
+        let tool_c = tools.get("tool_c").unwrap();
+        assert_eq!(tool_c.alias, Some("c".to_string()));
+        assert_eq!(tool_c.response_format, ResponseFormatConfig::Passthrough);
+    }
+
+    #[test]
+    fn test_policy_config_default() {
+        let config = PolicyConfig::default();
+        assert_eq!(config.default, PolicyDecisionConfig::Allow);
+        assert!(config.servers.is_empty());
+        assert!(config.tools.is_empty());
+    }
+
+    #[test]
+    fn test_policy_config_yaml_minimal() {
+        let yaml = r#"
+servers: []
+"#;
+
+        let config: McpConfig = serde_yaml::from_str(yaml).expect("Failed to parse");
+        assert_eq!(config.policy.default, PolicyDecisionConfig::Allow);
+        assert!(config.policy.servers.is_empty());
+    }
+
+    #[test]
+    fn test_policy_config_yaml_full() {
+        let yaml = r#"
+servers:
+  - name: "test"
+    protocol: sse
+    url: "http://localhost:3000/sse"
+
+policy:
+  default: allow
+  servers:
+    brave:
+      trust_level: trusted
+    untrusted_server:
+      trust_level: untrusted
+      default: deny
+    sandbox_server:
+      trust_level: sandboxed
+  tools:
+    "dangerous_server:delete_all": deny
+    "risky_server:format_disk":
+      deny_with_reason: "This operation is too dangerous"
+"#;
+
+        let config: McpConfig = serde_yaml::from_str(yaml).expect("Failed to parse");
+
+        // Check default policy
+        assert_eq!(config.policy.default, PolicyDecisionConfig::Allow);
+
+        // Check server policies
+        assert_eq!(config.policy.servers.len(), 3);
+
+        let brave = config.policy.servers.get("brave").unwrap();
+        assert_eq!(brave.trust_level, TrustLevelConfig::Trusted);
+        assert_eq!(brave.default, PolicyDecisionConfig::Allow);
+
+        let untrusted = config.policy.servers.get("untrusted_server").unwrap();
+        assert_eq!(untrusted.trust_level, TrustLevelConfig::Untrusted);
+        assert_eq!(untrusted.default, PolicyDecisionConfig::Deny);
+
+        let sandbox = config.policy.servers.get("sandbox_server").unwrap();
+        assert_eq!(sandbox.trust_level, TrustLevelConfig::Sandboxed);
+
+        // Check tool policies
+        assert_eq!(config.policy.tools.len(), 2);
+        assert_eq!(
+            config.policy.tools.get("dangerous_server:delete_all"),
+            Some(&PolicyDecisionConfig::Deny)
+        );
+        assert_eq!(
+            config.policy.tools.get("risky_server:format_disk"),
+            Some(&PolicyDecisionConfig::DenyWithReason(
+                "This operation is too dangerous".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_trust_level_config_serde() {
+        let levels = vec![
+            (TrustLevelConfig::Trusted, "\"trusted\""),
+            (TrustLevelConfig::Standard, "\"standard\""),
+            (TrustLevelConfig::Untrusted, "\"untrusted\""),
+            (TrustLevelConfig::Sandboxed, "\"sandboxed\""),
+        ];
+
+        for (level, expected) in levels {
+            let serialized = serde_json::to_string(&level).unwrap();
+            assert_eq!(serialized, expected);
+
+            let deserialized: TrustLevelConfig = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, level);
+        }
+    }
+
+    #[test]
+    fn test_policy_decision_config_serde() {
+        let decisions = vec![
+            (PolicyDecisionConfig::Allow, "\"allow\""),
+            (PolicyDecisionConfig::Deny, "\"deny\""),
+        ];
+
+        for (decision, expected) in decisions {
+            let serialized = serde_json::to_string(&decision).unwrap();
+            assert_eq!(serialized, expected);
+
+            let deserialized: PolicyDecisionConfig = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, decision);
+        }
+
+        // Test deny_with_reason
+        let deny_with_reason = PolicyDecisionConfig::DenyWithReason("Not allowed".to_string());
+        let serialized = serde_json::to_string(&deny_with_reason).unwrap();
+        assert!(serialized.contains("deny_with_reason"));
+        assert!(serialized.contains("Not allowed"));
     }
 }

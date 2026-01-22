@@ -41,7 +41,7 @@ rmcp = { version = "0.8.3", features = ["client", "server",
     "reqwest",
     "auth"] }
 chrono = { workspace = true, features = ["serde"] }
-regex = "1.12.2"
+regex = "1.12"
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]

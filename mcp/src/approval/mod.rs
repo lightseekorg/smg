@@ -9,6 +9,4 @@ pub use manager::{
     ApprovalDecision, ApprovalKey, ApprovalManager, ApprovalMode, ApprovalOutcome, ApprovalParams,
     McpApprovalRequest, McpApprovalResponse,
 };
-pub use policy::{
-    PolicyConfig, PolicyDecision, PolicyEngine, PolicyRule, ServerPolicy, TrustLevel,
-};
+pub use policy::{PolicyDecision, PolicyEngine, PolicyRule, RuleCondition, RulePattern, ServerPolicy, TrustLevel};

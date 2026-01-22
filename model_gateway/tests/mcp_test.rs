@@ -32,6 +32,7 @@ async fn test_mcp_server_initialization() {
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        policy: Default::default(),
     };
 
     // Should succeed but with no connected servers (empty config is allowed)
@@ -58,11 +59,13 @@ async fn test_server_connection_with_mock() {
             },
             proxy: None,
             required: false,
+            tools: None,
         }],
         pool: Default::default(),
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        policy: Default::default(),
     };
 
     let result = McpManager::with_defaults(config).await;
@@ -96,11 +99,13 @@ async fn test_tool_availability_checking() {
             },
             proxy: None,
             required: false,
+            tools: None,
         }],
         pool: Default::default(),
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        policy: Default::default(),
     };
 
     let manager = McpManager::with_defaults(config).await.unwrap();
@@ -145,6 +150,7 @@ async fn test_multi_server_connection() {
                 },
                 proxy: None,
                 required: false,
+                tools: None,
             },
             McpServerConfig {
                 name: "mock_server_2".to_string(),
@@ -154,12 +160,14 @@ async fn test_multi_server_connection() {
                 },
                 proxy: None,
                 required: false,
+                tools: None,
             },
         ],
         pool: Default::default(),
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        policy: Default::default(),
     };
 
     // Note: This will fail to connect to both servers in the current implementation
@@ -190,11 +198,13 @@ async fn test_tool_execution_with_mock() {
             },
             proxy: None,
             required: false,
+            tools: None,
         }],
         pool: Default::default(),
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        policy: Default::default(),
     };
 
     let manager = McpManager::with_defaults(config).await.unwrap();
@@ -247,11 +257,13 @@ async fn test_concurrent_tool_execution() {
             },
             proxy: None,
             required: false,
+            tools: None,
         }],
         pool: Default::default(),
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        policy: Default::default(),
     };
 
     let manager = McpManager::with_defaults(config).await.unwrap();
@@ -290,11 +302,13 @@ async fn test_tool_execution_errors() {
             },
             proxy: None,
             required: false,
+            tools: None,
         }],
         pool: Default::default(),
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        policy: Default::default(),
     };
 
     let manager = McpManager::with_defaults(config).await.unwrap();
@@ -327,11 +341,13 @@ async fn test_connection_without_server() {
             },
             proxy: None,
             required: false,
+            tools: None,
         }],
         pool: Default::default(),
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        policy: Default::default(),
     };
 
     let result = McpManager::with_defaults(config).await;
@@ -361,11 +377,13 @@ async fn test_tool_info_structure() {
             },
             proxy: None,
             required: false,
+            tools: None,
         }],
         pool: Default::default(),
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        policy: Default::default(),
     };
 
     let manager = McpManager::with_defaults(config).await.unwrap();
@@ -402,11 +420,13 @@ async fn test_sse_connection() {
             },
             proxy: None,
             required: false,
+            tools: None,
         }],
         pool: Default::default(),
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        policy: Default::default(),
     };
 
     // Manager succeeds but no servers are connected (errors are logged)
@@ -434,6 +454,7 @@ async fn test_transport_types() {
         },
         proxy: None,
         required: false,
+        tools: None,
     };
     assert_eq!(http_config.name, "http_server");
 
@@ -446,6 +467,7 @@ async fn test_transport_types() {
         },
         proxy: None,
         required: false,
+        tools: None,
     };
     assert_eq!(sse_config.name, "sse_server");
 
@@ -459,6 +481,7 @@ async fn test_transport_types() {
         },
         proxy: None,
         required: false,
+        tools: None,
     };
     assert_eq!(stdio_config.name, "stdio_server");
 }
@@ -479,11 +502,13 @@ async fn test_complete_workflow() {
             },
             proxy: None,
             required: false,
+            tools: None,
         }],
         pool: Default::default(),
         proxy: None,
         warmup: Vec::new(),
         inventory: Default::default(),
+        policy: Default::default(),
     };
 
     // 2. Connect to server

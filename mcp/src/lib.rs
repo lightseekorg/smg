@@ -27,17 +27,19 @@ pub mod inventory;
 pub use core::{config, manager, pool as connection_pool};
 // Re-export from core
 pub use core::{
-    HandlerRequestContext, LatencySnapshot, McpConfig, McpManager, McpMetrics, McpServerConfig,
-    McpTransport, MetricsSnapshot, RefreshRequest, RequestMcpContext, SmgClientHandler, Tool,
+    ArgMappingConfig, HandlerRequestContext, LatencySnapshot, McpConfig, McpManager, McpMetrics,
+    McpOrchestrator, McpRequestContext, McpServerConfig, McpTransport, MetricsSnapshot,
+    PolicyConfig, PolicyDecisionConfig, RefreshRequest, RequestMcpContext, ResponseFormatConfig,
+    ServerPolicyConfig, SmgClientHandler, Tool, ToolCallResult, ToolConfig, TrustLevelConfig,
 };
 
 // Re-export shared types
-pub use annotations::ToolAnnotations;
+pub use annotations::{AnnotationType, ToolAnnotations};
 // Re-export from approval
 pub use approval::{
     ApprovalDecision, ApprovalKey, ApprovalManager, ApprovalMode, ApprovalOutcome, ApprovalParams,
     AuditEntry, AuditLog, DecisionResult, DecisionSource, McpApprovalRequest, McpApprovalResponse,
-    PolicyConfig, PolicyDecision, PolicyEngine, PolicyRule, ServerPolicy, TrustLevel,
+    PolicyDecision, PolicyEngine, PolicyRule, RuleCondition, RulePattern, ServerPolicy, TrustLevel,
 };
 pub use error::{ApprovalError, McpError, McpResult};
 // Re-export from inventory

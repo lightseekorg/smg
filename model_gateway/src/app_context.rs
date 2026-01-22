@@ -496,6 +496,7 @@ impl AppContextBuilder {
             proxy: None,
             warmup: Vec::new(),
             inventory: Default::default(),
+            policy: Default::default(),
         };
 
         let manager = McpManager::with_defaults(empty_config)

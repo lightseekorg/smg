@@ -131,6 +131,7 @@ pub async fn ensure_request_mcp_client(
                 transport,
                 proxy: None,
                 required: false,
+                tools: None,
             };
 
             // Get the server key for tracking

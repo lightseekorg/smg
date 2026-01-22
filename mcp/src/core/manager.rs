@@ -238,6 +238,7 @@ impl McpManager {
             transport,
             proxy: None,
             required: false,
+            tools: None,
         })
     }
 
@@ -1013,6 +1014,7 @@ mod tests {
                 proxy: None,
                 warmup: vec![],
                 inventory: Default::default(),
+                policy: Default::default(),
             },
         }
     }
@@ -1037,6 +1039,7 @@ mod tests {
             proxy: None,
             warmup: vec![],
             inventory: Default::default(),
+            policy: Default::default(),
         };
 
         let manager = McpManager::new(config, 100).await.unwrap();

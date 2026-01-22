@@ -392,6 +392,7 @@ pub async fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
         proxy: None,
         warmup: vec![],
         inventory: Default::default(),
+        policy: Default::default(),
     };
     let mcp_manager = McpManager::with_defaults(empty_config)
         .await
@@ -516,6 +517,7 @@ pub async fn create_test_context_with_parsers(config: RouterConfig) -> Arc<AppCo
         proxy: None,
         warmup: vec![],
         inventory: Default::default(),
+        policy: Default::default(),
     };
     let mcp_manager = McpManager::with_defaults(empty_config)
         .await
