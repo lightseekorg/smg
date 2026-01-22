@@ -9,7 +9,7 @@ use tracing::{debug, error, warn};
 use crate::{
     core::WorkerRegistry,
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::McpManager,
+    mcp::McpOrchestrator,
     protocols::{
         common::Tool,
         responses::{ResponseTool, ResponseToolType, ResponsesRequest, ResponsesResponse},
@@ -25,7 +25,7 @@ use crate::{
 /// the MCP clients can be created and connected.
 /// Returns Ok((has_mcp_tools, server_keys)) on success.
 pub(crate) async fn ensure_mcp_connection(
-    mcp_manager: &Arc<McpManager>,
+    mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: Option<&[ResponseTool]>,
 ) -> Result<(bool, Vec<String>), Response> {
     let has_mcp_tools = tools
@@ -37,8 +37,8 @@ pub(crate) async fn ensure_mcp_connection(
 
     if has_mcp_tools {
         if let Some(tools) = tools {
-            match ensure_request_mcp_client(mcp_manager, tools).await {
-                Some((_manager, server_keys)) => {
+            match ensure_request_mcp_client(mcp_orchestrator, tools).await {
+                Some((_orchestrator, server_keys)) => {
                     return Ok((true, server_keys));
                 }
                 None => {

@@ -16,7 +16,7 @@ use super::{
 };
 use crate::routers::{
     header_utils::{apply_provider_headers, extract_auth_header},
-    mcp_utils::McpLoopConfig,
+    mcp_utils::{ensure_request_mcp_client, McpLoopConfig},
     openai::context::{PayloadState, RequestContext},
     persistence_utils::persist_conversation_items,
 };
@@ -43,29 +43,32 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             return (StatusCode::INTERNAL_SERVER_ERROR, "Worker not selected").into_response();
         }
     };
-    let mcp_manager = match ctx.components.mcp_manager() {
+    let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
         Some(m) => m,
         None => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "MCP manager required").into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "MCP orchestrator required",
+            )
+                .into_response();
         }
     };
 
-    let active_mcp = mcp_manager
-        .create_request_context(original_body.tools.as_deref())
-        .await;
-    let server_keys = active_mcp
-        .as_ref()
-        .map(|ctx| ctx.server_keys())
-        .unwrap_or_default();
+    // Check for MCP tools and create request context if needed
+    let mcp_result = if let Some(tools) = original_body.tools.as_deref() {
+        ensure_request_mcp_client(mcp_orchestrator, tools).await
+    } else {
+        None
+    };
 
     let mut response_json: Value;
 
-    if let Some(mcp) = active_mcp {
+    if let Some((orchestrator, server_keys)) = mcp_result {
         let config = McpLoopConfig {
             server_keys: server_keys.clone(),
             ..McpLoopConfig::default()
         };
-        prepare_mcp_tools_as_functions(&mut payload, &mcp, &server_keys);
+        prepare_mcp_tools_as_functions(&mut payload, &orchestrator, &server_keys);
 
         match execute_tool_loop(
             ctx.components.client(),
@@ -73,7 +76,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             ctx.headers(),
             payload,
             original_body,
-            &mcp,
+            &orchestrator,
             &config,
         )
         .await

@@ -23,14 +23,14 @@ pub mod core;
 pub mod inventory;
 
 // Backward-compatible re-exports (old module paths)
-// These allow `mcp::config::*` and `mcp::manager::*` to continue working
-pub use core::{config, manager, pool as connection_pool};
+// These allow `mcp::config::*` to continue working
+pub use core::{config, pool as connection_pool};
 // Re-export from core
 pub use core::{
-    ArgMappingConfig, HandlerRequestContext, LatencySnapshot, McpConfig, McpManager, McpMetrics,
+    ArgMappingConfig, HandlerRequestContext, LatencySnapshot, McpConfig, McpMetrics,
     McpOrchestrator, McpRequestContext, McpServerConfig, McpTransport, MetricsSnapshot,
-    PolicyConfig, PolicyDecisionConfig, RefreshRequest, RequestMcpContext, ResponseFormatConfig,
-    ServerPolicyConfig, SmgClientHandler, Tool, ToolCallResult, ToolConfig, TrustLevelConfig,
+    PolicyConfig, PolicyDecisionConfig, RefreshRequest, ResponseFormatConfig, ServerPolicyConfig,
+    SmgClientHandler, Tool, ToolCallResult, ToolConfig, TrustLevelConfig,
 };
 
 // Re-export shared types

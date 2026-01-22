@@ -31,7 +31,6 @@ McpRequestContext → call_tool() → Approval → Execute → Transform
 
 - `McpOrchestrator` - Main entry point, coordinates all MCP operations
 - `McpRequestContext` - Per-request context with tenant isolation
-- `McpManager` - Lower-level server connection management
 - `McpConnectionPool` - LRU pool for dynamic server connections
 - `SmgClientHandler` - RMCP ClientHandler implementation
 
@@ -435,7 +434,6 @@ mcp/src/
 │
 ├── core/
 │   ├── orchestrator.rs # McpOrchestrator, McpRequestContext
-│   ├── manager.rs      # McpManager (lower-level)
 │   ├── config.rs       # McpConfig, McpServerConfig
 │   ├── pool.rs         # McpConnectionPool (LRU)
 │   ├── handler.rs      # SmgClientHandler
@@ -469,7 +467,7 @@ mcp/src/
 - Response transformation
 - Metrics collection
 
-Use `McpOrchestrator` for new integrations. `McpManager` remains available for lower-level access.
+`McpOrchestrator` is the main entry point for all MCP integrations.
 
 ### Why Qualified Tool Names?
 

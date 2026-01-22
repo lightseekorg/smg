@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock as StdRwLock};
 
 use crate::{
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::McpManager,
+    mcp::McpOrchestrator,
     routers::grpc::{context::SharedComponents, pipeline::RequestPipeline},
 };
 
@@ -31,8 +31,8 @@ pub(crate) struct ResponsesContext {
     /// Conversation item storage backend
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
 
-    /// MCP manager for tool support
-    pub mcp_manager: Arc<McpManager>,
+    /// MCP orchestrator for tool support
+    pub mcp_orchestrator: Arc<McpOrchestrator>,
 
     /// Server keys for MCP tools requested in this context
     pub requested_servers: Arc<StdRwLock<Vec<String>>>,
@@ -46,7 +46,7 @@ impl ResponsesContext {
         response_storage: Arc<dyn ResponseStorage>,
         conversation_storage: Arc<dyn ConversationStorage>,
         conversation_item_storage: Arc<dyn ConversationItemStorage>,
-        mcp_manager: Arc<McpManager>,
+        mcp_orchestrator: Arc<McpOrchestrator>,
     ) -> Self {
         Self {
             pipeline,
@@ -54,7 +54,7 @@ impl ResponsesContext {
             response_storage,
             conversation_storage,
             conversation_item_storage,
-            mcp_manager,
+            mcp_orchestrator,
             requested_servers: Arc::new(StdRwLock::new(Vec::new())),
         }
     }

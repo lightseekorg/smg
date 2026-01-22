@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::{
-    mcp::{McpManager, McpServerConfig, McpTransport},
+    mcp::{McpOrchestrator, McpServerConfig, McpTransport},
     protocols::responses::{ResponseTool, ResponseToolType},
 };
 
@@ -79,12 +79,12 @@ pub fn extract_server_label(tools: Option<&[ResponseTool]>, default_label: &str)
 /// This function extracts MCP server configurations from ALL request tools (server_url, authorization)
 /// and ensures client connections are established via the connection pool.
 ///
-/// Returns `Some((manager, server_keys))` if MCP tools were found and clients created,
+/// Returns `Some((orchestrator, server_keys))` if MCP tools were found and clients created,
 /// `None` if no MCP tools with server_url were found.
 pub async fn ensure_request_mcp_client(
-    mcp_manager: &Arc<McpManager>,
+    mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
-) -> Option<(Arc<McpManager>, Vec<String>)> {
+) -> Option<(Arc<McpOrchestrator>, Vec<String>)> {
     let mut server_keys = Vec::new();
     let mut has_mcp_tools = false;
 
@@ -135,21 +135,18 @@ pub async fn ensure_request_mcp_client(
             };
 
             // Get the server key for tracking
-            let server_key = McpManager::server_key(&server_config);
+            let server_key = McpOrchestrator::server_key(&server_config);
 
-            // Use get_or_create_client to establish connection
-            match mcp_manager.get_or_create_client(server_config).await {
-                Ok(_client) => {
+            // Use connect_dynamic_server to establish connection
+            match mcp_orchestrator.connect_dynamic_server(server_config).await {
+                Ok(_key) => {
                     // Track this server for filtering
                     if !server_keys.contains(&server_key) {
                         server_keys.push(server_key);
                     }
                 }
                 Err(err) => {
-                    warn!(
-                        "Failed to get/create MCP connection for {}: {}",
-                        server_key, err
-                    );
+                    warn!("Failed to connect MCP server {}: {}", server_key, err);
                     // Continue processing other tools
                 }
             }
@@ -157,7 +154,7 @@ pub async fn ensure_request_mcp_client(
     }
 
     if has_mcp_tools && !server_keys.is_empty() {
-        Some((mcp_manager.clone(), server_keys))
+        Some((mcp_orchestrator.clone(), server_keys))
     } else {
         None
     }

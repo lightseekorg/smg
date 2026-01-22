@@ -15,6 +15,12 @@ pub enum McpError {
     #[error("Tool not found: {0}")]
     ToolNotFound(String),
 
+    #[error("Tool name collision: '{tool_name}' exists on servers: {servers:?}")]
+    ToolCollision {
+        tool_name: String,
+        servers: Vec<String>,
+    },
+
     #[error("Transport error: {0}")]
     Transport(String),
 

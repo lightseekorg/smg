@@ -11,7 +11,7 @@ use smg::{
     data_connector::{
         MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
     },
-    mcp::{McpConfig, McpManager},
+    mcp::{McpConfig, McpOrchestrator},
     middleware::{AuthConfig, TokenBucket},
     policies::PolicyRegistry,
     routers::RouterTrait,
@@ -174,8 +174,8 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
     let worker_job_queue = Arc::new(OnceLock::new());
     let workflow_engines = Arc::new(OnceLock::new());
 
-    // Initialize MCP manager with empty config
-    let mcp_manager_lock = Arc::new(OnceLock::new());
+    // Initialize MCP orchestrator with empty config
+    let mcp_orchestrator_lock = Arc::new(OnceLock::new());
     let empty_config = McpConfig {
         servers: vec![],
         pool: Default::default(),
@@ -184,10 +184,10 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
         inventory: Default::default(),
         policy: Default::default(),
     };
-    let mcp_manager = McpManager::with_defaults(empty_config)
+    let mcp_orchestrator = McpOrchestrator::new(empty_config)
         .await
-        .expect("Failed to create MCP manager");
-    mcp_manager_lock.set(Arc::new(mcp_manager)).ok();
+        .expect("Failed to create MCP orchestrator");
+    mcp_orchestrator_lock.set(Arc::new(mcp_orchestrator)).ok();
 
     // Initialize registries
     let worker_registry = Arc::new(WorkerRegistry::new());
@@ -214,7 +214,7 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
             .load_monitor(None)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
-            .mcp_manager(mcp_manager_lock)
+            .mcp_orchestrator(mcp_orchestrator_lock)
             .build()
             .unwrap(),
     )

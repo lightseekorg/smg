@@ -8,7 +8,7 @@
 use std::{sync::Arc, time::Instant};
 
 use axum::response::Response;
-use serde_json::json;
+use serde_json::{json, Value};
 use tracing::{debug, error, trace, warn};
 
 use super::{
@@ -20,6 +20,7 @@ use super::{
     conversions,
 };
 use crate::{
+    mcp::{ApprovalMode, TenantContext, ToolCallResult},
     observability::metrics::{metrics_labels, Metrics},
     protocols::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse},
     routers::{
@@ -50,7 +51,7 @@ pub(super) async fn route_responses_internal(
 
     // 2. Check MCP connection and get whether MCP tools are present
     let (has_mcp_tools, server_keys) =
-        ensure_mcp_connection(&ctx.mcp_manager, request.tools.as_deref()).await?;
+        ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await?;
 
     // Set the server keys in the context
     {
@@ -174,10 +175,20 @@ pub(super) async fn execute_tool_loop(
         DEFAULT_MAX_ITERATIONS
     );
 
+    // Create a request context for tool execution (use response_id if available)
+    let request_id = response_id
+        .clone()
+        .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4()));
+    let request_ctx = ctx.mcp_orchestrator.create_request_context(
+        request_id,
+        TenantContext::default(),
+        ApprovalMode::PolicyOnly,
+    );
+
     // Get MCP tools and convert to chat format (do this once before loop)
     let mcp_tools = {
         let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_manager.list_tools_for_servers(&servers)
+        ctx.mcp_orchestrator.list_tools_for_servers(&servers)
     };
     let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&mcp_tools);
     trace!(
@@ -231,7 +242,7 @@ pub(super) async fn execute_tool_loop(
 
             // Separate MCP and function tool calls
             let mcp_tool_names: std::collections::HashSet<&str> =
-                mcp_tools.iter().map(|t| t.name.as_ref()).collect();
+                mcp_tools.iter().map(|t| t.tool.name.as_ref()).collect();
             let (mcp_tool_calls, function_tool_calls): (Vec<ExtractedToolCall>, Vec<_>) =
                 tool_calls
                     .into_iter()
@@ -312,6 +323,12 @@ pub(super) async fn execute_tool_loop(
                 return Ok(responses_response);
             }
 
+            // Get server_keys for call_tool_by_name
+            let server_keys: Vec<String> = {
+                let servers = ctx.requested_servers.read().unwrap();
+                servers.clone()
+            };
+
             // Execute all MCP tools
             for tool_call in mcp_tool_calls {
                 trace!(
@@ -322,18 +339,36 @@ pub(super) async fn execute_tool_loop(
                 );
 
                 let tool_start = Instant::now();
+
+                // Parse arguments to Value
+                let arguments: Value =
+                    serde_json::from_str(&tool_call.arguments).unwrap_or_else(|_| json!({}));
+
                 let (output_str, success, error) = match ctx
-                    .mcp_manager
-                    .call_tool(tool_call.name.as_str(), tool_call.arguments.as_str())
+                    .mcp_orchestrator
+                    .call_tool_by_name(&tool_call.name, arguments, &server_keys, &request_ctx)
                     .await
                 {
-                    Ok(result) => match serde_json::to_string(&result) {
-                        Ok(output) => (output, true, None),
-                        Err(e) => {
-                            let err = format!("Failed to serialize tool result: {}", e);
+                    Ok(result) => match result {
+                        ToolCallResult::Success(output_item) => {
+                            match serde_json::to_string(&output_item) {
+                                Ok(output) => (output, true, None),
+                                Err(e) => {
+                                    let err = format!("Failed to serialize tool result: {}", e);
+                                    warn!("{}", err);
+                                    let error_json = json!({ "error": &err }).to_string();
+                                    (error_json, false, Some(err))
+                                }
+                            }
+                        }
+                        ToolCallResult::PendingApproval(_) => {
+                            let err = "Tool requires approval (not supported in this context)";
                             warn!("{}", err);
-                            let error_json = json!({ "error": &err }).to_string();
-                            (error_json, false, Some(err))
+                            (
+                                json!({ "error": err }).to_string(),
+                                false,
+                                Some(err.to_string()),
+                            )
                         }
                     },
                     Err(err) => {
@@ -413,7 +448,7 @@ pub(super) async fn execute_tool_loop(
                 // Prepend mcp_list_tools item
                 let servers = ctx.requested_servers.read().unwrap();
                 let mcp_list_tools =
-                    build_mcp_list_tools_item(&ctx.mcp_manager, &server_label, &servers);
+                    build_mcp_list_tools_item(&ctx.mcp_orchestrator, &server_label, &servers);
                 responses_response.output.insert(0, mcp_list_tools);
 
                 // Append all mcp_call items at the end

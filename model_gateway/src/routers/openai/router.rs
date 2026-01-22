@@ -149,8 +149,8 @@ impl OpenAIRouter {
 
     pub async fn new(ctx: &Arc<AppContext>) -> Result<Self, String> {
         let worker_registry = ctx.worker_registry.clone();
-        let mcp_manager = ctx
-            .mcp_manager
+        let mcp_orchestrator = ctx
+            .mcp_orchestrator
             .get()
             .ok_or_else(|| "MCP manager not initialized in AppContext".to_string())?
             .clone();
@@ -163,7 +163,7 @@ impl OpenAIRouter {
             shared: SharedComponents {
                 client: ctx.client.clone(),
             },
-            mcp_manager: mcp_manager.clone(),
+            mcp_orchestrator: mcp_orchestrator.clone(),
             response_storage: ctx.response_storage.clone(),
             conversation_storage: ctx.conversation_storage.clone(),
             conversation_item_storage: ctx.conversation_item_storage.clone(),

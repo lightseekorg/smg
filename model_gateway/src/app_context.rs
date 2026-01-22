@@ -13,7 +13,7 @@ use crate::{
         create_storage, ConversationItemStorage, ConversationStorage, ResponseStorage,
         StorageFactoryConfig,
     },
-    mcp::McpManager,
+    mcp::McpOrchestrator,
     middleware::TokenBucket,
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
@@ -55,7 +55,7 @@ pub struct AppContext {
     pub configured_tool_parser: Option<String>,
     pub worker_job_queue: Arc<OnceLock<Arc<JobQueue>>>,
     pub workflow_engines: Arc<OnceLock<WorkflowEngines>>,
-    pub mcp_manager: Arc<OnceLock<Arc<McpManager>>>,
+    pub mcp_orchestrator: Arc<OnceLock<Arc<McpOrchestrator>>>,
     pub wasm_manager: Option<Arc<WasmModuleManager>>,
     pub worker_service: Arc<WorkerService>,
     pub inflight_tracker: Arc<InFlightRequestTracker>,
@@ -85,7 +85,7 @@ pub struct AppContextBuilder {
     load_monitor: Option<Arc<LoadMonitor>>,
     worker_job_queue: Option<Arc<OnceLock<Arc<JobQueue>>>>,
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
-    mcp_manager: Option<Arc<OnceLock<Arc<McpManager>>>>,
+    mcp_orchestrator: Option<Arc<OnceLock<Arc<McpOrchestrator>>>>,
     wasm_manager: Option<Arc<WasmModuleManager>>,
 }
 
@@ -125,7 +125,7 @@ impl AppContextBuilder {
             load_monitor: None,
             worker_job_queue: None,
             workflow_engines: None,
-            mcp_manager: None,
+            mcp_orchestrator: None,
             wasm_manager: None,
         }
     }
@@ -214,8 +214,11 @@ impl AppContextBuilder {
         self
     }
 
-    pub fn mcp_manager(mut self, mcp_manager: Arc<OnceLock<Arc<McpManager>>>) -> Self {
-        self.mcp_manager = Some(mcp_manager);
+    pub fn mcp_orchestrator(
+        mut self,
+        mcp_orchestrator: Arc<OnceLock<Arc<McpOrchestrator>>>,
+    ) -> Self {
+        self.mcp_orchestrator = Some(mcp_orchestrator);
         self
     }
 
@@ -275,9 +278,9 @@ impl AppContextBuilder {
             workflow_engines: self
                 .workflow_engines
                 .ok_or(AppContextBuildError("workflow_engines"))?,
-            mcp_manager: self
-                .mcp_manager
-                .ok_or(AppContextBuildError("mcp_manager"))?,
+            mcp_orchestrator: self
+                .mcp_orchestrator
+                .ok_or(AppContextBuildError("mcp_orchestrator"))?,
             wasm_manager: self.wasm_manager,
             worker_service,
             inflight_tracker: InFlightRequestTracker::new(),
@@ -302,7 +305,7 @@ impl AppContextBuilder {
             .with_load_monitor(&router_config)
             .with_worker_job_queue()
             .with_workflow_engines()
-            .with_mcp_manager(&router_config)
+            .with_mcp_orchestrator(&router_config)
             .await?
             .with_wasm_manager(&router_config)?
             .router_config(router_config))
@@ -479,16 +482,19 @@ impl AppContextBuilder {
         self
     }
 
-    /// Create and initialize MCP manager with empty config
+    /// Create and initialize MCP orchestrator with empty config
     ///
-    /// This initializes the MCP manager with an empty config and default settings.
+    /// This initializes the MCP orchestrator with an empty config and default settings.
     /// MCP servers will be registered later via the InitializeMcpServers job.
-    async fn with_mcp_manager(mut self, _router_config: &RouterConfig) -> Result<Self, String> {
+    async fn with_mcp_orchestrator(
+        mut self,
+        _router_config: &RouterConfig,
+    ) -> Result<Self, String> {
         // Create OnceLock container
-        let mcp_manager_lock = Arc::new(OnceLock::new());
+        let mcp_orchestrator_lock = Arc::new(OnceLock::new());
 
         // Always create with empty config and defaults
-        debug!("Initializing MCP manager with empty config and default settings (5 min TTL, 100 max connections)");
+        debug!("Initializing MCP orchestrator with empty config and default settings (5 min TTL, 100 max connections)");
 
         let empty_config = crate::mcp::McpConfig {
             servers: Vec::new(),
@@ -499,16 +505,16 @@ impl AppContextBuilder {
             policy: Default::default(),
         };
 
-        let manager = McpManager::with_defaults(empty_config)
+        let orchestrator = McpOrchestrator::new(empty_config)
             .await
-            .map_err(|e| format!("Failed to initialize MCP manager with defaults: {}", e))?;
+            .map_err(|e| format!("Failed to initialize MCP orchestrator: {}", e))?;
 
-        // Store the initialized manager in the OnceLock
-        mcp_manager_lock
-            .set(Arc::new(manager))
-            .map_err(|_| "Failed to set MCP manager in OnceLock".to_string())?;
+        // Store the initialized orchestrator in the OnceLock
+        mcp_orchestrator_lock
+            .set(Arc::new(orchestrator))
+            .map_err(|_| "Failed to set MCP orchestrator in OnceLock".to_string())?;
 
-        self.mcp_manager = Some(mcp_manager_lock);
+        self.mcp_orchestrator = Some(mcp_orchestrator_lock);
         Ok(self)
     }
 

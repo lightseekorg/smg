@@ -47,11 +47,15 @@ pub(crate) async fn serve_harmony_responses_stream(
     };
 
     // Check MCP connection BEFORE starting stream and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) =
-        match ensure_mcp_connection(&ctx.mcp_manager, current_request.tools.as_deref()).await {
-            Ok(result) => result,
-            Err(response) => return response,
-        };
+    let (has_mcp_tools, server_keys) = match ensure_mcp_connection(
+        &ctx.mcp_orchestrator,
+        current_request.tools.as_deref(),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
 
     // Set the server keys in the context
     {
@@ -133,7 +137,7 @@ async fn execute_mcp_tool_loop_streaming(
     // Add filtered MCP tools (static + requested dynamic) to the request
     let mcp_tools = {
         let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_manager.list_tools_for_servers(&servers)
+        ctx.mcp_orchestrator.list_tools_for_servers(&servers)
     };
     if !mcp_tools.is_empty() {
         let mcp_response_tools = convert_mcp_tools_to_response_tools(&mcp_tools);
@@ -168,11 +172,11 @@ async fn execute_mcp_tool_loop_streaming(
     // Build tools list for item structure
     let tool_items: Vec<_> = mcp_tools
         .iter()
-        .map(|t| {
+        .map(|entry| {
             json!({
-                "name": t.name,
-                "description": t.description,
-                "input_schema": Value::Object((*t.input_schema).clone())
+                "name": entry.tool.name,
+                "description": entry.tool.description,
+                "input_schema": Value::Object((*entry.tool.input_schema).clone())
             })
         })
         .collect();
@@ -295,7 +299,7 @@ async fn execute_mcp_tool_loop_streaming(
                 analysis,
                 partial_text,
                 usage,
-                request_id: _,
+                request_id,
             } => {
                 debug!(
                     tool_call_count = tool_calls.len(),
@@ -351,10 +355,12 @@ async fn execute_mcp_tool_loop_streaming(
                 // Execute MCP tools (if any)
                 let mcp_results = if !mcp_tool_calls.is_empty() {
                     match execute_mcp_tools(
-                        &ctx.mcp_manager,
+                        &ctx.mcp_orchestrator,
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,
+                        &request_id,
+                        &mcp_tools,
                     )
                     .await
                     {

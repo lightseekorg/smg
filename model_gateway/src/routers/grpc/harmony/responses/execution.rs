@@ -8,7 +8,7 @@ use tracing::{debug, error, warn};
 
 use super::common::McpCallTracking;
 use crate::{
-    mcp::{self, McpManager},
+    mcp::{self, ApprovalMode, McpOrchestrator, TenantContext, ToolEntry},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         common::{Function, ToolCall},
@@ -37,18 +37,35 @@ pub(crate) struct ToolResult {
 
 /// Execute MCP tools and collect results
 ///
-/// Executes each tool call sequentially via the MCP manager.
+/// Executes each tool call sequentially via the MCP orchestrator.
 /// Tool execution errors are returned as error results to the model
 /// (allows model to handle gracefully).
 ///
 /// Vector of tool results (one per tool call)
 pub(super) async fn execute_mcp_tools(
-    mcp_manager: &Arc<McpManager>,
+    mcp_orchestrator: &Arc<McpOrchestrator>,
     tool_calls: &[ToolCall],
     tracking: &mut McpCallTracking,
     model_id: &str,
+    request_id: &str,
+    mcp_tools: &[ToolEntry],
 ) -> Result<Vec<ToolResult>, Response> {
     let mut results = Vec::new();
+
+    // Create request context for tool execution
+    let request_ctx = mcp_orchestrator.create_request_context(
+        request_id,
+        TenantContext::default(),
+        ApprovalMode::PolicyOnly,
+    );
+
+    // Extract server_keys from mcp_tools once (not per tool call)
+    let server_keys: Vec<String> = mcp_tools
+        .iter()
+        .map(|t| t.server_key().to_string())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
 
     for tool_call in tool_calls {
         debug!(
@@ -76,37 +93,39 @@ pub(super) async fn execute_mcp_tools(
             )
         })?;
 
-        // Execute tool via MCP manager
-        let args_map = if let Value::Object(map) = args {
-            Some(map)
-        } else {
-            None
-        };
-
         let tool_start = Instant::now();
-        let tool_result = mcp_manager
-            .call_tool(&tool_call.function.name, args_map)
+        let tool_result = mcp_orchestrator
+            .call_tool_by_name(
+                &tool_call.function.name,
+                args.clone(),
+                &server_keys,
+                &request_ctx,
+            )
             .await;
         let tool_duration = tool_start.elapsed();
 
         match tool_result {
-            Ok(mcp_result) => {
+            Ok(call_result) => {
                 debug!(
                     tool_name = %tool_call.function.name,
                     call_id = %tool_call.id,
                     "Tool execution succeeded"
                 );
 
-                // Extract content from MCP result
-                let output = if let Some(content) = mcp_result.content.first() {
-                    // Serialize the entire content item
-                    to_value(content)
-                        .unwrap_or_else(|_| json!({"error": "Failed to serialize tool result"}))
-                } else {
-                    json!({"result": "success"})
+                // Extract output from ToolCallResult
+                let (output, is_error) = match call_result {
+                    mcp::ToolCallResult::Success(response_item) => {
+                        // Convert ResponseOutputItem to JSON
+                        let output = to_value(&response_item)
+                            .unwrap_or_else(|_| json!({"result": "success"}));
+                        (output, false)
+                    }
+                    mcp::ToolCallResult::PendingApproval(_) => {
+                        // In PolicyOnly mode, this shouldn't happen
+                        (json!({"error": "Unexpected pending approval"}), true)
+                    }
                 };
 
-                let is_error = mcp_result.is_error.unwrap_or(false);
                 let output_str = to_string(&output)
                     .unwrap_or_else(|_| r#"{"error": "Failed to serialize output"}"#.to_string());
 
@@ -200,23 +219,23 @@ pub(super) async fn execute_mcp_tools(
 
 /// Convert MCP tools to Responses API tool format
 ///
-/// Converts MCP Tool entries (from rmcp SDK) to ResponseTool format so the model
+/// Converts MCP ToolEntry (from inventory) to ResponseTool format so the model
 /// knows about available MCP tools when making tool calls.
-pub(crate) fn convert_mcp_tools_to_response_tools(mcp_tools: &[mcp::Tool]) -> Vec<ResponseTool> {
+pub(crate) fn convert_mcp_tools_to_response_tools(mcp_tools: &[ToolEntry]) -> Vec<ResponseTool> {
     mcp_tools
         .iter()
-        .map(|tool_info| ResponseTool {
+        .map(|entry| ResponseTool {
             r#type: ResponseToolType::Mcp,
             function: Some(Function {
-                name: tool_info.name.to_string(),
-                description: tool_info.description.as_ref().map(|d| d.to_string()),
-                parameters: Value::Object((*tool_info.input_schema).clone()),
+                name: entry.tool.name.to_string(),
+                description: entry.tool.description.as_ref().map(|d| d.to_string()),
+                parameters: Value::Object((*entry.tool.input_schema).clone()),
                 strict: None,
             }),
             server_url: None, // MCP tools from inventory don't have individual server URLs
             authorization: None,
-            server_label: None,
-            server_description: tool_info.description.as_ref().map(|d| d.to_string()),
+            server_label: Some(entry.server_key().to_string()),
+            server_description: entry.tool.description.as_ref().map(|d| d.to_string()),
             require_approval: None,
             allowed_tools: None,
         })
