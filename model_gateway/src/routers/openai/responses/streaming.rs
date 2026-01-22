@@ -670,10 +670,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
 
         let mut state =
             ToolLoopState::new(original_request.input.clone(), server_label.to_string());
-        let loop_config = McpLoopConfig {
-            server_keys: server_keys_clone.clone(),
-            ..McpLoopConfig::default()
-        };
+        let loop_config = McpLoopConfig::default();
         let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
         let tools_json = payload_clone.get("tools").cloned().unwrap_or(json!([]));
         let base_payload = payload_clone.clone();
@@ -1008,7 +1005,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     let req = ctx.into_streaming_context();
 
     // If no MCP tools, use simple passthrough
-    let Some((orchestrator, server_keys)) = mcp_result else {
+    let Some((orchestrator, mcp_servers)) = mcp_result else {
         return handle_simple_streaming_passthrough(
             &client,
             circuit_breaker,
@@ -1017,6 +1014,8 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         )
         .await;
     };
+
+    let server_keys: Vec<String> = mcp_servers.iter().map(|(_, key)| key.clone()).collect();
 
     // MCP is active - transform tools and set up interception
     handle_streaming_with_tool_interception(

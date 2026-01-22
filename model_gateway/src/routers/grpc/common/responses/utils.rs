@@ -39,7 +39,9 @@ pub(crate) async fn ensure_mcp_connection(
     if has_mcp_tools {
         if let Some(tools) = tools {
             match ensure_request_mcp_client(mcp_orchestrator, tools, request_headers).await {
-                Some((_orchestrator, server_keys)) => {
+                Some((_orchestrator, mcp_servers)) => {
+                    let server_keys: Vec<String> =
+                        mcp_servers.into_iter().map(|(_, key)| key).collect();
                     return Ok((true, server_keys));
                 }
                 None => {

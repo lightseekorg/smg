@@ -204,32 +204,43 @@ fn insert_optional_string(map: &mut Map<String, Value>, key: &str, value: &Optio
 
 /// Mask function tools as MCP tools in response for client
 pub(super) fn mask_tools_as_mcp(resp: &mut Value, original_body: &ResponsesRequest) {
-    let mcp_tool = original_body.tools.as_ref().and_then(|tools| {
+    let mcp_tools = original_body.tools.as_ref().map(|tools| {
         tools
             .iter()
-            .find(|t| matches!(t.r#type, ResponseToolType::Mcp) && t.server_url.is_some())
+            .filter(|t| matches!(t.r#type, ResponseToolType::Mcp) && t.server_url.is_some())
+            .collect::<Vec<_>>()
     });
 
-    let Some(t) = mcp_tool else {
+    let Some(mcp_tools) = mcp_tools else {
         return;
     };
 
-    let mut m = Map::new();
-    m.insert("type".to_string(), json!("mcp"));
-    insert_optional_string(&mut m, "server_label", &t.server_label);
-    insert_optional_string(&mut m, "server_url", &t.server_url);
-    insert_optional_string(&mut m, "server_description", &t.server_description);
-    insert_optional_string(&mut m, "require_approval", &t.require_approval);
+    let mcp_tools: Vec<Value> = mcp_tools
+        .iter()
+        .map(|t| {
+            let mut m = Map::new();
+            m.insert("type".to_string(), json!("mcp"));
+            insert_optional_string(&mut m, "server_label", &t.server_label);
+            insert_optional_string(&mut m, "server_url", &t.server_url);
+            insert_optional_string(&mut m, "server_description", &t.server_description);
+            insert_optional_string(&mut m, "require_approval", &t.require_approval);
 
-    if let Some(allowed) = &t.allowed_tools {
-        m.insert(
-            "allowed_tools".to_string(),
-            Value::Array(allowed.iter().map(|s| json!(s)).collect()),
-        );
+            if let Some(allowed) = &t.allowed_tools {
+                m.insert(
+                    "allowed_tools".to_string(),
+                    Value::Array(allowed.iter().map(|s| json!(s)).collect()),
+                );
+            }
+            Value::Object(m)
+        })
+        .collect();
+
+    if mcp_tools.is_empty() {
+        return;
     }
 
     if let Some(obj) = resp.as_object_mut() {
-        obj.insert("tools".to_string(), json!([Value::Object(m)]));
+        obj.insert("tools".to_string(), Value::Array(mcp_tools));
         obj.entry("tool_choice").or_insert(json!("auto"));
     }
 }

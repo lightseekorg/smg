@@ -1,9 +1,6 @@
 //! Shared MCP utilities for routers.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use axum::http::HeaderMap;
 use tracing::warn;
@@ -22,15 +19,15 @@ pub const DEFAULT_MAX_ITERATIONS: usize = 10;
 pub struct McpLoopConfig {
     /// Maximum iterations (default: DEFAULT_MAX_ITERATIONS).
     pub max_iterations: usize,
-    /// Server keys for filtering MCP tools.
-    pub server_keys: Vec<String>,
+    /// MCP servers for this request (label, server_key).
+    pub mcp_servers: Vec<(String, String)>,
 }
 
 impl Default for McpLoopConfig {
     fn default() -> Self {
         Self {
             max_iterations: DEFAULT_MAX_ITERATIONS,
-            server_keys: Vec::new(),
+            mcp_servers: Vec::new(),
         }
     }
 }
@@ -55,14 +52,14 @@ pub fn extract_server_label(tools: Option<&[ResponseTool]>, default_label: &str)
 /// Extracts server configurations from request tools and establishes connections.
 /// Forwards filtered HTTP request headers (auth, tracing, correlation IDs) to MCP servers.
 ///
-/// Returns `Some((orchestrator, server_keys))` if connections were established,
+/// Returns `Some((orchestrator, mcp_servers))` if connections were established,
 /// `None` if no MCP tools with server_url were found.
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
     request_headers: Option<&HeaderMap>,
-) -> Option<(Arc<McpOrchestrator>, Vec<String>)> {
-    let mut server_keys = HashSet::new();
+) -> Option<(Arc<McpOrchestrator>, Vec<(String, String)>)> {
+    let mut mcp_servers = Vec::new();
     let mut has_mcp_tools = false;
     let forwarded_headers = extract_forwardable_headers(request_headers);
 
@@ -87,10 +84,10 @@ pub async fn ensure_request_mcp_client(
             continue;
         }
 
-        let name = tool
+        let label = tool
             .server_label
             .clone()
-            .unwrap_or_else(|| "request-mcp".to_string());
+            .unwrap_or_else(|| "mcp".to_string());
         let token = tool.authorization.clone();
         let headers = forwarded_headers.clone();
         let server_url = server_url.to_string();
@@ -110,7 +107,7 @@ pub async fn ensure_request_mcp_client(
         };
 
         let server_config = McpServerConfig {
-            name,
+            name: label.clone(),
             transport,
             proxy: None,
             required: false,
@@ -121,7 +118,9 @@ pub async fn ensure_request_mcp_client(
 
         match mcp_orchestrator.connect_dynamic_server(server_config).await {
             Ok(_) => {
-                server_keys.insert(server_key);
+                if !mcp_servers.iter().any(|(_, key)| key == &server_key) {
+                    mcp_servers.push((label.clone(), server_key));
+                }
             }
             Err(err) => {
                 warn!("Failed to connect MCP server {}: {}", server_key, err);
@@ -129,8 +128,8 @@ pub async fn ensure_request_mcp_client(
         }
     }
 
-    if has_mcp_tools && !server_keys.is_empty() {
-        Some((mcp_orchestrator.clone(), server_keys.into_iter().collect()))
+    if has_mcp_tools && !mcp_servers.is_empty() {
+        Some((mcp_orchestrator.clone(), mcp_servers))
     } else {
         None
     }

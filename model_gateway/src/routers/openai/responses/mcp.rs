@@ -615,6 +615,11 @@ pub(super) async fn execute_tool_loop(
     let base_payload = initial_payload.clone();
     let tools_json = base_payload.get("tools").cloned().unwrap_or(json!([]));
     let mut current_payload = initial_payload;
+    let server_keys: Vec<String> = config
+        .mcp_servers
+        .iter()
+        .map(|(_, key)| key.clone())
+        .collect();
 
     info!(
         "Starting tool loop: max_tool_calls={:?}, max_iterations={}",
@@ -685,13 +690,13 @@ pub(super) async fn execute_tool_loop(
                     "max_tool_calls",
                     orchestrator,
                     original_body,
-                    &config.server_keys,
+                    &config.mcp_servers,
                 );
             }
 
             // Look up response_format for transformation
             let response_format = orchestrator
-                .find_tool_by_name(&tool_name, &config.server_keys)
+                .find_tool_by_name(&tool_name, &server_keys)
                 .map(|entry| entry.response_format)
                 .unwrap_or(ResponseFormat::Passthrough);
 
@@ -710,7 +715,7 @@ pub(super) async fn execute_tool_loop(
                 .call_tool_by_name(
                     &tool_name,
                     arguments,
-                    &config.server_keys,
+                    &server_keys,
                     &state.server_label,
                     &request_ctx,
                 )
@@ -782,22 +787,21 @@ pub(super) async fn execute_tool_loop(
 
             // Inject MCP output items if we executed any tools
             if state.total_calls > 0 {
-                // Build mcp_list_tools item
-                let list_tools_item = build_mcp_list_tools_item(
-                    orchestrator,
-                    &state.server_label,
-                    &config.server_keys,
-                );
+                let mcp_servers = &config.mcp_servers;
 
                 // Insert at beginning of output array
                 if let Some(output_array) = response_json
                     .get_mut("output")
                     .and_then(|v| v.as_array_mut())
                 {
-                    output_array.insert(0, list_tools_item);
+                    for (label, key) in mcp_servers.iter().rev() {
+                        let list_tools_item =
+                            build_mcp_list_tools_item(orchestrator, label, &[key.clone()]);
+                        output_array.insert(0, list_tools_item);
+                    }
 
                     // Insert stored mcp_call items after mcp_list_tools (already transformed)
-                    let mut insert_pos = 1;
+                    let mut insert_pos = mcp_servers.len();
                     for item in &state.mcp_call_items {
                         output_array.insert(insert_pos, item.clone());
                         insert_pos += 1;
@@ -817,7 +821,7 @@ pub(super) fn build_incomplete_response(
     reason: &str,
     orchestrator: &Arc<McpOrchestrator>,
     _original_body: &ResponsesRequest,
-    server_keys: &[String],
+    mcp_servers: &[(String, String)],
 ) -> Result<Value, String> {
     let obj = response
         .as_object_mut()
@@ -858,14 +862,16 @@ pub(super) fn build_incomplete_response(
             }
         }
 
-        // Add mcp_list_tools and mcp_call items at the beginning
+        // Add mcp_list_tools and executed mcp_call items at the beginning
         if state.total_calls > 0 || !incomplete_items.is_empty() {
-            let list_tools_item =
-                build_mcp_list_tools_item(orchestrator, &state.server_label, server_keys);
-            output_array.insert(0, list_tools_item);
+            for (label, key) in mcp_servers.iter().rev() {
+                let list_tools_item =
+                    build_mcp_list_tools_item(orchestrator, label, &[key.clone()]);
+                output_array.insert(0, list_tools_item);
+            }
 
             // Insert stored transformed items for executed calls (no reconstruction needed)
-            let mut insert_pos = 1;
+            let mut insert_pos = mcp_servers.len();
             for item in &state.mcp_call_items {
                 output_array.insert(insert_pos, item.clone());
                 insert_pos += 1;
