@@ -4,12 +4,11 @@ use std::{collections::HashMap, sync::Arc};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use super::audit::{AuditLog, DecisionResult, DecisionSource};
 use crate::{
-    annotations::AnnotationType,
-    inventory::QualifiedToolName,
-    tenant::TenantContext,
+    annotations::AnnotationType, inventory::QualifiedToolName, tenant::TenantContext,
     ToolAnnotations,
 };
 
@@ -458,6 +457,11 @@ impl PolicyEngine {
                     ToolPolicy {
                         decision: decision.clone().into(),
                     },
+                );
+            } else {
+                warn!(
+                    "Invalid tool policy key '{}': expected 'server:tool' format",
+                    qualified_str
                 );
             }
         }

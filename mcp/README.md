@@ -314,7 +314,7 @@ match orchestrator.call_tool("server", "dangerous_tool", args, &request_ctx).awa
             "server", "dangerous_tool", args, &request_ctx
         ).await?;
     }
-    ToolCallResult::Raw(_) => { /* internal use */ }
+    _ => { /* other variants */ }
 }
 ```
 

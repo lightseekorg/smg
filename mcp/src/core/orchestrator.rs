@@ -698,8 +698,11 @@ impl McpOrchestrator {
     fn call_result_to_json(&self, result: &CallToolResult) -> Value {
         // Serialize the CallToolResult content to JSON
         // The content is a Vec of annotated content items
-        serde_json::to_value(&result.content).unwrap_or_else(|_| {
-            // Fallback: extract as simple error
+        serde_json::to_value(&result.content).unwrap_or_else(|e| {
+            warn!(
+                "Failed to serialize CallToolResult to JSON: {}. Falling back to empty object.",
+                e
+            );
             Value::Object(serde_json::Map::new())
         })
     }
@@ -1135,13 +1138,21 @@ impl<'a> Drop for McpRequestContext<'a> {
         // Cleanup dynamic clients
         if !self.dynamic_clients.is_empty() {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                for entry in self.dynamic_clients.iter() {
-                    if let Some(client) = Arc::into_inner(entry.value().clone()) {
-                        handle.spawn(async move {
-                            if let Err(e) = client.cancel().await {
-                                warn!("Error closing dynamic client: {}", e);
-                            }
-                        });
+                // Collect keys first, then remove to get exclusive ownership of Arc
+                let keys: Vec<_> = self
+                    .dynamic_clients
+                    .iter()
+                    .map(|e| e.key().clone())
+                    .collect();
+                for key in keys {
+                    if let Some((_, client)) = self.dynamic_clients.remove(&key) {
+                        if let Some(client) = Arc::into_inner(client) {
+                            handle.spawn(async move {
+                                if let Err(e) = client.cancel().await {
+                                    warn!("Error closing dynamic client: {}", e);
+                                }
+                            });
+                        }
                     }
                 }
             }
