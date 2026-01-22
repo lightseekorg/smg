@@ -3,7 +3,7 @@
 //! This module provides shared MCP-related functionality that can be
 //! used across different router implementations (OpenAI, gRPC regular, gRPC harmony).
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use tracing::warn;
 
@@ -113,15 +113,18 @@ pub async fn ensure_request_mcp_client(
             let token = tool.authorization.clone();
 
             // Determine transport type based on URL pattern
+            // TODO: Add headers support to ResponseTool to allow custom headers from API
             let transport = if server_url.contains("/sse") {
                 McpTransport::Sse {
                     url: server_url.clone(),
                     token,
+                    headers: HashMap::new(),
                 }
             } else {
                 McpTransport::Streamable {
                     url: server_url.clone(),
                     token,
+                    headers: HashMap::new(),
                 }
             };
 

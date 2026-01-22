@@ -89,11 +89,14 @@ servers:
       search:
         response_format: file_search_call  # Transform to file_search_call format
 
-  # Streamable HTTP transport
+  # Streamable HTTP transport with custom headers
   - name: custom-server
     protocol: streamable
     url: "https://my-mcp-server.com/mcp"
     token: "my-secret-token"
+    headers:
+      X-API-Key: "${CUSTOM_API_KEY}"
+      X-Tenant-ID: "tenant-123"
     required: false
 
 # Connection pool for dynamic servers
@@ -148,6 +151,7 @@ let config = McpConfig {
             transport: McpTransport::Sse {
                 url: "https://mcp.brave.com/sse".to_string(),
                 token: Some(std::env::var("BRAVE_API_KEY")?),
+                headers: HashMap::new(), // Custom headers (e.g., X-API-Key)
             },
             proxy: None,
             required: true,
@@ -481,3 +485,10 @@ Multiple MCP servers can expose tools with the same name. `QualifiedToolName` st
 ### Why Response Transformation?
 
 MCP returns `CallToolResult` with content arrays. OpenAI expects `ResponseOutputItem`. The transformer bridges this gap with format-specific handling (web search, file search, etc.).
+
+### Why Auth-Aware Connection Pooling?
+
+Connections are keyed by `PoolKey(url, auth_hash, tenant_id)` instead of just URL. This ensures:
+- Different auth credentials get different connections (security isolation)
+- Different tenants are isolated (multi-tenancy support)
+- Credentials are hashed, not stored as plaintext in pool keys

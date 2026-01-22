@@ -88,6 +88,8 @@ pub(super) fn apply_proxy_to_builder(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::core::config::McpTransport;
 
@@ -98,6 +100,7 @@ mod tests {
             transport: McpTransport::Sse {
                 url: "http://localhost:3000/sse".to_string(),
                 token: None,
+                headers: HashMap::new(),
             },
             proxy: None,
             required: false,
@@ -118,6 +121,7 @@ mod tests {
             transport: McpTransport::Sse {
                 url: "http://localhost:3000/sse".to_string(),
                 token: None,
+                headers: HashMap::new(),
             },
             proxy: None,
             required: false,
@@ -155,6 +159,7 @@ mod tests {
             transport: McpTransport::Sse {
                 url: "http://localhost:3000/sse".to_string(),
                 token: None,
+                headers: HashMap::new(),
             },
             proxy: Some(server_proxy),
             required: false,

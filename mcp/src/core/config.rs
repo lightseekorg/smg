@@ -241,13 +241,23 @@ pub enum McpTransport {
     },
     Sse {
         url: String,
+        /// Bearer token for Authorization header
         #[serde(skip_serializing_if = "Option::is_none")]
         token: Option<String>,
+        /// Additional headers (e.g., X-API-Key, custom auth)
+        /// These affect connection identity and will be hashed for pool keying
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        headers: HashMap<String, String>,
     },
     Streamable {
         url: String,
+        /// Bearer token for Authorization header
         #[serde(skip_serializing_if = "Option::is_none")]
         token: Option<String>,
+        /// Additional headers (e.g., X-API-Key, custom auth)
+        /// These affect connection identity and will be hashed for pool keying
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        headers: HashMap<String, String>,
     },
 }
 
@@ -264,15 +274,25 @@ impl fmt::Debug for McpTransport {
                 .field("args", args)
                 .field("envs", envs)
                 .finish(),
-            McpTransport::Sse { url, token } => f
+            McpTransport::Sse {
+                url,
+                token,
+                headers,
+            } => f
                 .debug_struct("Sse")
                 .field("url", url)
                 .field("token", &token.as_ref().map(|_| "****"))
+                .field("headers", &format!("{} headers", headers.len()))
                 .finish(),
-            McpTransport::Streamable { url, token } => f
+            McpTransport::Streamable {
+                url,
+                token,
+                headers,
+            } => f
                 .debug_struct("Streamable")
                 .field("url", url)
                 .field("token", &token.as_ref().map(|_| "****"))
+                .field("headers", &format!("{} headers", headers.len()))
                 .finish(),
         }
     }
@@ -678,7 +698,7 @@ token: "secret"
         assert_eq!(config.name, "test");
 
         match config.transport {
-            McpTransport::Sse { url, token } => {
+            McpTransport::Sse { url, token, .. } => {
                 assert_eq!(url, "http://localhost:3000/sse");
                 assert_eq!(token.unwrap(), "secret");
             }
@@ -699,7 +719,7 @@ url: "http://localhost:3000"
         assert_eq!(config.name, "test");
 
         match config.transport {
-            McpTransport::Streamable { url, token } => {
+            McpTransport::Streamable { url, token, .. } => {
                 assert_eq!(url, "http://localhost:3000");
                 assert!(token.is_none());
             }

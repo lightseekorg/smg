@@ -46,7 +46,7 @@ use super::{
     config::{McpConfig, McpServerConfig, McpTransport},
     handler::{HandlerRequestContext, RefreshRequest, SmgClientHandler},
     metrics::McpMetrics,
-    pool::McpConnectionPool,
+    pool::{McpConnectionPool, PoolKey},
 };
 use crate::{
     approval::{
@@ -60,6 +60,35 @@ use crate::{
     tenant::TenantContext,
     transform::{ResponseFormat, ResponseTransformer},
 };
+
+/// Build request headers from token and custom headers.
+fn build_request_headers(
+    token: &Option<String>,
+    custom_headers: &std::collections::HashMap<String, String>,
+) -> McpResult<reqwest::header::HeaderMap> {
+    let mut headers = reqwest::header::HeaderMap::new();
+
+    if let Some(tok) = token {
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", tok)
+                .parse()
+                .map_err(|e| McpError::Transport(format!("auth token: {}", e)))?,
+        );
+    }
+
+    for (key, value) in custom_headers {
+        headers.insert(
+            reqwest::header::HeaderName::from_bytes(key.as_bytes())
+                .map_err(|e| McpError::Transport(format!("header name: {}", e)))?,
+            value
+                .parse()
+                .map_err(|e| McpError::Transport(format!("header value: {}", e)))?,
+        );
+    }
+
+    Ok(headers)
+}
 
 /// Type alias for MCP client with handler.
 type McpClientWithHandler = RunningService<RoleClient, SmgClientHandler>;
@@ -199,12 +228,13 @@ impl McpOrchestrator {
             McpConnectionPool::with_full_config(config.pool.max_connections, config.proxy.clone());
 
         let inventory_clone = Arc::clone(&tool_inventory);
-        connection_pool.set_eviction_callback(move |server_key: &str| {
+        connection_pool.set_eviction_callback(move |key: &PoolKey| {
             debug!(
-                "LRU evicted dynamic server '{}' - clearing tools from inventory",
-                server_key
+                "LRU evicted dynamic server '{}' (tenant: {:?}) - clearing tools from inventory",
+                key.url, key.tenant_id
             );
-            inventory_clone.clear_server_tools(server_key);
+            // Tools are registered by URL, so clear by URL
+            inventory_clone.clear_server_tools(&key.url);
         });
 
         let connection_pool = Arc::new(connection_pool);
@@ -411,7 +441,11 @@ impl McpOrchestrator {
                 })
             }
 
-            McpTransport::Sse { url, token } => {
+            McpTransport::Sse {
+                url,
+                token,
+                headers: custom_headers,
+            } => {
                 let proxy_config =
                     super::proxy::resolve_proxy_config(config, self.config.proxy.as_ref());
 
@@ -422,17 +456,9 @@ impl McpOrchestrator {
                     builder = super::proxy::apply_proxy_to_builder(builder, proxy_cfg)?;
                 }
 
-                if let Some(tok) = token {
-                    builder = builder.default_headers({
-                        let mut headers = reqwest::header::HeaderMap::new();
-                        headers.insert(
-                            reqwest::header::AUTHORIZATION,
-                            format!("Bearer {}", tok)
-                                .parse()
-                                .map_err(|e| McpError::Transport(format!("auth token: {}", e)))?,
-                        );
-                        headers
-                    });
+                let req_headers = build_request_headers(token, custom_headers)?;
+                if !req_headers.is_empty() {
+                    builder = builder.default_headers(req_headers);
                 }
 
                 let http_client = builder
@@ -453,14 +479,28 @@ impl McpOrchestrator {
                 })
             }
 
-            McpTransport::Streamable { url, token } => {
-                let transport = if let Some(tok) = token {
-                    let mut cfg = StreamableHttpClientTransportConfig::with_uri(url.as_str());
-                    cfg.auth_header = Some(tok.to_string());
-                    StreamableHttpClientTransport::from_config(cfg)
-                } else {
-                    StreamableHttpClientTransport::from_uri(url.as_str())
-                };
+            McpTransport::Streamable {
+                url,
+                token,
+                headers: custom_headers,
+            } => {
+                let mut cfg = StreamableHttpClientTransportConfig::with_uri(url.as_str());
+
+                // Set auth header from token
+                if let Some(tok) = token {
+                    cfg.auth_header = Some(format!("Bearer {}", tok));
+                }
+
+                // Streamable transport only supports auth_header, not custom headers
+                // Custom headers are still included in pool key hash for correct isolation
+                if !custom_headers.is_empty() {
+                    warn!(
+                        "Streamable transport does not support custom headers, {} headers ignored (use SSE for custom headers)",
+                        custom_headers.len()
+                    );
+                }
+
+                let transport = StreamableHttpClientTransport::from_config(cfg);
 
                 handler.serve(transport).await.map_err(|e| {
                     McpError::ConnectionFailed(format!("initialize streamable client: {}", e))
@@ -624,13 +664,17 @@ impl McpOrchestrator {
         allowed_servers: &[String],
         request_ctx: &McpRequestContext<'_>,
     ) -> McpResult<ToolCallResult> {
+        // Use HashSet for O(1) lookups instead of O(n) Vec::contains
+        let allowed: std::collections::HashSet<&str> =
+            allowed_servers.iter().map(|s| s.as_str()).collect();
+
         // Find all matching tools in allowed servers
         let matching: Vec<_> = self
             .tool_inventory
             .list_tools()
             .into_iter()
             .filter(|(name, server_key, _)| {
-                name == tool_name && allowed_servers.contains(server_key)
+                name == tool_name && allowed.contains(server_key.as_str())
             })
             .collect();
 
@@ -970,8 +1014,10 @@ impl McpOrchestrator {
                 .map_err(|e| McpError::ToolExecution(format!("MCP call failed: {}", e)));
         }
 
-        // Check connection pool (pool uses different handler type)
-        if let Some(client) = self.connection_pool.get(server_key) {
+        // Check connection pool by URL (pool uses different handler type)
+        // Note: This uses URL-based lookup for backward compatibility.
+        // For full auth/tenant isolation, use PoolKey-based lookup.
+        if let Some(client) = self.connection_pool.get_by_url(server_key) {
             return client
                 .call_tool(request)
                 .await
@@ -1076,8 +1122,24 @@ impl McpOrchestrator {
     /// Connect to a dynamic server and add it to the connection pool.
     ///
     /// This is used for per-request MCP servers specified in tool configurations.
-    /// Returns the server key that can be used to reference the connection.
+    /// Returns the server key (URL) that can be used to reference the connection.
+    ///
+    /// The connection is keyed by (url, auth_hash, tenant_id) to ensure:
+    /// - Different auth tokens get different connections
+    /// - Different tenants are isolated
     pub async fn connect_dynamic_server(&self, config: McpServerConfig) -> McpResult<String> {
+        self.connect_dynamic_server_with_tenant(config, None).await
+    }
+
+    /// Connect to a dynamic server with tenant isolation.
+    ///
+    /// Like `connect_dynamic_server` but includes tenant_id in the pool key
+    /// for proper tenant isolation.
+    pub async fn connect_dynamic_server_with_tenant(
+        &self,
+        config: McpServerConfig,
+        tenant_id: Option<String>,
+    ) -> McpResult<String> {
         use rmcp::{
             transport::{
                 sse_client::SseClientConfig,
@@ -1087,12 +1149,15 @@ impl McpOrchestrator {
             ServiceExt,
         };
 
-        let server_key = Self::server_key(&config);
+        let pool_key = PoolKey::from_config(&config, tenant_id);
 
-        // Check if already connected
-        if self.connection_pool.get(&server_key).is_some() {
-            return Ok(server_key);
+        // Check if already connected with same auth/tenant
+        if self.connection_pool.contains(&pool_key) {
+            return Ok(pool_key.url.clone());
         }
+
+        // Extract server_key from pool_key to avoid double URL extraction
+        let server_key = pool_key.url.clone();
 
         // Connect via the pool
         let inventory_clone = Arc::clone(&self.tool_inventory);
@@ -1100,23 +1165,39 @@ impl McpOrchestrator {
 
         let client = self
             .connection_pool
-            .get_or_create(&server_key, config.clone(), |cfg, _proxy| async move {
+            .get_or_create(pool_key, config.clone(), |cfg, _proxy| async move {
                 match &cfg.transport {
-                    McpTransport::Streamable { url, token } => {
-                        let transport = if let Some(tok) = token {
-                            let mut cfg_http =
-                                StreamableHttpClientTransportConfig::with_uri(url.as_str());
-                            cfg_http.auth_header = Some(tok.to_string());
-                            StreamableHttpClientTransport::from_config(cfg_http)
-                        } else {
-                            StreamableHttpClientTransport::from_uri(url.as_str())
-                        };
+                    McpTransport::Streamable {
+                        url,
+                        token,
+                        headers: custom_headers,
+                    } => {
+                        let mut cfg_http =
+                            StreamableHttpClientTransportConfig::with_uri(url.as_str());
+
+                        if let Some(tok) = token {
+                            cfg_http.auth_header = Some(format!("Bearer {}", tok));
+                        }
+
+                        // Streamable transport only supports auth_header, not custom headers
+                        if !custom_headers.is_empty() {
+                            warn!(
+                                "Streamable transport does not support custom headers, {} headers ignored",
+                                custom_headers.len()
+                            );
+                        }
+
+                        let transport = StreamableHttpClientTransport::from_config(cfg_http);
 
                         ().serve(transport)
                             .await
                             .map_err(|e| McpError::ConnectionFailed(format!("streamable: {}", e)))
                     }
-                    McpTransport::Sse { url, token } => {
+                    McpTransport::Sse {
+                        url,
+                        token,
+                        headers: custom_headers,
+                    } => {
                         let proxy_config =
                             super::proxy::resolve_proxy_config(&cfg, global_proxy.as_ref());
 
@@ -1127,17 +1208,9 @@ impl McpOrchestrator {
                             builder = super::proxy::apply_proxy_to_builder(builder, proxy_cfg)?;
                         }
 
-                        if let Some(tok) = token {
-                            builder = builder.default_headers({
-                                let mut headers = reqwest::header::HeaderMap::new();
-                                headers.insert(
-                                    reqwest::header::AUTHORIZATION,
-                                    format!("Bearer {}", tok).parse().map_err(|e| {
-                                        McpError::Transport(format!("auth token: {}", e))
-                                    })?,
-                                );
-                                headers
-                            });
+                        let req_headers = build_request_headers(token, custom_headers)?;
+                        if !req_headers.is_empty() {
+                            builder = builder.default_headers(req_headers);
                         }
 
                         let http_client = builder.build().map_err(|e| {
@@ -1207,11 +1280,14 @@ impl McpOrchestrator {
 
     /// List tools for specific servers.
     pub fn list_tools_for_servers(&self, server_keys: &[String]) -> Vec<ToolEntry> {
+        let allowed: std::collections::HashSet<&str> =
+            server_keys.iter().map(|s| s.as_str()).collect();
+
         self.tool_inventory
             .list_tools()
             .into_iter()
             .filter_map(|(tool_name, server_key, _)| {
-                if server_keys.contains(&server_key) {
+                if allowed.contains(server_key.as_str()) {
                     self.tool_inventory.get_entry(&server_key, &tool_name)
                 } else {
                     None
@@ -1238,7 +1314,10 @@ impl McpOrchestrator {
             .iter()
             .map(|e| e.key().clone())
             .collect();
-        servers.extend(self.connection_pool.list_server_keys());
+        // Extract URLs from pool keys (may have duplicates for different auth/tenants)
+        servers.extend(self.connection_pool.list_keys().into_iter().map(|k| k.url));
+        servers.sort();
+        servers.dedup();
         servers
     }
 

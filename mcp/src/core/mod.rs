@@ -17,4 +17,4 @@ pub use metrics::{LatencySnapshot, McpMetrics, MetricsSnapshot};
 pub use orchestrator::{
     McpOrchestrator, McpRequestContext, ToolCallResult, ToolExecutionInput, ToolExecutionOutput,
 };
-pub use pool::McpConnectionPool;
+pub use pool::{McpConnectionPool, PoolKey};

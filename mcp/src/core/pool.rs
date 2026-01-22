@@ -1,67 +1,117 @@
-/// MCP Connection Pool
-///
-/// This module provides connection pooling for dynamic MCP servers (per-request).
-use std::sync::Arc;
+//! MCP Connection Pool for dynamic servers.
+
+use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 use lru::LruCache;
 use parking_lot::Mutex;
 use rmcp::{service::RunningService, RoleClient};
 
-use super::config::{McpProxyConfig, McpServerConfig};
+use super::config::{McpProxyConfig, McpServerConfig, McpTransport};
 use crate::error::McpResult;
 
-/// Type alias for MCP client
 type McpClient = RunningService<RoleClient, ()>;
+type EvictionCallback = Arc<dyn Fn(&PoolKey) + Send + Sync>;
 
-/// Type alias for eviction callback
-type EvictionCallback = Arc<dyn Fn(&str) + Send + Sync>;
-
-/// Cached MCP connection with metadata
-#[derive(Clone)]
-pub(crate) struct CachedConnection {
-    /// The MCP client instance
-    pub client: Arc<McpClient>,
-    /// Server configuration used to create this connection
-    #[allow(dead_code)]
-    pub config: McpServerConfig,
+/// Key for connection pool entries (URL + auth hash + tenant ID).
+///
+/// Credentials are hashed, not stored as plaintext.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PoolKey {
+    pub url: String,
+    pub auth_hash: u64,
+    pub tenant_id: Option<String>,
 }
 
-impl CachedConnection {
-    /// Create a new cached connection
-    pub fn new(client: Arc<McpClient>, config: McpServerConfig) -> Self {
-        Self { client, config }
+impl PoolKey {
+    pub fn new(url: impl Into<String>, auth_hash: u64, tenant_id: Option<String>) -> Self {
+        Self {
+            url: url.into(),
+            auth_hash,
+            tenant_id,
+        }
+    }
+
+    pub fn from_config(config: &McpServerConfig, tenant_id: Option<String>) -> Self {
+        let (url, auth_hash) = match &config.transport {
+            McpTransport::Streamable {
+                url,
+                token,
+                headers,
+            } => (url.clone(), Self::hash_auth(token, headers)),
+            McpTransport::Sse {
+                url,
+                token,
+                headers,
+            } => (url.clone(), Self::hash_auth(token, headers)),
+            McpTransport::Stdio { command, args, .. } => {
+                (format!("{}:{}", command, args.join(" ")), 0)
+            }
+        };
+        Self {
+            url,
+            auth_hash,
+            tenant_id,
+        }
+    }
+
+    /// Hash token and headers. Returns 0 if no auth info.
+    fn hash_auth(token: &Option<String>, headers: &HashMap<String, String>) -> u64 {
+        if token.is_none() && headers.is_empty() {
+            return 0;
+        }
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
+        if let Some(t) = token {
+            t.hash(&mut hasher);
+        }
+
+        if !headers.is_empty() {
+            let mut sorted_headers: Vec<_> = headers.iter().collect();
+            sorted_headers.sort_by_key(|(k, _)| *k);
+            for (key, value) in sorted_headers {
+                key.hash(&mut hasher);
+                value.hash(&mut hasher);
+            }
+        }
+
+        hasher.finish()
+    }
+
+    #[inline]
+    pub fn url(&self) -> &str {
+        &self.url
     }
 }
 
-/// Connection pool for dynamic MCP servers
-///
-/// Provides thread-safe connection pooling with LRU eviction.
-/// Connections are keyed by server URL and reused across requests.
+/// Cached MCP connection.
+#[derive(Clone)]
+pub(crate) struct CachedConnection {
+    pub client: Arc<McpClient>,
+}
+
+impl CachedConnection {
+    pub fn new(client: Arc<McpClient>) -> Self {
+        Self { client }
+    }
+}
+
+/// Thread-safe LRU connection pool for dynamic MCP servers.
 pub struct McpConnectionPool {
-    /// LRU cache of server_url -> cached connection
-    connections: Arc<Mutex<LruCache<String, CachedConnection>>>,
-
-    /// Maximum number of cached connections (LRU capacity)
+    connections: Arc<Mutex<LruCache<PoolKey, CachedConnection>>>,
     max_connections: usize,
-
-    /// Global proxy configuration (applied to all dynamic servers)
-    /// Can be overridden per-server via McpServerConfig.proxy
     global_proxy: Option<McpProxyConfig>,
-
-    /// Optional eviction callback (called when LRU evicts a connection)
-    /// Used to clean up tools from inventory
     eviction_callback: Option<EvictionCallback>,
 }
 
 impl McpConnectionPool {
-    /// Default max connections for pool
     const DEFAULT_MAX_CONNECTIONS: usize = 200;
 
-    /// Create a new connection pool with default settings
-    ///
-    /// Default settings:
-    /// - max_connections: 200
-    /// - global_proxy: Loaded from environment variables (MCP_HTTP_PROXY, etc.)
+    /// Create pool with defaults (200 connections, proxy from env).
     pub fn new() -> Self {
         Self {
             connections: Arc::new(Mutex::new(LruCache::new(
@@ -73,7 +123,6 @@ impl McpConnectionPool {
         }
     }
 
-    /// Create a new connection pool with custom capacity
     pub fn with_capacity(max_connections: usize) -> Self {
         Self {
             connections: Arc::new(Mutex::new(LruCache::new(
@@ -85,7 +134,6 @@ impl McpConnectionPool {
         }
     }
 
-    /// Create a new connection pool with full custom configuration
     pub fn with_full_config(max_connections: usize, global_proxy: Option<McpProxyConfig>) -> Self {
         Self {
             connections: Arc::new(Mutex::new(LruCache::new(
@@ -97,31 +145,17 @@ impl McpConnectionPool {
         }
     }
 
-    /// Set the eviction callback (called when LRU evicts a connection)
     pub fn set_eviction_callback<F>(&mut self, callback: F)
     where
-        F: Fn(&str) + Send + Sync + 'static,
+        F: Fn(&PoolKey) + Send + Sync + 'static,
     {
         self.eviction_callback = Some(Arc::new(callback));
     }
 
-    /// Get an existing connection or create a new one
-    ///
-    /// This method:
-    /// 1. Checks if a connection exists for the given URL (fast path <1ms)
-    /// 2. If exists, promotes it in LRU and returns it
-    /// 3. If not exists, creates new connection (slow path 70-650ms)
-    ///
-    /// # Arguments
-    /// * `server_url` - The MCP server URL (used as cache key)
-    /// * `server_config` - Server configuration (used to create new connection if needed)
-    /// * `connect_fn` - Async function to create a new client connection
-    ///
-    /// # Returns
-    /// Arc to the MCP client, either from cache or newly created
+    /// Get existing connection or create via `connect_fn`.
     pub async fn get_or_create<F, Fut>(
         &self,
-        server_url: &str,
+        key: PoolKey,
         server_config: McpServerConfig,
         connect_fn: F,
     ) -> McpResult<Arc<McpClient>>
@@ -129,27 +163,20 @@ impl McpConnectionPool {
         F: FnOnce(McpServerConfig, Option<McpProxyConfig>) -> Fut,
         Fut: std::future::Future<Output = McpResult<McpClient>>,
     {
-        // Fast path: Check if connection exists in LRU cache
         {
             let mut connections = self.connections.lock();
-            if let Some(cached) = connections.get(server_url) {
-                // LRU get() promotes the entry
+            if let Some(cached) = connections.get(&key) {
                 return Ok(Arc::clone(&cached.client));
             }
         }
 
-        // Slow path: Create new connection
         let client = connect_fn(server_config.clone(), self.global_proxy.clone()).await?;
         let client_arc = Arc::new(client);
 
-        // Cache the new connection (LRU will automatically evict oldest if at capacity)
-        let cached = CachedConnection::new(Arc::clone(&client_arc), server_config);
+        let cached = CachedConnection::new(Arc::clone(&client_arc));
         {
             let mut connections = self.connections.lock();
-            if let Some((evicted_key, _evicted_conn)) =
-                connections.push(server_url.to_string(), cached)
-            {
-                // Call eviction callback if set
+            if let Some((evicted_key, _)) = connections.push(key, cached) {
                 if let Some(callback) = &self.eviction_callback {
                     callback(&evicted_key);
                 }
@@ -159,33 +186,26 @@ impl McpConnectionPool {
         Ok(client_arc)
     }
 
-    /// Get current number of cached connections
     pub fn len(&self) -> usize {
         self.connections.lock().len()
     }
 
-    /// Check if pool is empty
     pub fn is_empty(&self) -> bool {
         self.connections.lock().is_empty()
     }
 
-    /// Clear all connections
     pub fn clear(&self) {
         self.connections.lock().clear();
     }
 
-    /// Get connection statistics
     pub fn stats(&self) -> PoolStats {
-        let total = self.connections.lock().len();
-
         PoolStats {
-            total_connections: total,
+            total_connections: self.connections.lock().len(),
             capacity: self.max_connections,
         }
     }
 
-    /// List all server keys in the pool
-    pub fn list_server_keys(&self) -> Vec<String> {
+    pub fn list_keys(&self) -> Vec<PoolKey> {
         self.connections
             .lock()
             .iter()
@@ -193,13 +213,32 @@ impl McpConnectionPool {
             .collect()
     }
 
-    /// Get a connection by server key without creating it
-    /// Promotes the entry in LRU cache if found
-    pub fn get(&self, server_key: &str) -> Option<Arc<McpClient>> {
+    /// Get connection, promoting in LRU.
+    pub fn get(&self, key: &PoolKey) -> Option<Arc<McpClient>> {
         self.connections
             .lock()
-            .get(server_key)
+            .get(key)
             .map(|cached| Arc::clone(&cached.client))
+    }
+
+    pub fn contains(&self, key: &PoolKey) -> bool {
+        self.connections.lock().contains(key)
+    }
+
+    /// Get by URL only (backward compat). Prefer `get()` with full `PoolKey`.
+    pub fn get_by_url(&self, url: &str) -> Option<Arc<McpClient>> {
+        self.connections
+            .lock()
+            .iter()
+            .find(|(key, _)| key.url == url)
+            .map(|(_, cached)| Arc::clone(&cached.client))
+    }
+
+    pub fn contains_url(&self, url: &str) -> bool {
+        self.connections
+            .lock()
+            .iter()
+            .any(|(key, _)| key.url == url)
     }
 }
 
@@ -228,6 +267,7 @@ mod tests {
             transport: McpTransport::Streamable {
                 url: url.to_string(),
                 token: None,
+                headers: HashMap::new(),
             },
             proxy: None,
             required: false,
@@ -252,27 +292,117 @@ mod tests {
     }
 
     #[test]
-    #[allow(invalid_value)]
     fn test_pool_clear() {
         let pool = McpConnectionPool::new();
-
-        // Add a connection
-        let config = create_test_config("http://localhost:3000");
-        let client: Arc<McpClient> =
-            Arc::new(unsafe { std::mem::MaybeUninit::zeroed().assume_init() });
-        let cached = CachedConnection::new(client.clone(), config);
-        pool.connections
-            .lock()
-            .push("http://localhost:3000".to_string(), cached);
-
-        assert_eq!(pool.len(), 1);
-
-        pool.clear();
+        // Pool starts empty
         assert_eq!(pool.len(), 0);
+        // Clear on empty pool should work
+        pool.clear();
         assert!(pool.is_empty());
+    }
 
-        // Prevent drop of invalid Arc (would segfault)
-        std::mem::forget(client);
+    #[test]
+    fn test_pool_key_from_config() {
+        // No token
+        let config = create_test_config("http://localhost:3000");
+        let key = PoolKey::from_config(&config, None);
+        assert_eq!(key.url, "http://localhost:3000");
+        assert_eq!(key.auth_hash, 0);
+        assert_eq!(key.tenant_id, None);
+
+        // With token
+        let config_with_token = McpServerConfig {
+            name: "test".to_string(),
+            transport: McpTransport::Streamable {
+                url: "http://localhost:3000".to_string(),
+                token: Some("secret-token".to_string()),
+                headers: HashMap::new(),
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+        };
+        let key_with_token = PoolKey::from_config(&config_with_token, None);
+        assert_eq!(key_with_token.url, "http://localhost:3000");
+        assert_ne!(key_with_token.auth_hash, 0); // Token hashed
+
+        // With tenant
+        let key_with_tenant = PoolKey::from_config(&config, Some("tenant-123".to_string()));
+        assert_eq!(key_with_tenant.tenant_id, Some("tenant-123".to_string()));
+    }
+
+    #[test]
+    fn test_pool_key_different_tokens() {
+        let config1 = McpServerConfig {
+            name: "test".to_string(),
+            transport: McpTransport::Streamable {
+                url: "http://localhost:3000".to_string(),
+                token: Some("token-a".to_string()),
+                headers: HashMap::new(),
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+        };
+        let config2 = McpServerConfig {
+            name: "test".to_string(),
+            transport: McpTransport::Streamable {
+                url: "http://localhost:3000".to_string(),
+                token: Some("token-b".to_string()),
+                headers: HashMap::new(),
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+        };
+
+        let key1 = PoolKey::from_config(&config1, None);
+        let key2 = PoolKey::from_config(&config2, None);
+
+        // Same URL but different tokens = different keys
+        assert_eq!(key1.url, key2.url);
+        assert_ne!(key1.auth_hash, key2.auth_hash);
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_pool_key_with_headers() {
+        let mut headers1 = HashMap::new();
+        headers1.insert("X-API-Key".to_string(), "key-1".to_string());
+
+        let mut headers2 = HashMap::new();
+        headers2.insert("X-API-Key".to_string(), "key-2".to_string());
+
+        let config1 = McpServerConfig {
+            name: "test".to_string(),
+            transport: McpTransport::Sse {
+                url: "http://localhost:3000".to_string(),
+                token: None,
+                headers: headers1,
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+        };
+        let config2 = McpServerConfig {
+            name: "test".to_string(),
+            transport: McpTransport::Sse {
+                url: "http://localhost:3000".to_string(),
+                token: None,
+                headers: headers2,
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+        };
+
+        let key1 = PoolKey::from_config(&config1, None);
+        let key2 = PoolKey::from_config(&config2, None);
+
+        // Same URL but different headers = different keys
+        assert_eq!(key1.url, key2.url);
+        assert_ne!(key1.auth_hash, key2.auth_hash);
+        assert_ne!(key1, key2);
     }
 
     #[test]

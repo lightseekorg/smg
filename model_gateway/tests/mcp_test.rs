@@ -60,6 +60,7 @@ async fn test_server_connection_with_mock() {
             transport: McpTransport::Streamable {
                 url: mock_server.url(),
                 token: None,
+                headers: HashMap::new(),
             },
             proxy: None,
             required: false,
@@ -100,6 +101,7 @@ async fn test_tool_availability_checking() {
             transport: McpTransport::Streamable {
                 url: mock_server.url(),
                 token: None,
+                headers: HashMap::new(),
             },
             proxy: None,
             required: false,
@@ -151,6 +153,7 @@ async fn test_multi_server_connection() {
                 transport: McpTransport::Streamable {
                     url: mock_server1.url(),
                     token: None,
+                    headers: HashMap::new(),
                 },
                 proxy: None,
                 required: false,
@@ -161,6 +164,7 @@ async fn test_multi_server_connection() {
                 transport: McpTransport::Streamable {
                     url: mock_server2.url(),
                     token: None,
+                    headers: HashMap::new(),
                 },
                 proxy: None,
                 required: false,
@@ -199,6 +203,7 @@ async fn test_tool_execution_with_mock() {
             transport: McpTransport::Streamable {
                 url: mock_server.url(),
                 token: None,
+                headers: HashMap::new(),
             },
             proxy: None,
             required: false,
@@ -267,6 +272,7 @@ async fn test_concurrent_tool_execution() {
             transport: McpTransport::Streamable {
                 url: mock_server.url(),
                 token: None,
+                headers: HashMap::new(),
             },
             proxy: None,
             required: false,
@@ -330,6 +336,7 @@ async fn test_tool_execution_errors() {
             transport: McpTransport::Streamable {
                 url: mock_server.url(),
                 token: None,
+                headers: HashMap::new(),
             },
             proxy: None,
             required: false,
@@ -412,6 +419,7 @@ async fn test_tool_info_structure() {
             transport: McpTransport::Streamable {
                 url: mock_server.url(),
                 token: None,
+                headers: HashMap::new(),
             },
             proxy: None,
             required: false,
@@ -490,6 +498,7 @@ async fn test_transport_types() {
         transport: McpTransport::Streamable {
             url: "http://localhost:8080/mcp".to_string(),
             token: Some("auth_token".to_string()),
+            headers: HashMap::new(),
         },
         proxy: None,
         required: false,
@@ -503,6 +512,7 @@ async fn test_transport_types() {
         transport: McpTransport::Sse {
             url: "http://localhost:8081/sse".to_string(),
             token: None,
+            headers: HashMap::new(),
         },
         proxy: None,
         required: false,
@@ -538,6 +548,7 @@ async fn test_complete_workflow() {
             transport: McpTransport::Streamable {
                 url: mock_server.url(),
                 token: None,
+                headers: HashMap::new(),
             },
             proxy: None,
             required: false,
