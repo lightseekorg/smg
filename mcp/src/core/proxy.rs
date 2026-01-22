@@ -1,8 +1,6 @@
 //! HTTP proxy configuration for MCP connections.
 //!
-//! Resolves proxy settings and creates HTTP clients for MCP server connections.
-
-use std::time::Duration;
+//! Resolves proxy settings and applies them to HTTP client builders.
 
 use super::config::{McpProxyConfig, McpServerConfig};
 use crate::error::{McpError, McpResult};
@@ -86,28 +84,6 @@ pub(super) fn apply_proxy_to_builder(
     }
 
     Ok(builder)
-}
-
-/// Create HTTP client with MCP-specific proxy configuration
-///
-/// # Arguments
-/// * `proxy_config` - Optional proxy configuration to apply
-///
-/// # Returns
-/// A configured reqwest::Client or error
-pub(crate) fn create_http_client(
-    proxy_config: Option<&McpProxyConfig>,
-) -> McpResult<reqwest::Client> {
-    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
-
-    // Apply MCP-specific proxy if configured
-    if let Some(proxy_cfg) = proxy_config {
-        builder = apply_proxy_to_builder(builder, proxy_cfg)?;
-    }
-
-    builder
-        .build()
-        .map_err(|e| McpError::Transport(format!("Failed to build HTTP client: {}", e)))
 }
 
 #[cfg(test)]
@@ -203,13 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_http_client_no_proxy() {
-        let client = create_http_client(None);
-        assert!(client.is_ok(), "Should create client without proxy");
-    }
-
-    #[test]
-    fn test_create_http_client_with_proxy() {
+    fn test_apply_proxy_to_builder_with_http() {
         let proxy = McpProxyConfig {
             http: Some("http://proxy.example.com:8080".to_string()),
             https: None,
@@ -218,12 +188,14 @@ mod tests {
             password: None,
         };
 
-        let client = create_http_client(Some(&proxy));
-        assert!(client.is_ok(), "Should create client with proxy");
+        let builder = reqwest::Client::builder();
+        let result = apply_proxy_to_builder(builder, &proxy);
+        assert!(result.is_ok(), "Should apply proxy to builder");
+        assert!(result.unwrap().build().is_ok(), "Should build client");
     }
 
     #[test]
-    fn test_create_http_client_with_auth() {
+    fn test_apply_proxy_to_builder_with_auth() {
         let proxy = McpProxyConfig {
             http: Some("http://proxy.example.com:8080".to_string()),
             https: None,
@@ -232,15 +204,17 @@ mod tests {
             password: Some("pass".to_string()),
         };
 
-        let client = create_http_client(Some(&proxy));
+        let builder = reqwest::Client::builder();
+        let result = apply_proxy_to_builder(builder, &proxy);
         assert!(
-            client.is_ok(),
-            "Should create client with proxy authentication"
+            result.is_ok(),
+            "Should apply proxy with authentication to builder"
         );
+        assert!(result.unwrap().build().is_ok(), "Should build client");
     }
 
     #[test]
-    fn test_create_http_client_invalid_proxy() {
+    fn test_apply_proxy_to_builder_invalid_url() {
         let proxy = McpProxyConfig {
             http: Some("://invalid".to_string()), // Invalid URL format
             https: None,
@@ -249,7 +223,8 @@ mod tests {
             password: None,
         };
 
-        let client = create_http_client(Some(&proxy));
-        assert!(client.is_err(), "Should fail with invalid proxy URL");
+        let builder = reqwest::Client::builder();
+        let result = apply_proxy_to_builder(builder, &proxy);
+        assert!(result.is_err(), "Should fail with invalid proxy URL");
     }
 }

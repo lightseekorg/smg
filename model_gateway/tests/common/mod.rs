@@ -322,10 +322,10 @@ pub async fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
         config.worker_startup_check_interval_secs,
     )));
 
-    // Create empty OnceLock for worker job queue, workflow engines, and mcp manager
+    // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
     let worker_job_queue = Arc::new(OnceLock::new());
     let workflow_engines = Arc::new(OnceLock::new());
-    let mcp_manager_lock = Arc::new(OnceLock::new());
+    let mcp_orchestrator_lock = Arc::new(OnceLock::new());
 
     let app_context = Arc::new(
         AppContext::builder()
@@ -343,7 +343,7 @@ pub async fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
             .load_monitor(load_monitor)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
-            .mcp_manager(mcp_manager_lock)
+            .mcp_orchestrator(mcp_orchestrator_lock)
             .build()
             .unwrap(),
     );
@@ -384,8 +384,8 @@ pub async fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
         }
     }
 
-    // Initialize MCP manager with empty config
-    use smg::mcp::{McpConfig, McpManager};
+    // Initialize MCP orchestrator with empty config
+    use smg::mcp::{McpConfig, McpOrchestrator};
     let empty_config = McpConfig {
         servers: vec![],
         pool: Default::default(),
@@ -394,14 +394,14 @@ pub async fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
         inventory: Default::default(),
         policy: Default::default(),
     };
-    let mcp_manager = McpManager::with_defaults(empty_config)
+    let mcp_orchestrator = McpOrchestrator::new(empty_config)
         .await
-        .expect("Failed to create MCP manager");
+        .expect("Failed to create MCP orchestrator");
     app_context
-        .mcp_manager
-        .set(Arc::new(mcp_manager))
+        .mcp_orchestrator
+        .set(Arc::new(mcp_orchestrator))
         .ok()
-        .expect("McpManager should only be initialized once");
+        .expect("McpOrchestrator should only be initialized once");
 
     app_context
 }
@@ -443,10 +443,10 @@ pub async fn create_test_context_with_parsers(config: RouterConfig) -> Arc<AppCo
         config.worker_startup_check_interval_secs,
     )));
 
-    // Create empty OnceLock for worker job queue, workflow engines, and mcp manager
+    // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
     let worker_job_queue = Arc::new(OnceLock::new());
     let workflow_engines = Arc::new(OnceLock::new());
-    let mcp_manager_lock = Arc::new(OnceLock::new());
+    let mcp_orchestrator_lock = Arc::new(OnceLock::new());
 
     // Initialize parser factories
     let reasoning_parser_factory = Some(ReasoningParserFactory::new());
@@ -468,7 +468,7 @@ pub async fn create_test_context_with_parsers(config: RouterConfig) -> Arc<AppCo
             .load_monitor(load_monitor)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
-            .mcp_manager(mcp_manager_lock)
+            .mcp_orchestrator(mcp_orchestrator_lock)
             .build()
             .unwrap(),
     );
@@ -509,8 +509,8 @@ pub async fn create_test_context_with_parsers(config: RouterConfig) -> Arc<AppCo
         }
     }
 
-    // Initialize MCP manager with empty config
-    use smg::mcp::{McpConfig, McpManager};
+    // Initialize MCP orchestrator with empty config
+    use smg::mcp::{McpConfig, McpOrchestrator};
     let empty_config = McpConfig {
         servers: vec![],
         pool: Default::default(),
@@ -519,14 +519,14 @@ pub async fn create_test_context_with_parsers(config: RouterConfig) -> Arc<AppCo
         inventory: Default::default(),
         policy: Default::default(),
     };
-    let mcp_manager = McpManager::with_defaults(empty_config)
+    let mcp_orchestrator = McpOrchestrator::new(empty_config)
         .await
-        .expect("Failed to create MCP manager");
+        .expect("Failed to create MCP orchestrator");
     app_context
-        .mcp_manager
-        .set(Arc::new(mcp_manager))
+        .mcp_orchestrator
+        .set(Arc::new(mcp_orchestrator))
         .ok()
-        .expect("McpManager should only be initialized once");
+        .expect("McpOrchestrator should only be initialized once");
 
     app_context
 }
@@ -536,7 +536,7 @@ pub async fn create_test_context_with_mcp_config(
     config: RouterConfig,
     mcp_config_path: &str,
 ) -> Arc<AppContext> {
-    use smg::mcp::{McpConfig, McpManager};
+    use smg::mcp::{McpConfig, McpOrchestrator};
 
     let client = reqwest::Client::new();
 
@@ -572,10 +572,10 @@ pub async fn create_test_context_with_mcp_config(
         config.worker_startup_check_interval_secs,
     )));
 
-    // Create empty OnceLock for worker job queue, workflow engines, and mcp manager
+    // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
     let worker_job_queue = Arc::new(OnceLock::new());
     let workflow_engines = Arc::new(OnceLock::new());
-    let mcp_manager_lock = Arc::new(OnceLock::new());
+    let mcp_orchestrator_lock = Arc::new(OnceLock::new());
 
     let app_context = Arc::new(
         AppContext::builder()
@@ -593,7 +593,7 @@ pub async fn create_test_context_with_mcp_config(
             .load_monitor(load_monitor)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
-            .mcp_manager(mcp_manager_lock)
+            .mcp_orchestrator(mcp_orchestrator_lock)
             .build()
             .unwrap(),
     );
@@ -634,18 +634,18 @@ pub async fn create_test_context_with_mcp_config(
         }
     }
 
-    // Initialize MCP manager from config file
+    // Initialize MCP orchestrator from config file
     let mcp_config = McpConfig::from_file(mcp_config_path)
         .await
         .expect("Failed to load MCP config from file");
-    let mcp_manager = McpManager::with_defaults(mcp_config)
+    let mcp_orchestrator = McpOrchestrator::new(mcp_config)
         .await
-        .expect("Failed to create MCP manager");
+        .expect("Failed to create MCP orchestrator");
     app_context
-        .mcp_manager
-        .set(Arc::new(mcp_manager))
+        .mcp_orchestrator
+        .set(Arc::new(mcp_orchestrator))
         .ok()
-        .expect("McpManager should only be initialized once");
+        .expect("McpOrchestrator should only be initialized once");
 
     app_context
 }

@@ -103,8 +103,8 @@ impl GrpcRouter {
             RequestPipeline::new_classify(worker_registry.clone(), _policy_registry.clone());
 
         // Extract shared dependencies for responses contexts
-        let mcp_manager = ctx
-            .mcp_manager
+        let mcp_orchestrator = ctx
+            .mcp_orchestrator
             .get()
             .ok_or_else(|| "gRPC router requires MCP manager".to_string())?
             .clone();
@@ -117,7 +117,7 @@ impl GrpcRouter {
                 ctx.response_storage.clone(),
                 ctx.conversation_storage.clone(),
                 ctx.conversation_item_storage.clone(),
-                mcp_manager.clone(),
+                mcp_orchestrator.clone(),
             )
         };
 
@@ -292,7 +292,7 @@ impl GrpcRouter {
                 self.harmony_responses_context
                     .conversation_item_storage
                     .clone(),
-                self.harmony_responses_context.mcp_manager.clone(),
+                self.harmony_responses_context.mcp_orchestrator.clone(),
             );
 
             if body.stream.unwrap_or(false) {

@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     data_connector::{self, ConversationId, ResponseId},
-    mcp::{self, McpManager},
+    mcp::{self, McpOrchestrator},
     protocols::{
         chat::ChatCompletionRequest,
         common::{Function, Tool, ToolChoice, ToolChoiceValue},
@@ -152,15 +152,15 @@ pub(super) fn extract_all_tool_calls_from_chat(
 }
 
 /// Convert MCP tools to Chat API tool format
-pub(super) fn convert_mcp_tools_to_chat_tools(mcp_tools: &[mcp::Tool]) -> Vec<Tool> {
+pub(super) fn convert_mcp_tools_to_chat_tools(mcp_tools: &[mcp::ToolEntry]) -> Vec<Tool> {
     mcp_tools
         .iter()
-        .map(|tool_info| Tool {
+        .map(|entry| Tool {
             tool_type: "function".to_string(),
             function: Function {
-                name: tool_info.name.to_string(),
-                description: tool_info.description.as_ref().map(|d| d.to_string()),
-                parameters: Value::Object((*tool_info.input_schema).clone()),
+                name: entry.tool.name.to_string(),
+                description: entry.tool.description.as_ref().map(|d| d.to_string()),
+                parameters: Value::Object((*entry.tool.input_schema).clone()),
                 strict: None,
             },
         })
@@ -178,7 +178,7 @@ pub(super) fn generate_mcp_id(prefix: &str) -> String {
 
 /// Build mcp_list_tools output item
 pub(super) fn build_mcp_list_tools_item(
-    mcp: &Arc<McpManager>,
+    mcp: &Arc<McpOrchestrator>,
     server_label: &str,
     server_keys: &[String],
 ) -> ResponseOutputItem {
@@ -186,9 +186,9 @@ pub(super) fn build_mcp_list_tools_item(
     let tools_info: Vec<McpToolInfo> = tools
         .iter()
         .map(|t| McpToolInfo {
-            name: t.name.to_string(),
-            description: t.description.as_ref().map(|d| d.to_string()),
-            input_schema: Value::Object((*t.input_schema).clone()),
+            name: t.tool_name().to_string(),
+            description: t.tool.description.as_ref().map(|d| d.to_string()),
+            input_schema: Value::Object((*t.tool.input_schema).clone()),
             annotations: Some(json!({
                 "read_only": false
             })),

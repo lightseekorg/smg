@@ -71,15 +71,13 @@ struct ServerEntry {
     handler: Arc<SmgClientHandler>,
 }
 
-/// Result of a tool call, either transformed or raw.
+/// Result of a tool call.
 #[derive(Debug)]
 pub enum ToolCallResult {
     /// Successfully executed and transformed.
     Success(ResponseOutputItem),
     /// Pending approval from user.
     PendingApproval(McpApprovalRequest),
-    /// Raw MCP result (for internal use).
-    Raw(CallToolResult),
 }
 
 /// Main orchestrator for MCP operations.
@@ -196,7 +194,15 @@ impl McpOrchestrator {
     // ========================================================================
 
     /// Connect to a static server from config.
-    async fn connect_static_server(&self, config: &McpServerConfig) -> McpResult<()> {
+    ///
+    /// This method:
+    /// 1. Establishes a connection to the MCP server
+    /// 2. Loads tools, prompts, and resources from the server
+    /// 3. Applies tool configurations (aliases, response formats)
+    /// 4. Registers the server as a static server
+    ///
+    /// Static servers are never evicted from the connection pool.
+    pub async fn connect_static_server(&self, config: &McpServerConfig) -> McpResult<()> {
         info!("Connecting to static server '{}'", config.name);
 
         let handler = Arc::new(
@@ -513,20 +519,64 @@ impl McpOrchestrator {
         result
     }
 
-    /// Call a tool by simple name (first registered server wins on collision).
+    /// Call a tool by name within a set of allowed servers.
+    ///
+    /// This is the recommended entry point for callers who have:
+    /// - A tool name (from LLM response)
+    /// - A list of allowed server keys (from request configuration)
+    ///
+    /// The method handles:
+    /// - Looking up which server has the tool
+    /// - Detecting collisions (same tool name on multiple allowed servers)
+    /// - Returning proper errors for not-found or collision cases
+    ///
+    /// # Arguments
+    /// * `tool_name` - The tool name to call
+    /// * `arguments` - Tool arguments as JSON
+    /// * `allowed_servers` - Server keys to search within (filters scope)
+    /// * `request_ctx` - Request context for approval and tenant isolation
+    ///
+    /// # Errors
+    /// * `ToolNotFound` - Tool doesn't exist on any allowed server
+    /// * `ToolCollision` - Tool exists on multiple allowed servers
     pub async fn call_tool_by_name(
         &self,
         tool_name: &str,
         arguments: Value,
+        allowed_servers: &[String],
         request_ctx: &McpRequestContext<'_>,
     ) -> McpResult<ToolCallResult> {
-        let (server_key, _) = self
+        // Find all matching tools in allowed servers
+        let matching: Vec<_> = self
             .tool_inventory
-            .get_tool(tool_name)
-            .ok_or_else(|| McpError::ToolNotFound(tool_name.to_string()))?;
+            .list_tools()
+            .into_iter()
+            .filter(|(name, server_key, _)| {
+                name == tool_name && allowed_servers.contains(server_key)
+            })
+            .collect();
 
-        self.call_tool(&server_key, tool_name, arguments, request_ctx)
-            .await
+        match matching.len() {
+            0 => Err(McpError::ToolNotFound(tool_name.to_string())),
+            1 => {
+                let (_, server_key, _) = &matching[0];
+                self.call_tool(server_key, tool_name, arguments, request_ctx)
+                    .await
+            }
+            _ => {
+                // Multiple servers have this tool - ambiguous
+                let servers: Vec<String> = matching.iter().map(|(_, s, _)| s.to_string()).collect();
+                warn!(
+                    tool_name = tool_name,
+                    servers = ?servers,
+                    "Tool name collision detected"
+                );
+                Err(McpError::ToolCollision {
+                    tool_name: tool_name.to_string(),
+                    servers,
+                })
+            }
+        }
     }
 
     /// Execute tool with approval checking.
@@ -636,6 +686,10 @@ impl McpOrchestrator {
             )
         };
 
+        // Coerce argument types based on tool schema
+        // LLMs often return numbers as strings (e.g., "5" instead of 5)
+        Self::coerce_arg_types(&mut arguments, &entry.tool.input_schema);
+
         // Build request
         let args_map = if let Value::Object(map) = arguments {
             Some(map)
@@ -650,6 +704,34 @@ impl McpOrchestrator {
 
         // Execute on server
         self.execute_on_server(&target_server, request).await
+    }
+
+    /// Coerce argument types based on tool schema.
+    ///
+    /// LLMs often output numbers as strings, so we convert them based on the schema.
+    fn coerce_arg_types(args: &mut Value, schema: &serde_json::Map<String, Value>) {
+        let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+            return;
+        };
+        let Some(args_map) = args.as_object_mut() else {
+            return;
+        };
+
+        for (key, val) in args_map.iter_mut() {
+            let should_be_number = props
+                .get(key)
+                .and_then(|s| s.get("type"))
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| matches!(t, "number" | "integer"));
+
+            if should_be_number {
+                if let Some(s) = val.as_str() {
+                    if let Ok(num) = s.parse::<f64>() {
+                        *val = serde_json::json!(num);
+                    }
+                }
+            }
+        }
     }
 
     /// Apply argument mapping for aliased tools.
@@ -806,6 +888,140 @@ impl McpOrchestrator {
         for entry in self.static_servers.iter() {
             entry.handler.clear_request_context();
         }
+    }
+
+    // ========================================================================
+    // Dynamic Server Connection
+    // ========================================================================
+
+    /// Generate a unique key for a server configuration.
+    ///
+    /// The key is based on the transport URL, making it suitable for connection pooling.
+    pub fn server_key(config: &McpServerConfig) -> String {
+        match &config.transport {
+            McpTransport::Streamable { url, .. } => url.clone(),
+            McpTransport::Sse { url, .. } => url.clone(),
+            McpTransport::Stdio { command, args, .. } => {
+                format!("{}:{}", command, args.join(" "))
+            }
+        }
+    }
+
+    /// Connect to a dynamic server and add it to the connection pool.
+    ///
+    /// This is used for per-request MCP servers specified in tool configurations.
+    /// Returns the server key that can be used to reference the connection.
+    pub async fn connect_dynamic_server(&self, config: McpServerConfig) -> McpResult<String> {
+        use rmcp::{
+            transport::{
+                sse_client::SseClientConfig,
+                streamable_http_client::StreamableHttpClientTransportConfig, SseClientTransport,
+                StreamableHttpClientTransport,
+            },
+            ServiceExt,
+        };
+
+        let server_key = Self::server_key(&config);
+
+        // Check if already connected
+        if self.connection_pool.get(&server_key).is_some() {
+            return Ok(server_key);
+        }
+
+        // Connect via the pool
+        let inventory_clone = Arc::clone(&self.tool_inventory);
+        let global_proxy = self.config.proxy.clone();
+
+        let client = self
+            .connection_pool
+            .get_or_create(&server_key, config.clone(), |cfg, _proxy| async move {
+                match &cfg.transport {
+                    McpTransport::Streamable { url, token } => {
+                        let transport = if let Some(tok) = token {
+                            let mut cfg_http =
+                                StreamableHttpClientTransportConfig::with_uri(url.as_str());
+                            cfg_http.auth_header = Some(tok.to_string());
+                            StreamableHttpClientTransport::from_config(cfg_http)
+                        } else {
+                            StreamableHttpClientTransport::from_uri(url.as_str())
+                        };
+
+                        ().serve(transport)
+                            .await
+                            .map_err(|e| McpError::ConnectionFailed(format!("streamable: {}", e)))
+                    }
+                    McpTransport::Sse { url, token } => {
+                        let proxy_config =
+                            super::proxy::resolve_proxy_config(&cfg, global_proxy.as_ref());
+
+                        let mut builder =
+                            reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
+
+                        if let Some(proxy_cfg) = proxy_config {
+                            builder = super::proxy::apply_proxy_to_builder(builder, proxy_cfg)?;
+                        }
+
+                        if let Some(tok) = token {
+                            builder = builder.default_headers({
+                                let mut headers = reqwest::header::HeaderMap::new();
+                                headers.insert(
+                                    reqwest::header::AUTHORIZATION,
+                                    format!("Bearer {}", tok).parse().map_err(|e| {
+                                        McpError::Transport(format!("auth token: {}", e))
+                                    })?,
+                                );
+                                headers
+                            });
+                        }
+
+                        let http_client = builder.build().map_err(|e| {
+                            McpError::Transport(format!("build HTTP client: {}", e))
+                        })?;
+
+                        let sse_config = SseClientConfig {
+                            sse_endpoint: url.clone().into(),
+                            ..Default::default()
+                        };
+
+                        let transport =
+                            SseClientTransport::start_with_client(http_client, sse_config)
+                                .await
+                                .map_err(|e| {
+                                    McpError::Transport(format!("create SSE transport: {}", e))
+                                })?;
+
+                        ().serve(transport)
+                            .await
+                            .map_err(|e| McpError::ConnectionFailed(format!("SSE: {}", e)))
+                    }
+                    McpTransport::Stdio { .. } => Err(McpError::Transport(
+                        "Stdio not supported for dynamic connections".to_string(),
+                    )),
+                }
+            })
+            .await?;
+
+        // Load tools from the server
+        // Use server_key (URL) as the tool's server identifier so it matches
+        // what ensure_request_mcp_client adds to server_keys for filtering
+        match client.peer().list_all_tools().await {
+            Ok(tools) => {
+                info!(
+                    "Discovered {} tools from dynamic server '{}'",
+                    tools.len(),
+                    server_key
+                );
+                for tool in tools {
+                    let entry = ToolEntry::from_server_tool(&server_key, tool)
+                        .with_category(ToolCategory::Dynamic);
+                    inventory_clone.insert_entry(entry);
+                }
+            }
+            Err(e) => warn!("Failed to list tools from '{}': {}", server_key, e),
+        }
+
+        self.metrics.record_connection_opened();
+        Ok(server_key)
     }
 
     // ========================================================================
@@ -1312,5 +1528,103 @@ mod tests {
     fn test_pending_approval_count() {
         let orchestrator = McpOrchestrator::new_test();
         assert_eq!(orchestrator.pending_approval_count(), 0);
+    }
+
+    #[test]
+    fn test_call_tool_by_name_finds_unique_tool() {
+        let orchestrator = McpOrchestrator::new_test();
+
+        // Insert a tool on server1
+        let tool = create_test_tool("unique_tool");
+        let entry = ToolEntry::from_server_tool("server1", tool);
+        orchestrator.tool_inventory.insert_entry(entry);
+
+        // Check that the tool is found in inventory
+        let tools = orchestrator.tool_inventory.list_tools();
+        let matching: Vec<_> = tools
+            .into_iter()
+            .filter(|(name, server_key, _)| name == "unique_tool" && server_key == "server1")
+            .collect();
+
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].1, "server1");
+    }
+
+    #[test]
+    fn test_call_tool_by_name_collision_detection() {
+        let orchestrator = McpOrchestrator::new_test();
+
+        // Insert same tool name on two different servers
+        let tool1 = create_test_tool("shared_tool");
+        let entry1 = ToolEntry::from_server_tool("server1", tool1);
+        orchestrator.tool_inventory.insert_entry(entry1);
+
+        let tool2 = create_test_tool("shared_tool");
+        let entry2 = ToolEntry::from_server_tool("server2", tool2);
+        orchestrator.tool_inventory.insert_entry(entry2);
+
+        // Check collision: both servers allowed
+        let tools = orchestrator.tool_inventory.list_tools();
+        let allowed_servers = ["server1", "server2"];
+        let matching: Vec<_> = tools
+            .into_iter()
+            .filter(|(name, server_key, _)| {
+                name == "shared_tool" && allowed_servers.contains(&server_key.as_str())
+            })
+            .collect();
+
+        // Should find 2 matches (collision)
+        assert_eq!(matching.len(), 2);
+    }
+
+    #[test]
+    fn test_call_tool_by_name_no_collision_with_single_server() {
+        let orchestrator = McpOrchestrator::new_test();
+
+        // Insert same tool name on two different servers
+        let tool1 = create_test_tool("shared_tool");
+        let entry1 = ToolEntry::from_server_tool("server1", tool1);
+        orchestrator.tool_inventory.insert_entry(entry1);
+
+        let tool2 = create_test_tool("shared_tool");
+        let entry2 = ToolEntry::from_server_tool("server2", tool2);
+        orchestrator.tool_inventory.insert_entry(entry2);
+
+        // Check no collision: only one server allowed
+        let tools = orchestrator.tool_inventory.list_tools();
+        let allowed_servers = ["server1"];
+        let matching: Vec<_> = tools
+            .into_iter()
+            .filter(|(name, server_key, _)| {
+                name == "shared_tool" && allowed_servers.contains(&server_key.as_str())
+            })
+            .collect();
+
+        // Should find only 1 match (no collision)
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].1, "server1");
+    }
+
+    #[test]
+    fn test_call_tool_by_name_tool_not_found() {
+        let orchestrator = McpOrchestrator::new_test();
+
+        // Insert a tool
+        let tool = create_test_tool("existing_tool");
+        let entry = ToolEntry::from_server_tool("server1", tool);
+        orchestrator.tool_inventory.insert_entry(entry);
+
+        // Search for non-existent tool
+        let tools = orchestrator.tool_inventory.list_tools();
+        let allowed_servers = ["server1"];
+        let matching: Vec<_> = tools
+            .into_iter()
+            .filter(|(name, server_key, _)| {
+                name == "nonexistent_tool" && allowed_servers.contains(&server_key.as_str())
+            })
+            .collect();
+
+        // Should find 0 matches
+        assert_eq!(matching.len(), 0);
     }
 }

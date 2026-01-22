@@ -32,7 +32,7 @@ use super::{
     utils::{mask_tools_as_mcp, patch_response_with_request_metadata, rewrite_streaming_block},
 };
 use crate::{
-    mcp::RequestMcpContext,
+    mcp::McpOrchestrator,
     protocols::{
         event_types::{
             is_function_call_type, is_response_event, FunctionCallEvent, ItemType, McpEvent,
@@ -425,7 +425,7 @@ pub(super) fn send_final_response_event(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     sequence_number: &mut u64,
     state: &ToolLoopState,
-    active_mcp: Option<&Arc<RequestMcpContext>>,
+    orchestrator: Option<&Arc<McpOrchestrator>>,
     ctx: &StreamingEventContext<'_>,
 ) -> bool {
     let mut final_response = match handler.snapshot_final_response() {
@@ -442,11 +442,11 @@ pub(super) fn send_final_response_event(
         }
     }
 
-    if let Some(mcp) = active_mcp {
+    if let Some(orch) = orchestrator {
         inject_mcp_metadata_streaming(
             &mut final_response,
             state,
-            mcp,
+            orch,
             ctx.server_label,
             ctx.server_keys,
         );
@@ -638,12 +638,12 @@ pub(super) async fn handle_streaming_with_tool_interception(
     client: &reqwest::Client,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
-    active_mcp: &Arc<RequestMcpContext>,
+    orchestrator: &Arc<McpOrchestrator>,
     server_keys: Vec<String>,
 ) -> Response {
     // Transform MCP tools to function tools in payload
     let mut payload = req.payload;
-    prepare_mcp_tools_as_functions(&mut payload, active_mcp, &server_keys);
+    prepare_mcp_tools_as_functions(&mut payload, orchestrator, &server_keys);
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
     let should_store = req.original_body.store.unwrap_or(false);
@@ -657,7 +657,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
     let url_clone = url.clone();
     let headers_opt = headers.cloned();
     let payload_clone = payload.clone();
-    let active_mcp_clone = Arc::clone(active_mcp);
+    let orchestrator_clone = Arc::clone(orchestrator);
     let server_keys_clone = server_keys.clone();
 
     // Spawn the streaming loop task
@@ -798,7 +798,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                                                         handler.allocate_synthetic_output_index();
                                                     if !send_mcp_list_tools_events(
                                                         &tx,
-                                                        &active_mcp_clone,
+                                                        &orchestrator_clone,
                                                         server_label,
                                                         list_tools_index,
                                                         &mut sequence_number,
@@ -859,7 +859,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                     &tx,
                     &mut sequence_number,
                     &state,
-                    Some(&active_mcp_clone),
+                    Some(&orchestrator_clone),
                     &streaming_ctx,
                 ) {
                     return;
@@ -880,7 +880,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                     inject_mcp_metadata_streaming(
                         &mut response_json,
                         &state,
-                        &active_mcp_clone,
+                        &orchestrator_clone,
                         server_label,
                         &server_keys_clone,
                     );
@@ -937,13 +937,18 @@ pub(super) async fn handle_streaming_with_tool_interception(
             }
 
             // Execute all pending tool calls
+            let request_id = preserved_response_id
+                .as_deref()
+                .unwrap_or("streaming-request");
             if !execute_streaming_tool_calls(
                 pending_calls,
-                &active_mcp_clone,
+                &orchestrator_clone,
                 &tx,
                 &mut state,
                 server_label,
                 &mut sequence_number,
+                request_id,
+                &server_keys_clone,
             )
             .await
             {
@@ -986,24 +991,29 @@ pub(super) async fn handle_streaming_with_tool_interception(
 
 /// Main entry point for streaming responses
 pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
+    use crate::routers::mcp_utils::ensure_request_mcp_client;
+
     let worker = ctx.worker().expect("Worker not selected").clone();
     let circuit_breaker = worker.circuit_breaker();
     let headers = ctx.headers().cloned();
     let original_body = ctx.responses_request();
-    let mcp_manager = ctx.components.mcp_manager().expect("MCP manager required");
+    let mcp_orchestrator = ctx
+        .components
+        .mcp_orchestrator()
+        .expect("MCP orchestrator required");
 
-    let active_mcp = mcp_manager
-        .create_request_context(original_body.tools.as_deref())
-        .await;
-    let server_keys = active_mcp
-        .as_ref()
-        .map(|ctx| ctx.server_keys())
-        .unwrap_or_default();
+    // Check for MCP tools and create request context if needed
+    let mcp_result = if let Some(tools) = original_body.tools.as_deref() {
+        ensure_request_mcp_client(mcp_orchestrator, tools).await
+    } else {
+        None
+    };
 
     let client = ctx.components.client().clone();
     let req = ctx.into_streaming_context();
 
-    if active_mcp.is_none() {
+    // If no MCP tools, use simple passthrough
+    let Some((orchestrator, server_keys)) = mcp_result else {
         return handle_simple_streaming_passthrough(
             &client,
             circuit_breaker,
@@ -1011,16 +1021,14 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
             req,
         )
         .await;
-    }
-
-    let active_mcp = active_mcp.unwrap();
+    };
 
     // MCP is active - transform tools and set up interception
     handle_streaming_with_tool_interception(
         &client,
         headers.as_ref(),
         req,
-        &active_mcp,
+        &orchestrator,
         server_keys,
     )
     .await

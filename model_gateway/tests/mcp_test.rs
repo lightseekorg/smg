@@ -12,8 +12,12 @@ mod common;
 use std::collections::HashMap;
 
 use common::mock_mcp_server::MockMCPServer;
+use openai_protocol::responses::ResponseOutputItem;
 use serde_json::json;
-use smg::mcp::{error::McpError, McpConfig, McpManager, McpServerConfig, McpTransport};
+use smg::mcp::{
+    error::McpError, ApprovalMode, McpConfig, McpOrchestrator, McpServerConfig, McpTransport,
+    TenantContext, ToolCallResult,
+};
 
 /// Create a new mock server for testing (each test gets its own)
 async fn create_mock_server() -> MockMCPServer {
@@ -36,13 +40,13 @@ async fn test_mcp_server_initialization() {
     };
 
     // Should succeed but with no connected servers (empty config is allowed)
-    let result = McpManager::with_defaults(config).await;
+    let result = McpOrchestrator::new(config).await;
     assert!(result.is_ok(), "Should succeed with empty config");
 
     let manager = result.unwrap();
     let servers = manager.list_servers();
     assert_eq!(servers.len(), 0, "Should have no servers");
-    let tools = manager.list_tools();
+    let tools = manager.list_tools(None);
     assert_eq!(tools.len(), 0, "Should have no tools");
 }
 
@@ -68,7 +72,7 @@ async fn test_server_connection_with_mock() {
         policy: Default::default(),
     };
 
-    let result = McpManager::with_defaults(config).await;
+    let result = McpOrchestrator::new(config).await;
     assert!(result.is_ok(), "Should connect to mock server");
 
     let manager = result.unwrap();
@@ -77,11 +81,11 @@ async fn test_server_connection_with_mock() {
     assert_eq!(servers.len(), 1);
     assert!(servers.contains(&"mock_server".to_string()));
 
-    let tools = manager.list_tools();
+    let tools = manager.list_tools(None);
     assert_eq!(tools.len(), 2, "Should have 2 tools from mock server");
 
-    assert!(manager.has_tool("brave_web_search"));
-    assert!(manager.has_tool("brave_local_search"));
+    assert!(manager.has_tool("mock_server", "brave_web_search"));
+    assert!(manager.has_tool("mock_server", "brave_local_search"));
 
     manager.shutdown().await;
 }
@@ -108,11 +112,11 @@ async fn test_tool_availability_checking() {
         policy: Default::default(),
     };
 
-    let manager = McpManager::with_defaults(config).await.unwrap();
+    let manager = McpOrchestrator::new(config).await.unwrap();
 
     let test_tools = vec!["brave_web_search", "brave_local_search", "calculator"];
     for tool in test_tools {
-        let available = manager.has_tool(tool);
+        let available = manager.has_tool("mock_server", tool);
         match tool {
             "brave_web_search" | "brave_local_search" => {
                 assert!(
@@ -172,13 +176,13 @@ async fn test_multi_server_connection() {
 
     // Note: This will fail to connect to both servers in the current implementation
     // since they return the same tools. The manager will connect to the first one.
-    let result = McpManager::with_defaults(config).await;
+    let result = McpOrchestrator::new(config).await;
 
     if let Ok(manager) = result {
         let servers = manager.list_servers();
         assert!(!servers.is_empty(), "Should have at least one server");
 
-        let tools = manager.list_tools();
+        let tools = manager.list_tools(None);
         assert!(tools.len() >= 2, "Should have tools from servers");
 
         manager.shutdown().await;
@@ -207,20 +211,23 @@ async fn test_tool_execution_with_mock() {
         policy: Default::default(),
     };
 
-    let manager = McpManager::with_defaults(config).await.unwrap();
+    let manager = McpOrchestrator::new(config).await.unwrap();
+
+    let request_ctx = manager.create_request_context(
+        "test-request-1",
+        TenantContext::default(),
+        ApprovalMode::PolicyOnly,
+    );
 
     let result = manager
         .call_tool(
+            "mock_server",
             "brave_web_search",
-            Some(
-                json!({
-                    "query": "rust programming",
-                    "count": 1
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
+            json!({
+                "query": "rust programming",
+                "count": 1
+            }),
+            &request_ctx,
         )
         .await;
 
@@ -230,15 +237,21 @@ async fn test_tool_execution_with_mock() {
     );
 
     let response = result.unwrap();
-    assert!(!response.content.is_empty(), "Should have content");
-
-    // Check the content
-    if let rmcp::model::RawContent::Text(text) = &response.content[0].raw {
-        assert!(text
-            .text
-            .contains("Mock search results for: rust programming"));
-    } else {
-        panic!("Expected text content");
+    match response {
+        ToolCallResult::Success(output_item) => {
+            // Verify the response is an MCP call with output
+            match output_item {
+                ResponseOutputItem::McpCall { output, status, .. } => {
+                    assert_eq!(status, "completed");
+                    assert!(
+                        output.contains("Mock search results for: rust programming"),
+                        "Output should contain mock search results"
+                    );
+                }
+                _ => panic!("Expected McpCall output item"),
+            }
+        }
+        _ => panic!("Expected Success result"),
     }
 
     manager.shutdown().await;
@@ -266,7 +279,13 @@ async fn test_concurrent_tool_execution() {
         policy: Default::default(),
     };
 
-    let manager = McpManager::with_defaults(config).await.unwrap();
+    let manager = McpOrchestrator::new(config).await.unwrap();
+
+    let request_ctx = manager.create_request_context(
+        "test-concurrent",
+        TenantContext::default(),
+        ApprovalMode::PolicyOnly,
+    );
 
     // Execute tools sequentially (true concurrent execution would require Arc<Mutex>)
     let tool_calls = vec![
@@ -276,12 +295,24 @@ async fn test_concurrent_tool_execution() {
 
     for (tool_name, args) in tool_calls {
         let result = manager
-            .call_tool(tool_name, Some(args.as_object().unwrap().clone()))
+            .call_tool("mock_server", tool_name, args, &request_ctx)
             .await;
 
         assert!(result.is_ok(), "Tool {} should succeed", tool_name);
         let response = result.unwrap();
-        assert!(!response.content.is_empty(), "Should have content");
+        match response {
+            ToolCallResult::Success(output_item) => {
+                // Verify the response is an MCP call with output
+                match output_item {
+                    ResponseOutputItem::McpCall { status, output, .. } => {
+                        assert_eq!(status, "completed");
+                        assert!(!output.is_empty(), "Should have output content");
+                    }
+                    _ => panic!("Expected McpCall output item"),
+                }
+            }
+            _ => panic!("Expected Success result"),
+        }
     }
 
     manager.shutdown().await;
@@ -311,17 +342,24 @@ async fn test_tool_execution_errors() {
         policy: Default::default(),
     };
 
-    let manager = McpManager::with_defaults(config).await.unwrap();
+    let manager = McpOrchestrator::new(config).await.unwrap();
+
+    let request_ctx = manager.create_request_context(
+        "test-error",
+        TenantContext::default(),
+        ApprovalMode::PolicyOnly,
+    );
 
     // Try to call unknown tool
     let result = manager
-        .call_tool("unknown_tool", Some(serde_json::Map::new()))
+        .call_tool("mock_server", "unknown_tool", json!({}), &request_ctx)
         .await;
     assert!(result.is_err(), "Should fail for unknown tool");
 
     match result.unwrap_err() {
         McpError::ToolNotFound(name) => {
-            assert_eq!(name, "unknown_tool");
+            // Error message now includes qualified name (server_key:tool_name)
+            assert_eq!(name, "mock_server:unknown_tool");
         }
         _ => panic!("Expected ToolNotFound error"),
     }
@@ -350,7 +388,7 @@ async fn test_connection_without_server() {
         policy: Default::default(),
     };
 
-    let result = McpManager::with_defaults(config).await;
+    let result = McpOrchestrator::new(config).await;
     // Manager succeeds but no servers are connected (errors are logged)
     assert!(
         result.is_ok(),
@@ -386,23 +424,24 @@ async fn test_tool_info_structure() {
         policy: Default::default(),
     };
 
-    let manager = McpManager::with_defaults(config).await.unwrap();
+    let manager = McpOrchestrator::new(config).await.unwrap();
 
-    let tools = manager.list_tools();
+    let tools = manager.list_tools(None);
     let brave_search = tools
         .iter()
-        .find(|t| t.name.as_ref() == "brave_web_search")
+        .find(|t| t.tool.name.as_ref() == "brave_web_search")
         .expect("Should have brave_web_search tool");
 
-    assert_eq!(brave_search.name.as_ref(), "brave_web_search");
+    assert_eq!(brave_search.tool.name.as_ref(), "brave_web_search");
     assert!(brave_search
+        .tool
         .description
         .as_ref()
         .map(|d| d.contains("Mock web search"))
         .unwrap_or(false));
     // Note: server information is now maintained separately in the inventory,
     // not in the Tool type itself
-    assert!(!brave_search.input_schema.is_empty());
+    assert!(!brave_search.tool.input_schema.is_empty());
 }
 
 // SSE Parsing Tests (simplified since we don't expose parse_sse_event)
@@ -430,7 +469,7 @@ async fn test_sse_connection() {
     };
 
     // Manager succeeds but no servers are connected (errors are logged)
-    let result = McpManager::with_defaults(config).await;
+    let result = McpOrchestrator::new(config).await;
     assert!(
         result.is_ok(),
         "Manager should succeed even if SSE server fails to connect"
@@ -512,7 +551,7 @@ async fn test_complete_workflow() {
     };
 
     // 2. Connect to server
-    let manager = McpManager::with_defaults(config)
+    let manager = McpOrchestrator::new(config)
         .await
         .expect("Should connect to mock server");
 
@@ -522,33 +561,48 @@ async fn test_complete_workflow() {
     assert_eq!(servers[0], "integration_test");
 
     // 4. Check available tools
-    let tools = manager.list_tools();
+    let tools = manager.list_tools(None);
     assert_eq!(tools.len(), 2);
 
     // 5. Verify specific tools exist
-    assert!(manager.has_tool("brave_web_search"));
-    assert!(manager.has_tool("brave_local_search"));
-    assert!(!manager.has_tool("nonexistent_tool"));
+    assert!(manager.has_tool("integration_test", "brave_web_search"));
+    assert!(manager.has_tool("integration_test", "brave_local_search"));
+    assert!(!manager.has_tool("integration_test", "nonexistent_tool"));
 
     // 6. Execute a tool
+    let request_ctx = manager.create_request_context(
+        "test-workflow",
+        TenantContext::default(),
+        ApprovalMode::PolicyOnly,
+    );
+
     let result = manager
         .call_tool(
+            "integration_test",
             "brave_web_search",
-            Some(
-                json!({
-                    "query": "SGLang router MCP integration",
-                    "count": 1
-                })
-                .as_object()
-                .unwrap()
-                .clone(),
-            ),
+            json!({
+                "query": "SGLang router MCP integration",
+                "count": 1
+            }),
+            &request_ctx,
         )
         .await;
 
     assert!(result.is_ok(), "Tool execution should succeed");
     let response = result.unwrap();
-    assert!(!response.content.is_empty(), "Should return content");
+    match response {
+        ToolCallResult::Success(output_item) => {
+            // Verify the response is an MCP call with output
+            match output_item {
+                ResponseOutputItem::McpCall { status, output, .. } => {
+                    assert_eq!(status, "completed");
+                    assert!(!output.is_empty(), "Should return output content");
+                }
+                _ => panic!("Expected McpCall output item"),
+            }
+        }
+        _ => panic!("Expected Success result"),
+    }
 
     // 7. Clean shutdown
     manager.shutdown().await;

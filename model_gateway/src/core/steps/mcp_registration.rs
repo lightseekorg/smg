@@ -6,7 +6,7 @@ use tracing::{debug, error, info, warn};
 use super::workflow_data::McpWorkflowData;
 use crate::{
     app_context::AppContext,
-    mcp::{config::McpServerConfig, manager::McpManager},
+    mcp::McpServerConfig,
     observability::metrics::Metrics,
     workflow::{
         BackoffStrategy, FailureAction, RetryPolicy, StepDefinition, StepExecutor, StepId,
@@ -30,9 +30,15 @@ impl McpServerConfigRequest {
     }
 }
 
-/// Step 1: Connect to MCP server
+/// Step 1: Connect and register MCP server
 ///
-/// This step establishes a connection to the MCP server using the flat manager architecture.
+/// This step establishes a connection to the MCP server using McpOrchestrator.
+/// The orchestrator handles:
+/// 1. Establishing the connection
+/// 2. Loading tools, prompts, and resources
+/// 3. Applying tool configurations (aliases, response formats)
+/// 4. Registering the server as a static server
+///
 /// The connection is retried aggressively (100 attempts) with a long timeout (2 hours)
 /// to handle slow-starting servers or network issues.
 pub struct ConnectMcpServerStep;
@@ -52,15 +58,19 @@ impl StepExecutor<McpWorkflowData> for ConnectMcpServerStep {
 
         debug!("Connecting to MCP server: {}", config_request.name);
 
-        // Get proxy config from router_config if available, otherwise fall back to env
-        let proxy_config = app_context
-            .router_config
-            .mcp_config
-            .as_ref()
-            .and_then(|cfg| cfg.proxy.as_ref());
+        // Get MCP orchestrator from app context
+        let mcp_orchestrator =
+            app_context
+                .mcp_orchestrator
+                .get()
+                .ok_or_else(|| WorkflowError::StepFailed {
+                    step_id: StepId::new("connect_mcp_server"),
+                    message: "MCP orchestrator not initialized".to_string(),
+                })?;
 
-        // Connect to MCP server
-        let client = McpManager::connect_server(&config_request.config, proxy_config)
+        // Connect to MCP server (orchestrator handles everything)
+        mcp_orchestrator
+            .connect_static_server(&config_request.config)
             .await
             .map_err(|e| WorkflowError::StepFailed {
                 step_id: StepId::new("connect_mcp_server"),
@@ -70,13 +80,16 @@ impl StepExecutor<McpWorkflowData> for ConnectMcpServerStep {
                 ),
             })?;
 
+        // Update active MCP servers metric
+        Metrics::set_mcp_servers_active(mcp_orchestrator.list_servers().len());
+
         info!(
-            "Successfully connected to MCP server: {}",
+            "Successfully connected and registered MCP server: {}",
             config_request.name
         );
 
-        // Store client in typed data
-        context.data.mcp_client = Some(Arc::new(client));
+        // Mark as connected for validation step
+        context.data.connected = true;
 
         Ok(StepResult::Success)
     }
@@ -86,119 +99,10 @@ impl StepExecutor<McpWorkflowData> for ConnectMcpServerStep {
     }
 }
 
-/// Step 2: Discover MCP inventory (tools, prompts, resources)
-///
-/// This step queries the MCP server for its capabilities using McpManager::load_server_inventory().
-/// - Tools: Available function calls
-/// - Prompts: Reusable prompt templates
-/// - Resources: Accessible files/data
-pub struct DiscoverMcpInventoryStep;
-
-#[async_trait]
-impl StepExecutor<McpWorkflowData> for DiscoverMcpInventoryStep {
-    async fn execute(
-        &self,
-        context: &mut WorkflowContext<McpWorkflowData>,
-    ) -> WorkflowResult<StepResult> {
-        let config_request = &context.data.config;
-        let app_context = context
-            .data
-            .app_context
-            .as_ref()
-            .ok_or_else(|| WorkflowError::ContextValueNotFound("app_context".to_string()))?;
-        let mcp_client = context
-            .data
-            .mcp_client
-            .as_ref()
-            .ok_or_else(|| WorkflowError::ContextValueNotFound("mcp_client".to_string()))?;
-
-        debug!(
-            "Discovering inventory for MCP server: {}",
-            config_request.name
-        );
-
-        // Get shared ToolInventory from McpManager
-        let mcp_manager =
-            app_context
-                .mcp_manager
-                .get()
-                .ok_or_else(|| WorkflowError::StepFailed {
-                    step_id: StepId::new("discover_mcp_inventory"),
-                    message: "MCP manager not initialized".to_string(),
-                })?;
-
-        let inventory = mcp_manager.inventory();
-
-        // Use the public load_server_inventory method
-        McpManager::load_server_inventory(&inventory, &config_request.name, mcp_client).await;
-
-        info!("Completed inventory discovery for {}", config_request.name);
-
-        Ok(StepResult::Success)
-    }
-
-    fn is_retryable(&self, _error: &WorkflowError) -> bool {
-        true // Discovery failures are retryable
-    }
-}
-
-/// Step 3: Register MCP server in manager
-///
-/// This step adds the MCP client to the McpManager's client map so it can be
-/// used for tool calls and inventory management.
-pub struct RegisterMcpServerStep;
-
-#[async_trait]
-impl StepExecutor<McpWorkflowData> for RegisterMcpServerStep {
-    async fn execute(
-        &self,
-        context: &mut WorkflowContext<McpWorkflowData>,
-    ) -> WorkflowResult<StepResult> {
-        let config_request = &context.data.config;
-        let app_context = context
-            .data
-            .app_context
-            .as_ref()
-            .ok_or_else(|| WorkflowError::ContextValueNotFound("app_context".to_string()))?;
-        let mcp_client = context
-            .data
-            .mcp_client
-            .as_ref()
-            .ok_or_else(|| WorkflowError::ContextValueNotFound("mcp_client".to_string()))?
-            .clone();
-
-        debug!("Registering MCP server: {}", config_request.name);
-
-        // Get MCP manager from app context
-        let mcp_manager =
-            app_context
-                .mcp_manager
-                .get()
-                .ok_or_else(|| WorkflowError::StepFailed {
-                    step_id: StepId::new("register_mcp_server"),
-                    message: "MCP manager not initialized".to_string(),
-                })?;
-
-        // Register the client in the manager's client map
-        mcp_manager.register_static_server(config_request.name.clone(), mcp_client);
-
-        // Update active MCP servers metric
-        Metrics::set_mcp_servers_active(mcp_manager.list_servers().len());
-
-        info!("Registered MCP server: {}", config_request.name);
-
-        Ok(StepResult::Success)
-    }
-
-    fn is_retryable(&self, _error: &WorkflowError) -> bool {
-        false // Registration is a simple operation, not retryable
-    }
-}
-
-/// Step 4: Validate registration based on required flag
+/// Step 2: Validate registration based on required flag
 ///
 /// This step checks if the server is marked as required. If the server is required
-/// but wasn't successfully registered (client not in context), this step fails the workflow.
+/// but wasn't successfully connected, this step fails the workflow.
 /// For optional servers, this step always succeeds, allowing the workflow to complete
 /// even if earlier steps failed.
 pub struct ValidateRegistrationStep;
@@ -210,9 +114,9 @@ impl StepExecutor<McpWorkflowData> for ValidateRegistrationStep {
         context: &mut WorkflowContext<McpWorkflowData>,
     ) -> WorkflowResult<StepResult> {
         let config_request = &context.data.config;
-        let client_registered = context.data.mcp_client.is_some();
+        let server_connected = context.data.connected;
 
-        if client_registered {
+        if server_connected {
             info!(
                 "MCP server '{}' registered successfully",
                 config_request.name
@@ -258,15 +162,14 @@ impl StepExecutor<McpWorkflowData> for ValidateRegistrationStep {
 ///
 /// Workflow configuration:
 /// - ConnectMcpServer: 100 retries, 2hr timeout (aggressive retry for slow servers)
-/// - DiscoverMcpInventory: 3 retries, 10s timeout (discovery + caching)
-/// - RegisterMcpServer: No retry, 5s timeout (fast registration)
+///   - Handles connection, inventory discovery, and registration in one step
 /// - ValidateRegistration: Final validation step
 pub fn create_mcp_registration_workflow() -> WorkflowDefinition<McpWorkflowData> {
     WorkflowDefinition::new("mcp_registration", "MCP Server Registration")
         .add_step(
             StepDefinition::new(
                 "connect_mcp_server",
-                "Connect to MCP Server",
+                "Connect and Register MCP Server",
                 Arc::new(ConnectMcpServerStep),
             )
             .with_retry(RetryPolicy {
@@ -281,37 +184,13 @@ pub fn create_mcp_registration_workflow() -> WorkflowDefinition<McpWorkflowData>
         )
         .add_step(
             StepDefinition::new(
-                "discover_mcp_inventory",
-                "Discover and Cache MCP Inventory",
-                Arc::new(DiscoverMcpInventoryStep),
-            )
-            .with_retry(RetryPolicy {
-                max_attempts: 3,
-                backoff: BackoffStrategy::Fixed(Duration::from_secs(1)),
-            })
-            .with_timeout(Duration::from_secs(10))
-            .with_failure_action(FailureAction::ContinueNextStep)
-            .depends_on(&["connect_mcp_server"]),
-        )
-        .add_step(
-            StepDefinition::new(
-                "register_mcp_server",
-                "Register MCP Server",
-                Arc::new(RegisterMcpServerStep),
-            )
-            .with_timeout(Duration::from_secs(5))
-            .with_failure_action(FailureAction::ContinueNextStep)
-            .depends_on(&["discover_mcp_inventory"]),
-        )
-        .add_step(
-            StepDefinition::new(
                 "validate_registration",
                 "Validate MCP Registration",
                 Arc::new(ValidateRegistrationStep),
             )
             .with_timeout(Duration::from_secs(1))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["register_mcp_server"]),
+            .depends_on(&["connect_mcp_server"]),
         )
 }
 
@@ -323,7 +202,7 @@ pub fn create_mcp_workflow_data(
     McpWorkflowData {
         config,
         validated: false,
+        connected: false,
         app_context: Some(app_context),
-        mcp_client: None,
     }
 }

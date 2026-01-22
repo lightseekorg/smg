@@ -59,7 +59,7 @@ pub(crate) async fn serve_harmony_responses(
 
     // Check MCP connection and get whether MCP tools are present
     let (has_mcp_tools, server_keys) =
-        ensure_mcp_connection(&ctx.mcp_manager, current_request.tools.as_deref()).await?;
+        ensure_mcp_connection(&ctx.mcp_orchestrator, current_request.tools.as_deref()).await?;
 
     // Set the server keys in the context
     {
@@ -106,7 +106,7 @@ async fn execute_with_mcp_loop(
     // Add filtered MCP tools (static + requested dynamic) to the request
     let mcp_tools = {
         let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_manager.list_tools_for_servers(&servers)
+        ctx.mcp_orchestrator.list_tools_for_servers(&servers)
     };
     if !mcp_tools.is_empty() {
         let mcp_response_tools = convert_mcp_tools_to_response_tools(&mcp_tools);
@@ -235,10 +235,12 @@ async fn execute_with_mcp_loop(
                 // Execute MCP tools (if any)
                 let mcp_results = if !mcp_tool_calls.is_empty() {
                     execute_mcp_tools(
-                        &ctx.mcp_manager,
+                        &ctx.mcp_orchestrator,
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,
+                        &request_id,
+                        &mcp_tools,
                     )
                     .await?
                 } else {

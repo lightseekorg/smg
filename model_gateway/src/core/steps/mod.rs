@@ -17,8 +17,7 @@ pub mod workflow_engines;
 // Worker management (registration, removal)
 pub use mcp_registration::{
     create_mcp_registration_workflow, create_mcp_workflow_data, ConnectMcpServerStep,
-    DiscoverMcpInventoryStep, McpServerConfigRequest, RegisterMcpServerStep,
-    ValidateRegistrationStep,
+    McpServerConfigRequest, ValidateRegistrationStep,
 };
 pub use tokenizer_registration::{
     create_tokenizer_registration_workflow, create_tokenizer_workflow_data, LoadTokenizerStep,

@@ -68,11 +68,11 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
         config.worker_startup_check_interval_secs,
     )));
 
-    // Create empty OnceLock for worker job queue, workflow engines, and mcp manager
+    // Create empty OnceLock for worker job queue, workflow engines, and mcp orchestrator
     use std::sync::OnceLock;
     let worker_job_queue = Arc::new(OnceLock::new());
     let workflow_engines = Arc::new(OnceLock::new());
-    let mcp_manager_lock = Arc::new(OnceLock::new());
+    let mcp_orchestrator_lock = Arc::new(OnceLock::new());
 
     let app_context = Arc::new(
         AppContext::builder()
@@ -90,7 +90,7 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
             .load_monitor(load_monitor)
             .worker_job_queue(worker_job_queue)
             .workflow_engines(workflow_engines)
-            .mcp_manager(mcp_manager_lock)
+            .mcp_orchestrator(mcp_orchestrator_lock)
             .wasm_manager(Some(wasm_manager))
             .build()
             .expect("Failed to build AppContext with WASM manager"),
@@ -112,8 +112,8 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
         .set(engines)
         .expect("WorkflowEngines should only be initialized once");
 
-    // Initialize MCP manager with empty config
-    use smg::mcp::{McpConfig, McpManager};
+    // Initialize MCP orchestrator with empty config
+    use smg::mcp::{McpConfig, McpOrchestrator};
     let empty_config = McpConfig {
         servers: vec![],
         pool: Default::default(),
@@ -122,14 +122,14 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
         inventory: Default::default(),
         policy: Default::default(),
     };
-    let mcp_manager = McpManager::with_defaults(empty_config)
+    let mcp_orchestrator = McpOrchestrator::new(empty_config)
         .await
-        .expect("Failed to create MCP manager");
+        .expect("Failed to create MCP orchestrator");
     app_context
-        .mcp_manager
-        .set(Arc::new(mcp_manager))
+        .mcp_orchestrator
+        .set(Arc::new(mcp_orchestrator))
         .ok()
-        .expect("McpManager should only be initialized once");
+        .expect("McpOrchestrator should only be initialized once");
 
     app_context
 }

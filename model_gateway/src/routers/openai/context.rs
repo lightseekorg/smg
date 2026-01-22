@@ -9,7 +9,7 @@ use super::provider::Provider;
 use crate::{
     core::Worker,
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::McpManager,
+    mcp::McpOrchestrator,
     protocols::{chat::ChatCompletionRequest, responses::ResponsesRequest},
 };
 
@@ -38,7 +38,7 @@ pub struct SharedComponents {
 
 pub struct ResponsesComponents {
     pub shared: SharedComponents,
-    pub mcp_manager: Arc<McpManager>,
+    pub mcp_orchestrator: Arc<McpOrchestrator>,
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
@@ -57,10 +57,10 @@ impl ComponentRefs {
         }
     }
 
-    pub fn mcp_manager(&self) -> Option<&Arc<McpManager>> {
+    pub fn mcp_orchestrator(&self) -> Option<&Arc<McpOrchestrator>> {
         match self {
             ComponentRefs::Shared(_) => None,
-            ComponentRefs::Responses(r) => Some(&r.mcp_manager),
+            ComponentRefs::Responses(r) => Some(&r.mcp_orchestrator),
         }
     }
 

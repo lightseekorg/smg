@@ -286,12 +286,12 @@ impl WorkerUpdateWorkflowData {
 pub struct McpWorkflowData {
     pub config: McpServerConfigRequest,
     pub validated: bool,
+    /// Whether the server was successfully connected
+    #[serde(default)]
+    pub connected: bool,
     /// Application context (transient, must be re-initialized after deserialization)
     #[serde(skip, default)]
     pub app_context: Option<Arc<AppContext>>,
-    /// Connected MCP client (transient, not serialized)
-    #[serde(skip, default)]
-    pub mcp_client: Option<Arc<rmcp::service::RunningService<rmcp::RoleClient, ()>>>,
 }
 
 impl WorkflowData for McpWorkflowData {

@@ -215,16 +215,15 @@ pub(super) fn build_next_request_with_tools(
 pub(super) fn inject_mcp_metadata(
     response: &mut ResponsesResponse,
     tracking: &McpCallTracking,
-    mcp_tools: &[mcp::Tool],
+    mcp_tools: &[mcp::ToolEntry],
 ) {
     // Build mcp_list_tools item
-    let tools = mcp_tools;
-    let tools_info: Vec<McpToolInfo> = tools
+    let tools_info: Vec<McpToolInfo> = mcp_tools
         .iter()
-        .map(|t| McpToolInfo {
-            name: t.name.to_string(),
-            description: t.description.as_ref().map(|d| d.to_string()),
-            input_schema: Value::Object((*t.input_schema).clone()),
+        .map(|entry| McpToolInfo {
+            name: entry.tool.name.to_string(),
+            description: entry.tool.description.as_ref().map(|d| d.to_string()),
+            input_schema: Value::Object((*entry.tool.input_schema).clone()),
             annotations: Some(json!({
                 "read_only": false
             })),
