@@ -25,7 +25,10 @@ mod tests;
 
 // Re-export types used outside this module
 pub use cache::{CacheConfig, CacheStats, CachedTokenizer, L0Cache, L1Cache, TokenizerFingerprint};
-pub use factory::{create_tokenizer_from_file, create_tokenizer_with_chat_template, TokenizerType};
+pub use factory::{
+    create_tokenizer, create_tokenizer_from_file, create_tokenizer_with_chat_template,
+    TokenizerType,
+};
 pub use huggingface::HuggingFaceTokenizer;
 pub use mock::MockTokenizer;
 pub use registry::{LoadError, LoadOutcome, TokenizerRegistry};

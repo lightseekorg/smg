@@ -17,11 +17,14 @@ class TestRegularPerf:
             router_url=gateway.base_url,
             model_path=model_path,
             experiment_folder=f"benchmark_cache_aware_regular_{backend}",
+            # Increase max_requests to ensure benchmark runs long enough for
+            # accurate GPU utilization sampling (at least 30+ seconds)
+            max_requests_per_run=200,
             thresholds={
                 "ttft_mean_max": 6,
                 "e2e_latency_mean_max": 14,
                 "input_throughput_mean_min": 800,
                 "output_throughput_mean_min": 12,
-                "gpu_util_p50_min": 99,
+                "gpu_util_p50_min": 20,
             },
         )

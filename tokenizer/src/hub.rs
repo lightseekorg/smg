@@ -2,6 +2,22 @@ use std::path::{Path, PathBuf};
 
 use hf_hub::api::tokio::ApiBuilder;
 
+/// Environment variable for HuggingFace token
+/// Note: The hf-hub crate's from_env() doesn't read HF_TOKEN directly,
+/// it only reads from the token file. We explicitly read this env var
+/// to support CI environments where the token is set as an environment variable.
+const HF_TOKEN_ENV: &str = "HF_TOKEN";
+
+/// Build an ApiBuilder with token from HF_TOKEN environment variable if set
+fn build_api() -> anyhow::Result<hf_hub::api::tokio::Api> {
+    let token = std::env::var(HF_TOKEN_ENV).ok();
+    ApiBuilder::from_env()
+        .with_token(token)
+        .with_progress(true)
+        .build()
+        .map_err(Into::into)
+}
+
 const IGNORED: [&str; 5] = [
     ".gitattributes",
     "LICENSE",
@@ -51,7 +67,7 @@ fn is_chat_template_file(filename: &str) -> bool {
 /// Returns the directory containing the downloaded tokenizer files
 pub async fn download_tokenizer_from_hf(model_id: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
     let model_id = model_id.as_ref();
-    let api = ApiBuilder::from_env().with_progress(true).build()?;
+    let api = build_api()?;
     let model_name = model_id.display().to_string();
 
     let repo = api.model(model_name.clone());
@@ -143,7 +159,7 @@ pub async fn download_tokenizer_from_hf(model_id: impl AsRef<Path>) -> anyhow::R
 /// If ignore_weights is true, model weight files will be skipped
 pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Result<PathBuf> {
     let name = name.as_ref();
-    let api = ApiBuilder::from_env().with_progress(true).build()?;
+    let api = build_api()?;
     let model_name = name.display().to_string();
 
     let repo = api.model(model_name.clone());

@@ -38,11 +38,16 @@ jobs:
   build-wheel:
     needs: check-ci
     if: needs.check-ci.outputs.should_run == 'true'
-    runs-on: 4-gpu-a10
+    runs-on: k8s-runner-gpu
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install pip & venv
+        run: |
+          sudo apt update
+          sudo apt install -y python3-pip python3-venv
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
@@ -51,9 +56,13 @@ jobs:
         run: |
           source "$HOME/.cargo/env"
           export RUSTC_WRAPPER=sccache
+          
+          # Create venv
+          python3 -m venv .venv
+          source .venv/bin/activate
 
-          # Install maturin first
-          python3 -m pip install --upgrade pip maturin
+          # Install maturin and zig for manylinux cross-compilation
+          python3 -m pip install --upgrade pip maturin ziglang
 
           # Start Go FFI build in background
           echo "Starting Go FFI build in background..."
@@ -63,7 +72,7 @@ jobs:
           # Build Python wheel in foreground
           echo "Building Python wheel..."
           cd bindings/python
-          maturin build --profile ci --features vendored-openssl --out dist
+          maturin build --profile ci --features vendored-openssl --manylinux 2_28 --zig --out dist
           echo "Python wheel: OK"
           ls -lh dist/
 
@@ -93,6 +102,7 @@ jobs:
 
       - name: Test wheel install
         run: |
+          source .venv/bin/activate
           pip install bindings/python/dist/*.whl
           python3 -c "import smg; print('Python package: OK')"
           python3 -c "from smg.smg_rs import Router; print('Rust extension: OK')"
@@ -221,11 +231,19 @@ jobs:
             # Excludes: 5-grpc (logprobs=5), 2-None-grpc (n=2 with no logprobs), multiple_choices (n=2 tests)
             test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
             setup_vllm: true
-    runs-on: 4-gpu-a10
+    runs-on: k8s-runner-gpu
     timeout-minutes: ${{ matrix.timeout }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Install pip & venv
+        run: |
+          sudo apt update
+          sudo apt install -y python3-pip python3-venv
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> $GITHUB_PATH
+          echo "CUDA_HOME=/usr/local/cuda" >> $GITHUB_ENV
 
       - name: Install inference backend (SGLang or vLLM)
         run: |
@@ -235,8 +253,9 @@ jobs:
           else
             echo "Installing SGLang..."
             git clone https://github.com/sgl-project/sglang.git
+            sudo apt update
             cd sglang
-            sudo --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
+            sudo CUDA_HOME=/usr/local/cuda IS_BLACKWELL=1 --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
           fi
 
       - name: Cache flash-attn build
@@ -257,7 +276,7 @@ jobs:
         if: matrix.setup_oracle
         run: |
           sudo apt-get install -y unzip
-          INSTANT_CLIENT_DIR="/home/ubuntu/instant-client"
+          INSTANT_CLIENT_DIR="$HOME/instant-client"
           INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.9.0.25.07.zip"
 
           if [ ! -d "$INSTANT_CLIENT_DIR/instantclient_23_9" ]; then
@@ -271,7 +290,7 @@ jobs:
             echo "Oracle Instant Client already exists, skipping download"
           fi
 
-          echo "LD_LIBRARY_PATH=/home/ubuntu/instant-client/instantclient_23_9:\$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_9:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Start Oracle Database
         if: matrix.setup_oracle
@@ -286,6 +305,8 @@ jobs:
 
       - name: Start Brave MCP Server
         if: matrix.setup_brave
+        env:
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
         run: |
           docker run -d --rm \
             -p 8001:8080 \
@@ -315,6 +336,8 @@ jobs:
           fi
 
       - name: Run E2E tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
@@ -377,7 +400,7 @@ jobs:
     name: go-bindings-e2e
     needs: [check-ci, build-wheel]
     if: needs.check-ci.outputs.should_run == 'true'
-    runs-on: 4-gpu-a10
+    runs-on: k8s-runner-gpu
     timeout-minutes: 45
     permissions:
       contents: read
@@ -388,10 +411,19 @@ jobs:
       - name: Clone SGLang repository
         run: git clone https://github.com/sgl-project/sglang.git
 
+      - name: Install pip & venv
+        run: |
+          sudo apt update
+          sudo apt install -y python3-pip python3-venv
+          python3 -m venv .venv
+          echo "$PWD/.venv/bin" >> $GITHUB_PATH
+          echo "CUDA_HOME=/usr/local/cuda" >> $GITHUB_ENV
+
       - name: Install SGLang dependencies
         run: |
+          sudo apt update
           cd sglang
-          sudo --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
+          sudo CUDA_HOME=/usr/local/cuda IS_BLACKWELL=1 --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -425,6 +457,8 @@ jobs:
           python3 -m pip install pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy
 
       - name: Run Go OAI server E2E tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
