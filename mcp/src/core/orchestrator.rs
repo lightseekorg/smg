@@ -691,39 +691,40 @@ impl McpOrchestrator {
             // Preserve arguments string for conversation history
             let arguments_str = input.arguments.to_string();
 
-            let (output, output_str, is_error, error_message) = match self
-                .call_tool_by_name(
-                    &input.tool_name,
-                    input.arguments,
-                    allowed_servers,
-                    request_ctx,
-                )
-                .await
-            {
-                Ok(ToolCallResult::Success(item)) => match serde_json::to_string(&item) {
-                    Ok(s) => {
-                        let output = serde_json::to_value(&item)
-                            .unwrap_or_else(|_| serde_json::json!({"result": "success"}));
-                        (output, s, false, None)
-                    }
-                    Err(e) => {
-                        let err = format!("Failed to serialize tool result: {}", e);
-                        warn!("{}", err);
-                        let error_json = serde_json::json!({"error": &err});
-                        (error_json.clone(), error_json.to_string(), true, Some(err))
-                    }
-                },
-                Ok(ToolCallResult::PendingApproval(_)) => {
-                    let err = "Tool requires approval (not supported in this context)".to_string();
-                    warn!("{}", err);
-                    let error_json = serde_json::json!({"error": &err});
-                    (error_json.clone(), error_json.to_string(), true, Some(err))
-                }
-                Err(e) => {
-                    let err = format!("Tool call failed: {}", e);
-                    warn!("Tool execution failed: {}", err);
-                    let error_json = serde_json::json!({"error": &err});
-                    (error_json.clone(), error_json.to_string(), true, Some(err))
+            let (output, output_str, is_error, error_message) = {
+                let result = self
+                    .call_tool_by_name(
+                        &input.tool_name,
+                        input.arguments,
+                        allowed_servers,
+                        request_ctx,
+                    )
+                    .await;
+
+                let handle_error = |err_msg: String| {
+                    warn!("Tool execution failed: {}", err_msg);
+                    let error_json = serde_json::json!({ "error": &err_msg });
+                    (
+                        error_json.clone(),
+                        error_json.to_string(),
+                        true,
+                        Some(err_msg),
+                    )
+                };
+
+                match result {
+                    Ok(ToolCallResult::Success(item)) => match serde_json::to_value(&item) {
+                        Ok(output) => {
+                            // Safe: serialization of a Value to string should not fail
+                            let output_str = serde_json::to_string(&output).unwrap();
+                            (output, output_str, false, None)
+                        }
+                        Err(e) => handle_error(format!("Failed to serialize tool result: {}", e)),
+                    },
+                    Ok(ToolCallResult::PendingApproval(_)) => handle_error(
+                        "Tool requires approval (not supported in this context)".to_string(),
+                    ),
+                    Err(e) => handle_error(format!("Tool call failed: {}", e)),
                 }
             };
 
