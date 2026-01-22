@@ -1,20 +1,19 @@
 //! MCP tool execution logic for Harmony Responses
 
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use axum::response::Response;
-use serde_json::{from_str, json, to_string, to_value, Value};
-use tracing::{debug, error, warn};
+use serde_json::{from_str, json, Value};
+use tracing::{debug, error};
 
 use super::common::McpCallTracking;
 use crate::{
-    mcp::{self, ApprovalMode, McpOrchestrator, TenantContext, ToolEntry},
+    mcp::{ApprovalMode, McpOrchestrator, TenantContext, ToolEntry, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         common::{Function, ToolCall},
         responses::{ResponseTool, ResponseToolType},
     },
-    routers::error,
 };
 
 /// Tool execution result
@@ -37,7 +36,7 @@ pub(crate) struct ToolResult {
 
 /// Execute MCP tools and collect results
 ///
-/// Executes each tool call sequentially via the MCP orchestrator.
+/// Executes tool calls via the unified MCP orchestrator batch API.
 /// Tool execution errors are returned as error results to the model
 /// (allows model to handle gracefully).
 ///
@@ -50,8 +49,6 @@ pub(super) async fn execute_mcp_tools(
     request_id: &str,
     mcp_tools: &[ToolEntry],
 ) -> Result<Vec<ToolResult>, Response> {
-    let mut results = Vec::new();
-
     // Create request context for tool execution
     let request_ctx = mcp_orchestrator.create_request_context(
         request_id,
@@ -59,7 +56,7 @@ pub(super) async fn execute_mcp_tools(
         ApprovalMode::PolicyOnly,
     );
 
-    // Extract server_keys from mcp_tools once (not per tool call)
+    // Extract server_keys from mcp_tools once
     let server_keys: Vec<String> = mcp_tools
         .iter()
         .map(|t| t.server_key().to_string())
@@ -67,152 +64,73 @@ pub(super) async fn execute_mcp_tools(
         .into_iter()
         .collect();
 
-    for tool_call in tool_calls {
-        debug!(
-            tool_name = %tool_call.function.name,
-            call_id = %tool_call.id,
-            "Executing MCP tool"
-        );
-
-        // Parse tool arguments from JSON string
-        let args_str = tool_call.function.arguments.as_deref().unwrap_or("{}");
-        let args: Value = from_str(args_str).map_err(|e| {
-            error!(
-                function = "execute_mcp_tools",
-                tool_name = %tool_call.function.name,
-                call_id = %tool_call.id,
-                error = %e,
-                "Failed to parse tool arguments JSON"
-            );
-            error::internal_error(
-                "invalid_tool_args",
-                format!(
-                    "Invalid tool arguments JSON for tool '{}': {}",
-                    tool_call.function.name, e
-                ),
-            )
-        })?;
-
-        let tool_start = Instant::now();
-        let tool_result = mcp_orchestrator
-            .call_tool_by_name(
-                &tool_call.function.name,
-                args.clone(),
-                &server_keys,
-                &request_ctx,
-            )
-            .await;
-        let tool_duration = tool_start.elapsed();
-
-        match tool_result {
-            Ok(call_result) => {
-                debug!(
-                    tool_name = %tool_call.function.name,
-                    call_id = %tool_call.id,
-                    "Tool execution succeeded"
-                );
-
-                // Extract output from ToolCallResult
-                let (output, is_error) = match call_result {
-                    mcp::ToolCallResult::Success(response_item) => {
-                        // Convert ResponseOutputItem to JSON
-                        let output = to_value(&response_item)
-                            .unwrap_or_else(|_| json!({"result": "success"}));
-                        (output, false)
-                    }
-                    mcp::ToolCallResult::PendingApproval(_) => {
-                        // In PolicyOnly mode, this shouldn't happen
-                        (json!({"error": "Unexpected pending approval"}), true)
-                    }
-                };
-
-                let output_str = to_string(&output)
-                    .unwrap_or_else(|_| r#"{"error": "Failed to serialize output"}"#.to_string());
-
-                // Record this call in tracking
-                tracking.record_call(
-                    tool_call.id.clone(),
-                    tool_call.function.name.clone(),
-                    args_str.to_string(),
-                    output_str.clone(),
-                    !is_error,
-                    if is_error {
-                        Some(output_str.clone())
-                    } else {
-                        None
-                    },
-                );
-
-                // Record MCP tool metrics
-                Metrics::record_mcp_tool_duration(
-                    model_id,
-                    &tool_call.function.name,
-                    tool_duration,
-                );
-                Metrics::record_mcp_tool_call(
-                    model_id,
-                    &tool_call.function.name,
-                    if is_error {
-                        metrics_labels::RESULT_ERROR
-                    } else {
-                        metrics_labels::RESULT_SUCCESS
-                    },
-                );
-
-                results.push(ToolResult {
-                    call_id: tool_call.id.clone(),
-                    tool_name: tool_call.function.name.clone(),
-                    output,
-                    is_error,
-                });
-            }
-            Err(e) => {
-                warn!(
-                    tool_name = %tool_call.function.name,
-                    call_id = %tool_call.id,
+    // Convert tool calls to execution inputs
+    let inputs: Vec<ToolExecutionInput> = tool_calls
+        .iter()
+        .map(|tc| {
+            let args_str = tc.function.arguments.as_deref().unwrap_or("{}");
+            let args: Value = from_str(args_str).unwrap_or_else(|e| {
+                error!(
+                    function = "execute_mcp_tools",
+                    tool_name = %tc.function.name,
+                    call_id = %tc.id,
                     error = %e,
-                    "Tool execution failed"
+                    "Failed to parse tool arguments JSON, using empty object"
                 );
-
-                let error_msg = format!("Tool execution failed: {}", e);
-                let error_output = json!({
-                    "error": error_msg.clone()
-                });
-                let error_output_str = to_string(&error_output)
-                    .unwrap_or_else(|_| format!(r#"{{"error": "{}"}}"#, error_msg));
-
-                // Record failed call in tracking
-                tracking.record_call(
-                    tool_call.id.clone(),
-                    tool_call.function.name.clone(),
-                    args_str.to_string(),
-                    error_output_str.clone(),
-                    false,
-                    Some(error_msg),
-                );
-
-                // Record MCP tool metrics
-                Metrics::record_mcp_tool_duration(
-                    model_id,
-                    &tool_call.function.name,
-                    tool_duration,
-                );
-                Metrics::record_mcp_tool_call(
-                    model_id,
-                    &tool_call.function.name,
-                    metrics_labels::RESULT_ERROR,
-                );
-
-                // Return error result to model (let it handle gracefully)
-                results.push(ToolResult {
-                    call_id: tool_call.id.clone(),
-                    tool_name: tool_call.function.name.clone(),
-                    output: error_output,
-                    is_error: true,
-                });
+                json!({})
+            });
+            ToolExecutionInput {
+                call_id: tc.id.clone(),
+                tool_name: tc.function.name.clone(),
+                arguments: args,
             }
-        }
-    }
+        })
+        .collect();
+
+    debug!(
+        tool_count = inputs.len(),
+        "Executing MCP tools via unified API"
+    );
+
+    // Execute all tools via unified batch API
+    let outputs = mcp_orchestrator
+        .execute_tools(inputs, &server_keys, &request_ctx)
+        .await;
+
+    // Convert outputs to ToolResults and record metrics/tracking
+    let results: Vec<ToolResult> = outputs
+        .into_iter()
+        .map(|output| {
+            // Record this call in tracking
+            tracking.record_call(
+                output.call_id.clone(),
+                output.tool_name.clone(),
+                output.arguments_str.clone(),
+                output.output_str.clone(),
+                !output.is_error,
+                output.error_message.clone(),
+            );
+
+            // Record MCP tool metrics
+            Metrics::record_mcp_tool_duration(model_id, &output.tool_name, output.duration);
+            Metrics::record_mcp_tool_call(
+                model_id,
+                &output.tool_name,
+                if output.is_error {
+                    metrics_labels::RESULT_ERROR
+                } else {
+                    metrics_labels::RESULT_SUCCESS
+                },
+            );
+
+            ToolResult {
+                call_id: output.call_id,
+                tool_name: output.tool_name,
+                output: output.output,
+                is_error: output.is_error,
+            }
+        })
+        .collect();
 
     Ok(results)
 }

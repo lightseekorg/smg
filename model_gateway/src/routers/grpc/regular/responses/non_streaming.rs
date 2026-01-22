@@ -5,10 +5,10 @@
 //! - `execute_tool_loop` - MCP tool loop execution
 //! - `execute_without_mcp` - Simple pipeline execution without MCP
 
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use axum::response::Response;
-use serde_json::{json, Value};
+use serde_json::json;
 use tracing::{debug, error, trace, warn};
 
 use super::{
@@ -20,7 +20,7 @@ use super::{
     conversions,
 };
 use crate::{
-    mcp::{ApprovalMode, TenantContext, ToolCallResult},
+    mcp::{ApprovalMode, TenantContext, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse},
     routers::{
@@ -323,88 +323,62 @@ pub(super) async fn execute_tool_loop(
                 return Ok(responses_response);
             }
 
-            // Get server_keys for call_tool_by_name
+            // Get server_keys for tool execution
             let server_keys: Vec<String> = {
                 let servers = ctx.requested_servers.read().unwrap();
                 servers.clone()
             };
 
-            // Execute all MCP tools
-            for tool_call in mcp_tool_calls {
+            // Convert tool calls to execution inputs
+            let inputs: Vec<ToolExecutionInput> = mcp_tool_calls
+                .into_iter()
+                .map(|tc| ToolExecutionInput {
+                    call_id: tc.call_id,
+                    tool_name: tc.name,
+                    arguments: serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!({})),
+                })
+                .collect();
+
+            // Execute all MCP tools via unified API
+            let results = ctx
+                .mcp_orchestrator
+                .execute_tools(inputs, &server_keys, &request_ctx)
+                .await;
+
+            // Process results: record metrics and state
+            for result in results {
                 trace!(
-                    "Calling MCP tool '{}' (call_id: {}) with args: {}",
-                    tool_call.name,
-                    tool_call.call_id,
-                    tool_call.arguments
+                    "Tool '{}' (call_id: {}) completed in {:?}, success={}",
+                    result.tool_name,
+                    result.call_id,
+                    result.duration,
+                    !result.is_error
                 );
-
-                let tool_start = Instant::now();
-
-                // Parse arguments to Value
-                let arguments: Value =
-                    serde_json::from_str(&tool_call.arguments).unwrap_or_else(|_| json!({}));
-
-                let (output_str, success, error) = match ctx
-                    .mcp_orchestrator
-                    .call_tool_by_name(&tool_call.name, arguments, &server_keys, &request_ctx)
-                    .await
-                {
-                    Ok(result) => match result {
-                        ToolCallResult::Success(output_item) => {
-                            match serde_json::to_string(&output_item) {
-                                Ok(output) => (output, true, None),
-                                Err(e) => {
-                                    let err = format!("Failed to serialize tool result: {}", e);
-                                    warn!("{}", err);
-                                    let error_json = json!({ "error": &err }).to_string();
-                                    (error_json, false, Some(err))
-                                }
-                            }
-                        }
-                        ToolCallResult::PendingApproval(_) => {
-                            let err = "Tool requires approval (not supported in this context)";
-                            warn!("{}", err);
-                            (
-                                json!({ "error": err }).to_string(),
-                                false,
-                                Some(err.to_string()),
-                            )
-                        }
-                    },
-                    Err(err) => {
-                        let err_str = format!("tool call failed: {}", err);
-                        warn!("Tool execution failed: {}", err_str);
-                        // Return error as output, let model decide how to proceed
-                        let error_json = json!({ "error": &err_str }).to_string();
-                        (error_json, false, Some(err_str))
-                    }
-                };
-                let tool_duration = tool_start.elapsed();
 
                 // Record MCP tool metrics
                 Metrics::record_mcp_tool_duration(
                     &current_request.model,
-                    &tool_call.name,
-                    tool_duration,
+                    &result.tool_name,
+                    result.duration,
                 );
                 Metrics::record_mcp_tool_call(
                     &current_request.model,
-                    &tool_call.name,
-                    if success {
-                        metrics_labels::RESULT_SUCCESS
-                    } else {
+                    &result.tool_name,
+                    if result.is_error {
                         metrics_labels::RESULT_ERROR
+                    } else {
+                        metrics_labels::RESULT_SUCCESS
                     },
                 );
 
                 // Record the call in state
                 state.record_call(
-                    tool_call.call_id,
-                    tool_call.name,
-                    tool_call.arguments,
-                    output_str,
-                    success,
-                    error,
+                    result.call_id,
+                    result.tool_name,
+                    result.arguments_str,
+                    result.output_str,
+                    !result.is_error,
+                    result.error_message,
                 );
 
                 // Increment total calls counter

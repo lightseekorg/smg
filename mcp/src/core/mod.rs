@@ -14,5 +14,7 @@ pub use config::{
 };
 pub use handler::{HandlerRequestContext, RefreshRequest, SmgClientHandler};
 pub use metrics::{LatencySnapshot, McpMetrics, MetricsSnapshot};
-pub use orchestrator::{McpOrchestrator, McpRequestContext, ToolCallResult};
+pub use orchestrator::{
+    McpOrchestrator, McpRequestContext, ToolCallResult, ToolExecutionInput, ToolExecutionOutput,
+};
 pub use pool::McpConnectionPool;

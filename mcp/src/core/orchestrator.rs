@@ -80,6 +80,84 @@ pub enum ToolCallResult {
     PendingApproval(McpApprovalRequest),
 }
 
+impl ToolCallResult {
+    /// Convert the result to a serialized output tuple.
+    ///
+    /// Returns `(output_str, is_error, error_message)` suitable for
+    /// recording in conversation history or emitting as events.
+    ///
+    /// This centralizes the result serialization logic that was previously
+    /// duplicated across all routers.
+    pub fn into_serialized(self) -> (String, bool, Option<String>) {
+        match self {
+            ToolCallResult::Success(item) => match serde_json::to_string(&item) {
+                Ok(s) => (s, false, None),
+                Err(e) => {
+                    let err = format!("Failed to serialize tool result: {}", e);
+                    (
+                        serde_json::json!({"error": &err}).to_string(),
+                        true,
+                        Some(err),
+                    )
+                }
+            },
+            ToolCallResult::PendingApproval(_) => {
+                let err = "Tool requires approval (not supported in this context)".to_string();
+                (
+                    serde_json::json!({"error": &err}).to_string(),
+                    true,
+                    Some(err),
+                )
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Batch Tool Execution Types
+// ============================================================================
+
+/// Input for batch tool execution.
+///
+/// This is a simplified input format that allows routers to batch
+/// multiple tool calls without worrying about the underlying execution details.
+#[derive(Debug, Clone)]
+pub struct ToolExecutionInput {
+    /// Unique identifier for this tool call (from LLM response).
+    pub call_id: String,
+    /// Name of the tool to execute.
+    pub tool_name: String,
+    /// Tool arguments as JSON.
+    pub arguments: Value,
+}
+
+/// Output from batch tool execution.
+///
+/// Contains all information needed by routers to build responses,
+/// record state, and emit events. The MCP crate handles:
+/// - Tool lookup and execution
+/// - Result serialization
+/// - Error handling
+#[derive(Debug, Clone)]
+pub struct ToolExecutionOutput {
+    /// The call_id from the input (for matching).
+    pub call_id: String,
+    /// Name of the tool that was executed.
+    pub tool_name: String,
+    /// Original arguments JSON string (for conversation history).
+    pub arguments_str: String,
+    /// Deserialized output (for building typed responses).
+    pub output: Value,
+    /// Serialized output string (for conversation history).
+    pub output_str: String,
+    /// Whether the execution resulted in an error.
+    pub is_error: bool,
+    /// Error message if `is_error` is true.
+    pub error_message: Option<String>,
+    /// Execution duration.
+    pub duration: Duration,
+}
+
 /// Main orchestrator for MCP operations.
 ///
 /// Thread-safe and designed for sharing across async tasks.
@@ -577,6 +655,93 @@ impl McpOrchestrator {
                 })
             }
         }
+    }
+
+    /// Execute multiple tools with unified error handling.
+    ///
+    /// This is the recommended entry point for batch tool execution. It:
+    /// - Executes each tool via `call_tool_by_name`
+    /// - Handles result serialization uniformly
+    /// - Returns fully-processed results ready for router use
+    ///
+    /// Routers should convert their tool calls to `ToolExecutionInput`,
+    /// call this method, and convert `ToolExecutionOutput` to their format.
+    /// Metrics recording is left to callers (routers) since they have access
+    /// to the model_gateway metrics infrastructure.
+    ///
+    /// # Arguments
+    /// * `inputs` - Tool calls to execute
+    /// * `allowed_servers` - Server keys to search within
+    /// * `request_ctx` - Request context for approval and tenant isolation
+    ///
+    /// # Returns
+    /// Vector of outputs in the same order as inputs. Errors are returned
+    /// as outputs with `is_error: true` rather than failing the entire batch.
+    pub async fn execute_tools(
+        &self,
+        inputs: Vec<ToolExecutionInput>,
+        allowed_servers: &[String],
+        request_ctx: &McpRequestContext<'_>,
+    ) -> Vec<ToolExecutionOutput> {
+        let mut results = Vec::with_capacity(inputs.len());
+
+        for input in inputs {
+            let start = Instant::now();
+
+            // Preserve arguments string for conversation history
+            let arguments_str = input.arguments.to_string();
+
+            let (output, output_str, is_error, error_message) = match self
+                .call_tool_by_name(
+                    &input.tool_name,
+                    input.arguments,
+                    allowed_servers,
+                    request_ctx,
+                )
+                .await
+            {
+                Ok(ToolCallResult::Success(item)) => match serde_json::to_string(&item) {
+                    Ok(s) => {
+                        let output = serde_json::to_value(&item)
+                            .unwrap_or_else(|_| serde_json::json!({"result": "success"}));
+                        (output, s, false, None)
+                    }
+                    Err(e) => {
+                        let err = format!("Failed to serialize tool result: {}", e);
+                        warn!("{}", err);
+                        let error_json = serde_json::json!({"error": &err});
+                        (error_json.clone(), error_json.to_string(), true, Some(err))
+                    }
+                },
+                Ok(ToolCallResult::PendingApproval(_)) => {
+                    let err = "Tool requires approval (not supported in this context)".to_string();
+                    warn!("{}", err);
+                    let error_json = serde_json::json!({"error": &err});
+                    (error_json.clone(), error_json.to_string(), true, Some(err))
+                }
+                Err(e) => {
+                    let err = format!("Tool call failed: {}", e);
+                    warn!("Tool execution failed: {}", err);
+                    let error_json = serde_json::json!({"error": &err});
+                    (error_json.clone(), error_json.to_string(), true, Some(err))
+                }
+            };
+
+            let duration = start.elapsed();
+
+            results.push(ToolExecutionOutput {
+                call_id: input.call_id,
+                tool_name: input.tool_name,
+                arguments_str,
+                output,
+                output_str,
+                is_error,
+                error_message,
+                duration,
+            });
+        }
+
+        results
     }
 
     /// Execute tool with approval checking.

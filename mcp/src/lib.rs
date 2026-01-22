@@ -30,7 +30,8 @@ pub use core::{
     ArgMappingConfig, HandlerRequestContext, LatencySnapshot, McpConfig, McpMetrics,
     McpOrchestrator, McpRequestContext, McpServerConfig, McpTransport, MetricsSnapshot,
     PolicyConfig, PolicyDecisionConfig, RefreshRequest, ResponseFormatConfig, ServerPolicyConfig,
-    SmgClientHandler, Tool, ToolCallResult, ToolConfig, TrustLevelConfig,
+    SmgClientHandler, Tool, ToolCallResult, ToolConfig, ToolExecutionInput, ToolExecutionOutput,
+    TrustLevelConfig,
 };
 
 // Re-export shared types
