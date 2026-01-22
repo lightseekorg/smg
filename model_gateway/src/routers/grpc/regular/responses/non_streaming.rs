@@ -51,7 +51,7 @@ pub(super) async fn route_responses_internal(
 
     // 2. Check MCP connection and get whether MCP tools are present
     let (has_mcp_tools, server_keys) =
-        ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await?;
+        ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref(), None).await?;
 
     // Set the server keys in the context
     {

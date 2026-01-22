@@ -1,41 +1,28 @@
 //! Shared MCP utilities for routers.
-//!
-//! This module provides shared MCP-related functionality that can be
-//! used across different router implementations (OpenAI, gRPC regular, gRPC harmony).
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
+use axum::http::HeaderMap;
 use tracing::warn;
 
+use super::header_utils::should_forward_request_header;
 use crate::{
     mcp::{McpOrchestrator, McpServerConfig, McpTransport},
     protocols::responses::{ResponseTool, ResponseToolType},
 };
 
-// ============================================================================
-// Constants
-// ============================================================================
-
 /// Default maximum tool loop iterations (safety limit).
-///
-/// Used as fallback when user doesn't specify `max_tool_calls`.
-/// All routers use this same value.
 pub const DEFAULT_MAX_ITERATIONS: usize = 10;
 
-// ============================================================================
-// Configuration
-// ============================================================================
-
 /// Configuration for MCP tool calling loops.
-///
-/// Provides a common structure for loop configuration across routers.
 #[derive(Debug, Clone)]
 pub struct McpLoopConfig {
-    /// Maximum iterations as safety limit (default: DEFAULT_MAX_ITERATIONS).
-    /// Prevents infinite loops when max_tool_calls is not set by user.
+    /// Maximum iterations (default: DEFAULT_MAX_ITERATIONS).
     pub max_iterations: usize,
     /// Server keys for filtering MCP tools.
-    /// Contains keys for dynamic servers that were connected for this request.
     pub server_keys: Vec<String>,
 }
 
@@ -48,14 +35,7 @@ impl Default for McpLoopConfig {
     }
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Extract MCP server label from request tools.
-///
-/// Searches for the first MCP tool in the tools array and returns its server_label.
-/// Falls back to a default value if no MCP tool with server_label is found.
+/// Extract MCP server label from request tools, falling back to default.
 pub fn extract_server_label(tools: Option<&[ResponseTool]>, default_label: &str) -> String {
     tools
         .and_then(|tools| {
@@ -70,95 +50,110 @@ pub fn extract_server_label(tools: Option<&[ResponseTool]>, default_label: &str)
         .unwrap_or_else(|| default_label.to_string())
 }
 
-// ============================================================================
-// MCP Connection
-// ============================================================================
-
-/// Ensure MCP clients are connected for all request-level MCP tools.
+/// Ensure MCP clients are connected for request-level MCP tools.
 ///
-/// This function extracts MCP server configurations from ALL request tools (server_url, authorization)
-/// and ensures client connections are established via the connection pool.
+/// Extracts server configurations from request tools and establishes connections.
+/// Forwards filtered HTTP request headers (auth, tracing, correlation IDs) to MCP servers.
 ///
-/// Returns `Some((orchestrator, server_keys))` if MCP tools were found and clients created,
+/// Returns `Some((orchestrator, server_keys))` if connections were established,
 /// `None` if no MCP tools with server_url were found.
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
+    request_headers: Option<&HeaderMap>,
 ) -> Option<(Arc<McpOrchestrator>, Vec<String>)> {
-    let mut server_keys = Vec::new();
+    let mut server_keys = HashSet::new();
     let mut has_mcp_tools = false;
+    let forwarded_headers = extract_forwardable_headers(request_headers);
 
-    // Process all MCP tools
     for tool in tools {
-        if matches!(tool.r#type, ResponseToolType::Mcp) && tool.server_url.is_some() {
-            has_mcp_tools = true;
-            let Some(server_url) = tool.server_url.as_ref().map(|s| s.trim().to_string()) else {
-                continue;
-            };
+        let Some(server_url) = tool
+            .server_url
+            .as_ref()
+            .filter(|_| matches!(tool.r#type, ResponseToolType::Mcp))
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
 
-            // Validate URL scheme
-            if !(server_url.starts_with("http://") || server_url.starts_with("https://")) {
-                warn!(
-                    "Ignoring MCP server_url with unsupported scheme: {}",
-                    server_url
-                );
-                continue;
+        has_mcp_tools = true;
+
+        if !(server_url.starts_with("http://") || server_url.starts_with("https://")) {
+            warn!(
+                "Ignoring MCP server_url with unsupported scheme: {}",
+                server_url
+            );
+            continue;
+        }
+
+        let name = tool
+            .server_label
+            .clone()
+            .unwrap_or_else(|| "request-mcp".to_string());
+        let token = tool.authorization.clone();
+        let headers = forwarded_headers.clone();
+        let server_url = server_url.to_string();
+
+        let transport = if server_url.contains("/sse") {
+            McpTransport::Sse {
+                url: server_url,
+                token,
+                headers,
             }
+        } else {
+            McpTransport::Streamable {
+                url: server_url,
+                token,
+                headers,
+            }
+        };
 
-            // Extract server label and auth token
-            let name = tool
-                .server_label
-                .clone()
-                .unwrap_or_else(|| "request-mcp".to_string());
-            let token = tool.authorization.clone();
+        let server_config = McpServerConfig {
+            name,
+            transport,
+            proxy: None,
+            required: false,
+            tools: None,
+        };
 
-            // Determine transport type based on URL pattern
-            // TODO: Add headers support to ResponseTool to allow custom headers from API
-            let transport = if server_url.contains("/sse") {
-                McpTransport::Sse {
-                    url: server_url.clone(),
-                    token,
-                    headers: HashMap::new(),
-                }
-            } else {
-                McpTransport::Streamable {
-                    url: server_url.clone(),
-                    token,
-                    headers: HashMap::new(),
-                }
-            };
+        let server_key = McpOrchestrator::server_key(&server_config);
 
-            // Create server config
-            let server_config = McpServerConfig {
-                name,
-                transport,
-                proxy: None,
-                required: false,
-                tools: None,
-            };
-
-            // Get the server key for tracking
-            let server_key = McpOrchestrator::server_key(&server_config);
-
-            // Use connect_dynamic_server to establish connection
-            match mcp_orchestrator.connect_dynamic_server(server_config).await {
-                Ok(_key) => {
-                    // Track this server for filtering
-                    if !server_keys.contains(&server_key) {
-                        server_keys.push(server_key);
-                    }
-                }
-                Err(err) => {
-                    warn!("Failed to connect MCP server {}: {}", server_key, err);
-                    // Continue processing other tools
-                }
+        match mcp_orchestrator.connect_dynamic_server(server_config).await {
+            Ok(_) => {
+                server_keys.insert(server_key);
+            }
+            Err(err) => {
+                warn!("Failed to connect MCP server {}: {}", server_key, err);
             }
         }
     }
 
     if has_mcp_tools && !server_keys.is_empty() {
-        Some((mcp_orchestrator.clone(), server_keys))
+        Some((mcp_orchestrator.clone(), server_keys.into_iter().collect()))
     } else {
         None
     }
+}
+
+/// Extract headers that should be forwarded to MCP servers.
+fn extract_forwardable_headers(request_headers: Option<&HeaderMap>) -> HashMap<String, String> {
+    let Some(headers) = request_headers else {
+        return HashMap::new();
+    };
+
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let name_str = name.as_str();
+            if should_forward_request_header(name_str) {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|v| (name_str.to_string(), v.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
