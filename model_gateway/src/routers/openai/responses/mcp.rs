@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
-    mcp::{ApprovalMode, McpOrchestrator, TenantContext, ToolCallResult},
+    mcp::{ApprovalMode, McpOrchestrator, TenantContext},
     protocols::{
         event_types::{is_function_call_type, ItemType, McpEvent, OutputItemEvent},
         responses::{generate_id, ResponseInput, ResponsesRequest},
@@ -195,26 +195,12 @@ pub(super) async fn execute_streaming_tool_calls(
             .call_tool_by_name(&call.name, arguments, server_keys, &request_ctx)
             .await;
 
+        // Use unified serialization helper for result handling
         let (output_str, success, error_msg) = match call_result {
-            Ok(result) => match result {
-                ToolCallResult::Success(output_item) => match serde_json::to_string(&output_item) {
-                    Ok(output) => (output, true, None),
-                    Err(e) => {
-                        let err = format!("Failed to serialize tool result: {}", e);
-                        warn!("{}", err);
-                        (json!({ "error": &err }).to_string(), false, Some(err))
-                    }
-                },
-                ToolCallResult::PendingApproval(_) => {
-                    let err = "Tool requires approval (not supported in streaming context)";
-                    warn!("{}", err);
-                    (
-                        json!({ "error": err }).to_string(),
-                        false,
-                        Some(err.to_string()),
-                    )
-                }
-            },
+            Ok(result) => {
+                let (output, is_error, err_msg) = result.into_serialized();
+                (output, !is_error, err_msg)
+            }
             Err(err) => {
                 let err_str = format!("tool call failed: {}", err);
                 warn!("Tool execution failed during streaming: {}", err_str);
@@ -671,23 +657,15 @@ pub(super) async fn execute_tool_loop(
                 .call_tool_by_name(&tool_name, arguments, &config.server_keys, &request_ctx)
                 .await;
 
+            // Use unified serialization helper for result handling
             let output_str = match call_result {
-                Ok(result) => match result {
-                    ToolCallResult::Success(output_item) => {
-                        match serde_json::to_string(&output_item) {
-                            Ok(output) => output,
-                            Err(e) => {
-                                warn!("Failed to serialize tool result: {}", e);
-                                json!({ "error": format!("Serialization error: {}", e) })
-                                    .to_string()
-                            }
-                        }
+                Ok(result) => {
+                    let (output, is_error, _) = result.into_serialized();
+                    if is_error {
+                        warn!("Tool execution returned error: {}", output);
                     }
-                    ToolCallResult::PendingApproval(_) => {
-                        warn!("Tool requires approval (not supported in non-streaming context)");
-                        json!({ "error": "Tool requires approval" }).to_string()
-                    }
-                },
+                    output
+                }
                 Err(err) => {
                     warn!("Tool execution failed: {}", err);
                     // Return error as output, let model decide how to proceed
@@ -728,7 +706,7 @@ pub(super) async fn execute_tool_loop(
                 {
                     output_array.insert(0, list_tools_item);
 
-                    // Build mcp_call items using helper function
+                    // Build mcp_call items from records
                     let mcp_call_items =
                         build_executed_mcp_call_items(&state.conversation_history, &server_label);
 
@@ -802,7 +780,7 @@ pub(super) fn build_incomplete_response(
                 build_mcp_list_tools_item(orchestrator, &server_label, server_keys);
             output_array.insert(0, list_tools_item);
 
-            // Add mcp_call items for executed calls using helper
+            // Add mcp_call items for executed calls from records
             let executed_items =
                 build_executed_mcp_call_items(&state.conversation_history, &server_label);
 

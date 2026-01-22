@@ -33,7 +33,7 @@ use super::{
 };
 use crate::{
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::{ApprovalMode, TenantContext, ToolCallResult},
+    mcp::{ApprovalMode, TenantContext},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         chat::{
@@ -740,27 +740,15 @@ async fn execute_tool_loop_streaming_internal(
                 let arguments: Value =
                     serde_json::from_str(&tool_call.arguments).unwrap_or_else(|_| json!({}));
 
-                let (output_str, success, error) = match ctx
+                // Execute tool and convert result using unified serialization
+                let call_result = ctx
                     .mcp_orchestrator
                     .call_tool_by_name(&tool_call.name, arguments, &server_keys, &request_ctx)
-                    .await
-                {
+                    .await;
+
+                let (output_str, success, error) = match call_result {
                     Ok(result) => {
-                        let (output, is_error) = match result {
-                            ToolCallResult::Success(output_item) => {
-                                match serde_json::to_string(&output_item) {
-                                    Ok(o) => (o, false),
-                                    Err(e) => (
-                                        json!({"error": format!("Failed to serialize: {}", e)})
-                                            .to_string(),
-                                        true,
-                                    ),
-                                }
-                            }
-                            ToolCallResult::PendingApproval(_) => {
-                                (json!({"error": "Tool requires approval"}).to_string(), true)
-                            }
-                        };
+                        let (output, is_error, err_msg) = result.into_serialized();
 
                         if !is_error {
                             // Emit mcp_call.completed
@@ -807,11 +795,11 @@ async fn execute_tool_loop_streaming_internal(
                             emitter.send_event(&event, &tx)?;
 
                             emitter.complete_output_item(output_index);
-                            (output.clone(), false, Some(output))
+                            (output, false, err_msg)
                         }
                     }
                     Err(err) => {
-                        let err_str = format!("tool call failed: {}", err);
+                        let err_str = format!("Tool call failed: {}", err);
                         warn!("Tool execution failed: {}", err_str);
                         // Emit mcp_call.failed
                         let event = emitter.emit_mcp_call_failed(output_index, &item_id, &err_str);
