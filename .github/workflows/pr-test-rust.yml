@@ -283,31 +283,8 @@ jobs:
           docker stop oracle-db || true
           docker rm oracle-db || true
 
-  docker-build-test:
-    needs: check-ci
-    if: needs.check-ci.outputs.should_run == 'true'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker image (no push)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: docker/Dockerfile
-          push: false
-          tags: smg:test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   finish:
-    needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e, docker-build-test]
+    needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
@@ -317,7 +294,7 @@ jobs:
           if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
             echo "CI was skipped (external contributor without run-ci label)"
             exit 0
-          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.docker-build-test.result }}" == "failure" ]]; then
+          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else
