@@ -537,6 +537,14 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn maybe_genai_oci_oracle(mut self, oracle: Option<OracleConfig>) -> Self {
+        if let Some(cfg) = oracle {
+            self.config.history_backend = HistoryBackend::GenaiOciOracle;
+            self.config.genai_oci_oracle = Some(cfg);
+        }
+        self
+    }
+
     pub fn maybe_postgres(mut self, postgres: Option<PostgresConfig>) -> Self {
         if let Some(cfg) = postgres {
             self.config.history_backend = HistoryBackend::Postgres;

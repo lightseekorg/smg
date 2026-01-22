@@ -16,6 +16,7 @@ mod common;
 pub mod config;
 mod core;
 mod factory;
+mod genai_oci_oracle;
 mod memory;
 mod noop;
 mod oracle;

@@ -919,6 +919,7 @@ impl OracleResponseStorage {
             safety_identifier,
             model,
             conversation_id,
+            conversation_store_id: None,
             raw_response,
         })
     }

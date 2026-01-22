@@ -230,8 +230,15 @@ async fn v1_rerank(
 async fn v1_responses(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
-    ValidatedJson(body): ValidatedJson<ResponsesRequest>,
+    ValidatedJson(mut body): ValidatedJson<ResponsesRequest>,
 ) -> Response {
+    // Extract opc-conversation-store-id header and set it in the request body
+    if let Some(store_id) = headers.get("opc-conversation-store-id") {
+        if let Ok(store_id_str) = store_id.to_str() {
+            body.conversation_store_id = Some(store_id_str.to_string());
+        }
+    }
+
     state
         .router
         .route_responses(Some(&headers), &body, Some(&body.model))
@@ -307,9 +314,10 @@ async fn v1_responses_list_input_items(
 
 async fn v1_conversations_create(
     State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    conversations::create_conversation(&state.context.conversation_storage, body).await
+    conversations::create_conversation(&state.context.conversation_storage, body, Some(&headers)).await
 }
 
 async fn v1_conversations_get(

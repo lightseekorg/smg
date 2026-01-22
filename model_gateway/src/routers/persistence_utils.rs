@@ -77,6 +77,10 @@ pub fn item_to_json(item: &ConversationItem) -> Value {
         obj.insert("status".to_string(), json!(status));
     }
 
+    if let Some(response_id) = &item.response_id {
+        obj.insert("response_id".to_string(), json!(response_id));
+    }
+
     Value::Object(obj)
 }
 
@@ -150,6 +154,7 @@ pub fn build_stored_response(
 
     stored.safety_identifier = original_body.user.clone();
     stored.conversation_id = original_body.conversation.clone();
+    stored.conversation_store_id = original_body.conversation_store_id.clone();
 
     stored.metadata = response_json
         .get("metadata")
@@ -282,6 +287,7 @@ fn item_to_new_conversation_item(
             .get("id")
             .and_then(|v| v.as_str())
             .map(ConversationItemId::from),
+        conversation_id: None,
         response_id,
         item_type: item_type.to_string(),
         role: item_value

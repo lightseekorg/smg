@@ -625,6 +625,10 @@ pub struct ResponsesRequest {
     #[validate(custom(function = "validate_conversation_id"))]
     pub conversation: Option<String>,
 
+    /// Optional conversation store id
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_store_id: Option<String>,
+
     /// Whether to enable parallel tool calls
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
@@ -747,6 +751,7 @@ impl Default for ResponsesRequest {
             metadata: None,
             model: default_model(),
             conversation: None,
+            conversation_store_id: None,
             parallel_tool_calls: None,
             previous_response_id: None,
             reasoning: None,

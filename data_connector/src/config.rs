@@ -11,6 +11,8 @@ pub enum HistoryBackend {
     Memory,
     None,
     Oracle,
+    #[serde(rename = "genai_oci_oracle")]
+    GenaiOciOracle,
     Postgres,
     Redis,
 }

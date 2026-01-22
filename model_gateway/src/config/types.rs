@@ -59,6 +59,9 @@ pub struct RouterConfig {
     /// Required when history_backend = "postgres"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub postgres: Option<PostgresConfig>,
+    /// Required when history_backend = "genai_oci_oracle"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genai_oci_oracle: Option<OracleConfig>,
     /// Required when history_backend = "redis"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redis: Option<RedisConfig>,
@@ -510,6 +513,7 @@ impl Default for RouterConfig {
             history_backend: default_history_backend(),
             oracle: None,
             postgres: None,
+            genai_oci_oracle: None,
             redis: None,
             reasoning_parser: None,
             tool_call_parser: None,

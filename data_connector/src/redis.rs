@@ -708,6 +708,7 @@ impl ResponseStorage for RedisResponseStorage {
             safety_identifier,
             model,
             conversation_id,
+            conversation_store_id: None,
             raw_response,
         }))
     }
@@ -813,11 +814,10 @@ impl ResponseStorage for RedisResponseStorage {
                 continue;
             }
 
-            let id = ResponseId(
-                map.get("id")
-                    .cloned()
-                    .unwrap_or_else(|| response_ids[i].clone()),
-            );
+            let id_str = map.get("id")
+                .cloned()
+                .unwrap_or_else(|| response_ids[i].clone());
+            let id = ResponseId(id_str);
             let previous_response_id = map
                 .get("previous_response_id")
                 .map(|s| ResponseId(s.clone()));
@@ -868,6 +868,7 @@ impl ResponseStorage for RedisResponseStorage {
                 safety_identifier,
                 model,
                 conversation_id,
+                conversation_store_id: None,
                 raw_response,
             });
         }

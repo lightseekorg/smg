@@ -436,6 +436,7 @@ impl AppContextBuilder {
         let storage_config = StorageFactoryConfig {
             backend: &config.history_backend,
             oracle: config.oracle.as_ref(),
+            genai_oci_oracle: config.genai_oci_oracle.as_ref(),
             postgres: config.postgres.as_ref(),
             redis: config.redis.as_ref(),
         };

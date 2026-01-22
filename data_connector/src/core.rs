@@ -69,6 +69,9 @@ pub struct NewConversation {
     /// Optional conversation ID (if None, a random ID will be generated)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<ConversationId>,
+    /// Optional conversation store ID (defaults to conversation ID if not provided)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_store_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<ConversationMetadata>,
 }
@@ -180,6 +183,7 @@ pub struct ConversationItem {
 pub struct NewConversationItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<ConversationItemId>,
+    pub conversation_id: Option<ConversationId>,
     pub response_id: Option<String>,
     pub item_type: String,
     pub role: Option<String>,
@@ -350,6 +354,10 @@ pub struct StoredResponse {
     #[serde(default)]
     pub conversation_id: Option<String>,
 
+    /// Conversation store id if associated with a conversation store
+    #[serde(default)]
+    pub conversation_store_id: Option<String>,
+
     /// Raw OpenAI response payload
     #[serde(default)]
     pub raw_response: Value,
@@ -369,6 +377,7 @@ impl StoredResponse {
             safety_identifier: None,
             model: None,
             conversation_id: None,
+            conversation_store_id: None,
             raw_response: Value::Null,
         }
     }

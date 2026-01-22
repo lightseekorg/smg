@@ -430,7 +430,7 @@ struct CliArgs {
     backend: Backend,
 
     /// History storage backend
-    #[arg(long, default_value = "memory", value_parser = ["memory", "none", "oracle", "postgres", "redis"], help_heading = "Backend")]
+    #[arg(long, default_value = "memory", value_parser = ["memory", "none", "oracle", "genai_oci_oracle", "postgres", "redis"], help_heading = "Backend")]
     history_backend: String,
 
     /// Enable WebAssembly support
@@ -937,12 +937,18 @@ impl CliArgs {
         let history_backend = match self.history_backend.as_str() {
             "none" => HistoryBackend::None,
             "oracle" => HistoryBackend::Oracle,
+            "genai_oci_oracle" => HistoryBackend::GenaiOciOracle,
             "postgres" => HistoryBackend::Postgres,
             "redis" => HistoryBackend::Redis,
             _ => HistoryBackend::Memory,
         };
 
         let oracle = if history_backend == HistoryBackend::Oracle {
+            Some(self.build_oracle_config()?)
+        } else {
+            None
+        };
+        let genai_oci_oracle = if history_backend == HistoryBackend::GenaiOciOracle {
             Some(self.build_oracle_config()?)
         } else {
             None
@@ -1014,6 +1020,7 @@ impl CliArgs {
             .maybe_tokenizer_path(self.tokenizer_path.as_ref())
             .maybe_chat_template(self.chat_template.as_ref())
             .maybe_oracle(oracle)
+            .maybe_genai_oci_oracle(genai_oci_oracle)
             .maybe_postgres(postgres)
             .maybe_redis(redis)
             .maybe_reasoning_parser(self.reasoning_parser.as_ref())

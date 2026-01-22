@@ -213,6 +213,7 @@ async fn test_openai_router_responses_with_mock() {
     let storage = ctx.response_storage.clone();
 
     let request1 = ResponsesRequest {
+        conversation_store_id: None,
         model: "gpt-4o-mini".to_string(),
         input: ResponseInput::Text("Say hi".to_string()),
         store: Some(true),
@@ -229,6 +230,7 @@ async fn test_openai_router_responses_with_mock() {
     assert_eq!(body1["previous_response_id"], serde_json::Value::Null);
 
     let request2 = ResponsesRequest {
+        conversation_store_id: None,
         model: "gpt-4o-mini".to_string(),
         input: ResponseInput::Text("Thanks".to_string()),
         store: Some(true),
@@ -486,6 +488,7 @@ async fn test_openai_router_responses_streaming_with_mock() {
     metadata.insert("topic".to_string(), json!("unicorns"));
 
     let request = ResponsesRequest {
+        conversation_store_id: None,
         model: "gpt-5-nano".to_string(),
         input: ResponseInput::Text("Tell me a bedtime story.".to_string()),
         instructions: Some("Be kind".to_string()),

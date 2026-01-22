@@ -450,6 +450,7 @@ pub(super) fn build_next_request(
         parallel_tool_calls: current_request.parallel_tool_calls,
         previous_response_id: None,
         conversation: None,
+        conversation_store_id: None,
         user: current_request.user.clone(),
         metadata: current_request.metadata.clone(),
         include: current_request.include.clone(),

@@ -22,6 +22,7 @@ fn test_validate_conversation_id_valid() {
 
     for id in valid_ids {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             conversation: Some(id.to_string()),
             input: ResponseInput::Text("test".to_string()),
             ..Default::default()
@@ -72,6 +73,7 @@ fn test_validate_conversation_id_invalid() {
 
     for id in invalid_ids {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             conversation: Some(id.to_string()),
             input: ResponseInput::Text("test".to_string()),
             ..Default::default()
@@ -122,6 +124,7 @@ fn test_validate_conversation_id_invalid() {
 #[test]
 fn test_validate_conversation_id_none() {
     let request = ResponsesRequest {
+        conversation_store_id: None,
         conversation: None,
         input: ResponseInput::Text("test".to_string()),
         ..Default::default()
@@ -137,6 +140,7 @@ fn test_validate_conversation_id_none() {
 fn test_validate_conversation_id_error_message_format() {
     let invalid_id = "conv_.test-conv-streaming";
     let request = ResponsesRequest {
+        conversation_store_id: None,
         conversation: Some(invalid_id.to_string()),
         input: ResponseInput::Text("test".to_string()),
         ..Default::default()
@@ -175,6 +179,7 @@ fn test_validate_conversation_id_error_message_format() {
 fn test_validate_conversation_id_missing_prefix() {
     let invalid_id = "test-conv-streaming";
     let request = ResponsesRequest {
+        conversation_store_id: None,
         conversation: Some(invalid_id.to_string()),
         input: ResponseInput::Text("test".to_string()),
         ..Default::default()
@@ -219,6 +224,7 @@ fn test_validate_temperature_range() {
     // Valid temperatures
     for temp in [0.0, 1.0, 2.0, 0.5, 1.5] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             temperature: Some(temp),
             ..Default::default()
@@ -233,6 +239,7 @@ fn test_validate_temperature_range() {
     // Invalid temperatures
     for temp in [-0.1, 2.1, -1.0, 3.0] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             temperature: Some(temp),
             ..Default::default()
@@ -251,6 +258,7 @@ fn test_validate_frequency_penalty_range() {
     // Valid penalties
     for penalty in [-2.0, -1.0, 0.0, 1.0, 2.0] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             frequency_penalty: Some(penalty),
             ..Default::default()
@@ -265,6 +273,7 @@ fn test_validate_frequency_penalty_range() {
     // Invalid penalties
     for penalty in [-2.1, 2.1, -3.0, 3.0] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             frequency_penalty: Some(penalty),
             ..Default::default()
@@ -283,6 +292,7 @@ fn test_validate_presence_penalty_range() {
     // Valid penalties
     for penalty in [-2.0, -1.0, 0.0, 1.0, 2.0] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             presence_penalty: Some(penalty),
             ..Default::default()
@@ -297,6 +307,7 @@ fn test_validate_presence_penalty_range() {
     // Invalid penalties
     for penalty in [-2.1, 2.1, -3.0, 3.0] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             presence_penalty: Some(penalty),
             ..Default::default()
@@ -315,6 +326,7 @@ fn test_validate_top_logprobs_range() {
     // Valid values
     for val in [0, 1, 10, 20] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             top_logprobs: Some(val),
             include: Some(vec![IncludeField::MessageOutputTextLogprobs]),
@@ -330,6 +342,7 @@ fn test_validate_top_logprobs_range() {
     // Invalid values
     for val in [21, 30, 100] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             top_logprobs: Some(val),
             include: Some(vec![IncludeField::MessageOutputTextLogprobs]),
@@ -349,6 +362,7 @@ fn test_validate_top_p_range() {
     // Valid values (> 0.0 and <= 1.0)
     for val in [0.01, 0.5, 1.0] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             top_p: Some(val),
             ..Default::default()
@@ -359,6 +373,7 @@ fn test_validate_top_p_range() {
     // Invalid values (0.0 is invalid because it means no tokens, < 0 or > 1)
     for val in [0.0, -0.1, 1.1, 2.0] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             top_p: Some(val),
             ..Default::default()
@@ -377,6 +392,7 @@ fn test_validate_top_k() {
     // Valid values (-1 means disabled, or >= 1)
     for val in [-1, 1, 10, 100] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             top_k: val,
             ..Default::default()
@@ -387,6 +403,7 @@ fn test_validate_top_k() {
     // Invalid values (0 or < -1)
     for val in [0, -2, -10] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             top_k: val,
             ..Default::default()
@@ -405,6 +422,7 @@ fn test_validate_min_p_range() {
     // Valid values
     for val in [0.0, 0.5, 1.0] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             min_p: val,
             ..Default::default()
@@ -415,6 +433,7 @@ fn test_validate_min_p_range() {
     // Invalid values
     for val in [-0.1, 1.1, 2.0] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             min_p: val,
             ..Default::default()
@@ -433,6 +452,7 @@ fn test_validate_repetition_penalty_range() {
     // Valid values
     for val in [0.0, 1.0, 2.0] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             repetition_penalty: val,
             ..Default::default()
@@ -447,6 +467,7 @@ fn test_validate_repetition_penalty_range() {
     // Invalid values
     for val in [-0.1, 2.1, 3.0] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             repetition_penalty: val,
             ..Default::default()
@@ -465,6 +486,7 @@ fn test_validate_max_output_tokens() {
     // Valid values
     for val in [1, 100, 1000] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             max_output_tokens: Some(val),
             ..Default::default()
@@ -478,6 +500,7 @@ fn test_validate_max_output_tokens() {
 
     // Invalid values
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         max_output_tokens: Some(0),
         ..Default::default()
@@ -494,6 +517,7 @@ fn test_validate_max_tool_calls() {
     // Valid values
     for val in [1, 5, 10] {
         let request = ResponsesRequest {
+        conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             max_tool_calls: Some(val),
             ..Default::default()
@@ -507,6 +531,7 @@ fn test_validate_max_tool_calls() {
 
     // Invalid values
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         max_tool_calls: Some(0),
         ..Default::default()
@@ -521,6 +546,7 @@ fn test_validate_max_tool_calls() {
 #[test]
 fn test_validate_input_empty_text() {
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("".to_string()),
         ..Default::default()
     };
@@ -540,6 +566,7 @@ fn test_validate_input_empty_text() {
 #[test]
 fn test_validate_input_empty_items() {
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Items(vec![]),
         ..Default::default()
     };
@@ -551,6 +578,7 @@ fn test_validate_input_empty_items() {
 #[test]
 fn test_validate_input_items_empty_content() {
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Items(vec![ResponseInputOutputItem::SimpleInputMessage {
             content: StringOrContentParts::String("".to_string()),
             role: "user".to_string(),
@@ -570,6 +598,7 @@ fn test_validate_input_items_empty_content() {
 fn test_validate_stop_sequences_max() {
     // Valid: 4 or fewer stop sequences
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         stop: Some(StringOrArray::Array(vec![
             "stop1".to_string(),
@@ -586,6 +615,7 @@ fn test_validate_stop_sequences_max() {
 
     // Invalid: more than 4 stop sequences
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         stop: Some(StringOrArray::Array(vec![
             "stop1".to_string(),
@@ -607,6 +637,7 @@ fn test_validate_stop_sequences_max() {
 fn test_validate_stop_sequences_non_empty() {
     // Invalid: empty string stop sequence
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         stop: Some(StringOrArray::String("".to_string())),
         ..Default::default()
@@ -618,6 +649,7 @@ fn test_validate_stop_sequences_non_empty() {
 
     // Invalid: array with empty string
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         stop: Some(StringOrArray::Array(vec!["".to_string()])),
         ..Default::default()
@@ -632,6 +664,7 @@ fn test_validate_stop_sequences_non_empty() {
 #[test]
 fn test_validate_tools_function_missing() {
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         tools: Some(vec![ResponseTool {
             r#type: ResponseToolType::Function,
@@ -656,6 +689,7 @@ fn test_validate_tools_function_missing() {
 #[test]
 fn test_validate_tools_mcp_missing_url() {
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         tools: Some(vec![ResponseTool {
             r#type: ResponseToolType::Mcp,
@@ -680,6 +714,7 @@ fn test_validate_tools_mcp_missing_url() {
 #[test]
 fn test_validate_text_format_json_schema_empty_name() {
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         text: Some(TextConfig {
             format: Some(TextFormat::JsonSchema {
@@ -707,6 +742,7 @@ fn test_validate_text_format_json_schema_empty_name() {
 fn test_validate_tool_choice_requires_tools() {
     // Valid: tool_choice with tools
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         tools: Some(vec![ResponseTool {
             r#type: ResponseToolType::Function,
@@ -733,6 +769,7 @@ fn test_validate_tool_choice_requires_tools() {
 
     // Valid: tool_choice=none without tools is OK
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         tools: None,
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::None)),
@@ -745,6 +782,7 @@ fn test_validate_tool_choice_requires_tools() {
 
     // Invalid: tool_choice=auto without tools
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         tools: None,
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
@@ -770,6 +808,7 @@ fn test_validate_tool_choice_requires_tools() {
 fn test_validate_top_logprobs_requires_include() {
     // Valid: top_logprobs with correct include field
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         top_logprobs: Some(5),
         include: Some(vec![IncludeField::MessageOutputTextLogprobs]),
@@ -782,6 +821,7 @@ fn test_validate_top_logprobs_requires_include() {
 
     // Invalid: top_logprobs without include field
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         top_logprobs: Some(5),
         include: None,
@@ -795,6 +835,7 @@ fn test_validate_top_logprobs_requires_include() {
 
     // Invalid: top_logprobs with wrong include field
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         top_logprobs: Some(5),
         include: Some(vec![IncludeField::ReasoningEncryptedContent]),
@@ -812,6 +853,7 @@ fn test_validate_top_logprobs_requires_include() {
 fn test_validate_background_stream_conflict() {
     // Invalid: both background and stream enabled
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         background: Some(true),
         stream: Some(true),
@@ -840,6 +882,7 @@ fn test_validate_background_stream_conflict() {
 fn test_validate_previous_response_id_format() {
     // Valid: starts with "resp_"
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         previous_response_id: Some("resp_123abc".to_string()),
         ..Default::default()
@@ -851,6 +894,7 @@ fn test_validate_previous_response_id_format() {
 
     // Invalid: doesn't start with "resp_"
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         previous_response_id: Some("response_123abc".to_string()),
         ..Default::default()
@@ -875,6 +919,7 @@ fn test_validate_previous_response_id_format() {
 fn test_validate_conversation_previous_response_mutual_exclusion() {
     // Valid: only conversation
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         conversation: Some("conv_123".to_string()),
         previous_response_id: None,
@@ -887,6 +932,7 @@ fn test_validate_conversation_previous_response_mutual_exclusion() {
 
     // Valid: only previous_response_id
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         conversation: None,
         previous_response_id: Some("resp_123".to_string()),
@@ -899,6 +945,7 @@ fn test_validate_conversation_previous_response_mutual_exclusion() {
 
     // Invalid: both conversation and previous_response_id
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         conversation: Some("conv_123".to_string()),
         previous_response_id: Some("resp_123".to_string()),
@@ -927,6 +974,7 @@ fn test_validate_conversation_previous_response_mutual_exclusion() {
 fn test_validate_input_items_structure() {
     // Valid: items with at least one message
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Items(vec![ResponseInputOutputItem::SimpleInputMessage {
             content: StringOrContentParts::String("Hello".to_string()),
             role: "user".to_string(),
@@ -941,6 +989,7 @@ fn test_validate_input_items_structure() {
 
     // Invalid: items with no messages (only function calls)
     let request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Items(vec![ResponseInputOutputItem::FunctionCallOutput {
             id: None,
             call_id: "call_123".to_string(),
@@ -966,6 +1015,7 @@ fn test_normalize_tool_choice_auto() {
     use smg::protocols::validated::Normalizable;
 
     let mut request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         tools: Some(vec![ResponseTool {
             r#type: ResponseToolType::Function,
@@ -1007,6 +1057,7 @@ fn test_normalize_tool_choice_none() {
     use smg::protocols::validated::Normalizable;
 
     let mut request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         tools: Some(vec![]),
         tool_choice: None,
@@ -1034,6 +1085,7 @@ fn test_normalize_tool_choice_no_override() {
     use smg::protocols::validated::Normalizable;
 
     let mut request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         tools: Some(vec![ResponseTool {
             r#type: ResponseToolType::Function,
@@ -1071,6 +1123,7 @@ fn test_normalize_parallel_tool_calls() {
     use smg::protocols::validated::Normalizable;
 
     let mut request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         tools: Some(vec![ResponseTool {
             r#type: ResponseToolType::Function,
@@ -1110,6 +1163,7 @@ fn test_normalize_parallel_tool_calls_no_tools() {
     use smg::protocols::validated::Normalizable;
 
     let mut request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         tools: None,
         parallel_tool_calls: None,
@@ -1130,6 +1184,7 @@ fn test_normalize_parallel_tool_calls_no_override() {
     use smg::protocols::validated::Normalizable;
 
     let mut request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         tools: Some(vec![ResponseTool {
             r#type: ResponseToolType::Function,
@@ -1165,6 +1220,7 @@ fn test_normalize_store_default() {
     use smg::protocols::validated::Normalizable;
 
     let mut request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         store: None,
         ..Default::default()
@@ -1185,6 +1241,7 @@ fn test_normalize_store_no_override() {
     use smg::protocols::validated::Normalizable;
 
     let mut request = ResponsesRequest {
+        conversation_store_id: None,
         input: ResponseInput::Text("test".to_string()),
         store: Some(false),
         ..Default::default()
