@@ -66,7 +66,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     if let Some((orchestrator, mcp_servers)) = mcp_result {
         let server_keys: Vec<String> = mcp_servers.iter().map(|(_, key)| key.clone()).collect();
         let config = McpLoopConfig {
-            mcp_servers: mcp_servers.clone(),
+            mcp_servers,
             ..McpLoopConfig::default()
         };
         prepare_mcp_tools_as_functions(&mut payload, &orchestrator, &server_keys);

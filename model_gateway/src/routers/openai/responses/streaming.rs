@@ -1015,7 +1015,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         .await;
     };
 
-    let server_keys: Vec<String> = mcp_servers.iter().map(|(_, key)| key.clone()).collect();
+    let server_keys: Vec<String> = mcp_servers.into_iter().map(|(_, key)| key).collect();
 
     // MCP is active - transform tools and set up interception
     handle_streaming_with_tool_interception(

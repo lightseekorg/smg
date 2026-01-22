@@ -8,7 +8,7 @@
 //! - Payload transformation for MCP tool interception
 //! - Metadata injection for MCP operations
 
-use std::{io, sync::Arc};
+use std::{io, slice, sync::Arc};
 
 use axum::http::HeaderMap;
 use bytes::Bytes;
@@ -796,7 +796,7 @@ pub(super) async fn execute_tool_loop(
                 {
                     for (label, key) in mcp_servers.iter().rev() {
                         let list_tools_item =
-                            build_mcp_list_tools_item(orchestrator, label, &[key.clone()]);
+                            build_mcp_list_tools_item(orchestrator, label, slice::from_ref(key));
                         output_array.insert(0, list_tools_item);
                     }
 
@@ -866,7 +866,7 @@ pub(super) fn build_incomplete_response(
         if state.total_calls > 0 || !incomplete_items.is_empty() {
             for (label, key) in mcp_servers.iter().rev() {
                 let list_tools_item =
-                    build_mcp_list_tools_item(orchestrator, label, &[key.clone()]);
+                    build_mcp_list_tools_item(orchestrator, label, slice::from_ref(key));
                 output_array.insert(0, list_tools_item);
             }
 
