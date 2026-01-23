@@ -1,33 +1,40 @@
-/* SMG Documentation Theme - Dark Mode First */
+/* SMG Documentation Theme - Gradient Mesh Edition */
 
 :root {
-  /* Brand Colors */
-  --smg-primary: #818cf8;
-  --smg-primary-light: #a5b4fc;
-  --smg-primary-dark: #6366f1;
-  --smg-secondary: #38bdf8;
-  --smg-accent: #34d399;
+  /* Brand Colors - Vibrant */
+  --smg-primary: #8b5cf6;
+  --smg-primary-light: #a78bfa;
+  --smg-primary-dark: #7c3aed;
+  --smg-secondary: #06b6d4;
+  --smg-accent: #10b981;
+
+  /* Mesh Colors */
+  --mesh-purple: #8b5cf6;
+  --mesh-blue: #3b82f6;
+  --mesh-cyan: #06b6d4;
+  --mesh-pink: #ec4899;
+  --mesh-orange: #f97316;
 }
 
 /* Dark theme (default) */
 [data-md-color-scheme="slate"] {
-  --md-default-bg-color: #0f172a;
-  --md-default-bg-color--light: #1e293b;
-  --md-default-bg-color--lighter: #334155;
-  --md-default-bg-color--lightest: #475569;
-  --md-default-fg-color: #f1f5f9;
-  --md-default-fg-color--light: #cbd5e1;
-  --md-default-fg-color--lighter: #94a3b8;
-  --md-default-fg-color--lightest: #64748b;
+  --md-default-bg-color: #09090b;
+  --md-default-bg-color--light: #18181b;
+  --md-default-bg-color--lighter: #27272a;
+  --md-default-bg-color--lightest: #3f3f46;
+  --md-default-fg-color: #fafafa;
+  --md-default-fg-color--light: #d4d4d8;
+  --md-default-fg-color--lighter: #a1a1aa;
+  --md-default-fg-color--lightest: #71717a;
   --md-primary-fg-color: var(--smg-primary);
   --md-primary-fg-color--light: var(--smg-primary-light);
   --md-primary-fg-color--dark: var(--smg-primary-dark);
   --md-accent-fg-color: var(--smg-secondary);
-  --md-typeset-a-color: var(--smg-primary);
-  --md-code-bg-color: #1e293b;
-  --md-code-fg-color: #e2e8f0;
-  --md-footer-bg-color: #0f172a;
-  --md-footer-bg-color--dark: #020617;
+  --md-typeset-a-color: var(--smg-primary-light);
+  --md-code-bg-color: #18181b;
+  --md-code-fg-color: #e4e4e7;
+  --md-footer-bg-color: #09090b;
+  --md-footer-bg-color--dark: #000;
 }
 
 /* Light theme */
@@ -45,84 +52,173 @@
 }
 
 .md-typeset h2 {
-  font-weight: 600;
-  margin-top: 2rem;
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+  font-weight: 700;
+  font-size: 1.75rem;
+  margin-top: 1.5rem;
+  padding-bottom: 0;
+  border-bottom: none;
+  letter-spacing: -0.02em;
 }
 
-/* Hero section */
+/* Bold gradient dividers */
+.md-typeset hr {
+  border: none;
+  height: 2px;
+  margin: 4rem 0;
+  background: linear-gradient(90deg, var(--mesh-purple), var(--mesh-cyan), var(--mesh-blue));
+  opacity: 0.3;
+  border-radius: 1px;
+}
+
+/* ==============================================
+   HERO - Gradient Mesh Design
+   ============================================== */
+
 .md-typeset .hero {
+  position: relative;
   text-align: center;
-  padding: 3rem 1rem;
+  padding: 6rem 1rem 5rem;
   margin-bottom: 2rem;
+  overflow: hidden;
 }
 
+/* Large gradient mesh blobs */
+.md-typeset .hero::before {
+  content: "";
+  position: absolute;
+  width: 150%;
+  height: 150%;
+  top: -50%;
+  left: -25%;
+  background:
+    radial-gradient(circle at 20% 30%, var(--mesh-purple) 0%, transparent 35%),
+    radial-gradient(circle at 80% 20%, var(--mesh-blue) 0%, transparent 30%),
+    radial-gradient(circle at 70% 80%, var(--mesh-cyan) 0%, transparent 35%),
+    radial-gradient(circle at 30% 70%, var(--mesh-pink) 0%, transparent 25%);
+  filter: blur(80px);
+  opacity: 0.5;
+  z-index: 0;
+  animation: mesh-shift 15s ease-in-out infinite alternate;
+}
+
+@keyframes mesh-shift {
+  0% { transform: translate(0, 0) rotate(0deg) scale(1); }
+  100% { transform: translate(-5%, 5%) rotate(3deg) scale(1.05); }
+}
+
+.md-typeset .hero > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Bold title */
 .md-typeset .hero h1 {
-  font-size: 2.5rem;
+  font-size: 4rem;
   font-weight: 800;
-  margin-bottom: 1rem;
-  background: linear-gradient(135deg, var(--smg-primary) 0%, var(--smg-secondary) 100%);
+  margin-bottom: 1.5rem;
+  letter-spacing: -0.04em;
+  line-height: 1.1;
+  color: white;
+}
+
+/* Hide anchor */
+.md-typeset .hero h1 a.headerlink {
+  display: none;
+}
+
+/* Subtitle accent */
+.md-typeset .hero > p:first-of-type {
+  font-size: 1.25rem;
+  font-weight: 600;
+  background: linear-gradient(90deg, var(--mesh-purple), var(--mesh-cyan));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+  margin-bottom: 0.75rem;
 }
 
-.md-typeset .hero p {
-  font-size: 1.25rem;
-  color: var(--md-default-fg-color--light);
-  max-width: 600px;
-  margin: 0 auto 2rem;
+.md-typeset .hero > p:last-of-type {
+  font-size: 1.15rem;
+  color: var(--md-default-fg-color--lighter);
+  max-width: 580px;
+  margin: 0 auto 2.5rem;
+  line-height: 1.7;
 }
 
-/* Feature cards - Modern glassmorphism style */
+/* Hide edit buttons on homepage */
+.md-content:has(.hero) .md-content__button {
+  display: none;
+}
+
+/* ==============================================
+   FEATURE CARDS - Bold Clean Style
+   ============================================== */
+
 .md-typeset .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 1.25rem;
-  margin: 2rem 0;
+  margin: 2.5rem 0;
 }
 
 .md-typeset .card {
   position: relative;
-  padding: 1.25rem 1.5rem;
-  border-radius: 12px;
-  border: 1px solid rgba(148, 163, 184, 0.1);
-  background: linear-gradient(135deg, rgba(30, 41, 59, 0.8) 0%, rgba(15, 23, 42, 0.9) 100%);
-  backdrop-filter: blur(10px);
+  padding: 1.75rem;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
 }
 
+/* Gradient accent line */
 .md-typeset .card::before {
   content: "";
   position: absolute;
   top: 0;
   left: 0;
-  right: 0;
-  height: 3px;
-  background: linear-gradient(90deg, var(--smg-primary) 0%, var(--smg-secondary) 100%);
-  opacity: 0;
-  transition: opacity 0.3s ease;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(90deg, var(--mesh-purple), var(--mesh-cyan), var(--mesh-blue));
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.4s ease;
 }
 
 .md-typeset .card:hover {
-  border-color: rgba(129, 140, 248, 0.3);
-  box-shadow: 0 8px 32px rgba(99, 102, 241, 0.15), 0 0 0 1px rgba(129, 140, 248, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.1);
   transform: translateY(-4px);
 }
 
 .md-typeset .card:hover::before {
-  opacity: 1;
+  transform: scaleX(1);
 }
 
 .md-typeset .card h3 {
   margin-top: 0;
-  margin-bottom: 0.5rem;
-  font-size: 1rem;
+  margin-bottom: 0.75rem;
+  font-size: 1.05rem;
   font-weight: 600;
   color: var(--md-default-fg-color);
   line-height: 1.4;
+  transition: color 0.3s ease;
+}
+
+.md-typeset .card:hover h3 {
+  color: white;
+}
+
+/* Make card links cover entire card */
+.md-typeset .card a:only-of-type::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+}
+
+.md-typeset .card:has(a:only-of-type) {
+  cursor: pointer;
 }
 
 /* Material icons alignment - target the span wrapper */
@@ -166,37 +262,43 @@
   padding: 1rem 1.25rem;
 }
 
-/* Buttons */
+/* ==============================================
+   BUTTONS - Bold Modern Style
+   ============================================== */
+
 .md-typeset .button {
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.75rem 1.5rem;
-  border-radius: 8px;
+  padding: 0.9rem 1.75rem;
+  border-radius: 10px;
   font-weight: 600;
+  font-size: 0.95rem;
   text-decoration: none;
   transition: all 0.2s ease;
 }
 
 .md-typeset .button--primary {
-  background: var(--smg-primary-dark);
-  color: white !important;
+  background: white;
+  color: #09090b !important;
 }
 
 .md-typeset .button--primary:hover {
-  background: var(--smg-primary);
-  transform: translateY(-1px);
+  background: #e4e4e7;
+  transform: translateY(-2px);
+  box-shadow: 0 10px 40px rgba(255, 255, 255, 0.15);
 }
 
 .md-typeset .button--secondary {
-  background: transparent;
-  border: 2px solid var(--smg-primary);
-  color: var(--smg-primary) !important;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: white !important;
 }
 
 .md-typeset .button--secondary:hover {
-  background: var(--smg-primary);
-  color: white !important;
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.3);
+  transform: translateY(-2px);
 }
 
 /* Admonitions */
@@ -337,6 +439,86 @@
   font-size: 0.9rem;
 }
 
+/* ==============================================
+   STATS BAR - Bold Numbers
+   ============================================== */
+
+.md-typeset .stats-bar {
+  display: flex;
+  justify-content: center;
+  gap: 4rem;
+  padding: 2.5rem 2rem;
+  margin: 0 auto 1.5rem;
+  max-width: 900px;
+}
+
+.md-typeset .stat {
+  text-align: center;
+}
+
+.md-typeset .stat-value {
+  display: block;
+  font-size: 3rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  background: linear-gradient(135deg, white 0%, var(--md-default-fg-color--light) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  line-height: 1.1;
+}
+
+.md-typeset .stat-label {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--md-default-fg-color--lightest);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-top: 0.5rem;
+}
+
+/* ==============================================
+   SUPPORTED BACKENDS - Minimal Pills
+   ============================================== */
+
+.md-typeset .backends {
+  margin: 1.5rem 0 3rem;
+  text-align: center;
+}
+
+.md-typeset .backends-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--md-default-fg-color--lightest);
+  margin-bottom: 1rem;
+}
+
+.md-typeset .backends-grid {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.md-typeset .backend {
+  padding: 0.4rem 0.9rem;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--md-default-fg-color--lighter);
+  transition: all 0.2s ease;
+}
+
+.md-typeset .backend:hover {
+  border-color: var(--mesh-purple);
+  color: white;
+}
+
 /* Footer */
 .md-footer {
   margin-top: 3rem;
@@ -374,11 +556,38 @@
 
 /* Responsive */
 @media screen and (max-width: 76.25em) {
+  .md-typeset .hero {
+    padding: 4rem 1rem 3rem;
+  }
+
   .md-typeset .hero h1 {
-    font-size: 2rem;
+    font-size: 2.75rem;
   }
 
   .md-typeset .grid {
     grid-template-columns: 1fr;
+  }
+
+  .md-typeset .stats-bar {
+    flex-wrap: wrap;
+    gap: 2rem;
+  }
+
+  .md-typeset .stat {
+    flex: 1 1 40%;
+  }
+
+  .md-typeset .stat-value {
+    font-size: 2.25rem;
+  }
+}
+
+@media screen and (max-width: 480px) {
+  .md-typeset .hero h1 {
+    font-size: 2.25rem;
+  }
+
+  .md-typeset .stat-value {
+    font-size: 1.75rem;
   }
 }

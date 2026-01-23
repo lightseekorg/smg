@@ -18,6 +18,37 @@ Route, balance, and orchestrate traffic across your LLM fleet with enterprise-gr
 
 </div>
 
+<div class="stats-bar">
+<div class="stat">
+<span class="stat-value">70%</span>
+<span class="stat-label">TTFT Reduction</span>
+</div>
+<div class="stat">
+<span class="stat-value"><1ms</span>
+<span class="stat-label">Routing Latency</span>
+</div>
+<div class="stat">
+<span class="stat-value">40+</span>
+<span class="stat-label">Metrics</span>
+</div>
+<div class="stat">
+<span class="stat-value">100%</span>
+<span class="stat-label">OpenAI Compatible</span>
+</div>
+</div>
+
+<div class="backends">
+<div class="backends-label">Works With</div>
+<div class="backends-grid">
+<span class="backend">vLLM</span>
+<span class="backend">SGLang</span>
+<span class="backend">TensorRT-LLM</span>
+<span class="backend">OpenAI</span>
+<span class="backend">Claude</span>
+<span class="backend">Gemini</span>
+</div>
+</div>
+
 ---
 
 ## Why Shepherd Model Gateway?
