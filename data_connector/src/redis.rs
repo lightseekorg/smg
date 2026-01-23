@@ -814,7 +814,8 @@ impl ResponseStorage for RedisResponseStorage {
                 continue;
             }
 
-            let id_str = map.get("id")
+            let id_str = map
+                .get("id")
                 .cloned()
                 .unwrap_or_else(|| response_ids[i].clone());
             let id = ResponseId(id_str);

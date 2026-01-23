@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn test_text_input_conversion() {
         let req = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("Hello, world!".to_string()),
             instructions: Some("You are a helpful assistant.".to_string()),
             model: "gpt-4".to_string(),
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn test_items_input_conversion() {
         let req = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Items(vec![
                 ResponseInputOutputItem::Message {
                     id: "msg_1".to_string(),
@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn test_empty_input_error() {
         let req = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("".to_string()),
             ..Default::default()
         };

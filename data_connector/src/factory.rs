@@ -8,7 +8,10 @@ use url::Url;
 use crate::{
     config::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig},
     core::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    genai_oci_oracle::{GenaiOciOracleConversationItemStorage, GenaiOciOracleConversationStorage, GenaiOciOracleResponseStorage},
+    genai_oci_oracle::{
+        GenaiOciOracleConversationItemStorage, GenaiOciOracleConversationStorage,
+        GenaiOciOracleResponseStorage,
+    },
     memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage},
     noop::{NoOpConversationItemStorage, NoOpConversationStorage, NoOpResponseStorage},
     oracle::{OracleConversationItemStorage, OracleConversationStorage, OracleResponseStorage},
@@ -174,11 +177,15 @@ fn create_genai_oci_oracle_storage(oracle_cfg: &OracleConfig) -> Result<StorageT
     let response_storage = GenaiOciOracleResponseStorage::new(oracle_cfg.clone())
         .map_err(|err| format!("failed to initialize Genai OCI Oracle response storage: {err}"))?;
 
-    let conversation_storage = GenaiOciOracleConversationStorage::new(oracle_cfg.clone())
-        .map_err(|err| format!("failed to initialize Genai OCI Oracle conversation storage: {err}"))?;
+    let conversation_storage =
+        GenaiOciOracleConversationStorage::new(oracle_cfg.clone()).map_err(|err| {
+            format!("failed to initialize Genai OCI Oracle conversation storage: {err}")
+        })?;
 
     let conversation_item_storage = GenaiOciOracleConversationItemStorage::new(oracle_cfg.clone())
-        .map_err(|err| format!("failed to initialize Genai OCI Oracle conversation item storage: {err}"))?;
+        .map_err(|err| {
+            format!("failed to initialize Genai OCI Oracle conversation item storage: {err}")
+        })?;
 
     Ok((
         Arc::new(response_storage),

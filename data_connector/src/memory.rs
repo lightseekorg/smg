@@ -484,6 +484,7 @@ mod tests {
     ) -> NewConversationItem {
         NewConversationItem {
             id: None,
+            conversation_id: None,
             response_id: None,
             item_type: item_type.to_string(),
             role: role.map(|r| r.to_string()),

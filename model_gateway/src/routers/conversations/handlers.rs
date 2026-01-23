@@ -160,7 +160,11 @@ fn apply_metadata_patches(
 // Conversation CRUD Handlers
 // ============================================================================
 
-pub async fn create_conversation(storage: &Arc<dyn ConversationStorage>, body: Value, headers: Option<&http::HeaderMap>) -> Response {
+pub async fn create_conversation(
+    storage: &Arc<dyn ConversationStorage>,
+    body: Value,
+    headers: Option<&http::HeaderMap>,
+) -> Response {
     let metadata = match validate_metadata(&body) {
         Ok(m) => m,
         Err(msg) => return bad_request(msg),

@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn test_copy_from_request() {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             model: "gpt-4".to_string(),
             input: ResponseInput::Text("test".to_string()),
             instructions: Some("Be helpful".to_string()),

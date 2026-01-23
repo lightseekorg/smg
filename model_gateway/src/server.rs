@@ -317,7 +317,8 @@ async fn v1_conversations_create(
     headers: http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    conversations::create_conversation(&state.context.conversation_storage, body, Some(&headers)).await
+    conversations::create_conversation(&state.context.conversation_storage, body, Some(&headers))
+        .await
 }
 
 async fn v1_conversations_get(

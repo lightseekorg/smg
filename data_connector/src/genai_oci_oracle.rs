@@ -14,17 +14,17 @@ use deadpool::managed::{Manager, Metrics, Pool, RecycleError, RecycleResult};
 use oracle::{Connection, Row};
 use serde_json::Value;
 
-use super::core::{
-    make_item_id, Conversation, ConversationId, ConversationItem, ConversationItemId,
-    ConversationItemStorage, ConversationItemStorageError, ConversationMetadata,
-    ConversationStorage, ConversationStorageError, ListParams, NewConversation,
-    NewConversationItem, ResponseChain, ResponseId, ResponseStorage, ResponseStorageError,
-    SortOrder, StoredResponse,
+use super::{
+    common::{parse_json_value, parse_metadata, parse_raw_response, parse_tool_calls},
+    core::{
+        make_item_id, Conversation, ConversationId, ConversationItem, ConversationItemId,
+        ConversationItemStorage, ConversationItemStorageError, ConversationMetadata,
+        ConversationStorage, ConversationStorageError, ListParams, NewConversation,
+        NewConversationItem, ResponseChain, ResponseId, ResponseStorage, ResponseStorageError,
+        SortOrder, StoredResponse,
+    },
 };
 use crate::config::OracleConfig;
-use super::common::{
-    parse_json_value, parse_metadata, parse_raw_response, parse_tool_calls,
-};
 // ============================================================================
 // PART 1: GenaiOciOracleStore Helper + Common Utilities
 // ============================================================================
@@ -152,7 +152,8 @@ fn configure_genai_oci_oracle_client(config: &OracleConfig) -> Result<(), String
                 .map_err(|e| format!("Failed to read sqlnet.ora: {}", e))?;
 
             // Replace placeholder "?" with actual wallet directory
-            let updated_content = content.replace("DIRECTORY=\"?\"", &format!("DIRECTORY=\"{}\"", wallet_path));
+            let updated_content =
+                content.replace("DIRECTORY=\"?\"", &format!("DIRECTORY=\"{}\"", wallet_path));
 
             if updated_content != content {
                 std::fs::write(&sqlnet_path, updated_content)
@@ -259,7 +260,9 @@ impl GenaiOciOracleConversationStorage {
 
             // Return error if table doesn't exist
             if exists == 0 {
-                return Err("CONVERSATIONS table does not exist. Please create the table.".to_string());
+                return Err(
+                    "CONVERSATIONS table does not exist. Please create the table.".to_string(),
+                );
             }
 
             Ok(())
@@ -405,8 +408,11 @@ impl ConversationStorage for GenaiOciOracleConversationStorage {
         let res = self
             .store
             .execute(move |conn| {
-                conn.execute("DELETE FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1", &[&id_str])
-                    .map_err(map_genai_oci_oracle_error)
+                conn.execute(
+                    "DELETE FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                    &[&id_str],
+                )
+                .map_err(map_genai_oci_oracle_error)
             })
             .await
             .map_err(ConversationStorageError::StorageError)?;
@@ -443,8 +449,9 @@ impl ConversationItemStorage for GenaiOciOracleConversationItemStorage {
         &self,
         item: NewConversationItem,
     ) -> Result<ConversationItem, ConversationItemStorageError> {
-        let conversation_id = item.conversation_id.as_ref()
-            .ok_or_else(|| ConversationItemStorageError::StorageError("conversation_id required".to_string()))?;
+        let conversation_id = item.conversation_id.as_ref().ok_or_else(|| {
+            ConversationItemStorageError::StorageError("conversation_id required".to_string())
+        })?;
 
         let id = item
             .id
@@ -539,8 +546,8 @@ impl ConversationItemStorage for GenaiOciOracleConversationItemStorage {
 
                 let mut conversation_items: Vec<ConversationItem> = Vec::new();
                 for item_value in items_array {
-                    let item: ConversationItem = serde_json::from_value(item_value)
-                        .map_err(|e| e.to_string())?;
+                    let item: ConversationItem =
+                        serde_json::from_value(item_value).map_err(|e| e.to_string())?;
                     conversation_items.push(item);
                 }
 
@@ -599,11 +606,12 @@ impl ConversationItemStorage for GenaiOciOracleConversationItemStorage {
 
                 for row_res in rows {
                     let row = row_res.map_err(map_genai_oci_oracle_error)?;
-                    let items_json: Option<String> = row.get(0).map_err(map_genai_oci_oracle_error)?;
+                    let items_json: Option<String> =
+                        row.get(0).map_err(map_genai_oci_oracle_error)?;
 
                     if let Some(json_str) = items_json {
-                        let items_array: Vec<Value> = serde_json::from_str(&json_str)
-                            .map_err(|e| e.to_string())?;
+                        let items_array: Vec<Value> =
+                            serde_json::from_str(&json_str).map_err(|e| e.to_string())?;
 
                         for item_value in items_array {
                             let item: ConversationItem = serde_json::from_value(item_value.clone())
@@ -640,12 +648,12 @@ impl ConversationItemStorage for GenaiOciOracleConversationItemStorage {
                     .ok(); // Convert to Option - None if no row found
 
                 if let Some(json_str) = items_json {
-                    let items_array: Vec<Value> = serde_json::from_str(&json_str)
-                        .map_err(|e| e.to_string())?;
+                    let items_array: Vec<Value> =
+                        serde_json::from_str(&json_str).map_err(|e| e.to_string())?;
 
                     for item_value in items_array {
-                        let item: ConversationItem = serde_json::from_value(item_value)
-                            .map_err(|e| e.to_string())?;
+                        let item: ConversationItem =
+                            serde_json::from_value(item_value).map_err(|e| e.to_string())?;
                         if item.id.0 == iid {
                             return Ok(true);
                         }
@@ -746,7 +754,8 @@ impl GenaiOciOracleResponseStorage {
 
     fn build_response_from_row(row: &Row) -> Result<StoredResponse, String> {
         let id: String = row.get(0).map_err(map_genai_oci_oracle_error)?;
-        let conversation_store_id: Option<String> = row.get(1).map_err(map_genai_oci_oracle_error)?;
+        let conversation_store_id: Option<String> =
+            row.get(1).map_err(map_genai_oci_oracle_error)?;
         let conversation_id: Option<String> = row.get(2).map_err(map_genai_oci_oracle_error)?;
         let previous: Option<String> = row.get(3).map_err(map_genai_oci_oracle_error)?;
         let input_json: Option<String> = row.get(4).map_err(map_genai_oci_oracle_error)?;
@@ -855,9 +864,12 @@ impl ResponseStorage for GenaiOciOracleResponseStorage {
         let id = response_id.0.clone();
         self.store
             .execute(move |conn| {
-                conn.execute("DELETE FROM \"RESPONSES\" WHERE \"RESPONSE_ID\" = :1", &[&id])
-                    .map(|_| ())
-                    .map_err(map_genai_oci_oracle_error)
+                conn.execute(
+                    "DELETE FROM \"RESPONSES\" WHERE \"RESPONSE_ID\" = :1",
+                    &[&id],
+                )
+                .map(|_| ())
+                .map_err(map_genai_oci_oracle_error)
             })
             .await
             .map_err(ResponseStorageError::StorageError)

@@ -22,7 +22,7 @@ fn test_validate_conversation_id_valid() {
 
     for id in valid_ids {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             conversation: Some(id.to_string()),
             input: ResponseInput::Text("test".to_string()),
             ..Default::default()
@@ -73,7 +73,7 @@ fn test_validate_conversation_id_invalid() {
 
     for id in invalid_ids {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             conversation: Some(id.to_string()),
             input: ResponseInput::Text("test".to_string()),
             ..Default::default()
@@ -224,7 +224,7 @@ fn test_validate_temperature_range() {
     // Valid temperatures
     for temp in [0.0, 1.0, 2.0, 0.5, 1.5] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             temperature: Some(temp),
             ..Default::default()
@@ -239,7 +239,7 @@ fn test_validate_temperature_range() {
     // Invalid temperatures
     for temp in [-0.1, 2.1, -1.0, 3.0] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             temperature: Some(temp),
             ..Default::default()
@@ -258,7 +258,7 @@ fn test_validate_frequency_penalty_range() {
     // Valid penalties
     for penalty in [-2.0, -1.0, 0.0, 1.0, 2.0] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             frequency_penalty: Some(penalty),
             ..Default::default()
@@ -273,7 +273,7 @@ fn test_validate_frequency_penalty_range() {
     // Invalid penalties
     for penalty in [-2.1, 2.1, -3.0, 3.0] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             frequency_penalty: Some(penalty),
             ..Default::default()
@@ -292,7 +292,7 @@ fn test_validate_presence_penalty_range() {
     // Valid penalties
     for penalty in [-2.0, -1.0, 0.0, 1.0, 2.0] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             presence_penalty: Some(penalty),
             ..Default::default()
@@ -307,7 +307,7 @@ fn test_validate_presence_penalty_range() {
     // Invalid penalties
     for penalty in [-2.1, 2.1, -3.0, 3.0] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             presence_penalty: Some(penalty),
             ..Default::default()
@@ -326,7 +326,7 @@ fn test_validate_top_logprobs_range() {
     // Valid values
     for val in [0, 1, 10, 20] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             top_logprobs: Some(val),
             include: Some(vec![IncludeField::MessageOutputTextLogprobs]),
@@ -342,7 +342,7 @@ fn test_validate_top_logprobs_range() {
     // Invalid values
     for val in [21, 30, 100] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             top_logprobs: Some(val),
             include: Some(vec![IncludeField::MessageOutputTextLogprobs]),
@@ -362,7 +362,7 @@ fn test_validate_top_p_range() {
     // Valid values (> 0.0 and <= 1.0)
     for val in [0.01, 0.5, 1.0] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             top_p: Some(val),
             ..Default::default()
@@ -373,7 +373,7 @@ fn test_validate_top_p_range() {
     // Invalid values (0.0 is invalid because it means no tokens, < 0 or > 1)
     for val in [0.0, -0.1, 1.1, 2.0] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             top_p: Some(val),
             ..Default::default()
@@ -392,7 +392,7 @@ fn test_validate_top_k() {
     // Valid values (-1 means disabled, or >= 1)
     for val in [-1, 1, 10, 100] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             top_k: val,
             ..Default::default()
@@ -403,7 +403,7 @@ fn test_validate_top_k() {
     // Invalid values (0 or < -1)
     for val in [0, -2, -10] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             top_k: val,
             ..Default::default()
@@ -422,7 +422,7 @@ fn test_validate_min_p_range() {
     // Valid values
     for val in [0.0, 0.5, 1.0] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             min_p: val,
             ..Default::default()
@@ -433,7 +433,7 @@ fn test_validate_min_p_range() {
     // Invalid values
     for val in [-0.1, 1.1, 2.0] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             min_p: val,
             ..Default::default()
@@ -452,7 +452,7 @@ fn test_validate_repetition_penalty_range() {
     // Valid values
     for val in [0.0, 1.0, 2.0] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             repetition_penalty: val,
             ..Default::default()
@@ -467,7 +467,7 @@ fn test_validate_repetition_penalty_range() {
     // Invalid values
     for val in [-0.1, 2.1, 3.0] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             repetition_penalty: val,
             ..Default::default()
@@ -486,7 +486,7 @@ fn test_validate_max_output_tokens() {
     // Valid values
     for val in [1, 100, 1000] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             max_output_tokens: Some(val),
             ..Default::default()
@@ -517,7 +517,7 @@ fn test_validate_max_tool_calls() {
     // Valid values
     for val in [1, 5, 10] {
         let request = ResponsesRequest {
-        conversation_store_id: None,
+            conversation_store_id: None,
             input: ResponseInput::Text("test".to_string()),
             max_tool_calls: Some(val),
             ..Default::default()
