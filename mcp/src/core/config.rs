@@ -188,6 +188,136 @@ pub struct McpServerConfig {
     /// Tool-level configuration (aliases, response formats, arg mappings)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<HashMap<String, ToolConfig>>,
+
+    /// Built-in tool type this server handles.
+    ///
+    /// When set, requests with `{"type": "web_search_preview"}` (or other built-in types)
+    /// will be routed to this MCP server instead of being passed to the model.
+    ///
+    /// Example:
+    /// ```yaml
+    /// servers:
+    ///   - name: brave
+    ///     protocol: sse
+    ///     url: "https://mcp.brave.com/sse"
+    ///     builtin_type: web_search_preview
+    ///     builtin_tool_name: brave_web_search
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_type: Option<BuiltinToolType>,
+
+    /// Which tool on this server to call for the built-in type.
+    ///
+    /// Required when `builtin_type` is set. This is the actual MCP tool name
+    /// to invoke (e.g., "brave_web_search", "execute", "search").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_tool_name: Option<String>,
+}
+
+impl McpServerConfig {
+    /// Validate the server configuration.
+    ///
+    /// Returns an error if:
+    /// - `builtin_type` is set but `builtin_tool_name` is not
+    /// - `builtin_tool_name` is set but `builtin_type` is not
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        match (&self.builtin_type, &self.builtin_tool_name) {
+            (Some(_), None) => Err(ConfigValidationError::MissingBuiltinToolName {
+                server: self.name.clone(),
+            }),
+            (None, Some(tool_name)) => Err(ConfigValidationError::MissingBuiltinType {
+                server: self.name.clone(),
+                tool_name: tool_name.clone(),
+            }),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Configuration validation error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigValidationError {
+    /// `builtin_type` is set but `builtin_tool_name` is missing.
+    MissingBuiltinToolName { server: String },
+    /// `builtin_tool_name` is set but `builtin_type` is missing.
+    MissingBuiltinType { server: String, tool_name: String },
+    /// Multiple servers configured for the same `builtin_type`.
+    DuplicateBuiltinType {
+        builtin_type: BuiltinToolType,
+        first_server: String,
+        second_server: String,
+    },
+}
+
+impl std::fmt::Display for ConfigValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigValidationError::MissingBuiltinToolName { server } => {
+                write!(
+                    f,
+                    "server '{}': builtin_type is set but builtin_tool_name is missing",
+                    server
+                )
+            }
+            ConfigValidationError::MissingBuiltinType { server, tool_name } => {
+                write!(
+                    f,
+                    "server '{}': builtin_tool_name '{}' is set but builtin_type is missing",
+                    server, tool_name
+                )
+            }
+            ConfigValidationError::DuplicateBuiltinType {
+                builtin_type,
+                first_server,
+                second_server,
+            } => {
+                write!(
+                    f,
+                    "duplicate builtin_type '{}': configured on both '{}' and '{}'",
+                    builtin_type, first_server, second_server
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigValidationError {}
+
+/// Built-in tool types that can be routed to MCP servers.
+///
+/// When a request includes `{"type": "web_search_preview"}`, and an MCP server
+/// is configured with `builtin_type: web_search_preview`, the gateway routes
+/// the tool call to that MCP server instead of passing it to the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinToolType {
+    /// Web search tool (OpenAI: web_search_preview)
+    WebSearchPreview,
+    /// Code interpreter tool (OpenAI: code_interpreter)
+    CodeInterpreter,
+    /// File search tool (OpenAI: file_search)
+    FileSearch,
+}
+
+impl BuiltinToolType {
+    /// Get the corresponding response format for this built-in type.
+    pub fn response_format(&self) -> ResponseFormatConfig {
+        match self {
+            BuiltinToolType::WebSearchPreview => ResponseFormatConfig::WebSearchCall,
+            BuiltinToolType::CodeInterpreter => ResponseFormatConfig::CodeInterpreterCall,
+            BuiltinToolType::FileSearch => ResponseFormatConfig::FileSearchCall,
+        }
+    }
+}
+
+impl fmt::Display for BuiltinToolType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BuiltinToolType::WebSearchPreview => write!(f, "web_search_preview"),
+            BuiltinToolType::CodeInterpreter => write!(f, "code_interpreter"),
+            BuiltinToolType::FileSearch => write!(f, "file_search"),
+        }
+    }
 }
 
 /// Configuration for a specific tool on an MCP server.
@@ -457,6 +587,34 @@ impl McpConfig {
             self.proxy = McpProxyConfig::from_env();
         }
         self
+    }
+
+    /// Validate the entire configuration.
+    ///
+    /// Checks:
+    /// - Each server's builtin_type/builtin_tool_name pairing
+    /// - No duplicate builtin_type across servers
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        let mut builtin_types: HashMap<BuiltinToolType, &str> = HashMap::new();
+
+        for server in &self.servers {
+            // Validate individual server config
+            server.validate()?;
+
+            // Check for duplicate builtin_type
+            if let Some(builtin_type) = &server.builtin_type {
+                if let Some(first_server) = builtin_types.get(builtin_type) {
+                    return Err(ConfigValidationError::DuplicateBuiltinType {
+                        builtin_type: *builtin_type,
+                        first_server: first_server.to_string(),
+                        second_server: server.name.clone(),
+                    });
+                }
+                builtin_types.insert(*builtin_type, &server.name);
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -978,5 +1136,306 @@ policy:
         let serialized = serde_json::to_string(&deny_with_reason).unwrap();
         assert!(serialized.contains("deny_with_reason"));
         assert!(serialized.contains("Not allowed"));
+    }
+
+    #[test]
+    fn test_builtin_tool_type_serde() {
+        let types = vec![
+            (BuiltinToolType::WebSearchPreview, "\"web_search_preview\""),
+            (BuiltinToolType::CodeInterpreter, "\"code_interpreter\""),
+            (BuiltinToolType::FileSearch, "\"file_search\""),
+        ];
+
+        for (builtin_type, expected) in types {
+            let serialized = serde_json::to_string(&builtin_type).unwrap();
+            assert_eq!(serialized, expected);
+
+            let deserialized: BuiltinToolType = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, builtin_type);
+        }
+    }
+
+    #[test]
+    fn test_builtin_tool_type_response_format() {
+        assert_eq!(
+            BuiltinToolType::WebSearchPreview.response_format(),
+            ResponseFormatConfig::WebSearchCall
+        );
+        assert_eq!(
+            BuiltinToolType::CodeInterpreter.response_format(),
+            ResponseFormatConfig::CodeInterpreterCall
+        );
+        assert_eq!(
+            BuiltinToolType::FileSearch.response_format(),
+            ResponseFormatConfig::FileSearchCall
+        );
+    }
+
+    #[test]
+    fn test_server_config_with_builtin_type() {
+        let yaml = r#"
+name: "brave-search"
+protocol: sse
+url: "https://mcp.brave.com/sse"
+token: "${BRAVE_API_KEY}"
+builtin_type: web_search_preview
+builtin_tool_name: brave_web_search
+"#;
+
+        let config: McpServerConfig = serde_yaml::from_str(yaml).expect("Failed to parse");
+        assert_eq!(config.name, "brave-search");
+        assert_eq!(config.builtin_type, Some(BuiltinToolType::WebSearchPreview));
+        assert_eq!(
+            config.builtin_tool_name,
+            Some("brave_web_search".to_string())
+        );
+    }
+
+    #[test]
+    fn test_server_config_without_builtin_type() {
+        let yaml = r#"
+name: "regular-server"
+protocol: sse
+url: "http://localhost:3000/sse"
+"#;
+
+        let config: McpServerConfig = serde_yaml::from_str(yaml).expect("Failed to parse");
+        assert_eq!(config.name, "regular-server");
+        assert!(config.builtin_type.is_none());
+        assert!(config.builtin_tool_name.is_none());
+    }
+
+    #[test]
+    fn test_full_config_with_builtin_servers() {
+        let yaml = r#"
+servers:
+  - name: brave
+    protocol: sse
+    url: "https://mcp.brave.com/sse"
+    builtin_type: web_search_preview
+    builtin_tool_name: brave_web_search
+    tools:
+      brave_web_search:
+        response_format: web_search_call
+
+  - name: code-runner
+    protocol: stdio
+    command: "code-interpreter"
+    builtin_type: code_interpreter
+    builtin_tool_name: execute
+
+  - name: regular-mcp
+    protocol: sse
+    url: "http://localhost:3000/sse"
+"#;
+
+        let config: McpConfig = serde_yaml::from_str(yaml).expect("Failed to parse");
+        assert_eq!(config.servers.len(), 3);
+
+        // Brave with web_search_preview
+        assert_eq!(
+            config.servers[0].builtin_type,
+            Some(BuiltinToolType::WebSearchPreview)
+        );
+        assert_eq!(
+            config.servers[0].builtin_tool_name,
+            Some("brave_web_search".to_string())
+        );
+
+        // Code interpreter
+        assert_eq!(
+            config.servers[1].builtin_type,
+            Some(BuiltinToolType::CodeInterpreter)
+        );
+        assert_eq!(
+            config.servers[1].builtin_tool_name,
+            Some("execute".to_string())
+        );
+
+        // Regular MCP server (no builtin type)
+        assert!(config.servers[2].builtin_type.is_none());
+        assert!(config.servers[2].builtin_tool_name.is_none());
+    }
+
+    #[test]
+    fn test_validate_valid_config_no_builtin() {
+        let config = McpServerConfig {
+            name: "test".to_string(),
+            transport: McpTransport::Sse {
+                url: "http://localhost:3000/sse".to_string(),
+                token: None,
+                headers: HashMap::new(),
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+            builtin_type: None,
+            builtin_tool_name: None,
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_valid_config_with_builtin() {
+        let config = McpServerConfig {
+            name: "brave".to_string(),
+            transport: McpTransport::Sse {
+                url: "http://localhost:3000/sse".to_string(),
+                token: None,
+                headers: HashMap::new(),
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+            builtin_type: Some(BuiltinToolType::WebSearchPreview),
+            builtin_tool_name: Some("brave_web_search".to_string()),
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_missing_builtin_tool_name() {
+        let config = McpServerConfig {
+            name: "brave".to_string(),
+            transport: McpTransport::Sse {
+                url: "http://localhost:3000/sse".to_string(),
+                token: None,
+                headers: HashMap::new(),
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+            builtin_type: Some(BuiltinToolType::WebSearchPreview),
+            builtin_tool_name: None, // Missing!
+        };
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigValidationError::MissingBuiltinToolName { .. }
+        ));
+        assert!(err.to_string().contains("brave"));
+        assert!(err.to_string().contains("builtin_tool_name is missing"));
+    }
+
+    #[test]
+    fn test_validate_missing_builtin_type() {
+        let config = McpServerConfig {
+            name: "brave".to_string(),
+            transport: McpTransport::Sse {
+                url: "http://localhost:3000/sse".to_string(),
+                token: None,
+                headers: HashMap::new(),
+            },
+            proxy: None,
+            required: false,
+            tools: None,
+            builtin_type: None, // Missing!
+            builtin_tool_name: Some("brave_web_search".to_string()),
+        };
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigValidationError::MissingBuiltinType { .. }
+        ));
+        assert!(err.to_string().contains("brave"));
+        assert!(err.to_string().contains("builtin_type is missing"));
+    }
+
+    #[test]
+    fn test_mcp_config_validate_no_duplicates() {
+        let config = McpConfig {
+            servers: vec![
+                McpServerConfig {
+                    name: "brave".to_string(),
+                    transport: McpTransport::Sse {
+                        url: "http://localhost:3000/sse".to_string(),
+                        token: None,
+                        headers: HashMap::new(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: None,
+                    builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                    builtin_tool_name: Some("search".to_string()),
+                },
+                McpServerConfig {
+                    name: "code-runner".to_string(),
+                    transport: McpTransport::Sse {
+                        url: "http://localhost:3001/sse".to_string(),
+                        token: None,
+                        headers: HashMap::new(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: None,
+                    builtin_type: Some(BuiltinToolType::CodeInterpreter),
+                    builtin_tool_name: Some("execute".to_string()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_mcp_config_validate_duplicate_builtin_type() {
+        let config = McpConfig {
+            servers: vec![
+                McpServerConfig {
+                    name: "brave1".to_string(),
+                    transport: McpTransport::Sse {
+                        url: "http://localhost:3000/sse".to_string(),
+                        token: None,
+                        headers: HashMap::new(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: None,
+                    builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                    builtin_tool_name: Some("search1".to_string()),
+                },
+                McpServerConfig {
+                    name: "brave2".to_string(),
+                    transport: McpTransport::Sse {
+                        url: "http://localhost:3001/sse".to_string(),
+                        token: None,
+                        headers: HashMap::new(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: None,
+                    builtin_type: Some(BuiltinToolType::WebSearchPreview), // Duplicate!
+                    builtin_tool_name: Some("search2".to_string()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigValidationError::DuplicateBuiltinType { .. }
+        ));
+        assert!(err.to_string().contains("brave1"));
+        assert!(err.to_string().contains("brave2"));
+        assert!(err.to_string().contains("web_search_preview"));
+    }
+
+    #[test]
+    fn test_builtin_tool_type_display() {
+        assert_eq!(
+            BuiltinToolType::WebSearchPreview.to_string(),
+            "web_search_preview"
+        );
+        assert_eq!(
+            BuiltinToolType::CodeInterpreter.to_string(),
+            "code_interpreter"
+        );
+        assert_eq!(BuiltinToolType::FileSearch.to_string(), "file_search");
     }
 }

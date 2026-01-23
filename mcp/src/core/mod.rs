@@ -9,8 +9,9 @@ pub mod pool;
 pub mod proxy;
 
 pub use config::{
-    ArgMappingConfig, McpConfig, McpServerConfig, McpTransport, PolicyConfig, PolicyDecisionConfig,
-    ResponseFormatConfig, ServerPolicyConfig, Tool, ToolConfig, TrustLevelConfig,
+    ArgMappingConfig, BuiltinToolType, ConfigValidationError, McpConfig, McpServerConfig,
+    McpTransport, PolicyConfig, PolicyDecisionConfig, ResponseFormatConfig, ServerPolicyConfig,
+    Tool, ToolConfig, TrustLevelConfig,
 };
 pub use handler::{HandlerRequestContext, RefreshRequest, SmgClientHandler};
 pub use metrics::{LatencySnapshot, McpMetrics, MetricsSnapshot};

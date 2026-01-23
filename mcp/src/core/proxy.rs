@@ -105,6 +105,8 @@ mod tests {
             proxy: None,
             required: false,
             tools: None,
+            builtin_type: None,
+            builtin_tool_name: None,
         };
 
         let result = resolve_proxy_config(&server, None);
@@ -126,6 +128,8 @@ mod tests {
             proxy: None,
             required: false,
             tools: None,
+            builtin_type: None,
+            builtin_tool_name: None,
         };
 
         let global = McpProxyConfig {
@@ -164,6 +168,8 @@ mod tests {
             proxy: Some(server_proxy),
             required: false,
             tools: None,
+            builtin_type: None,
+            builtin_tool_name: None,
         };
 
         let global = McpProxyConfig {
