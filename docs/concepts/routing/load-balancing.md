@@ -457,16 +457,6 @@ Deep dive into the radix tree architecture and routing algorithm.
 
 <div class="card" markdown>
 
-### :material-cog: Configuration Reference
-
-Detailed configuration options for all routing policies.
-
-[Routing Configuration →](../../configuration/routing.md)
-
-</div>
-
-<div class="card" markdown>
-
 ### :material-shield: Circuit Breakers
 
 How SMG handles worker failures gracefully.
