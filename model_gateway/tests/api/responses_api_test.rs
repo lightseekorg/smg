@@ -106,7 +106,6 @@ async fn test_non_streaming_mcp_minimal_e2e_with_persistence() {
         repetition_penalty: 1.0,
         conversation: None,
         conversation_store_id: None,
-        conversation_store_id: None,
     };
 
     let resp = router
@@ -244,7 +243,7 @@ async fn test_conversations_crud_basic() {
     // Create
     let create_body = serde_json::json!({ "metadata": { "project": "alpha" } });
     let create_resp =
-        conversations::create_conversation(&ctx.conversation_storage, create_body.clone()).await;
+        conversations::create_conversation(&ctx.conversation_storage, create_body.clone(), None).await;
     assert_eq!(create_resp.status(), StatusCode::OK);
     let create_bytes = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
         .await
@@ -1255,7 +1254,7 @@ async fn test_conversation_items_create_and_get() {
     // Create conversation
     let create_conv = serde_json::json!({});
     let conv_resp =
-        conversations::create_conversation(&ctx.conversation_storage, create_conv).await;
+        conversations::create_conversation(&ctx.conversation_storage, create_conv, None).await;
     assert_eq!(conv_resp.status(), StatusCode::OK);
     let conv_bytes = axum::body::to_bytes(conv_resp.into_body(), usize::MAX)
         .await
@@ -1341,7 +1340,7 @@ async fn test_conversation_items_delete() {
     // Create conversation
     let create_conv = serde_json::json!({});
     let conv_resp =
-        conversations::create_conversation(&ctx.conversation_storage, create_conv).await;
+        conversations::create_conversation(&ctx.conversation_storage, create_conv, None).await;
     let conv_bytes = axum::body::to_bytes(conv_resp.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -1449,7 +1448,7 @@ async fn test_conversation_items_max_limit() {
     // Create conversation
     let create_conv = serde_json::json!({});
     let conv_resp =
-        conversations::create_conversation(&ctx.conversation_storage, create_conv).await;
+        conversations::create_conversation(&ctx.conversation_storage, create_conv, None).await;
     let conv_bytes = axum::body::to_bytes(conv_resp.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -1506,7 +1505,7 @@ async fn test_conversation_items_unsupported_type() {
     // Create conversation
     let create_conv = serde_json::json!({});
     let conv_resp =
-        conversations::create_conversation(&ctx.conversation_storage, create_conv).await;
+        conversations::create_conversation(&ctx.conversation_storage, create_conv, None).await;
     let conv_bytes = axum::body::to_bytes(conv_resp.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -1561,7 +1560,7 @@ async fn test_conversation_items_multi_conversation_sharing() {
 
     // Create two conversations
     let conv_a_resp =
-        conversations::create_conversation(&ctx.conversation_storage, serde_json::json!({})).await;
+        conversations::create_conversation(&ctx.conversation_storage, serde_json::json!({}), None).await;
     let conv_a_bytes = axum::body::to_bytes(conv_a_resp.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -1569,7 +1568,7 @@ async fn test_conversation_items_multi_conversation_sharing() {
     let conv_a_id = conv_a_json["id"].as_str().unwrap();
 
     let conv_b_resp =
-        conversations::create_conversation(&ctx.conversation_storage, serde_json::json!({})).await;
+        conversations::create_conversation(&ctx.conversation_storage, serde_json::json!({}), None).await;
     let conv_b_bytes = axum::body::to_bytes(conv_b_resp.into_body(), usize::MAX)
         .await
         .unwrap();
