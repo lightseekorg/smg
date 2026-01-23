@@ -249,26 +249,18 @@ pub(super) struct GenaiOciOracleConversationStorage {
 impl GenaiOciOracleConversationStorage {
     pub fn new(config: OracleConfig) -> Result<Self, ConversationStorageError> {
         let store = GenaiOciOracleStore::new(&config, |conn| {
-            // Use PL/SQL EXECUTE IMMEDIATE for conditional table creation
-            let create_table_sql = "
-                BEGIN
-                    EXECUTE IMMEDIATE q'[
-                        CREATE TABLE IF NOT EXISTS \"CONVERSATIONS\" (
-                            \"CONVERSATION_ID\" VARCHAR2(255) NOT NULL,
-                            \"CONVERSATION_STORE_ID\" VARCHAR2(255),
-                            \"CREATED_AT\" TIMESTAMP WITH TIME ZONE NOT NULL,
-                            \"METADATA\" CLOB,
-                            \"ITEMS\" CLOB,
-                            \"UPDATED_AT\" TIMESTAMP WITH TIME ZONE,
-                            \"EXPIRES_AT\" TIMESTAMP WITH TIME ZONE NOT NULL,
-                            CONSTRAINT PK_CONVERSATIONS_RECORD PRIMARY KEY (\"CONVERSATION_ID\")
-                        )
-                    ]';
-                END;
-            ";
-
-            conn.execute(create_table_sql, &[])
+            // Check if table exists
+            let exists: i64 = conn
+                .query_row_as(
+                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATIONS'",
+                    &[],
+                )
                 .map_err(map_genai_oci_oracle_error)?;
+
+            // Return error if table doesn't exist
+            if exists == 0 {
+                return Err("CONVERSATIONS table does not exist. Please create the table.".to_string());
+            }
 
             Ok(())
         })
@@ -732,28 +724,18 @@ pub(super) struct GenaiOciOracleResponseStorage {
 impl GenaiOciOracleResponseStorage {
     pub fn new(config: OracleConfig) -> Result<Self, ResponseStorageError> {
         let store = GenaiOciOracleStore::new(&config, |conn| {
-            // Use EXECUTE IMMEDIATE for conditional table creation
-            let create_table_sql = "
-                BEGIN
-                    EXECUTE IMMEDIATE q'[
-                        CREATE TABLE IF NOT EXISTS \"RESPONSES\" (
-                            \"RESPONSE_ID\" VARCHAR2(255) NOT NULL,
-                            \"CONVERSATION_STORE_ID\" VARCHAR2(255),
-                            \"CONVERSATION_ID\" VARCHAR2(255),
-                            \"PREVIOUS_RESPONSE_ID\" VARCHAR2(255),
-                            \"INPUT_ITEMS\" CLOB NOT NULL CHECK (\"INPUT_ITEMS\" IS JSON),
-                            \"RESPONSE_OBJECT\" CLOB NOT NULL CHECK (\"RESPONSE_OBJECT\" IS JSON),
-                            \"MODEL\" VARCHAR2(255) NOT NULL,
-                            \"CREATED_AT\" TIMESTAMP WITH TIME ZONE NOT NULL,
-                            \"EXPIRES_AT\" TIMESTAMP WITH TIME ZONE NOT NULL,
-                            CONSTRAINT \"PK_RESPONSES_RECORD\" PRIMARY KEY (\"RESPONSE_ID\")
-                        )
-                    ]';
-                END;
-            ";
-
-            conn.execute(create_table_sql, &[])
+            // Check if table exists
+            let exists: i64 = conn
+                .query_row_as(
+                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'RESPONSES'",
+                    &[],
+                )
                 .map_err(map_genai_oci_oracle_error)?;
+
+            // Return error if table doesn't exist
+            if exists == 0 {
+                return Err("RESPONSES table does not exist. Please create the table.".to_string());
+            }
 
             Ok(())
         })
