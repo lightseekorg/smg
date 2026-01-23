@@ -50,6 +50,7 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
     import openai
     from infra import (
         DEFAULT_MODEL,
+        DEFAULT_PD_ROUTER_TIMEOUT,
         DEFAULT_ROUTER_TIMEOUT,
         ENV_MODEL,
         ENV_SKIP_BACKEND_SETUP,
@@ -131,7 +132,18 @@ def _setup_pd_backend(
 ):
     """Setup PD disaggregation backend."""
     import openai
-    from infra import ConnectionMode, Gateway, WorkerIdentity, WorkerType
+    from infra import (
+        DEFAULT_PD_ROUTER_TIMEOUT,
+        ConnectionMode,
+        Gateway,
+        WorkerIdentity,
+        WorkerType,
+    )
+
+    # Use longer timeout for PD mode if not explicitly configured
+    if gateway_config.get("timeout") == 60:  # Default wasn't overridden
+        gateway_config = gateway_config.copy()
+        gateway_config["timeout"] = DEFAULT_PD_ROUTER_TIMEOUT
 
     logger.info("Setting up PD backend for model %s", model_id)
 

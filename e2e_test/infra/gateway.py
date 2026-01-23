@@ -211,11 +211,15 @@ class Gateway:
             for dc in decodes:
                 mode_args += ["--decode", dc.base_url]
 
+            # Total workers = prefill + decode
+            num_pd_workers = len(prefills) + len(decodes)
+
             self._launch(
                 mode_args=mode_args,
                 timeout=timeout,
                 show_output=show_output,
                 extra_args=extra_args,
+                num_workers=num_pd_workers,
                 log_msg=f"PD gateway ({len(prefills)} prefill, {len(decodes)} decode)",
             )
         elif is_cloud_mode:

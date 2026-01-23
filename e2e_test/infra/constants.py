@@ -57,6 +57,7 @@ DEFAULT_HOST = "127.0.0.1"
 # Timeouts (seconds)
 DEFAULT_STARTUP_TIMEOUT = 300
 DEFAULT_ROUTER_TIMEOUT = 60
+DEFAULT_PD_ROUTER_TIMEOUT = 180  # PD mode needs longer for worker connection setup
 HEALTH_CHECK_INTERVAL = 2  # Check every 2s (was 5s)
 
 # Model loading configuration
