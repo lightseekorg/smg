@@ -59,30 +59,22 @@ impl ToolLoopState {
         tool_name: String,
         args_json_str: String,
         output_str: String,
-        success: bool,
-        error: Option<String>,
+        output_item: ResponseOutputItem,
+        _success: bool,
     ) {
         // Add function_tool_call item with both arguments and output
         self.conversation_history
             .push(ResponseInputOutputItem::FunctionToolCall {
                 id: call_id.clone(),
                 call_id: call_id.clone(),
-                name: tool_name.clone(),
-                arguments: args_json_str.clone(),
-                output: Some(output_str.clone()),
+                name: tool_name,
+                arguments: args_json_str,
+                output: Some(output_str),
                 status: Some("completed".to_string()),
             });
 
-        // Add mcp_call output item for metadata
-        let mcp_call = build_mcp_call_item(
-            &tool_name,
-            &args_json_str,
-            &output_str,
-            &self.server_label,
-            success,
-            error.as_deref(),
-        );
-        self.mcp_call_items.push(mcp_call);
+        // Add transformed output item (respects tool's response_format)
+        self.mcp_call_items.push(output_item);
     }
 }
 
@@ -199,27 +191,6 @@ pub(super) fn build_mcp_list_tools_item(
         id: generate_mcp_id("mcpl"),
         server_label: server_label.to_string(),
         tools: tools_info,
-    }
-}
-
-/// Build mcp_call output item
-pub(super) fn build_mcp_call_item(
-    tool_name: &str,
-    arguments: &str,
-    output: &str,
-    server_label: &str,
-    success: bool,
-    error: Option<&str>,
-) -> ResponseOutputItem {
-    ResponseOutputItem::McpCall {
-        id: generate_mcp_id("mcp"),
-        status: if success { "completed" } else { "failed" }.to_string(),
-        approval_request_id: None,
-        arguments: arguments.to_string(),
-        error: error.map(|e| e.to_string()),
-        name: tool_name.to_string(),
-        output: output.to_string(),
-        server_label: server_label.to_string(),
     }
 }
 

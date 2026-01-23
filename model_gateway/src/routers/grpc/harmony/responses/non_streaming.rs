@@ -244,6 +244,7 @@ async fn execute_with_mcp_loop(
                         &mut mcp_tracking,
                         &current_request.model,
                         &request_id,
+                        &server_label,
                         &mcp_tools,
                     )
                     .await?

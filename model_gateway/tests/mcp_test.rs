@@ -232,6 +232,7 @@ async fn test_tool_execution_with_mock() {
                 "query": "rust programming",
                 "count": 1
             }),
+            "mock_server",
             &request_ctx,
         )
         .await;
@@ -301,7 +302,7 @@ async fn test_concurrent_tool_execution() {
 
     for (tool_name, args) in tool_calls {
         let result = manager
-            .call_tool("mock_server", tool_name, args, &request_ctx)
+            .call_tool("mock_server", tool_name, args, "mock_server", &request_ctx)
             .await;
 
         assert!(result.is_ok(), "Tool {} should succeed", tool_name);
@@ -359,7 +360,13 @@ async fn test_tool_execution_errors() {
 
     // Try to call unknown tool
     let result = manager
-        .call_tool("mock_server", "unknown_tool", json!({}), &request_ctx)
+        .call_tool(
+            "mock_server",
+            "unknown_tool",
+            json!({}),
+            "mock_server",
+            &request_ctx,
+        )
         .await;
     assert!(result.is_err(), "Should fail for unknown tool");
 
@@ -595,6 +602,7 @@ async fn test_complete_workflow() {
                 "query": "SGLang router MCP integration",
                 "count": 1
             }),
+            "integration_test",
             &request_ctx,
         )
         .await;

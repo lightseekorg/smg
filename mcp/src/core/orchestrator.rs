@@ -18,9 +18,10 @@
 //!
 //! // Call a tool
 //! let result = orchestrator.call_tool(
-//!     "brave",
-//!     "web_search",
+//!     "brave",           // server_key
+//!     "web_search",      // tool_name
 //!     json!({"query": "rust programming"}),
+//!     "brave",           // server_label (user-facing)
 //!     &request_ctx,
 //! ).await?;
 //! ```
@@ -109,7 +110,31 @@ pub enum ToolCallResult {
     PendingApproval(McpApprovalRequest),
 }
 
+/// Internal result type for approval-checked execution.
+///
+/// Used to avoid code duplication between `execute_tool_with_approval` and
+/// `execute_tool_with_approval_raw`. Contains either the raw result or
+/// the pending approval request.
+enum ApprovalExecutionResult {
+    /// Tool executed successfully, contains raw result.
+    Success(CallToolResult),
+    /// Pending approval from user (interactive mode only).
+    PendingApproval(McpApprovalRequest),
+}
+
 impl ToolCallResult {
+    /// Get the transformed output item directly without serialization.
+    ///
+    /// Returns `Some(item)` for successful tool calls, `None` for pending approvals.
+    /// This avoids the serialize/deserialize roundtrip when the caller needs
+    /// the item as a Value or ResponseOutputItem.
+    pub fn into_item(self) -> Option<ResponseOutputItem> {
+        match self {
+            ToolCallResult::Success(item) => Some(item),
+            ToolCallResult::PendingApproval(_) => None,
+        }
+    }
+
     /// Convert the result to a serialized output tuple.
     ///
     /// Returns `(output_str, is_error, error_message)` suitable for
@@ -165,7 +190,7 @@ pub struct ToolExecutionInput {
 /// Contains all information needed by routers to build responses,
 /// record state, and emit events. The MCP crate handles:
 /// - Tool lookup and execution
-/// - Result serialization
+/// - Result serialization and transformation
 /// - Error handling
 #[derive(Debug, Clone)]
 pub struct ToolExecutionOutput {
@@ -173,18 +198,42 @@ pub struct ToolExecutionOutput {
     pub call_id: String,
     /// Name of the tool that was executed.
     pub tool_name: String,
+    /// Server key where the tool was executed (internal identifier, may be URL).
+    pub server_key: String,
+    /// User-facing server label for API responses.
+    pub server_label: String,
     /// Original arguments JSON string (for conversation history).
     pub arguments_str: String,
-    /// Deserialized output (for building typed responses).
+    /// Raw tool output as Value (for conversation history and transformation).
     pub output: Value,
-    /// Serialized output string (for conversation history).
-    pub output_str: String,
     /// Whether the execution resulted in an error.
     pub is_error: bool,
     /// Error message if `is_error` is true.
     pub error_message: Option<String>,
+    /// Response format for transforming output to API-specific types.
+    pub response_format: ResponseFormat,
     /// Execution duration.
     pub duration: Duration,
+}
+
+impl ToolExecutionOutput {
+    /// Get the transformed ResponseOutputItem.
+    ///
+    /// Transforms the raw output to the appropriate ResponseOutputItem type
+    /// based on the tool's configured response format (WebSearchCall,
+    /// CodeInterpreterCall, FileSearchCall, or Passthrough/McpCall).
+    ///
+    /// Uses `server_label` (user-facing) for the output, not `server_key` (internal).
+    pub fn to_response_item(&self) -> ResponseOutputItem {
+        ResponseTransformer::transform(
+            &self.output,
+            &self.response_format,
+            &self.call_id,
+            &self.server_label,
+            &self.tool_name,
+            &self.arguments_str,
+        )
+    }
 }
 
 /// Main orchestrator for MCP operations.
@@ -605,11 +654,19 @@ impl McpOrchestrator {
     /// Call a tool with approval checking and response transformation.
     ///
     /// This is the main entry point for tool execution.
+    ///
+    /// # Arguments
+    /// * `server_key` - Internal server identifier (may be URL for dynamic servers)
+    /// * `tool_name` - The tool name to execute
+    /// * `arguments` - Tool arguments as JSON
+    /// * `server_label` - User-facing label for API responses
+    /// * `request_ctx` - Request context for approval
     pub async fn call_tool(
         &self,
         server_key: &str,
         tool_name: &str,
         arguments: Value,
+        server_label: &str,
         request_ctx: &McpRequestContext<'_>,
     ) -> McpResult<ToolCallResult> {
         let qualified = QualifiedToolName::new(server_key, tool_name);
@@ -626,7 +683,7 @@ impl McpOrchestrator {
 
         // Execute with approval flow
         let result = self
-            .execute_tool_with_approval(&entry, arguments, request_ctx)
+            .execute_tool_with_approval(&entry, arguments, server_label, request_ctx)
             .await;
 
         // Record metrics end
@@ -662,27 +719,26 @@ impl McpOrchestrator {
         tool_name: &str,
         arguments: Value,
         allowed_servers: &[String],
+        server_label: &str,
         request_ctx: &McpRequestContext<'_>,
     ) -> McpResult<ToolCallResult> {
-        // Use HashSet for O(1) lookups instead of O(n) Vec::contains
-        let allowed: std::collections::HashSet<&str> =
-            allowed_servers.iter().map(|s| s.as_str()).collect();
+        // For small server lists (typical case: 1-5), linear scan is faster than HashSet
+        let is_allowed =
+            |server_key: &str| -> bool { allowed_servers.iter().any(|s| s == server_key) };
 
         // Find all matching tools in allowed servers
         let matching: Vec<_> = self
             .tool_inventory
             .list_tools()
             .into_iter()
-            .filter(|(name, server_key, _)| {
-                name == tool_name && allowed.contains(server_key.as_str())
-            })
+            .filter(|(name, server_key, _)| name == tool_name && is_allowed(server_key))
             .collect();
 
         match matching.len() {
             0 => Err(McpError::ToolNotFound(tool_name.to_string())),
             1 => {
                 let (_, server_key, _) = &matching[0];
-                self.call_tool(server_key, tool_name, arguments, request_ctx)
+                self.call_tool(server_key, tool_name, arguments, server_label, request_ctx)
                     .await
             }
             _ => {
@@ -701,6 +757,38 @@ impl McpOrchestrator {
         }
     }
 
+    /// Find a tool entry by name within allowed servers.
+    ///
+    /// Use this when you need tool metadata (especially `response_format`)
+    /// without executing the tool. Useful for streaming paths that execute
+    /// tools individually but need format information for output transformation.
+    ///
+    /// Returns `None` if tool not found or collision detected.
+    pub fn find_tool_by_name(
+        &self,
+        tool_name: &str,
+        allowed_servers: &[String],
+    ) -> Option<ToolEntry> {
+        // For small server lists (typical case: 1-5), linear scan is faster than HashSet
+        let is_allowed =
+            |server_key: &str| -> bool { allowed_servers.iter().any(|s| s == server_key) };
+
+        let matching: Vec<_> = self
+            .tool_inventory
+            .list_tools()
+            .into_iter()
+            .filter(|(name, server_key, _)| name == tool_name && is_allowed(server_key))
+            .collect();
+
+        // Only return if exactly one match (no collision)
+        if matching.len() == 1 {
+            let (_, server_key, _) = &matching[0];
+            self.tool_inventory.get_entry(server_key, tool_name)
+        } else {
+            None
+        }
+    }
+
     /// Execute multiple tools with unified error handling.
     ///
     /// This is the recommended entry point for batch tool execution. It:
@@ -709,13 +797,15 @@ impl McpOrchestrator {
     /// - Returns fully-processed results ready for router use
     ///
     /// Routers should convert their tool calls to `ToolExecutionInput`,
-    /// call this method, and convert `ToolExecutionOutput` to their format.
+    /// call this method, and use `ToolExecutionOutput::to_response_item()`
+    /// to get correctly-typed output items.
     /// Metrics recording is left to callers (routers) since they have access
     /// to the model_gateway metrics infrastructure.
     ///
     /// # Arguments
     /// * `inputs` - Tool calls to execute
     /// * `allowed_servers` - Server keys to search within
+    /// * `server_label` - User-facing label for API responses (from request config)
     /// * `request_ctx` - Request context for approval and tenant isolation
     ///
     /// # Returns
@@ -725,6 +815,7 @@ impl McpOrchestrator {
         &self,
         inputs: Vec<ToolExecutionInput>,
         allowed_servers: &[String],
+        server_label: &str,
         request_ctx: &McpRequestContext<'_>,
     ) -> Vec<ToolExecutionOutput> {
         let mut results = Vec::with_capacity(inputs.len());
@@ -735,40 +826,48 @@ impl McpOrchestrator {
             // Preserve arguments string for conversation history
             let arguments_str = input.arguments.to_string();
 
-            let (output, output_str, is_error, error_message) = {
-                let result = self
-                    .call_tool_by_name(
-                        &input.tool_name,
-                        input.arguments,
-                        allowed_servers,
-                        request_ctx,
-                    )
-                    .await;
+            // Look up tool entry to get server_key, response_format, and entry itself
+            let tool_entry = self.find_tool_by_name(&input.tool_name, allowed_servers);
 
+            let (server_key, response_format, entry) = match tool_entry {
+                Some(entry) => (
+                    entry.server_key().to_string(),
+                    entry.response_format.clone(),
+                    Some(entry),
+                ),
+                None => {
+                    // Tool not found - will error below
+                    ("unknown".to_string(), ResponseFormat::Passthrough, None)
+                }
+            };
+
+            let (output, is_error, error_message) = {
                 let handle_error = |err_msg: String| {
                     warn!("Tool execution failed: {}", err_msg);
                     let error_json = serde_json::json!({ "error": &err_msg });
-                    (
-                        error_json.clone(),
-                        error_json.to_string(),
-                        true,
-                        Some(err_msg),
-                    )
+                    (error_json, true, Some(err_msg))
                 };
 
-                match result {
-                    Ok(ToolCallResult::Success(item)) => match serde_json::to_value(&item) {
-                        Ok(output) => {
-                            // Safe: serialization of a Value to string should not fail
-                            let output_str = serde_json::to_string(&output).unwrap();
-                            (output, output_str, false, None)
+                match entry {
+                    None => handle_error(format!("Tool '{}' not found", input.tool_name)),
+                    Some(entry) => {
+                        // Execute with approval, getting raw result
+                        match self
+                            .execute_tool_with_approval_raw(&entry, input.arguments, request_ctx)
+                            .await
+                        {
+                            Ok(Some(raw_result)) => {
+                                // Convert raw CallToolResult to JSON
+                                let output = self.call_result_to_json(&raw_result);
+                                (output, raw_result.is_error.unwrap_or(false), None)
+                            }
+                            Ok(None) => handle_error(
+                                "Tool requires approval (not supported in this context)"
+                                    .to_string(),
+                            ),
+                            Err(e) => handle_error(format!("Tool call failed: {}", e)),
                         }
-                        Err(e) => handle_error(format!("Failed to serialize tool result: {}", e)),
-                    },
-                    Ok(ToolCallResult::PendingApproval(_)) => handle_error(
-                        "Tool requires approval (not supported in this context)".to_string(),
-                    ),
-                    Err(e) => handle_error(format!("Tool call failed: {}", e)),
+                    }
                 }
             };
 
@@ -777,11 +876,13 @@ impl McpOrchestrator {
             results.push(ToolExecutionOutput {
                 call_id: input.call_id,
                 tool_name: input.tool_name,
+                server_key,
+                server_label: server_label.to_string(),
                 arguments_str,
                 output,
-                output_str,
                 is_error,
                 error_message,
+                response_format,
                 duration,
             });
         }
@@ -790,13 +891,74 @@ impl McpOrchestrator {
     }
 
     /// Execute tool with approval checking.
+    ///
+    /// Returns a transformed `ToolCallResult` ready for API responses.
+    /// For raw results without transformation, use `execute_tool_with_approval_raw`.
+    ///
+    /// # Arguments
+    /// * `entry` - Tool entry to execute
+    /// * `arguments` - Tool arguments
+    /// * `server_label` - User-facing server label for API responses
+    /// * `request_ctx` - Request context for approval
     async fn execute_tool_with_approval(
         &self,
         entry: &ToolEntry,
         arguments: Value,
+        server_label: &str,
         request_ctx: &McpRequestContext<'_>,
     ) -> McpResult<ToolCallResult> {
-        // Check if approval is needed
+        // Delegate to raw implementation and transform result
+        match self
+            .execute_tool_with_approval_raw_internal(entry, arguments.clone(), request_ctx)
+            .await?
+        {
+            ApprovalExecutionResult::Success(result) => {
+                let output = self.transform_result(
+                    &result,
+                    &entry.response_format,
+                    &request_ctx.request_id,
+                    server_label,
+                    entry.tool_name(),
+                    &arguments.to_string(),
+                );
+                Ok(ToolCallResult::Success(output))
+            }
+            ApprovalExecutionResult::PendingApproval(approval_request) => {
+                Ok(ToolCallResult::PendingApproval(approval_request))
+            }
+        }
+    }
+
+    /// Execute tool with approval, returning raw CallToolResult.
+    ///
+    /// This is used by `execute_tools` to get the raw output before transformation.
+    /// Returns `Ok(Some(result))` on success, `Ok(None)` if pending approval,
+    /// or `Err` on failure.
+    async fn execute_tool_with_approval_raw(
+        &self,
+        entry: &ToolEntry,
+        arguments: Value,
+        request_ctx: &McpRequestContext<'_>,
+    ) -> McpResult<Option<CallToolResult>> {
+        match self
+            .execute_tool_with_approval_raw_internal(entry, arguments, request_ctx)
+            .await?
+        {
+            ApprovalExecutionResult::Success(result) => Ok(Some(result)),
+            ApprovalExecutionResult::PendingApproval(_) => Ok(None),
+        }
+    }
+
+    /// Internal implementation of approval-checked tool execution.
+    ///
+    /// Returns either the raw result or the pending approval request.
+    /// Both public methods delegate to this to avoid code duplication.
+    async fn execute_tool_with_approval_raw_internal(
+        &self,
+        entry: &ToolEntry,
+        arguments: Value,
+        request_ctx: &McpRequestContext<'_>,
+    ) -> McpResult<ApprovalExecutionResult> {
         let approval_params = ApprovalParams {
             request_id: &request_ctx.request_id,
             server_key: entry.server_key(),
@@ -819,21 +981,8 @@ impl McpOrchestrator {
                     return Err(McpError::ToolDenied(entry.tool_name().to_string()));
                 }
                 self.metrics.record_approval_granted();
-
-                // Execute the tool
-                let result = self.execute_tool_impl(entry, arguments.clone()).await?;
-
-                // Transform response
-                let output = self.transform_result(
-                    &result,
-                    &entry.response_format,
-                    &request_ctx.request_id,
-                    entry.server_key(),
-                    entry.tool_name(),
-                    &arguments.to_string(),
-                );
-
-                Ok(ToolCallResult::Success(output))
+                let result = self.execute_tool_impl(entry, arguments).await?;
+                Ok(ApprovalExecutionResult::Success(result))
             }
             ApprovalOutcome::Pending {
                 approval_request,
@@ -843,25 +992,16 @@ impl McpOrchestrator {
                 self.metrics.record_approval_requested();
 
                 // In interactive mode, return pending approval
-                // The caller should send this to the client and wait for response
                 if request_ctx.approval_mode == ApprovalMode::Interactive {
-                    return Ok(ToolCallResult::PendingApproval(approval_request));
+                    return Ok(ApprovalExecutionResult::PendingApproval(approval_request));
                 }
 
-                // In policy-only mode (shouldn't happen), wait for decision
+                // In policy-only mode, wait for decision
                 match rx.await {
                     Ok(ApprovalDecision::Approved) => {
                         self.metrics.record_approval_granted();
-                        let result = self.execute_tool_impl(entry, arguments.clone()).await?;
-                        let output = self.transform_result(
-                            &result,
-                            &entry.response_format,
-                            &request_ctx.request_id,
-                            entry.server_key(),
-                            entry.tool_name(),
-                            &arguments.to_string(),
-                        );
-                        Ok(ToolCallResult::Success(output))
+                        let result = self.execute_tool_impl(entry, arguments).await?;
+                        Ok(ApprovalExecutionResult::Success(result))
                     }
                     Ok(ApprovalDecision::Denied { reason }) => {
                         self.metrics.record_approval_denied();
@@ -1280,14 +1420,14 @@ impl McpOrchestrator {
 
     /// List tools for specific servers.
     pub fn list_tools_for_servers(&self, server_keys: &[String]) -> Vec<ToolEntry> {
-        let allowed: std::collections::HashSet<&str> =
-            server_keys.iter().map(|s| s.as_str()).collect();
+        // For small server lists (typical case: 1-5), linear scan is faster than HashSet
+        let is_allowed = |server_key: &str| -> bool { server_keys.iter().any(|s| s == server_key) };
 
         self.tool_inventory
             .list_tools()
             .into_iter()
             .filter_map(|(tool_name, server_key, _)| {
-                if allowed.contains(server_key.as_str()) {
+                if is_allowed(&server_key) {
                     self.tool_inventory.get_entry(&server_key, &tool_name)
                 } else {
                     None
@@ -1516,21 +1656,30 @@ impl<'a> McpRequestContext<'a> {
     }
 
     /// Call a tool in this request context.
+    ///
+    /// # Arguments
+    /// * `server_key` - Internal server identifier
+    /// * `tool_name` - Tool name to execute
+    /// * `arguments` - Tool arguments as JSON
+    /// * `server_label` - User-facing label for API responses
     pub async fn call_tool(
         &self,
         server_key: &str,
         tool_name: &str,
         arguments: Value,
+        server_label: &str,
     ) -> McpResult<ToolCallResult> {
         // Check dynamic tools first
         let qualified = QualifiedToolName::new(server_key, tool_name);
         if let Some(entry) = self.dynamic_tools.get(&qualified) {
-            return self.execute_dynamic_tool(&entry, arguments).await;
+            return self
+                .execute_dynamic_tool(&entry, arguments, server_label)
+                .await;
         }
 
         // Fall back to orchestrator
         self.orchestrator
-            .call_tool(server_key, tool_name, arguments, self)
+            .call_tool(server_key, tool_name, arguments, server_label, self)
             .await
     }
 
@@ -1539,6 +1688,7 @@ impl<'a> McpRequestContext<'a> {
         &self,
         entry: &ToolEntry,
         arguments: Value,
+        server_label: &str,
     ) -> McpResult<ToolCallResult> {
         let client = self
             .dynamic_clients
@@ -1565,7 +1715,7 @@ impl<'a> McpRequestContext<'a> {
             &result,
             &entry.response_format,
             &self.request_id,
-            entry.server_key(),
+            server_label,
             entry.tool_name(),
             &arguments.to_string(),
         );

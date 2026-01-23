@@ -22,22 +22,12 @@ use crate::{
 
 /// Record of a single MCP tool call execution
 ///
-/// Stores metadata needed to build mcp_call output items for Responses API format
+/// Stores the transformed output item for Responses API format.
+/// The output_item respects the tool's response_format configuration.
 #[derive(Debug, Clone)]
 pub(super) struct McpCallRecord {
-    /// Tool call ID (stored for potential future use, currently generate new IDs)
-    #[allow(dead_code)]
-    pub call_id: String,
-    /// Tool name
-    pub tool_name: String,
-    /// JSON-encoded arguments
-    pub arguments: String,
-    /// JSON-encoded output/result
-    pub output: String,
-    /// Whether execution succeeded
-    pub success: bool,
-    /// Error message if execution failed
-    pub error: Option<String>,
+    /// Transformed output item (McpCall, WebSearchCall, etc.)
+    pub output_item: ResponseOutputItem,
 }
 
 /// Tracking structure for MCP tool calls across iterations
@@ -60,23 +50,8 @@ impl McpCallTracking {
         }
     }
 
-    pub fn record_call(
-        &mut self,
-        call_id: String,
-        tool_name: String,
-        arguments: String,
-        output: String,
-        success: bool,
-        error: Option<String>,
-    ) {
-        self.tool_calls.push(McpCallRecord {
-            call_id,
-            tool_name,
-            arguments,
-            output,
-            success,
-            error,
-        });
+    pub fn record_call(&mut self, output_item: ResponseOutputItem) {
+        self.tool_calls.push(McpCallRecord { output_item });
     }
 
     pub fn total_calls(&self) -> usize {
@@ -208,10 +183,13 @@ pub(super) fn build_next_request_with_tools(
 
 /// Inject MCP metadata into final response
 ///
-/// Adds mcp_list_tools and mcp_call output items to the response output array.
+/// Adds mcp_list_tools and tool output items to the response output array.
+/// The output items respect the tool's response_format configuration
+/// (McpCall, WebSearchCall, CodeInterpreterCall, FileSearchCall).
+///
 /// Following non-Harmony pipeline pattern:
 /// 1. Prepend mcp_list_tools at the beginning
-/// 2. Append all mcp_call items at the end
+/// 2. Append all tool output items at the end
 pub(super) fn inject_mcp_metadata(
     response: &mut ResponsesResponse,
     tracking: &McpCallTracking,
@@ -236,33 +214,19 @@ pub(super) fn inject_mcp_metadata(
         tools: tools_info,
     };
 
-    // Build mcp_call items for each tracked call
-    let mcp_call_items: Vec<ResponseOutputItem> = tracking
+    // Collect tool output items (already transformed with correct type)
+    let tool_output_items: Vec<ResponseOutputItem> = tracking
         .tool_calls
         .iter()
-        .map(|record| ResponseOutputItem::McpCall {
-            id: format!("mcp_{}", Uuid::new_v4()),
-            status: if record.success {
-                "completed"
-            } else {
-                "failed"
-            }
-            .to_string(),
-            approval_request_id: None,
-            arguments: record.arguments.clone(),
-            error: record.error.clone(),
-            name: record.tool_name.clone(),
-            output: record.output.clone(),
-            server_label: tracking.server_label.clone(),
-        })
+        .map(|record| record.output_item.clone())
         .collect();
 
     // Inject into response output:
     // 1. Prepend mcp_list_tools at the beginning
     response.output.insert(0, mcp_list_tools);
 
-    // 2. Append all mcp_call items at the end
-    response.output.extend(mcp_call_items);
+    // 2. Append all tool output items at the end
+    response.output.extend(tool_output_items);
 }
 
 /// Load previous conversation messages from storage

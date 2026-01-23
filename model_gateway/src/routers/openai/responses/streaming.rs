@@ -443,13 +443,7 @@ pub(super) fn send_final_response_event(
     }
 
     if let Some(orch) = orchestrator {
-        inject_mcp_metadata_streaming(
-            &mut final_response,
-            state,
-            orch,
-            ctx.server_label,
-            ctx.server_keys,
-        );
+        inject_mcp_metadata_streaming(&mut final_response, state, orch, ctx.server_keys);
     }
 
     mask_tools_as_mcp(&mut final_response, ctx.original_request);
@@ -662,7 +656,20 @@ pub(super) async fn handle_streaming_with_tool_interception(
 
     // Spawn the streaming loop task
     tokio::spawn(async move {
-        let mut state = ToolLoopState::new(original_request.input.clone());
+        // Extract server_label first (needed for ToolLoopState)
+        let server_label = original_request
+            .tools
+            .as_ref()
+            .and_then(|tools| {
+                tools
+                    .iter()
+                    .find(|t| matches!(t.r#type, ResponseToolType::Mcp))
+                    .and_then(|t| t.server_label.as_deref())
+            })
+            .unwrap_or("mcp");
+
+        let mut state =
+            ToolLoopState::new(original_request.input.clone(), server_label.to_string());
         let loop_config = McpLoopConfig {
             server_keys: server_keys_clone.clone(),
             ..McpLoopConfig::default()
@@ -676,17 +683,6 @@ pub(super) async fn handle_streaming_with_tool_interception(
         let mut sequence_number: u64 = 0;
         let mut next_output_index: usize = 0;
         let mut preserved_response_id: Option<String> = None;
-
-        let server_label = original_request
-            .tools
-            .as_ref()
-            .and_then(|tools| {
-                tools
-                    .iter()
-                    .find(|t| matches!(t.r#type, ResponseToolType::Mcp))
-                    .and_then(|t| t.server_label.as_deref())
-            })
-            .unwrap_or("mcp");
 
         let streaming_ctx = StreamingEventContext {
             server_label,
@@ -881,7 +877,6 @@ pub(super) async fn handle_streaming_with_tool_interception(
                         &mut response_json,
                         &state,
                         &orchestrator_clone,
-                        server_label,
                         &server_keys_clone,
                     );
 

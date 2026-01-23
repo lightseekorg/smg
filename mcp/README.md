@@ -274,10 +274,12 @@ let request_ctx = orchestrator.create_request_context(
 );
 
 // Call a tool
+// server_label is the user-facing name shown in API responses
 let result = orchestrator.call_tool(
-    "brave",
-    "web_search",
+    "brave",           // server_key (internal identifier)
+    "web_search",      // tool_name
     json!({"query": "rust programming"}),
+    "brave",           // server_label (user-facing)
     &request_ctx,
 ).await?;
 ```
@@ -296,7 +298,7 @@ let request_ctx = orchestrator.create_request_context(
     mode,
 );
 
-match orchestrator.call_tool("server", "dangerous_tool", args, &request_ctx).await? {
+match orchestrator.call_tool("server", "dangerous_tool", args, "server", &request_ctx).await? {
     ToolCallResult::Success(output) => {
         // Tool executed successfully
     }
@@ -338,8 +340,51 @@ orchestrator.register_alias(
 )?;
 
 // Now callable as just "search"
-let result = orchestrator.call_tool_by_name("search", args, &request_ctx).await?;
+// server_label is the user-facing name for API responses
+let result = orchestrator.call_tool_by_name("search", args, &allowed_servers, "my-search", &request_ctx).await?;
 ```
+
+### Batch Tool Execution
+
+For executing multiple tools efficiently (e.g., parallel tool calls from LLM):
+
+```rust
+use smg_mcp::{ToolExecutionInput, ToolExecutionOutput};
+
+// Convert tool calls to inputs
+let inputs: Vec<ToolExecutionInput> = tool_calls
+    .iter()
+    .map(|tc| ToolExecutionInput {
+        call_id: tc.id.clone(),
+        tool_name: tc.function.name.clone(),
+        arguments: serde_json::from_str(&tc.arguments).unwrap_or(json!({})),
+    })
+    .collect();
+
+// Execute all tools (sequential, with approval checking)
+let outputs: Vec<ToolExecutionOutput> = orchestrator
+    .execute_tools(inputs, &server_keys, "my-server", &request_ctx)
+    .await;
+
+// Process results
+for output in outputs {
+    // Get transformed ResponseOutputItem (uses server_label for API response)
+    let item = output.to_response_item();
+
+    // Access raw output for conversation history
+    let raw_output = &output.output;
+
+    // Check success/error status
+    if output.is_error {
+        eprintln!("Tool {} failed: {:?}", output.tool_name, output.error_message);
+    }
+}
+```
+
+**Key types:**
+- `ToolExecutionInput`: Tool call ID, name, and arguments
+- `ToolExecutionOutput`: Full result including raw output, transformed item, duration, and error info
+- `server_label`: User-facing label for API responses (distinct from internal `server_key`)
 
 ## Approval System
 
@@ -492,3 +537,16 @@ Connections are keyed by `PoolKey(url, auth_hash, tenant_id)` instead of just UR
 - Different auth credentials get different connections (security isolation)
 - Different tenants are isolated (multi-tenancy support)
 - Credentials are hashed, not stored as plaintext in pool keys
+
+### Server Key vs Server Label
+
+Two distinct identifiers are used for servers:
+
+| Identifier | Purpose | Example |
+|------------|---------|---------|
+| `server_key` | Internal identifier for connection lookup | URL like `https://mcp.example.com/sse` |
+| `server_label` | User-facing label in API responses | `"brave"` or `"my-search-server"` |
+
+For static servers configured in YAML, both are typically the server name. For dynamic servers (connected at runtime via URL), `server_key` is the URL while `server_label` comes from the request's MCP tool configuration.
+
+API responses always use `server_label` so clients see consistent, user-friendly names regardless of the underlying connection mechanism.

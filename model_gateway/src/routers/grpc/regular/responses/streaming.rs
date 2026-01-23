@@ -33,7 +33,7 @@ use super::{
 };
 use crate::{
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::{ApprovalMode, TenantContext},
+    mcp::{ApprovalMode, ResponseFormat, ResponseTransformer, TenantContext},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         chat::{
@@ -743,10 +743,16 @@ async fn execute_tool_loop_streaming_internal(
                 // Execute tool and convert result using unified serialization
                 let call_result = ctx
                     .mcp_orchestrator
-                    .call_tool_by_name(&tool_call.name, arguments, &server_keys, &request_ctx)
+                    .call_tool_by_name(
+                        &tool_call.name,
+                        arguments,
+                        &server_keys,
+                        &state.server_label,
+                        &request_ctx,
+                    )
                     .await;
 
-                let (output_str, success, error) = match call_result {
+                let (output_str, success, _error) = match call_result {
                     Ok(result) => {
                         let (output, is_error, err_msg) = result.into_serialized();
 
@@ -839,14 +845,37 @@ async fn execute_tool_loop_streaming_internal(
                     },
                 );
 
-                // Record the call in state
+                // Look up tool entry to get response_format for transformation
+                let response_format = ctx
+                    .mcp_orchestrator
+                    .find_tool_by_name(&tool_call.name, &server_keys)
+                    .map(|entry| entry.response_format)
+                    .unwrap_or(ResponseFormat::Passthrough);
+
+                // Parse output for transformer
+                let output_value: Value = serde_json::from_str(&output_str).unwrap_or_else(|e| {
+                    warn!(tool = %tool_call.name, error = %e, "Failed to parse tool output as JSON");
+                    json!({})
+                });
+
+                // Build transformed output item using centralized transformer
+                let output_item = ResponseTransformer::transform(
+                    &output_value,
+                    &response_format,
+                    &tool_call.call_id,
+                    &state.server_label,
+                    &tool_call.name,
+                    &tool_call.arguments,
+                );
+
+                // Record the call in state with transformed output item
                 state.record_call(
                     tool_call.call_id,
                     tool_call.name,
                     tool_call.arguments,
                     output_str,
+                    output_item,
                     success,
-                    error,
                 );
             }
 

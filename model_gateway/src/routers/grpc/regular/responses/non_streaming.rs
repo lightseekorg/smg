@@ -342,7 +342,7 @@ pub(super) async fn execute_tool_loop(
             // Execute all MCP tools via unified API
             let results = ctx
                 .mcp_orchestrator
-                .execute_tools(inputs, &server_keys, &request_ctx)
+                .execute_tools(inputs, &server_keys, &server_label, &request_ctx)
                 .await;
 
             // Process results: record metrics and state
@@ -371,14 +371,16 @@ pub(super) async fn execute_tool_loop(
                     },
                 );
 
-                // Record the call in state
+                // Record the call in state with transformed output item
+                let output_item = result.to_response_item();
+                let output_str = result.output.to_string();
                 state.record_call(
                     result.call_id,
                     result.tool_name,
                     result.arguments_str,
-                    result.output_str,
+                    output_str,
+                    output_item,
                     !result.is_error,
-                    result.error_message,
                 );
 
                 // Increment total calls counter

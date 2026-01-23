@@ -19,15 +19,12 @@ use crate::{
 /// Tool execution result
 ///
 /// Contains the result of executing a single MCP tool.
+/// Used for building conversation history (raw output) and status tracking.
 pub(crate) struct ToolResult {
     /// Tool call ID (for matching with request)
     pub call_id: String,
 
-    /// Tool name
-    #[allow(dead_code)] // Kept for documentation and future use
-    pub tool_name: String,
-
-    /// Tool output (JSON value)
+    /// Tool output (JSON value) - used for conversation history
     pub output: Value,
 
     /// Whether this is an error result
@@ -47,6 +44,7 @@ pub(super) async fn execute_mcp_tools(
     tracking: &mut McpCallTracking,
     model_id: &str,
     request_id: &str,
+    server_label: &str,
     mcp_tools: &[ToolEntry],
 ) -> Result<Vec<ToolResult>, Response> {
     // Create request context for tool execution
@@ -56,13 +54,15 @@ pub(super) async fn execute_mcp_tools(
         ApprovalMode::PolicyOnly,
     );
 
-    // Extract server_keys from mcp_tools once
-    let server_keys: Vec<String> = mcp_tools
-        .iter()
-        .map(|t| t.server_key().to_string())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
+    // Extract unique server_keys from mcp_tools
+    // For small lists (typical: 1-10 tools), linear scan is faster than HashSet
+    let mut server_keys = Vec::new();
+    for entry in mcp_tools {
+        let key = entry.server_key().to_string();
+        if !server_keys.iter().any(|k| k == &key) {
+            server_keys.push(key);
+        }
+    }
 
     // Convert tool calls to execution inputs
     let inputs: Vec<ToolExecutionInput> = tool_calls
@@ -94,22 +94,18 @@ pub(super) async fn execute_mcp_tools(
 
     // Execute all tools via unified batch API
     let outputs = mcp_orchestrator
-        .execute_tools(inputs, &server_keys, &request_ctx)
+        .execute_tools(inputs, &server_keys, server_label, &request_ctx)
         .await;
 
     // Convert outputs to ToolResults and record metrics/tracking
     let results: Vec<ToolResult> = outputs
         .into_iter()
         .map(|output| {
+            // Transform to correctly-typed ResponseOutputItem
+            let output_item = output.to_response_item();
+
             // Record this call in tracking
-            tracking.record_call(
-                output.call_id.clone(),
-                output.tool_name.clone(),
-                output.arguments_str.clone(),
-                output.output_str.clone(),
-                !output.is_error,
-                output.error_message.clone(),
-            );
+            tracking.record_call(output_item.clone());
 
             // Record MCP tool metrics
             Metrics::record_mcp_tool_duration(model_id, &output.tool_name, output.duration);
@@ -125,7 +121,6 @@ pub(super) async fn execute_mcp_tools(
 
             ToolResult {
                 call_id: output.call_id,
-                tool_name: output.tool_name,
                 output: output.output,
                 is_error: output.is_error,
             }

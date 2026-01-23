@@ -361,6 +361,7 @@ async fn execute_mcp_tool_loop_streaming(
                         &mut mcp_tracking,
                         &current_request.model,
                         &request_id,
+                        &server_label,
                         &mcp_tools,
                     )
                     .await
