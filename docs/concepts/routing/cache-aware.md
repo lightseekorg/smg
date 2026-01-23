@@ -403,16 +403,6 @@ When running multiple SMG instances behind a load balancer:
 
 <div class="card" markdown>
 
-### :material-cog: Configure Routing
-
-Set up cache-aware routing with detailed parameter options.
-
-[Routing Configuration →](../../configuration/routing.md)
-
-</div>
-
-<div class="card" markdown>
-
 ### :material-scale-balance: Load Balancing
 
 Compare all available routing policies.

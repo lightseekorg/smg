@@ -41,8 +41,8 @@ flowchart LR
 | Layer | Purpose |
 |-------|---------|
 | [API Layer](architecture/overview.md) | Inference, utility, and admin endpoints |
-| [Router Manager](architecture/data-plane.md) | Selects path based on worker type |
-| [Control Plane](architecture/control-plane.md) | Health monitoring, service discovery |
+| [Router Manager](routing/load-balancing.md) | Selects path based on worker type |
+| [Service Discovery](architecture/service-discovery.md) | Health monitoring, worker registration |
 
 ---
 
@@ -111,8 +111,9 @@ Circuit breakers, retries, and rate limiting for resilient deployments.
 Understand how SMG is structured internally:
 
 - [Architecture Overview](architecture/overview.md) — High-level system design
-- [Control Plane](architecture/control-plane.md) — Worker management and health checking
-- [Data Plane](architecture/data-plane.md) — Request routing and response streaming
+- [Service Discovery](architecture/service-discovery.md) — Kubernetes integration and worker registration
+- [gRPC Pipeline](architecture/grpc-pipeline.md) — Token-level streaming implementation
+- [High Availability](architecture/high-availability.md) — Multi-instance mesh networking
 
 ### Routing
 
