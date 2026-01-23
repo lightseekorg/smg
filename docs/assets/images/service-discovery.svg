@@ -1,0 +1,259 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 480">
+  <defs>
+    <linearGradient id="sd-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="sd-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="sd-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="sd-amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="sd-pinkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ec4899"/>
+      <stop offset="100%" style="stop-color:#f472b6"/>
+    </linearGradient>
+    <linearGradient id="sd-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <filter id="sd-glow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="sd-softGlow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="sd-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+    <marker id="sd-arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#10b981"/>
+    </marker>
+    <marker id="sd-arrow-amber" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#f59e0b"/>
+    </marker>
+    <marker id="sd-arrow-blue" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#38bdf8"/>
+    </marker>
+    <clipPath id="sd-clipFlow1">
+      <rect x="245" y="135" width="70" height="30"/>
+    </clipPath>
+    <clipPath id="sd-clipFlow2">
+      <rect x="565" y="185" width="120" height="30"/>
+    </clipPath>
+  </defs>
+
+  <style>
+    .sd-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .sd-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .sd-feature { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #94a3b8; }
+    .sd-layer-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+    .sd-code { font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace; font-size: 9px; fill: #a5b4fc; }
+    .sd-badge { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 7px; }
+
+    @keyframes sd-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    @keyframes sd-flow { 0% { transform: translateX(0); opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } 100% { transform: translateX(55px); opacity: 0; } }
+
+    .sd-pulse { animation: sd-pulse 2s ease-in-out infinite; }
+    .sd-packet1 { animation: sd-flow 1.2s linear infinite; }
+    .sd-packet2 { animation: sd-flow 1.2s linear infinite 0.4s; }
+    .sd-packet3 { animation: sd-flow 1.2s linear infinite 0.8s; }
+  </style>
+
+  <!-- Background -->
+  <rect width="900" height="480" rx="16" fill="url(#sd-bgGrad)"/>
+  <rect width="900" height="480" fill="url(#sd-grid)" rx="16"/>
+
+  <!-- Glow effects -->
+  <ellipse cx="130" cy="200" rx="100" ry="130" fill="#0ea5e9" opacity="0.06" filter="url(#sd-softGlow)"/>
+  <ellipse cx="450" cy="200" rx="120" ry="140" fill="#6366f1" opacity="0.08" filter="url(#sd-softGlow)"/>
+  <ellipse cx="770" cy="200" rx="100" ry="130" fill="#10b981" opacity="0.06" filter="url(#sd-softGlow)"/>
+
+  <!-- Title -->
+  <text x="450" y="32" text-anchor="middle" class="sd-label" font-size="14" fill="#f1f5f9">Kubernetes Service Discovery</text>
+
+  <!-- Left: Kubernetes API -->
+  <rect x="30" y="55" width="200" height="290" rx="12" fill="#1e293b" stroke="#0ea5e9" stroke-width="1.5"/>
+  <rect x="30" y="55" width="200" height="32" rx="12" fill="url(#sd-blueGrad)"/>
+  <rect x="30" y="75" width="200" height="12" fill="url(#sd-blueGrad)"/>
+  <text x="130" y="77" text-anchor="middle" class="sd-label" font-size="11" fill="white">Kubernetes API</text>
+
+  <!-- Namespace box -->
+  <rect x="45" y="100" width="170" height="30" rx="6" fill="#334155" stroke="#475569" stroke-width="1"/>
+  <text x="130" y="113" text-anchor="middle" class="sd-layer-label" fill="#38bdf8">Namespace: inference</text>
+  <text x="130" y="125" text-anchor="middle" class="sd-code" font-size="8">selector: app=sglang</text>
+
+  <!-- Pod list -->
+  <rect x="45" y="140" width="170" height="190" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+  <text x="130" y="158" text-anchor="middle" class="sd-layer-label">Watched Pods</text>
+
+  <!-- Pod 1 - Healthy -->
+  <rect x="55" y="168" width="150" height="38" rx="5" fill="#334155" stroke="#10b981" stroke-width="1" class="sd-pulse"/>
+  <circle cx="68" cy="180" r="4" fill="#10b981"/>
+  <text x="78" y="183" class="sd-code" font-size="8" fill="#e2e8f0">sglang-worker-0</text>
+  <text x="68" y="198" class="sd-feature" font-size="7">10.0.0.5:8000 • Running</text>
+  <rect x="158" y="172" width="38" height="11" rx="3" fill="#10b981" opacity="0.3"/>
+  <text x="177" y="180" text-anchor="middle" class="sd-badge" fill="#34d399">Ready</text>
+
+  <!-- Pod 2 - Healthy -->
+  <rect x="55" y="212" width="150" height="38" rx="5" fill="#334155" stroke="#10b981" stroke-width="1" class="sd-pulse"/>
+  <circle cx="68" cy="224" r="4" fill="#10b981"/>
+  <text x="78" y="227" class="sd-code" font-size="8" fill="#e2e8f0">sglang-worker-1</text>
+  <text x="68" y="242" class="sd-feature" font-size="7">10.0.0.6:8000 • Running</text>
+  <rect x="158" y="216" width="38" height="11" rx="3" fill="#10b981" opacity="0.3"/>
+  <text x="177" y="224" text-anchor="middle" class="sd-badge" fill="#34d399">Ready</text>
+
+  <!-- Pod 3 - Not Ready -->
+  <rect x="55" y="256" width="150" height="38" rx="5" fill="#334155" stroke="#f59e0b" stroke-width="1"/>
+  <circle cx="68" cy="268" r="4" fill="#f59e0b"/>
+  <text x="78" y="271" class="sd-code" font-size="8" fill="#e2e8f0">sglang-worker-2</text>
+  <text x="68" y="286" class="sd-feature" font-size="7">10.0.0.7:8000 • Pending</text>
+  <rect x="148" y="260" width="48" height="11" rx="3" fill="#f59e0b" opacity="0.3"/>
+  <text x="172" y="268" text-anchor="middle" class="sd-badge" fill="#fbbf24">Not Ready</text>
+
+  <!-- Pod 4 - Terminating -->
+  <rect x="55" y="300" width="150" height="24" rx="5" fill="#334155" stroke="#ef4444" stroke-width="1" opacity="0.6"/>
+  <circle cx="68" cy="312" r="4" fill="#ef4444" opacity="0.6"/>
+  <text x="78" y="316" class="sd-code" font-size="7" fill="#94a3b8">sglang-worker-3 (deleting)</text>
+
+  <!-- Center: SMG Gateway -->
+  <rect x="295" y="55" width="310" height="290" rx="12" fill="#1e293b" stroke="#6366f1" stroke-width="1.5"/>
+  <rect x="295" y="55" width="310" height="32" rx="12" fill="url(#sd-primaryGrad)"/>
+  <rect x="295" y="75" width="310" height="12" fill="url(#sd-primaryGrad)"/>
+  <text x="450" y="77" text-anchor="middle" class="sd-label" font-size="11" fill="white">SMG Gateway</text>
+
+  <!-- Watcher box -->
+  <rect x="310" y="100" width="130" height="85" rx="8" fill="#334155" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="375" y="118" text-anchor="middle" class="sd-layer-label" fill="#a5b4fc">Pod Watcher</text>
+  <text x="375" y="140" text-anchor="middle" class="sd-feature" fill="#e2e8f0">kube::watcher</text>
+  <text x="375" y="157" text-anchor="middle" class="sd-feature" fill="#e2e8f0">Filter by selector</text>
+  <text x="375" y="174" text-anchor="middle" class="sd-feature" fill="#e2e8f0">Track pod state</text>
+
+  <!-- Event Handler box -->
+  <rect x="455" y="100" width="140" height="85" rx="8" fill="#334155" stroke="#10b981" stroke-width="1"/>
+  <text x="525" y="118" text-anchor="middle" class="sd-layer-label" fill="#34d399">Event Handler</text>
+
+  <rect x="465" y="130" width="120" height="22" rx="4" fill="#1e293b" stroke="#10b981" stroke-width="1"/>
+  <text x="525" y="145" text-anchor="middle" class="sd-code" font-size="8" fill="#34d399">handle_pod_event()</text>
+
+  <rect x="465" y="157" width="120" height="22" rx="4" fill="#1e293b" stroke="#ef4444" stroke-width="1"/>
+  <text x="525" y="172" text-anchor="middle" class="sd-code" font-size="8" fill="#f87171">handle_pod_deletion()</text>
+
+  <!-- Job Queue box -->
+  <rect x="310" y="200" width="285" height="65" rx="8" fill="#334155" stroke="#475569" stroke-width="1"/>
+  <text x="452" y="218" text-anchor="middle" class="sd-layer-label">Job Queue</text>
+
+  <rect x="325" y="232" width="80" height="25" rx="4" fill="#10b981" opacity="0.2" stroke="#10b981" stroke-width="1"/>
+  <text x="365" y="249" text-anchor="middle" class="sd-feature" fill="#34d399">AddWorker</text>
+
+  <rect x="415" y="232" width="90" height="25" rx="4" fill="#ef4444" opacity="0.2" stroke="#ef4444" stroke-width="1"/>
+  <text x="460" y="249" text-anchor="middle" class="sd-feature" fill="#f87171">RemoveWorker</text>
+
+  <rect x="515" y="232" width="70" height="25" rx="4" fill="#f59e0b" opacity="0.2" stroke="#f59e0b" stroke-width="1"/>
+  <text x="550" y="249" text-anchor="middle" class="sd-feature" fill="#fbbf24">HealthCheck</text>
+
+  <!-- Tracked Pods state -->
+  <rect x="310" y="275" width="285" height="60" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+  <text x="452" y="293" text-anchor="middle" class="sd-layer-label">Tracked Pods (HashSet)</text>
+  <text x="452" y="312" text-anchor="middle" class="sd-code" font-size="9" fill="#94a3b8">{ sglang-worker-0, sglang-worker-1 }</text>
+  <text x="452" y="328" text-anchor="middle" class="sd-feature" font-size="8" fill="#64748b">Deduplication • State tracking</text>
+
+  <!-- Right: Worker Registry -->
+  <rect x="670" y="55" width="200" height="290" rx="12" fill="#1e293b" stroke="#10b981" stroke-width="1.5"/>
+  <rect x="670" y="55" width="200" height="32" rx="12" fill="url(#sd-greenGrad)"/>
+  <rect x="670" y="75" width="200" height="12" fill="url(#sd-greenGrad)"/>
+  <text x="770" y="77" text-anchor="middle" class="sd-label" font-size="11" fill="white">Worker Registry</text>
+
+  <!-- Registered workers header -->
+  <rect x="685" y="100" width="170" height="24" rx="6" fill="#334155" stroke="#475569" stroke-width="1"/>
+  <text x="770" y="116" text-anchor="middle" class="sd-layer-label" fill="#34d399">Registered Workers</text>
+
+  <!-- Worker 1 -->
+  <rect x="685" y="132" width="170" height="60" rx="6" fill="#334155" stroke="#10b981" stroke-width="1"/>
+  <circle cx="700" cy="150" r="5" fill="#10b981"/>
+  <text x="712" y="153" class="sd-code" font-size="8" fill="#e2e8f0">http://10.0.0.5:8000</text>
+  <text x="695" y="170" class="sd-feature" font-size="8">Model: Llama-3.1-8B</text>
+  <text x="695" y="185" class="sd-feature" font-size="8" fill="#34d399">Status: Healthy</text>
+
+  <!-- Worker 2 -->
+  <rect x="685" y="200" width="170" height="60" rx="6" fill="#334155" stroke="#10b981" stroke-width="1"/>
+  <circle cx="700" cy="218" r="5" fill="#10b981"/>
+  <text x="712" y="221" class="sd-code" font-size="8" fill="#e2e8f0">http://10.0.0.6:8000</text>
+  <text x="695" y="238" class="sd-feature" font-size="8">Model: Llama-3.1-8B</text>
+  <text x="695" y="253" class="sd-feature" font-size="8" fill="#34d399">Status: Healthy</text>
+
+  <!-- Metrics box -->
+  <rect x="685" y="270" width="170" height="65" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+  <text x="770" y="290" text-anchor="middle" class="sd-layer-label" fill="#fbbf24">Discovery Metrics</text>
+  <text x="770" y="310" text-anchor="middle" class="sd-feature" fill="#e2e8f0">Workers discovered: 2</text>
+  <text x="770" y="326" text-anchor="middle" class="sd-feature" fill="#e2e8f0">Registrations: 2 success</text>
+
+  <!-- Flow arrows -->
+  <!-- K8s to SMG Watch -->
+  <path d="M 230 150 L 295 150" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#sd-arrow-blue)"/>
+  <text x="262" y="140" text-anchor="middle" class="sd-feature" font-size="8" fill="#38bdf8">Watch</text>
+
+  <!-- SMG to Registry -->
+  <path d="M 605 200 L 670 200" stroke="#10b981" stroke-width="2" fill="none" marker-end="url(#sd-arrow)"/>
+  <text x="637" y="190" text-anchor="middle" class="sd-feature" font-size="8" fill="#10b981">Register</text>
+
+  <!-- Animated watch events -->
+  <g clip-path="url(#sd-clipFlow1)">
+    <circle cx="245" cy="150" r="4" fill="#38bdf8" class="sd-packet1" filter="url(#sd-glow)"/>
+    <circle cx="245" cy="150" r="4" fill="#0ea5e9" class="sd-packet2" filter="url(#sd-glow)"/>
+  </g>
+
+  <!-- Animated register events -->
+  <g clip-path="url(#sd-clipFlow2)">
+    <circle cx="605" cy="200" r="4" fill="#34d399" class="sd-packet1" filter="url(#sd-glow)"/>
+  </g>
+
+  <!-- Bottom: PD Mode section -->
+  <rect x="30" y="360" width="840" height="105" rx="12" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+  <text x="450" y="382" text-anchor="middle" class="sd-layer-label" fill="#a5b4fc">PD Disaggregation Mode</text>
+
+  <!-- Prefill selector -->
+  <rect x="50" y="395" width="195" height="58" rx="8" fill="#334155" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="50" y="395" width="195" height="22" rx="8" fill="#3b82f6"/>
+  <rect x="50" y="409" width="195" height="8" fill="#3b82f6"/>
+  <text x="147" y="411" text-anchor="middle" class="sd-label" font-size="10" fill="white">Prefill Workers</text>
+  <text x="147" y="432" text-anchor="middle" class="sd-code" font-size="8">--prefill-selector</text>
+  <text x="147" y="447" text-anchor="middle" class="sd-code" font-size="7" fill="#94a3b8">"app=sglang,role=prefill"</text>
+
+  <!-- Decode selector -->
+  <rect x="260" y="395" width="195" height="58" rx="8" fill="#334155" stroke="#f59e0b" stroke-width="1.5"/>
+  <rect x="260" y="395" width="195" height="22" rx="8" fill="#f59e0b"/>
+  <rect x="260" y="409" width="195" height="8" fill="#f59e0b"/>
+  <text x="357" y="411" text-anchor="middle" class="sd-label" font-size="10" fill="#1e293b">Decode Workers</text>
+  <text x="357" y="432" text-anchor="middle" class="sd-code" font-size="8">--decode-selector</text>
+  <text x="357" y="447" text-anchor="middle" class="sd-code" font-size="7" fill="#94a3b8">"app=sglang,role=decode"</text>
+
+  <!-- Router selector (for mesh) -->
+  <rect x="470" y="395" width="195" height="58" rx="8" fill="#334155" stroke="#ec4899" stroke-width="1.5"/>
+  <rect x="470" y="395" width="195" height="22" rx="8" fill="#ec4899"/>
+  <rect x="470" y="409" width="195" height="8" fill="#ec4899"/>
+  <text x="567" y="411" text-anchor="middle" class="sd-label" font-size="10" fill="white">Router Nodes</text>
+  <text x="567" y="432" text-anchor="middle" class="sd-code" font-size="8">--router-selector</text>
+  <text x="567" y="447" text-anchor="middle" class="sd-code" font-size="7" fill="#94a3b8">"app=smg,role=router"</text>
+
+  <!-- Feature callouts -->
+  <rect x="680" y="395" width="180" height="58" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+  <text x="770" y="415" text-anchor="middle" class="sd-layer-label" fill="#10b981">Features</text>
+  <text x="770" y="434" text-anchor="middle" class="sd-feature" fill="#e2e8f0">• Automatic type detection</text>
+  <text x="770" y="450" text-anchor="middle" class="sd-feature" fill="#e2e8f0">• Bootstrap port annotation</text>
+</svg>

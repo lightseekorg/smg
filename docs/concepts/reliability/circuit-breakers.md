@@ -6,13 +6,43 @@ title: Circuit Breakers
 
 Circuit breakers prevent cascade failures by stopping traffic to unhealthy workers. They're essential for maintaining system stability when workers fail.
 
-<div class="objectives" markdown>
+---
 
-#### What you'll learn
+## Overview
 
-- How circuit breakers protect your system
-- The three circuit breaker states
-- How to configure circuit breaker behavior
+<div class="grid" markdown>
+
+<div class="card" markdown>
+
+### :material-electric-switch: Automatic Isolation
+
+Automatically isolate unhealthy workers to prevent cascade failures across your inference fleet.
+
+</div>
+
+<div class="card" markdown>
+
+### :material-lightning-bolt: Fail Fast
+
+Detect failing workers and stop sending traffic immediately—no wasted requests or timeout waits.
+
+</div>
+
+<div class="card" markdown>
+
+### :material-refresh: Self-Healing
+
+Automatically test recovery and restore traffic when workers become healthy again.
+
+</div>
+
+<div class="card" markdown>
+
+### :material-chart-line: Observable
+
+Full Prometheus metrics for state transitions, failure counts, and recovery timing.
+
+</div>
 
 </div>
 
@@ -33,30 +63,51 @@ Circuit breakers **fail fast**—they detect failing workers and stop sending tr
 
 ## How It Works
 
+<div class="architecture-diagram">
+  <img src="../../../assets/images/circuit-breaker.svg" alt="Circuit Breaker State Machine">
+</div>
+
 Each worker has its own circuit breaker with three states:
 
-```mermaid
-stateDiagram-v2
-    [*] --> Closed: Initial state
+<div class="grid" markdown>
 
-    Closed --> Open: Failures ≥ threshold
-    note right of Closed: Normal operation<br/>Requests allowed
+<div class="card" markdown>
 
-    Open --> HalfOpen: Timeout expires
-    note right of Open: Failing<br/>Requests rejected
+### :material-check-circle: Closed State
 
-    HalfOpen --> Closed: Success
-    HalfOpen --> Open: Failure
-    note right of HalfOpen: Testing<br/>Limited requests
-```
+**Normal operation** - requests flow through.
 
-### States
+- Failures increment counter
+- Success resets counter to zero
+- Opens when failures ≥ threshold
 
-| State | Behavior |
-|-------|----------|
-| **Closed** | Normal operation. Requests flow to worker. Failures are counted. |
-| **Open** | Worker is failing. Requests are **immediately rejected** without attempting the worker. |
-| **Half-Open** | Testing recovery. A **limited number** of requests are allowed through. Success closes the circuit; failure reopens it. |
+</div>
+
+<div class="card" markdown>
+
+### :material-close-circle: Open State
+
+**Circuit tripped** - requests rejected immediately.
+
+- Worker isolated from pool
+- No traffic sent to worker
+- Transitions to half-open after timeout
+
+</div>
+
+<div class="card" markdown>
+
+### :material-help-circle: Half-Open State
+
+**Testing recovery** - limited probe requests allowed.
+
+- Success → close circuit
+- Any failure → reopen circuit
+- Gradual traffic restoration
+
+</div>
+
+</div>
 
 ---
 
@@ -101,11 +152,50 @@ smg \
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--cb-failure-threshold` | 5 | Failures to open circuit |
-| `--cb-success-threshold` | 2 | Successes to close from half-open |
-| `--cb-timeout-duration-secs` | 30 | Time before testing recovery |
-| `--cb-window-duration-secs` | 60 | Sliding window for counting failures |
-| `--disable-circuit-breaker` | false | Disable circuit breakers entirely |
+| `--cb-failure-threshold` | `10` | Consecutive failures before circuit opens |
+| `--cb-success-threshold` | `3` | Successes in half-open state to close circuit |
+| `--cb-timeout-duration-secs` | `60` | Seconds before open circuit transitions to half-open |
+| `--cb-window-duration-secs` | `120` | Sliding window for counting failures |
+| `--disable-circuit-breaker` | `false` | Disable circuit breakers entirely |
+
+### Configuration Examples
+
+<div class="grid" markdown>
+
+<div class="card" markdown>
+
+#### :material-lightning-bolt: Fast Circuit Opening
+
+Sensitive to failures—isolate workers quickly.
+
+```bash
+smg \
+  --cb-failure-threshold 3 \
+  --cb-timeout-duration-secs 30
+```
+
+**Use when**: Critical availability, latency-sensitive applications
+
+</div>
+
+<div class="card" markdown>
+
+#### :material-shield: Tolerant Configuration
+
+Allow occasional failures before tripping.
+
+```bash
+smg \
+  --cb-failure-threshold 20 \
+  --cb-success-threshold 5 \
+  --cb-timeout-duration-secs 120
+```
+
+**Use when**: Flaky workers, network instability, batch processing
+
+</div>
+
+</div>
 
 ### Tuning Guidelines
 
@@ -191,22 +281,56 @@ sequenceDiagram
 
 ## Monitoring
 
-Track circuit breaker state with Prometheus:
+### Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `smg_circuit_breaker_state` | Current state per worker (0=closed, 1=open, 2=half-open) |
+| `smg_circuit_breaker_transitions_total` | State transitions by worker and direction |
+| `smg_circuit_breaker_consecutive_failures` | Current failure count per worker |
+| `smg_circuit_breaker_consecutive_successes` | Current success count per worker |
+
+### Useful PromQL Queries
+
+<div class="grid" markdown>
+
+<div class="card" markdown>
+
+#### Current States
 
 ```promql
 # Current circuit breaker states
-# 0 = closed, 1 = open, 2 = half-open
-smg_worker_cb_state
+smg_circuit_breaker_state
 
 # Workers with open circuits
-count(smg_worker_cb_state == 1)
+count(smg_circuit_breaker_state == 1)
+```
 
-# State transitions
-rate(smg_worker_cb_transitions_total[5m])
+</div>
+
+<div class="card" markdown>
+
+#### Transitions
+
+```promql
+# State transitions rate
+rate(smg_circuit_breaker_transitions_total[5m])
 
 # Consecutive failures per worker
-smg_worker_cb_consecutive_failures
+smg_circuit_breaker_consecutive_failures
 ```
+
+</div>
+
+</div>
+
+### Alert Thresholds
+
+| Metric | Warning | Critical | Action |
+|--------|---------|----------|--------|
+| Open circuits | 1 worker | All workers | Investigate worker health |
+| Transition rate | >10/min | >50/min | Check for flapping |
+| Consecutive failures | >5 | >threshold | Worker likely failing |
 
 ### Alerting Example
 
@@ -215,7 +339,7 @@ groups:
   - name: smg-circuit-breakers
     rules:
       - alert: CircuitBreakerOpen
-        expr: smg_worker_cb_state == 1
+        expr: smg_circuit_breaker_state == 1
         for: 1m
         labels:
           severity: warning
@@ -223,7 +347,7 @@ groups:
           summary: "Circuit breaker open for {{ $labels.worker_id }}"
 
       - alert: AllCircuitsOpen
-        expr: count(smg_worker_cb_state == 1) == count(smg_worker_cb_state)
+        expr: count(smg_circuit_breaker_state == 1) == count(smg_circuit_breaker_state)
         for: 30s
         labels:
           severity: critical
@@ -274,5 +398,46 @@ smg --worker-urls http://w1:8000 --disable-circuit-breaker
 
 ## What's Next?
 
-- [Rate Limiting](rate-limiting.md) — Protecting workers from overload
-- [Metrics Reference](../../reference/metrics.md) — Circuit breaker metrics
+<div class="grid" markdown>
+
+<div class="card" markdown>
+
+### :material-refresh: Retries
+
+Automatic retry with exponential backoff for transient failures.
+
+[Retries →](retries.md)
+
+</div>
+
+<div class="card" markdown>
+
+### :material-heart-pulse: Health Checks
+
+Proactive worker monitoring and failure detection.
+
+[Health Checks →](health-checks.md)
+
+</div>
+
+<div class="card" markdown>
+
+### :material-traffic-light: Rate Limiting
+
+Protect workers from overload with token bucket rate limiting.
+
+[Rate Limiting →](rate-limiting.md)
+
+</div>
+
+<div class="card" markdown>
+
+### :material-chart-box: Metrics Reference
+
+Complete list of circuit breaker metrics.
+
+[Metrics Reference →](../../reference/metrics.md)
+
+</div>
+
+</div>

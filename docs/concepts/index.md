@@ -72,6 +72,26 @@ Routing strategies from simple random selection to cache-aware algorithms.
 
 <div class="card" markdown>
 
+### :material-lightning-bolt: Performance
+
+Tokenizer caching and optimization strategies for high-throughput deployments.
+
+[Learn about Performance →](performance/tokenizer-caching.md)
+
+</div>
+
+<div class="card" markdown>
+
+### :material-puzzle: Extensibility
+
+WASM plugins and MCP integration for custom middleware and external tools.
+
+[Learn about Extensibility →](extensibility/wasm-plugins.md)
+
+</div>
+
+<div class="card" markdown>
+
 ### :material-shield: Reliability
 
 Circuit breakers, retries, and rate limiting for resilient deployments.
@@ -100,6 +120,19 @@ Learn how SMG selects workers for requests:
 
 - [Load Balancing](routing/load-balancing.md) — Available routing policies
 - [Cache-Aware Routing](routing/cache-aware.md) — Prefix-based worker affinity
+
+### Performance
+
+Optimize SMG for high-throughput deployments:
+
+- [Tokenizer Caching](performance/tokenizer-caching.md) — Two-level cache for tokenization
+
+### Extensibility
+
+Extend SMG with custom logic and external tools:
+
+- [WASM Plugins](extensibility/wasm-plugins.md) — Dynamic middleware with WebAssembly
+- [Model Context Protocol](extensibility/mcp.md) — External tool integration via MCP
 
 ### Reliability
 

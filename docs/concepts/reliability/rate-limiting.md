@@ -6,13 +6,43 @@ title: Rate Limiting
 
 Rate limiting protects workers from being overwhelmed by too many concurrent requests. SMG uses a token bucket algorithm with optional request queuing.
 
-<div class="objectives" markdown>
+---
 
-#### What you'll learn
+## Overview
 
-- How the token bucket algorithm works
-- How request queuing prevents request loss
-- How to configure rate limits for your workload
+<div class="grid" markdown>
+
+<div class="card" markdown>
+
+### :material-bucket: Token Bucket
+
+Smooth rate limiting with burst capacity using the token bucket algorithm.
+
+</div>
+
+<div class="card" markdown>
+
+### :material-tray-full: Request Queuing
+
+Queue excess requests instead of rejecting them immediately.
+
+</div>
+
+<div class="card" markdown>
+
+### :material-timer-outline: Configurable Timeouts
+
+Bound request and queue wait times to maintain system responsiveness.
+
+</div>
+
+<div class="card" markdown>
+
+### :material-chart-line: Observable
+
+Full Prometheus metrics for queue depth, wait times, and rejection rates.
+
+</div>
 
 </div>
 
@@ -76,14 +106,25 @@ smg \
   --queue-timeout-secs 30
 ```
 
-### Parameters
+### Rate Limit Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--max-concurrent-requests` | -1 (unlimited) | Maximum concurrent requests |
-| `--rate-limit-tokens-per-second` | 512 | Token refill rate |
-| `--queue-size` | 128 | Maximum queued requests |
-| `--queue-timeout-secs` | 30 | Maximum queue wait time |
+| `--max-concurrent-requests` | `-1` (unlimited) | Maximum concurrent requests |
+| `--rate-limit-tokens-per-second` | `512` | Token refill rate |
+| `--queue-size` | `128` | Maximum queued requests |
+| `--queue-timeout-secs` | `30` | Maximum queue wait time |
+
+### Timeout Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--request-timeout-secs` | `1800` (30 min) | Maximum time for a request to complete |
+| `--queue-timeout-secs` | `60` | Maximum time a request waits in queue |
+| `--worker-startup-timeout-secs` | `1800` (30 min) | Timeout for worker startup/model loading |
+
+!!! note "Concurrency vs. Rate Limiting"
+    Setting `--max-concurrent-requests` alone enables **concurrency limiting** (bounds simultaneous requests). To enable **rate limiting** (bounds requests per second using a token bucket), you must explicitly set `--rate-limit-tokens-per-second`.
 
 ---
 
@@ -201,29 +242,61 @@ The 1.2 factor provides headroom for bursts.
 
 ## Monitoring
 
-Track rate limiting with Prometheus:
+### Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `smg_http_rate_limit_total` | Rate limit decisions by type |
+| `smg_queue_depth` | Current number of queued requests |
+| `smg_queue_wait_seconds` | Queue wait time histogram |
+| `smg_request_duration_seconds` | Request duration histogram |
+| `smg_queue_timeout_total` | Requests that timed out in queue |
+
+### Useful PromQL Queries
+
+<div class="grid" markdown>
+
+<div class="card" markdown>
+
+#### Rate Limit Decisions
 
 ```promql
-# Rate limit decisions
+# Rate limit decisions per second
 rate(smg_http_rate_limit_total[5m])
 
-# By decision type
-sum by (decision) (rate(smg_http_rate_limit_total[5m]))
-
-# Queue depth
-smg_queue_depth
-
-# Queue wait time
-histogram_quantile(0.99, rate(smg_queue_wait_seconds_bucket[5m]))
+# By decision type (allowed/rejected)
+sum by (decision) (
+  rate(smg_http_rate_limit_total[5m])
+)
 ```
 
-### Dashboard Queries
+</div>
 
-| Metric | Query |
-|--------|-------|
-| Rejection rate | `rate(smg_http_rate_limit_total{decision="rejected"}[5m])` |
-| Queue utilization | `smg_queue_depth / smg_queue_size` |
-| Average queue wait | `rate(smg_queue_wait_seconds_sum[5m]) / rate(smg_queue_wait_seconds_count[5m])` |
+<div class="card" markdown>
+
+#### Queue Metrics
+
+```promql
+# Queue utilization
+smg_queue_depth / smg_queue_size
+
+# 99th percentile queue wait
+histogram_quantile(0.99,
+  rate(smg_queue_wait_seconds_bucket[5m]))
+```
+
+</div>
+
+</div>
+
+### Alert Thresholds
+
+| Metric | Warning | Critical | Action |
+|--------|---------|----------|--------|
+| Queue utilization | >70% | >90% | Increase queue size or capacity |
+| Rejection rate | >5% | >20% | Increase limits or scale workers |
+| Avg queue wait | >10s | >30s | Reduce load or increase capacity |
+| Queue timeouts | >1/min | >10/min | Investigate bottlenecks |
 
 ---
 
@@ -271,6 +344,46 @@ class AdaptiveClient:
 
 ## What's Next?
 
-- [Circuit Breakers](circuit-breakers.md) — Handling worker failures
-- [Metrics Reference](../../reference/metrics.md) — Rate limiting metrics
-- [Monitoring Task](../../tasks/operations/monitoring.md) — Setting up dashboards
+<div class="grid" markdown>
+
+<div class="card" markdown>
+
+### :material-electric-switch: Circuit Breakers
+
+Isolate failing workers to prevent cascade failures.
+
+[Circuit Breakers →](circuit-breakers.md)
+
+</div>
+
+<div class="card" markdown>
+
+### :material-refresh: Retries
+
+Automatic retry with exponential backoff for transient failures.
+
+[Retries →](retries.md)
+
+</div>
+
+<div class="card" markdown>
+
+### :material-heart-pulse: Health Checks
+
+Proactive worker monitoring and failure detection.
+
+[Health Checks →](health-checks.md)
+
+</div>
+
+<div class="card" markdown>
+
+### :material-chart-box: Metrics Reference
+
+Complete list of rate limiting metrics.
+
+[Metrics Reference →](../../reference/metrics.md)
+
+</div>
+
+</div>

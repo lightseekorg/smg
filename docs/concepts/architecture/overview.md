@@ -197,19 +197,24 @@ All paths use the same load balancing infrastructure with multiple policies.
 
 | Policy | Algorithm | Best For |
 |--------|-----------|----------|
-| `random` | Uniform random | Simple deployments |
+| `cache_aware` | Radix tree prefix matching + load | **Production default** |
+| `bucket` | Request-length buckets | PD disaggregation |
+| `power_of_two` | Sample two, pick lighter | Load-aware routing |
+| `consistent_hashing` | Hash ring with virtual nodes | Session affinity |
+| `prefix_hash` | Prefix token hash | Lightweight cache locality |
+| `manual` | Explicit routing key mapping | Stateful chat |
 | `round_robin` | Sequential cycling | Even distribution |
-| `power_of_two` | Sample two, pick lighter | Balanced load |
-| `cache_aware` | Prefix locality + load | Production (default) |
+| `random` | Uniform random | Testing |
 
 ### Cache-Aware Routing
 
 The cache-aware policy optimizes for KV cache reuse:
 
-1. Hash the tokenized prefix
-2. Find workers with cached prefix
-3. Among matches, select by current load
-4. Falls back to least-loaded if no cache hit
+1. Tokenize the request prefix
+2. Search radix tree for longest matching prefix per worker
+3. If match ratio ≥ threshold, route to matched worker
+4. Otherwise, route to worker with most cache capacity
+5. Falls back to least-loaded when system is imbalanced
 
 This integrates with vLLM, SGLang, and TensorRT-LLM's native KV cache management.
 
@@ -230,7 +235,9 @@ Built-in resilience features protect against failures.
 
 ## What's Next?
 
-- [Control Plane](control-plane.md) - Worker management and service discovery
-- [Data Plane](data-plane.md) - Request routing implementation details
+- [Service Discovery](service-discovery.md) - Automatic worker discovery in Kubernetes
+- [gRPC Pipeline](grpc-pipeline.md) - Token-level streaming implementation
+- [High Availability](high-availability.md) - Multi-instance mesh networking
 - [Load Balancing](../routing/load-balancing.md) - Routing policy deep dive
 - [Cache-Aware Routing](../routing/cache-aware.md) - KV cache optimization
+- [PD Disaggregation](../routing/pd-disaggregation.md) - Prefill-decode separation

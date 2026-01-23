@@ -1,0 +1,290 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560">
+  <defs>
+    <linearGradient id="mcp-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="mcp-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="mcp-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="mcp-amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="mcp-redGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ef4444"/>
+      <stop offset="100%" style="stop-color:#f87171"/>
+    </linearGradient>
+    <linearGradient id="mcp-tealGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#14b8a6"/>
+      <stop offset="100%" style="stop-color:#2dd4bf"/>
+    </linearGradient>
+    <linearGradient id="mcp-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <filter id="mcp-glow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="mcp-softGlow">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="mcp-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+    <clipPath id="mcp-clipFlow1">
+      <rect x="125" y="170" width="45" height="30"/>
+    </clipPath>
+    <clipPath id="mcp-clipFlow2">
+      <rect x="590" y="115" width="45" height="30"/>
+    </clipPath>
+    <clipPath id="mcp-clipFlow3">
+      <rect x="590" y="200" width="45" height="30"/>
+    </clipPath>
+  </defs>
+
+  <style>
+    .mcp-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .mcp-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .mcp-feature { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #94a3b8; }
+    .mcp-layer-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+    .mcp-code { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 9px; }
+
+    @keyframes mcp-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    @keyframes mcp-flow { 0% { transform: translateX(0); opacity: 0; } 10% { opacity: 1; } 90% { opacity: 1; } 100% { transform: translateX(35px); opacity: 0; } }
+
+    .mcp-packet1 { animation: mcp-flow 0.7s linear infinite; }
+    .mcp-packet2 { animation: mcp-flow 0.7s linear infinite 0.23s; }
+    .mcp-packet3 { animation: mcp-flow 0.7s linear infinite 0.46s; }
+    .mcp-pulse { animation: mcp-pulse 2s ease-in-out infinite; }
+  </style>
+
+  <!-- Background -->
+  <rect width="900" height="560" rx="16" fill="url(#mcp-bgGrad)"/>
+  <rect width="900" height="560" fill="url(#mcp-grid)" rx="16"/>
+
+  <!-- Glow effects -->
+  <ellipse cx="70" cy="185" rx="50" ry="70" fill="#6366f1" opacity="0.08" filter="url(#mcp-softGlow)"/>
+  <ellipse cx="380" cy="185" rx="150" ry="120" fill="#8b5cf6" opacity="0.06" filter="url(#mcp-softGlow)"/>
+  <ellipse cx="750" cy="130" rx="80" ry="60" fill="#10b981" opacity="0.08" filter="url(#mcp-softGlow)"/>
+  <ellipse cx="750" cy="215" rx="80" ry="60" fill="#0ea5e9" opacity="0.08" filter="url(#mcp-softGlow)"/>
+
+  <!-- Title -->
+  <text x="450" y="35" text-anchor="middle" class="mcp-label" font-size="14" fill="#e2e8f0">MCP Integration Architecture</text>
+  <text x="450" y="52" text-anchor="middle" class="mcp-feature" fill="#64748b">Tool Orchestration • Policy-Based Approval • Response Transformation</text>
+
+  <!-- LLM Worker -->
+  <g class="mcp-pulse">
+    <rect x="20" y="130" width="105" height="110" rx="10" fill="#1e293b" stroke="#6366f1" stroke-width="2"/>
+    <rect x="20" y="130" width="105" height="26" rx="10" fill="url(#mcp-primaryGrad)"/>
+    <rect x="20" y="148" width="105" height="8" fill="url(#mcp-primaryGrad)"/>
+    <text x="72" y="149" text-anchor="middle" class="mcp-label" font-size="11" fill="white">LLM Worker</text>
+    <text x="72" y="175" text-anchor="middle" class="mcp-feature">Tool Call:</text>
+    <text x="72" y="190" text-anchor="middle" class="mcp-code" fill="#a78bfa">web_search</text>
+    <text x="72" y="205" text-anchor="middle" class="mcp-code" fill="#94a3b8">{"query": "..."}</text>
+    <text x="72" y="225" text-anchor="middle" class="mcp-feature" fill="#64748b">vLLM / SGLang</text>
+  </g>
+
+  <!-- SMG Gateway Container -->
+  <rect x="155" y="70" width="420" height="220" rx="12" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="365" y="90" text-anchor="middle" class="mcp-layer-label" fill="#64748b">SMG GATEWAY — MCP ORCHESTRATOR</text>
+
+  <!-- Tool Inventory -->
+  <rect x="170" y="110" width="130" height="95" rx="8" fill="#1e293b" stroke="#f59e0b" stroke-width="1.5"/>
+  <rect x="170" y="110" width="130" height="24" rx="8" fill="url(#mcp-amberGrad)"/>
+  <rect x="170" y="126" width="130" height="8" fill="url(#mcp-amberGrad)"/>
+  <text x="235" y="128" text-anchor="middle" class="mcp-label" font-size="10" fill="#1e293b">Tool Inventory</text>
+  <text x="182" y="150" class="mcp-code" fill="#fbbf24">brave:web_search</text>
+  <text x="182" y="165" class="mcp-code" fill="#fbbf24">fs:read_file</text>
+  <text x="182" y="180" class="mcp-code" fill="#fbbf24">db:query</text>
+  <text x="182" y="195" class="mcp-feature" fill="#94a3b8">+ aliases, mappings</text>
+
+  <!-- Approval System -->
+  <rect x="170" y="215" width="130" height="65" rx="8" fill="#1e293b" stroke="#ef4444" stroke-width="1.5"/>
+  <rect x="170" y="215" width="130" height="22" rx="8" fill="url(#mcp-redGrad)"/>
+  <rect x="170" y="231" width="130" height="6" fill="url(#mcp-redGrad)"/>
+  <text x="235" y="231" text-anchor="middle" class="mcp-label" font-size="9" fill="white">Policy Engine</text>
+  <text x="182" y="250" class="mcp-feature" fill="#e2e8f0">Trust Levels</text>
+  <text x="182" y="265" class="mcp-feature" fill="#94a3b8">Audit Logging</text>
+
+  <!-- Connection Pool -->
+  <rect x="320" y="110" width="120" height="95" rx="8" fill="#1e293b" stroke="#14b8a6" stroke-width="1.5"/>
+  <rect x="320" y="110" width="120" height="24" rx="8" fill="url(#mcp-tealGrad)"/>
+  <rect x="320" y="126" width="120" height="8" fill="url(#mcp-tealGrad)"/>
+  <text x="380" y="128" text-anchor="middle" class="mcp-label" font-size="10" fill="#1e293b">Connection Pool</text>
+  <text x="332" y="150" class="mcp-feature" fill="#e2e8f0">LRU Cache</text>
+  <text x="332" y="165" class="mcp-feature" fill="#e2e8f0">Auth-Aware Keys</text>
+  <text x="332" y="180" class="mcp-feature" fill="#e2e8f0">Tenant Isolation</text>
+  <text x="332" y="195" class="mcp-feature" fill="#94a3b8">Auto-Reconnect</text>
+
+  <!-- Response Transformer -->
+  <rect x="320" y="215" width="120" height="65" rx="8" fill="#1e293b" stroke="#0ea5e9" stroke-width="1.5"/>
+  <rect x="320" y="215" width="120" height="22" rx="8" fill="url(#mcp-blueGrad)"/>
+  <rect x="320" y="231" width="120" height="6" fill="url(#mcp-blueGrad)"/>
+  <text x="380" y="231" text-anchor="middle" class="mcp-label" font-size="9" fill="white">Transformer</text>
+  <text x="332" y="250" class="mcp-feature" fill="#e2e8f0">MCP → OpenAI</text>
+  <text x="332" y="265" class="mcp-feature" fill="#94a3b8">web_search_call</text>
+
+  <!-- Router Box -->
+  <rect x="460" y="140" width="100" height="110" rx="8" fill="#1e293b" stroke="#8b5cf6" stroke-width="1.5"/>
+  <rect x="460" y="140" width="100" height="24" rx="8" fill="url(#mcp-primaryGrad)"/>
+  <rect x="460" y="156" width="100" height="8" fill="url(#mcp-primaryGrad)"/>
+  <text x="510" y="158" text-anchor="middle" class="mcp-label" font-size="10" fill="white">Router</text>
+  <text x="472" y="180" class="mcp-feature" fill="#e2e8f0">Qualified Names</text>
+  <text x="472" y="195" class="mcp-feature" fill="#e2e8f0">Server Discovery</text>
+  <text x="472" y="210" class="mcp-feature" fill="#e2e8f0">Health Checks</text>
+  <text x="472" y="225" class="mcp-feature" fill="#94a3b8">Retry Logic</text>
+  <text x="472" y="240" class="mcp-feature" fill="#94a3b8">Timeout Handling</text>
+
+  <!-- Connection lines within gateway -->
+  <line x1="300" y1="157" x2="320" y2="157" stroke="#475569" stroke-width="1.5"/>
+  <line x1="300" y1="247" x2="320" y2="247" stroke="#475569" stroke-width="1.5"/>
+  <line x1="440" y1="157" x2="460" y2="157" stroke="#475569" stroke-width="1.5"/>
+  <line x1="440" y1="247" x2="460" y2="247" stroke="#475569" stroke-width="1.5"/>
+
+  <!-- MCP Server 1 - Static (Brave) -->
+  <rect x="640" y="85" width="130" height="90" rx="10" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+  <rect x="640" y="85" width="130" height="24" rx="10" fill="url(#mcp-greenGrad)"/>
+  <rect x="640" y="101" width="130" height="8" fill="url(#mcp-greenGrad)"/>
+  <text x="705" y="103" text-anchor="middle" class="mcp-label" font-size="10" fill="white">Brave Search</text>
+  <text x="652" y="125" class="mcp-feature" fill="#e2e8f0">SSE Transport</text>
+  <text x="652" y="140" class="mcp-feature" fill="#e2e8f0">Static Connection</text>
+  <text x="652" y="155" class="mcp-code" fill="#34d399">web_search</text>
+  <text x="652" y="168" class="mcp-code" fill="#34d399">local_search</text>
+
+  <!-- MCP Server 2 - Static (Filesystem) -->
+  <rect x="640" y="185" width="130" height="90" rx="10" fill="#1e293b" stroke="#0ea5e9" stroke-width="2"/>
+  <rect x="640" y="185" width="130" height="24" rx="10" fill="url(#mcp-blueGrad)"/>
+  <rect x="640" y="201" width="130" height="8" fill="url(#mcp-blueGrad)"/>
+  <text x="705" y="203" text-anchor="middle" class="mcp-label" font-size="10" fill="white">Filesystem</text>
+  <text x="652" y="225" class="mcp-feature" fill="#e2e8f0">stdio Transport</text>
+  <text x="652" y="240" class="mcp-feature" fill="#e2e8f0">Local Process</text>
+  <text x="652" y="255" class="mcp-code" fill="#38bdf8">read_file</text>
+  <text x="652" y="268" class="mcp-code" fill="#38bdf8">write_file</text>
+
+  <!-- Dynamic Server indicator -->
+  <rect x="790" y="135" width="90" height="45" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1" stroke-dasharray="4,2"/>
+  <text x="835" y="155" text-anchor="middle" class="mcp-feature" fill="#94a3b8">Dynamic</text>
+  <text x="835" y="170" text-anchor="middle" class="mcp-feature" fill="#64748b">Per-Request</text>
+
+  <!-- Connection lines to servers -->
+  <line x1="560" y1="130" x2="640" y2="130" stroke="#10b981" stroke-width="2"/>
+  <polygon points="637,126 645,130 637,134" fill="#10b981"/>
+  <line x1="560" y1="230" x2="640" y2="230" stroke="#0ea5e9" stroke-width="2"/>
+  <polygon points="637,226 645,230 637,234" fill="#0ea5e9"/>
+  <line x1="560" y1="157" x2="590" y2="157" stroke="#475569" stroke-width="1.5" stroke-dasharray="4,2"/>
+  <line x1="590" y1="157" x2="790" y2="157" stroke="#475569" stroke-width="1.5" stroke-dasharray="4,2"/>
+
+  <!-- Animated flow packets -->
+  <g clip-path="url(#mcp-clipFlow1)">
+    <circle cx="130" cy="185" r="4" fill="#818cf8" class="mcp-packet1" filter="url(#mcp-glow)"/>
+    <circle cx="130" cy="185" r="4" fill="#a78bfa" class="mcp-packet2" filter="url(#mcp-glow)"/>
+  </g>
+  <g clip-path="url(#mcp-clipFlow2)">
+    <circle cx="595" cy="130" r="4" fill="#34d399" class="mcp-packet1" filter="url(#mcp-glow)"/>
+  </g>
+  <g clip-path="url(#mcp-clipFlow3)">
+    <circle cx="595" cy="230" r="4" fill="#38bdf8" class="mcp-packet1" filter="url(#mcp-glow)"/>
+  </g>
+
+  <!-- Connection line from LLM to Gateway -->
+  <line x1="125" y1="185" x2="170" y2="157" stroke="#6366f1" stroke-width="2"/>
+  <polygon points="167,154 175,157 167,161" fill="#6366f1"/>
+
+  <!-- Trust Levels Legend -->
+  <rect x="20" y="320" width="210" height="130" rx="10" fill="#1e293b" stroke="#ef4444" stroke-width="1"/>
+  <text x="125" y="342" text-anchor="middle" class="mcp-layer-label" fill="#ef4444">Trust Levels</text>
+
+  <rect x="35" y="358" width="10" height="10" rx="2" fill="#10b981"/>
+  <text x="52" y="367" class="mcp-sublabel" font-size="9" fill="#e2e8f0">Trusted</text>
+  <text x="105" y="367" class="mcp-feature" fill="#94a3b8">Allow all tools</text>
+
+  <rect x="35" y="378" width="10" height="10" rx="2" fill="#0ea5e9"/>
+  <text x="52" y="387" class="mcp-sublabel" font-size="9" fill="#e2e8f0">Standard</text>
+  <text x="105" y="387" class="mcp-feature" fill="#94a3b8">Use default policy</text>
+
+  <rect x="35" y="398" width="10" height="10" rx="2" fill="#f59e0b"/>
+  <text x="52" y="407" class="mcp-sublabel" font-size="9" fill="#e2e8f0">Untrusted</text>
+  <text x="105" y="407" class="mcp-feature" fill="#94a3b8">Deny destructive ops</text>
+
+  <rect x="35" y="418" width="10" height="10" rx="2" fill="#ef4444"/>
+  <text x="52" y="427" class="mcp-sublabel" font-size="9" fill="#e2e8f0">Sandboxed</text>
+  <text x="105" y="427" class="mcp-feature" fill="#94a3b8">Read-only, no network</text>
+
+  <!-- Response Formats Legend -->
+  <rect x="250" y="320" width="210" height="130" rx="10" fill="#1e293b" stroke="#0ea5e9" stroke-width="1"/>
+  <text x="355" y="342" text-anchor="middle" class="mcp-layer-label" fill="#0ea5e9">Response Transformation</text>
+
+  <text x="265" y="365" class="mcp-code" fill="#38bdf8">passthrough</text>
+  <text x="350" y="365" class="mcp-feature" fill="#94a3b8">→ mcp_call (raw)</text>
+
+  <text x="265" y="385" class="mcp-code" fill="#38bdf8">web_search_call</text>
+  <text x="370" y="385" class="mcp-feature" fill="#94a3b8">→ OpenAI format</text>
+
+  <text x="265" y="405" class="mcp-code" fill="#38bdf8">file_search_call</text>
+  <text x="370" y="405" class="mcp-feature" fill="#94a3b8">→ OpenAI format</text>
+
+  <text x="265" y="425" class="mcp-code" fill="#38bdf8">code_interpreter</text>
+  <text x="370" y="425" class="mcp-feature" fill="#94a3b8">→ OpenAI format</text>
+
+  <!-- Transport Types -->
+  <rect x="480" y="320" width="180" height="130" rx="10" fill="#1e293b" stroke="#14b8a6" stroke-width="1"/>
+  <text x="570" y="342" text-anchor="middle" class="mcp-layer-label" fill="#14b8a6">Transport Types</text>
+
+  <circle cx="498" cy="362" r="4" fill="#10b981"/>
+  <text x="510" y="366" class="mcp-sublabel" font-size="9" fill="#e2e8f0">stdio</text>
+  <text x="495" y="380" class="mcp-feature" fill="#94a3b8">Local processes (npx, python)</text>
+
+  <circle cx="498" cy="398" r="4" fill="#0ea5e9"/>
+  <text x="510" y="402" class="mcp-sublabel" font-size="9" fill="#e2e8f0">SSE</text>
+  <text x="495" y="416" class="mcp-feature" fill="#94a3b8">Server-Sent Events (remote)</text>
+
+  <circle cx="498" cy="434" r="4" fill="#f59e0b"/>
+  <text x="510" y="438" class="mcp-sublabel" font-size="9" fill="#e2e8f0">streamable</text>
+  <text x="495" y="452" class="mcp-feature" fill="#94a3b8">Bidirectional HTTP streaming</text>
+
+  <!-- Enterprise Features -->
+  <rect x="680" y="320" width="200" height="130" rx="10" fill="#1e293b" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="780" y="342" text-anchor="middle" class="mcp-layer-label" fill="#8b5cf6">Enterprise Features</text>
+
+  <circle cx="698" cy="362" r="4" fill="#8b5cf6"/>
+  <text x="710" y="366" class="mcp-feature" fill="#e2e8f0">Multi-tenant isolation</text>
+
+  <circle cx="698" cy="382" r="4" fill="#10b981"/>
+  <text x="710" y="386" class="mcp-feature" fill="#e2e8f0">Audit logging for compliance</text>
+
+  <circle cx="698" cy="402" r="4" fill="#0ea5e9"/>
+  <text x="710" y="406" class="mcp-feature" fill="#e2e8f0">Per-tool policy rules</text>
+
+  <circle cx="698" cy="422" r="4" fill="#f59e0b"/>
+  <text x="710" y="426" class="mcp-feature" fill="#e2e8f0">Credential isolation</text>
+
+  <circle cx="698" cy="442" r="4" fill="#ef4444"/>
+  <text x="710" y="446" class="mcp-feature" fill="#e2e8f0">Proxy support (HTTP/HTTPS)</text>
+
+  <!-- Bottom tagline -->
+  <text x="450" y="485" text-anchor="middle" class="mcp-sublabel" font-size="11" fill="#64748b">Models Never See Credentials  •  All Tool Calls Logged  •  Qualified Names Prevent Collisions</text>
+
+  <!-- External Tools indicator -->
+  <rect x="790" y="200" width="90" height="70" rx="6" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+  <text x="835" y="220" text-anchor="middle" class="mcp-layer-label" fill="#64748b">External</text>
+  <text x="835" y="238" text-anchor="middle" class="mcp-feature" fill="#94a3b8">Web APIs</text>
+  <text x="835" y="253" text-anchor="middle" class="mcp-feature" fill="#94a3b8">Databases</text>
+  <text x="835" y="268" text-anchor="middle" class="mcp-feature" fill="#94a3b8">File Systems</text>
+
+  <line x1="770" y1="130" x2="790" y2="235" stroke="#475569" stroke-width="1.5"/>
+  <line x1="770" y1="230" x2="790" y2="235" stroke="#475569" stroke-width="1.5"/>
+</svg>

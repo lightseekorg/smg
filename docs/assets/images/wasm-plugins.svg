@@ -1,0 +1,254 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520">
+  <defs>
+    <linearGradient id="wp-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="wp-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="wp-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="wp-amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="wp-redGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ef4444"/>
+      <stop offset="100%" style="stop-color:#f87171"/>
+    </linearGradient>
+    <linearGradient id="wp-purpleGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#8b5cf6"/>
+      <stop offset="100%" style="stop-color:#a78bfa"/>
+    </linearGradient>
+    <linearGradient id="wp-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <filter id="wp-glow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="wp-softGlow">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="wp-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+    <clipPath id="wp-clipFlow1">
+      <rect x="125" y="185" width="50" height="30"/>
+    </clipPath>
+    <clipPath id="wp-clipFlow2">
+      <rect x="615" y="185" width="50" height="30"/>
+    </clipPath>
+    <clipPath id="wp-clipFlow3">
+      <rect x="730" y="185" width="50" height="30"/>
+    </clipPath>
+  </defs>
+
+  <style>
+    .wp-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .wp-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .wp-feature { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #94a3b8; }
+    .wp-layer-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+    .wp-action-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 9px; font-weight: 600; }
+    .wp-code { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 9px; }
+
+    @keyframes wp-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    @keyframes wp-flow { 0% { transform: translateX(0); opacity: 0; } 10% { opacity: 1; } 90% { opacity: 1; } 100% { transform: translateX(40px); opacity: 0; } }
+    @keyframes wp-reject { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+    .wp-packet1 { animation: wp-flow 0.6s linear infinite; }
+    .wp-packet2 { animation: wp-flow 0.6s linear infinite 0.2s; }
+    .wp-packet3 { animation: wp-flow 0.6s linear infinite 0.4s; }
+    .wp-pulse { animation: wp-pulse 2s ease-in-out infinite; }
+    .wp-reject-pulse { animation: wp-reject 1.5s ease-in-out infinite; }
+  </style>
+
+  <!-- Background -->
+  <rect width="900" height="520" rx="16" fill="url(#wp-bgGrad)"/>
+  <rect width="900" height="520" fill="url(#wp-grid)" rx="16"/>
+
+  <!-- Glow effects -->
+  <ellipse cx="70" cy="200" rx="50" ry="70" fill="#6366f1" opacity="0.08" filter="url(#wp-softGlow)"/>
+  <ellipse cx="400" cy="200" rx="180" ry="120" fill="#8b5cf6" opacity="0.06" filter="url(#wp-softGlow)"/>
+  <ellipse cx="700" cy="200" rx="60" ry="80" fill="#10b981" opacity="0.08" filter="url(#wp-softGlow)"/>
+  <ellipse cx="830" cy="200" rx="50" ry="70" fill="#f59e0b" opacity="0.08" filter="url(#wp-softGlow)"/>
+
+  <!-- Title -->
+  <text x="450" y="35" text-anchor="middle" class="wp-label" font-size="14" fill="#e2e8f0">WASM Plugin Middleware Pipeline</text>
+  <text x="450" y="52" text-anchor="middle" class="wp-feature" fill="#64748b">Sandboxed • Dynamic • Language Agnostic</text>
+
+  <!-- Client Request -->
+  <g class="wp-pulse">
+    <rect x="20" y="150" width="105" height="100" rx="10" fill="#1e293b" stroke="#6366f1" stroke-width="2"/>
+    <rect x="20" y="150" width="105" height="26" rx="10" fill="url(#wp-primaryGrad)"/>
+    <rect x="20" y="168" width="105" height="8" fill="url(#wp-primaryGrad)"/>
+    <text x="72" y="169" text-anchor="middle" class="wp-label" font-size="11" fill="white">Request</text>
+    <text x="72" y="195" text-anchor="middle" class="wp-feature">POST /v1/chat</text>
+    <text x="72" y="212" text-anchor="middle" class="wp-feature">Authorization: ...</text>
+    <text x="72" y="229" text-anchor="middle" class="wp-feature">Content-Type: json</text>
+  </g>
+
+  <!-- SMG Gateway Container -->
+  <rect x="155" y="75" width="450" height="250" rx="12" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="380" y="95" text-anchor="middle" class="wp-layer-label" fill="#64748b">SMG GATEWAY MIDDLEWARE LAYER</text>
+
+  <!-- OnRequest Plugins Section -->
+  <rect x="170" y="115" width="200" height="195" rx="10" fill="#1e293b" stroke="#8b5cf6" stroke-width="1.5"/>
+  <rect x="170" y="115" width="200" height="26" rx="10" fill="url(#wp-purpleGrad)"/>
+  <rect x="170" y="133" width="200" height="8" fill="url(#wp-purpleGrad)"/>
+  <text x="270" y="134" text-anchor="middle" class="wp-label" font-size="11" fill="white">OnRequest Plugins</text>
+
+  <!-- Plugin 1: Auth -->
+  <rect x="182" y="155" width="176" height="44" rx="6" fill="#334155" stroke="#10b981" stroke-width="1"/>
+  <circle cx="198" cy="170" r="8" fill="#10b981" opacity="0.2"/>
+  <text x="198" y="173" text-anchor="middle" class="wp-code" fill="#10b981">1</text>
+  <text x="215" y="171" class="wp-sublabel" font-size="10" fill="#e2e8f0">auth-middleware</text>
+  <text x="215" y="186" class="wp-feature" fill="#94a3b8">Validate API keys → 401 on failure</text>
+
+  <!-- Plugin 2: Rate Limit -->
+  <rect x="182" y="205" width="176" height="44" rx="6" fill="#334155" stroke="#0ea5e9" stroke-width="1"/>
+  <circle cx="198" cy="220" r="8" fill="#0ea5e9" opacity="0.2"/>
+  <text x="198" y="223" text-anchor="middle" class="wp-code" fill="#0ea5e9">2</text>
+  <text x="215" y="221" class="wp-sublabel" font-size="10" fill="#e2e8f0">ratelimit-middleware</text>
+  <text x="215" y="236" class="wp-feature" fill="#94a3b8">60 req/min per key → 429 if exceeded</text>
+
+  <!-- Plugin 3: Logging -->
+  <rect x="182" y="255" width="176" height="44" rx="6" fill="#334155" stroke="#f59e0b" stroke-width="1"/>
+  <circle cx="198" cy="270" r="8" fill="#f59e0b" opacity="0.2"/>
+  <text x="198" y="273" text-anchor="middle" class="wp-code" fill="#f59e0b">3</text>
+  <text x="215" y="271" class="wp-sublabel" font-size="10" fill="#e2e8f0">logging-middleware</text>
+  <text x="215" y="286" class="wp-feature" fill="#94a3b8">Add x-request-id, x-wasm-processed</text>
+
+  <!-- Router/Worker section -->
+  <rect x="390" y="155" width="90" height="90" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1.5"/>
+  <text x="435" y="135" text-anchor="middle" class="wp-layer-label" fill="#64748b">Core</text>
+  <text x="435" y="185" text-anchor="middle" class="wp-sublabel" font-size="10" fill="#e2e8f0">Router</text>
+  <text x="435" y="200" text-anchor="middle" class="wp-feature">Load Balance</text>
+  <text x="435" y="218" text-anchor="middle" class="wp-sublabel" font-size="9" fill="#64748b">↓</text>
+  <text x="435" y="232" text-anchor="middle" class="wp-sublabel" font-size="10" fill="#e2e8f0">Worker</text>
+
+  <!-- OnResponse Plugin Section -->
+  <rect x="500" y="155" width="90" height="90" rx="10" fill="#1e293b" stroke="#8b5cf6" stroke-width="1.5"/>
+  <text x="545" y="135" text-anchor="middle" class="wp-layer-label" fill="#8b5cf6">OnResponse</text>
+  <rect x="508" y="168" width="74" height="32" rx="4" fill="#334155" stroke="#f59e0b" stroke-width="1"/>
+  <text x="545" y="186" text-anchor="middle" class="wp-feature" fill="#e2e8f0">logging</text>
+  <text x="545" y="218" text-anchor="middle" class="wp-feature" fill="#94a3b8">500 → 503</text>
+  <text x="545" y="233" text-anchor="middle" class="wp-feature" fill="#94a3b8">Add headers</text>
+
+  <!-- Connection arrows within gateway -->
+  <line x1="370" y1="200" x2="390" y2="200" stroke="#475569" stroke-width="2"/>
+  <polygon points="387,196 395,200 387,204" fill="#475569"/>
+  <line x1="480" y1="200" x2="500" y2="200" stroke="#475569" stroke-width="2"/>
+  <polygon points="497,196 505,200 497,204" fill="#475569"/>
+
+  <!-- Worker (external) -->
+  <rect x="630" y="150" width="85" height="100" rx="10" fill="#1e293b" stroke="#10b981" stroke-width="2"/>
+  <rect x="630" y="150" width="85" height="26" rx="10" fill="url(#wp-greenGrad)"/>
+  <rect x="630" y="168" width="85" height="8" fill="url(#wp-greenGrad)"/>
+  <text x="672" y="169" text-anchor="middle" class="wp-label" font-size="10" fill="white">Worker</text>
+  <text x="672" y="195" text-anchor="middle" class="wp-feature">vLLM / SGLang</text>
+  <text x="672" y="212" text-anchor="middle" class="wp-feature">LLM Inference</text>
+  <text x="672" y="229" text-anchor="middle" class="wp-feature">KV Cache</text>
+
+  <!-- Response -->
+  <g class="wp-pulse">
+    <rect x="775" y="150" width="105" height="100" rx="10" fill="#1e293b" stroke="#f59e0b" stroke-width="2"/>
+    <rect x="775" y="150" width="105" height="26" rx="10" fill="url(#wp-amberGrad)"/>
+    <rect x="775" y="168" width="105" height="8" fill="url(#wp-amberGrad)"/>
+    <text x="827" y="169" text-anchor="middle" class="wp-label" font-size="11" fill="#1e293b">Response</text>
+    <text x="827" y="195" text-anchor="middle" class="wp-feature">200 OK</text>
+    <text x="827" y="212" text-anchor="middle" class="wp-feature">x-request-id: abc</text>
+    <text x="827" y="229" text-anchor="middle" class="wp-feature">{"choices": [...]}</text>
+  </g>
+
+  <!-- Animated flow packets -->
+  <g clip-path="url(#wp-clipFlow1)">
+    <circle cx="130" cy="200" r="4" fill="#818cf8" class="wp-packet1" filter="url(#wp-glow)"/>
+    <circle cx="130" cy="200" r="4" fill="#a78bfa" class="wp-packet2" filter="url(#wp-glow)"/>
+  </g>
+  <g clip-path="url(#wp-clipFlow2)">
+    <circle cx="620" cy="200" r="4" fill="#34d399" class="wp-packet1" filter="url(#wp-glow)"/>
+  </g>
+  <g clip-path="url(#wp-clipFlow3)">
+    <circle cx="735" cy="200" r="4" fill="#fbbf24" class="wp-packet1" filter="url(#wp-glow)"/>
+  </g>
+
+  <!-- Connection lines outside gateway -->
+  <line x1="125" y1="200" x2="170" y2="200" stroke="#6366f1" stroke-width="2"/>
+  <polygon points="167,196 175,200 167,204" fill="#6366f1"/>
+  <line x1="605" y1="200" x2="630" y2="200" stroke="#475569" stroke-width="2"/>
+  <polygon points="627,196 635,200 627,204" fill="#475569"/>
+  <line x1="715" y1="200" x2="775" y2="200" stroke="#f59e0b" stroke-width="2"/>
+  <polygon points="772,196 780,200 772,204" fill="#f59e0b"/>
+
+  <!-- Reject path (401/429) -->
+  <g class="wp-reject-pulse">
+    <path d="M 270 310 L 270 350 L 72 350 L 72 260" stroke="#ef4444" stroke-width="2" fill="none" stroke-dasharray="5,3"/>
+    <polygon points="68,265 72,255 76,265" fill="#ef4444"/>
+    <rect x="225" y="335" width="90" height="24" rx="4" fill="#1e293b" stroke="#ef4444" stroke-width="1"/>
+    <text x="270" y="351" text-anchor="middle" class="wp-action-label" fill="#f87171">401 / 429 Reject</text>
+  </g>
+
+  <!-- Plugin Actions Legend -->
+  <rect x="20" y="380" width="280" height="120" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="160" y="402" text-anchor="middle" class="wp-layer-label" fill="#64748b">Plugin Actions</text>
+
+  <rect x="35" y="415" width="12" height="12" rx="2" fill="#10b981"/>
+  <text x="55" y="425" class="wp-sublabel" font-size="10" fill="#e2e8f0">Continue</text>
+  <text x="140" y="425" class="wp-feature" fill="#94a3b8">Pass to next plugin</text>
+
+  <rect x="35" y="440" width="12" height="12" rx="2" fill="#ef4444"/>
+  <text x="55" y="450" class="wp-sublabel" font-size="10" fill="#e2e8f0">Reject(status)</text>
+  <text x="140" y="450" class="wp-feature" fill="#94a3b8">Return error immediately</text>
+
+  <rect x="35" y="465" width="12" height="12" rx="2" fill="#0ea5e9"/>
+  <text x="55" y="475" class="wp-sublabel" font-size="10" fill="#e2e8f0">Modify(changes)</text>
+  <text x="140" y="475" class="wp-feature" fill="#94a3b8">Transform request/response</text>
+
+  <!-- Enterprise Features -->
+  <rect x="320" y="380" width="280" height="120" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="460" y="402" text-anchor="middle" class="wp-layer-label" fill="#64748b">Enterprise Features</text>
+
+  <circle cx="338" cy="420" r="4" fill="#8b5cf6"/>
+  <text x="350" y="424" class="wp-feature" fill="#e2e8f0">Sandboxed WASM runtime (no host access)</text>
+
+  <circle cx="338" cy="442" r="4" fill="#10b981"/>
+  <text x="350" y="446" class="wp-feature" fill="#e2e8f0">Dynamic hot-reload via REST API</text>
+
+  <circle cx="338" cy="464" r="4" fill="#0ea5e9"/>
+  <text x="350" y="468" class="wp-feature" fill="#e2e8f0">LRU cache for compiled modules</text>
+
+  <circle cx="338" cy="486" r="4" fill="#f59e0b"/>
+  <text x="350" y="490" class="wp-feature" fill="#e2e8f0">Resource limits (memory, CPU, timeout)</text>
+
+  <!-- Performance Stats -->
+  <rect x="620" y="380" width="260" height="120" rx="10" fill="#1e293b" stroke="#10b981" stroke-width="1"/>
+  <text x="750" y="402" text-anchor="middle" class="wp-layer-label" fill="#10b981">Performance</text>
+
+  <text x="635" y="425" class="wp-feature" fill="#94a3b8">Cache Hit Execution:</text>
+  <text x="865" y="425" text-anchor="end" class="wp-sublabel" font-size="11" fill="#34d399">&lt;1ms</text>
+
+  <text x="635" y="447" class="wp-feature" fill="#94a3b8">First Load (compile):</text>
+  <text x="865" y="447" text-anchor="end" class="wp-sublabel" font-size="11" fill="#fbbf24">10-50ms</text>
+
+  <text x="635" y="469" class="wp-feature" fill="#94a3b8">Simple Plugin (auth):</text>
+  <text x="865" y="469" text-anchor="end" class="wp-sublabel" font-size="11" fill="#34d399">0.1-0.3ms</text>
+
+  <text x="635" y="491" class="wp-feature" fill="#94a3b8">Complex Plugin (transform):</text>
+  <text x="865" y="491" text-anchor="end" class="wp-sublabel" font-size="11" fill="#38bdf8">0.5-2ms</text>
+
+  <!-- Bottom tagline -->
+  <text x="450" y="510" text-anchor="middle" class="wp-sublabel" font-size="11" fill="#64748b">WebAssembly Component Model  •  Rust / Go / C / Any Language  •  Zero Gateway Restarts</text>
+</svg>

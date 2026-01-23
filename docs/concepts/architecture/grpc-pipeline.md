@@ -1,10 +1,10 @@
 ---
-title: gRPC Pipeline Configuration
+title: gRPC Pipeline
 ---
 
-# gRPC Pipeline Configuration
+# gRPC Pipeline
 
-When workers communicate via gRPC, SMG becomes a complete OpenAI-compatible server with a sophisticated request processing pipeline. This guide covers the configuration options for reasoning extraction and tool call parsing.
+When workers communicate via gRPC, SMG becomes a complete OpenAI-compatible server with a sophisticated request processing pipeline for reasoning extraction, tool call parsing, and MCP execution.
 
 ---
 
@@ -51,7 +51,7 @@ Parse function calls and execute MCP tools with automatic result injection.
 ## Pipeline Architecture
 
 <div class="architecture-diagram">
-  <img src="../../assets/images/grpc-pipeline.svg" alt="gRPC Pipeline Architecture">
+  <img src="../../../assets/images/grpc-pipeline.svg" alt="gRPC Pipeline Architecture">
 </div>
 
 <div class="grid" markdown>
@@ -289,7 +289,7 @@ Qwen Coder XML format with parameter tags.
 
 ---
 
-## Advanced Configuration
+## Configuration
 
 ### Parser CLI Options
 
@@ -299,7 +299,7 @@ Qwen Coder XML format with parameter tags.
 | `--tool-call-parser` | Auto | Tool call parser type to use |
 | `--mcp-config-path` | None | Path to MCP server configuration file |
 
-### MCP Configuration
+### MCP Integration
 
 When MCP is configured, tool calls can be executed automatically:
 
@@ -309,11 +309,11 @@ smg \
   --tool-call-parser llama
 ```
 
-See the [MCP Guide](mcp.md) for detailed configuration.
+See the [MCP Guide](../extensibility/mcp.md) for detailed configuration.
 
 ---
 
-## Production Configurations
+## Recommended Configurations
 
 <div class="grid" markdown>
 
@@ -370,7 +370,7 @@ smg \
 
 ---
 
-## Observability
+## Monitoring
 
 ### Pipeline Metrics
 
@@ -402,3 +402,41 @@ RUST_LOG=smg::parsers=debug smg ...
 | Tool calls not parsed | Format mismatch | Verify tool parser selection |
 | MCP tools timeout | Slow tool execution | Check MCP server configuration |
 | Empty reasoning_content | Model not thinking | Enable `separate_reasoning: true` in request |
+
+---
+
+## What's Next?
+
+<div class="grid" markdown>
+
+<div class="card" markdown>
+
+### :material-memory: Tokenizer Caching
+
+Learn about two-level tokenizer caching for performance.
+
+[Tokenizer Caching →](../performance/tokenizer-caching.md)
+
+</div>
+
+<div class="card" markdown>
+
+### :material-puzzle: MCP Integration
+
+Configure Model Context Protocol servers for tool execution.
+
+[MCP →](../extensibility/mcp.md)
+
+</div>
+
+<div class="card" markdown>
+
+### :material-cached: Cache-Aware Routing
+
+Maximize KV cache hits with prefix-based routing.
+
+[Cache-Aware Routing →](../routing/cache-aware.md)
+
+</div>
+
+</div>

@@ -1,10 +1,10 @@
 ---
-title: High Availability Configuration
+title: High Availability
 ---
 
-# High Availability Configuration
+# High Availability
 
-This guide covers the configuration and operation of SMG in a high-availability (HA) cluster deployment using the mesh networking feature.
+SMG supports high-availability cluster deployments using mesh networking for fault tolerance, scalability, and zero-downtime updates.
 
 ---
 
@@ -51,7 +51,7 @@ Perform rolling updates without service interruption. Graceful shutdown with req
 ## Mesh Architecture
 
 <div class="architecture-diagram">
-  <img src="../../assets/images/mesh-architecture.svg" alt="SMG Mesh Architecture">
+  <img src="../../../assets/images/mesh-architecture.svg" alt="SMG Mesh Architecture">
 </div>
 
 <div class="grid" markdown>
@@ -108,7 +108,7 @@ Real-time synchronization of all cluster state.
 
 ---
 
-## Mesh Configuration
+## Configuration
 
 ### Command Line Options
 
@@ -436,7 +436,7 @@ spec:
 
 ---
 
-## Observability
+## Monitoring
 
 ### Mesh Metrics
 
@@ -546,3 +546,41 @@ curl http://node1:8000/ha/workers | jq
 # Check policy states
 curl http://node1:8000/ha/policies | jq
 ```
+
+---
+
+## What's Next?
+
+<div class="grid" markdown>
+
+<div class="card" markdown>
+
+### :material-power: Graceful Shutdown
+
+Allow in-flight requests to complete during shutdown.
+
+[Graceful Shutdown →](../reliability/graceful-shutdown.md)
+
+</div>
+
+<div class="card" markdown>
+
+### :material-electric-switch: Circuit Breakers
+
+Isolate failing workers to prevent cascade failures.
+
+[Circuit Breakers →](../reliability/circuit-breakers.md)
+
+</div>
+
+<div class="card" markdown>
+
+### :material-chart-box: Metrics Reference
+
+Complete list of mesh networking metrics.
+
+[Metrics Reference →](../../reference/metrics.md)
+
+</div>
+
+</div>

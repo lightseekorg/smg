@@ -144,25 +144,28 @@ nav:
       - concepts/index.md
       - Architecture:
           - Overview: concepts/architecture/overview.md
-          - Control Plane: concepts/architecture/control-plane.md
-          - Data Plane: concepts/architecture/data-plane.md
+          - Service Discovery: concepts/architecture/service-discovery.md
+          - gRPC Pipeline: concepts/architecture/grpc-pipeline.md
+          - High Availability: concepts/architecture/high-availability.md
       - Routing:
           - Load Balancing: concepts/routing/load-balancing.md
           - Cache-Aware Routing: concepts/routing/cache-aware.md
+          - PD Disaggregation: concepts/routing/pd-disaggregation.md
+      - Performance:
+          - Tokenizer Caching: concepts/performance/tokenizer-caching.md
+      - Extensibility:
+          - WASM Plugins: concepts/extensibility/wasm-plugins.md
+          - Model Context Protocol: concepts/extensibility/mcp.md
       - Reliability:
           - Circuit Breakers: concepts/reliability/circuit-breakers.md
           - Rate Limiting: concepts/reliability/rate-limiting.md
-  - Configuration:
-      - configuration/index.md
-      - gRPC Pipeline: configuration/grpc-pipeline.md
-      - Tokenization: configuration/tokenization.md
-      - Routing Policies: configuration/routing.md
-      - Chat History Backend: configuration/storage.md
-      - MCP Integration: configuration/mcp.md
-      - Authentication: configuration/authentication.md
-      - High Availability: configuration/high-availability.md
-      - Resilience: configuration/resilience.md
-      - WASM Plugins: configuration/wasm-plugins.md
+          - Retries: concepts/reliability/retries.md
+          - Health Checks: concepts/reliability/health-checks.md
+          - Graceful Shutdown: concepts/reliability/graceful-shutdown.md
+      - Data:
+          - Chat History: concepts/data/chat-history.md
+      - Security:
+          - Authentication: concepts/security/authentication.md
   - Tasks:
       - tasks/index.md
       - Deployment:

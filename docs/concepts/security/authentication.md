@@ -1,16 +1,54 @@
 ---
-title: Authentication Configuration
+title: Authentication
 ---
 
-# Authentication Configuration
+# Authentication
 
-This guide covers authentication and authorization configuration for SMG, including JWT/OIDC integration, API key authentication, role-based access control, and audit logging.
+SMG supports multiple authentication methods for securing access to inference APIs and the control plane, including JWT/OIDC integration, API keys, and role-based access control.
 
 ---
 
 ## Overview
 
-SMG supports multiple authentication methods for securing access to the control plane APIs:
+<div class="grid" markdown>
+
+<div class="card" markdown>
+
+### :material-key-chain: Multiple Auth Methods
+
+Support for JWT/OIDC, API keys, and worker authentication to fit your deployment model.
+
+</div>
+
+<div class="card" markdown>
+
+### :material-shield-account: Role-Based Access
+
+Admin and user roles control access to control plane vs. data plane APIs.
+
+</div>
+
+<div class="card" markdown>
+
+### :material-office-building: Enterprise SSO
+
+Integrate with Keycloak, Auth0, Azure AD, Okta, and other OIDC providers.
+
+</div>
+
+<div class="card" markdown>
+
+### :material-clipboard-text: Audit Logging
+
+Track all control plane operations for security monitoring and compliance.
+
+</div>
+
+</div>
+
+---
+
+## Authentication Methods
 
 | Method | Use Case | Configuration |
 |--------|----------|---------------|
@@ -65,7 +103,7 @@ smg \
 
 ### Role Mapping
 
-Map identity provider roles to SMG gateway roles using `--jwt-role-mapping`:
+Map identity provider roles to SMG gateway roles:
 
 ```bash
 smg \
@@ -104,121 +142,133 @@ SMG supports the following JWT signing algorithms:
 
 ---
 
-## Setting Up OIDC with Common Providers
+## Identity Provider Setup
 
 ### Keycloak
 
-1. **Create a Client**:
-   - Navigate to Clients > Create
-   - Client ID: `smg-gateway`
-   - Client Protocol: `openid-connect`
-   - Access Type: `confidential` or `public` (depending on your use case)
+<div class="grid" markdown>
 
-2. **Configure Mappers** (for role claims):
-   - Add a mapper of type "User Realm Role" or "User Client Role"
-   - Token Claim Name: `roles`
-   - Add to ID token: Yes
-   - Add to access token: Yes
+<div class="card" markdown>
 
-3. **Get Configuration Values**:
-   ```
-   Issuer: https://keycloak.example.com/realms/myrealm
-   Audience: smg-gateway
-   ```
+**1. Create a Client**
 
-4. **Configure SMG**:
-   ```bash
-   smg \
-     --worker-urls http://worker:8000 \
-     --jwt-issuer "https://keycloak.example.com/realms/myrealm" \
-     --jwt-audience "smg-gateway" \
-     --jwt-role-mapping "admin=admin" \
-     --jwt-role-mapping "user=user"
-   ```
+- Navigate to Clients > Create
+- Client ID: `smg-gateway`
+- Client Protocol: `openid-connect`
+- Access Type: `confidential` or `public`
+
+</div>
+
+<div class="card" markdown>
+
+**2. Configure Mappers**
+
+- Add a mapper of type "User Realm Role"
+- Token Claim Name: `roles`
+- Add to ID token: Yes
+- Add to access token: Yes
+
+</div>
+
+</div>
+
+```bash
+smg \
+  --worker-urls http://worker:8000 \
+  --jwt-issuer "https://keycloak.example.com/realms/myrealm" \
+  --jwt-audience "smg-gateway" \
+  --jwt-role-mapping "admin=admin" \
+  --jwt-role-mapping "user=user"
+```
 
 ### Auth0
 
-1. **Create an API**:
-   - Navigate to Applications > APIs > Create API
-   - Name: `SMG Gateway`
-   - Identifier: `https://smg.example.com/api`
+<div class="grid" markdown>
 
-2. **Create Roles**:
-   - Navigate to User Management > Roles
-   - Create `smg-admin` and `smg-user` roles
+<div class="card" markdown>
 
-3. **Add Roles to Access Token** (via Auth0 Action):
-   ```javascript
-   exports.onExecutePostLogin = async (event, api) => {
-     const namespace = 'https://smg.example.com';
-     if (event.authorization) {
-       api.accessToken.setCustomClaim(`${namespace}/roles`, event.authorization.roles);
-     }
-   };
-   ```
+**1. Create an API**
 
-4. **Configure SMG**:
-   ```bash
-   smg \
-     --worker-urls http://worker:8000 \
-     --jwt-issuer "https://your-tenant.auth0.com/" \
-     --jwt-audience "https://smg.example.com/api" \
-     --jwt-role-claim "https://smg.example.com/roles" \
-     --jwt-role-mapping "smg-admin=admin" \
-     --jwt-role-mapping "smg-user=user"
-   ```
+- Navigate to Applications > APIs > Create API
+- Name: `SMG Gateway`
+- Identifier: `https://smg.example.com/api`
+
+</div>
+
+<div class="card" markdown>
+
+**2. Add Roles Action**
+
+```javascript
+exports.onExecutePostLogin = async (event, api) => {
+  const namespace = 'https://smg.example.com';
+  if (event.authorization) {
+    api.accessToken.setCustomClaim(
+      `${namespace}/roles`,
+      event.authorization.roles
+    );
+  }
+};
+```
+
+</div>
+
+</div>
+
+```bash
+smg \
+  --worker-urls http://worker:8000 \
+  --jwt-issuer "https://your-tenant.auth0.com/" \
+  --jwt-audience "https://smg.example.com/api" \
+  --jwt-role-claim "https://smg.example.com/roles" \
+  --jwt-role-mapping "smg-admin=admin" \
+  --jwt-role-mapping "smg-user=user"
+```
 
 ### Azure AD / Entra ID
 
-1. **Register an Application**:
-   - Navigate to Azure Portal > App registrations > New registration
-   - Name: `SMG Gateway`
-   - Supported account types: Select based on your requirements
+<div class="grid" markdown>
 
-2. **Configure App Roles**:
-   - Navigate to App roles > Create app role
-   - Create `Gateway.Admin` and `Gateway.User` roles
+<div class="card" markdown>
 
-3. **Expose an API**:
-   - Navigate to Expose an API
-   - Set Application ID URI: `api://smg-gateway`
+**1. Register an Application**
 
-4. **Get Configuration Values**:
-   ```
-   Issuer: https://login.microsoftonline.com/{tenant-id}/v2.0
-   Audience: api://smg-gateway (or your client ID)
-   ```
+- Navigate to Azure Portal > App registrations
+- Name: `SMG Gateway`
+- Configure app roles: `Gateway.Admin`, `Gateway.User`
 
-5. **Configure SMG**:
-   ```bash
-   smg \
-     --worker-urls http://worker:8000 \
-     --jwt-issuer "https://login.microsoftonline.com/{tenant-id}/v2.0" \
-     --jwt-audience "api://smg-gateway" \
-     --jwt-role-mapping "Gateway.Admin=admin" \
-     --jwt-role-mapping "Gateway.User=user"
-   ```
+</div>
+
+<div class="card" markdown>
+
+**2. Expose an API**
+
+- Navigate to Expose an API
+- Set Application ID URI: `api://smg-gateway`
+
+</div>
+
+</div>
+
+```bash
+smg \
+  --worker-urls http://worker:8000 \
+  --jwt-issuer "https://login.microsoftonline.com/{tenant-id}/v2.0" \
+  --jwt-audience "api://smg-gateway" \
+  --jwt-role-mapping "Gateway.Admin=admin" \
+  --jwt-role-mapping "Gateway.User=user"
+```
 
 ### Okta
 
-1. **Create an Authorization Server** (or use the default):
-   - Navigate to Security > API > Authorization Servers
-
-2. **Create Scopes and Claims**:
-   - Add a custom claim for roles
-   - Claim name: `roles`
-   - Value type: Groups
-   - Filter: Matches regex `.*` (or specific groups)
-
-3. **Configure SMG**:
-   ```bash
-   smg \
-     --worker-urls http://worker:8000 \
-     --jwt-issuer "https://your-org.okta.com/oauth2/default" \
-     --jwt-audience "api://smg" \
-     --jwt-role-mapping "smg_admins=admin" \
-     --jwt-role-mapping "smg_users=user"
-   ```
+```bash
+smg \
+  --worker-urls http://worker:8000 \
+  --jwt-issuer "https://your-org.okta.com/oauth2/default" \
+  --jwt-audience "api://smg" \
+  --jwt-role-mapping "smg_admins=admin" \
+  --jwt-role-mapping "smg_users=user"
+```
 
 ---
 
@@ -228,7 +278,7 @@ API keys provide a simpler authentication method for service accounts and progra
 
 ### Control Plane API Keys
 
-Configure API keys for control plane access using `--control-plane-api-keys`:
+Configure API keys for control plane access:
 
 ```bash
 smg \
@@ -246,8 +296,6 @@ smg \
 | `key` | The secret API key value |
 
 ### Multiple API Keys
-
-You can configure multiple API keys:
 
 ```bash
 smg \
@@ -276,9 +324,7 @@ curl -H "Authorization: Bearer sk-admin-key-12345" \
 
 ### Security Features
 
-API keys in SMG include several security measures:
-
-- **Hashed Storage**: Keys are SHA-256 hashed immediately upon loading; plaintext keys are never stored in memory
+- **Hashed Storage**: Keys are SHA-256 hashed immediately; plaintext keys are never stored in memory
 - **Constant-Time Comparison**: Key verification uses constant-time comparison to prevent timing attacks
 - **Role-Based Access**: Each key is assigned a specific role limiting its permissions
 
@@ -384,19 +430,8 @@ Audit events are logged with structured fields:
 | `resource` | Resource being accessed (if applicable) |
 | `outcome` | Result (`success`, `denied`) |
 | `request_id` | Correlation ID for request tracing |
-| `details` | Additional context or error message |
-
-### Security Features
-
-Audit logging includes:
-
-- **Input Sanitization**: Log injection attacks are prevented by escaping control characters
-- **Truncation**: Long inputs are truncated to prevent log flooding
-- **Structured Format**: Machine-readable format for SIEM integration
 
 ### Viewing Audit Logs
-
-Audit events are logged to the `smg::audit` target:
 
 ```bash
 # Filter for audit logs
@@ -408,7 +443,7 @@ kubectl logs -n inference -l app=smg | grep "control_plane_audit"
 
 ---
 
-## Combined Configuration Example
+## Production Configuration
 
 A production setup combining JWT and API key authentication:
 
@@ -498,13 +533,11 @@ spec:
 
 1. Verify issuer URL matches exactly (including trailing slash):
    ```bash
-   # Check your IDP's discovery endpoint
    curl https://auth.example.com/.well-known/openid-configuration
    ```
 
 2. Verify audience claim matches your configuration:
    ```bash
-   # Decode your JWT to inspect claims
    echo "YOUR_JWT" | cut -d. -f2 | base64 -d | jq .
    ```
 
@@ -528,39 +561,84 @@ spec:
 
 **Solutions**:
 
-1. Check which claim contains roles in your JWT:
-   ```bash
-   echo "YOUR_JWT" | cut -d. -f2 | base64 -d | jq .
-   ```
-
+1. Check which claim contains roles in your JWT
 2. Verify role mapping syntax: `idp_role=gateway_role`
 3. Check if role claim name needs to be specified with `--jwt-role-claim`
-
-### JWKS Fetch Errors
-
-**Symptom**: `Failed to fetch JWKS` or SSRF protection errors
-
-**Solutions**:
-
-1. Ensure JWKS endpoint uses HTTPS (required for production)
-2. Check network connectivity to the OIDC provider
-3. Verify the JWKS URI is not pointing to internal/private addresses
 
 ---
 
 ## Security Best Practices
 
-1. **Use HTTPS**: Always enable TLS for the gateway in production
-2. **Rotate API Keys**: Regularly rotate API keys and use short-lived JWT tokens
-3. **Principle of Least Privilege**: Assign `user` role by default, `admin` only when needed
-4. **Enable Audit Logging**: Keep audit logs for security monitoring and compliance
-5. **Secure Secrets**: Use Kubernetes secrets or a secret manager for API keys
-6. **Network Segmentation**: Restrict network access to the control plane APIs
+<div class="grid" markdown>
+
+<div class="card" markdown>
+
+### :material-shield-lock: Use HTTPS
+
+Always enable TLS for the gateway in production.
+
+</div>
+
+<div class="card" markdown>
+
+### :material-key-change: Rotate Keys
+
+Regularly rotate API keys and use short-lived JWT tokens.
+
+</div>
+
+<div class="card" markdown>
+
+### :material-account-lock: Least Privilege
+
+Assign `user` role by default, `admin` only when needed.
+
+</div>
+
+<div class="card" markdown>
+
+### :material-clipboard-text: Enable Auditing
+
+Keep audit logs for security monitoring and compliance.
+
+</div>
+
+</div>
 
 ---
 
 ## What's Next?
 
-- [Configure TLS](../tasks/deployment/tls.md) - Secure communications with TLS/mTLS
-- [Monitoring](../tasks/operations/monitoring.md) - Set up observability
-- [Rate Limiting](../concepts/reliability/rate-limiting.md) - Protect against overload
+<div class="grid" markdown>
+
+<div class="card" markdown>
+
+### :material-traffic-light: Rate Limiting
+
+Protect against overload and abuse.
+
+[Rate Limiting →](../reliability/rate-limiting.md)
+
+</div>
+
+<div class="card" markdown>
+
+### :material-shield-check: High Availability
+
+Deploy SMG in a highly available configuration.
+
+[High Availability →](../architecture/high-availability.md)
+
+</div>
+
+<div class="card" markdown>
+
+### :material-chart-box: Metrics Reference
+
+Monitor authentication metrics.
+
+[Metrics Reference →](../../reference/metrics.md)
+
+</div>
+
+</div>
