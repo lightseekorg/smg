@@ -277,6 +277,17 @@
   opacity: 0.2;
 }
 
+/* Fallback for browsers not supporting mask-composite (Firefox) */
+@supports not (mask-composite: exclude) {
+  .md-typeset .card:hover {
+    border-color: var(--mesh-purple);
+  }
+  .md-typeset .card::before,
+  .md-typeset .card::after {
+    display: none;
+  }
+}
+
 .md-typeset .card h3 {
   margin-top: 0;
   margin-bottom: 0.75rem;
@@ -784,5 +795,17 @@
 
   .md-typeset .stat-value {
     font-size: 2rem;
+  }
+}
+
+/* Accessibility: Respect reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
