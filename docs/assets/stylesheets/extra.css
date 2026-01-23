@@ -1,20 +1,26 @@
-/* SMG Documentation Theme - Dark Mode First */
+/* SMG Documentation Theme - Cyberpunk Neon Edition */
 
 :root {
-  /* Brand Colors */
+  /* Brand Colors - More vivid */
   --smg-primary: #818cf8;
   --smg-primary-light: #a5b4fc;
   --smg-primary-dark: #6366f1;
   --smg-secondary: #38bdf8;
   --smg-accent: #34d399;
+
+  /* Neon Colors */
+  --neon-purple: #a855f7;
+  --neon-blue: #3b82f6;
+  --neon-cyan: #22d3ee;
+  --neon-pink: #ec4899;
 }
 
 /* Dark theme (default) */
 [data-md-color-scheme="slate"] {
-  --md-default-bg-color: #0f172a;
-  --md-default-bg-color--light: #1e293b;
-  --md-default-bg-color--lighter: #334155;
-  --md-default-bg-color--lightest: #475569;
+  --md-default-bg-color: #050816;
+  --md-default-bg-color--light: #0f172a;
+  --md-default-bg-color--lighter: #1e293b;
+  --md-default-bg-color--lightest: #334155;
   --md-default-fg-color: #f1f5f9;
   --md-default-fg-color--light: #cbd5e1;
   --md-default-fg-color--lighter: #94a3b8;
@@ -22,12 +28,21 @@
   --md-primary-fg-color: var(--smg-primary);
   --md-primary-fg-color--light: var(--smg-primary-light);
   --md-primary-fg-color--dark: var(--smg-primary-dark);
-  --md-accent-fg-color: var(--smg-secondary);
-  --md-typeset-a-color: var(--smg-primary);
-  --md-code-bg-color: #1e293b;
+  --md-accent-fg-color: var(--neon-cyan);
+  --md-typeset-a-color: var(--neon-cyan);
+  --md-code-bg-color: #0f172a;
   --md-code-fg-color: #e2e8f0;
-  --md-footer-bg-color: #0f172a;
+  --md-footer-bg-color: #050816;
   --md-footer-bg-color--dark: #020617;
+}
+
+/* Cyberpunk page background */
+[data-md-color-scheme="slate"] .md-main {
+  background:
+    radial-gradient(ellipse 100% 80% at 50% -30%, rgba(168, 85, 247, 0.12), transparent 60%),
+    radial-gradient(ellipse 80% 50% at 100% 50%, rgba(34, 211, 238, 0.06), transparent),
+    radial-gradient(ellipse 80% 50% at 0% 80%, rgba(168, 85, 247, 0.06), transparent),
+    var(--md-default-bg-color);
 }
 
 /* Light theme */
@@ -45,84 +60,230 @@
 }
 
 .md-typeset h2 {
-  font-weight: 600;
-  margin-top: 2rem;
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--md-default-fg-color--lightest);
-}
-
-/* Hero section */
-.md-typeset .hero {
-  text-align: center;
-  padding: 3rem 1rem;
-  margin-bottom: 2rem;
-}
-
-.md-typeset .hero h1 {
-  font-size: 2.5rem;
+  font-size: 2rem;
   font-weight: 800;
+  margin-top: 1rem;
   margin-bottom: 1rem;
-  background: linear-gradient(135deg, var(--smg-primary) 0%, var(--smg-secondary) 100%);
+  padding-bottom: 0;
+  border-bottom: none;
+  color: white;
+  text-shadow: 0 0 40px rgba(129, 140, 248, 0.3);
+}
+
+/* Neon section dividers */
+.md-typeset hr {
+  border: none;
+  height: 1px;
+  margin: 4rem 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--neon-purple) 20%,
+    var(--neon-cyan) 50%,
+    var(--neon-purple) 80%,
+    transparent 100%
+  );
+  box-shadow: 0 0 20px rgba(168, 85, 247, 0.3);
+}
+
+/* ==============================================
+   HERO SECTION - Cyberpunk Neon Design
+   ============================================== */
+
+.md-typeset .hero {
+  position: relative;
+  text-align: center;
+  padding: 6rem 1rem 5rem;
+  margin-bottom: 3rem;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+/* Animated perspective grid background */
+.md-typeset .hero::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(transparent 0%, transparent 49%, rgba(56, 189, 248, 0.03) 50%, transparent 51%),
+    linear-gradient(90deg, transparent 0%, transparent 49%, rgba(56, 189, 248, 0.03) 50%, transparent 51%);
+  background-size: 60px 60px;
+  mask-image: linear-gradient(to bottom, black, transparent 90%);
+  animation: grid-scroll 20s linear infinite;
+  z-index: -2;
+}
+
+@keyframes grid-scroll {
+  to { transform: translateY(60px); }
+}
+
+/* Glowing orbs */
+.md-typeset .hero::after {
+  content: "";
+  position: absolute;
+  width: 600px;
+  height: 600px;
+  border-radius: 50%;
+  background: radial-gradient(circle, var(--neon-purple) 0%, transparent 70%);
+  top: -300px;
+  left: 50%;
+  transform: translateX(-50%);
+  opacity: 0.15;
+  filter: blur(60px);
+  z-index: -1;
+  animation: orb-pulse 4s ease-in-out infinite;
+}
+
+@keyframes orb-pulse {
+  0%, 100% { opacity: 0.15; transform: translateX(-50%) scale(1); }
+  50% { opacity: 0.25; transform: translateX(-50%) scale(1.1); }
+}
+
+/* Giant glowing title */
+.md-typeset .hero h1 {
+  font-size: 4.5rem;
+  font-weight: 900;
+  margin-bottom: 1.5rem;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  background: linear-gradient(
+    135deg,
+    #fff 0%,
+    var(--neon-cyan) 25%,
+    var(--smg-primary-light) 50%,
+    var(--neon-purple) 75%,
+    #fff 100%
+  );
+  background-size: 200% auto;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+  animation: title-glow 5s linear infinite;
+  filter: drop-shadow(0 0 30px rgba(56, 189, 248, 0.5));
 }
 
-.md-typeset .hero p {
-  font-size: 1.25rem;
+@keyframes title-glow {
+  to { background-position: 200% center; }
+}
+
+/* Hide anchor link on hero title */
+.md-typeset .hero h1 a.headerlink {
+  display: none;
+}
+
+/* Hide edit/view source buttons on pages with hero (homepage) */
+.md-content:has(.hero) .md-content__button {
+  display: none;
+}
+
+/* Subtitle with typing cursor effect */
+.md-typeset .hero > p:first-of-type {
+  display: inline-block;
+  font-size: 1.3rem;
+  font-weight: 500;
+  color: var(--neon-cyan);
+  text-shadow: 0 0 20px rgba(34, 211, 238, 0.5);
+  margin-bottom: 1rem;
+}
+
+.md-typeset .hero > p:last-of-type {
+  font-size: 1.15rem;
   color: var(--md-default-fg-color--light);
-  max-width: 600px;
-  margin: 0 auto 2rem;
+  max-width: 650px;
+  margin: 0 auto 2.5rem;
+  line-height: 1.7;
 }
 
-/* Feature cards - Modern glassmorphism style */
+/* ==============================================
+   FEATURE CARDS - Neon Glass Style
+   ============================================== */
+
 .md-typeset .grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 1.25rem;
-  margin: 2rem 0;
+  gap: 1.5rem;
+  margin: 2.5rem 0;
 }
 
 .md-typeset .card {
   position: relative;
-  padding: 1.25rem 1.5rem;
-  border-radius: 12px;
-  border: 1px solid rgba(148, 163, 184, 0.1);
-  background: linear-gradient(135deg, rgba(30, 41, 59, 0.8) 0%, rgba(15, 23, 42, 0.9) 100%);
-  backdrop-filter: blur(10px);
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  overflow: hidden;
+  padding: 1.75rem;
+  border-radius: 16px;
+  border: 1px solid rgba(56, 189, 248, 0.15);
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.9) 0%, rgba(30, 41, 59, 0.6) 100%);
+  backdrop-filter: blur(20px);
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: visible;
 }
 
+/* Animated gradient border */
 .md-typeset .card::before {
   content: "";
   position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: linear-gradient(90deg, var(--smg-primary) 0%, var(--smg-secondary) 100%);
+  inset: -1px;
+  border-radius: 17px;
+  padding: 1px;
+  background: linear-gradient(
+    135deg,
+    var(--neon-cyan) 0%,
+    var(--neon-purple) 50%,
+    var(--neon-pink) 100%
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
   opacity: 0;
-  transition: opacity 0.3s ease;
+  transition: opacity 0.4s ease;
+}
+
+/* Neon glow effect */
+.md-typeset .card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 16px;
+  box-shadow:
+    0 0 30px rgba(34, 211, 238, 0.15),
+    inset 0 0 30px rgba(34, 211, 238, 0.03);
+  opacity: 0;
+  transition: opacity 0.4s ease;
+  pointer-events: none;
 }
 
 .md-typeset .card:hover {
-  border-color: rgba(129, 140, 248, 0.3);
-  box-shadow: 0 8px 32px rgba(99, 102, 241, 0.15), 0 0 0 1px rgba(129, 140, 248, 0.1);
-  transform: translateY(-4px);
+  transform: translateY(-10px) scale(1.02);
+  border-color: transparent;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.8) 100%);
 }
 
 .md-typeset .card:hover::before {
   opacity: 1;
 }
 
+.md-typeset .card:hover::after {
+  opacity: 1;
+  box-shadow:
+    0 0 50px rgba(34, 211, 238, 0.2),
+    0 20px 60px rgba(168, 85, 247, 0.15),
+    inset 0 0 40px rgba(34, 211, 238, 0.05);
+}
+
 .md-typeset .card h3 {
   margin-top: 0;
-  margin-bottom: 0.5rem;
-  font-size: 1rem;
-  font-weight: 600;
+  margin-bottom: 0.75rem;
+  font-size: 1.05rem;
+  font-weight: 700;
   color: var(--md-default-fg-color);
   line-height: 1.4;
+  transition: all 0.3s ease;
+}
+
+.md-typeset .card:hover h3 {
+  color: var(--neon-cyan);
+  text-shadow: 0 0 20px rgba(34, 211, 238, 0.5);
 }
 
 /* Material icons alignment - target the span wrapper */
@@ -178,25 +339,45 @@
   transition: all 0.2s ease;
 }
 
+/* Neon Buttons */
 .md-typeset .button--primary {
-  background: var(--smg-primary-dark);
+  position: relative;
+  background: linear-gradient(135deg, var(--neon-purple) 0%, var(--neon-blue) 100%);
   color: white !important;
+  border: none;
+  box-shadow:
+    0 0 20px rgba(168, 85, 247, 0.4),
+    0 0 40px rgba(168, 85, 247, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
 .md-typeset .button--primary:hover {
-  background: var(--smg-primary);
-  transform: translateY(-1px);
+  transform: translateY(-3px) scale(1.02);
+  box-shadow:
+    0 0 30px rgba(168, 85, 247, 0.6),
+    0 0 60px rgba(168, 85, 247, 0.3),
+    0 10px 40px rgba(168, 85, 247, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 
 .md-typeset .button--secondary {
+  position: relative;
   background: transparent;
-  border: 2px solid var(--smg-primary);
-  color: var(--smg-primary) !important;
+  border: 2px solid var(--neon-cyan);
+  color: var(--neon-cyan) !important;
+  box-shadow: 0 0 15px rgba(34, 211, 238, 0.2), inset 0 0 15px rgba(34, 211, 238, 0.1);
 }
 
 .md-typeset .button--secondary:hover {
-  background: var(--smg-primary);
+  background: rgba(34, 211, 238, 0.1);
+  border-color: var(--neon-cyan);
   color: white !important;
+  transform: translateY(-3px);
+  box-shadow:
+    0 0 25px rgba(34, 211, 238, 0.4),
+    0 0 50px rgba(34, 211, 238, 0.2),
+    inset 0 0 20px rgba(34, 211, 238, 0.2);
 }
 
 /* Admonitions */
@@ -374,11 +555,25 @@
 
 /* Responsive */
 @media screen and (max-width: 76.25em) {
+  .md-typeset .hero {
+    padding: 4rem 1rem 3rem;
+  }
+
   .md-typeset .hero h1 {
-    font-size: 2rem;
+    font-size: 3rem;
   }
 
   .md-typeset .grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media screen and (max-width: 480px) {
+  .md-typeset .hero h1 {
+    font-size: 2.25rem;
+  }
+
+  .md-typeset .hero > p:first-of-type {
+    font-size: 1.1rem;
   }
 }
