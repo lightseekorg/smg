@@ -176,6 +176,138 @@
   display: none;
 }
 
+/* ==============================================
+   STATS BAR - Animated counters
+   ============================================== */
+
+.md-typeset .stats-bar {
+  display: flex;
+  justify-content: center;
+  gap: 3rem;
+  padding: 2rem;
+  margin: 0 auto 1rem;
+  max-width: 900px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(34, 211, 238, 0.15);
+  border-radius: 16px;
+  backdrop-filter: blur(20px);
+}
+
+.md-typeset .stat {
+  text-align: center;
+  padding: 0.5rem 1rem;
+}
+
+.md-typeset .stat-value {
+  display: block;
+  font-size: 2.5rem;
+  font-weight: 800;
+  font-family: "JetBrains Mono", "SF Mono", monospace;
+  background: linear-gradient(135deg, var(--neon-cyan) 0%, var(--neon-purple) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  filter: drop-shadow(0 0 20px rgba(34, 211, 238, 0.4));
+  line-height: 1.2;
+}
+
+.md-typeset .stat-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--md-default-fg-color--lighter);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: 0.5rem;
+}
+
+/* Counter animation */
+.md-typeset .stat-value {
+  animation: counter-glow 2s ease-out;
+}
+
+@keyframes counter-glow {
+  0% {
+    opacity: 0;
+    transform: translateY(10px);
+    filter: drop-shadow(0 0 40px rgba(34, 211, 238, 0.8));
+  }
+  50% {
+    filter: drop-shadow(0 0 30px rgba(34, 211, 238, 0.6));
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+    filter: drop-shadow(0 0 20px rgba(34, 211, 238, 0.4));
+  }
+}
+
+/* Staggered animation delays */
+.md-typeset .stat:nth-child(1) .stat-value { animation-delay: 0.1s; animation-fill-mode: both; }
+.md-typeset .stat:nth-child(2) .stat-value { animation-delay: 0.2s; animation-fill-mode: both; }
+.md-typeset .stat:nth-child(3) .stat-value { animation-delay: 0.3s; animation-fill-mode: both; }
+.md-typeset .stat:nth-child(4) .stat-value { animation-delay: 0.4s; animation-fill-mode: both; }
+
+/* ==============================================
+   SUPPORTED BACKENDS
+   ============================================== */
+
+.md-typeset .backends {
+  margin: 3rem 0;
+  text-align: center;
+}
+
+.md-typeset .backends-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--md-default-fg-color--lighter);
+  margin-bottom: 1.5rem;
+}
+
+.md-typeset .backends-grid {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.md-typeset .backend {
+  padding: 0.6rem 1.1rem;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(34, 211, 238, 0.15);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--md-default-fg-color--lighter);
+  transition: all 0.3s ease;
+}
+
+.md-typeset .backend:hover {
+  transform: translateY(-2px);
+  color: var(--neon-cyan);
+  border-color: rgba(34, 211, 238, 0.4);
+  box-shadow: 0 0 20px rgba(34, 211, 238, 0.15);
+}
+
+/* Responsive */
+@media screen and (max-width: 700px) {
+  .md-typeset .stats-bar {
+    flex-wrap: wrap;
+    gap: 1.5rem;
+    padding: 1.5rem;
+  }
+
+  .md-typeset .stat {
+    flex: 1 1 40%;
+  }
+
+  .md-typeset .stat-value {
+    font-size: 2rem;
+  }
+}
+
 /* Subtitle with typing cursor effect */
 .md-typeset .hero > p:first-of-type {
   display: inline-block;
@@ -284,6 +416,22 @@
 .md-typeset .card:hover h3 {
   color: var(--neon-cyan);
   text-shadow: 0 0 20px rgba(34, 211, 238, 0.5);
+}
+
+/* Make card links cover entire card */
+.md-typeset .card a:only-of-type {
+  position: static;
+}
+
+.md-typeset .card a:only-of-type::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+.md-typeset .card:has(a:only-of-type) {
+  cursor: pointer;
 }
 
 /* Material icons alignment - target the span wrapper */
