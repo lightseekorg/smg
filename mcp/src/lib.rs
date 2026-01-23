@@ -27,11 +27,11 @@ pub mod inventory;
 pub use core::{config, pool as connection_pool};
 // Re-export from core
 pub use core::{
-    ArgMappingConfig, HandlerRequestContext, LatencySnapshot, McpConfig, McpMetrics,
-    McpOrchestrator, McpRequestContext, McpServerConfig, McpTransport, MetricsSnapshot,
-    PolicyConfig, PolicyDecisionConfig, PoolKey, RefreshRequest, ResponseFormatConfig,
-    ServerPolicyConfig, SmgClientHandler, Tool, ToolCallResult, ToolConfig, ToolExecutionInput,
-    ToolExecutionOutput, TrustLevelConfig,
+    ArgMappingConfig, BuiltinToolType, ConfigValidationError, HandlerRequestContext,
+    LatencySnapshot, McpConfig, McpMetrics, McpOrchestrator, McpRequestContext, McpServerConfig,
+    McpTransport, MetricsSnapshot, PolicyConfig, PolicyDecisionConfig, PoolKey, RefreshRequest,
+    ResponseFormatConfig, ServerPolicyConfig, SmgClientHandler, Tool, ToolCallResult, ToolConfig,
+    ToolExecutionInput, ToolExecutionOutput, TrustLevelConfig,
 };
 
 // Re-export shared types

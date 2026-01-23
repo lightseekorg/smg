@@ -3,11 +3,11 @@
 use std::{collections::HashMap, sync::Arc};
 
 use axum::http::HeaderMap;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::header_utils::should_forward_request_header;
 use crate::{
-    mcp::{McpOrchestrator, McpServerConfig, McpTransport},
+    mcp::{BuiltinToolType, McpOrchestrator, McpServerConfig, McpTransport, ResponseFormat},
     protocols::responses::{ResponseTool, ResponseToolType},
 };
 
@@ -21,6 +21,22 @@ pub struct McpLoopConfig {
     pub max_iterations: usize,
     /// MCP servers for this request (label, server_key).
     pub mcp_servers: Vec<(String, String)>,
+}
+
+/// Routing information for a built-in tool type.
+///
+/// When a built-in tool type (web_search_preview, code_interpreter, file_search)
+/// is configured to route to an MCP server, this struct holds the routing details.
+#[derive(Debug, Clone)]
+pub struct BuiltinToolRouting {
+    /// The built-in tool type being routed.
+    pub builtin_type: BuiltinToolType,
+    /// The MCP server name to route to.
+    pub server_name: String,
+    /// The MCP tool name to call on the server.
+    pub tool_name: String,
+    /// The response format for transforming the output.
+    pub response_format: ResponseFormat,
 }
 
 impl Default for McpLoopConfig {
@@ -45,6 +61,59 @@ pub fn extract_server_label(tools: Option<&[ResponseTool]>, default_label: &str)
             })
         })
         .unwrap_or_else(|| default_label.to_string())
+}
+
+/// Collect routing information for built-in tools in a request.
+///
+/// Scans request tools for built-in types (web_search_preview, code_interpreter, file_search)
+/// and looks up configured MCP servers to handle them.
+///
+/// # Arguments
+/// * `mcp_orchestrator` - The MCP orchestrator with server configuration
+/// * `tools` - Request tools to scan for built-in types
+///
+/// # Returns
+/// Vector of routing information for built-in tools that have configured MCP servers.
+/// Empty if no built-in tools are found or none have MCP server configurations.
+pub fn collect_builtin_routing(
+    mcp_orchestrator: &Arc<McpOrchestrator>,
+    tools: Option<&[ResponseTool]>,
+) -> Vec<BuiltinToolRouting> {
+    let Some(tools) = tools else {
+        return Vec::new();
+    };
+
+    let mut routing = Vec::new();
+
+    for tool in tools {
+        let builtin_type = match tool.r#type {
+            ResponseToolType::WebSearchPreview => BuiltinToolType::WebSearchPreview,
+            ResponseToolType::CodeInterpreter => BuiltinToolType::CodeInterpreter,
+            // FileSearch is not in ResponseToolType yet, but we handle it if added
+            _ => continue,
+        };
+
+        // Look up configured MCP server for this built-in type
+        if let Some((server_name, tool_name, response_format)) =
+            mcp_orchestrator.find_builtin_server(builtin_type)
+        {
+            debug!(
+                builtin_type = ?builtin_type,
+                server = %server_name,
+                tool = %tool_name,
+                "Found MCP server for built-in tool type"
+            );
+
+            routing.push(BuiltinToolRouting {
+                builtin_type,
+                server_name,
+                tool_name,
+                response_format,
+            });
+        }
+    }
+
+    routing
 }
 
 /// Ensure MCP clients are connected for request-level MCP tools.
@@ -112,6 +181,8 @@ pub async fn ensure_request_mcp_client(
             proxy: None,
             required: false,
             tools: None,
+            builtin_type: None,
+            builtin_tool_name: None,
         };
 
         let server_key = McpOrchestrator::server_key(&server_config);
@@ -155,4 +226,261 @@ fn extract_forwardable_headers(request_headers: Option<&HeaderMap>) -> HashMap<S
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        mcp::{McpConfig, ResponseFormatConfig, ToolConfig},
+        protocols::responses::ResponseTool,
+    };
+
+    /// Create a test orchestrator with a built-in server configuration
+    async fn create_test_orchestrator_with_builtin() -> Arc<McpOrchestrator> {
+        let mut tools_config = HashMap::new();
+        tools_config.insert(
+            "web_search".to_string(),
+            ToolConfig {
+                response_format: ResponseFormatConfig::WebSearchCall,
+                ..Default::default()
+            },
+        );
+
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "search-server".to_string(),
+                transport: McpTransport::Streamable {
+                    url: "http://localhost:9999/mcp".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: Some(tools_config),
+                builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                builtin_tool_name: Some("web_search".to_string()),
+            }],
+            pool: Default::default(),
+            proxy: None,
+            warmup: Vec::new(),
+            inventory: Default::default(),
+            policy: Default::default(),
+        };
+
+        // Note: This will fail to connect but still create the orchestrator with config
+        Arc::new(McpOrchestrator::new(config).await.unwrap())
+    }
+
+    /// Create a test orchestrator without built-in server configuration
+    async fn create_test_orchestrator_no_builtin() -> Arc<McpOrchestrator> {
+        let config = McpConfig {
+            servers: vec![],
+            pool: Default::default(),
+            proxy: None,
+            warmup: Vec::new(),
+            inventory: Default::default(),
+            policy: Default::default(),
+        };
+
+        Arc::new(McpOrchestrator::new(config).await.unwrap())
+    }
+
+    #[test]
+    fn test_extract_server_label_with_mcp_tool() {
+        let tools = vec![ResponseTool {
+            r#type: ResponseToolType::Mcp,
+            server_label: Some("my-server".to_string()),
+            ..Default::default()
+        }];
+
+        let label = extract_server_label(Some(&tools), "default");
+        assert_eq!(label, "my-server");
+    }
+
+    #[test]
+    fn test_extract_server_label_no_mcp_tools() {
+        let tools = vec![ResponseTool {
+            r#type: ResponseToolType::WebSearchPreview,
+            ..Default::default()
+        }];
+
+        let label = extract_server_label(Some(&tools), "default");
+        assert_eq!(label, "default");
+    }
+
+    #[test]
+    fn test_extract_server_label_none_tools() {
+        let label = extract_server_label(None, "default");
+        assert_eq!(label, "default");
+    }
+
+    #[tokio::test]
+    async fn test_collect_builtin_routing_with_configured_server() {
+        let orchestrator = create_test_orchestrator_with_builtin().await;
+
+        let tools = vec![ResponseTool {
+            r#type: ResponseToolType::WebSearchPreview,
+            ..Default::default()
+        }];
+
+        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+
+        assert_eq!(routing.len(), 1);
+        assert_eq!(routing[0].builtin_type, BuiltinToolType::WebSearchPreview);
+        assert_eq!(routing[0].server_name, "search-server");
+        assert_eq!(routing[0].tool_name, "web_search");
+        assert_eq!(routing[0].response_format, ResponseFormat::WebSearchCall);
+    }
+
+    #[tokio::test]
+    async fn test_collect_builtin_routing_no_configured_server() {
+        let orchestrator = create_test_orchestrator_no_builtin().await;
+
+        let tools = vec![ResponseTool {
+            r#type: ResponseToolType::WebSearchPreview,
+            ..Default::default()
+        }];
+
+        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+
+        // No routing because no server configured for this built-in type
+        assert!(routing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_collect_builtin_routing_ignores_mcp_tools() {
+        let orchestrator = create_test_orchestrator_with_builtin().await;
+
+        let tools = vec![ResponseTool {
+            r#type: ResponseToolType::Mcp,
+            server_url: Some("http://example.com/mcp".to_string()),
+            ..Default::default()
+        }];
+
+        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+
+        // MCP tools are not built-in types, should be empty
+        assert!(routing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_collect_builtin_routing_ignores_function_tools() {
+        let orchestrator = create_test_orchestrator_with_builtin().await;
+
+        let tools = vec![ResponseTool {
+            r#type: ResponseToolType::Function,
+            ..Default::default()
+        }];
+
+        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+
+        // Function tools are not built-in types, should be empty
+        assert!(routing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_collect_builtin_routing_none_tools() {
+        let orchestrator = create_test_orchestrator_no_builtin().await;
+
+        let routing = collect_builtin_routing(&orchestrator, None);
+
+        assert!(routing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_collect_builtin_routing_multiple_builtin_tools() {
+        // Create orchestrator with both web search and code interpreter
+        let mut web_search_tools = HashMap::new();
+        web_search_tools.insert(
+            "web_search".to_string(),
+            ToolConfig {
+                response_format: ResponseFormatConfig::WebSearchCall,
+                ..Default::default()
+            },
+        );
+
+        let mut code_interp_tools = HashMap::new();
+        code_interp_tools.insert(
+            "run_code".to_string(),
+            ToolConfig {
+                response_format: ResponseFormatConfig::CodeInterpreterCall,
+                ..Default::default()
+            },
+        );
+
+        let config = McpConfig {
+            servers: vec![
+                McpServerConfig {
+                    name: "search-server".to_string(),
+                    transport: McpTransport::Streamable {
+                        url: "http://localhost:9999/search".to_string(),
+                        token: None,
+                        headers: HashMap::new(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: Some(web_search_tools),
+                    builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                    builtin_tool_name: Some("web_search".to_string()),
+                },
+                McpServerConfig {
+                    name: "code-server".to_string(),
+                    transport: McpTransport::Streamable {
+                        url: "http://localhost:9998/code".to_string(),
+                        token: None,
+                        headers: HashMap::new(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: Some(code_interp_tools),
+                    builtin_type: Some(BuiltinToolType::CodeInterpreter),
+                    builtin_tool_name: Some("run_code".to_string()),
+                },
+            ],
+            pool: Default::default(),
+            proxy: None,
+            warmup: Vec::new(),
+            inventory: Default::default(),
+            policy: Default::default(),
+        };
+
+        let orchestrator = Arc::new(McpOrchestrator::new(config).await.unwrap());
+
+        let tools = vec![
+            ResponseTool {
+                r#type: ResponseToolType::WebSearchPreview,
+                ..Default::default()
+            },
+            ResponseTool {
+                r#type: ResponseToolType::CodeInterpreter,
+                ..Default::default()
+            },
+        ];
+
+        let routing = collect_builtin_routing(&orchestrator, Some(&tools));
+
+        assert_eq!(routing.len(), 2);
+
+        // Find web search routing
+        let web_routing = routing
+            .iter()
+            .find(|r| r.builtin_type == BuiltinToolType::WebSearchPreview)
+            .expect("Should have web search routing");
+        assert_eq!(web_routing.server_name, "search-server");
+        assert_eq!(web_routing.tool_name, "web_search");
+        assert_eq!(web_routing.response_format, ResponseFormat::WebSearchCall);
+
+        // Find code interpreter routing
+        let code_routing = routing
+            .iter()
+            .find(|r| r.builtin_type == BuiltinToolType::CodeInterpreter)
+            .expect("Should have code interpreter routing");
+        assert_eq!(code_routing.server_name, "code-server");
+        assert_eq!(code_routing.tool_name, "run_code");
+        assert_eq!(
+            code_routing.response_format,
+            ResponseFormat::CodeInterpreterCall
+        );
+    }
 }

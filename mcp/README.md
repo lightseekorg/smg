@@ -99,6 +99,26 @@ servers:
       X-Tenant-ID: "tenant-123"
     required: false
 
+  # Built-in tool routing: route OpenAI built-in tools to MCP servers
+  - name: brave-search
+    protocol: sse
+    url: "https://mcp.brave.com/sse"
+    token: "${BRAVE_API_KEY}"
+    builtin_type: web_search_preview    # Route web_search_preview to this server
+    builtin_tool_name: brave_web_search # Call this MCP tool
+    tools:
+      brave_web_search:
+        response_format: web_search_call
+
+  - name: code-runner
+    protocol: stdio
+    command: "code-interpreter-server"
+    builtin_type: code_interpreter      # Route code_interpreter to this server
+    builtin_tool_name: execute          # Call this MCP tool
+    tools:
+      execute:
+        response_format: code_interpreter_call
+
 # Connection pool for dynamic servers
 pool:
   max_connections: 100
@@ -253,6 +273,57 @@ MCP Server Response (CallToolResult)
         ▼
 OpenAI ResponseOutputItem
 ```
+
+### Built-in Tool Routing
+
+Route OpenAI built-in tool types (`web_search_preview`, `code_interpreter`, `file_search`) to MCP servers instead of passing them to the upstream model.
+
+**Configuration:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `builtin_type` | `web_search_preview` \| `code_interpreter` \| `file_search` | Which built-in tool type this server handles |
+| `builtin_tool_name` | string | The MCP tool to call on this server |
+
+**Example:**
+
+```yaml
+servers:
+  - name: brave-search
+    protocol: sse
+    url: "https://mcp.brave.com/sse"
+    token: "${BRAVE_API_KEY}"
+    builtin_type: web_search_preview    # Handle web_search_preview requests
+    builtin_tool_name: brave_web_search # Call this tool
+    tools:
+      brave_web_search:
+        response_format: web_search_call  # Transform to OpenAI format
+```
+
+**How it works:**
+
+1. Request includes `{"type": "web_search_preview"}` tool
+2. Gateway finds server with `builtin_type: web_search_preview`
+3. Calls `builtin_tool_name` on that MCP server
+4. Transforms response using configured `response_format`
+
+**Programmatic lookup:**
+
+```rust
+use smg_mcp::BuiltinToolType;
+
+// Find configured server for a built-in type
+if let Some((server_name, tool_name, format)) =
+    orchestrator.find_builtin_server(BuiltinToolType::WebSearchPreview)
+{
+    // Route to MCP server
+    let result = orchestrator.call_tool(
+        &server_name, &tool_name, args, "web-search", &request_ctx
+    ).await?;
+}
+```
+
+**Note:** Both `builtin_type` and `builtin_tool_name` must be set together. If only one is set, the configuration is invalid.
 
 ## Usage
 

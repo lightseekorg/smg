@@ -44,7 +44,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use super::{
-    config::{McpConfig, McpServerConfig, McpTransport},
+    config::{BuiltinToolType, McpConfig, McpServerConfig, McpTransport},
     handler::{HandlerRequestContext, RefreshRequest, SmgClientHandler},
     metrics::McpMetrics,
     pool::{McpConnectionPool, PoolKey},
@@ -261,6 +261,11 @@ impl McpOrchestrator {
     ///
     /// Policy is built from `config.policy`. Default policy allows all tools.
     pub async fn new(config: McpConfig) -> McpResult<Self> {
+        // Validate configuration (server pairs, no duplicate builtin_types)
+        config
+            .validate()
+            .map_err(|e| McpError::Config(e.to_string()))?;
+
         let tool_inventory = Arc::new(ToolInventory::new());
         let metrics = Arc::new(McpMetrics::new());
 
@@ -787,6 +792,73 @@ impl McpOrchestrator {
         } else {
             None
         }
+    }
+
+    /// Find the MCP server configured to handle a built-in tool type.
+    ///
+    /// When a request includes built-in tools like `{"type": "web_search_preview"}`,
+    /// routers can use this method to find which MCP server should handle it.
+    ///
+    /// # Arguments
+    /// * `builtin_type` - The built-in tool type to look up
+    ///
+    /// # Returns
+    /// If a server is configured for this built-in type, returns:
+    /// - `server_key` - Internal identifier for the server (used for `call_tool`)
+    /// - `tool_name` - The MCP tool to call on that server
+    /// - `response_format` - The format to use for response transformation
+    ///
+    /// Returns `None` if no server is configured for this built-in type.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Check if web_search_preview is configured
+    /// if let Some((server_key, tool_name, format)) =
+    ///     orchestrator.find_builtin_server(BuiltinToolType::WebSearchPreview)
+    /// {
+    ///     // Route to MCP server
+    ///     let result = orchestrator.call_tool(
+    ///         &server_key,
+    ///         &tool_name,
+    ///         arguments,
+    ///         "web-search",  // user-facing label
+    ///         &request_ctx,
+    ///     ).await?;
+    /// } else {
+    ///     // No MCP configured - handle differently
+    /// }
+    /// ```
+    pub fn find_builtin_server(
+        &self,
+        builtin_type: BuiltinToolType,
+    ) -> Option<(String, String, ResponseFormat)> {
+        // Search static servers for matching builtin_type
+        // Note: Config validation ensures builtin_type and builtin_tool_name are set together
+        for server_config in &self.config.servers {
+            if let (Some(cfg_type), Some(tool_name)) = (
+                &server_config.builtin_type,
+                &server_config.builtin_tool_name,
+            ) {
+                if *cfg_type == builtin_type {
+                    // Determine response format from tool config or use builtin default
+                    let response_format = server_config
+                        .tools
+                        .as_ref()
+                        .and_then(|tools| tools.get(tool_name))
+                        .map(|tc| tc.response_format.clone().into())
+                        .unwrap_or_else(|| builtin_type.response_format().into());
+
+                    return Some((
+                        server_config.name.clone(),
+                        tool_name.clone(),
+                        response_format,
+                    ));
+                }
+            }
+        }
+
+        None
     }
 
     /// Execute multiple tools with unified error handling.
@@ -2021,5 +2093,136 @@ mod tests {
 
         // Should find 0 matches
         assert_eq!(matching.len(), 0);
+    }
+
+    #[test]
+    fn test_find_builtin_server_web_search() {
+        use std::collections::HashMap;
+
+        use crate::approval::{audit::AuditLog, policy::PolicyEngine};
+
+        // Create config with a server configured for web_search_preview
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "brave".to_string(),
+                transport: McpTransport::Sse {
+                    url: "https://mcp.brave.com/sse".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                builtin_tool_name: Some("brave_web_search".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let (refresh_tx, _) = mpsc::channel(10);
+        let audit_log = Arc::new(AuditLog::new());
+        let policy_engine = Arc::new(PolicyEngine::new(Arc::clone(&audit_log)));
+        let approval_manager = Arc::new(ApprovalManager::new(policy_engine, audit_log));
+
+        let orchestrator = McpOrchestrator {
+            static_servers: DashMap::new(),
+            tool_inventory: Arc::new(ToolInventory::new()),
+            approval_manager,
+            connection_pool: Arc::new(McpConnectionPool::new()),
+            metrics: Arc::new(McpMetrics::new()),
+            refresh_tx,
+            config,
+        };
+
+        // Should find the brave server for web_search_preview
+        let result = orchestrator.find_builtin_server(BuiltinToolType::WebSearchPreview);
+        assert!(result.is_some());
+
+        let (server_key, tool_name, response_format) = result.unwrap();
+        assert_eq!(server_key, "brave");
+        assert_eq!(tool_name, "brave_web_search");
+        assert_eq!(response_format, ResponseFormat::WebSearchCall);
+
+        // Should NOT find a server for code_interpreter
+        let result = orchestrator.find_builtin_server(BuiltinToolType::CodeInterpreter);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_builtin_server_with_custom_response_format() {
+        use std::collections::HashMap;
+
+        use crate::{
+            approval::{audit::AuditLog, policy::PolicyEngine},
+            core::config::{ResponseFormatConfig, ToolConfig},
+        };
+
+        // Create config with custom response_format for the tool
+        let mut tools = HashMap::new();
+        tools.insert(
+            "my_search".to_string(),
+            ToolConfig {
+                alias: None,
+                response_format: ResponseFormatConfig::Passthrough, // Override default
+                arg_mapping: None,
+            },
+        );
+
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "custom-search".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: Some(tools),
+                builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                builtin_tool_name: Some("my_search".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let (refresh_tx, _) = mpsc::channel(10);
+        let audit_log = Arc::new(AuditLog::new());
+        let policy_engine = Arc::new(PolicyEngine::new(Arc::clone(&audit_log)));
+        let approval_manager = Arc::new(ApprovalManager::new(policy_engine, audit_log));
+
+        let orchestrator = McpOrchestrator {
+            static_servers: DashMap::new(),
+            tool_inventory: Arc::new(ToolInventory::new()),
+            approval_manager,
+            connection_pool: Arc::new(McpConnectionPool::new()),
+            metrics: Arc::new(McpMetrics::new()),
+            refresh_tx,
+            config,
+        };
+
+        let result = orchestrator.find_builtin_server(BuiltinToolType::WebSearchPreview);
+        assert!(result.is_some());
+
+        let (server_key, tool_name, response_format) = result.unwrap();
+        assert_eq!(server_key, "custom-search");
+        assert_eq!(tool_name, "my_search");
+        // Should use the custom Passthrough format, not the default WebSearchCall
+        assert_eq!(response_format, ResponseFormat::Passthrough);
+    }
+
+    #[test]
+    fn test_find_builtin_server_no_config() {
+        let orchestrator = McpOrchestrator::new_test();
+
+        // No servers configured for any builtin type
+        assert!(orchestrator
+            .find_builtin_server(BuiltinToolType::WebSearchPreview)
+            .is_none());
+        assert!(orchestrator
+            .find_builtin_server(BuiltinToolType::CodeInterpreter)
+            .is_none());
+        assert!(orchestrator
+            .find_builtin_server(BuiltinToolType::FileSearch)
+            .is_none());
     }
 }
