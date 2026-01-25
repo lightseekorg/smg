@@ -59,6 +59,11 @@ def create_mcp_config() -> dict:
                 "url": BRAVE_MCP_URL,
                 "builtin_type": "web_search_preview",
                 "builtin_tool_name": "brave_web_search",
+                "tools": {
+                    "brave_web_search": {
+                        "response_format": "web_search_call",
+                    }
+                },
             }
         ]
     }

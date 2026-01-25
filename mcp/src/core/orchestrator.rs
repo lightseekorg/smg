@@ -94,11 +94,12 @@ fn build_request_headers(
 /// Type alias for MCP client with handler.
 type McpClientWithHandler = RunningService<RoleClient, SmgClientHandler>;
 
-/// Server entry with client and handler.
+/// Server entry with client, handler, and config.
 #[derive(Clone)]
 struct ServerEntry {
     client: Arc<McpClientWithHandler>,
     handler: Arc<SmgClientHandler>,
+    config: McpServerConfig,
 }
 
 /// Result of a tool call.
@@ -388,9 +389,15 @@ impl McpOrchestrator {
         // Apply builtin response format if server has builtin_type configured
         self.apply_builtin_response_format(config);
 
-        // Store server entry
-        self.static_servers
-            .insert(config.name.clone(), ServerEntry { client, handler });
+        // Store server entry with config for builtin lookups
+        self.static_servers.insert(
+            config.name.clone(),
+            ServerEntry {
+                client,
+                handler,
+                config: config.clone(),
+            },
+        );
 
         self.metrics.record_connection_opened();
         info!("Connected to static server '{}'", config.name);
@@ -890,9 +897,8 @@ impl McpOrchestrator {
         &self,
         builtin_type: BuiltinToolType,
     ) -> Option<(String, String, ResponseFormat)> {
-        // Search static servers for matching builtin_type
-        // Note: Config validation ensures builtin_type and builtin_tool_name are set together
-        for server_config in &self.config.servers {
+        // Helper to extract builtin info from a server config
+        let extract_builtin = |server_config: &McpServerConfig| {
             if let (Some(cfg_type), Some(tool_name)) = (
                 &server_config.builtin_type,
                 &server_config.builtin_tool_name,
@@ -912,6 +918,23 @@ impl McpOrchestrator {
                         response_format,
                     ));
                 }
+            }
+            None
+        };
+
+        // First, search connected static servers (dynamically registered via connect_static_server).
+        // This handles servers registered after orchestrator initialization.
+        for entry in self.static_servers.iter() {
+            if let Some(result) = extract_builtin(&entry.config) {
+                return Some(result);
+            }
+        }
+
+        // Fallback to initial config servers (handles edge cases where servers
+        // from the initial config haven't connected yet, and supports tests).
+        for server_config in &self.config.servers {
+            if let Some(result) = extract_builtin(server_config) {
+                return Some(result);
             }
         }
 
