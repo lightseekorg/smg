@@ -121,6 +121,43 @@ def gateway_with_mcp_config(require_brave_server, mcp_config_file):
     gateway.shutdown()
 
 
+@pytest.fixture(scope="class")
+def gateway_with_mcp_config_grpc(require_brave_server, mcp_config_file, model_pool):
+    """Launch gRPC gateway with MCP config that routes web_search_preview to Brave."""
+    from infra import ConnectionMode, Gateway
+
+    logger.info("Launching gRPC gateway with MCP config: %s", mcp_config_file)
+
+    # Get a gRPC worker from the pool
+    try:
+        instance = model_pool.get("gpt-oss", ConnectionMode.GRPC)
+    except (KeyError, RuntimeError) as e:
+        pytest.skip(f"gRPC worker not available: {e}")
+
+    gateway = Gateway()
+    gateway.start(
+        worker_urls=[instance.worker_url],
+        model_path=instance.model_path,
+        extra_args=[
+            "--mcp-config-path",
+            mcp_config_file,
+            "--reasoning-parser=gpt-oss",
+            "--history-backend",
+            "memory",
+        ],
+    )
+
+    client = openai.OpenAI(
+        base_url=f"{gateway.base_url}/v1",
+        api_key="not-used",
+    )
+
+    yield gateway, client, instance.model_path
+
+    gateway.shutdown()
+    instance.release()
+
+
 # Note: These tests require manual gateway configuration with MCP config.
 # In CI, the gateway is started with --mcp-config-path pointing to a config
 # that has builtin_type: web_search_preview configured.
@@ -532,6 +569,195 @@ class TestWebSearchStreamingEvents:
 
         resp = client.responses.create(
             model="gpt-4o-mini",
+            input=WEB_SEARCH_PROMPT,
+            tools=[WEB_SEARCH_PREVIEW_TOOL],
+            stream=True,
+        )
+
+        events = list(resp)
+        event_types = [event.type for event in events]
+
+        # Find positions of key events
+        def find_first(event_type: str) -> int:
+            try:
+                return event_types.index(event_type)
+            except ValueError:
+                return -1
+
+        created_pos = find_first("response.created")
+        in_progress_pos = find_first("response.web_search_call.in_progress")
+        searching_pos = find_first("response.web_search_call.searching")
+        completed_pos = find_first("response.web_search_call.completed")
+        response_completed_pos = find_first("response.completed")
+
+        # Verify event ordering
+        assert created_pos == 0, "response.created should be first"
+        assert in_progress_pos > created_pos, "in_progress should be after created"
+        assert searching_pos > in_progress_pos, "searching should be after in_progress"
+        assert completed_pos > searching_pos, "completed should be after searching"
+        assert response_completed_pos > completed_pos, (
+            "response.completed should be after web_search_call.completed"
+        )
+
+
+# =============================================================================
+# gRPC Backend Integration Tests (require Brave MCP server + gRPC worker)
+# =============================================================================
+# These tests run the same builtin tool routing tests against gRPC backend
+# to verify the harmony router produces the same events as the regular router.
+
+
+@pytest.mark.e2e
+class TestBuiltinToolRoutingGrpc:
+    """Full integration tests for built-in tool routing on gRPC backend.
+
+    These tests verify the complete flow on gRPC/harmony router:
+    1. Client sends {type: "web_search_preview"}
+    2. Gateway routes to configured MCP server (Brave)
+    3. Response contains web_search_call (not mcp_call)
+
+    Requires:
+    - Brave MCP server on port 8001
+    - gRPC worker available in model_pool
+    """
+
+    def test_web_search_preview_produces_web_search_call(
+        self, gateway_with_mcp_config_grpc
+    ):
+        """Test that web_search_preview produces web_search_call output on gRPC."""
+        gateway, client, model_path = gateway_with_mcp_config_grpc
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model=model_path,
+            input=WEB_SEARCH_PROMPT,
+            tools=[WEB_SEARCH_PREVIEW_TOOL],
+            stream=False,
+        )
+
+        assert resp.error is None, f"Response error: {resp.error}"
+        assert resp.output is not None
+
+        output_types = [item.type for item in resp.output]
+        logger.info("Built-in tool output types (gRPC): %s", output_types)
+
+        # Built-in tool should produce web_search_call, NOT mcp_call
+        assert "web_search_call" in output_types, (
+            f"Built-in web_search_preview should produce web_search_call, got: {output_types}"
+        )
+        assert "mcp_call" not in output_types, (
+            f"Built-in tool should NOT produce mcp_call, got: {output_types}"
+        )
+
+    def test_response_tools_shows_original_type(self, gateway_with_mcp_config_grpc):
+        """Test that response tools field shows web_search_preview, not mcp (gRPC)."""
+        gateway, client, model_path = gateway_with_mcp_config_grpc
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model=model_path,
+            input=WEB_SEARCH_PROMPT,
+            tools=[WEB_SEARCH_PREVIEW_TOOL],
+            stream=False,
+        )
+
+        assert resp.error is None, f"Response error: {resp.error}"
+
+        # The tools field in response should mirror the original request
+        if resp.tools:
+            tool_types = [t.type for t in resp.tools]
+            logger.info("Response tools types (gRPC): %s", tool_types)
+            assert "mcp" not in tool_types, (
+                f"Response tools should not show 'mcp' type, got: {tool_types}"
+            )
+
+
+@pytest.mark.e2e
+class TestWebSearchStreamingEventsGrpc:
+    """Test web_search_call SSE streaming events with builtin routing on gRPC.
+
+    These tests verify the streaming event sequence for web search when
+    using builtin tool routing on gRPC backend (harmony router).
+    Should produce the same events as the regular router:
+    - response.web_search_call.in_progress
+    - response.web_search_call.searching
+    - response.web_search_call.completed
+    """
+
+    def test_web_search_preview_streaming_events(self, gateway_with_mcp_config_grpc):
+        """Test that web_search_preview produces web_search_call streaming events (gRPC)."""
+        gateway, client, model_path = gateway_with_mcp_config_grpc
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model=model_path,
+            input=WEB_SEARCH_PROMPT,
+            tools=[WEB_SEARCH_PREVIEW_TOOL],
+            stream=True,
+        )
+
+        events = list(resp)
+        event_types = [event.type for event in events]
+        logger.info(
+            "web_search_preview streaming event types (gRPC): %s", sorted(set(event_types))
+        )
+
+        # Core streaming events
+        assert "response.created" in event_types
+        assert "response.completed" in event_types
+
+        # web_search_call specific events (per OpenAI API spec)
+        assert (
+            "response.web_search_call.in_progress" in event_types
+        ), "Should have web_search_call.in_progress event"
+        assert (
+            "response.web_search_call.searching" in event_types
+        ), "Should have web_search_call.searching event"
+        assert (
+            "response.web_search_call.completed" in event_types
+        ), "Should have web_search_call.completed event"
+
+        # Verify no MCP events (these should be transformed)
+        assert (
+            "response.mcp_call.in_progress" not in event_types
+        ), "Built-in tool should NOT produce mcp_call events"
+        assert (
+            "response.mcp_call.completed" not in event_types
+        ), "Built-in tool should NOT produce mcp_call events"
+
+        # Verify final response
+        completed_events = [e for e in events if e.type == "response.completed"]
+        final_response = completed_events[0].response
+        assert final_response.status == "completed"
+
+        # Verify web_search_call in final output (not mcp_call)
+        final_output_types = [item.type for item in final_response.output]
+        assert "web_search_call" in final_output_types, (
+            f"Built-in tool should produce web_search_call, got: {final_output_types}"
+        )
+        assert "mcp_call" not in final_output_types, (
+            "Built-in tool should NOT produce mcp_call output"
+        )
+
+        # Verify web_search_call item structure
+        web_search_calls = [
+            item for item in final_response.output if item.type == "web_search_call"
+        ]
+        for ws_call in web_search_calls:
+            assert ws_call.status == "completed"
+            assert ws_call.id is not None
+
+    def test_web_search_streaming_event_order(self, gateway_with_mcp_config_grpc):
+        """Test that web_search streaming events occur in correct order (gRPC)."""
+        gateway, client, model_path = gateway_with_mcp_config_grpc
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model=model_path,
             input=WEB_SEARCH_PROMPT,
             tools=[WEB_SEARCH_PREVIEW_TOOL],
             stream=True,
