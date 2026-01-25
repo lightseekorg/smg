@@ -296,28 +296,42 @@ pub(super) async fn execute_streaming_tool_calls(
 // Payload Transformation
 // ============================================================================
 
-/// Transform payload to replace MCP tools with function tools
+/// Transform payload to replace MCP/builtin tools with function tools
+///
+/// This function:
+/// 1. Retains existing function tools from the request
+/// 2. Removes non-function tools (MCP tools, builtin tools like web_search_preview)
+/// 3. Appends function tools for all discovered MCP tools from the connected servers
 pub(super) fn prepare_mcp_tools_as_functions(
     payload: &mut Value,
     orchestrator: &Arc<McpOrchestrator>,
     server_keys: &[String],
 ) {
     if let Some(obj) = payload.as_object_mut() {
-        // Remove any non-function tools from outgoing payload
+        // Remove any non-function tools from outgoing payload, keep function tools
+        let mut retained_tools: Vec<Value> = Vec::new();
         if let Some(v) = obj.get_mut("tools") {
             if let Some(arr) = v.as_array_mut() {
-                arr.retain(|item| {
-                    item.get("type")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s == ItemType::FUNCTION)
-                        .unwrap_or(false)
-                });
+                retained_tools = arr
+                    .drain(..)
+                    .filter(|item| {
+                        item.get("type")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == ItemType::FUNCTION)
+                            .unwrap_or(false)
+                    })
+                    .collect();
             }
         }
 
         // Build function tools for all discovered MCP tools
         let tools = orchestrator.list_tools_for_servers(server_keys);
-        let mut tools_json = Vec::with_capacity(tools.len());
+        let mut tools_json = Vec::with_capacity(retained_tools.len() + tools.len());
+
+        // Keep original function tools first
+        tools_json.append(&mut retained_tools);
+
+        // Append MCP tools as function tools
         for entry in tools {
             let parameters = Value::Object((*entry.tool.input_schema).clone());
             let tool = serde_json::json!({
@@ -328,6 +342,7 @@ pub(super) fn prepare_mcp_tools_as_functions(
             });
             tools_json.push(tool);
         }
+
         if !tools_json.is_empty() {
             obj.insert("tools".to_string(), Value::Array(tools_json));
             obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));

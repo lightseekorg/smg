@@ -385,6 +385,9 @@ impl McpOrchestrator {
         // Apply tool configs (aliases, response formats)
         self.apply_tool_configs(config);
 
+        // Apply builtin response format if server has builtin_type configured
+        self.apply_builtin_response_format(config);
+
         // Store server entry
         self.static_servers
             .insert(config.name.clone(), ServerEntry { client, handler });
@@ -457,6 +460,57 @@ impl McpOrchestrator {
                     );
                 }
             }
+        }
+    }
+
+    /// Apply builtin response format to the builtin_tool_name if not explicitly overridden.
+    ///
+    /// When a server is configured with `builtin_type` and `builtin_tool_name`, the
+    /// corresponding tool should use the response format associated with the builtin type
+    /// (e.g., WebSearchPreview -> WebSearch) unless explicitly overridden in the tools config.
+    fn apply_builtin_response_format(&self, config: &McpServerConfig) {
+        let Some(builtin_type) = &config.builtin_type else {
+            return;
+        };
+        let Some(tool_name) = &config.builtin_tool_name else {
+            return;
+        };
+
+        // Check if the tool is configured in the tools config at all.
+        // If it is, the user has explicitly chosen a response_format (even if Passthrough),
+        // so we should respect that and not auto-apply the builtin format.
+        let has_explicit_config = config
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.contains_key(tool_name));
+
+        if has_explicit_config {
+            debug!(
+                server = %config.name,
+                tool = %tool_name,
+                "Builtin tool has explicit config, skipping auto-apply of response_format"
+            );
+            return;
+        }
+
+        // Get the response format for this builtin type
+        let response_format: ResponseFormat = builtin_type.response_format().into();
+
+        // Update the tool entry if it exists
+        if let Some(mut entry) = self.tool_inventory.get_entry(&config.name, tool_name) {
+            if entry.response_format != response_format {
+                entry.response_format = response_format.clone();
+                self.tool_inventory.insert_entry(entry);
+                info!(
+                    "Applied builtin response format {:?} to '{}:{}' for builtin_type {:?}",
+                    response_format, config.name, tool_name, builtin_type
+                );
+            }
+        } else {
+            warn!(
+                "Builtin tool '{}:{}' not found on server for builtin_type {:?}",
+                config.name, tool_name, builtin_type
+            );
         }
     }
 
@@ -2224,5 +2278,141 @@ mod tests {
         assert!(orchestrator
             .find_builtin_server(BuiltinToolType::FileSearch)
             .is_none());
+    }
+
+    #[test]
+    fn test_apply_builtin_response_format() {
+        use std::collections::HashMap;
+
+        use crate::{
+            approval::{audit::AuditLog, policy::PolicyEngine},
+            inventory::types::ToolEntry,
+        };
+
+        // Create config with builtin_type but no explicit response_format for the tool
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "brave".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: None, // No explicit tool config
+                builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                builtin_tool_name: Some("brave_search".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let (refresh_tx, _) = mpsc::channel(10);
+        let audit_log = Arc::new(AuditLog::new());
+        let policy_engine = Arc::new(PolicyEngine::new(Arc::clone(&audit_log)));
+        let approval_manager = Arc::new(ApprovalManager::new(policy_engine, audit_log));
+
+        let orchestrator = McpOrchestrator {
+            static_servers: DashMap::new(),
+            tool_inventory: Arc::new(ToolInventory::new()),
+            approval_manager,
+            connection_pool: Arc::new(McpConnectionPool::new()),
+            metrics: Arc::new(McpMetrics::new()),
+            refresh_tx,
+            config,
+        };
+
+        // Simulate tool discovery - tool is registered with default Passthrough
+        let tool = create_test_tool("brave_search");
+        let entry = ToolEntry::from_server_tool("brave", tool);
+        assert_eq!(entry.response_format, ResponseFormat::Passthrough); // Default
+        orchestrator.tool_inventory.insert_entry(entry);
+
+        // Apply builtin response format - should update to WebSearchCall
+        orchestrator.apply_builtin_response_format(&orchestrator.config.servers[0]);
+
+        // Verify the tool entry was updated
+        let entry = orchestrator
+            .tool_inventory
+            .get_entry("brave", "brave_search")
+            .expect("Tool should exist");
+        assert_eq!(
+            entry.response_format,
+            ResponseFormat::WebSearchCall,
+            "Builtin type should auto-apply WebSearchCall format"
+        );
+    }
+
+    #[test]
+    fn test_apply_builtin_response_format_with_explicit_override() {
+        use std::collections::HashMap;
+
+        use crate::{
+            approval::{audit::AuditLog, policy::PolicyEngine},
+            core::config::{ResponseFormatConfig, ToolConfig},
+            inventory::types::ToolEntry,
+        };
+
+        // Create config with builtin_type AND explicit response_format override
+        let mut tools = HashMap::new();
+        tools.insert(
+            "brave_search".to_string(),
+            ToolConfig {
+                alias: None,
+                response_format: ResponseFormatConfig::Passthrough, // Explicit override
+                arg_mapping: None,
+            },
+        );
+
+        let config = McpConfig {
+            servers: vec![McpServerConfig {
+                name: "brave".to_string(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:3000/sse".to_string(),
+                    token: None,
+                    headers: HashMap::new(),
+                },
+                proxy: None,
+                required: false,
+                tools: Some(tools),
+                builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                builtin_tool_name: Some("brave_search".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let (refresh_tx, _) = mpsc::channel(10);
+        let audit_log = Arc::new(AuditLog::new());
+        let policy_engine = Arc::new(PolicyEngine::new(Arc::clone(&audit_log)));
+        let approval_manager = Arc::new(ApprovalManager::new(policy_engine, audit_log));
+
+        let orchestrator = McpOrchestrator {
+            static_servers: DashMap::new(),
+            tool_inventory: Arc::new(ToolInventory::new()),
+            approval_manager,
+            connection_pool: Arc::new(McpConnectionPool::new()),
+            metrics: Arc::new(McpMetrics::new()),
+            refresh_tx,
+            config,
+        };
+
+        // Simulate tool discovery
+        let tool = create_test_tool("brave_search");
+        let entry = ToolEntry::from_server_tool("brave", tool);
+        orchestrator.tool_inventory.insert_entry(entry);
+
+        // Apply builtin response format - should NOT override because explicit config exists
+        orchestrator.apply_builtin_response_format(&orchestrator.config.servers[0]);
+
+        // Verify the tool entry kept Passthrough (explicit override)
+        let entry = orchestrator
+            .tool_inventory
+            .get_entry("brave", "brave_search")
+            .expect("Tool should exist");
+        assert_eq!(
+            entry.response_format,
+            ResponseFormat::Passthrough,
+            "Explicit override should be preserved"
+        );
     }
 }

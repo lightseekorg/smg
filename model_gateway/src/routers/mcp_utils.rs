@@ -116,13 +116,18 @@ pub fn collect_builtin_routing(
     routing
 }
 
-/// Ensure MCP clients are connected for request-level MCP tools.
+/// Ensure MCP clients are connected for request-level MCP tools and built-in tool routing.
 ///
-/// Extracts server configurations from request tools and establishes connections.
+/// This function handles two cases:
+/// 1. **Dynamic MCP tools**: Tools with `type: mcp` and `server_url` in the request.
+///    These require connecting to the MCP server dynamically.
+/// 2. **Built-in tool routing**: Tools like `web_search_preview` that have a static
+///    MCP server configured via `builtin_type`. These use pre-connected static servers.
+///
 /// Forwards filtered HTTP request headers (auth, tracing, correlation IDs) to MCP servers.
 ///
-/// Returns `Some((orchestrator, mcp_servers))` if connections were established,
-/// `None` if no MCP tools with server_url were found.
+/// Returns `Some((orchestrator, mcp_servers))` if MCP tools or built-in routing is available,
+/// `None` otherwise.
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
@@ -132,6 +137,7 @@ pub async fn ensure_request_mcp_client(
     let mut has_mcp_tools = false;
     let forwarded_headers = extract_forwardable_headers(request_headers);
 
+    // 1. Process dynamic MCP tools (from request server_url)
     for tool in tools {
         let Some(server_url) = tool
             .server_url
@@ -197,6 +203,25 @@ pub async fn ensure_request_mcp_client(
                 warn!("Failed to connect MCP server {}: {}", server_key, err);
             }
         }
+    }
+
+    // 2. Process built-in tool routing (static servers configured with builtin_type)
+    let builtin_routing = collect_builtin_routing(mcp_orchestrator, Some(tools));
+    for routing in builtin_routing {
+        debug!(
+            builtin_type = %routing.builtin_type,
+            server = %routing.server_name,
+            tool = %routing.tool_name,
+            "Adding static server for built-in tool routing"
+        );
+
+        // Static servers use their name as both label and key
+        // (they're already connected at startup)
+        let server_key = routing.server_name.clone();
+        if !mcp_servers.iter().any(|(_, key)| key == &server_key) {
+            mcp_servers.push((routing.server_name.clone(), server_key));
+        }
+        has_mcp_tools = true;
     }
 
     if has_mcp_tools && !mcp_servers.is_empty() {
@@ -482,5 +507,94 @@ mod tests {
             code_routing.response_format,
             ResponseFormat::CodeInterpreterCall
         );
+    }
+
+    // =========================================================================
+    // ensure_request_mcp_client tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_ensure_request_mcp_client_with_builtin_routing() {
+        // Create orchestrator with a built-in server configured
+        let orchestrator = create_test_orchestrator_with_builtin().await;
+
+        // Request has web_search_preview tool (no server_url, not MCP type)
+        let tools = vec![ResponseTool {
+            r#type: ResponseToolType::WebSearchPreview,
+            ..Default::default()
+        }];
+
+        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
+
+        // Should return Some because built-in routing is configured
+        assert!(result.is_some());
+
+        let (_, mcp_servers) = result.unwrap();
+        assert_eq!(mcp_servers.len(), 1);
+
+        // The server key should be the static server name
+        let (label, key) = &mcp_servers[0];
+        assert_eq!(label, "search-server");
+        assert_eq!(key, "search-server");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_request_mcp_client_no_builtin_routing() {
+        // Create orchestrator WITHOUT built-in server configured
+        let orchestrator = create_test_orchestrator_no_builtin().await;
+
+        // Request has web_search_preview tool
+        let tools = vec![ResponseTool {
+            r#type: ResponseToolType::WebSearchPreview,
+            ..Default::default()
+        }];
+
+        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
+
+        // Should return None because no MCP or built-in routing is available
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_request_mcp_client_function_tools_only() {
+        let orchestrator = create_test_orchestrator_with_builtin().await;
+
+        // Request has only function tools (no MCP, no built-in)
+        let tools = vec![ResponseTool {
+            r#type: ResponseToolType::Function,
+            ..Default::default()
+        }];
+
+        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
+
+        // Should return None - function tools don't need MCP processing
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_ensure_request_mcp_client_mixed_tools() {
+        // Create orchestrator with built-in server
+        let orchestrator = create_test_orchestrator_with_builtin().await;
+
+        // Request has mixed tools: function + web_search_preview
+        let tools = vec![
+            ResponseTool {
+                r#type: ResponseToolType::Function,
+                ..Default::default()
+            },
+            ResponseTool {
+                r#type: ResponseToolType::WebSearchPreview,
+                ..Default::default()
+            },
+        ];
+
+        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
+
+        // Should return Some because web_search_preview has built-in routing
+        assert!(result.is_some());
+
+        let (_, mcp_servers) = result.unwrap();
+        assert_eq!(mcp_servers.len(), 1);
+        assert_eq!(mcp_servers[0].0, "search-server");
     }
 }

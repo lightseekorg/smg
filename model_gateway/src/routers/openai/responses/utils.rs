@@ -202,45 +202,52 @@ fn insert_optional_string(map: &mut Map<String, Value>, key: &str, value: &Optio
     }
 }
 
-/// Mask function tools as MCP tools in response for client
+/// Restore original tools (MCP and builtin) in response for client
+///
+/// The model receives function tools, but the response should mirror the original
+/// request's tool format (MCP tools with server_url, builtin tools like web_search_preview).
 pub(super) fn mask_tools_as_mcp(resp: &mut Value, original_body: &ResponsesRequest) {
-    let mcp_tools = original_body.tools.as_ref().map(|tools| {
-        tools
-            .iter()
-            .filter(|t| matches!(t.r#type, ResponseToolType::Mcp) && t.server_url.is_some())
-            .collect::<Vec<_>>()
-    });
-
-    let Some(mcp_tools) = mcp_tools else {
+    let Some(original_tools) = original_body.tools.as_ref() else {
         return;
     };
 
-    let mcp_tools: Vec<Value> = mcp_tools
+    let restored_tools: Vec<Value> = original_tools
         .iter()
-        .map(|t| {
-            let mut m = Map::new();
-            m.insert("type".to_string(), json!("mcp"));
-            insert_optional_string(&mut m, "server_label", &t.server_label);
-            insert_optional_string(&mut m, "server_url", &t.server_url);
-            insert_optional_string(&mut m, "server_description", &t.server_description);
-            insert_optional_string(&mut m, "require_approval", &t.require_approval);
+        .filter_map(|t| {
+            match t.r#type {
+                // MCP tools - restore with server metadata
+                ResponseToolType::Mcp if t.server_url.is_some() => {
+                    let mut m = Map::new();
+                    m.insert("type".to_string(), json!("mcp"));
+                    insert_optional_string(&mut m, "server_label", &t.server_label);
+                    insert_optional_string(&mut m, "server_url", &t.server_url);
+                    insert_optional_string(&mut m, "server_description", &t.server_description);
+                    insert_optional_string(&mut m, "require_approval", &t.require_approval);
 
-            if let Some(allowed) = &t.allowed_tools {
-                m.insert(
-                    "allowed_tools".to_string(),
-                    Value::Array(allowed.iter().map(|s| json!(s)).collect()),
-                );
+                    if let Some(allowed) = &t.allowed_tools {
+                        m.insert(
+                            "allowed_tools".to_string(),
+                            Value::Array(allowed.iter().map(|s| json!(s)).collect()),
+                        );
+                    }
+                    Some(Value::Object(m))
+                }
+                // Builtin tools - restore with type only
+                ResponseToolType::WebSearchPreview => Some(json!({"type": "web_search_preview"})),
+                ResponseToolType::CodeInterpreter => Some(json!({"type": "code_interpreter"})),
+                // Note: FileSearch not yet in ResponseToolType, add when available
+                // Function tools and others - skip (not transformed)
+                _ => None,
             }
-            Value::Object(m)
         })
         .collect();
 
-    if mcp_tools.is_empty() {
+    if restored_tools.is_empty() {
         return;
     }
 
     if let Some(obj) = resp.as_object_mut() {
-        obj.insert("tools".to_string(), Value::Array(mcp_tools));
+        obj.insert("tools".to_string(), Value::Array(restored_tools));
         obj.entry("tool_choice").or_insert(json!("auto"));
     }
 }
