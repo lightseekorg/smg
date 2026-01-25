@@ -16,6 +16,7 @@ import socket
 import tempfile
 import time
 
+import openai
 import pytest
 import yaml
 
@@ -87,6 +88,32 @@ def require_brave_server():
             "Run: docker run -d -p 8001:8080 -e BRAVE_API_KEY=<key> "
             "shoofio/brave-search-mcp-sse:1.0.10"
         )
+
+
+@pytest.fixture(scope="class")
+def gateway_with_mcp_config(require_brave_server, mcp_config_file):
+    """Launch gateway with MCP config that routes web_search_preview to Brave."""
+    from infra import launch_cloud_gateway
+
+    api_key_env = "OPENAI_API_KEY"
+    if not os.environ.get(api_key_env):
+        pytest.skip(f"{api_key_env} not set")
+
+    logger.info("Launching gateway with MCP config: %s", mcp_config_file)
+    gateway = launch_cloud_gateway(
+        "openai",
+        history_backend="memory",
+        extra_args=["--mcp-config-path", mcp_config_file],
+    )
+
+    client = openai.OpenAI(
+        base_url=f"{gateway.base_url}/v1",
+        api_key=os.environ.get(api_key_env),
+    )
+
+    yield gateway, client
+
+    gateway.shutdown()
 
 
 # Note: These tests require manual gateway configuration with MCP config.
@@ -242,15 +269,14 @@ class TestBuiltinToolsLocalBackend:
 # =============================================================================
 # Full Integration Tests (require Brave MCP server + proper gateway config)
 # =============================================================================
-# These tests are designed for CI where:
+# These tests run in CI where:
 # 1. Brave MCP server runs on port 8001
-# 2. Gateway is configured with builtin_type: web_search_preview
+# 2. Gateway is configured with builtin_type: web_search_preview via fixture
 #
 # To run locally:
 # 1. Start Brave MCP: docker run -d -p 8001:8080 -e BRAVE_API_KEY=<key> shoofio/brave-search-mcp-sse:1.0.10
-# 2. Create mcp.yaml with builtin_type config
-# 3. Start gateway with --mcp-config-path mcp.yaml
-# 4. Run tests with proper backend
+# 2. Set OPENAI_API_KEY environment variable
+# 3. Run: pytest e2e_test/responses/test_builtin_tools.py::TestBuiltinToolRouting -v
 
 
 class TestBuiltinToolRouting:
@@ -258,35 +284,275 @@ class TestBuiltinToolRouting:
 
     These tests verify the complete flow:
     1. Client sends {type: "web_search_preview"}
-    2. Gateway routes to configured MCP server
+    2. Gateway routes to configured MCP server (Brave)
     3. Response contains web_search_call (not mcp_call)
 
     Requires:
     - Brave MCP server on port 8001
-    - Gateway with builtin_type config
+    - OPENAI_API_KEY environment variable
     """
 
-    @pytest.fixture(autouse=True)
-    def check_prerequisites(self, require_brave_server):
-        """Ensure Brave server is available for these tests."""
-        pass
-
-    @pytest.mark.skip(reason="Requires gateway with builtin_type MCP config")
-    def test_web_search_preview_produces_web_search_call(self):
+    def test_web_search_preview_produces_web_search_call(self, gateway_with_mcp_config):
         """Test that web_search_preview produces web_search_call output.
 
         This is the core test for Phase 2 built-in tool support.
-        Skip by default - enable when running with proper gateway config.
+        Verifies:
+        1. Send request with {type: "web_search_preview"}
+        2. Response has web_search_call in output types
+        3. Response does NOT have mcp_call
         """
-        # This test would verify:
-        # 1. Send request with {type: "web_search_preview"}
-        # 2. Verify response has web_search_call in output types
-        # 3. Verify response does NOT have mcp_call
+        gateway, client = gateway_with_mcp_config
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model="gpt-4o-mini",
+            input=WEB_SEARCH_PROMPT,
+            tools=[WEB_SEARCH_PREVIEW_TOOL],
+            stream=False,
+        )
+
+        assert resp.error is None, f"Response error: {resp.error}"
+        assert resp.output is not None
+
+        output_types = [item.type for item in resp.output]
+        logger.info("Built-in tool output types: %s", output_types)
+
+        # Built-in tool should produce web_search_call, NOT mcp_call
+        assert "web_search_call" in output_types, (
+            f"Built-in web_search_preview should produce web_search_call, got: {output_types}"
+        )
+        assert "mcp_call" not in output_types, (
+            f"Built-in tool should NOT produce mcp_call, got: {output_types}"
+        )
+
+    def test_response_tools_shows_original_type(self, gateway_with_mcp_config):
+        """Test that response tools field shows web_search_preview, not mcp."""
+        gateway, client = gateway_with_mcp_config
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model="gpt-4o-mini",
+            input=WEB_SEARCH_PROMPT,
+            tools=[WEB_SEARCH_PREVIEW_TOOL],
+            stream=False,
+        )
+
+        assert resp.error is None, f"Response error: {resp.error}"
+
+        # The tools field in response should mirror the original request
+        # It should show web_search_preview, not mcp
+        if resp.tools:
+            tool_types = [t.type for t in resp.tools]
+            logger.info("Response tools types: %s", tool_types)
+            assert "mcp" not in tool_types, (
+                f"Response tools should not show 'mcp' type, got: {tool_types}"
+            )
+
+
+@pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
+class TestMcpWebSearchStreamingEvents:
+    """Test MCP tool SSE streaming events (baseline behavior).
+
+    These tests verify the baseline MCP streaming behavior using direct
+    MCP tool configuration (not builtin routing).
+    """
+
+    @pytest.fixture(autouse=True)
+    def check_brave_server(self, require_brave_server):
+        """Ensure Brave server is available for these tests."""
         pass
 
-    @pytest.mark.skip(reason="Requires gateway with builtin_type MCP config")
-    def test_response_tools_shows_original_type(self):
-        """Test that response tools field shows web_search_preview, not mcp."""
-        # This test would verify the tools field in response
-        # mirrors the original request tool type
-        pass
+    def test_mcp_web_search_streaming_events(self, setup_backend):
+        """Test that MCP web search produces proper streaming events.
+
+        This verifies the baseline MCP streaming behavior that built-in
+        tools should eventually match (with different event types).
+        """
+        _, model, client, gateway = setup_backend
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model=model,
+            input="Search the web for Python programming language.",
+            tools=[BRAVE_MCP_TOOL],
+            stream=True,
+        )
+
+        events = list(resp)
+        assert len(events) > 0
+
+        event_types = [event.type for event in events]
+        logger.info("MCP streaming event types: %s", sorted(set(event_types)))
+
+        # Core streaming events
+        assert "response.created" in event_types, "Should have response.created event"
+        assert "response.completed" in event_types, "Should have response.completed event"
+
+        # MCP-specific events
+        assert (
+            "response.mcp_list_tools.in_progress" in event_types
+        ), "Should have mcp_list_tools.in_progress event"
+        assert (
+            "response.mcp_list_tools.completed" in event_types
+        ), "Should have mcp_list_tools.completed event"
+        assert (
+            "response.mcp_call.in_progress" in event_types
+        ), "Should have mcp_call.in_progress event"
+        assert (
+            "response.mcp_call.completed" in event_types
+        ), "Should have mcp_call.completed event"
+
+        # Verify final response
+        completed_events = [e for e in events if e.type == "response.completed"]
+        assert len(completed_events) == 1
+
+        final_response = completed_events[0].response
+        assert final_response.status == "completed"
+        assert final_response.output is not None
+
+        # Verify mcp_call in final output
+        final_output_types = [item.type for item in final_response.output]
+        assert "mcp_call" in final_output_types, (
+            f"MCP tool should produce mcp_call output, got: {final_output_types}"
+        )
+
+        # Verify mcp_call item structure
+        mcp_calls = [item for item in final_response.output if item.type == "mcp_call"]
+        for mcp_call in mcp_calls:
+            assert mcp_call.status == "completed"
+            assert mcp_call.server_label == "brave"
+            assert mcp_call.name is not None
+            assert mcp_call.output is not None
+
+
+class TestWebSearchStreamingEvents:
+    """Test web_search_call SSE streaming events with builtin routing.
+
+    These tests verify the streaming event sequence for web search when
+    using builtin tool routing (web_search_preview -> MCP server):
+    - response.web_search_call.in_progress
+    - response.web_search_call.searching
+    - response.web_search_call.completed
+
+    Reference: OpenAI API spec for Responses streaming events.
+    """
+
+    def test_web_search_preview_streaming_events(self, gateway_with_mcp_config):
+        """Test that web_search_preview produces web_search_call streaming events.
+
+        Verifies the SSE event sequence:
+        - response.web_search_call.in_progress (search started)
+        - response.web_search_call.searching (actively searching)
+        - response.web_search_call.completed (search finished)
+        """
+        gateway, client = gateway_with_mcp_config
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model="gpt-4o-mini",
+            input=WEB_SEARCH_PROMPT,
+            tools=[WEB_SEARCH_PREVIEW_TOOL],
+            stream=True,
+        )
+
+        events = list(resp)
+        event_types = [event.type for event in events]
+        logger.info("web_search_preview streaming event types: %s", sorted(set(event_types)))
+
+        # Core streaming events
+        assert "response.created" in event_types
+        assert "response.completed" in event_types
+
+        # web_search_call specific events (per OpenAI API spec)
+        assert (
+            "response.web_search_call.in_progress" in event_types
+        ), "Should have web_search_call.in_progress event"
+        assert (
+            "response.web_search_call.searching" in event_types
+        ), "Should have web_search_call.searching event"
+        assert (
+            "response.web_search_call.completed" in event_types
+        ), "Should have web_search_call.completed event"
+
+        # Verify no MCP events (these should be transformed)
+        assert (
+            "response.mcp_call.in_progress" not in event_types
+        ), "Built-in tool should NOT produce mcp_call events"
+        assert (
+            "response.mcp_call.completed" not in event_types
+        ), "Built-in tool should NOT produce mcp_call events"
+
+        # Verify final response
+        completed_events = [e for e in events if e.type == "response.completed"]
+        final_response = completed_events[0].response
+        assert final_response.status == "completed"
+
+        # Verify web_search_call in final output (not mcp_call)
+        final_output_types = [item.type for item in final_response.output]
+        assert "web_search_call" in final_output_types, (
+            f"Built-in tool should produce web_search_call, got: {final_output_types}"
+        )
+        assert "mcp_call" not in final_output_types, (
+            "Built-in tool should NOT produce mcp_call output"
+        )
+
+        # Verify web_search_call item structure
+        web_search_calls = [
+            item for item in final_response.output if item.type == "web_search_call"
+        ]
+        for ws_call in web_search_calls:
+            assert ws_call.status == "completed"
+            assert ws_call.id is not None
+
+    def test_web_search_streaming_event_order(self, gateway_with_mcp_config):
+        """Test that web_search streaming events occur in correct order.
+
+        Event order should be:
+        1. response.created
+        2. response.output_item.added (for web_search_call item)
+        3. response.web_search_call.in_progress
+        4. response.web_search_call.searching (may occur multiple times)
+        5. response.web_search_call.completed
+        6. response.output_item.done
+        7. ... (message events)
+        8. response.completed
+        """
+        gateway, client = gateway_with_mcp_config
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model="gpt-4o-mini",
+            input=WEB_SEARCH_PROMPT,
+            tools=[WEB_SEARCH_PREVIEW_TOOL],
+            stream=True,
+        )
+
+        events = list(resp)
+        event_types = [event.type for event in events]
+
+        # Find positions of key events
+        def find_first(event_type: str) -> int:
+            try:
+                return event_types.index(event_type)
+            except ValueError:
+                return -1
+
+        created_pos = find_first("response.created")
+        in_progress_pos = find_first("response.web_search_call.in_progress")
+        searching_pos = find_first("response.web_search_call.searching")
+        completed_pos = find_first("response.web_search_call.completed")
+        response_completed_pos = find_first("response.completed")
+
+        # Verify event ordering
+        assert created_pos == 0, "response.created should be first"
+        assert in_progress_pos > created_pos, "in_progress should be after created"
+        assert searching_pos > in_progress_pos, "searching should be after in_progress"
+        assert completed_pos > searching_pos, "completed should be after searching"
+        assert response_completed_pos > completed_pos, (
+            "response.completed should be after web_search_call.completed"
+        )

@@ -1,7 +1,7 @@
 //! Harmony streaming response processor
 
 use std::{
-    collections::{hash_map::Entry::Vacant, HashMap},
+    collections::{hash_map::Entry::Vacant, HashMap, HashSet},
     io,
     sync::Arc,
     time::Instant,
@@ -20,6 +20,7 @@ use super::{
 };
 use crate::{
     grpc_client::sglang_proto::generate_complete::MatchedStop::{MatchedStopStr, MatchedTokenId},
+    mcp::{McpOrchestrator, ResponseFormat},
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     protocols::{
         chat::{
@@ -36,70 +37,6 @@ use crate::{
         proto_wrapper::{ProtoResponseVariant, ProtoStream},
     },
 };
-
-/// Mode for tool call event emission
-#[derive(Debug, Clone, Copy)]
-enum ToolCallMode {
-    /// MCP tool calls (emit .in_progress and .completed events)
-    Mcp,
-    /// Function tool calls (no status events, only arguments streaming)
-    Function,
-}
-
-impl ToolCallMode {
-    /// Get the output item type for this mode
-    fn output_item_type(&self) -> OutputItemType {
-        match self {
-            Self::Mcp => OutputItemType::McpCall,
-            Self::Function => OutputItemType::FunctionCall,
-        }
-    }
-
-    /// Get the type string for JSON output
-    fn type_str(&self) -> &'static str {
-        match self {
-            Self::Mcp => "mcp_call",
-            Self::Function => "function_call",
-        }
-    }
-
-    /// Whether this mode emits status events (.in_progress, .completed)
-    fn emits_status_events(&self) -> bool {
-        matches!(self, Self::Mcp)
-    }
-
-    /// Emit arguments delta event
-    fn emit_arguments_delta(
-        &self,
-        emitter: &mut ResponseStreamEventEmitter,
-        output_index: usize,
-        item_id: &str,
-        delta: &str,
-    ) -> serde_json::Value {
-        match self {
-            Self::Mcp => emitter.emit_mcp_call_arguments_delta(output_index, item_id, delta),
-            Self::Function => {
-                emitter.emit_function_call_arguments_delta(output_index, item_id, delta)
-            }
-        }
-    }
-
-    /// Emit arguments done event
-    fn emit_arguments_done(
-        &self,
-        emitter: &mut ResponseStreamEventEmitter,
-        output_index: usize,
-        item_id: &str,
-        arguments: &str,
-    ) -> serde_json::Value {
-        match self {
-            Self::Mcp => emitter.emit_mcp_call_arguments_done(output_index, item_id, arguments),
-            Self::Function => {
-                emitter.emit_function_call_arguments_done(output_index, item_id, arguments)
-            }
-        }
-    }
-}
 
 /// Processor for streaming Harmony responses
 ///
@@ -630,29 +567,44 @@ impl HarmonyStreamingProcessor {
         Ok(())
     }
 
-    /// Process streaming chunks for Responses API iteration
+    /// Process streaming chunks for Responses API iteration.
     ///
-    /// Emits correct event types based on tool names: mcp_call.* for MCP tools, function_call.* for function tools.
-    /// Pass empty HashSet for function-only tools, full MCP tool names for MCP-only, or subset for mixed.
+    /// When MCP context is provided (orchestrator, server_keys, mcp_tool_names):
+    /// - MCP tools with `ResponseFormat::WebSearchCall` → `web_search_call.*` events
+    /// - Other MCP tools → `mcp_call.*` events
+    /// - Function tools (not in mcp_tool_names) → `function_call.*` events
+    ///
+    /// When no MCP context is provided, all tool calls are treated as function calls.
     pub async fn process_responses_iteration_stream(
         execution_result: context::ExecutionResult,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        mcp_tool_names: &std::collections::HashSet<String>,
+        orchestrator: Option<&Arc<McpOrchestrator>>,
+        server_keys: Option<&[String]>,
+        mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         match execution_result {
             context::ExecutionResult::Single { stream } => {
                 debug!("Processing Responses API single stream mode");
-                Self::process_responses_single_stream_mixed(stream, emitter, tx, mcp_tool_names)
-                    .await
+                Self::process_decode_stream(
+                    stream,
+                    emitter,
+                    tx,
+                    orchestrator,
+                    server_keys,
+                    mcp_tool_names,
+                )
+                .await
             }
             context::ExecutionResult::Dual { prefill, decode } => {
                 debug!("Processing Responses API dual stream mode");
-                Self::process_responses_dual_stream_mixed(
+                Self::process_responses_dual_stream(
                     prefill,
                     *decode,
                     emitter,
                     tx,
+                    orchestrator,
+                    server_keys,
                     mcp_tool_names,
                 )
                 .await
@@ -663,73 +615,59 @@ impl HarmonyStreamingProcessor {
         }
     }
 
-    /// Process streaming chunks from a single stream
-    async fn process_responses_single_stream_mixed(
-        grpc_stream: ProtoStream,
-        emitter: &mut ResponseStreamEventEmitter,
-        tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        mcp_tool_names: &std::collections::HashSet<String>,
-    ) -> Result<ResponsesIterationResult, String> {
-        Self::process_decode_stream_with_tool_lookup(grpc_stream, emitter, tx, Some(mcp_tool_names))
-            .await
-    }
-
-    /// Process streaming chunks from dual streams
-    async fn process_responses_dual_stream_mixed(
+    async fn process_responses_dual_stream(
         mut prefill_stream: ProtoStream,
         decode_stream: ProtoStream,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        mcp_tool_names: &std::collections::HashSet<String>,
+        orchestrator: Option<&Arc<McpOrchestrator>>,
+        server_keys: Option<&[String]>,
+        mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
-        // Phase 1: Process prefill stream (collect metadata, no output)
+        // Phase 1: Drain prefill stream
         while let Some(result) = prefill_stream.next().await {
             let _response = result.map_err(|e| format!("Prefill stream error: {}", e))?;
         }
 
-        // Phase 2: Process decode stream with per-tool mode detection
-        let result = Self::process_decode_stream_with_tool_lookup(
+        // Phase 2: Process decode stream
+        let result = Self::process_decode_stream(
             decode_stream,
             emitter,
             tx,
-            Some(mcp_tool_names),
+            orchestrator,
+            server_keys,
+            mcp_tool_names,
         )
         .await;
 
-        // Mark prefill stream as completed AFTER decode completes successfully
-        // This ensures that if client disconnects during decode, BOTH streams send abort
         prefill_stream.mark_completed();
         result
     }
 
-    /// Decode stream processing with optional per-tool mode lookup
-    ///
-    /// If mcp_tool_names is Some, determines mode per-tool by checking tool name.
-    /// If mcp_tool_names is None, uses default MCP mode for all tools.
-    async fn process_decode_stream_with_tool_lookup(
+    /// Process decode stream for tool call events.
+    async fn process_decode_stream(
         mut decode_stream: ProtoStream,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        mcp_tool_names: Option<&std::collections::HashSet<String>>,
+        orchestrator: Option<&Arc<McpOrchestrator>>,
+        server_keys: Option<&[String]>,
+        mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
-        // Initialize Harmony parser for this iteration
         let mut parser =
             HarmonyParserAdapter::new().map_err(|e| format!("Failed to create parser: {}", e))?;
 
-        // State tracking for channels
         let mut has_analysis = false;
         let mut accumulated_final_text = String::new();
         let mut accumulated_tool_calls: Option<Vec<ToolCall>> = None;
 
-        // Track which items we've started
         let mut has_emitted_reasoning = false;
         let mut message_output_index: Option<usize> = None;
         let mut message_item_id: Option<String> = None;
         let mut has_emitted_content_part_added = false;
 
-        // Tool call tracking (call_index -> (output_index, item_id, mode))
-        // Mode is determined per-tool when mcp_tool_names is provided
-        let mut tool_call_tracking: HashMap<usize, (usize, String, ToolCallMode)> = HashMap::new();
+        // Tool call tracking: call_index -> (output_index, item_id, response_format)
+        let mut tool_call_tracking: HashMap<usize, (usize, String, Option<ResponseFormat>)> =
+            HashMap::new();
 
         // Metadata from Complete message
         let mut finish_reason = String::from("stop");
@@ -823,9 +761,8 @@ impl HarmonyStreamingProcessor {
                         if let Some(tc_delta) = &delta.commentary_delta {
                             let call_index = tc_delta.index;
 
-                            // Check if this is a new tool call (has id and name)
+                            // New tool call (has id and name)
                             if let Some(call_id) = &tc_delta.id {
-                                // Get tool name first to determine mode
                                 let tool_name = tc_delta
                                     .function
                                     .as_ref()
@@ -833,83 +770,131 @@ impl HarmonyStreamingProcessor {
                                     .map(|n| n.as_str())
                                     .unwrap_or("");
 
-                                // Determine mode for this specific tool call
-                                let tool_mode = if let Some(mcp_names) = mcp_tool_names {
-                                    // Mixed mode: check if tool is MCP
-                                    if mcp_names.contains(tool_name) {
-                                        ToolCallMode::Mcp
+                                // Determine response_format based on MCP context
+                                let response_format = if let Some(names) = mcp_tool_names {
+                                    if names.contains(tool_name) {
+                                        Some(
+                                            orchestrator
+                                                .and_then(|o| {
+                                                    o.find_tool_by_name(
+                                                        tool_name,
+                                                        server_keys.unwrap_or(&[]),
+                                                    )
+                                                })
+                                                .map(|e| e.response_format.clone())
+                                                .unwrap_or(ResponseFormat::Passthrough),
+                                        )
                                     } else {
-                                        ToolCallMode::Function
+                                        None // Function tool
                                     }
                                 } else {
-                                    // Single mode: use MCP (legacy behavior)
-                                    ToolCallMode::Mcp
+                                    None // No MCP context, treat as function tool
                                 };
 
-                                // NEW TOOL CALL: Allocate output item
+                                // Determine output item type and JSON type string
+                                let output_item_type =
+                                    ResponseStreamEventEmitter::output_item_type_for_format(
+                                        response_format.as_ref(),
+                                    );
+                                let type_str = ResponseStreamEventEmitter::type_str_for_format(
+                                    response_format.as_ref(),
+                                );
+
                                 let (output_index, item_id) =
-                                    emitter.allocate_output_index(tool_mode.output_item_type());
+                                    emitter.allocate_output_index(output_item_type);
 
-                                // Store tracking info with mode
-                                tool_call_tracking
-                                    .insert(call_index, (output_index, item_id.clone(), tool_mode));
+                                tool_call_tracking.insert(
+                                    call_index,
+                                    (output_index, item_id.clone(), response_format.clone()),
+                                );
 
-                                // Emit output_item.added wrapper event
+                                // Build output_item.added event
                                 let mut item = json!({
                                     "id": item_id,
-                                    "type": tool_mode.type_str(),
+                                    "type": type_str,
                                     "name": tool_name,
                                     "call_id": call_id,
                                     "arguments": "",
                                     "status": "in_progress"
                                 });
 
-                                // Add server_label for MCP calls
-                                if tool_mode.emits_status_events() {
-                                    if let Some(ref server_label) = emitter.mcp_server_label {
-                                        item["server_label"] = json!(server_label);
+                                // Add server_label for mcp_call only (not web_search_call)
+                                if matches!(response_format, Some(ref f) if !matches!(f, ResponseFormat::WebSearchCall))
+                                {
+                                    if let Some(ref label) = emitter.mcp_server_label {
+                                        item["server_label"] = json!(label);
                                     }
                                 }
 
                                 let event = emitter.emit_output_item_added(output_index, &item);
                                 emitter.send_event_best_effort(&event, tx);
 
-                                // Emit status event if mode supports it (MCP only)
-                                if tool_mode.emits_status_events() {
-                                    let event =
-                                        emitter.emit_mcp_call_in_progress(output_index, &item_id);
+                                // Emit in_progress event for MCP tools
+                                if let Some(ref fmt) = response_format {
+                                    let event = emitter.emit_tool_call_in_progress(
+                                        output_index,
+                                        &item_id,
+                                        fmt,
+                                    );
                                     emitter.send_event_best_effort(&event, tx);
-                                }
 
-                                // If we have function name, emit initial arguments delta
-                                if let Some(func) = &tc_delta.function {
-                                    if func.name.is_some() {
-                                        let event = tool_mode.emit_arguments_delta(
-                                            emitter,
-                                            output_index,
-                                            &item_id,
-                                            "",
-                                        );
+                                    // Emit searching event for web_search_call
+                                    if let Some(event) = emitter.emit_tool_call_searching(
+                                        output_index,
+                                        &item_id,
+                                        fmt,
+                                    ) {
                                         emitter.send_event_best_effort(&event, tx);
                                     }
                                 }
+
+                                // Emit initial arguments delta for non-web_search
+                                if !matches!(response_format, Some(ResponseFormat::WebSearchCall)) {
+                                    let event = match &response_format {
+                                        Some(_) => emitter.emit_mcp_call_arguments_delta(
+                                            output_index,
+                                            &item_id,
+                                            "",
+                                        ),
+                                        None => emitter.emit_function_call_arguments_delta(
+                                            output_index,
+                                            &item_id,
+                                            "",
+                                        ),
+                                    };
+                                    emitter.send_event_best_effort(&event, tx);
+                                }
                             } else {
-                                // CONTINUING TOOL CALL: Emit arguments delta
-                                if let Some((output_index, item_id, tool_mode)) =
+                                // Continuing tool call: emit arguments delta
+                                if let Some((output_index, item_id, response_format)) =
                                     tool_call_tracking.get(&call_index)
                                 {
+                                    // Skip arguments streaming for web_search_call
+                                    if matches!(
+                                        response_format,
+                                        Some(ResponseFormat::WebSearchCall)
+                                    ) {
+                                        continue;
+                                    }
+
                                     if let Some(args) = tc_delta
                                         .function
                                         .as_ref()
                                         .and_then(|f| f.arguments.as_ref())
                                         .filter(|a| !a.is_empty())
                                     {
-                                        let event = tool_mode.emit_arguments_delta(
-                                            emitter,
-                                            *output_index,
-                                            item_id,
-                                            args,
-                                        );
+                                        let event = match response_format {
+                                            Some(_) => emitter.emit_mcp_call_arguments_delta(
+                                                *output_index,
+                                                item_id,
+                                                args,
+                                            ),
+                                            None => emitter.emit_function_call_arguments_delta(
+                                                *output_index,
+                                                item_id,
+                                                args,
+                                            ),
+                                        };
                                         emitter.send_event_best_effort(&event, tx);
                                     }
                                 }
@@ -944,53 +929,64 @@ impl HarmonyStreamingProcessor {
                     // Complete all tool calls if we have commentary
                     if let Some(ref tool_calls) = accumulated_tool_calls {
                         for (call_idx, tool_call) in tool_calls.iter().enumerate() {
-                            if let Some((output_index, item_id, tool_mode)) =
+                            if let Some((output_index, item_id, response_format)) =
                                 tool_call_tracking.get(&call_idx)
                             {
                                 let tool_name = &tool_call.function.name;
-
-                                // Emit arguments done with final arguments
                                 let args_str =
                                     tool_call.function.arguments.as_deref().unwrap_or("");
 
-                                let event = tool_mode.emit_arguments_done(
-                                    emitter,
-                                    *output_index,
-                                    item_id,
-                                    args_str,
-                                );
-                                emitter.send_event_best_effort(&event, tx);
-
-                                // Emit status event if mode supports it (MCP only)
-                                if tool_mode.emits_status_events() {
-                                    let event =
-                                        emitter.emit_mcp_call_completed(*output_index, item_id);
+                                // Emit arguments done (skip for web_search_call)
+                                if !matches!(response_format, Some(ResponseFormat::WebSearchCall)) {
+                                    let event = match response_format {
+                                        Some(_) => emitter.emit_mcp_call_arguments_done(
+                                            *output_index,
+                                            item_id,
+                                            args_str,
+                                        ),
+                                        None => emitter.emit_function_call_arguments_done(
+                                            *output_index,
+                                            item_id,
+                                            args_str,
+                                        ),
+                                    };
                                     emitter.send_event_best_effort(&event, tx);
                                 }
 
-                                // Emit output_item.done wrapper event
+                                // Emit completed event for MCP tools
+                                if let Some(ref fmt) = response_format {
+                                    let event = emitter.emit_tool_call_completed(
+                                        *output_index,
+                                        item_id,
+                                        fmt,
+                                    );
+                                    emitter.send_event_best_effort(&event, tx);
+                                }
+
+                                // Determine type string for JSON
+                                let type_str = ResponseStreamEventEmitter::type_str_for_format(
+                                    response_format.as_ref(),
+                                );
+
                                 let mut item = json!({
                                     "id": item_id,
-                                    "type": tool_mode.type_str(),
+                                    "type": type_str,
                                     "name": tool_name,
                                     "call_id": &tool_call.id,
                                     "arguments": args_str,
                                     "status": "completed"
                                 });
 
-                                // Add server_label for MCP calls
-                                if tool_mode.emits_status_events() {
-                                    // MCP mode - include server_label
-                                    if let Some(ref server_label) = emitter.mcp_server_label {
-                                        item["server_label"] = json!(server_label);
+                                // Add server_label for mcp_call only
+                                if matches!(response_format, Some(ref f) if !matches!(f, ResponseFormat::WebSearchCall))
+                                {
+                                    if let Some(ref label) = emitter.mcp_server_label {
+                                        item["server_label"] = json!(label);
                                     }
                                 }
 
                                 let event = emitter.emit_output_item_done(*output_index, &item);
-
-                                // Mark output item as completed before sending
                                 emitter.complete_output_item(*output_index);
-
                                 emitter.send_event_best_effort(&event, tx);
                             }
                         }
@@ -1068,49 +1064,58 @@ impl HarmonyStreamingProcessor {
             // Complete any pending tool calls with data from completed messages
             if let Some(ref tool_calls) = accumulated_tool_calls {
                 for (call_idx, tool_call) in tool_calls.iter().enumerate() {
-                    if let Some((output_index, item_id, tool_mode)) =
+                    if let Some((output_index, item_id, response_format)) =
                         tool_call_tracking.get(&call_idx)
                     {
                         let tool_name = &tool_call.function.name;
-
-                        // Emit arguments done with final arguments
                         let args_str = tool_call.function.arguments.as_deref().unwrap_or("");
-                        let event = tool_mode.emit_arguments_done(
-                            emitter,
-                            *output_index,
-                            item_id,
-                            args_str,
-                        );
-                        emitter.send_event_best_effort(&event, tx);
 
-                        // Emit status event if mode supports it (MCP only)
-                        if tool_mode.emits_status_events() {
-                            let event = emitter.emit_mcp_call_completed(*output_index, item_id);
+                        // Emit arguments done (skip for web_search_call)
+                        if !matches!(response_format, Some(ResponseFormat::WebSearchCall)) {
+                            let event = match response_format {
+                                Some(_) => emitter.emit_mcp_call_arguments_done(
+                                    *output_index,
+                                    item_id,
+                                    args_str,
+                                ),
+                                None => emitter.emit_function_call_arguments_done(
+                                    *output_index,
+                                    item_id,
+                                    args_str,
+                                ),
+                            };
                             emitter.send_event_best_effort(&event, tx);
                         }
 
-                        // Emit output_item.done wrapper event
+                        // Emit completed event for MCP tools
+                        if let Some(ref fmt) = response_format {
+                            let event =
+                                emitter.emit_tool_call_completed(*output_index, item_id, fmt);
+                            emitter.send_event_best_effort(&event, tx);
+                        }
+
+                        let type_str = ResponseStreamEventEmitter::type_str_for_format(
+                            response_format.as_ref(),
+                        );
+
                         let mut item = json!({
                             "id": item_id,
-                            "type": tool_mode.type_str(),
+                            "type": type_str,
                             "name": tool_name,
                             "call_id": &tool_call.id,
                             "arguments": args_str,
                             "status": "completed"
                         });
 
-                        // Add server_label for MCP calls
-                        if tool_mode.emits_status_events() {
-                            if let Some(ref server_label) = emitter.mcp_server_label {
-                                item["server_label"] = json!(server_label);
+                        if matches!(response_format, Some(ref f) if !matches!(f, ResponseFormat::WebSearchCall))
+                        {
+                            if let Some(ref label) = emitter.mcp_server_label {
+                                item["server_label"] = json!(label);
                             }
                         }
 
                         let event = emitter.emit_output_item_done(*output_index, &item);
-
-                        // Mark output item as completed before sending
                         emitter.complete_output_item(*output_index);
-
                         emitter.send_event_best_effort(&event, tx);
                     }
                 }

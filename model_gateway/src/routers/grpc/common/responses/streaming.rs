@@ -1,7 +1,5 @@
 //! Streaming infrastructure for /v1/responses endpoint
 
-use std::collections::HashMap;
-
 use axum::{body::Body, http::StatusCode, response::Response};
 use bytes::Bytes;
 use serde_json::json;
@@ -10,13 +8,13 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
 use crate::{
-    mcp,
+    mcp::{self, ResponseFormat},
     protocols::{
         chat::ChatCompletionStreamResponse,
         common::{Usage, UsageInfo},
         event_types::{
             ContentPartEvent, FunctionCallEvent, McpEvent, OutputItemEvent, OutputTextEvent,
-            ResponseEvent,
+            ResponseEvent, WebSearchCallEvent,
         },
         responses::{
             ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse, ResponsesUsage,
@@ -31,6 +29,7 @@ pub(crate) enum OutputItemType {
     McpCall,
     FunctionCall,
     Reasoning,
+    WebSearchCall,
 }
 
 /// Status of an output item
@@ -54,12 +53,12 @@ struct OutputItemState {
 /// - response.created
 /// - response.in_progress
 /// - response.output_item.added
-/// - response.content_part.added
-/// - response.output_text.delta (multiple)
-/// - response.output_text.done
-/// - response.content_part.done
 /// - response.output_item.done
 /// - response.completed
+/// - response.content_part.added
+/// - response.content_part.done
+/// - response.output_text.delta
+/// - response.output_text.done
 /// - response.mcp_list_tools.in_progress
 /// - response.mcp_list_tools.completed
 /// - response.mcp_call.in_progress
@@ -67,6 +66,11 @@ struct OutputItemState {
 /// - response.mcp_call_arguments.done
 /// - response.mcp_call.completed
 /// - response.mcp_call.failed
+/// - response.web_search_call.in_progress
+/// - response.web_search_call.searching
+/// - response.web_search_call.completed
+/// - response.function_call_arguments.delta
+/// - response.function_call_arguments.done
 pub(crate) struct ResponseStreamEventEmitter {
     sequence_number: u64,
     pub response_id: String,
@@ -74,18 +78,14 @@ pub(crate) struct ResponseStreamEventEmitter {
     created_at: u64,
     message_id: String,
     accumulated_text: String,
-    has_emitted_created: bool,
-    has_emitted_in_progress: bool,
     has_emitted_output_item_added: bool,
     has_emitted_content_part_added: bool,
-    // MCP call tracking
-    mcp_call_accumulated_args: HashMap<String, String>,
-    pub(crate) mcp_server_label: Option<String>, // Server label for MCP tools
+    pub(crate) mcp_server_label: Option<String>,
     // Output item tracking
     output_items: Vec<OutputItemState>,
     next_output_index: usize,
-    current_message_output_index: Option<usize>, // Tracks output_index of current message
-    current_item_id: Option<String>,             // Tracks item_id of current item
+    current_message_output_index: Option<usize>,
+    current_item_id: Option<String>,
     original_request: Option<ResponsesRequest>,
 }
 
@@ -100,11 +100,8 @@ impl ResponseStreamEventEmitter {
             created_at,
             message_id,
             accumulated_text: String::new(),
-            has_emitted_created: false,
-            has_emitted_in_progress: false,
             has_emitted_output_item_added: false,
             has_emitted_content_part_added: false,
-            mcp_call_accumulated_args: HashMap::new(),
             mcp_server_label: None,
             output_items: Vec::new(),
             next_output_index: 0,
@@ -119,22 +116,26 @@ impl ResponseStreamEventEmitter {
         self.original_request = Some(request);
     }
 
-    /// Set the MCP server label for MCP tool calls
+    /// Set the MCP server label for MCP tool call events
     pub fn set_mcp_server_label(&mut self, server_label: String) {
         self.mcp_server_label = Some(server_label);
     }
 
-    /// Update mcp_call output items with tool execution results
+    /// Update tool call output items with tool execution results
     ///
     /// After MCP tools are executed, this updates the stored output items
     /// to include the output field from the tool results.
+    /// Supports both mcp_call and web_search_call item types.
     pub(crate) fn update_mcp_call_outputs(&mut self, tool_results: &[ToolResult]) {
         for tool_result in tool_results {
             // Find the output item with matching call_id
             for item_state in self.output_items.iter_mut() {
                 if let Some(ref mut item_data) = item_state.item_data {
-                    // Check if this is an mcp_call item with matching call_id
-                    if item_data.get("type").and_then(|t| t.as_str()) == Some("mcp_call")
+                    // Check if this is an mcp_call or web_search_call item with matching call_id
+                    let item_type = item_data.get("type").and_then(|t| t.as_str());
+                    let is_tool_call =
+                        item_type == Some("mcp_call") || item_type == Some("web_search_call");
+                    if is_tool_call
                         && item_data.get("call_id").and_then(|c| c.as_str())
                             == Some(&tool_result.call_id)
                     {
@@ -161,7 +162,6 @@ impl ResponseStreamEventEmitter {
     }
 
     pub fn emit_created(&mut self) -> serde_json::Value {
-        self.has_emitted_created = true;
         json!({
             "type": ResponseEvent::CREATED,
             "sequence_number": self.next_sequence(),
@@ -177,7 +177,6 @@ impl ResponseStreamEventEmitter {
     }
 
     pub fn emit_in_progress(&mut self) -> serde_json::Value {
-        self.has_emitted_in_progress = true;
         json!({
             "type": ResponseEvent::IN_PROGRESS,
             "sequence_number": self.next_sequence(),
@@ -412,12 +411,6 @@ impl ResponseStreamEventEmitter {
         item_id: &str,
         delta: &str,
     ) -> serde_json::Value {
-        // Accumulate arguments for this call
-        self.mcp_call_accumulated_args
-            .entry(item_id.to_string())
-            .or_default()
-            .push_str(delta);
-
         json!({
             "type": McpEvent::CALL_ARGUMENTS_DELTA,
             "sequence_number": self.next_sequence(),
@@ -468,6 +461,120 @@ impl ResponseStreamEventEmitter {
             "item_id": item_id,
             "error": error
         })
+    }
+
+    // ========================================================================
+    // Web Search Call Event Emission Methods
+    // ========================================================================
+
+    pub fn emit_web_search_call_in_progress(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+    ) -> serde_json::Value {
+        json!({
+            "type": WebSearchCallEvent::IN_PROGRESS,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id
+        })
+    }
+
+    pub fn emit_web_search_call_searching(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+    ) -> serde_json::Value {
+        json!({
+            "type": WebSearchCallEvent::SEARCHING,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id
+        })
+    }
+
+    pub fn emit_web_search_call_completed(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+    ) -> serde_json::Value {
+        json!({
+            "type": WebSearchCallEvent::COMPLETED,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id
+        })
+    }
+
+    // ========================================================================
+    // Generic Tool Call Event Emission (based on ResponseFormat)
+    // ========================================================================
+
+    /// Emit the appropriate in_progress event based on response format
+    pub fn emit_tool_call_in_progress(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        response_format: &ResponseFormat,
+    ) -> serde_json::Value {
+        match response_format {
+            ResponseFormat::WebSearchCall => {
+                self.emit_web_search_call_in_progress(output_index, item_id)
+            }
+            _ => self.emit_mcp_call_in_progress(output_index, item_id),
+        }
+    }
+
+    /// Emit the searching event for web_search_call (no-op for other formats)
+    pub fn emit_tool_call_searching(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        response_format: &ResponseFormat,
+    ) -> Option<serde_json::Value> {
+        match response_format {
+            ResponseFormat::WebSearchCall => {
+                Some(self.emit_web_search_call_searching(output_index, item_id))
+            }
+            _ => None,
+        }
+    }
+
+    /// Emit the appropriate completed event based on response format
+    pub fn emit_tool_call_completed(
+        &mut self,
+        output_index: usize,
+        item_id: &str,
+        response_format: &ResponseFormat,
+    ) -> serde_json::Value {
+        match response_format {
+            ResponseFormat::WebSearchCall => {
+                self.emit_web_search_call_completed(output_index, item_id)
+            }
+            _ => self.emit_mcp_call_completed(output_index, item_id),
+        }
+    }
+
+    // ========================================================================
+    // Helper Methods for ResponseFormat
+    // ========================================================================
+
+    /// Get the type string for JSON based on response format.
+    pub fn type_str_for_format(response_format: Option<&ResponseFormat>) -> &'static str {
+        match response_format {
+            Some(ResponseFormat::WebSearchCall) => "web_search_call",
+            Some(_) => "mcp_call",
+            None => "function_call",
+        }
+    }
+
+    /// Get the OutputItemType based on response format.
+    pub fn output_item_type_for_format(response_format: Option<&ResponseFormat>) -> OutputItemType {
+        match response_format {
+            Some(ResponseFormat::WebSearchCall) => OutputItemType::WebSearchCall,
+            Some(_) => OutputItemType::McpCall,
+            None => OutputItemType::FunctionCall,
+        }
     }
 
     // ========================================================================
@@ -541,7 +648,7 @@ impl ResponseStreamEventEmitter {
 
     /// Generate unique ID for item type
     fn generate_item_id(prefix: &str) -> String {
-        format!("{}_{}", prefix, Uuid::new_v4().to_string().replace("-", ""))
+        format!("{}_{}", prefix, Uuid::new_v4().simple())
     }
 
     /// Allocate next output index and track item
@@ -555,6 +662,7 @@ impl ResponseStreamEventEmitter {
             OutputItemType::FunctionCall => "fc",
             OutputItemType::Message => "msg",
             OutputItemType::Reasoning => "rs",
+            OutputItemType::WebSearchCall => "ws",
         };
 
         let id = Self::generate_item_id(id_prefix);

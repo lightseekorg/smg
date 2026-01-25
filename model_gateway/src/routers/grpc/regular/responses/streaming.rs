@@ -690,43 +690,69 @@ async fn execute_tool_loop_streaming_internal(
                     tool_call.call_id
                 );
 
-                // Allocate output_index for this mcp_call item
-                let (output_index, item_id) =
-                    emitter.allocate_output_index(OutputItemType::McpCall);
+                // Look up response_format for this tool
+                let response_format = ctx
+                    .mcp_orchestrator
+                    .find_tool_by_name(&tool_call.name, &server_keys)
+                    .map(|entry| entry.response_format)
+                    .unwrap_or(ResponseFormat::Passthrough);
 
-                // Build initial mcp_call item
-                let item = json!({
+                // Use emitter helpers to determine correct type and allocate index
+                let item_type =
+                    ResponseStreamEventEmitter::type_str_for_format(Some(&response_format));
+                let output_item_type =
+                    ResponseStreamEventEmitter::output_item_type_for_format(Some(&response_format));
+
+                // Allocate output_index with correct type (generates appropriate item_id prefix)
+                let (output_index, item_id) = emitter.allocate_output_index(output_item_type);
+
+                // Build initial tool call item
+                let mut item = json!({
                     "id": item_id,
-                    "type": "mcp_call",
+                    "type": item_type,
                     "name": tool_call.name,
-                    "server_label": state.server_label,
                     "status": "in_progress",
                     "arguments": ""
                 });
+                // Add server_label only for mcp_call
+                if item_type == "mcp_call" {
+                    item["server_label"] = json!(state.server_label);
+                }
 
                 // Emit output_item.added
                 let event = emitter.emit_output_item_added(output_index, &item);
                 emitter.send_event(&event, &tx)?;
 
-                // Emit mcp_call.in_progress
-                let event = emitter.emit_mcp_call_in_progress(output_index, &item_id);
+                // Emit tool_call.in_progress (mcp_call.in_progress or web_search_call.in_progress)
+                let event =
+                    emitter.emit_tool_call_in_progress(output_index, &item_id, &response_format);
                 emitter.send_event(&event, &tx)?;
 
-                // Emit mcp_call_arguments.delta (simulate streaming by sending full arguments)
-                let event = emitter.emit_mcp_call_arguments_delta(
-                    output_index,
-                    &item_id,
-                    &tool_call.arguments,
-                );
-                emitter.send_event(&event, &tx)?;
+                // Emit arguments events for all MCP formats except WebSearchCall
+                if !matches!(response_format, ResponseFormat::WebSearchCall) {
+                    // Emit mcp_call_arguments.delta (simulate streaming by sending full arguments)
+                    let event = emitter.emit_mcp_call_arguments_delta(
+                        output_index,
+                        &item_id,
+                        &tool_call.arguments,
+                    );
+                    emitter.send_event(&event, &tx)?;
 
-                // Emit mcp_call_arguments.done
-                let event = emitter.emit_mcp_call_arguments_done(
-                    output_index,
-                    &item_id,
-                    &tool_call.arguments,
-                );
-                emitter.send_event(&event, &tx)?;
+                    // Emit mcp_call_arguments.done
+                    let event = emitter.emit_mcp_call_arguments_done(
+                        output_index,
+                        &item_id,
+                        &tool_call.arguments,
+                    );
+                    emitter.send_event(&event, &tx)?;
+                }
+
+                // For web_search_call, emit searching event before tool execution
+                if let Some(event) =
+                    emitter.emit_tool_call_searching(output_index, &item_id, &response_format)
+                {
+                    emitter.send_event(&event, &tx)?;
+                }
 
                 // Execute the MCP tool
                 trace!(
@@ -757,20 +783,26 @@ async fn execute_tool_loop_streaming_internal(
                         let (output, is_error, err_msg) = result.into_serialized();
 
                         if !is_error {
-                            // Emit mcp_call.completed
-                            let event = emitter.emit_mcp_call_completed(output_index, &item_id);
+                            // Emit tool_call.completed
+                            let event = emitter.emit_tool_call_completed(
+                                output_index,
+                                &item_id,
+                                &response_format,
+                            );
                             emitter.send_event(&event, &tx)?;
 
                             // Build complete item with output
-                            let item_done = json!({
+                            let mut item_done = json!({
                                 "id": item_id,
-                                "type": "mcp_call",
+                                "type": item_type,
                                 "name": tool_call.name,
-                                "server_label": state.server_label,
                                 "status": "completed",
                                 "arguments": tool_call.arguments,
                                 "output": output
                             });
+                            if item_type == "mcp_call" {
+                                item_done["server_label"] = json!(state.server_label);
+                            }
 
                             // Emit output_item.done
                             let event = emitter.emit_output_item_done(output_index, &item_done);
@@ -780,21 +812,23 @@ async fn execute_tool_loop_streaming_internal(
                             (output, true, None)
                         } else {
                             warn!("Tool execution returned error: {}", output);
-                            // Emit mcp_call.failed
+                            // Emit mcp_call.failed (no web_search_call.failed event exists)
                             let event =
                                 emitter.emit_mcp_call_failed(output_index, &item_id, &output);
                             emitter.send_event(&event, &tx)?;
 
                             // Build failed item
-                            let item_done = json!({
+                            let mut item_done = json!({
                                 "id": item_id,
-                                "type": "mcp_call",
+                                "type": item_type,
                                 "name": tool_call.name,
-                                "server_label": state.server_label,
                                 "status": "failed",
                                 "arguments": tool_call.arguments,
                                 "error": &output
                             });
+                            if item_type == "mcp_call" {
+                                item_done["server_label"] = json!(state.server_label);
+                            }
 
                             // Emit output_item.done
                             let event = emitter.emit_output_item_done(output_index, &item_done);
@@ -807,20 +841,22 @@ async fn execute_tool_loop_streaming_internal(
                     Err(err) => {
                         let err_str = format!("Tool call failed: {}", err);
                         warn!("Tool execution failed: {}", err_str);
-                        // Emit mcp_call.failed
+                        // Emit mcp_call.failed (no web_search_call.failed event exists)
                         let event = emitter.emit_mcp_call_failed(output_index, &item_id, &err_str);
                         emitter.send_event(&event, &tx)?;
 
                         // Build failed item
-                        let item_done = json!({
+                        let mut item_done = json!({
                             "id": item_id,
-                            "type": "mcp_call",
+                            "type": item_type,
                             "name": tool_call.name,
-                            "server_label": state.server_label,
                             "status": "failed",
                             "arguments": tool_call.arguments,
                             "error": &err_str
                         });
+                        if item_type == "mcp_call" {
+                            item_done["server_label"] = json!(state.server_label);
+                        }
 
                         // Emit output_item.done
                         let event = emitter.emit_output_item_done(output_index, &item_done);

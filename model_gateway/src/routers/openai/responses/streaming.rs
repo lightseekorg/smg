@@ -34,11 +34,11 @@ use super::{
     },
 };
 use crate::{
-    mcp::McpOrchestrator,
+    mcp::{McpOrchestrator, ResponseFormat},
     protocols::{
         event_types::{
             is_function_call_type, is_response_event, FunctionCallEvent, ItemType, McpEvent,
-            OutputItemEvent, ResponseEvent,
+            OutputItemEvent, ResponseEvent, WebSearchCallEvent,
         },
         responses::{ResponseToolType, ResponsesRequest},
     },
@@ -125,19 +125,35 @@ pub(super) fn apply_event_transformations_inplace(
         }
     }
 
-    // 2. Apply transform_streaming_event logic (function_call → mcp_call)
+    // 2. Apply transform_streaming_event logic (function_call → mcp_call/web_search_call)
     match event_type.as_str() {
         OutputItemEvent::ADDED | OutputItemEvent::DONE => {
             if let Some(item) = parsed_data.get_mut("item") {
                 if let Some(item_type) = item.get("type").and_then(|v| v.as_str()) {
                     if is_function_call_type(item_type) {
-                        item["type"] = json!(ItemType::MCP_CALL);
-                        item["server_label"] = json!(ctx.server_label);
+                        // Look up response_format for the tool
+                        let tool_name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let response_format = ctx
+                            .orchestrator
+                            .and_then(|orch| orch.find_tool_by_name(tool_name, ctx.server_keys))
+                            .map(|entry| entry.response_format)
+                            .unwrap_or(ResponseFormat::Passthrough);
 
-                        // Transform ID from fc_* to mcp_*
+                        // Determine item type and ID prefix based on response_format
+                        let (new_type, id_prefix) = match response_format {
+                            ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
+                            _ => (ItemType::MCP_CALL, "mcp_"),
+                        };
+
+                        item["type"] = json!(new_type);
+                        if new_type == ItemType::MCP_CALL {
+                            item["server_label"] = json!(ctx.server_label);
+                        }
+
+                        // Transform ID from fc_* to appropriate prefix
                         if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
                             if let Some(stripped) = id.strip_prefix("fc_") {
-                                let new_id = format!("mcp_{}", stripped);
+                                let new_id = format!("{}{}", id_prefix, stripped);
                                 item["id"] = json!(new_id);
                             }
                         }
@@ -377,9 +393,9 @@ pub(super) fn forward_streaming_event(
         return false;
     }
 
-    // After sending output_item.added for mcp_call, inject mcp_call.in_progress event
+    // After sending output_item.added for tool calls, inject in_progress event
     if event_name == Some(OutputItemEvent::ADDED)
-        && !maybe_inject_mcp_in_progress(&parsed_data, tx, sequence_number)
+        && !maybe_inject_tool_in_progress(&parsed_data, tx, sequence_number)
     {
         return false;
     }
@@ -387,9 +403,10 @@ pub(super) fn forward_streaming_event(
     true
 }
 
-/// Inject mcp_call.in_progress event after an mcp_call item is added.
+/// Inject in_progress event after a tool call item is added.
+/// Handles both mcp_call and web_search_call items.
 /// Returns false if client disconnected.
-fn maybe_inject_mcp_in_progress(
+fn maybe_inject_tool_in_progress(
     parsed_data: &Value,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     sequence_number: &mut u64,
@@ -398,9 +415,14 @@ fn maybe_inject_mcp_in_progress(
         return true;
     };
 
-    if item.get("type").and_then(|v| v.as_str()) != Some(ItemType::MCP_CALL) {
-        return true;
-    }
+    let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Determine the in_progress event type based on item type
+    let event_type = match item_type {
+        ItemType::MCP_CALL => McpEvent::CALL_IN_PROGRESS,
+        ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::IN_PROGRESS,
+        _ => return true, // Not a tool call item, nothing to inject
+    };
 
     let Some(item_id) = item.get("id").and_then(|v| v.as_str()) else {
         return true;
@@ -410,14 +432,14 @@ fn maybe_inject_mcp_in_progress(
     };
 
     let event = json!({
-        "type": McpEvent::CALL_IN_PROGRESS,
+        "type": event_type,
         "sequence_number": *sequence_number,
         "output_index": output_index,
         "item_id": item_id
     });
     *sequence_number += 1;
 
-    send_sse_event(tx, McpEvent::CALL_IN_PROGRESS, &event)
+    send_sse_event(tx, event_type, &event)
 }
 
 /// Send final response.completed event to client
@@ -688,6 +710,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
             original_request: &original_request,
             previous_response_id: previous_response_id.as_deref(),
             server_keys: &server_keys_clone,
+            orchestrator: Some(&orchestrator_clone),
         };
 
         loop {

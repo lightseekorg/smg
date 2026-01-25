@@ -123,23 +123,12 @@ async fn execute_mcp_tool_loop_streaming(
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) {
-    // Extract server_label from request tools
     let server_label = extract_server_label(current_request.tools.as_deref(), "sglang-mcp");
-
-    // Set server label in emitter for MCP call items
-    emitter.set_mcp_server_label(server_label.clone());
-
-    // Initialize MCP call tracking
-    let mut mcp_tracking = McpCallTracking::new(server_label.clone());
-
-    // Extract user's max_tool_calls limit (if set)
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
 
     // Add filtered MCP tools (static + requested dynamic) to the request
-    let mcp_tools = {
-        let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_orchestrator.list_tools_for_servers(&servers)
-    };
+    let server_keys: Vec<String> = ctx.requested_servers.read().unwrap().clone();
+    let mcp_tools = ctx.mcp_orchestrator.list_tools_for_servers(&server_keys);
     if !mcp_tools.is_empty() {
         let mcp_response_tools = convert_mcp_tools_to_response_tools(&mcp_tools);
         let mut all_tools = current_request.tools.clone().unwrap_or_default();
@@ -154,7 +143,6 @@ async fn execute_mcp_tool_loop_streaming(
     }
 
     // Build HashSet of MCP tool names for O(1) lookup during streaming
-    // Clone tool names to owned strings to avoid borrowing current_request
     let mcp_tool_names: std::collections::HashSet<String> = current_request
         .tools
         .as_ref()
@@ -166,6 +154,11 @@ async fn execute_mcp_tool_loop_streaming(
                 .collect()
         })
         .unwrap_or_default();
+
+    // Set server label for MCP tool call events
+    emitter.set_mcp_server_label(server_label.clone());
+
+    let mut mcp_tracking = McpCallTracking::new(server_label.clone());
 
     // Emit mcp_list_tools on first iteration
     let (output_index, item_id) = emitter.allocate_output_index(OutputItemType::McpListTools);
@@ -276,13 +269,14 @@ async fn execute_mcp_tool_loop_streaming(
             }
         };
 
-        // Process stream with token-level streaming (mixed tools - emits correct events per tool type)
-        // Load guards are held during processing and dropped when iteration completes
+        // Process stream with token-level streaming
         let iteration_result = match HarmonyStreamingProcessor::process_responses_iteration_stream(
             execution_result,
             emitter,
             tx,
-            &mcp_tool_names,
+            Some(&ctx.mcp_orchestrator),
+            Some(&server_keys),
+            Some(&mcp_tool_names),
         )
         .await
         {
@@ -492,15 +486,14 @@ async fn execute_without_mcp_streaming(
         }
     };
 
-    // Process stream (emits all output items during streaming - function tool path emits function_call_arguments.* events)
-    // Pass empty HashSet so all tools are treated as function tools (per-tool detection)
-    // Load guards are held during processing and dropped when iteration completes
-    let empty_mcp_tools = std::collections::HashSet::new();
+    // Process stream (no MCP context, all tools treated as function tools)
     let iteration_result = match HarmonyStreamingProcessor::process_responses_iteration_stream(
         execution_result,
         emitter,
         tx,
-        &empty_mcp_tools,
+        None,
+        None,
+        None,
     )
     .await
     {
