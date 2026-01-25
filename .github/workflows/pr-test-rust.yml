@@ -196,7 +196,7 @@ jobs:
       - name: Install SGLang dependencies
         run: |
           cd sglang
-          sudo --preserve-env=PATH bash scripts/ci/ci_install_dependency.sh
+          sudo --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
 
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
