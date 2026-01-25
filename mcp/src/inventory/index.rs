@@ -132,6 +132,22 @@ impl ToolInventory {
         self.tools_by_qualified.get(&qualified).map(|e| e.clone())
     }
 
+    /// Atomically update a tool entry if it exists.
+    ///
+    /// Returns true if the entry was found and updated, false otherwise.
+    pub fn update_entry<F>(&self, server_key: &str, tool_name: &str, f: F) -> bool
+    where
+        F: FnOnce(&mut ToolEntry),
+    {
+        let qualified = QualifiedToolName::new(server_key, tool_name);
+        if let Some(mut entry) = self.tools_by_qualified.get_mut(&qualified) {
+            f(&mut entry);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Register an alias for a tool.
     pub fn register_alias(&self, alias_name: String, target: QualifiedToolName) {
         self.aliases.insert(alias_name, target);

@@ -12,7 +12,7 @@ use tracing::warn;
 
 use super::{
     mcp::{execute_tool_loop, prepare_mcp_tools_as_functions},
-    utils::{mask_tools_as_mcp, patch_response_with_request_metadata},
+    utils::{patch_response_with_request_metadata, restore_original_tools},
 };
 use crate::routers::{
     header_utils::{apply_provider_headers, extract_auth_header},
@@ -137,7 +137,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         worker.circuit_breaker().record_success();
     }
 
-    mask_tools_as_mcp(&mut response_json, original_body);
+    restore_original_tools(&mut response_json, original_body);
     patch_response_with_request_metadata(
         &mut response_json,
         original_body,

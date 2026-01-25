@@ -467,7 +467,7 @@ impl McpOrchestrator {
     ///
     /// When a server is configured with `builtin_type` and `builtin_tool_name`, the
     /// corresponding tool should use the response format associated with the builtin type
-    /// (e.g., WebSearchPreview -> WebSearch) unless explicitly overridden in the tools config.
+    /// (e.g., WebSearchPreview -> WebSearchCall) unless explicitly overridden in the tools config.
     fn apply_builtin_response_format(&self, config: &McpServerConfig) {
         let Some(builtin_type) = &config.builtin_type else {
             return;
@@ -476,9 +476,6 @@ impl McpOrchestrator {
             return;
         };
 
-        // Check if the tool is configured in the tools config at all.
-        // If it is, the user has explicitly chosen a response_format (even if Passthrough),
-        // so we should respect that and not auto-apply the builtin format.
         let has_explicit_config = config
             .tools
             .as_ref()
@@ -493,23 +490,29 @@ impl McpOrchestrator {
             return;
         }
 
-        // Get the response format for this builtin type
         let response_format: ResponseFormat = builtin_type.response_format().into();
 
-        // Update the tool entry if it exists
-        if let Some(mut entry) = self.tool_inventory.get_entry(&config.name, tool_name) {
-            if entry.response_format != response_format {
-                entry.response_format = response_format.clone();
-                self.tool_inventory.insert_entry(entry);
-                info!(
-                    "Applied builtin response format {:?} to '{}:{}' for builtin_type {:?}",
-                    response_format, config.name, tool_name, builtin_type
-                );
-            }
-        } else {
+        let updated = self
+            .tool_inventory
+            .update_entry(&config.name, tool_name, |entry| {
+                if entry.response_format != response_format {
+                    info!(
+                        server = %config.name,
+                        tool = %tool_name,
+                        builtin_type = %builtin_type,
+                        format = ?response_format,
+                        "Applied builtin response format"
+                    );
+                    entry.response_format = response_format.clone();
+                }
+            });
+
+        if !updated {
             warn!(
-                "Builtin tool '{}:{}' not found on server for builtin_type {:?}",
-                config.name, tool_name, builtin_type
+                server = %config.name,
+                tool = %tool_name,
+                builtin_type = %builtin_type,
+                "Builtin tool not found on server"
             );
         }
     }

@@ -29,7 +29,9 @@ use super::{
         prepare_mcp_tools_as_functions, send_mcp_list_tools_events, ToolLoopState,
     },
     tool_handler::{StreamAction, StreamingToolHandler},
-    utils::{mask_tools_as_mcp, patch_response_with_request_metadata, rewrite_streaming_block},
+    utils::{
+        patch_response_with_request_metadata, restore_original_tools, rewrite_streaming_block,
+    },
 };
 use crate::{
     mcp::McpOrchestrator,
@@ -446,7 +448,7 @@ pub(super) fn send_final_response_event(
         inject_mcp_metadata_streaming(&mut final_response, state, orch, ctx.server_keys);
     }
 
-    mask_tools_as_mcp(&mut final_response, ctx.original_request);
+    restore_original_tools(&mut final_response, ctx.original_request);
     patch_response_with_request_metadata(
         &mut final_response,
         ctx.original_request,
@@ -877,7 +879,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                         &server_keys_clone,
                     );
 
-                    mask_tools_as_mcp(&mut response_json, &original_request);
+                    restore_original_tools(&mut response_json, &original_request);
                     patch_response_with_request_metadata(
                         &mut response_json,
                         &original_request,

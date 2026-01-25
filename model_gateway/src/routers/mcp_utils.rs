@@ -93,7 +93,6 @@ pub fn collect_builtin_routing(
             _ => continue,
         };
 
-        // Look up configured MCP server for this built-in type
         if let Some((server_name, tool_name, response_format)) =
             mcp_orchestrator.find_builtin_server(builtin_type)
         {
@@ -110,6 +109,11 @@ pub fn collect_builtin_routing(
                 tool_name,
                 response_format,
             });
+        } else {
+            warn!(
+                builtin_type = %builtin_type,
+                "Request includes built-in tool but no MCP server is configured for it"
+            );
         }
     }
 
@@ -134,7 +138,6 @@ pub async fn ensure_request_mcp_client(
     request_headers: Option<&HeaderMap>,
 ) -> Option<(Arc<McpOrchestrator>, Vec<(String, String)>)> {
     let mut mcp_servers = Vec::new();
-    let mut has_mcp_tools = false;
     let forwarded_headers = extract_forwardable_headers(request_headers);
 
     // 1. Process dynamic MCP tools (from request server_url)
@@ -148,8 +151,6 @@ pub async fn ensure_request_mcp_client(
         else {
             continue;
         };
-
-        has_mcp_tools = true;
 
         if !(server_url.starts_with("http://") || server_url.starts_with("https://")) {
             warn!(
@@ -206,8 +207,7 @@ pub async fn ensure_request_mcp_client(
     }
 
     // 2. Process built-in tool routing (static servers configured with builtin_type)
-    let builtin_routing = collect_builtin_routing(mcp_orchestrator, Some(tools));
-    for routing in builtin_routing {
+    for routing in collect_builtin_routing(mcp_orchestrator, Some(tools)) {
         debug!(
             builtin_type = %routing.builtin_type,
             server = %routing.server_name,
@@ -215,19 +215,16 @@ pub async fn ensure_request_mcp_client(
             "Adding static server for built-in tool routing"
         );
 
-        // Static servers use their name as both label and key
-        // (they're already connected at startup)
-        let server_key = routing.server_name.clone();
-        if !mcp_servers.iter().any(|(_, key)| key == &server_key) {
-            mcp_servers.push((routing.server_name.clone(), server_key));
+        let server_name = routing.server_name;
+        if !mcp_servers.iter().any(|(_, key)| key == &server_name) {
+            mcp_servers.push((server_name.clone(), server_name));
         }
-        has_mcp_tools = true;
     }
 
-    if has_mcp_tools && !mcp_servers.is_empty() {
-        Some((mcp_orchestrator.clone(), mcp_servers))
-    } else {
+    if mcp_servers.is_empty() {
         None
+    } else {
+        Some((mcp_orchestrator.clone(), mcp_servers))
     }
 }
 

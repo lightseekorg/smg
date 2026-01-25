@@ -202,11 +202,11 @@ fn insert_optional_string(map: &mut Map<String, Value>, key: &str, value: &Optio
     }
 }
 
-/// Restore original tools (MCP and builtin) in response for client
+/// Restore original tools (MCP and builtin) in response for client.
 ///
 /// The model receives function tools, but the response should mirror the original
 /// request's tool format (MCP tools with server_url, builtin tools like web_search_preview).
-pub(super) fn mask_tools_as_mcp(resp: &mut Value, original_body: &ResponsesRequest) {
+pub(super) fn restore_original_tools(resp: &mut Value, original_body: &ResponsesRequest) {
     let Some(original_tools) = original_body.tools.as_ref() else {
         return;
     };
