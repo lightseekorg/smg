@@ -169,6 +169,10 @@ impl GrpcClient {
                 let stream = client.generate(*boxed_req).await?;
                 Ok(ProtoStream::Vllm(stream))
             }
+            (Self::Trtllm(client), ProtoGenerateRequest::Trtllm(boxed_req)) => {
+                let stream = client.generate(*boxed_req).await?;
+                Ok(ProtoStream::Trtllm(stream))
+            }
             _ => panic!("Mismatched client and request types"),
         }
     }

@@ -122,7 +122,7 @@ impl ProtoGenerateRequest {
 pub enum ProtoGenerateResponse {
     Sglang(Box<sglang::GenerateResponse>),
     Vllm(vllm::GenerateResponse),
-    Trtllm(trtllm::GenerateResponse),
+    Trtllm(Box<trtllm::GenerateResponse>),
 }
 
 impl ProtoGenerateResponse {
@@ -226,12 +226,11 @@ impl ProtoGenerateStreamChunk {
     }
 
     /// Get token IDs from chunk (common field)
-    /// Note: TensorRT-LLM uses i32 for token_ids, converted to u32
-    pub fn token_ids(&self) -> Vec<u32> {
+    pub fn token_ids(&self) -> &[u32] {
         match self {
-            Self::Sglang(c) => c.token_ids.clone(),
-            Self::Vllm(c) => c.token_ids.clone(),
-            Self::Trtllm(c) => c.token_ids.iter().map(|&id| id as u32).collect(),
+            Self::Sglang(c) => &c.token_ids,
+            Self::Vllm(c) => &c.token_ids,
+            Self::Trtllm(c) => &c.token_ids,
         }
     }
 
@@ -338,12 +337,11 @@ impl ProtoGenerateComplete {
     }
 
     /// Get token IDs from either backend (output_ids in proto)
-    /// Note: TensorRT-LLM uses i32 for token_ids, converted to u32
-    pub fn token_ids(&self) -> Vec<u32> {
+    pub fn token_ids(&self) -> &[u32] {
         match self {
-            Self::Sglang(c) => c.output_ids.clone(),
-            Self::Vllm(c) => c.output_ids.clone(),
-            Self::Trtllm(c) => c.output_token_ids.iter().map(|&id| id as u32).collect(),
+            Self::Sglang(c) => &c.output_ids,
+            Self::Vllm(c) => &c.output_ids,
+            Self::Trtllm(c) => &c.output_token_ids,
         }
     }
 
@@ -394,12 +392,11 @@ impl ProtoGenerateComplete {
     }
 
     /// Get output IDs (decode tokens only)
-    /// Note: TensorRT-LLM uses i32 for token_ids, converted to u32
-    pub fn output_ids(&self) -> Vec<u32> {
+    pub fn output_ids(&self) -> &[u32] {
         match self {
-            Self::Sglang(c) => c.output_ids.clone(),
-            Self::Vllm(c) => c.output_ids.clone(),
-            Self::Trtllm(c) => c.output_token_ids.iter().map(|&id| id as u32).collect(),
+            Self::Sglang(c) => &c.output_ids,
+            Self::Vllm(c) => &c.output_ids,
+            Self::Trtllm(c) => &c.output_token_ids,
         }
     }
 
@@ -451,6 +448,7 @@ impl ProtoGenerateError {
 pub enum ProtoStream {
     Sglang(SglangStream),
     Vllm(VllmStream),
+    Trtllm(TrtllmStream),
 }
 
 impl ProtoStream {
@@ -465,6 +463,10 @@ impl ProtoStream {
                 .next()
                 .await
                 .map(|result| result.map(ProtoGenerateResponse::Vllm)),
+            Self::Trtllm(stream) => stream
+                .next()
+                .await
+                .map(|result| result.map(|r| ProtoGenerateResponse::Trtllm(Box::new(r)))),
         }
     }
 
@@ -473,6 +475,7 @@ impl ProtoStream {
         match self {
             Self::Sglang(stream) => stream.mark_completed(),
             Self::Vllm(stream) => stream.mark_completed(),
+            Self::Trtllm(stream) => stream.mark_completed(),
         }
     }
 }
