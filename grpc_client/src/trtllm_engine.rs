@@ -255,7 +255,7 @@ impl TrtllmEngineClient {
         request_id: String,
         body: &ChatCompletionRequest,
         processed_text: String,
-        token_ids: Vec<i32>,
+        token_ids: Vec<u32>,
         tool_call_constraint: Option<(String, String)>, // (constraint_type, constraint_value)
     ) -> Result<proto::GenerateRequest, String> {
         // Build sampling config
@@ -308,7 +308,7 @@ impl TrtllmEngineClient {
         request_id: String,
         body: &GenerateRequest,
         original_text: Option<String>,
-        token_ids: Vec<i32>,
+        token_ids: Vec<u32>,
     ) -> Result<proto::GenerateRequest, String> {
         let sampling_config =
             Self::build_sampling_config_from_plain(body.sampling_params.as_ref())?;
@@ -375,7 +375,7 @@ impl TrtllmEngineClient {
         request_id: String,
         body: &ResponsesRequest,
         processed_text: String,
-        token_ids: Vec<i32>,
+        token_ids: Vec<u32>,
         _harmony_stop_ids: Option<Vec<u32>>,
         constraint: Option<(String, String)>,
     ) -> Result<proto::GenerateRequest, String> {
