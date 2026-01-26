@@ -20,7 +20,8 @@ use crate::{
     mcp::{ApprovalMode, McpOrchestrator, ResponseFormat, ResponseTransformer, TenantContext},
     protocols::{
         event_types::{
-            is_function_call_type, ItemType, McpEvent, OutputItemEvent, WebSearchCallEvent,
+            is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType,
+            McpEvent, OutputItemEvent, WebSearchCallEvent,
         },
         responses::{generate_id, ResponseInput, ResponsesRequest},
     },
@@ -218,10 +219,8 @@ pub(super) async fn execute_streaming_tool_calls(
             }
         };
 
-        // For web_search_call, emit the searching event before tool execution
-        if matches!(response_format, ResponseFormat::WebSearchCall)
-            && !send_web_search_searching_event(tx, &call, sequence_number)
-        {
+        // Emit the intermediate event before tool execution (searching/interpreting)
+        if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
             return false;
         }
 
@@ -502,40 +501,45 @@ pub(super) fn send_mcp_list_tools_events(
     tx.send(Ok(Bytes::from(event4))).is_ok()
 }
 
-/// Send web_search_call.searching event during tool execution.
+/// Send intermediate event during tool execution (searching/interpreting).
 /// Returns false if client disconnected.
-fn send_web_search_searching_event(
+fn send_tool_call_intermediate_event(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     call: &FunctionCallInProgress,
+    response_format: &ResponseFormat,
     sequence_number: &mut u64,
 ) -> bool {
+    // Determine event type and ID prefix based on response format
+    let (event_type, id_prefix) = match response_format {
+        ResponseFormat::WebSearchCall => (WebSearchCallEvent::SEARCHING, "ws_"),
+        ResponseFormat::CodeInterpreterCall => (CodeInterpreterCallEvent::INTERPRETING, "ci_"),
+        ResponseFormat::FileSearchCall => (FileSearchCallEvent::SEARCHING, "fs_"),
+        ResponseFormat::Passthrough => return true, // mcp_call has no intermediate event
+    };
+
     let effective_output_index = call.effective_output_index();
 
-    // Transform call_id from fc_* to ws_* for web_search item_id
+    // Transform call_id from fc_* to appropriate prefix
     let item_id = call
         .call_id
         .strip_prefix("fc_")
-        .map(|stripped| format!("ws_{}", stripped))
+        .map(|stripped| format!("{}{}", id_prefix, stripped))
         .unwrap_or_else(|| call.call_id.clone());
 
-    let searching_payload = json!({
-        "type": WebSearchCallEvent::SEARCHING,
+    let event_payload = json!({
+        "type": event_type,
         "sequence_number": *sequence_number,
         "output_index": effective_output_index,
         "item_id": item_id
     });
     *sequence_number += 1;
 
-    let searching_event = format!(
-        "event: {}\ndata: {}\n\n",
-        WebSearchCallEvent::SEARCHING,
-        searching_payload
-    );
-    tx.send(Ok(Bytes::from(searching_event))).is_ok()
+    let event = format!("event: {}\ndata: {}\n\n", event_type, event_payload);
+    tx.send(Ok(Bytes::from(event))).is_ok()
 }
 
 /// Send tool call completion events after tool execution.
-/// Handles both mcp_call and web_search_call items based on their type.
+/// Handles mcp_call, web_search_call, code_interpreter_call, and file_search_call items.
 /// Returns false if client disconnected.
 pub(super) fn send_tool_call_completion_events(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
@@ -559,6 +563,8 @@ pub(super) fn send_tool_call_completion_events(
 
     let completed_event_type: &str = match item_type {
         ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::COMPLETED,
+        ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::COMPLETED,
+        ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::COMPLETED,
         _ => McpEvent::CALL_COMPLETED, // Default to mcp_call for mcp_call and unknown types
     };
 

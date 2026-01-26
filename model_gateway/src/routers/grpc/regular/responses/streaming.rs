@@ -723,13 +723,13 @@ async fn execute_tool_loop_streaming_internal(
                 let event = emitter.emit_output_item_added(output_index, &item);
                 emitter.send_event(&event, &tx)?;
 
-                // Emit tool_call.in_progress (mcp_call.in_progress or web_search_call.in_progress)
+                // Emit tool_call.in_progress
                 let event =
                     emitter.emit_tool_call_in_progress(output_index, &item_id, &response_format);
                 emitter.send_event(&event, &tx)?;
 
-                // Emit arguments events for all MCP formats except WebSearchCall
-                if !matches!(response_format, ResponseFormat::WebSearchCall) {
+                // Emit arguments events for mcp_call only (skip for builtin tools)
+                if matches!(response_format, ResponseFormat::Passthrough) {
                     // Emit mcp_call_arguments.delta (simulate streaming by sending full arguments)
                     let event = emitter.emit_mcp_call_arguments_delta(
                         output_index,
@@ -747,7 +747,7 @@ async fn execute_tool_loop_streaming_internal(
                     emitter.send_event(&event, &tx)?;
                 }
 
-                // For web_search_call, emit searching event before tool execution
+                // Emit searching/interpreting event for builtin tools
                 if let Some(event) =
                     emitter.emit_tool_call_searching(output_index, &item_id, &response_format)
                 {
