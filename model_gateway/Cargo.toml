@@ -65,7 +65,7 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 
 # Workspace crates
 openai-protocol = { version = "1.0.0", path = "../protocols", features = ["axum"] }
-reasoning-parser = { version = "1.0.0", path = "../reasoning_parser" }
+reasoning-parser = { version = "1.0.1", path = "../reasoning_parser" }
 tool-parser = { version = "1.0.0", path = "../tool_parser" }
 wfaas = { version = "1.0.1", path = "../workflow" }
 llm-tokenizer = { version = "1.0.0", path = "../tokenizer" }
