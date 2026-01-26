@@ -107,6 +107,10 @@ async fn execute_with_mcp_loop(
     // Extract user's max_tool_calls limit (if set)
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
 
+    // Preserve original tools for response (before merging MCP tools)
+    // The response should show the user's original request tools, not internal MCP tools
+    let original_tools = current_request.tools.clone();
+
     // Add filtered MCP tools (static + requested dynamic) to the request
     let mcp_tools = {
         let servers = ctx.requested_servers.read().unwrap();
@@ -213,6 +217,9 @@ async fn execute_with_mcp_loop(
                         .collect();
 
                     // Build response with incomplete status - no tools executed due to limit
+                    // Use original_tools for response (hide internal MCP tools)
+                    let mut response_request = current_request.clone();
+                    response_request.tools = original_tools.clone();
                     let mut response = build_tool_response(
                         vec![],         // No MCP tools executed
                         vec![],         // No MCP results
@@ -221,7 +228,7 @@ async fn execute_with_mcp_loop(
                         partial_text,
                         usage,
                         request_id,
-                        Arc::new(current_request),
+                        Arc::new(response_request),
                     );
 
                     // Mark as completed with incomplete_details
@@ -262,6 +269,9 @@ async fn execute_with_mcp_loop(
                     // 1. Reasoning/message from this iteration
                     // 2. MCP tools as completed (with output) - these were executed
                     // 3. Function tools as completed (without output) - need caller execution
+                    // Use original_tools for response (hide internal MCP tools)
+                    let mut response_request = current_request.clone();
+                    response_request.tools = original_tools.clone();
                     let mut response = build_tool_response(
                         mcp_tool_calls,
                         mcp_results,
@@ -270,7 +280,7 @@ async fn execute_with_mcp_loop(
                         partial_text,
                         usage,
                         request_id,
-                        Arc::new(current_request),
+                        Arc::new(response_request),
                     );
 
                     // Inject MCP metadata for all executed calls
@@ -309,6 +319,9 @@ async fn execute_with_mcp_loop(
 
                 // Inject MCP metadata into final response
                 inject_mcp_metadata(&mut response, &mcp_tracking, &mcp_tools);
+
+                // Restore original tools (hide internal MCP tools from response)
+                response.tools = original_tools.clone().unwrap_or_default();
 
                 debug!(
                     mcp_calls = mcp_tracking.total_calls(),

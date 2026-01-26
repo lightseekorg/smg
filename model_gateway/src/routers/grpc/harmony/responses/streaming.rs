@@ -126,6 +126,9 @@ async fn execute_mcp_tool_loop_streaming(
     let server_label = extract_server_label(current_request.tools.as_deref(), "sglang-mcp");
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
 
+    // Note: For streaming, the emitter's original_request (set before spawn) preserves
+    // the original tools. MCP tools are only merged into current_request for model calls.
+
     // Add filtered MCP tools (static + requested dynamic) to the request
     let server_keys: Vec<String> = ctx.requested_servers.read().unwrap().clone();
     let mcp_tools = ctx.mcp_orchestrator.list_tools_for_servers(&server_keys);
