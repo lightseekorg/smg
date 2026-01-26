@@ -366,6 +366,15 @@ impl McpOrchestrator {
     ///
     /// Static servers are never evicted from the connection pool.
     pub async fn connect_static_server(&self, config: &McpServerConfig) -> McpResult<()> {
+        // Skip if already connected (handles duplicate registrations from workflow)
+        if self.static_servers.contains_key(&config.name) {
+            debug!(
+                "Server '{}' already connected, skipping duplicate registration",
+                config.name
+            );
+            return Ok(());
+        }
+
         info!("Connecting to static server '{}'", config.name);
 
         let handler = Arc::new(

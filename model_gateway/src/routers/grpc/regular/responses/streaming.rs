@@ -881,12 +881,7 @@ async fn execute_tool_loop_streaming_internal(
                     },
                 );
 
-                // Look up tool entry to get response_format for transformation
-                let response_format = ctx
-                    .mcp_orchestrator
-                    .find_tool_by_name(&tool_call.name, &server_keys)
-                    .map(|entry| entry.response_format)
-                    .unwrap_or(ResponseFormat::Passthrough);
+                // Note: response_format already looked up at start of loop iteration
 
                 // Parse output for transformer
                 let output_value: Value = serde_json::from_str(&output_str).unwrap_or_else(|e| {
@@ -928,10 +923,10 @@ async fn execute_tool_loop_streaming_internal(
                     let (output_index, item_id) =
                         emitter.allocate_output_index(OutputItemType::FunctionCall);
 
-                    // Build initial function_tool_call item
+                    // Build initial function_call item
                     let item = json!({
                         "id": item_id,
-                        "type": "function_tool_call",
+                        "type": "function_call",
                         "call_id": tool_call.call_id,
                         "name": tool_call.name,
                         "status": "in_progress",
@@ -961,7 +956,7 @@ async fn execute_tool_loop_streaming_internal(
                     // Build complete item
                     let item_complete = json!({
                         "id": item_id,
-                        "type": "function_tool_call",
+                        "type": "function_call",
                         "call_id": tool_call.call_id,
                         "name": tool_call.name,
                         "status": "completed",

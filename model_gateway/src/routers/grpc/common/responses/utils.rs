@@ -19,32 +19,54 @@ use crate::{
     },
 };
 
-/// Ensure MCP connection succeeds if MCP tools are declared
+/// Ensure MCP connection succeeds if MCP tools or builtin tools are declared
 ///
-/// Checks if request declares MCP tools, and if so, validates that
-/// the MCP clients can be created and connected.
+/// Checks if request declares MCP tools or builtin tool types (web_search_preview,
+/// code_interpreter), and if so, validates that the MCP clients can be created
+/// and connected.
+///
 /// Returns Ok((has_mcp_tools, server_keys)) on success.
 pub(crate) async fn ensure_mcp_connection(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: Option<&[ResponseTool]>,
     request_headers: Option<&HeaderMap>,
 ) -> Result<(bool, Vec<String>), Response> {
-    let has_mcp_tools = tools
+    // Check for explicit MCP tools (must error if connection fails)
+    let has_explicit_mcp_tools = tools
         .map(|t| {
             t.iter()
                 .any(|tool| matches!(tool.r#type, ResponseToolType::Mcp))
         })
         .unwrap_or(false);
 
-    if has_mcp_tools {
-        if let Some(tools) = tools {
-            match ensure_request_mcp_client(mcp_orchestrator, tools, request_headers).await {
-                Some((_orchestrator, mcp_servers)) => {
-                    let server_keys: Vec<String> =
-                        mcp_servers.into_iter().map(|(_, key)| key).collect();
-                    return Ok((true, server_keys));
-                }
-                None => {
+    // Check for builtin tools that MAY have MCP routing configured
+    let has_builtin_tools = tools
+        .map(|t| {
+            t.iter().any(|tool| {
+                matches!(
+                    tool.r#type,
+                    ResponseToolType::WebSearchPreview | ResponseToolType::CodeInterpreter
+                )
+            })
+        })
+        .unwrap_or(false);
+
+    // Only process if we have MCP or builtin tools
+    if !has_explicit_mcp_tools && !has_builtin_tools {
+        return Ok((false, Vec::new()));
+    }
+
+    if let Some(tools) = tools {
+        match ensure_request_mcp_client(mcp_orchestrator, tools, request_headers).await {
+            Some((_orchestrator, mcp_servers)) => {
+                let server_keys: Vec<String> =
+                    mcp_servers.into_iter().map(|(_, key)| key).collect();
+                return Ok((true, server_keys));
+            }
+            None => {
+                // No MCP servers available
+                if has_explicit_mcp_tools {
+                    // Explicit MCP tools MUST have working connections
                     error!(
                         function = "ensure_mcp_connection",
                         "Failed to connect to MCP servers"
@@ -54,6 +76,12 @@ pub(crate) async fn ensure_mcp_connection(
                         "Failed to connect to MCP servers. Check server_url and authorization.",
                     ));
                 }
+                // Builtin tools without MCP routing - pass through to model
+                debug!(
+                    function = "ensure_mcp_connection",
+                    "No MCP routing configured for builtin tools, passing through to model"
+                );
+                return Ok((false, Vec::new()));
             }
         }
     }
