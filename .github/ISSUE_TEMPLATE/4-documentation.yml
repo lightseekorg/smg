@@ -1,0 +1,123 @@
+name: Documentation
+description: Report missing, incorrect, or unclear documentation
+title: "[Docs]: "
+labels: ["documentation", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve SMG documentation! Good docs make the project more accessible to everyone.
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Documentation Type
+      description: What type of documentation issue is this?
+      options:
+        - Missing documentation
+        - Incorrect / Outdated information
+        - Unclear / Confusing explanation
+        - Typo / Grammar
+        - Missing example
+        - API reference issue
+        - Broken link
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: doc-area
+    attributes:
+      label: Documentation Area
+      description: Which documentation area is affected?
+      options:
+        - README
+        - Getting Started / Quickstart
+        - Configuration Guide
+        - API Reference
+        - Deployment Guide
+        - Architecture / Design Docs
+        - Code Comments / Rustdoc
+        - Examples
+        - CHANGELOG
+        - Contributing Guide
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component (if applicable)
+      description: Does this relate to a specific component?
+      options:
+        - General / Multiple
+        - model-gateway
+        - protocols
+        - auth
+        - mcp
+        - mesh
+        - tokenizer
+        - reasoning-parser
+        - tool-parser
+        - workflow
+        - data-connector
+        - multimodal
+        - wasm
+        - grpc-client
+        - kv-index
+        - python-bindings
+    validations:
+      required: false
+
+  - type: textarea
+    id: location
+    attributes:
+      label: Location
+      description: Where is this documentation (file path, URL, or section name)?
+      placeholder: |
+        - File: README.md, line 45
+        - URL: https://github.com/lightseekorg/smg/blob/main/docs/configuration.md
+        - Section: "Routing Policies"
+    validations:
+      required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current Documentation
+      description: What does the current documentation say (if applicable)?
+      placeholder: |
+        The current docs say:
+        > "Configure routing with the `policy` field..."
+    validations:
+      required: false
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected / Suggested Documentation
+      description: What should the documentation say? What's missing or unclear?
+      placeholder: |
+        The docs should explain:
+        - How to configure cache_aware routing
+        - What the `radix_tree_config` options mean
+        - Example configuration for high-throughput scenarios
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to submit a PR to fix this documentation
+        - label: I can provide more details if needed
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other context or suggestions.
+    validations:
+      required: false

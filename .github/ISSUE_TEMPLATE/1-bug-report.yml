@@ -1,0 +1,197 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in SMG
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the form below to help us investigate.
+
+        **Before submitting**, please:
+        - Search [existing issues](https://github.com/lightseekorg/smg/issues) to avoid duplicates
+        - Check [discussions](https://github.com/lightseekorg/smg/discussions) for known issues or workarounds
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe the bug...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal steps to reproduce the behavior.
+      placeholder: |
+        1. Configure SMG with...
+        2. Send request to...
+        3. Observe error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+      placeholder: Describe the expected behavior...
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened?
+      placeholder: Describe what happened instead...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component is affected?
+      options:
+        - model-gateway (core routing)
+        - protocols (API types)
+        - auth (authentication)
+        - mcp (Model Context Protocol)
+        - mesh (HA clustering)
+        - tokenizer
+        - reasoning-parser
+        - tool-parser
+        - workflow (wfaas)
+        - data-connector (storage)
+        - multimodal
+        - wasm (middleware)
+        - grpc (gRPC client)
+        - kv-index (radix tree)
+        - python-bindings
+        - Other / Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: routing-policy
+    attributes:
+      label: Routing Policy (if applicable)
+      description: Which routing policy were you using?
+      options:
+        - N/A
+        - cache_aware
+        - round_robin
+        - power_of_two
+        - consistent_hashing
+        - prefix_hash
+        - manual
+        - random
+        - bucket
+    validations:
+      required: false
+
+  - type: dropdown
+    id: connection-mode
+    attributes:
+      label: Connection Mode
+      description: How are workers connected?
+      options:
+        - HTTP
+        - HTTPS
+        - gRPC
+        - Mixed
+        - N/A
+    validations:
+      required: false
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Relevant SMG configuration (sanitize any secrets).
+      placeholder: |
+        ```yaml
+        # Paste relevant config here
+        ```
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Error Output
+      description: Relevant log output or error messages.
+      placeholder: |
+        ```
+        Paste logs here
+        ```
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Please run the following commands and paste the output:
+        ```bash
+        echo "OS: $(uname -s) $(uname -r)"
+        cargo --version
+        rustc --version
+        ```
+      placeholder: |
+        OS: Linux 5.15.0
+        cargo 1.75.0 (1d8b05cdd 2023-11-20)
+        rustc 1.75.0 (82e1608df 2023-12-21)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment Environment
+      description: How is SMG deployed?
+      options:
+        - Docker
+        - Kubernetes
+        - Bare metal / VM
+        - Local development
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: streaming
+    attributes:
+      label: Streaming Context
+      description: Does this involve streaming responses?
+      options:
+        - label: Issue occurs with streaming (SSE) responses
+        - label: Issue occurs with non-streaming responses
+        - label: Issue occurs in both modes
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other context, screenshots, or information that might help.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have searched existing issues and discussions
+          required: true
+        - label: I can reproduce this issue consistently
+          required: false
+        - label: I am using the latest version of SMG
+          required: false

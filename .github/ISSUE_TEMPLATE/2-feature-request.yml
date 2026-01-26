@@ -1,0 +1,132 @@
+name: Feature Request
+description: Suggest a new feature or enhancement for SMG
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Please describe your idea below.
+
+        **Before submitting**, please:
+        - Search [existing issues](https://github.com/lightseekorg/smg/issues) for similar requests
+        - Consider discussing in [GitHub Discussions](https://github.com/lightseekorg/smg/discussions) first
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What problem does this feature solve? Is it related to a frustration with SMG?
+      placeholder: I'm always frustrated when...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution you'd like.
+      placeholder: I would like SMG to...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Have you considered any alternative solutions or workarounds?
+      placeholder: I've tried...
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Feature Area
+      description: Which area of SMG does this feature relate to?
+      options:
+        - Routing & Load Balancing
+        - Authentication & Authorization
+        - API Compatibility (OpenAI, etc.)
+        - Streaming & SSE
+        - gRPC Support
+        - MCP (Model Context Protocol)
+        - Mesh & High Availability
+        - Tokenization
+        - Workflow Engine (wfaas)
+        - Storage & Persistence
+        - Multimodal Support
+        - WASM Middleware
+        - Observability (metrics, tracing, logging)
+        - Configuration
+        - Performance
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected Component(s)
+      description: Which component(s) would need changes?
+      multiple: true
+      options:
+        - model-gateway
+        - protocols
+        - auth
+        - mcp
+        - mesh
+        - tokenizer
+        - reasoning-parser
+        - tool-parser
+        - workflow
+        - data-connector
+        - multimodal
+        - wasm
+        - grpc-client
+        - kv-index
+        - python-bindings
+        - Not sure / Multiple
+    validations:
+      required: false
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case
+      description: Describe your use case and how this feature would help.
+      placeholder: |
+        In my deployment, I need to...
+        This would help because...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority to You
+      description: How important is this feature for your use case?
+      options:
+        - Nice to have
+        - Important
+        - Critical / Blocking
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to contribute this feature (with guidance)
+        - label: I am willing to help test this feature
+        - label: I can provide more detailed requirements if needed
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other context, mockups, or examples that would help.
+    validations:
+      required: false

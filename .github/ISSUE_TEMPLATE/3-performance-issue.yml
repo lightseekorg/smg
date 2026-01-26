@@ -1,0 +1,230 @@
+name: Performance Issue
+description: Report a performance problem (latency, throughput, memory, etc.)
+title: "[Performance]: "
+labels: ["performance", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a performance issue! Please provide as much detail as possible to help us investigate.
+
+        Performance issues in gateways can be complex - the more context you provide, the faster we can help.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Performance Issue Description
+      description: Describe the performance problem you're experiencing.
+      placeholder: SMG is experiencing high latency when...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: Issue Type
+      description: What type of performance issue is this?
+      options:
+        - High latency (slow responses)
+        - Low throughput (requests/second)
+        - High memory usage
+        - High CPU usage
+        - Connection issues (timeouts, failures)
+        - Streaming delays
+        - Cold start / Warm-up
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Performance Metrics
+      description: |
+        Please provide specific metrics if available:
+        - Latency: p50, p95, p99
+        - Throughput: requests/second
+        - Memory: RSS, heap usage
+        - CPU: utilization percentage
+      placeholder: |
+        Latency:
+          - p50: 150ms
+          - p95: 450ms
+          - p99: 1200ms
+
+        Throughput: ~500 req/s
+
+        Memory: 2.5GB RSS
+
+        CPU: 85% (4 cores)
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-metrics
+    attributes:
+      label: Expected Performance
+      description: What performance did you expect or previously observe?
+      placeholder: |
+        Previously we were seeing:
+        - p99 latency: 200ms
+        - Throughput: 1000 req/s
+    validations:
+      required: true
+
+  - type: textarea
+    id: load-profile
+    attributes:
+      label: Load Profile
+      description: Describe your workload characteristics.
+      placeholder: |
+        - Concurrent connections: 100
+        - Request rate: 500 req/s
+        - Average prompt tokens: 500
+        - Average completion tokens: 200
+        - Streaming: Yes/No
+        - Worker count: 4
+    validations:
+      required: true
+
+  - type: dropdown
+    id: routing-policy
+    attributes:
+      label: Routing Policy
+      description: Which routing policy are you using?
+      options:
+        - cache_aware
+        - round_robin
+        - power_of_two
+        - consistent_hashing
+        - prefix_hash
+        - manual
+        - random
+        - bucket
+    validations:
+      required: true
+
+  - type: dropdown
+    id: connection-mode
+    attributes:
+      label: Connection Mode
+      description: How are workers connected?
+      options:
+        - HTTP
+        - HTTPS
+        - gRPC
+        - Mixed
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Relevant SMG configuration (sanitize secrets).
+      placeholder: |
+        ```yaml
+        # Paste relevant config here
+        workers:
+          - url: http://worker-1:8000
+          - url: http://worker-2:8000
+        policy: cache_aware
+        ```
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: profiling
+    attributes:
+      label: Profiling Data
+      description: |
+        If available, attach or link to profiling data:
+        - Flame graphs (perf, cargo-flamegraph)
+        - Memory profiles
+        - Prometheus metrics export
+        - Distributed traces (OpenTelemetry)
+      placeholder: |
+        Attach flame graphs, link to traces, or paste relevant profiling output...
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Please provide your environment details:
+        ```bash
+        echo "OS: $(uname -s) $(uname -r)"
+        cargo --version
+        rustc --version
+        nproc  # CPU cores
+        free -h  # Memory (Linux)
+        ```
+      placeholder: |
+        OS: Linux 5.15.0
+        cargo 1.75.0
+        rustc 1.75.0
+        CPU cores: 8
+        Memory: 32GB
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment Environment
+      description: How is SMG deployed?
+      options:
+        - Docker
+        - Kubernetes
+        - Bare metal / VM
+        - Local development
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: backend
+    attributes:
+      label: Backend Workers
+      description: What inference backends are you using?
+      placeholder: |
+        - vLLM v0.4.0 (4 workers)
+        - Model: Llama-3-70B
+        - GPU: 8x A100
+    validations:
+      required: false
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction Steps
+      description: How can we reproduce this performance issue?
+      placeholder: |
+        1. Deploy SMG with config above
+        2. Run load test with: `wrk -t4 -c100 -d60s http://smg:8080/v1/chat/completions`
+        3. Observe latency spike after ~30 seconds
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other context that might help (recent changes, traffic patterns, etc.).
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have verified this is not a backend worker issue
+          required: false
+        - label: I have collected metrics during the performance issue
+          required: false
+        - label: I can reproduce this issue
+          required: false
