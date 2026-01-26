@@ -283,8 +283,86 @@ jobs:
           docker stop oracle-db || true
           docker rm oracle-db || true
 
+  go-bindings:
+    name: go-bindings
+    needs: [check-ci, build-wheel]
+    if: needs.check-ci.outputs.should_run == 'true'
+    runs-on: 4-gpu-a10
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Clone SGLang repository
+        run: git clone https://github.com/sgl-project/sglang.git
+
+      - name: Install SGLang dependencies
+        run: |
+          cd sglang
+          sudo --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+          cache-dependency-path: bindings/golang/go.sum
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Build Go FFI library
+        run: |
+          source "$HOME/.cargo/env"
+          cd bindings/golang
+          make build
+          echo "Go FFI library built successfully"
+          ls -la target/release/libsmg_go.*
+
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: smg-wheel
+          path: wheel/
+
+      - name: Install wheel
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+
+      - name: Run Go unit tests
+        run: |
+          cd bindings/golang
+          export CGO_LDFLAGS="-L$(pwd)/target/release"
+          export LD_LIBRARY_PATH="$(pwd)/target/release:$LD_LIBRARY_PATH"
+          go test -v ./...
+
+      - name: Install benchmark dependencies
+        run: pip install genai-bench==0.0.3 pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy
+
+      - name: Run Go integration tests and benchmarks
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          cd bindings/golang
+          export CGO_LDFLAGS="-L$(pwd)/target/release"
+          export LD_LIBRARY_PATH="$(pwd)/target/release:$LD_LIBRARY_PATH"
+          export ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models"
+          export SHOW_WORKER_LOGS=0
+          export SHOW_ROUTER_LOGS=1
+          go test -v -tags=integration -timeout 30m ./...
+
+      - name: Upload benchmark results
+        if: success()
+        uses: actions/upload-artifact@v6
+        with:
+          name: go-bindings-benchmark-results
+          path: bindings/golang/benchmark_**/
+          if-no-files-found: ignore
+
   finish:
-    needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e]
+    needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-bindings]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
@@ -294,7 +372,7 @@ jobs:
           if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
             echo "CI was skipped (external contributor without run-ci label)"
             exit 0
-          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" ]]; then
+          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-bindings.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else
