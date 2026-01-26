@@ -239,6 +239,7 @@ pub struct StreamingEventContext<'a> {
     pub original_request: &'a ResponsesRequest,
     pub previous_response_id: Option<&'a str>,
     pub server_keys: &'a [String],
+    pub orchestrator: Option<&'a Arc<McpOrchestrator>>,
 }
 
 pub type StreamingRequest = OwnedStreamingContext;

@@ -19,7 +19,9 @@ use tracing::{debug, info, warn};
 use crate::{
     mcp::{ApprovalMode, McpOrchestrator, ResponseFormat, ResponseTransformer, TenantContext},
     protocols::{
-        event_types::{is_function_call_type, ItemType, McpEvent, OutputItemEvent},
+        event_types::{
+            is_function_call_type, ItemType, McpEvent, OutputItemEvent, WebSearchCallEvent,
+        },
         responses::{generate_id, ResponseInput, ResponsesRequest},
     },
     routers::{
@@ -197,7 +199,7 @@ pub(super) async fn execute_streaming_tool_calls(
                     &call.arguments_buffer,
                 );
                 // Send error event and continue
-                if !send_mcp_call_completion_events_with_error(
+                if !send_tool_call_completion_events(
                     tx,
                     &call,
                     mcp_call_item.clone(),
@@ -215,6 +217,13 @@ pub(super) async fn execute_streaming_tool_calls(
                 continue;
             }
         };
+
+        // For web_search_call, emit the searching event before tool execution
+        if matches!(response_format, ResponseFormat::WebSearchCall)
+            && !send_web_search_searching_event(tx, &call, sequence_number)
+        {
+            return false;
+        }
 
         // Call tool by name within allowed servers
         debug!("Calling MCP tool '{}' with args: {}", call.name, args_str);
@@ -270,12 +279,7 @@ pub(super) async fn execute_streaming_tool_calls(
         };
 
         // Send mcp_call completion event to client
-        if !send_mcp_call_completion_events_with_error(
-            tx,
-            &call,
-            mcp_call_item.clone(),
-            sequence_number,
-        ) {
+        if !send_tool_call_completion_events(tx, &call, mcp_call_item.clone(), sequence_number) {
             // Client disconnected, no point continuing tool execution
             return false;
         }
@@ -498,25 +502,69 @@ pub(super) fn send_mcp_list_tools_events(
     tx.send(Ok(Bytes::from(event4))).is_ok()
 }
 
-/// Send mcp_call completion events after tool execution
-/// Returns false if client disconnected
-pub(super) fn send_mcp_call_completion_events_with_error(
+/// Send web_search_call.searching event during tool execution.
+/// Returns false if client disconnected.
+fn send_web_search_searching_event(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     call: &FunctionCallInProgress,
-    mcp_call_item: Value,
     sequence_number: &mut u64,
 ) -> bool {
     let effective_output_index = call.effective_output_index();
 
-    // Get the mcp_call item_id
-    let item_id = mcp_call_item
+    // Transform call_id from fc_* to ws_* for web_search item_id
+    let item_id = call
+        .call_id
+        .strip_prefix("fc_")
+        .map(|stripped| format!("ws_{}", stripped))
+        .unwrap_or_else(|| call.call_id.clone());
+
+    let searching_payload = json!({
+        "type": WebSearchCallEvent::SEARCHING,
+        "sequence_number": *sequence_number,
+        "output_index": effective_output_index,
+        "item_id": item_id
+    });
+    *sequence_number += 1;
+
+    let searching_event = format!(
+        "event: {}\ndata: {}\n\n",
+        WebSearchCallEvent::SEARCHING,
+        searching_payload
+    );
+    tx.send(Ok(Bytes::from(searching_event))).is_ok()
+}
+
+/// Send tool call completion events after tool execution.
+/// Handles both mcp_call and web_search_call items based on their type.
+/// Returns false if client disconnected.
+pub(super) fn send_tool_call_completion_events(
+    tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    call: &FunctionCallInProgress,
+    tool_call_item: Value,
+    sequence_number: &mut u64,
+) -> bool {
+    let effective_output_index = call.effective_output_index();
+
+    // Get the item_id
+    let item_id = tool_call_item
         .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // Event 1: response.mcp_call.completed
+    // Determine the completion event type based on item type
+    let item_type = tool_call_item
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let completed_event_type: &str = match item_type {
+        ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::COMPLETED,
+        _ => McpEvent::CALL_COMPLETED, // Default to mcp_call for mcp_call and unknown types
+    };
+
+    // Event 1: response.<type>.completed
     let completed_payload = json!({
-        "type": McpEvent::CALL_COMPLETED,
+        "type": completed_event_type,
         "sequence_number": *sequence_number,
         "output_index": effective_output_index,
         "item_id": item_id
@@ -525,19 +573,18 @@ pub(super) fn send_mcp_call_completion_events_with_error(
 
     let completed_event = format!(
         "event: {}\ndata: {}\n\n",
-        McpEvent::CALL_COMPLETED,
-        completed_payload
+        completed_event_type, completed_payload
     );
     if tx.send(Ok(Bytes::from(completed_event))).is_err() {
         return false;
     }
 
-    // Event 2: response.output_item.done (with completed mcp_call)
+    // Event 2: response.output_item.done (with completed tool call)
     let done_payload = json!({
         "type": OutputItemEvent::DONE,
         "sequence_number": *sequence_number,
         "output_index": effective_output_index,
-        "item": mcp_call_item
+        "item": tool_call_item
     });
     *sequence_number += 1;
 

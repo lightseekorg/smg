@@ -175,6 +175,38 @@ impl fmt::Display for McpEvent {
     }
 }
 
+// ============================================================================
+// Built-in Tool Events
+// ============================================================================
+
+/// Web search call events for streaming
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WebSearchCallEvent {
+    InProgress,
+    Searching,
+    Completed,
+}
+
+impl WebSearchCallEvent {
+    pub const IN_PROGRESS: &'static str = "response.web_search_call.in_progress";
+    pub const SEARCHING: &'static str = "response.web_search_call.searching";
+    pub const COMPLETED: &'static str = "response.web_search_call.completed";
+
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::InProgress => Self::IN_PROGRESS,
+            Self::Searching => Self::SEARCHING,
+            Self::Completed => Self::COMPLETED,
+        }
+    }
+}
+
+impl fmt::Display for WebSearchCallEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Item type discriminators used in output items
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemType {
@@ -183,6 +215,7 @@ pub enum ItemType {
     McpCall,
     Function,
     McpListTools,
+    WebSearchCall,
 }
 
 impl ItemType {
@@ -191,6 +224,7 @@ impl ItemType {
     pub const MCP_CALL: &'static str = "mcp_call";
     pub const FUNCTION: &'static str = "function";
     pub const MCP_LIST_TOOLS: &'static str = "mcp_list_tools";
+    pub const WEB_SEARCH_CALL: &'static str = "web_search_call";
 
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -199,6 +233,7 @@ impl ItemType {
             Self::McpCall => Self::MCP_CALL,
             Self::Function => Self::FUNCTION,
             Self::McpListTools => Self::MCP_LIST_TOOLS,
+            Self::WebSearchCall => Self::WEB_SEARCH_CALL,
         }
     }
 
