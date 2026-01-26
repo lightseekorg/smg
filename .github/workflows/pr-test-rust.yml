@@ -339,27 +339,17 @@ jobs:
           export LD_LIBRARY_PATH="$(pwd)/target/release:$LD_LIBRARY_PATH"
           go test -v ./...
 
-      - name: Install benchmark dependencies
-        run: pip install genai-bench==0.0.3 pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy
+      - name: Install test dependencies
+        run: |
+          python3 -m pip install pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy
 
-      - name: Run Go integration tests and benchmarks
+      - name: Run Go OAI server E2E tests
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          cd bindings/golang
-          export CGO_LDFLAGS="-L$(pwd)/target/release"
-          export LD_LIBRARY_PATH="$(pwd)/target/release:$LD_LIBRARY_PATH"
-          export ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models"
-          export SHOW_WORKER_LOGS=0
-          export SHOW_ROUTER_LOGS=1
-          go test -v -tags=integration -timeout 30m ./...
-
-      - name: Upload benchmark results
-        if: success()
-        uses: actions/upload-artifact@v6
-        with:
-          name: go-bindings-benchmark-results
-          path: bindings/golang/benchmark_**/
-          if-no-files-found: ignore
+          export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
+          export LD_LIBRARY_PATH="$(pwd)/bindings/golang/target/release:$LD_LIBRARY_PATH"
+          SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+            pytest --reruns 2 --reruns-delay 5 e2e_test/bindings_go -s -vv -o log_cli=true --log-cli-level=INFO
 
   finish:
     needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-bindings]
