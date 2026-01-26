@@ -818,9 +818,8 @@ impl HarmonyStreamingProcessor {
                                     "status": "in_progress"
                                 });
 
-                                // Add server_label for mcp_call only (not web_search_call)
-                                if matches!(response_format, Some(ref f) if !matches!(f, ResponseFormat::WebSearchCall))
-                                {
+                                // Add server_label for mcp_call only (Passthrough format)
+                                if matches!(response_format, Some(ResponseFormat::Passthrough)) {
                                     if let Some(ref label) = emitter.mcp_server_label {
                                         item["server_label"] = json!(label);
                                     }
@@ -838,7 +837,7 @@ impl HarmonyStreamingProcessor {
                                     );
                                     emitter.send_event_best_effort(&event, tx);
 
-                                    // Emit searching event for web_search_call
+                                    // Emit searching/interpreting event for builtin tools
                                     if let Some(event) = emitter.emit_tool_call_searching(
                                         output_index,
                                         &item_id,
@@ -848,8 +847,11 @@ impl HarmonyStreamingProcessor {
                                     }
                                 }
 
-                                // Emit initial arguments delta for non-web_search
-                                if !matches!(response_format, Some(ResponseFormat::WebSearchCall)) {
+                                // Emit initial arguments delta for mcp_call only (skip for builtin tools)
+                                if matches!(
+                                    response_format,
+                                    Some(ResponseFormat::Passthrough) | None
+                                ) {
                                     let event = match &response_format {
                                         Some(_) => emitter.emit_mcp_call_arguments_delta(
                                             output_index,
@@ -869,10 +871,10 @@ impl HarmonyStreamingProcessor {
                                 if let Some((output_index, item_id, response_format)) =
                                     tool_call_tracking.get(&call_index)
                                 {
-                                    // Skip arguments streaming for web_search_call
-                                    if matches!(
+                                    // Skip arguments streaming for builtin tools (only mcp_call streams arguments)
+                                    if !matches!(
                                         response_format,
-                                        Some(ResponseFormat::WebSearchCall)
+                                        Some(ResponseFormat::Passthrough) | None
                                     ) {
                                         continue;
                                     }
@@ -936,8 +938,11 @@ impl HarmonyStreamingProcessor {
                                 let args_str =
                                     tool_call.function.arguments.as_deref().unwrap_or("");
 
-                                // Emit arguments done (skip for web_search_call)
-                                if !matches!(response_format, Some(ResponseFormat::WebSearchCall)) {
+                                // Emit arguments done (skip for builtin tools)
+                                if matches!(
+                                    response_format,
+                                    Some(ResponseFormat::Passthrough) | None
+                                ) {
                                     let event = match response_format {
                                         Some(_) => emitter.emit_mcp_call_arguments_done(
                                             *output_index,
@@ -977,9 +982,8 @@ impl HarmonyStreamingProcessor {
                                     "status": "completed"
                                 });
 
-                                // Add server_label for mcp_call only
-                                if matches!(response_format, Some(ref f) if !matches!(f, ResponseFormat::WebSearchCall))
-                                {
+                                // Add server_label for mcp_call only (Passthrough format)
+                                if matches!(response_format, Some(ResponseFormat::Passthrough)) {
                                     if let Some(ref label) = emitter.mcp_server_label {
                                         item["server_label"] = json!(label);
                                     }
@@ -1070,8 +1074,8 @@ impl HarmonyStreamingProcessor {
                         let tool_name = &tool_call.function.name;
                         let args_str = tool_call.function.arguments.as_deref().unwrap_or("");
 
-                        // Emit arguments done (skip for web_search_call)
-                        if !matches!(response_format, Some(ResponseFormat::WebSearchCall)) {
+                        // Emit arguments done (skip for builtin tools)
+                        if matches!(response_format, Some(ResponseFormat::Passthrough) | None) {
                             let event = match response_format {
                                 Some(_) => emitter.emit_mcp_call_arguments_done(
                                     *output_index,
@@ -1107,8 +1111,8 @@ impl HarmonyStreamingProcessor {
                             "status": "completed"
                         });
 
-                        if matches!(response_format, Some(ref f) if !matches!(f, ResponseFormat::WebSearchCall))
-                        {
+                        // Add server_label for mcp_call only (Passthrough format)
+                        if matches!(response_format, Some(ResponseFormat::Passthrough)) {
                             if let Some(ref label) = emitter.mcp_server_label {
                                 item["server_label"] = json!(label);
                             }

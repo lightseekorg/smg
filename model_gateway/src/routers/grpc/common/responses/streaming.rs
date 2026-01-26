@@ -13,8 +13,8 @@ use crate::{
         chat::ChatCompletionStreamResponse,
         common::{Usage, UsageInfo},
         event_types::{
-            ContentPartEvent, FunctionCallEvent, McpEvent, OutputItemEvent, OutputTextEvent,
-            ResponseEvent, WebSearchCallEvent,
+            CodeInterpreterCallEvent, ContentPartEvent, FileSearchCallEvent, FunctionCallEvent,
+            McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent, WebSearchCallEvent,
         },
         responses::{
             ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse, ResponsesUsage,
@@ -30,6 +30,8 @@ pub(crate) enum OutputItemType {
     FunctionCall,
     Reasoning,
     WebSearchCall,
+    CodeInterpreterCall,
+    FileSearchCall,
 }
 
 /// Status of an output item
@@ -125,16 +127,21 @@ impl ResponseStreamEventEmitter {
     ///
     /// After MCP tools are executed, this updates the stored output items
     /// to include the output field from the tool results.
-    /// Supports both mcp_call and web_search_call item types.
+    /// Supports mcp_call, web_search_call, code_interpreter_call, and file_search_call item types.
     pub(crate) fn update_mcp_call_outputs(&mut self, tool_results: &[ToolResult]) {
         for tool_result in tool_results {
             // Find the output item with matching call_id
             for item_state in self.output_items.iter_mut() {
                 if let Some(ref mut item_data) = item_state.item_data {
-                    // Check if this is an mcp_call or web_search_call item with matching call_id
+                    // Check if this is a tool call item with matching call_id
                     let item_type = item_data.get("type").and_then(|t| t.as_str());
-                    let is_tool_call =
-                        item_type == Some("mcp_call") || item_type == Some("web_search_call");
+                    let is_tool_call = matches!(
+                        item_type,
+                        Some("mcp_call")
+                            | Some("web_search_call")
+                            | Some("code_interpreter_call")
+                            | Some("file_search_call")
+                    );
                     if is_tool_call
                         && item_data.get("call_id").and_then(|c| c.as_str())
                             == Some(&tool_result.call_id)
@@ -392,19 +399,6 @@ impl ResponseStreamEventEmitter {
         })
     }
 
-    pub fn emit_mcp_call_in_progress(
-        &mut self,
-        output_index: usize,
-        item_id: &str,
-    ) -> serde_json::Value {
-        json!({
-            "type": McpEvent::CALL_IN_PROGRESS,
-            "sequence_number": self.next_sequence(),
-            "output_index": output_index,
-            "item_id": item_id
-        })
-    }
-
     pub fn emit_mcp_call_arguments_delta(
         &mut self,
         output_index: usize,
@@ -435,19 +429,6 @@ impl ResponseStreamEventEmitter {
         })
     }
 
-    pub fn emit_mcp_call_completed(
-        &mut self,
-        output_index: usize,
-        item_id: &str,
-    ) -> serde_json::Value {
-        json!({
-            "type": McpEvent::CALL_COMPLETED,
-            "sequence_number": self.next_sequence(),
-            "output_index": output_index,
-            "item_id": item_id
-        })
-    }
-
     pub fn emit_mcp_call_failed(
         &mut self,
         output_index: usize,
@@ -464,51 +445,24 @@ impl ResponseStreamEventEmitter {
     }
 
     // ========================================================================
-    // Web Search Call Event Emission Methods
-    // ========================================================================
-
-    pub fn emit_web_search_call_in_progress(
-        &mut self,
-        output_index: usize,
-        item_id: &str,
-    ) -> serde_json::Value {
-        json!({
-            "type": WebSearchCallEvent::IN_PROGRESS,
-            "sequence_number": self.next_sequence(),
-            "output_index": output_index,
-            "item_id": item_id
-        })
-    }
-
-    pub fn emit_web_search_call_searching(
-        &mut self,
-        output_index: usize,
-        item_id: &str,
-    ) -> serde_json::Value {
-        json!({
-            "type": WebSearchCallEvent::SEARCHING,
-            "sequence_number": self.next_sequence(),
-            "output_index": output_index,
-            "item_id": item_id
-        })
-    }
-
-    pub fn emit_web_search_call_completed(
-        &mut self,
-        output_index: usize,
-        item_id: &str,
-    ) -> serde_json::Value {
-        json!({
-            "type": WebSearchCallEvent::COMPLETED,
-            "sequence_number": self.next_sequence(),
-            "output_index": output_index,
-            "item_id": item_id
-        })
-    }
-
-    // ========================================================================
     // Generic Tool Call Event Emission (based on ResponseFormat)
     // ========================================================================
+
+    /// Emit a tool call event with the specified event type.
+    /// This is the internal helper used by all tool call event methods.
+    fn emit_tool_event(
+        &mut self,
+        event_type: &'static str,
+        output_index: usize,
+        item_id: &str,
+    ) -> serde_json::Value {
+        json!({
+            "type": event_type,
+            "sequence_number": self.next_sequence(),
+            "output_index": output_index,
+            "item_id": item_id
+        })
+    }
 
     /// Emit the appropriate in_progress event based on response format
     pub fn emit_tool_call_in_progress(
@@ -517,27 +471,29 @@ impl ResponseStreamEventEmitter {
         item_id: &str,
         response_format: &ResponseFormat,
     ) -> serde_json::Value {
-        match response_format {
-            ResponseFormat::WebSearchCall => {
-                self.emit_web_search_call_in_progress(output_index, item_id)
-            }
-            _ => self.emit_mcp_call_in_progress(output_index, item_id),
-        }
+        let event_type = match response_format {
+            ResponseFormat::WebSearchCall => WebSearchCallEvent::IN_PROGRESS,
+            ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::IN_PROGRESS,
+            ResponseFormat::FileSearchCall => FileSearchCallEvent::IN_PROGRESS,
+            ResponseFormat::Passthrough => McpEvent::CALL_IN_PROGRESS,
+        };
+        self.emit_tool_event(event_type, output_index, item_id)
     }
 
-    /// Emit the searching event for web_search_call (no-op for other formats)
+    /// Emit the searching/interpreting event for builtin tool calls (no-op for passthrough)
     pub fn emit_tool_call_searching(
         &mut self,
         output_index: usize,
         item_id: &str,
         response_format: &ResponseFormat,
     ) -> Option<serde_json::Value> {
-        match response_format {
-            ResponseFormat::WebSearchCall => {
-                Some(self.emit_web_search_call_searching(output_index, item_id))
-            }
-            _ => None,
-        }
+        let event_type = match response_format {
+            ResponseFormat::WebSearchCall => WebSearchCallEvent::SEARCHING,
+            ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::INTERPRETING,
+            ResponseFormat::FileSearchCall => FileSearchCallEvent::SEARCHING,
+            ResponseFormat::Passthrough => return None,
+        };
+        Some(self.emit_tool_event(event_type, output_index, item_id))
     }
 
     /// Emit the appropriate completed event based on response format
@@ -547,12 +503,13 @@ impl ResponseStreamEventEmitter {
         item_id: &str,
         response_format: &ResponseFormat,
     ) -> serde_json::Value {
-        match response_format {
-            ResponseFormat::WebSearchCall => {
-                self.emit_web_search_call_completed(output_index, item_id)
-            }
-            _ => self.emit_mcp_call_completed(output_index, item_id),
-        }
+        let event_type = match response_format {
+            ResponseFormat::WebSearchCall => WebSearchCallEvent::COMPLETED,
+            ResponseFormat::CodeInterpreterCall => CodeInterpreterCallEvent::COMPLETED,
+            ResponseFormat::FileSearchCall => FileSearchCallEvent::COMPLETED,
+            ResponseFormat::Passthrough => McpEvent::CALL_COMPLETED,
+        };
+        self.emit_tool_event(event_type, output_index, item_id)
     }
 
     // ========================================================================
@@ -563,7 +520,9 @@ impl ResponseStreamEventEmitter {
     pub fn type_str_for_format(response_format: Option<&ResponseFormat>) -> &'static str {
         match response_format {
             Some(ResponseFormat::WebSearchCall) => "web_search_call",
-            Some(_) => "mcp_call",
+            Some(ResponseFormat::CodeInterpreterCall) => "code_interpreter_call",
+            Some(ResponseFormat::FileSearchCall) => "file_search_call",
+            Some(ResponseFormat::Passthrough) => "mcp_call",
             None => "function_call",
         }
     }
@@ -572,7 +531,9 @@ impl ResponseStreamEventEmitter {
     pub fn output_item_type_for_format(response_format: Option<&ResponseFormat>) -> OutputItemType {
         match response_format {
             Some(ResponseFormat::WebSearchCall) => OutputItemType::WebSearchCall,
-            Some(_) => OutputItemType::McpCall,
+            Some(ResponseFormat::CodeInterpreterCall) => OutputItemType::CodeInterpreterCall,
+            Some(ResponseFormat::FileSearchCall) => OutputItemType::FileSearchCall,
+            Some(ResponseFormat::Passthrough) => OutputItemType::McpCall,
             None => OutputItemType::FunctionCall,
         }
     }
@@ -663,6 +624,8 @@ impl ResponseStreamEventEmitter {
             OutputItemType::Message => "msg",
             OutputItemType::Reasoning => "rs",
             OutputItemType::WebSearchCall => "ws",
+            OutputItemType::CodeInterpreterCall => "ci",
+            OutputItemType::FileSearchCall => "fs",
         };
 
         let id = Self::generate_item_id(id_prefix);

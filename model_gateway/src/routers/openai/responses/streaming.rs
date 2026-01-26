@@ -37,8 +37,9 @@ use crate::{
     mcp::{McpOrchestrator, ResponseFormat},
     protocols::{
         event_types::{
-            is_function_call_type, is_response_event, FunctionCallEvent, ItemType, McpEvent,
-            OutputItemEvent, ResponseEvent, WebSearchCallEvent,
+            is_function_call_type, is_response_event, CodeInterpreterCallEvent,
+            FileSearchCallEvent, FunctionCallEvent, ItemType, McpEvent, OutputItemEvent,
+            ResponseEvent, WebSearchCallEvent,
         },
         responses::{ResponseToolType, ResponsesRequest},
     },
@@ -404,7 +405,7 @@ pub(super) fn forward_streaming_event(
 }
 
 /// Inject in_progress event after a tool call item is added.
-/// Handles both mcp_call and web_search_call items.
+/// Handles mcp_call, web_search_call, code_interpreter_call, and file_search_call items.
 /// Returns false if client disconnected.
 fn maybe_inject_tool_in_progress(
     parsed_data: &Value,
@@ -421,6 +422,8 @@ fn maybe_inject_tool_in_progress(
     let event_type = match item_type {
         ItemType::MCP_CALL => McpEvent::CALL_IN_PROGRESS,
         ItemType::WEB_SEARCH_CALL => WebSearchCallEvent::IN_PROGRESS,
+        ItemType::CODE_INTERPRETER_CALL => CodeInterpreterCallEvent::IN_PROGRESS,
+        ItemType::FILE_SEARCH_CALL => FileSearchCallEvent::IN_PROGRESS,
         _ => return true, // Not a tool call item, nothing to inject
     };
 

@@ -207,6 +207,62 @@ impl fmt::Display for WebSearchCallEvent {
     }
 }
 
+/// Code interpreter call events for streaming
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CodeInterpreterCallEvent {
+    InProgress,
+    Interpreting,
+    Completed,
+}
+
+impl CodeInterpreterCallEvent {
+    pub const IN_PROGRESS: &'static str = "response.code_interpreter_call.in_progress";
+    pub const INTERPRETING: &'static str = "response.code_interpreter_call.interpreting";
+    pub const COMPLETED: &'static str = "response.code_interpreter_call.completed";
+
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::InProgress => Self::IN_PROGRESS,
+            Self::Interpreting => Self::INTERPRETING,
+            Self::Completed => Self::COMPLETED,
+        }
+    }
+}
+
+impl fmt::Display for CodeInterpreterCallEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// File search call events for streaming
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FileSearchCallEvent {
+    InProgress,
+    Searching,
+    Completed,
+}
+
+impl FileSearchCallEvent {
+    pub const IN_PROGRESS: &'static str = "response.file_search_call.in_progress";
+    pub const SEARCHING: &'static str = "response.file_search_call.searching";
+    pub const COMPLETED: &'static str = "response.file_search_call.completed";
+
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::InProgress => Self::IN_PROGRESS,
+            Self::Searching => Self::SEARCHING,
+            Self::Completed => Self::COMPLETED,
+        }
+    }
+}
+
+impl fmt::Display for FileSearchCallEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Item type discriminators used in output items
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemType {
@@ -216,6 +272,8 @@ pub enum ItemType {
     Function,
     McpListTools,
     WebSearchCall,
+    CodeInterpreterCall,
+    FileSearchCall,
 }
 
 impl ItemType {
@@ -225,6 +283,8 @@ impl ItemType {
     pub const FUNCTION: &'static str = "function";
     pub const MCP_LIST_TOOLS: &'static str = "mcp_list_tools";
     pub const WEB_SEARCH_CALL: &'static str = "web_search_call";
+    pub const CODE_INTERPRETER_CALL: &'static str = "code_interpreter_call";
+    pub const FILE_SEARCH_CALL: &'static str = "file_search_call";
 
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -234,12 +294,22 @@ impl ItemType {
             Self::Function => Self::FUNCTION,
             Self::McpListTools => Self::MCP_LIST_TOOLS,
             Self::WebSearchCall => Self::WEB_SEARCH_CALL,
+            Self::CodeInterpreterCall => Self::CODE_INTERPRETER_CALL,
+            Self::FileSearchCall => Self::FILE_SEARCH_CALL,
         }
     }
 
     /// Check if this is a function call variant (FunctionCall or FunctionToolCall)
     pub const fn is_function_call(&self) -> bool {
         matches!(self, Self::FunctionCall | Self::FunctionToolCall)
+    }
+
+    /// Check if this is a builtin tool call variant
+    pub const fn is_builtin_tool_call(&self) -> bool {
+        matches!(
+            self,
+            Self::WebSearchCall | Self::CodeInterpreterCall | Self::FileSearchCall
+        )
     }
 }
 
