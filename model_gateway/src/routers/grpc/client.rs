@@ -1,7 +1,7 @@
-//! Unified gRPC client wrapper for SGLang and vLLM backends
+//! Unified gRPC client wrapper for SGLang, vLLM, and TensorRT-LLM backends
 
 use crate::{
-    grpc_client::{SglangSchedulerClient, VllmEngineClient},
+    grpc_client::{SglangSchedulerClient, TrtllmEngineClient, VllmEngineClient},
     routers::grpc::proto_wrapper::{
         ProtoEmbedRequest, ProtoEmbedResponse, ProtoGenerateRequest, ProtoStream,
     },
@@ -14,43 +14,60 @@ pub struct HealthCheckResponse {
     pub message: String,
 }
 
-/// Polymorphic gRPC client that wraps either SGLang or vLLM
+/// Polymorphic gRPC client that wraps SGLang, vLLM, or TensorRT-LLM
 #[derive(Clone)]
 pub enum GrpcClient {
     Sglang(SglangSchedulerClient),
     Vllm(VllmEngineClient),
+    Trtllm(TrtllmEngineClient),
 }
 
 impl GrpcClient {
-    /// Get reference to SGLang client (panics if vLLM)
+    /// Get reference to SGLang client (panics if not SGLang)
     pub fn as_sglang(&self) -> &SglangSchedulerClient {
         match self {
             Self::Sglang(client) => client,
-            Self::Vllm(_) => panic!("Expected SGLang client, got vLLM"),
+            _ => panic!("Expected SGLang client"),
         }
     }
 
-    /// Get mutable reference to SGLang client (panics if vLLM)
+    /// Get mutable reference to SGLang client (panics if not SGLang)
     pub fn as_sglang_mut(&mut self) -> &mut SglangSchedulerClient {
         match self {
             Self::Sglang(client) => client,
-            Self::Vllm(_) => panic!("Expected SGLang client, got vLLM"),
+            _ => panic!("Expected SGLang client"),
         }
     }
 
-    /// Get reference to vLLM client (panics if SGLang)
+    /// Get reference to vLLM client (panics if not vLLM)
     pub fn as_vllm(&self) -> &VllmEngineClient {
         match self {
             Self::Vllm(client) => client,
-            Self::Sglang(_) => panic!("Expected vLLM client, got SGLang"),
+            _ => panic!("Expected vLLM client"),
         }
     }
 
-    /// Get mutable reference to vLLM client (panics if SGLang)
+    /// Get mutable reference to vLLM client (panics if not vLLM)
     pub fn as_vllm_mut(&mut self) -> &mut VllmEngineClient {
         match self {
             Self::Vllm(client) => client,
-            Self::Sglang(_) => panic!("Expected vLLM client, got SGLang"),
+            _ => panic!("Expected vLLM client"),
+        }
+    }
+
+    /// Get reference to TensorRT-LLM client (panics if not TensorRT-LLM)
+    pub fn as_trtllm(&self) -> &TrtllmEngineClient {
+        match self {
+            Self::Trtllm(client) => client,
+            _ => panic!("Expected TensorRT-LLM client"),
+        }
+    }
+
+    /// Get mutable reference to TensorRT-LLM client (panics if not TensorRT-LLM)
+    pub fn as_trtllm_mut(&mut self) -> &mut TrtllmEngineClient {
+        match self {
+            Self::Trtllm(client) => client,
+            _ => panic!("Expected TensorRT-LLM client"),
         }
     }
 
@@ -64,6 +81,11 @@ impl GrpcClient {
         matches!(self, Self::Vllm(_))
     }
 
+    /// Check if this is a TensorRT-LLM client
+    pub fn is_trtllm(&self) -> bool {
+        matches!(self, Self::Trtllm(_))
+    }
+
     /// Connect to gRPC server (runtime-aware)
     pub async fn connect(
         url: &str,
@@ -72,6 +94,9 @@ impl GrpcClient {
         match runtime_type {
             "sglang" => Ok(Self::Sglang(SglangSchedulerClient::connect(url).await?)),
             "vllm" => Ok(Self::Vllm(VllmEngineClient::connect(url).await?)),
+            "trtllm" | "tensorrt-llm" => {
+                Ok(Self::Trtllm(TrtllmEngineClient::connect(url).await?))
+            }
             _ => Err(format!("Unknown runtime type: {}", runtime_type).into()),
         }
     }
@@ -95,6 +120,16 @@ impl GrpcClient {
                     message: resp.message,
                 })
             }
+            Self::Trtllm(client) => {
+                let resp = client.health_check().await?;
+                // TensorRT-LLM returns status string, not separate healthy/message fields
+                let healthy = resp.status.to_lowercase().contains("ok")
+                    || resp.status.to_lowercase().contains("healthy");
+                Ok(HealthCheckResponse {
+                    healthy,
+                    message: resp.status,
+                })
+            }
         }
     }
 
@@ -110,6 +145,10 @@ impl GrpcClient {
             Self::Vllm(client) => {
                 let info = client.get_model_info().await?;
                 Ok(ModelInfo::Vllm(info))
+            }
+            Self::Trtllm(client) => {
+                let info = client.get_model_info().await?;
+                Ok(ModelInfo::Trtllm(info))
             }
         }
     }
@@ -153,6 +192,7 @@ impl GrpcClient {
 pub enum ModelInfo {
     Sglang(Box<crate::grpc_client::sglang_proto::GetModelInfoResponse>),
     Vllm(crate::grpc_client::vllm_proto::GetModelInfoResponse),
+    Trtllm(crate::grpc_client::trtllm_proto::GetModelInfoResponse),
 }
 
 impl ModelInfo {
@@ -164,6 +204,7 @@ impl ModelInfo {
         let value = match self {
             ModelInfo::Sglang(info) => serde_json::to_value(info).ok(),
             ModelInfo::Vllm(info) => serde_json::to_value(info).ok(),
+            ModelInfo::Trtllm(info) => serde_json::to_value(info).ok(),
         };
 
         // Convert JSON object to HashMap, filtering out empty/zero/false values
