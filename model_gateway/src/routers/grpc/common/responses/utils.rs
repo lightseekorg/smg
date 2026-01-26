@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::{http::HeaderMap, response::Response};
+use axum::response::Response;
 use serde_json::to_value;
 use tracing::{debug, error, warn};
 
@@ -29,7 +29,6 @@ use crate::{
 pub(crate) async fn ensure_mcp_connection(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: Option<&[ResponseTool]>,
-    request_headers: Option<&HeaderMap>,
 ) -> Result<(bool, Vec<String>), Response> {
     // Check for explicit MCP tools (must error if connection fails)
     let has_explicit_mcp_tools = tools
@@ -57,7 +56,7 @@ pub(crate) async fn ensure_mcp_connection(
     }
 
     if let Some(tools) = tools {
-        match ensure_request_mcp_client(mcp_orchestrator, tools, request_headers).await {
+        match ensure_request_mcp_client(mcp_orchestrator, tools).await {
             Some((_orchestrator, mcp_servers)) => {
                 let server_keys: Vec<String> =
                     mcp_servers.into_iter().map(|(_, key)| key).collect();

@@ -34,6 +34,9 @@ pub struct ResponseTool {
     pub server_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization: Option<String>,
+    /// Custom headers to send to MCP server (from request payload, not HTTP headers)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,6 +54,7 @@ impl Default for ResponseTool {
             function: None,
             server_url: None,
             authorization: None,
+            headers: None,
             server_label: None,
             server_description: None,
             require_approval: None,

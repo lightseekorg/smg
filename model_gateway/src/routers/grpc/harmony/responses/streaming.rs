@@ -50,7 +50,6 @@ pub(crate) async fn serve_harmony_responses_stream(
     let (has_mcp_tools, server_keys) = match ensure_mcp_connection(
         &ctx.mcp_orchestrator,
         current_request.tools.as_deref(),
-        None,
     )
     .await
     {

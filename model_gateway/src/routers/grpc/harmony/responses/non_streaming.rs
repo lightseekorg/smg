@@ -58,12 +58,8 @@ pub(crate) async fn serve_harmony_responses(
     let current_request = load_previous_messages(ctx, request).await?;
 
     // Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) = ensure_mcp_connection(
-        &ctx.mcp_orchestrator,
-        current_request.tools.as_deref(),
-        None,
-    )
-    .await?;
+    let (has_mcp_tools, server_keys) =
+        ensure_mcp_connection(&ctx.mcp_orchestrator, current_request.tools.as_deref()).await?;
 
     // Set the server keys in the context
     {

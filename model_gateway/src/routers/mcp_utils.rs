@@ -1,11 +1,9 @@
 //! Shared MCP utilities for routers.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
-use axum::http::HeaderMap;
 use tracing::{debug, warn};
 
-use super::header_utils::should_forward_request_header;
 use crate::{
     mcp::{BuiltinToolType, McpOrchestrator, McpServerConfig, McpTransport, ResponseFormat},
     protocols::responses::{ResponseTool, ResponseToolType},
@@ -128,17 +126,15 @@ pub fn collect_builtin_routing(
 /// 2. **Built-in tool routing**: Tools like `web_search_preview` that have a static
 ///    MCP server configured via `builtin_type`. These use pre-connected static servers.
 ///
-/// Forwards filtered HTTP request headers (auth, tracing, correlation IDs) to MCP servers.
+/// Headers for MCP servers come from the tool payload (`tool.headers`), not HTTP request headers.
 ///
 /// Returns `Some((orchestrator, mcp_servers))` if MCP tools or built-in routing is available,
 /// `None` otherwise.
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
-    request_headers: Option<&HeaderMap>,
 ) -> Option<(Arc<McpOrchestrator>, Vec<(String, String)>)> {
     let mut mcp_servers = Vec::new();
-    let forwarded_headers = extract_forwardable_headers(request_headers);
 
     // 1. Process dynamic MCP tools (from request server_url)
     for tool in tools {
@@ -165,7 +161,8 @@ pub async fn ensure_request_mcp_client(
             .clone()
             .unwrap_or_else(|| "mcp".to_string());
         let token = tool.authorization.clone();
-        let headers = forwarded_headers.clone();
+        // Use headers from tool payload instead of HTTP request headers
+        let headers = tool.headers.clone().unwrap_or_default();
         let server_url = server_url.to_string();
 
         let transport = if server_url.contains("/sse") {
@@ -228,30 +225,10 @@ pub async fn ensure_request_mcp_client(
     }
 }
 
-/// Extract headers that should be forwarded to MCP servers.
-fn extract_forwardable_headers(request_headers: Option<&HeaderMap>) -> HashMap<String, String> {
-    let Some(headers) = request_headers else {
-        return HashMap::new();
-    };
-
-    headers
-        .iter()
-        .filter_map(|(name, value)| {
-            let name_str = name.as_str();
-            if should_forward_request_header(name_str) {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|v| (name_str.to_string(), v.to_string()))
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::{
         mcp::{McpConfig, ResponseFormatConfig, ToolConfig},
@@ -521,7 +498,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
         // Should return Some because built-in routing is configured
         assert!(result.is_some());
@@ -546,7 +523,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
         // Should return None because no MCP or built-in routing is available
         assert!(result.is_none());
@@ -562,7 +539,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
         // Should return None - function tools don't need MCP processing
         assert!(result.is_none());
@@ -585,7 +562,7 @@ mod tests {
             },
         ];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools, None).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
         // Should return Some because web_search_preview has built-in routing
         assert!(result.is_some());

@@ -147,6 +147,7 @@ pub(crate) fn convert_mcp_tools_to_response_tools(mcp_tools: &[ToolEntry]) -> Ve
             }),
             server_url: None, // MCP tools from inventory don't have individual server URLs
             authorization: None,
+            headers: None,
             server_label: Some(entry.server_key().to_string()),
             server_description: entry.tool.description.as_ref().map(|d| d.to_string()),
             require_approval: None,
