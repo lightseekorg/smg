@@ -169,10 +169,11 @@ pub async fn get_model_info(url: &str, api_key: Option<&str>) -> Result<ModelInf
         .map_err(|e| format!("Failed to parse response from {}: {}", model_info_url, e))
 }
 
-/// Fetch gRPC metadata (returns labels and detected runtime type).
+/// Fetch gRPC metadata (returns labels and runtime type).
+/// The runtime_type should be pre-detected by the connection detection step.
 async fn fetch_grpc_metadata(
     url: &str,
-    runtime_type: Option<&str>,
+    runtime_type: &str,
 ) -> Result<(HashMap<String, String>, String), String> {
     let grpc_url = if url.starts_with("grpc://") {
         url.to_string()
@@ -180,41 +181,16 @@ async fn fetch_grpc_metadata(
         format!("grpc://{}", strip_protocol(url))
     };
 
-    async fn do_fetch(
-        grpc_url: &str,
-        runtime_type: &str,
-    ) -> Result<HashMap<String, String>, String> {
-        let client = GrpcClient::connect(grpc_url, runtime_type)
-            .await
-            .map_err(|e| format!("Failed to connect to gRPC: {}", e))?;
+    let client = GrpcClient::connect(&grpc_url, runtime_type)
+        .await
+        .map_err(|e| format!("Failed to connect to gRPC: {}", e))?;
 
-        let model_info = client
-            .get_model_info()
-            .await
-            .map_err(|e| format!("Failed to fetch gRPC metadata: {}", e))?;
+    let model_info = client
+        .get_model_info()
+        .await
+        .map_err(|e| format!("Failed to fetch gRPC metadata: {}", e))?;
 
-        Ok(model_info.to_labels())
-    }
-
-    match runtime_type {
-        Some(runtime) => {
-            let labels = do_fetch(&grpc_url, runtime).await?;
-            Ok((labels, runtime.to_string()))
-        }
-        None => {
-            // Try SGLang first, then vLLM, then TensorRT-LLM as fallback
-            if let Ok(labels) = do_fetch(&grpc_url, "sglang").await {
-                return Ok((labels, "sglang".to_string()));
-            }
-            if let Ok(labels) = do_fetch(&grpc_url, "vllm").await {
-                return Ok((labels, "vllm".to_string()));
-            }
-            let labels = do_fetch(&grpc_url, "trtllm")
-                .await
-                .map_err(|e| format!("gRPC metadata failed (tried SGLang, vLLM, and TensorRT-LLM): {}", e))?;
-            Ok((labels, "trtllm".to_string()))
-        }
-    }
+    Ok((model_info.to_labels(), runtime_type.to_string()))
 }
 
 /// Step 2a: Discover metadata from worker.
@@ -284,7 +260,18 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverMetadataStep {
                 Ok((labels, None))
             }
             ConnectionMode::Grpc { .. } => {
-                let runtime_type = config.runtime.as_deref();
+                // Use pre-detected runtime type from connection detection step,
+                // falling back to config.runtime if not available
+                let runtime_type = context
+                    .data
+                    .detected_runtime_type
+                    .as_deref()
+                    .or(config.runtime.as_deref())
+                    .unwrap_or("sglang"); // Fallback to sglang if somehow not detected
+                debug!(
+                    "Using runtime type '{}' for gRPC metadata fetch",
+                    runtime_type
+                );
                 fetch_grpc_metadata(&config.url, runtime_type)
                     .await
                     .map(|(labels, runtime)| (labels, Some(runtime)))
