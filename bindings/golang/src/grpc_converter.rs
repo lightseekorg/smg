@@ -1,24 +1,30 @@
 //! gRPC response converter FFI functions
 
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int};
-use std::ptr;
-use std::sync::Arc;
-use std::collections::HashMap;
-use serde_json::Value;
-use tokio::runtime::Runtime;
+use std::{
+    collections::HashMap,
+    ffi::{CStr, CString},
+    os::raw::{c_char, c_int},
+    ptr,
+    sync::Arc,
+};
+
 use once_cell::sync::Lazy;
+use serde_json::Value;
+use smg::{
+    grpc_client::sglang_proto as proto,
+    protocols::common::{
+        FunctionCallDelta, StringOrArray, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage,
+    },
+    tokenizer::{stop::StopSequenceDecoder, stream::DecodeStream, traits::Tokenizer},
+    tool_parser::ToolParser,
+};
+use tokio::runtime::Runtime;
 
-use smg::tokenizer::traits::Tokenizer;
-use smg::tokenizer::stream::DecodeStream;
-use smg::tool_parser::ToolParser;
-use smg::protocols::common::{Tool, ToolChoice, ToolChoiceValue, ToolCallDelta, FunctionCallDelta, Usage, StringOrArray};
-use smg::tokenizer::stop::StopSequenceDecoder;
-use smg::grpc_client::sglang_proto as proto;
-
-use super::error::{SglErrorCode, set_error_message, clear_error_message};
-use super::tokenizer::TokenizerHandle;
-use super::utils::generate_tool_call_id;
+use super::{
+    error::{clear_error_message, set_error_message, SglErrorCode},
+    tokenizer::TokenizerHandle,
+    utils::generate_tool_call_id,
+};
 
 /// Global parser factory (initialized once)
 // Use the re-exported ParserFactory from tool_parser module
@@ -28,9 +34,8 @@ static PARSER_FACTORY: Lazy<smg::tool_parser::ParserFactory> = Lazy::new(|| {
 });
 
 /// Global tokio runtime for async operations
-static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    Runtime::new().expect("Failed to create tokio runtime for gRPC converter FFI")
-});
+static RUNTIME: Lazy<Runtime> =
+    Lazy::new(|| Runtime::new().expect("Failed to create tokio runtime for gRPC converter FFI"));
 
 /// Handle for gRPC response converter (maintains state for streaming)
 #[repr(C)]
@@ -47,12 +52,12 @@ pub struct GrpcResponseConverterHandle {
     pub(crate) history_tool_calls_count: usize,
     pub(crate) stream_buffers: HashMap<u32, String>, // Per-index text buffers
     pub(crate) decode_streams: HashMap<u32, DecodeStream>, // Per-index incremental decoders
-    pub(crate) has_tool_calls: HashMap<u32, bool>, // Track if tool calls were emitted
-    pub(crate) is_first_chunk: HashMap<u32, bool>, // Track first chunk per index
-    pub(crate) prompt_tokens: HashMap<u32, i32>, // Track prompt tokens per index (from chunks)
+    pub(crate) has_tool_calls: HashMap<u32, bool>,   // Track if tool calls were emitted
+    pub(crate) is_first_chunk: HashMap<u32, bool>,   // Track first chunk per index
+    pub(crate) prompt_tokens: HashMap<u32, i32>,     // Track prompt tokens per index (from chunks)
     pub(crate) completion_tokens: HashMap<u32, i32>, // Track completion tokens per index (cumulative)
     pub(crate) initial_prompt_tokens: Option<i32>, // Initial prompt tokens from request (if available)
-    pub(crate) skip_special_tokens: bool, // Whether to skip special tokens when decoding
+    pub(crate) skip_special_tokens: bool,          // Whether to skip special tokens when decoding
 }
 
 /// Create a gRPC response converter handle
@@ -172,7 +177,9 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_create(
 
     // Create tool parser if tools are provided
     let tool_parser = if tools.is_some() {
-        PARSER_FACTORY.registry().create_for_model(model_str)
+        PARSER_FACTORY
+            .registry()
+            .create_for_model(model_str)
             .map(|p| Arc::new(tokio::sync::Mutex::new(p)))
     } else {
         None
@@ -254,7 +261,8 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_convert_chunk(
 
     // Build proto::GenerateResponse from JSON value
     let mut proto_response = proto::GenerateResponse {
-        request_id: json_value.get("request_id")
+        request_id: json_value
+            .get("request_id")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
@@ -264,19 +272,27 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_convert_chunk(
     // Parse the response oneof field
     if let Some(chunk_json) = json_value.get("chunk") {
         let chunk = proto::GenerateStreamChunk {
-            token_ids: chunk_json.get("token_ids")
+            token_ids: chunk_json
+                .get("token_ids")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_u64().map(|n| n as u32))
+                        .collect()
+                })
                 .unwrap_or_default(),
-            prompt_tokens: chunk_json.get("prompt_tokens")
+            prompt_tokens: chunk_json
+                .get("prompt_tokens")
                 .and_then(|v| v.as_i64())
                 .map(|n| n as i32)
                 .unwrap_or(0),
-            completion_tokens: chunk_json.get("completion_tokens")
+            completion_tokens: chunk_json
+                .get("completion_tokens")
                 .and_then(|v| v.as_i64())
                 .map(|n| n as i32)
                 .unwrap_or(0),
-            cached_tokens: chunk_json.get("cached_tokens")
+            cached_tokens: chunk_json
+                .get("cached_tokens")
                 .and_then(|v| v.as_i64())
                 .map(|n| n as i32)
                 .unwrap_or(0),
@@ -288,23 +304,32 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_convert_chunk(
         proto_response.response = Some(proto::generate_response::Response::Chunk(chunk));
     } else if let Some(complete_json) = json_value.get("complete") {
         let complete = proto::GenerateComplete {
-            output_ids: complete_json.get("output_ids")
+            output_ids: complete_json
+                .get("output_ids")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u32)).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_u64().map(|n| n as u32))
+                        .collect()
+                })
                 .unwrap_or_default(),
-            finish_reason: complete_json.get("finish_reason")
+            finish_reason: complete_json
+                .get("finish_reason")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            prompt_tokens: complete_json.get("prompt_tokens")
+            prompt_tokens: complete_json
+                .get("prompt_tokens")
                 .and_then(|v| v.as_i64())
                 .map(|n| n as i32)
                 .unwrap_or(0),
-            completion_tokens: complete_json.get("completion_tokens")
+            completion_tokens: complete_json
+                .get("completion_tokens")
                 .and_then(|v| v.as_i64())
                 .map(|n| n as i32)
                 .unwrap_or(0),
-            cached_tokens: complete_json.get("cached_tokens")
+            cached_tokens: complete_json
+                .get("cached_tokens")
                 .and_then(|v| v.as_i64())
                 .map(|n| n as i32)
                 .unwrap_or(0),
@@ -317,22 +342,28 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_convert_chunk(
         proto_response.response = Some(proto::generate_response::Response::Complete(complete));
     } else if let Some(error_json) = json_value.get("error") {
         let error = proto::GenerateError {
-            message: error_json.get("message")
+            message: error_json
+                .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            http_status_code: error_json.get("http_status_code")
+            http_status_code: error_json
+                .get("http_status_code")
                 .and_then(|v| v.as_str())
                 .unwrap_or("500")
                 .to_string(),
-            details: error_json.get("details")
+            details: error_json
+                .get("details")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
         };
         proto_response.response = Some(proto::generate_response::Response::Error(error));
     } else {
-        set_error_message(error_out, "Response JSON must contain 'chunk', 'complete', or 'error' field");
+        set_error_message(
+            error_out,
+            "Response JSON must contain 'chunk', 'complete', or 'error' field",
+        );
         return SglErrorCode::ParsingError;
     }
 
@@ -404,8 +435,10 @@ pub(crate) async fn convert_proto_chunk_to_openai(
     created: u64,
     system_fingerprint: Option<&str>,
 ) -> Result<Option<smg::protocols::chat::ChatCompletionStreamResponse>, String> {
-    use smg::grpc_client::sglang_proto::generate_response::Response::*;
-    use smg::protocols::chat::{ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice};
+    use smg::{
+        grpc_client::sglang_proto::generate_response::Response::*,
+        protocols::chat::{ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice},
+    };
 
     match proto_response.response {
         Some(Chunk(chunk)) => {
@@ -433,16 +466,19 @@ pub(crate) async fn convert_proto_chunk_to_openai(
                 // If existing value exists, keep it (don't overwrite with 0)
             }
             // For completion_tokens, always update (even if 0) as it's cumulative
-            handle.completion_tokens.insert(index, chunk.completion_tokens);
+            handle
+                .completion_tokens
+                .insert(index, chunk.completion_tokens);
 
             // Process tokens through stop decoder if available, otherwise use incremental decoder
             let chunk_text = if let Some(ref stop_decoder) = handle.stop_decoder {
                 let mut decoder_guard = stop_decoder.lock().await;
                 let mut text = String::new();
                 for &token_id in &chunk.token_ids {
-                    match decoder_guard.process_token(token_id).unwrap_or(
-                        smg::tokenizer::stop::SequenceDecoderOutput::Held
-                    ) {
+                    match decoder_guard
+                        .process_token(token_id)
+                        .unwrap_or(smg::tokenizer::stop::SequenceDecoderOutput::Held)
+                    {
                         smg::tokenizer::stop::SequenceDecoderOutput::Text(t) => {
                             text.push_str(&t);
                         }
@@ -511,7 +547,9 @@ pub(crate) async fn convert_proto_chunk_to_openai(
             stream_buffer.push_str(&chunk_text);
 
             // Handle tool calls if tools are provided
-            if let (Some(tools), Some(tool_parser)) = (handle.tools.as_ref(), handle.tool_parser.as_ref()) {
+            if let (Some(tools), Some(tool_parser)) =
+                (handle.tools.as_ref(), handle.tool_parser.as_ref())
+            {
                 let tool_choice_enabled = !matches!(
                     handle.tool_choice,
                     Some(ToolChoice::Value(ToolChoiceValue::None))
@@ -633,7 +671,8 @@ pub(crate) async fn convert_proto_chunk_to_openai(
                 && (complete.finish_reason == "stop" || complete.finish_reason.is_empty())
             {
                 "tool_calls".to_string()
-            } else if complete.finish_reason.is_empty() || complete.finish_reason.trim().is_empty() {
+            } else if complete.finish_reason.is_empty() || complete.finish_reason.trim().is_empty()
+            {
                 // If finish_reason is empty, try to infer from completion_tokens or use default
                 if complete.completion_tokens > 0 {
                     // If we have completion tokens, likely stopped normally
@@ -670,11 +709,15 @@ pub(crate) async fn convert_proto_chunk_to_openai(
             // Build usage - prefer values from complete message, but fallback to accumulated values from chunks
             // Complete message should have the final values, but sometimes they might be 0 or missing
             // Always use the latest cumulative value from chunks if available, otherwise use complete message value
-            let mut prompt_tokens = handle.prompt_tokens.get(&index)
+            let mut prompt_tokens = handle
+                .prompt_tokens
+                .get(&index)
                 .copied()
                 .filter(|&v| v > 0)
                 .unwrap_or(complete.prompt_tokens);
-            let mut completion_tokens = handle.completion_tokens.get(&index)
+            let mut completion_tokens = handle
+                .completion_tokens
+                .get(&index)
                 .copied()
                 .filter(|&v| v > 0)
                 .unwrap_or(complete.completion_tokens);
@@ -756,9 +799,10 @@ pub(crate) async fn convert_proto_chunk_to_openai(
 
             Ok(Some(finish_response))
         }
-        Some(Error(error)) => {
-            Err(format!("Server error: {} (status: {})", error.message, error.http_status_code))
-        }
+        Some(Error(error)) => Err(format!(
+            "Server error: {} (status: {})",
+            error.message, error.http_status_code
+        )),
         None => Ok(None),
     }
 }
@@ -770,7 +814,9 @@ pub(crate) async fn convert_proto_chunk_to_openai(
 /// - `handle` must not be used after this call
 /// - This function must not be called more than once for the same handle
 #[no_mangle]
-pub unsafe extern "C" fn sgl_grpc_response_converter_free(handle: *mut GrpcResponseConverterHandle) {
+pub unsafe extern "C" fn sgl_grpc_response_converter_free(
+    handle: *mut GrpcResponseConverterHandle,
+) {
     if !handle.is_null() {
         let _ = Box::from_raw(handle);
     }

@@ -7,18 +7,23 @@
 //!
 //! These functions are designed to be called once per request, reducing FFI overhead.
 
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int};
-use std::ptr;
-use std::os::raw::c_uint;
+use std::{
+    ffi::{CStr, CString},
+    os::raw::{c_char, c_int, c_uint},
+    ptr,
+};
 
-use smg::tokenizer::create_tokenizer_from_file;
-use smg::protocols::chat::ChatCompletionRequest;
-use smg::routers::grpc::utils::{process_chat_messages, generate_tool_constraints};
+use smg::{
+    protocols::chat::ChatCompletionRequest,
+    routers::grpc::utils::{generate_tool_constraints, process_chat_messages},
+    tokenizer::create_tokenizer_from_file,
+};
 
-use super::error::{SglErrorCode, set_error_message};
-use super::memory::{sgl_free_string, sgl_free_token_ids};
-use super::tokenizer::TokenizerHandle;
+use super::{
+    error::{set_error_message, SglErrorCode},
+    memory::{sgl_free_string, sgl_free_token_ids},
+    tokenizer::TokenizerHandle,
+};
 
 /// Handle for preprocessed request
 #[repr(C)]
@@ -117,7 +122,10 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request(
     let processed_messages = match process_chat_messages(&chat_request, tokenizer.as_ref()) {
         Ok(msgs) => msgs,
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to process chat messages: {}", e));
+            set_error_message(
+                error_out,
+                &format!("Failed to process chat messages: {}", e),
+            );
             return SglErrorCode::ParsingError;
         }
     };
@@ -131,29 +139,23 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request(
         }
     };
 
-    let token_ids_vec: Vec<i32> = encoding
-        .token_ids()
-        .iter()
-        .map(|&id| id as i32)
-        .collect();
+    let token_ids_vec: Vec<i32> = encoding.token_ids().iter().map(|&id| id as i32).collect();
 
     let prompt_tokens = token_ids_vec.len() as i32;
 
     // Generate tool constraints if tools are present
     let tool_constraints_json = if let Some(tools) = chat_request.tools.as_ref() {
         match generate_tool_constraints(tools, &chat_request.tool_choice, &chat_request.model) {
-            Ok(Some(constraints)) => {
-                match serde_json::to_string(&constraints) {
-                    Ok(json_str) => Some(CString::new(json_str).unwrap()),
-                    Err(e) => {
-                        set_error_message(
-                            error_out,
-                            &format!("Failed to serialize tool constraints: {}", e),
-                        );
-                        return SglErrorCode::ParsingError;
-                    }
+            Ok(Some(constraints)) => match serde_json::to_string(&constraints) {
+                Ok(json_str) => Some(CString::new(json_str).unwrap()),
+                Err(e) => {
+                    set_error_message(
+                        error_out,
+                        &format!("Failed to serialize tool constraints: {}", e),
+                    );
+                    return SglErrorCode::ParsingError;
                 }
-            }
+            },
             Ok(None) => None,
             Err(e) => {
                 set_error_message(
@@ -277,7 +279,10 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request_with_tokenizer(
     let processed_messages = match process_chat_messages(&chat_request, tokenizer.as_ref()) {
         Ok(msgs) => msgs,
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to process chat messages: {}", e));
+            set_error_message(
+                error_out,
+                &format!("Failed to process chat messages: {}", e),
+            );
             return SglErrorCode::ParsingError;
         }
     };
@@ -291,29 +296,23 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request_with_tokenizer(
         }
     };
 
-    let token_ids_vec: Vec<i32> = encoding
-        .token_ids()
-        .iter()
-        .map(|&id| id as i32)
-        .collect();
+    let token_ids_vec: Vec<i32> = encoding.token_ids().iter().map(|&id| id as i32).collect();
 
     let prompt_tokens = token_ids_vec.len() as i32;
 
     // Generate tool constraints if tools are present
     let tool_constraints_json = if let Some(tools) = chat_request.tools.as_ref() {
         match generate_tool_constraints(tools, &chat_request.tool_choice, &chat_request.model) {
-            Ok(Some(constraints)) => {
-                match serde_json::to_string(&constraints) {
-                    Ok(json_str) => Some(CString::new(json_str).unwrap()),
-                    Err(e) => {
-                        set_error_message(
-                            error_out,
-                            &format!("Failed to serialize tool constraints: {}", e),
-                        );
-                        return SglErrorCode::ParsingError;
-                    }
+            Ok(Some(constraints)) => match serde_json::to_string(&constraints) {
+                Ok(json_str) => Some(CString::new(json_str).unwrap()),
+                Err(e) => {
+                    set_error_message(
+                        error_out,
+                        &format!("Failed to serialize tool constraints: {}", e),
+                    );
+                    return SglErrorCode::ParsingError;
                 }
-            }
+            },
             Ok(None) => None,
             Err(e) => {
                 set_error_message(

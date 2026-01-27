@@ -15,23 +15,29 @@
 //! - Ensure proper pointer lifetime management
 //! - Call corresponding free functions for cleanup
 
-use std::ffi::CString;
-use std::os::raw::{c_char, c_int};
-use std::ptr;
-use std::sync::Arc;
-use tokio::runtime::Runtime;
-use once_cell::sync::Lazy;
+use std::{
+    ffi::CString,
+    os::raw::{c_char, c_int},
+    ptr,
+    sync::Arc,
+};
+
 use futures_util::StreamExt;
+use once_cell::sync::Lazy;
+use smg::grpc_client::{
+    sglang_proto as proto,
+    sglang_scheduler::{AbortOnDropStream, SglangSchedulerClient},
+};
+use tokio::runtime::Runtime;
 
-use smg::grpc_client::{sglang_proto as proto, sglang_scheduler::{SglangSchedulerClient, AbortOnDropStream}};
-
-use super::error::{SglErrorCode, set_error_message};
-use super::grpc_converter::{GrpcResponseConverterHandle, convert_proto_chunk_to_openai};
+use super::{
+    error::{set_error_message, SglErrorCode},
+    grpc_converter::{convert_proto_chunk_to_openai, GrpcResponseConverterHandle},
+};
 
 /// Global tokio runtime for async operations
-static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    Runtime::new().expect("Failed to create tokio runtime for stream FFI")
-});
+static RUNTIME: Lazy<Runtime> =
+    Lazy::new(|| Runtime::new().expect("Failed to create tokio runtime for stream FFI"));
 
 /// Handle for an active streaming request.
 ///
@@ -143,7 +149,10 @@ pub unsafe extern "C" fn sgl_stream_read_next(
                     let result_str = match serde_json::to_string(&openai_response) {
                         Ok(s) => s,
                         Err(e) => {
-                            set_error_message(error_out, &format!("Failed to serialize response: {}", e));
+                            set_error_message(
+                                error_out,
+                                &format!("Failed to serialize response: {}", e),
+                            );
                             return SglErrorCode::ParsingError;
                         }
                     };
@@ -151,13 +160,20 @@ pub unsafe extern "C" fn sgl_stream_read_next(
                     let result_cstr = match CString::new(result_str) {
                         Ok(s) => s,
                         Err(e) => {
-                            set_error_message(error_out, &format!("Failed to create result string: {}", e));
+                            set_error_message(
+                                error_out,
+                                &format!("Failed to create result string: {}", e),
+                            );
                             return SglErrorCode::MemoryError;
                         }
                     };
 
                     // Check if this is a complete response (stream done)
-                    let is_complete = matches!(proto_response.response, Some(proto::generate_response::Response::Complete(_)) | Some(proto::generate_response::Response::Error(_)));
+                    let is_complete = matches!(
+                        proto_response.response,
+                        Some(proto::generate_response::Response::Complete(_))
+                            | Some(proto::generate_response::Response::Error(_))
+                    );
 
                     *response_json_out = result_cstr.into_raw();
                     *is_done_out = if is_complete { 1 } else { 0 };

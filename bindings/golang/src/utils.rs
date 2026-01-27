@@ -11,7 +11,11 @@ pub fn generate_tool_call_id(
 ) -> String {
     if model.to_lowercase().contains("kimi") {
         // KimiK2 format: functions.{name}:{global_index}
-        format!("functions.{}:{}", function_name, history_tool_calls_count + index)
+        format!(
+            "functions.{}:{}",
+            function_name,
+            history_tool_calls_count + index
+        )
     } else {
         // Standard OpenAI format: call_{24-char-uuid}
         format!("call_{}", &Uuid::new_v4().simple().to_string()[..24])
@@ -45,6 +49,9 @@ pub unsafe extern "C" fn sgl_generate_tool_constraints(
 ) -> super::error::SglErrorCode {
     // Implementation would parse JSON and call generate_tool_constraints
     // This is a placeholder
-    super::error::set_error_message(error_out, "Tool constraint generation not yet implemented in FFI");
+    super::error::set_error_message(
+        error_out,
+        "Tool constraint generation not yet implemented in FFI",
+    );
     super::error::SglErrorCode::UnknownError
 }

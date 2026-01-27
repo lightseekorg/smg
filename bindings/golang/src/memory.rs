@@ -1,7 +1,6 @@
 //! Memory management for FFI functions
 
-use std::ffi::CString;
-use std::os::raw::c_char;
+use std::{ffi::CString, os::raw::c_char};
 
 /// Free a C string allocated by Rust
 ///

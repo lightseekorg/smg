@@ -1,35 +1,40 @@
 //! Tool parser FFI functions
 
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char};
-use std::ptr;
-use std::sync::Arc;
-use std::collections::HashMap;
-use serde_json::{json, Value};
-use tokio::runtime::Runtime;
+use std::{
+    collections::HashMap,
+    ffi::{CStr, CString},
+    os::raw::c_char,
+    ptr,
+    sync::Arc,
+};
+
 use once_cell::sync::Lazy;
+use serde_json::{json, Value};
+use smg::{
+    protocols::common::Tool,
+    tool_parser::{ParserFactory, ToolParser},
+};
+use tokio::runtime::Runtime;
 
-use smg::tool_parser::{ParserFactory, ToolParser};
-use smg::protocols::common::Tool;
-
-use super::error::{SglErrorCode, set_error_message, clear_error_message};
-use super::utils::generate_tool_call_id;
+use super::{
+    error::{clear_error_message, set_error_message, SglErrorCode},
+    utils::generate_tool_call_id,
+};
 
 /// Global parser factory (initialized once)
 static PARSER_FACTORY: Lazy<ParserFactory> = Lazy::new(ParserFactory::new);
 
 /// Global tokio runtime for async operations
-static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
-    Runtime::new().expect("Failed to create tokio runtime for tool parser FFI")
-});
+static RUNTIME: Lazy<Runtime> =
+    Lazy::new(|| Runtime::new().expect("Failed to create tokio runtime for tool parser FFI"));
 
 /// Opaque handle for a tool parser instance
 /// Note: For streaming, we need mutable access, so we use Arc<Mutex<>> internally
 /// Note: This is an opaque handle, C code doesn't access fields directly
 pub struct ToolParserHandle {
     parser: Arc<tokio::sync::Mutex<Box<dyn ToolParser>>>,
-    model: String, // Store model name for ID generation
-    history_tool_calls_count: usize, // Track tool call count for ID generation
+    model: String,                            // Store model name for ID generation
+    history_tool_calls_count: usize,          // Track tool call count for ID generation
     tool_index_to_id: HashMap<usize, String>, // Map tool_index to ID for incremental updates
 }
 
@@ -261,12 +266,16 @@ pub unsafe extern "C" fn sgl_tool_parser_parse_incremental(
                     // Generate or reuse ID based on tool_index
                     let id = if let Some(ref name) = item.name {
                         // New tool call with name - generate ID and store it
-                        let id = generate_tool_call_id(&model, name, item.tool_index, history_count);
-                        handle_mut.tool_index_to_id.insert(item.tool_index, id.clone());
+                        let id =
+                            generate_tool_call_id(&model, name, item.tool_index, history_count);
+                        handle_mut
+                            .tool_index_to_id
+                            .insert(item.tool_index, id.clone());
                         id
                     } else {
                         // Parameter update - reuse existing ID for this tool_index
-                        handle_mut.tool_index_to_id
+                        handle_mut
+                            .tool_index_to_id
                             .get(&item.tool_index)
                             .cloned()
                             .unwrap_or_else(|| format!("call_{}", item.tool_index))
