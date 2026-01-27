@@ -71,13 +71,16 @@ async fn try_grpc_health_check(
     match runtime_type {
         Some(runtime) => do_grpc_health_check(&grpc_url, timeout_secs, runtime).await,
         None => {
-            // Try SGLang first, then vLLM as fallback
+            // Try SGLang first, then vLLM, then TensorRT-LLM as fallback
             if let Ok(()) = do_grpc_health_check(&grpc_url, timeout_secs, "sglang").await {
                 return Ok(());
             }
-            do_grpc_health_check(&grpc_url, timeout_secs, "vllm")
+            if let Ok(()) = do_grpc_health_check(&grpc_url, timeout_secs, "vllm").await {
+                return Ok(());
+            }
+            do_grpc_health_check(&grpc_url, timeout_secs, "trtllm")
                 .await
-                .map_err(|e| format!("gRPC failed (tried SGLang and vLLM): {}", e))
+                .map_err(|e| format!("gRPC failed (tried SGLang, vLLM, and TensorRT-LLM): {}", e))
         }
     }
 }

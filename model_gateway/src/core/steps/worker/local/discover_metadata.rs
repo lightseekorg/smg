@@ -202,14 +202,17 @@ async fn fetch_grpc_metadata(
             Ok((labels, runtime.to_string()))
         }
         None => {
-            // Try SGLang first, then vLLM as fallback
+            // Try SGLang first, then vLLM, then TensorRT-LLM as fallback
             if let Ok(labels) = do_fetch(&grpc_url, "sglang").await {
                 return Ok((labels, "sglang".to_string()));
             }
-            let labels = do_fetch(&grpc_url, "vllm")
+            if let Ok(labels) = do_fetch(&grpc_url, "vllm").await {
+                return Ok((labels, "vllm".to_string()));
+            }
+            let labels = do_fetch(&grpc_url, "trtllm")
                 .await
-                .map_err(|e| format!("gRPC metadata failed (tried SGLang and vLLM): {}", e))?;
-            Ok((labels, "vllm".to_string()))
+                .map_err(|e| format!("gRPC metadata failed (tried SGLang, vLLM, and TensorRT-LLM): {}", e))?;
+            Ok((labels, "trtllm".to_string()))
         }
     }
 }
