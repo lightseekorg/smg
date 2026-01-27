@@ -1045,7 +1045,7 @@ impl HarmonyStreamingProcessor {
                             "type": "message",
                             "role": "assistant",
                             "content": [{
-                                "type": "text",
+                                "type": "output_text",
                                 "text": accumulated_final_text.clone()
                             }]
                         });
