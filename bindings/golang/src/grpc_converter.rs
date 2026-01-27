@@ -1,14 +1,12 @@
 //! gRPC response converter FFI functions
 
 use std::{
-    collections::HashMap,
     ffi::{CStr, CString},
     os::raw::{c_char, c_int},
     ptr,
     sync::Arc,
 };
 
-use once_cell::sync::Lazy;
 use serde_json::Value;
 use smg::{
     grpc_client::sglang_proto as proto,
@@ -18,24 +16,15 @@ use smg::{
     tokenizer::{stop::StopSequenceDecoder, stream::DecodeStream, traits::Tokenizer},
     tool_parser::ToolParser,
 };
-use tokio::runtime::Runtime;
 
 use super::{
     error::{clear_error_message, set_error_message, SglErrorCode},
+    proto_parse::parse_proto_response,
+    runtime::{PARSER_FACTORY, RUNTIME},
+    stream_state::StreamStateManager,
     tokenizer::TokenizerHandle,
     utils::generate_tool_call_id,
 };
-
-/// Global parser factory (initialized once)
-// Use the re-exported ParserFactory from tool_parser module
-static PARSER_FACTORY: Lazy<smg::tool_parser::ParserFactory> = Lazy::new(|| {
-    // ParserFactory is re-exported from tool_parser::factory, so we can use it directly
-    smg::tool_parser::ParserFactory::default()
-});
-
-/// Global tokio runtime for async operations
-static RUNTIME: Lazy<Runtime> =
-    Lazy::new(|| Runtime::new().expect("Failed to create tokio runtime for gRPC converter FFI"));
 
 /// Handle for gRPC response converter (maintains state for streaming)
 #[repr(C)]
@@ -50,14 +39,9 @@ pub struct GrpcResponseConverterHandle {
     pub(crate) tools: Option<Vec<Tool>>,
     pub(crate) tool_choice: Option<ToolChoice>,
     pub(crate) history_tool_calls_count: usize,
-    pub(crate) stream_buffers: HashMap<u32, String>, // Per-index text buffers
-    pub(crate) decode_streams: HashMap<u32, DecodeStream>, // Per-index incremental decoders
-    pub(crate) has_tool_calls: HashMap<u32, bool>,   // Track if tool calls were emitted
-    pub(crate) is_first_chunk: HashMap<u32, bool>,   // Track first chunk per index
-    pub(crate) prompt_tokens: HashMap<u32, i32>,     // Track prompt tokens per index (from chunks)
-    pub(crate) completion_tokens: HashMap<u32, i32>, // Track completion tokens per index (cumulative)
-    pub(crate) initial_prompt_tokens: Option<i32>, // Initial prompt tokens from request (if available)
-    pub(crate) skip_special_tokens: bool,          // Whether to skip special tokens when decoding
+    pub(crate) stream_state: StreamStateManager,
+    pub(crate) initial_prompt_tokens: Option<i32>,
+    pub(crate) skip_special_tokens: bool,
 }
 
 /// Create a gRPC response converter handle
@@ -202,13 +186,8 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_create(
         tools,
         tool_choice,
         history_tool_calls_count: 0,
-        stream_buffers: HashMap::new(),
-        decode_streams: HashMap::new(),
-        has_tool_calls: HashMap::new(),
-        is_first_chunk: HashMap::new(),
-        prompt_tokens: HashMap::new(),
-        completion_tokens: HashMap::new(),
-        initial_prompt_tokens: None, // Will be set from stream handle
+        stream_state: StreamStateManager::new(),
+        initial_prompt_tokens: None,
         skip_special_tokens: skip_special_tokens != 0,
     }))
 }
@@ -250,7 +229,7 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_convert_chunk(
         }
     };
 
-    // Parse proto.GenerateResponse from JSON
+    // Parse proto.GenerateResponse from JSON using shared module
     let json_value: Value = match serde_json::from_str(response_str) {
         Ok(v) => v,
         Err(e) => {
@@ -259,133 +238,20 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_convert_chunk(
         }
     };
 
-    // Build proto::GenerateResponse from JSON value
-    let mut proto_response = proto::GenerateResponse {
-        request_id: json_value
-            .get("request_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        response: None,
+    let proto_response = match parse_proto_response(&json_value) {
+        Ok(r) => r,
+        Err(e) => {
+            set_error_message(error_out, e);
+            return SglErrorCode::ParsingError;
+        }
     };
-
-    // Parse the response oneof field
-    if let Some(chunk_json) = json_value.get("chunk") {
-        let chunk = proto::GenerateStreamChunk {
-            token_ids: chunk_json
-                .get("token_ids")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_u64().map(|n| n as u32))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            prompt_tokens: chunk_json
-                .get("prompt_tokens")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32)
-                .unwrap_or(0),
-            completion_tokens: chunk_json
-                .get("completion_tokens")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32)
-                .unwrap_or(0),
-            cached_tokens: chunk_json
-                .get("cached_tokens")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32)
-                .unwrap_or(0),
-            output_logprobs: None,
-            hidden_states: vec![],
-            input_logprobs: None,
-            index: 0,
-        };
-        proto_response.response = Some(proto::generate_response::Response::Chunk(chunk));
-    } else if let Some(complete_json) = json_value.get("complete") {
-        let complete = proto::GenerateComplete {
-            output_ids: complete_json
-                .get("output_ids")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_u64().map(|n| n as u32))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            finish_reason: complete_json
-                .get("finish_reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            prompt_tokens: complete_json
-                .get("prompt_tokens")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32)
-                .unwrap_or(0),
-            completion_tokens: complete_json
-                .get("completion_tokens")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32)
-                .unwrap_or(0),
-            cached_tokens: complete_json
-                .get("cached_tokens")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32)
-                .unwrap_or(0),
-            output_logprobs: None,
-            all_hidden_states: vec![],
-            input_logprobs: None,
-            matched_stop: None,
-            index: 0,
-        };
-        proto_response.response = Some(proto::generate_response::Response::Complete(complete));
-    } else if let Some(error_json) = json_value.get("error") {
-        let error = proto::GenerateError {
-            message: error_json
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            http_status_code: error_json
-                .get("http_status_code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("500")
-                .to_string(),
-            details: error_json
-                .get("details")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        };
-        proto_response.response = Some(proto::generate_response::Response::Error(error));
-    } else {
-        set_error_message(
-            error_out,
-            "Response JSON must contain 'chunk', 'complete', or 'error' field",
-        );
-        return SglErrorCode::ParsingError;
-    }
 
     let handle_ref = &mut *handle;
     let tokenizer = Arc::clone(&handle_ref.tokenizer);
-    let model = handle_ref.model.clone();
-    let request_id = handle_ref.request_id.clone();
-    let created = handle_ref.created;
-    let system_fingerprint = handle_ref.system_fingerprint.clone();
 
     // Use tokio runtime to run async code
     let result = RUNTIME.block_on(async {
-        convert_proto_chunk_to_openai(
-            proto_response,
-            handle_ref,
-            &tokenizer,
-            &model,
-            &request_id,
-            created,
-            system_fingerprint.as_deref(),
-        )
-        .await
+        convert_proto_chunk_to_openai(proto_response, handle_ref, &tokenizer).await
     });
 
     match result {
@@ -430,10 +296,6 @@ pub(crate) async fn convert_proto_chunk_to_openai(
     proto_response: proto::GenerateResponse,
     handle: &mut GrpcResponseConverterHandle,
     tokenizer: &Arc<dyn Tokenizer>,
-    model: &str,
-    request_id: &str,
-    created: u64,
-    system_fingerprint: Option<&str>,
 ) -> Result<Option<smg::protocols::chat::ChatCompletionStreamResponse>, String> {
     use smg::{
         grpc_client::sglang_proto::generate_response::Response::*,
@@ -443,32 +305,21 @@ pub(crate) async fn convert_proto_chunk_to_openai(
     match proto_response.response {
         Some(Chunk(chunk)) => {
             let index = chunk.index;
+            let state = handle.stream_state.get_or_create(index);
 
             // Mark as not first chunk if we've seen this index before
-            let is_first = handle.is_first_chunk.entry(index).or_insert(true);
-            let first_chunk = *is_first;
-            *is_first = false;
+            let first_chunk = state.is_first_chunk;
+            state.is_first_chunk = false;
 
-            // Track token counts from chunks (cumulative values from proto)
-            // These are cumulative values, so we always use the latest value
-            // For prompt_tokens, if chunk value is 0, preserve existing value or use initial_prompt_tokens
-            // This prevents overwriting valid prompt_tokens with 0
+            // Track token counts (cumulative values from proto)
             if chunk.prompt_tokens > 0 {
-                handle.prompt_tokens.insert(index, chunk.prompt_tokens);
-            } else {
-                // If chunk.prompt_tokens is 0, try to preserve existing value or use initial_prompt_tokens
-                if !handle.prompt_tokens.contains_key(&index) {
-                    // No existing value, try to use initial_prompt_tokens
-                    if let Some(initial_prompt) = handle.initial_prompt_tokens {
-                        handle.prompt_tokens.insert(index, initial_prompt);
-                    }
+                state.prompt_tokens = chunk.prompt_tokens;
+            } else if state.prompt_tokens == 0 {
+                if let Some(initial_prompt) = handle.initial_prompt_tokens {
+                    state.prompt_tokens = initial_prompt;
                 }
-                // If existing value exists, keep it (don't overwrite with 0)
             }
-            // For completion_tokens, always update (even if 0) as it's cumulative
-            handle
-                .completion_tokens
-                .insert(index, chunk.completion_tokens);
+            state.completion_tokens = chunk.completion_tokens;
 
             // Process tokens through stop decoder if available, otherwise use incremental decoder
             let chunk_text = if let Some(ref stop_decoder) = handle.stop_decoder {
@@ -495,19 +346,20 @@ pub(crate) async fn convert_proto_chunk_to_openai(
                 text
             } else {
                 // Use incremental decoder to handle multi-byte character boundaries
-                let decode_stream = handle.decode_streams.entry(index).or_insert_with(|| {
-                    DecodeStream::new(
-                        tokenizer.clone(),
-                        &[], // No prompt tokens for completion
-                        handle.skip_special_tokens,
-                    )
-                });
+                let skip_special = handle.skip_special_tokens;
+                let state = handle.stream_state.get_or_create(index);
+                if state.decode_stream.is_none() {
+                    state.decode_stream =
+                        Some(DecodeStream::new(tokenizer.clone(), &[], skip_special));
+                }
 
                 // Process tokens incrementally
                 let mut text_parts = Vec::new();
-                for &token_id in &chunk.token_ids {
-                    if let Ok(Some(text)) = decode_stream.step(token_id) {
-                        text_parts.push(text);
+                if let Some(ref mut decode_stream) = state.decode_stream {
+                    for &token_id in &chunk.token_ids {
+                        if let Ok(Some(text)) = decode_stream.step(token_id) {
+                            text_parts.push(text);
+                        }
                     }
                 }
                 text_parts.join("")
@@ -520,11 +372,11 @@ pub(crate) async fn convert_proto_chunk_to_openai(
             // Send first chunk with role
             if first_chunk {
                 let first_response = ChatCompletionStreamResponse {
-                    id: request_id.to_string(),
+                    id: handle.request_id.clone(),
                     object: "chat.completion.chunk".to_string(),
-                    created,
-                    model: model.to_string(),
-                    system_fingerprint: system_fingerprint.map(|s| s.to_string()),
+                    created: handle.created,
+                    model: handle.model.clone(),
+                    system_fingerprint: handle.system_fingerprint.clone(),
                     choices: vec![ChatStreamChoice {
                         index,
                         delta: ChatMessageDelta {
@@ -543,8 +395,11 @@ pub(crate) async fn convert_proto_chunk_to_openai(
             }
 
             // Update stream buffer
-            let stream_buffer = handle.stream_buffers.entry(index).or_default();
-            stream_buffer.push_str(&chunk_text);
+            handle
+                .stream_state
+                .get_or_create(index)
+                .text_buffer
+                .push_str(&chunk_text);
 
             // Handle tool calls if tools are provided
             if let (Some(tools), Some(tool_parser)) =
@@ -560,7 +415,7 @@ pub(crate) async fn convert_proto_chunk_to_openai(
                     match parser_guard.parse_incremental(&chunk_text, tools).await {
                         Ok(streaming_result) => {
                             if !streaming_result.calls.is_empty() {
-                                handle.has_tool_calls.insert(index, true);
+                                handle.stream_state.get_or_create(index).has_tool_calls = true;
                                 // Convert tool call items to OpenAI format
                                 let tool_call_deltas: Vec<_> = streaming_result
                                     .calls
@@ -568,7 +423,7 @@ pub(crate) async fn convert_proto_chunk_to_openai(
                                     .map(|item| {
                                         let id = if let Some(ref name) = item.name {
                                             generate_tool_call_id(
-                                                model,
+                                                &handle.model,
                                                 name,
                                                 item.tool_index,
                                                 handle.history_tool_calls_count,
@@ -598,11 +453,11 @@ pub(crate) async fn convert_proto_chunk_to_openai(
                                     .collect();
 
                                 let tool_response = ChatCompletionStreamResponse {
-                                    id: request_id.to_string(),
+                                    id: handle.request_id.clone(),
                                     object: "chat.completion.chunk".to_string(),
-                                    created,
-                                    model: model.to_string(),
-                                    system_fingerprint: system_fingerprint.map(|s| s.to_string()),
+                                    created: handle.created,
+                                    model: handle.model.clone(),
+                                    system_fingerprint: handle.system_fingerprint.clone(),
                                     choices: vec![ChatStreamChoice {
                                         index,
                                         delta: ChatMessageDelta {
@@ -630,11 +485,11 @@ pub(crate) async fn convert_proto_chunk_to_openai(
 
             // Regular content emission
             let content_response = ChatCompletionStreamResponse {
-                id: request_id.to_string(),
+                id: handle.request_id.clone(),
                 object: "chat.completion.chunk".to_string(),
-                created,
-                model: model.to_string(),
-                system_fingerprint: system_fingerprint.map(|s| s.to_string()),
+                created: handle.created,
+                model: handle.model.clone(),
+                system_fingerprint: handle.system_fingerprint.clone(),
                 choices: vec![ChatStreamChoice {
                     index,
                     delta: ChatMessageDelta {
@@ -655,44 +510,37 @@ pub(crate) async fn convert_proto_chunk_to_openai(
         Some(Complete(complete)) => {
             let index = complete.index;
 
-            // Flush any remaining text
-            // Flush any remaining text from decode stream
-            let mut final_text = handle.stream_buffers.remove(&index).unwrap_or_default();
-            if let Some(ref mut decode_stream) = handle.decode_streams.get_mut(&index) {
-                if let Ok(Some(remaining)) = decode_stream.flush() {
-                    final_text.push_str(&remaining);
-                }
-            }
-            handle.decode_streams.remove(&index);
+            // Get and remove state for this index
+            let removed_state = handle.stream_state.remove(index);
+            let (final_text, has_tool_calls, state_prompt_tokens, state_completion_tokens) =
+                if let Some(mut state) = removed_state {
+                    // Flush decode stream
+                    let mut text = std::mem::take(&mut state.text_buffer);
+                    if let Some(ref mut decode_stream) = state.decode_stream {
+                        if let Ok(Some(remaining)) = decode_stream.flush() {
+                            text.push_str(&remaining);
+                        }
+                    }
+                    (
+                        text,
+                        state.has_tool_calls,
+                        state.prompt_tokens,
+                        state.completion_tokens,
+                    )
+                } else {
+                    (String::new(), false, 0, 0)
+                };
 
-            // Determine finish reason - ensure it's never empty
-            // If finish_reason is empty, try to infer from other fields or use default
-            let finish_reason = if handle.has_tool_calls.get(&index).copied().unwrap_or(false)
+            // Determine finish reason
+            let finish_reason = if has_tool_calls
                 && (complete.finish_reason == "stop" || complete.finish_reason.is_empty())
             {
                 "tool_calls".to_string()
             } else if complete.finish_reason.is_empty() || complete.finish_reason.trim().is_empty()
             {
-                // If finish_reason is empty, try to infer from completion_tokens or use default
-                if complete.completion_tokens > 0 {
-                    // If we have completion tokens, likely stopped normally
-                    "stop".to_string()
-                } else if !complete.output_ids.is_empty() {
-                    // If we have output_ids, likely stopped normally
-                    "stop".to_string()
-                } else {
-                    // Default fallback - always ensure we have a value
-                    "stop".to_string()
-                }
-            } else {
-                complete.finish_reason.clone()
-            };
-
-            // Ensure finish_reason is never empty (defensive check)
-            let finish_reason = if finish_reason.is_empty() || finish_reason.trim().is_empty() {
                 "stop".to_string()
             } else {
-                finish_reason
+                complete.finish_reason.clone()
             };
 
             // Extract matched_stop
@@ -706,58 +554,26 @@ pub(crate) async fn convert_proto_chunk_to_openai(
                 None => None,
             };
 
-            // Build usage - prefer values from complete message, but fallback to accumulated values from chunks
-            // Complete message should have the final values, but sometimes they might be 0 or missing
-            // Always use the latest cumulative value from chunks if available, otherwise use complete message value
-            let mut prompt_tokens = handle
-                .prompt_tokens
-                .get(&index)
-                .copied()
-                .filter(|&v| v > 0)
-                .unwrap_or(complete.prompt_tokens);
-            let mut completion_tokens = handle
-                .completion_tokens
-                .get(&index)
-                .copied()
-                .filter(|&v| v > 0)
-                .unwrap_or(complete.completion_tokens);
+            // Build usage from state or complete message
+            let mut prompt_tokens = if state_prompt_tokens > 0 {
+                state_prompt_tokens
+            } else if complete.prompt_tokens > 0 {
+                complete.prompt_tokens
+            } else {
+                handle.initial_prompt_tokens.unwrap_or(0)
+            };
 
-            // Always try to use initial_prompt_tokens if prompt_tokens is 0 or missing
-            // This is the most reliable source for prompt tokens since we calculate it from the request
-            if prompt_tokens == 0 {
-                if let Some(initial_prompt) = handle.initial_prompt_tokens {
-                    prompt_tokens = initial_prompt;
-                }
-            }
+            let completion_tokens = if state_completion_tokens > 0 {
+                state_completion_tokens
+            } else if complete.completion_tokens > 0 {
+                complete.completion_tokens
+            } else if !complete.output_ids.is_empty() {
+                complete.output_ids.len() as i32
+            } else {
+                0
+            };
 
-            // If completion_tokens is 0, try to infer from output_ids or accumulated chunks
-            if completion_tokens == 0 {
-                // Try to use completion_tokens from complete message even if 0
-                // Or calculate from output_ids
-                if complete.completion_tokens > 0 {
-                    completion_tokens = complete.completion_tokens;
-                } else if !complete.output_ids.is_empty() {
-                    completion_tokens = complete.output_ids.len() as i32;
-                } else if let Some(&last_completion) = handle.completion_tokens.get(&index) {
-                    completion_tokens = last_completion;
-                }
-            }
-
-            // Final fallback: if both are still 0, try to use initial_prompt_tokens for prompt
-            // and calculate completion from output_ids
-            if prompt_tokens == 0 && completion_tokens == 0 {
-                // Try to infer from output_ids if available
-                let output_ids_len = complete.output_ids.len() as i32;
-                if output_ids_len > 0 {
-                    completion_tokens = output_ids_len;
-                    // Always try to use initial_prompt_tokens for prompt
-                    if let Some(initial_prompt) = handle.initial_prompt_tokens {
-                        prompt_tokens = initial_prompt;
-                    }
-                }
-            }
-
-            // Final defensive check: ensure prompt_tokens is set if we have initial_prompt_tokens
+            // Final fallback for prompt_tokens
             if prompt_tokens == 0 {
                 if let Some(initial_prompt) = handle.initial_prompt_tokens {
                     prompt_tokens = initial_prompt;
@@ -773,11 +589,11 @@ pub(crate) async fn convert_proto_chunk_to_openai(
             });
 
             let finish_response = ChatCompletionStreamResponse {
-                id: request_id.to_string(),
+                id: handle.request_id.clone(),
                 object: "chat.completion.chunk".to_string(),
-                created,
-                model: model.to_string(),
-                system_fingerprint: system_fingerprint.map(|s| s.to_string()),
+                created: handle.created,
+                model: handle.model.clone(),
+                system_fingerprint: handle.system_fingerprint.clone(),
                 choices: vec![ChatStreamChoice {
                     index,
                     delta: ChatMessageDelta {

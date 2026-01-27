@@ -1,19 +1,4 @@
 //! Stream handling FFI functions
-//!
-//! This module provides FFI (Foreign Function Interface) functions for managing
-//! streaming responses from the SGLang gRPC API. It handles:
-//!
-//! - Creating and managing stream handles
-//! - Reading chunks from streams and converting them to OpenAI format
-//! - Managing automatic abort on stream drop (via AbortOnDropStream)
-//! - Thread-safe access to streams and response converters
-//!
-//! # Safety
-//!
-//! All FFI functions are marked `unsafe` as per Rust FFI conventions. Callers must:
-//! - Pass valid pointers
-//! - Ensure proper pointer lifetime management
-//! - Call corresponding free functions for cleanup
 
 use std::{
     ffi::CString,
@@ -23,21 +8,16 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use once_cell::sync::Lazy;
 use smg::grpc_client::{
     sglang_proto as proto,
     sglang_scheduler::{AbortOnDropStream, SglangSchedulerClient},
 };
-use tokio::runtime::Runtime;
 
 use super::{
     error::{set_error_message, SglErrorCode},
     grpc_converter::{convert_proto_chunk_to_openai, GrpcResponseConverterHandle},
+    runtime::RUNTIME,
 };
-
-/// Global tokio runtime for async operations
-static RUNTIME: Lazy<Runtime> =
-    Lazy::new(|| Runtime::new().expect("Failed to create tokio runtime for stream FFI"));
 
 /// Handle for an active streaming request.
 ///
@@ -123,22 +103,11 @@ pub unsafe extern "C" fn sgl_stream_read_next(
             let conversion_result = RUNTIME.block_on(async {
                 let mut converter_guard = converter.lock().await;
 
-                // Clone necessary fields for conversion
                 let tokenizer = Arc::clone(&converter_guard.tokenizer);
-                let model = converter_guard.model.clone();
-                let request_id = converter_guard.request_id.clone();
-                let created = converter_guard.created;
-                let system_fingerprint = converter_guard.system_fingerprint.clone();
-
-                // Call the conversion function
                 convert_proto_chunk_to_openai(
                     proto_response.clone(),
                     &mut converter_guard,
                     &tokenizer,
-                    &model,
-                    &request_id,
-                    created,
-                    system_fingerprint.as_deref(),
                 )
                 .await
             });
@@ -179,18 +148,9 @@ pub unsafe extern "C" fn sgl_stream_read_next(
                     *is_done_out = if is_complete { 1 } else { 0 };
 
                     if is_complete {
-                        // Mark stream as completed
-                        // Ensure mark_completed() completes and is visible before returning
-                        // Use yield_now to ensure Release ordering is fully propagated
+                        // Mark stream as completed to prevent abort on drop
                         RUNTIME.block_on(async {
-                            let stream_guard = stream.lock().await;
-                            stream_guard.mark_completed();
-                            // Keep the guard until mark_completed() is fully executed
-                            drop(stream_guard);
-                            // Yield to ensure Release ordering is propagated before returning
-                            // This prevents race condition where Free() is called immediately
-                            // and Drop might not see the mark_completed() write
-                            tokio::task::yield_now().await;
+                            stream.lock().await.mark_completed();
                         });
                     }
 
@@ -217,11 +177,7 @@ pub unsafe extern "C" fn sgl_stream_read_next(
         Some(Err(e)) => {
             // Stream error - mark as completed to prevent abort
             RUNTIME.block_on(async {
-                let stream_guard = stream.lock().await;
-                stream_guard.mark_completed();
-                drop(stream_guard);
-                // Yield to ensure Release ordering is propagated
-                tokio::task::yield_now().await;
+                stream.lock().await.mark_completed();
             });
 
             set_error_message(error_out, &format!("Stream error: {}", e));
@@ -229,14 +185,9 @@ pub unsafe extern "C" fn sgl_stream_read_next(
             SglErrorCode::UnknownError
         }
         None => {
-            // Stream ended naturally (no more chunks)
-            // Mark stream as completed before returning to prevent abort
+            // Stream ended naturally - mark as completed to prevent abort
             RUNTIME.block_on(async {
-                let stream_guard = stream.lock().await;
-                stream_guard.mark_completed();
-                drop(stream_guard);
-                // Yield to ensure Release ordering is propagated
-                tokio::task::yield_now().await;
+                stream.lock().await.mark_completed();
             });
 
             *response_json_out = ptr::null_mut();
@@ -265,40 +216,20 @@ pub unsafe extern "C" fn sgl_stream_read_next(
 ///
 /// # Notes
 ///
-/// - This function internally calls `mark_completed()` before freeing to ensure
+/// - This function calls `mark_completed()` before freeing to ensure
 ///   the stream cleanup doesn't trigger an abort RPC to the server
-/// - Memory fences are used to ensure visibility across threads
 #[no_mangle]
 pub unsafe extern "C" fn sgl_stream_free(handle: *mut SglangStreamHandle) {
     if !handle.is_null() {
         let handle_ref = Box::from_raw(handle);
 
         // Mark stream as completed to prevent abort on drop
-        // By this point, the stream should already be completed by ReadNext()
-        // but we call it again to be safe
+        // (should already be marked by ReadNext, but ensure it for safety)
         RUNTIME.block_on(async {
-            let stream_guard = handle_ref.stream.lock().await;
-            stream_guard.mark_completed();
-            // Keep guard alive to ensure mark_completed() write completes
-            drop(stream_guard);
-            // Yield to ensure the atomic write is visible
-            tokio::task::yield_now().await;
+            handle_ref.stream.lock().await.mark_completed();
         });
 
-        // Use a strong memory fence to ensure mark_completed()'s Release write
-        // is visible before we drop the last Arc reference
-        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-
-        // Now drop all references - if mark_completed() was called successfully,
-        // the drop won't send an abort
-        drop(handle_ref.stream);
-
-        // Free converter
-        let converter = Arc::try_unwrap(handle_ref.converter)
-            .ok()
-            .map(|m| m.into_inner());
-        if let Some(conv) = converter {
-            super::grpc_converter::sgl_grpc_response_converter_free(Box::into_raw(Box::new(conv)));
-        }
+        // Drop handle - mark_completed() ensures no abort signal is sent
+        drop(handle_ref);
     }
 }

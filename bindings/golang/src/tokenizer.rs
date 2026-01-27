@@ -26,6 +26,42 @@ pub struct TokenizerHandle {
     pub(crate) tokenizer: Arc<dyn TokenizerTrait>,
 }
 
+/// Internal helper to apply chat template with optional tools
+fn apply_chat_template_impl(
+    tokenizer: &dyn TokenizerTrait,
+    messages: Vec<Value>,
+    tools: Option<&[Value]>,
+) -> Result<String, (SglErrorCode, &'static str)> {
+    // Try to downcast to HuggingFaceTokenizer
+    let hf_tokenizer = tokenizer
+        .as_any()
+        .downcast_ref::<HuggingFaceTokenizer>()
+        .ok_or((
+            SglErrorCode::TokenizationError,
+            "Chat template is only supported for HuggingFace tokenizers",
+        ))?;
+
+    // Use empty arrays for missing optional fields
+    let empty_tools: [Value; 0] = [];
+    let empty_docs: [Value; 0] = [];
+
+    let params = ChatTemplateParams {
+        add_generation_prompt: true,
+        tools: Some(tools.unwrap_or(&empty_tools)),
+        documents: Some(&empty_docs),
+        template_kwargs: None,
+    };
+
+    hf_tokenizer
+        .apply_chat_template(&messages, params)
+        .map_err(|_| {
+            (
+                SglErrorCode::TokenizationError,
+                "Failed to apply chat template",
+            )
+        })
+}
+
 /// Create a tokenizer from a file path
 ///
 /// # Arguments
@@ -112,10 +148,9 @@ pub unsafe extern "C" fn sgl_tokenizer_encode(
             let token_ids = encoding.token_ids();
             let count = token_ids.len();
 
-            // Allocate memory for token IDs using Vec, then leak to give ownership to C
-            let vec = token_ids.to_vec();
-            let ptr = vec.as_ptr() as *mut u32;
-            let _ = std::mem::ManuallyDrop::new(vec);
+            // Allocate memory for token IDs, transfer ownership to C
+            let boxed = token_ids.to_vec().into_boxed_slice();
+            let ptr = Box::into_raw(boxed) as *mut u32;
 
             *token_ids_out = ptr;
             *token_count_out = count;
@@ -169,7 +204,6 @@ pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template_with_tools(
         }
     };
 
-    // Parse JSON messages
     let messages: Vec<Value> = match serde_json::from_str(messages_str) {
         Ok(msgs) => msgs,
         Err(e) => {
@@ -182,74 +216,40 @@ pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template_with_tools(
     let tools: Option<Vec<Value>> = if tools_json.is_null() {
         None
     } else {
-        let tools_str = match CStr::from_ptr(tools_json).to_str() {
-            Ok(s) => {
-                if s.is_empty() {
-                    None
-                } else {
-                    match serde_json::from_str::<Vec<Value>>(s) {
-                        Ok(t) => Some(t),
-                        Err(e) => {
-                            set_error_message(
-                                error_out,
-                                &format!("Failed to parse tools JSON: {}", e),
-                            );
-                            return SglErrorCode::InvalidArgument;
-                        }
-                    }
+        match CStr::from_ptr(tools_json).to_str() {
+            Ok("") => None,
+            Ok(s) => match serde_json::from_str::<Vec<Value>>(s) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    set_error_message(error_out, &format!("Failed to parse tools JSON: {}", e));
+                    return SglErrorCode::InvalidArgument;
                 }
-            }
+            },
             Err(_) => {
                 set_error_message(error_out, "Invalid UTF-8 in tools_json");
                 return SglErrorCode::InvalidArgument;
             }
-        };
-        tools_str
+        }
     };
 
-    // Get the tokenizer from handle
     let handle_ref = &*handle;
-    let tokenizer = &handle_ref.tokenizer;
-
-    // Try to downcast to HuggingFaceTokenizer
-    if let Some(hf_tokenizer) = tokenizer.as_any().downcast_ref::<HuggingFaceTokenizer>() {
-        // Apply chat template with tools
-        let empty_docs: [Value; 0] = [];
-        let tools_slice = tools.as_deref();
-        let params = ChatTemplateParams {
-            add_generation_prompt: true,
-            tools: tools_slice,
-            documents: Some(&empty_docs),
-            template_kwargs: None,
-        };
-
-        match hf_tokenizer.apply_chat_template(&messages, params) {
-            Ok(result) => {
-                let result_cstr = match CString::new(result) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        set_error_message(
-                            error_out,
-                            &format!("Failed to create result string: {}", e),
-                        );
-                        return SglErrorCode::MemoryError;
-                    }
-                };
-                *result_out = result_cstr.into_raw();
-                clear_error_message(error_out);
-                SglErrorCode::Success
-            }
-            Err(e) => {
-                set_error_message(error_out, &format!("Failed to apply chat template: {}", e));
-                SglErrorCode::TokenizationError
-            }
+    match apply_chat_template_impl(handle_ref.tokenizer.as_ref(), messages, tools.as_deref()) {
+        Ok(result) => {
+            let result_cstr = match CString::new(result) {
+                Ok(s) => s,
+                Err(e) => {
+                    set_error_message(error_out, &format!("Failed to create result string: {}", e));
+                    return SglErrorCode::MemoryError;
+                }
+            };
+            *result_out = result_cstr.into_raw();
+            clear_error_message(error_out);
+            SglErrorCode::Success
         }
-    } else {
-        set_error_message(
-            error_out,
-            "Chat template is only supported for HuggingFace tokenizers",
-        );
-        SglErrorCode::TokenizationError
+        Err((code, msg)) => {
+            set_error_message(error_out, msg);
+            code
+        }
     }
 }
 
@@ -290,7 +290,6 @@ pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template(
         }
     };
 
-    // Parse JSON messages
     let messages: Vec<Value> = match serde_json::from_str(messages_str) {
         Ok(msgs) => msgs,
         Err(e) => {
@@ -299,51 +298,24 @@ pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template(
         }
     };
 
-    // Get the tokenizer from handle
     let handle_ref = &*handle;
-    let tokenizer = &handle_ref.tokenizer;
-
-    // Try to downcast to HuggingFaceTokenizer
-    if let Some(hf_tokenizer) = tokenizer.as_any().downcast_ref::<HuggingFaceTokenizer>() {
-        // Apply chat template with default parameters
-        // Use empty arrays instead of None to avoid template errors
-        // Set add_generation_prompt to true so the model knows to start generating
-        let empty_tools: [Value; 0] = [];
-        let empty_docs: [Value; 0] = [];
-        let params = ChatTemplateParams {
-            add_generation_prompt: true, // Important: tells the model to start generating
-            tools: Some(&empty_tools),
-            documents: Some(&empty_docs),
-            template_kwargs: None,
-        };
-
-        match hf_tokenizer.apply_chat_template(&messages, params) {
-            Ok(result) => {
-                let result_cstr = match CString::new(result) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        set_error_message(
-                            error_out,
-                            &format!("Failed to create result string: {}", e),
-                        );
-                        return SglErrorCode::MemoryError;
-                    }
-                };
-                *result_out = result_cstr.into_raw();
-                clear_error_message(error_out);
-                SglErrorCode::Success
-            }
-            Err(e) => {
-                set_error_message(error_out, &format!("Failed to apply chat template: {}", e));
-                SglErrorCode::TokenizationError
-            }
+    match apply_chat_template_impl(handle_ref.tokenizer.as_ref(), messages, None) {
+        Ok(result) => {
+            let result_cstr = match CString::new(result) {
+                Ok(s) => s,
+                Err(e) => {
+                    set_error_message(error_out, &format!("Failed to create result string: {}", e));
+                    return SglErrorCode::MemoryError;
+                }
+            };
+            *result_out = result_cstr.into_raw();
+            clear_error_message(error_out);
+            SglErrorCode::Success
         }
-    } else {
-        set_error_message(
-            error_out,
-            "Chat template is only supported for HuggingFace tokenizers",
-        );
-        SglErrorCode::TokenizationError
+        Err((code, msg)) => {
+            set_error_message(error_out, msg);
+            code
+        }
     }
 }
 

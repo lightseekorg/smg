@@ -16,7 +16,7 @@ use std::{
 use smg::{
     protocols::chat::ChatCompletionRequest,
     routers::grpc::utils::{generate_tool_constraints, process_chat_messages},
-    tokenizer::create_tokenizer_from_file,
+    tokenizer::{create_tokenizer_from_file, traits::Tokenizer},
 };
 
 use super::{
@@ -25,14 +25,114 @@ use super::{
     tokenizer::TokenizerHandle,
 };
 
-/// Handle for preprocessed request
-#[repr(C)]
-#[allow(dead_code)]
-pub struct PreprocessedRequestHandle {
-    pub(crate) prompt_text: CString,
-    pub(crate) token_ids: Vec<i32>,
-    pub(crate) tool_constraints_json: Option<CString>,
-    pub(crate) prompt_tokens: i32,
+/// Result of preprocessing a chat request
+struct PreprocessResult {
+    prompt_text: CString,
+    token_ids: Vec<u32>,
+    tool_constraints: Option<CString>,
+    prompt_tokens: i32,
+}
+
+/// Internal helper to preprocess a chat request with a given tokenizer
+fn preprocess_impl(
+    chat_request: &ChatCompletionRequest,
+    tokenizer: &dyn Tokenizer,
+) -> Result<PreprocessResult, (SglErrorCode, String)> {
+    // Process chat messages (apply chat_template)
+    let processed_messages = process_chat_messages(chat_request, tokenizer).map_err(|e| {
+        (
+            SglErrorCode::ParsingError,
+            format!("Failed to process chat messages: {}", e),
+        )
+    })?;
+
+    // Tokenize the processed text
+    let encoding = tokenizer
+        .encode(&processed_messages.text, false)
+        .map_err(|e| {
+            (
+                SglErrorCode::TokenizationError,
+                format!("Tokenization failed: {}", e),
+            )
+        })?;
+
+    let token_ids: Vec<u32> = encoding.token_ids().to_vec();
+    let prompt_tokens = token_ids.len() as i32;
+
+    // Generate tool constraints if tools are present
+    let tool_constraints = if let Some(tools) = chat_request.tools.as_ref() {
+        match generate_tool_constraints(tools, &chat_request.tool_choice, &chat_request.model) {
+            Ok(Some(constraints)) => {
+                let json_str = serde_json::to_string(&constraints).map_err(|e| {
+                    (
+                        SglErrorCode::ParsingError,
+                        format!("Failed to serialize tool constraints: {}", e),
+                    )
+                })?;
+                Some(CString::new(json_str).map_err(|e| {
+                    (
+                        SglErrorCode::MemoryError,
+                        format!("Failed to create C string: {}", e),
+                    )
+                })?)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                return Err((
+                    SglErrorCode::ParsingError,
+                    format!("Failed to generate tool constraints: {}", e),
+                ))
+            }
+        }
+    } else {
+        None
+    };
+
+    // Create prompt text CString
+    let prompt_text = CString::new(processed_messages.text).map_err(|e| {
+        (
+            SglErrorCode::MemoryError,
+            format!("Failed to create C string: {}", e),
+        )
+    })?;
+
+    Ok(PreprocessResult {
+        prompt_text,
+        token_ids,
+        tool_constraints,
+        prompt_tokens,
+    })
+}
+
+/// Write preprocess results to FFI output pointers
+///
+/// # Safety
+/// All output pointers must be valid and writable
+unsafe fn write_preprocess_outputs(
+    result: PreprocessResult,
+    prompt_text_out: *mut *mut c_char,
+    token_ids_out: *mut *mut c_uint,
+    token_ids_len_out: *mut usize,
+    tool_constraints_json_out: *mut *mut c_char,
+    prompt_tokens_out: *mut c_int,
+) {
+    *prompt_text_out = result.prompt_text.into_raw();
+    *token_ids_len_out = result.token_ids.len();
+    *prompt_tokens_out = result.prompt_tokens;
+
+    *token_ids_out = if result.token_ids.is_empty() {
+        ptr::null_mut()
+    } else {
+        let boxed = result.token_ids.into_boxed_slice();
+        Box::into_raw(boxed) as *mut c_uint
+    };
+
+    if !tool_constraints_json_out.is_null() {
+        *tool_constraints_json_out = result
+            .tool_constraints
+            .map(|c| c.into_raw())
+            .unwrap_or(ptr::null_mut());
+    }
 }
 
 /// Preprocess a chat completion request
@@ -83,7 +183,6 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request(
         return SglErrorCode::InvalidArgument;
     }
 
-    // Parse input strings
     let request_str = match CStr::from_ptr(request_json).to_str() {
         Ok(s) => s,
         Err(_) => {
@@ -100,7 +199,6 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request(
         }
     };
 
-    // Parse ChatCompletionRequest
     let chat_request: ChatCompletionRequest = match serde_json::from_str(request_str) {
         Ok(req) => req,
         Err(e) => {
@@ -109,7 +207,6 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request(
         }
     };
 
-    // Create tokenizer
     let tokenizer = match create_tokenizer_from_file(tokenizer_path_str) {
         Ok(t) => t,
         Err(e) => {
@@ -118,91 +215,23 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request(
         }
     };
 
-    // Process chat messages (apply chat_template)
-    let processed_messages = match process_chat_messages(&chat_request, tokenizer.as_ref()) {
-        Ok(msgs) => msgs,
-        Err(e) => {
-            set_error_message(
-                error_out,
-                &format!("Failed to process chat messages: {}", e),
+    match preprocess_impl(&chat_request, tokenizer.as_ref()) {
+        Ok(result) => {
+            write_preprocess_outputs(
+                result,
+                prompt_text_out,
+                token_ids_out,
+                token_ids_len_out,
+                tool_constraints_json_out,
+                prompt_tokens_out,
             );
-            return SglErrorCode::ParsingError;
+            SglErrorCode::Success
         }
-    };
-
-    // Tokenize the processed text
-    let encoding = match tokenizer.encode(&processed_messages.text, false) {
-        Ok(enc) => enc,
-        Err(e) => {
-            set_error_message(error_out, &format!("Tokenization failed: {}", e));
-            return SglErrorCode::TokenizationError;
-        }
-    };
-
-    let token_ids_vec: Vec<i32> = encoding.token_ids().iter().map(|&id| id as i32).collect();
-
-    let prompt_tokens = token_ids_vec.len() as i32;
-
-    // Generate tool constraints if tools are present
-    let tool_constraints_json = if let Some(tools) = chat_request.tools.as_ref() {
-        match generate_tool_constraints(tools, &chat_request.tool_choice, &chat_request.model) {
-            Ok(Some(constraints)) => match serde_json::to_string(&constraints) {
-                Ok(json_str) => Some(CString::new(json_str).unwrap()),
-                Err(e) => {
-                    set_error_message(
-                        error_out,
-                        &format!("Failed to serialize tool constraints: {}", e),
-                    );
-                    return SglErrorCode::ParsingError;
-                }
-            },
-            Ok(None) => None,
-            Err(e) => {
-                set_error_message(
-                    error_out,
-                    &format!("Failed to generate tool constraints: {}", e),
-                );
-                return SglErrorCode::ParsingError;
-            }
-        }
-    } else {
-        None
-    };
-
-    // Allocate memory for outputs
-    let prompt_text_cstr = match CString::new(processed_messages.text) {
-        Ok(s) => s,
-        Err(e) => {
-            set_error_message(error_out, &format!("Failed to create C string: {}", e));
-            return SglErrorCode::MemoryError;
-        }
-    };
-
-    let token_ids_len = token_ids_vec.len();
-    // Convert i32 to u32 for token IDs (as expected by the memory management functions)
-    let token_ids_u32: Vec<u32> = token_ids_vec.iter().map(|&id| id as u32).collect();
-    let token_ids_ptr = if token_ids_u32.is_empty() {
-        ptr::null_mut()
-    } else {
-        let boxed = token_ids_u32.into_boxed_slice();
-        Box::into_raw(boxed) as *mut c_uint
-    };
-
-    // Set output values
-    *prompt_text_out = prompt_text_cstr.into_raw();
-    *token_ids_out = token_ids_ptr;
-    *token_ids_len_out = token_ids_len;
-    *prompt_tokens_out = prompt_tokens;
-
-    if !tool_constraints_json_out.is_null() {
-        if let Some(constraints) = tool_constraints_json {
-            *tool_constraints_json_out = constraints.into_raw();
-        } else {
-            *tool_constraints_json_out = ptr::null_mut();
+        Err((code, msg)) => {
+            set_error_message(error_out, &msg);
+            code
         }
     }
-
-    SglErrorCode::Success
 }
 
 /// Preprocess a chat completion request using an existing tokenizer handle
@@ -253,7 +282,6 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request_with_tokenizer(
         return SglErrorCode::InvalidArgument;
     }
 
-    // Parse input string
     let request_str = match CStr::from_ptr(request_json).to_str() {
         Ok(s) => s,
         Err(_) => {
@@ -262,7 +290,6 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request_with_tokenizer(
         }
     };
 
-    // Parse ChatCompletionRequest
     let chat_request: ChatCompletionRequest = match serde_json::from_str(request_str) {
         Ok(req) => req,
         Err(e) => {
@@ -271,95 +298,25 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request_with_tokenizer(
         }
     };
 
-    // Use existing tokenizer from handle (no need to create new one!)
     let handle_ref = &*tokenizer_handle;
-    let tokenizer = &handle_ref.tokenizer;
 
-    // Process chat messages (apply chat_template)
-    let processed_messages = match process_chat_messages(&chat_request, tokenizer.as_ref()) {
-        Ok(msgs) => msgs,
-        Err(e) => {
-            set_error_message(
-                error_out,
-                &format!("Failed to process chat messages: {}", e),
+    match preprocess_impl(&chat_request, handle_ref.tokenizer.as_ref()) {
+        Ok(result) => {
+            write_preprocess_outputs(
+                result,
+                prompt_text_out,
+                token_ids_out,
+                token_ids_len_out,
+                tool_constraints_json_out,
+                prompt_tokens_out,
             );
-            return SglErrorCode::ParsingError;
+            SglErrorCode::Success
         }
-    };
-
-    // Tokenize the processed text
-    let encoding = match tokenizer.encode(&processed_messages.text, false) {
-        Ok(enc) => enc,
-        Err(e) => {
-            set_error_message(error_out, &format!("Tokenization failed: {}", e));
-            return SglErrorCode::TokenizationError;
-        }
-    };
-
-    let token_ids_vec: Vec<i32> = encoding.token_ids().iter().map(|&id| id as i32).collect();
-
-    let prompt_tokens = token_ids_vec.len() as i32;
-
-    // Generate tool constraints if tools are present
-    let tool_constraints_json = if let Some(tools) = chat_request.tools.as_ref() {
-        match generate_tool_constraints(tools, &chat_request.tool_choice, &chat_request.model) {
-            Ok(Some(constraints)) => match serde_json::to_string(&constraints) {
-                Ok(json_str) => Some(CString::new(json_str).unwrap()),
-                Err(e) => {
-                    set_error_message(
-                        error_out,
-                        &format!("Failed to serialize tool constraints: {}", e),
-                    );
-                    return SglErrorCode::ParsingError;
-                }
-            },
-            Ok(None) => None,
-            Err(e) => {
-                set_error_message(
-                    error_out,
-                    &format!("Failed to generate tool constraints: {}", e),
-                );
-                return SglErrorCode::ParsingError;
-            }
-        }
-    } else {
-        None
-    };
-
-    // Allocate memory for outputs
-    let prompt_text_cstr = match CString::new(processed_messages.text) {
-        Ok(s) => s,
-        Err(e) => {
-            set_error_message(error_out, &format!("Failed to create C string: {}", e));
-            return SglErrorCode::MemoryError;
-        }
-    };
-
-    let token_ids_len = token_ids_vec.len();
-    // Convert i32 to u32 for token IDs (as expected by the memory management functions)
-    let token_ids_u32: Vec<u32> = token_ids_vec.iter().map(|&id| id as u32).collect();
-    let token_ids_ptr = if token_ids_u32.is_empty() {
-        ptr::null_mut()
-    } else {
-        let boxed = token_ids_u32.into_boxed_slice();
-        Box::into_raw(boxed) as *mut c_uint
-    };
-
-    // Set output values
-    *prompt_text_out = prompt_text_cstr.into_raw();
-    *token_ids_out = token_ids_ptr;
-    *token_ids_len_out = token_ids_len;
-    *prompt_tokens_out = prompt_tokens;
-
-    if !tool_constraints_json_out.is_null() {
-        if let Some(constraints) = tool_constraints_json {
-            *tool_constraints_json_out = constraints.into_raw();
-        } else {
-            *tool_constraints_json_out = ptr::null_mut();
+        Err((code, msg)) => {
+            set_error_message(error_out, &msg);
+            code
         }
     }
-
-    SglErrorCode::Success
 }
 
 /// Free a preprocessed request handle (cleanup function)

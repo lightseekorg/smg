@@ -1,0 +1,50 @@
+//! Stream state tracking for per-index data
+
+use std::collections::HashMap;
+
+use smg::tokenizer::stream::DecodeStream;
+
+/// Per-index state for streaming responses
+pub struct StreamIndexState {
+    pub text_buffer: String,
+    pub decode_stream: Option<DecodeStream>,
+    pub has_tool_calls: bool,
+    pub is_first_chunk: bool,
+    pub prompt_tokens: i32,
+    pub completion_tokens: i32,
+}
+
+impl Default for StreamIndexState {
+    fn default() -> Self {
+        Self {
+            text_buffer: String::new(),
+            decode_stream: None,
+            has_tool_calls: false,
+            is_first_chunk: true, // New streams start with first chunk
+            prompt_tokens: 0,
+            completion_tokens: 0,
+        }
+    }
+}
+
+/// Manager for per-index stream state
+#[derive(Default)]
+pub struct StreamStateManager {
+    states: HashMap<u32, StreamIndexState>,
+}
+
+impl StreamStateManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get or create state for an index
+    pub fn get_or_create(&mut self, index: u32) -> &mut StreamIndexState {
+        self.states.entry(index).or_default()
+    }
+
+    /// Remove and return state for an index
+    pub fn remove(&mut self, index: u32) -> Option<StreamIndexState> {
+        self.states.remove(&index)
+    }
+}

@@ -37,7 +37,7 @@ A high-level Go SDK for interacting with Shepherd Model Gateway (SMG) gRPC API, 
 ## Installation
 
 ```bash
-go get github.com/lightseekorg/smg-go-grpc-sdk
+go get github.com/lightseek/smg/go-grpc-sdk
 ```
 
 ### Sync Dependencies
@@ -105,7 +105,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/lightseekorg/smg-go-grpc-sdk"
+    "github.com/lightseek/smg/go-grpc-sdk"
 )
 
 func main() {
@@ -150,7 +150,7 @@ import (
     "io"
     "log"
 
-    "github.com/lightseekorg/smg-go-grpc-sdk"
+    "github.com/lightseek/smg/go-grpc-sdk"
 )
 
 func main() {
@@ -375,7 +375,7 @@ All public types and functions include comprehensive documentation with usage ex
 
 ```bash
 godoc -http=:6060
-# Visit: http://localhost:6060/pkg/github.com/lightseekorg/smg-go-grpc-sdk/
+# Visit: http://localhost:6060/pkg/github.com/lightseek/smg/go-grpc-sdk/
 ```
 
 ## Development
@@ -402,10 +402,17 @@ bindings/golang/
 │   ├── simple/             # Non-streaming example
 │   └── streaming/          # Streaming example
 ├── src/                    # Rust FFI source
+│   ├── lib.rs             # Module exports
 │   ├── client.rs          # Client FFI
 │   ├── stream.rs          # Stream handling
 │   ├── grpc_converter.rs  # Response conversion
-│   └── ...
+│   ├── preprocessor.rs    # Request preprocessing
+│   ├── postprocessor.rs   # Response postprocessing
+│   ├── tokenizer.rs       # Tokenizer FFI
+│   ├── tool_parser.rs     # Tool call parsing
+│   ├── runtime.rs         # Shared runtime
+│   ├── stream_state.rs    # Stream state management
+│   └── proto_parse.rs     # Proto parsing utilities
 └── internal/               # Internal packages
     └── ffi/               # FFI bindings
 ```

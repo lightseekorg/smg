@@ -7,38 +7,27 @@ use std::{
     sync::Arc,
 };
 
-use once_cell::sync::Lazy;
 use smg::{
     grpc_client::sglang_scheduler::SglangSchedulerClient,
     protocols::chat::ChatCompletionRequest,
     routers::grpc::utils::{generate_tool_constraints, process_chat_messages},
     tokenizer::{create_tokenizer_from_file, traits::Tokenizer},
 };
-use tokio::runtime::Runtime;
 use uuid::Uuid;
 
 use super::{
     error::{set_error_message, SglErrorCode},
     grpc_converter::sgl_grpc_response_converter_create,
+    runtime::RUNTIME,
     stream::SglangStreamHandle,
     tokenizer::TokenizerHandle,
 };
-
-/// Global tokio runtime for async operations
-static RUNTIME: Lazy<Runtime> =
-    Lazy::new(|| Runtime::new().expect("Failed to create tokio runtime for client FFI"));
 
 /// Handle for complete client SDK (gRPC client + tokenizer)
 /// This handle manages the connection to sglang and provides a complete SDK interface
 pub struct SglangClientHandle {
     pub(crate) client: Arc<SglangSchedulerClient>,
     pub(crate) tokenizer: Arc<dyn Tokenizer>,
-}
-
-/// Handle for streaming request (includes prompt token count)
-#[allow(dead_code)]
-pub struct StreamRequestState {
-    pub(crate) prompt_tokens: i32, // Number of prompt tokens for this request
 }
 
 /// Create a new SGLang client handle
