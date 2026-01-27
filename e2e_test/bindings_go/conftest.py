@@ -150,24 +150,26 @@ def go_oai_server(
         Tuple of (host, port, model_path) for the Go OAI server.
     """
     # Get the gRPC endpoint from the worker
-    grpc_endpoint = f"localhost:{grpc_worker.port}"
+    grpc_endpoint = f"grpc://localhost:{grpc_worker.port}"
 
     # Find a free port for the Go OAI server
     oai_port = _find_free_port()
 
-    # Set up environment
+    # Set up environment - the Go OAI server uses env vars for config
     env = os.environ.copy()
     env["LD_LIBRARY_PATH"] = f"{go_ffi_library}:{env.get('LD_LIBRARY_PATH', '')}"
     env["DYLD_LIBRARY_PATH"] = f"{go_ffi_library}:{env.get('DYLD_LIBRARY_PATH', '')}"
 
+    # Configuration via environment variables (server uses these, not CLI args)
+    env["SGL_GRPC_ENDPOINT"] = grpc_endpoint
+    env["SGL_TOKENIZER_PATH"] = grpc_worker.model_path  # model dir contains tokenizer
+    env["PORT"] = str(oai_port)
+
     # Start the Go OAI server
     logger.info(f"Starting Go OAI server on port {oai_port}, connecting to gRPC worker at {grpc_endpoint}")
+    logger.info(f"Tokenizer path: {grpc_worker.model_path}")
 
-    cmd = [
-        str(go_oai_binary),
-        "-port", str(oai_port),
-        "-grpc-endpoint", grpc_endpoint,
-    ]
+    cmd = [str(go_oai_binary)]
 
     process = subprocess.Popen(
         cmd,
