@@ -29,6 +29,12 @@ pub fn generate_tool_call_id(
 ///
 /// # Returns
 /// * SglErrorCode::Success on success, error code on failure
+///
+/// # Safety
+/// - `tools_json` and `tool_choice_json` must be valid null-terminated C strings or null
+/// - `constraint_type_out` and `constraint_schema_out` must be valid pointers to writable memory
+/// - `error_out` may be null; if non-null, must point to writable memory
+/// - Caller is responsible for freeing any allocated strings using `sgl_free_string`
 #[no_mangle]
 pub unsafe extern "C" fn sgl_generate_tool_constraints(
     _tools_json: *const std::os::raw::c_char,

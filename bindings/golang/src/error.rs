@@ -17,20 +17,25 @@ pub enum SglErrorCode {
 }
 
 /// Helper to set error message in FFI output parameter
-pub fn set_error_message(error_out: *mut *mut c_char, message: &str) {
-    unsafe {
-        if !error_out.is_null() {
-            if let Ok(cstr) = CString::new(message) {
-                *error_out = cstr.into_raw();
-            } else {
-                *error_out = ptr::null_mut();
-            }
+///
+/// # Safety
+/// - `error_out` may be null; if non-null, must point to valid writable memory
+/// - Caller must free any previous string at `*error_out` before calling
+pub unsafe fn set_error_message(error_out: *mut *mut c_char, message: &str) {
+    if !error_out.is_null() {
+        if let Ok(cstr) = CString::new(message) {
+            *error_out = cstr.into_raw();
+        } else {
+            *error_out = ptr::null_mut();
         }
     }
 }
 
 /// Helper to set error message from format string
-pub fn set_error_message_fmt(error_out: *mut *mut c_char, fmt: std::fmt::Arguments) {
+///
+/// # Safety
+/// - `error_out` may be null; if non-null, must point to valid writable memory
+pub unsafe fn set_error_message_fmt(error_out: *mut *mut c_char, fmt: std::fmt::Arguments) {
     if !error_out.is_null() {
         let msg = format!("{}", fmt);
         set_error_message(error_out, &msg);
@@ -38,11 +43,12 @@ pub fn set_error_message_fmt(error_out: *mut *mut c_char, fmt: std::fmt::Argumen
 }
 
 /// Helper to clear error message
-pub fn clear_error_message(error_out: *mut *mut c_char) {
-    unsafe {
-        if !error_out.is_null() {
-            *error_out = ptr::null_mut();
-        }
+///
+/// # Safety
+/// - `error_out` may be null; if non-null, must point to valid writable memory
+pub unsafe fn clear_error_message(error_out: *mut *mut c_char) {
+    if !error_out.is_null() {
+        *error_out = ptr::null_mut();
     }
 }
 

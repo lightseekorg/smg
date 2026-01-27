@@ -142,6 +142,14 @@ pub unsafe extern "C" fn sgl_tokenizer_encode(
 ///
 /// # Returns
 /// * SglErrorCode::Success on success, error code on failure
+///
+/// # Safety
+/// - `handle` must be a valid pointer returned by `sgl_tokenizer_create`
+/// - `messages_json` must be a valid null-terminated C string containing valid JSON
+/// - `tools_json` may be null; if non-null, must be a valid null-terminated C string
+/// - `result_out` must be a valid pointer to writable memory
+/// - `error_out` may be null; if non-null, must point to writable memory
+/// - Caller must free the string written to `result_out` using `sgl_free_string`
 #[no_mangle]
 pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template_with_tools(
     handle: *mut TokenizerHandle,
@@ -206,7 +214,7 @@ pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template_with_tools(
     if let Some(hf_tokenizer) = tokenizer.as_any().downcast_ref::<HuggingFaceTokenizer>() {
         // Apply chat template with tools
         let empty_docs: [Value; 0] = [];
-        let tools_slice = tools.as_ref().map(|t| t.as_slice());
+        let tools_slice = tools.as_deref();
         let params = ChatTemplateParams {
             add_generation_prompt: true,
             tools: tools_slice,
@@ -248,6 +256,13 @@ pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template_with_tools(
 ///
 /// # Returns
 /// * SglErrorCode::Success on success, error code on failure
+///
+/// # Safety
+/// - `handle` must be a valid pointer returned by `sgl_tokenizer_create`
+/// - `messages_json` must be a valid null-terminated C string containing valid JSON
+/// - `result_out` must be a valid pointer to writable memory
+/// - `error_out` may be null; if non-null, must point to writable memory
+/// - Caller must free the string written to `result_out` using `sgl_free_string`
 #[no_mangle]
 pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template(
     handle: *mut TokenizerHandle,
@@ -331,6 +346,13 @@ pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template(
 ///
 /// # Returns
 /// * SglErrorCode::Success on success, error code on failure
+///
+/// # Safety
+/// - `handle` must be a valid pointer returned by `sgl_tokenizer_create`
+/// - `token_ids` must be a valid pointer to an array of at least `token_count` u32 values
+/// - `result_out` must be a valid pointer to writable memory
+/// - `error_out` may be null; if non-null, must point to writable memory
+/// - Caller must free the string written to `result_out` using `sgl_free_string`
 #[no_mangle]
 pub unsafe extern "C" fn sgl_tokenizer_decode(
     handle: *mut TokenizerHandle,

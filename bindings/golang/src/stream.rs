@@ -127,7 +127,7 @@ pub unsafe extern "C" fn sgl_stream_read_next(
                 // Call the conversion function
                 convert_proto_chunk_to_openai(
                     proto_response.clone(),
-                    &mut *converter_guard,
+                    &mut converter_guard,
                     &tokenizer,
                     &model,
                     &request_id,

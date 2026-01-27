@@ -16,7 +16,7 @@ use super::error::{SglErrorCode, set_error_message, clear_error_message};
 use super::utils::generate_tool_call_id;
 
 /// Global parser factory (initialized once)
-static PARSER_FACTORY: Lazy<ParserFactory> = Lazy::new(|| ParserFactory::new());
+static PARSER_FACTORY: Lazy<ParserFactory> = Lazy::new(ParserFactory::new);
 
 /// Global tokio runtime for async operations
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
@@ -41,6 +41,11 @@ pub struct ToolParserHandle {
 ///
 /// # Returns
 /// * Pointer to ToolParserHandle on success, null on failure
+///
+/// # Safety
+/// - `parser_type` must be a valid null-terminated C string
+/// - `error_out` may be null; if non-null, must point to writable memory
+/// - Caller owns the returned handle and must free it with `sgl_tool_parser_free`
 #[no_mangle]
 pub unsafe extern "C" fn sgl_tool_parser_create(
     parser_type: *const c_char,
@@ -88,6 +93,13 @@ pub unsafe extern "C" fn sgl_tool_parser_create(
 ///
 /// # Returns
 /// * SglErrorCode::Success on success, error code on failure
+///
+/// # Safety
+/// - `handle` must be a valid pointer returned by `sgl_tool_parser_create`
+/// - `text` must be a valid null-terminated C string
+/// - `result_json_out` must be a valid pointer to writable memory
+/// - `error_out` may be null; if non-null, must point to writable memory
+/// - Caller must free the string written to `result_json_out` using `sgl_free_string`
 #[no_mangle]
 pub unsafe extern "C" fn sgl_tool_parser_parse_complete(
     handle: *mut ToolParserHandle,
@@ -183,6 +195,14 @@ pub unsafe extern "C" fn sgl_tool_parser_parse_complete(
 ///
 /// # Returns
 /// * SglErrorCode::Success on success, error code on failure
+///
+/// # Safety
+/// - `handle` must be a valid pointer returned by `sgl_tool_parser_create`
+/// - `chunk` must be a valid null-terminated C string
+/// - `tools_json` may be null; if non-null, must be a valid null-terminated C string
+/// - `result_json_out` must be a valid pointer to writable memory
+/// - `error_out` may be null; if non-null, must point to writable memory
+/// - Caller must free the string written to `result_json_out` using `sgl_free_string`
 #[no_mangle]
 pub unsafe extern "C" fn sgl_tool_parser_parse_incremental(
     handle: *mut ToolParserHandle,
@@ -213,10 +233,7 @@ pub unsafe extern "C" fn sgl_tool_parser_parse_incremental(
                 return SglErrorCode::InvalidArgument;
             }
         };
-        match serde_json::from_str::<Vec<Tool>>(tools_str) {
-            Ok(t) => t,
-            Err(_) => vec![], // If parsing fails, use empty tools
-        }
+        serde_json::from_str::<Vec<Tool>>(tools_str).unwrap_or_default()
     } else {
         vec![]
     };
@@ -300,6 +317,9 @@ pub unsafe extern "C" fn sgl_tool_parser_parse_incremental(
 }
 
 /// Reset the parser state for reuse
+///
+/// # Safety
+/// - `handle` must be a valid pointer returned by `sgl_tool_parser_create`, or null
 #[no_mangle]
 pub unsafe extern "C" fn sgl_tool_parser_reset(handle: *mut ToolParserHandle) {
     if handle.is_null() {
@@ -321,6 +341,11 @@ pub unsafe extern "C" fn sgl_tool_parser_reset(handle: *mut ToolParserHandle) {
 }
 
 /// Free a tool parser handle
+///
+/// # Safety
+/// - `handle` must be a valid pointer returned by `sgl_tool_parser_create`, or null
+/// - `handle` must not be used after this call
+/// - This function must not be called more than once for the same handle
 #[no_mangle]
 pub unsafe extern "C" fn sgl_tool_parser_free(handle: *mut ToolParserHandle) {
     if !handle.is_null() {

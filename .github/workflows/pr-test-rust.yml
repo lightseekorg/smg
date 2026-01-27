@@ -151,6 +151,18 @@ jobs:
           rustup toolchain install nightly --profile minimal
           cargo +nightly fmt -- --check
 
+      - name: Run Go bindings Rust lint
+        run: |
+          source "$HOME/.cargo/env"
+          cd bindings/golang
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Run Go bindings Rust fmt
+        run: |
+          source "$HOME/.cargo/env"
+          cd bindings/golang
+          cargo +nightly fmt -- --check
+
       - name: Generate vision golden fixtures
         run: |
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu

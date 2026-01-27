@@ -46,6 +46,11 @@ pub struct StreamRequestState {
 ///
 /// # Returns
 /// * Pointer to SglangClientHandle on success, null on failure
+///
+/// # Safety
+/// - `endpoint` and `tokenizer_path` must be valid null-terminated C strings
+/// - `error_out` may be null; if non-null, must point to writable memory
+/// - Caller owns the returned handle and must free it with `sgl_client_free`
 #[no_mangle]
 pub unsafe extern "C" fn sgl_client_create(
     endpoint: *const c_char,
@@ -100,6 +105,11 @@ pub unsafe extern "C" fn sgl_client_create(
 }
 
 /// Free a client handle
+///
+/// # Safety
+/// - `handle` must be a valid pointer returned by `sgl_client_create`, or null
+/// - `handle` must not be used after this call
+/// - This function must not be called more than once for the same handle
 #[no_mangle]
 pub unsafe extern "C" fn sgl_client_free(handle: *mut SglangClientHandle) {
     if !handle.is_null() {
@@ -117,6 +127,13 @@ pub unsafe extern "C" fn sgl_client_free(handle: *mut SglangClientHandle) {
 ///
 /// # Returns
 /// * SglErrorCode::Success on success, error code on failure
+///
+/// # Safety
+/// - `client_handle` must be a valid pointer returned by `sgl_client_create`
+/// - `request_json` must be a valid null-terminated C string containing valid JSON
+/// - `stream_handle_out` must be a valid pointer to writable memory
+/// - `error_out` may be null; if non-null, must point to writable memory
+/// - Caller owns the stream handle written to `stream_handle_out` and must free it
 #[no_mangle]
 pub unsafe extern "C" fn sgl_client_chat_completion_stream(
     client_handle: *mut SglangClientHandle,

@@ -70,6 +70,13 @@ pub struct GrpcResponseConverterHandle {
 ///
 /// # Returns
 /// * Pointer to GrpcResponseConverterHandle on success, null on failure
+///
+/// # Safety
+/// - `tokenizer_handle` must be a valid pointer returned by `sgl_tokenizer_create`
+/// - `model` and `request_id` must be valid null-terminated C strings
+/// - `tools_json`, `tool_choice_json`, `stop`, `stop_token_ids` may be null
+/// - `error_out` may be null; if non-null, must point to writable memory
+/// - Caller owns the returned handle and must free it with `sgl_grpc_response_converter_free`
 #[no_mangle]
 pub unsafe extern "C" fn sgl_grpc_response_converter_create(
     tokenizer_handle: *mut TokenizerHandle,
@@ -209,6 +216,13 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_create(
 ///
 /// # Returns
 /// * SglErrorCode::Success on success, error code on failure
+///
+/// # Safety
+/// - `handle` must be a valid pointer returned by `sgl_grpc_response_converter_create`
+/// - `response_json` must be a valid null-terminated C string containing valid JSON
+/// - `result_json_out` must be a valid pointer to writable memory
+/// - `error_out` may be null; if non-null, must point to writable memory
+/// - Caller must free the string written to `result_json_out` using `sgl_free_string`
 #[no_mangle]
 pub unsafe extern "C" fn sgl_grpc_response_converter_convert_chunk(
     handle: *mut GrpcResponseConverterHandle,
@@ -426,9 +440,9 @@ pub(crate) async fn convert_proto_chunk_to_openai(
                 let mut decoder_guard = stop_decoder.lock().await;
                 let mut text = String::new();
                 for &token_id in &chunk.token_ids {
-                    match decoder_guard.process_token(token_id).unwrap_or_else(|_| {
+                    match decoder_guard.process_token(token_id).unwrap_or(
                         smg::tokenizer::stop::SequenceDecoderOutput::Held
-                    }) {
+                    ) {
                         smg::tokenizer::stop::SequenceDecoderOutput::Text(t) => {
                             text.push_str(&t);
                         }
@@ -447,7 +461,7 @@ pub(crate) async fn convert_proto_chunk_to_openai(
                 // Use incremental decoder to handle multi-byte character boundaries
                 let decode_stream = handle.decode_streams.entry(index).or_insert_with(|| {
                     DecodeStream::new(
-                        Arc::clone(&tokenizer),
+                        tokenizer.clone(),
                         &[], // No prompt tokens for completion
                         handle.skip_special_tokens,
                     )
@@ -497,7 +511,7 @@ pub(crate) async fn convert_proto_chunk_to_openai(
             stream_buffer.push_str(&chunk_text);
 
             // Handle tool calls if tools are provided
-            if let (Some(ref tools), Some(ref tool_parser)) = (handle.tools.as_ref(), handle.tool_parser.as_ref()) {
+            if let (Some(tools), Some(tool_parser)) = (handle.tools.as_ref(), handle.tool_parser.as_ref()) {
                 let tool_choice_enabled = !matches!(
                     handle.tool_choice,
                     Some(ToolChoice::Value(ToolChoiceValue::None))
@@ -750,6 +764,11 @@ pub(crate) async fn convert_proto_chunk_to_openai(
 }
 
 /// Free a gRPC response converter handle
+///
+/// # Safety
+/// - `handle` must be a valid pointer returned by `sgl_grpc_response_converter_create`, or null
+/// - `handle` must not be used after this call
+/// - This function must not be called more than once for the same handle
 #[no_mangle]
 pub unsafe extern "C" fn sgl_grpc_response_converter_free(handle: *mut GrpcResponseConverterHandle) {
     if !handle.is_null() {

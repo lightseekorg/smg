@@ -43,6 +43,13 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
 ///
 /// # Returns
 /// * SglErrorCode::Success on success, error code on failure
+///
+/// # Safety
+/// - `converter_handle` must be a valid pointer returned by `sgl_grpc_response_converter_create`
+/// - `proto_chunk_json` must be a valid null-terminated C string containing valid JSON
+/// - `openai_json_out` and `is_done_out` must be valid pointers to writable memory
+/// - `error_out` may be null; if non-null, must point to writable memory
+/// - Caller must free the string written to `openai_json_out` using `sgl_free_string`
 #[no_mangle]
 pub unsafe extern "C" fn sgl_postprocess_stream_chunk(
     converter_handle: *mut GrpcResponseConverterHandle,
@@ -233,6 +240,13 @@ pub unsafe extern "C" fn sgl_postprocess_stream_chunk(
 ///
 /// # Returns
 /// * SglErrorCode::Success on success, error code on failure
+///
+/// # Safety
+/// - `converter_handle` must be a valid pointer returned by `sgl_grpc_response_converter_create`
+/// - `proto_chunks_json_array` must be a valid null-terminated C string containing valid JSON array
+/// - `openai_chunks_json_array_out` and `chunks_count_out` must be valid pointers to writable memory
+/// - `error_out` may be null; if non-null, must point to writable memory
+/// - Caller must free the string written to `openai_chunks_json_array_out` using `sgl_free_string`
 #[no_mangle]
 pub unsafe extern "C" fn sgl_postprocess_stream_chunks_batch(
     converter_handle: *mut GrpcResponseConverterHandle,
