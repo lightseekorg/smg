@@ -30,7 +30,7 @@ url = "2.5"
 # Database backends
 deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"] }
 deadpool-postgres = "0.14.1"
-deadpool-redis = "0.18.0"
+deadpool-redis = "0.22.1"
 futures = "0.3"
 oracle = { version = "0.6.3", features = ["chrono"] }
 redis = { version = "0.27.6", features = ["tokio-comp", "json", "connection-manager"] }
