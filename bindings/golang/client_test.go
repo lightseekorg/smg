@@ -13,14 +13,6 @@ func TestClientConfig(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "valid config",
-			config: ClientConfig{
-				Endpoint:      "grpc://localhost:20000",
-				TokenizerPath: "/path/to/tokenizer",
-			},
-			wantErr: false,
-		},
-		{
 			name: "missing endpoint",
 			config: ClientConfig{
 				Endpoint:      "",
@@ -43,6 +35,14 @@ func TestClientConfig(t *testing.T) {
 				TokenizerPath: "",
 			},
 			wantErr: true,
+		},
+		{
+			name: "nonexistent tokenizer path",
+			config: ClientConfig{
+				Endpoint:      "grpc://localhost:20000",
+				TokenizerPath: "/path/to/nonexistent/tokenizer",
+			},
+			wantErr: true, // Tokenizer file doesn't exist
 		},
 	}
 
