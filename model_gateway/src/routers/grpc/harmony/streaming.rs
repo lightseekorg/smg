@@ -27,7 +27,10 @@ use crate::{
         chat::{
             ChatCompletionRequest, ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice,
         },
-        common::{ChatLogProbs, CompletionTokensDetails, FunctionCallDelta, ToolCall, ToolCallDelta, Usage},
+        common::{
+            ChatLogProbs, CompletionTokensDetails, FunctionCallDelta, ToolCall, ToolCallDelta,
+            Usage,
+        },
         responses::{
             OutputTokensDetails, ResponseStatus, ResponseUsage, ResponsesResponse, ResponsesUsage,
         },
