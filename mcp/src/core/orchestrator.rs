@@ -91,7 +91,7 @@ fn build_request_headers(
     Ok(headers)
 }
 
-/// Build a shared HTTP client (SSE + Streamable) with default headers.
+/// Build HTTP client with default headers.
 fn build_http_client(
     proxy_config: Option<&McpProxyConfig>,
     token: &Option<String>,
