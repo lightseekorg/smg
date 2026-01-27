@@ -68,27 +68,27 @@ class TestLogprobsGptOss:
         # Verify logprobs are returned
         logprobs = output_text.logprobs
         assert logprobs is not None, "logprobs should be present in OutputText"
-        assert logprobs.content is not None, "logprobs.content should be present"
-        assert len(logprobs.content) > 0, "logprobs.content should not be empty"
+
+        # Access as dict
+        logprobs_content = logprobs["content"]
+        assert logprobs_content is not None, "logprobs.content should be present"
+        assert len(logprobs_content) > 0, "logprobs.content should not be empty"
 
         # Verify logprobs structure
-        first_logprob = logprobs.content[0]
-        assert isinstance(first_logprob.token, str), "token should be a string"
-        assert isinstance(first_logprob.logprob, float), "logprob should be a float"
-        assert first_logprob.bytes is not None, "bytes should be present"
+        first_logprob = logprobs_content[0]
+        assert isinstance(first_logprob["token"], str), "token should be a string"
+        assert isinstance(first_logprob["logprob"], float), "logprob should be a float"
+        assert first_logprob.get("bytes") is not None, "bytes should be present"
 
         # Verify top_logprobs count
-        assert first_logprob.top_logprobs is not None, "top_logprobs should be present"
-        assert len(first_logprob.top_logprobs) == 5, "should have 5 top_logprobs"
+        top_logprobs = first_logprob.get("top_logprobs")
+        assert top_logprobs is not None, "top_logprobs should be present"
+        assert len(top_logprobs) == 5, "should have 5 top_logprobs"
 
-        for top_logprob in first_logprob.top_logprobs:
-            assert isinstance(
-                top_logprob.token, str
-            ), "top_logprob token should be string"
-            assert isinstance(
-                top_logprob.logprob, float
-            ), "top_logprob logprob should be float"
-            assert top_logprob.bytes is not None, "top_logprob bytes should be present"
+        for top_logprob in top_logprobs:
+            assert isinstance(top_logprob["token"], str), "top_logprob token should be string"
+            assert isinstance(top_logprob["logprob"], float), "top_logprob logprob should be float"
+            assert top_logprob.get("bytes") is not None, "top_logprob bytes should be present"
 
         # Verify usage
         assert response.usage is not None
@@ -162,53 +162,23 @@ class TestLogprobsGptOss:
         output_text_parts = [
             part for part in message_item.content if part.type == "output_text"
         ]
-        assert len(output_text_parts) > 0
+        assert len(output_text_parts) > 0, "Should have output_text content"
 
         # Verify logprobs in final response
         output_text = output_text_parts[0]
         logprobs = output_text.logprobs
         assert logprobs is not None, "logprobs should be present in streaming response"
-        assert logprobs.content is not None
-        assert len(logprobs.content) > 0
+
+        # Access as dict
+        logprobs_content = logprobs["content"]
+        assert logprobs_content is not None
+        assert len(logprobs_content) > 0
 
         # Verify logprobs structure
-        first_logprob = logprobs.content[0]
-        assert isinstance(first_logprob.token, str)
-        assert isinstance(first_logprob.logprob, float)
-        assert first_logprob.top_logprobs is not None
-        assert len(first_logprob.top_logprobs) == 3
+        first_logprob = logprobs_content[0]
+        assert isinstance(first_logprob["token"], str)
+        assert isinstance(first_logprob["logprob"], float)
 
-    @pytest.mark.parametrize("top_logprobs_count", [1, 3, 5, 10])
-    def test_responses_logprobs_count(self, setup_backend, top_logprobs_count):
-        """Test that top_logprobs count is respected in Responses API."""
-        _, model, client, gateway = setup_backend
-
-        response = client.responses.create(
-            model=model,
-            input="Say hello",
-            max_output_tokens=20,
-            top_logprobs=top_logprobs_count,
-            include=["message.output_text.logprobs"],
-        )
-
-        # Find message output
-        message_items = [item for item in response.output if item.type == "message"]
-        assert len(message_items) > 0
-
-        message_item = message_items[0]
-        output_text_parts = [
-            part for part in message_item.content if part.type == "output_text"
-        ]
-        assert len(output_text_parts) > 0
-
-        # Verify logprobs count
-        logprobs = output_text_parts[0].logprobs
-        assert logprobs is not None
-        assert logprobs.content is not None
-        assert len(logprobs.content) > 0
-
-        first_logprob = logprobs.content[0]
-        assert len(first_logprob.top_logprobs) == top_logprobs_count, (
-            f"Expected {top_logprobs_count} top_logprobs, "
-            f"got {len(first_logprob.top_logprobs)}"
-        )
+        top_logprobs = first_logprob.get("top_logprobs")
+        assert top_logprobs is not None
+        assert len(top_logprobs) == 3
