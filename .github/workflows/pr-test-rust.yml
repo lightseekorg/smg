@@ -47,24 +47,35 @@ jobs:
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
 
-      - name: Build python binding
+      - name: Build Python wheel and Go FFI library (parallel)
         run: |
           source "$HOME/.cargo/env"
           export RUSTC_WRAPPER=sccache
-          cd bindings/python
+
+          # Install maturin first
           python3 -m pip install --upgrade pip maturin
+
+          # Start Go FFI build in background
+          echo "Starting Go FFI build in background..."
+          (cd bindings/golang && make build && echo "Go FFI: OK" && ls -la target/release/libsmg_go.*) &
+          GO_PID=$!
+
+          # Build Python wheel in foreground
+          echo "Building Python wheel..."
+          cd bindings/python
           maturin build --profile ci --features vendored-openssl --out dist
+          echo "Python wheel: OK"
+          ls -lh dist/
 
-      - name: Build Go FFI library
-        run: |
-          source "$HOME/.cargo/env"
-          cd bindings/golang
-          make build
-          echo "Go FFI library built successfully"
-          ls -la target/release/libsmg_go.*
-
-      - name: List built wheel
-        run: ls -lh bindings/python/dist/
+          # Wait for Go build to complete
+          echo "Waiting for Go FFI build..."
+          wait $GO_PID
+          GO_EXIT=$?
+          if [ $GO_EXIT -ne 0 ]; then
+            echo "Go FFI build failed with exit code $GO_EXIT"
+            exit $GO_EXIT
+          fi
+          echo "Both builds completed successfully"
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v6
