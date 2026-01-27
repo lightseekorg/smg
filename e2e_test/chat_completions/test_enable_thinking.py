@@ -28,7 +28,7 @@ API_KEY = "not-used"
 @pytest.mark.gateway(
     extra_args=["--reasoning-parser", "qwen3", "--history-backend", "memory"]
 )
-@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("setup_backend", ["grpc", "vllm-grpc"], indirect=True)
 class TestEnableThinking:
     """Tests for enable_thinking feature with Qwen3 reasoning parser."""
 

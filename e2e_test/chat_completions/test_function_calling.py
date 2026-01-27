@@ -102,7 +102,7 @@ PYTHONIC_MESSAGES = [
 @pytest.mark.gateway(
     extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"]
 )
-@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("setup_backend", ["grpc", "vllm-grpc"], indirect=True)
 class TestOpenAIServerFunctionCalling:
     """Tests for OpenAI-compatible function calling with Llama tool parser."""
 
@@ -730,7 +730,7 @@ class TestOpenAIServerFunctionCalling:
 @pytest.mark.gateway(
     extra_args=["--tool-call-parser", "pythonic", "--history-backend", "memory"]
 )
-@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("setup_backend", ["grpc", "vllm-grpc"], indirect=True)
 class TestOpenAIPythonicFunctionCalling:
     """Tests for pythonic function calling format."""
 
@@ -1476,7 +1476,7 @@ class _TestToolChoiceBase:
 @pytest.mark.gateway(
     extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"]
 )
-@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("setup_backend", ["grpc", "vllm-grpc"], indirect=True)
 class TestToolChoiceLlama(_TestToolChoiceBase):
     """Tests for tool_choice functionality with Llama model."""
 
@@ -1496,7 +1496,7 @@ class TestToolChoiceLlama(_TestToolChoiceBase):
 @pytest.mark.gateway(
     extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"]
 )
-@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("setup_backend", ["grpc", "vllm-grpc"], indirect=True)
 class TestToolChoiceQwen(_TestToolChoiceBase):
     """Tests for tool_choice functionality with Qwen model."""
 
@@ -1513,7 +1513,7 @@ class TestToolChoiceQwen(_TestToolChoiceBase):
 @pytest.mark.gateway(
     extra_args=["--tool-call-parser", "mistral", "--history-backend", "memory"]
 )
-@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+@pytest.mark.parametrize("setup_backend", ["grpc", "vllm-grpc"], indirect=True)
 class TestToolChoiceMistral(_TestToolChoiceBase):
     """Tests for tool_choice functionality with Mistral model."""
 

@@ -72,3 +72,6 @@ MAX_RETRY_ATTEMPTS = (
 
 # Display formatting
 LOG_SEPARATOR_WIDTH = 60  # Width for log separator lines (e.g., "="*60)
+
+# Backend types
+VLLM_GRPC_BACKEND = "vllm-grpc"  # vLLM worker with native gRPC

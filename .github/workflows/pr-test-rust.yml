@@ -224,6 +224,24 @@ jobs:
           cd sglang
           sudo --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
 
+      - name: Install vLLM for gRPC testing
+        if: matrix.name == 'chat-completions'
+        run: python3 -m pip install vllm
+
+      - name: Cache flash-attn build
+        if: matrix.name == 'chat-completions'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip/wheels
+          key: flash-attn-${{ runner.os }}-py310-${{ hashFiles('**/setup.py') }}
+
+      - name: Install flash-attn for vLLM
+        if: matrix.name == 'chat-completions'
+        run: |
+          python3 -m pip install flash-attn --no-build-isolation
+          python3 -m pip uninstall -y flashinfer flashinfer-python flashinfer-cubin flashinfer-jit-cache 2>/dev/null || true
+          python3 -m pip install flashinfer-python==0.5.3 flashinfer-cubin==0.5.3
+
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
         run: |

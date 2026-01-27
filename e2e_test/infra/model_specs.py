@@ -5,6 +5,8 @@ Each model spec defines:
 - memory_gb: Estimated GPU memory required
 - tp: Tensor parallelism size (number of GPUs needed)
 - features: List of features this model supports (for test filtering)
+- worker_args: (optional) Additional CLI args for SGLang workers
+- vllm_args: (optional) Additional CLI args for vLLM workers
 """
 
 from __future__ import annotations

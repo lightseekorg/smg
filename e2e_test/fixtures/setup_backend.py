@@ -94,6 +94,13 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         )
         return
 
+    # vLLM gRPC backend
+    if backend_name == "vllm-grpc":
+        yield from _setup_vllm_grpc_backend(
+            request, model_pool, model_id, workers_config, gateway_config
+        )
+        return
+
     # Check if this is a local backend (grpc, http)
     try:
         connection_mode = ConnectionMode(backend_name)
@@ -260,6 +267,61 @@ def _setup_pd_backend(
         # Release references to allow eviction
         for worker in prefills + decodes:
             worker.release()
+
+
+def _setup_vllm_grpc_backend(
+    request: pytest.FixtureRequest,
+    model_pool: "ModelPool",
+    model_id: str,
+    workers_config: dict,
+    gateway_config: dict,
+):
+    """Setup vLLM gRPC backend."""
+    import openai
+    from infra import Gateway
+
+    logger.info("Setting up vLLM gRPC backend for model %s", model_id)
+
+    # vLLM currently only supports single worker per test
+    # get_vllm_grpc_worker() auto-acquires the returned instance
+    try:
+        instance = model_pool.get_vllm_grpc_worker(model_id)
+    except RuntimeError as e:
+        pytest.fail(str(e))
+
+    model_path = instance.model_path
+    worker_urls = [instance.worker_url]
+
+    # Launch gateway
+    gateway = Gateway()
+    gateway.start(
+        worker_urls=worker_urls,
+        model_path=model_path,
+        policy=gateway_config["policy"],
+        timeout=gateway_config["timeout"],
+        extra_args=gateway_config["extra_args"],
+    )
+
+    client = openai.OpenAI(
+        base_url=f"{gateway.base_url}/v1",
+        api_key="not-used",
+    )
+
+    logger.info(
+        "Setup vLLM gRPC backend: model=%s, worker=%s, gateway=%s, policy=%s",
+        model_id,
+        instance.worker_url,
+        gateway.base_url,
+        gateway_config["policy"],
+    )
+
+    try:
+        yield "vllm-grpc", model_path, client, gateway
+    finally:
+        logger.info("Tearing down vLLM gRPC gateway")
+        gateway.shutdown()
+        # Release reference to allow eviction
+        instance.release()
 
 
 def _setup_local_backend(
