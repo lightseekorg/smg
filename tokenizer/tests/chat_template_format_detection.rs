@@ -308,3 +308,43 @@ fn test_detect_openai_format_arbitrary_variable_names() {
         ChatTemplateContentFormat::OpenAI
     );
 }
+
+#[test]
+fn test_llama31_template_should_be_string_format() {
+    // Llama 3.1 template uses `message.content is iterable` only for tool/ipython roles
+    // to decide JSON serialization format, NOT for iterating over content parts.
+    // This should be detected as String format, not OpenAI format.
+    let template = r#"{{- bos_token }}
+{%- if messages[0]['role'] == 'system' %}
+    {%- set system_message = messages[0]['content']|trim %}
+    {%- set messages = messages[1:] %}
+{%- else %}
+    {%- set system_message = "" %}
+{%- endif %}
+{{- "<|start_header_id|>system<|end_header_id|>\n\n" }}
+{{- system_message }}
+{{- "<|eot_id|>" }}
+
+{%- for message in messages %}
+    {%- if not (message.role == 'ipython' or message.role == 'tool' or 'tool_calls' in message) %}
+        {{- '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n'+ message['content'] | trim + '<|eot_id|>' }}
+    {%- elif message.role == "tool" or message.role == "ipython" %}
+        {{- "<|start_header_id|>ipython<|end_header_id|>\n\n" }}
+        {%- if message.content is mapping or message.content is iterable %}
+            {{- message.content | tojson }}
+        {%- else %}
+            {{- message.content }}
+        {%- endif %}
+        {{- "<|eot_id|>" }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' }}
+{%- endif %}
+"#;
+
+    assert_eq!(
+        detect_chat_template_content_format(template),
+        ChatTemplateContentFormat::String
+    );
+}

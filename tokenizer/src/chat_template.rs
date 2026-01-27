@@ -265,18 +265,10 @@ impl<'a> Detector<'a> {
                     self.inspect_expr_for_structure(inner_ref);
                 }
             }
-            // content is sequence/iterable OR message.content is sequence/iterable
-            Expr::Test(t) => {
-                if t.name == "sequence" || t.name == "iterable" || t.name == "string" {
-                    if matches!(&t.expr, Expr::Var(v) if v.id == "content")
-                        || self.is_any_scope_var_content(&t.expr)
-                    {
-                        self.flags.saw_structure = true;
-                    }
-                } else {
-                    self.inspect_expr_for_structure(&t.expr);
-                }
-            }
+            // Type tests like `content is iterable` or `message.content is string`
+            // These are used for branching (e.g., Llama 3.1 uses them for tool output formatting),
+            // not as indicators that the template expects structured content. Keep walking.
+            Expr::Test(t) => self.inspect_expr_for_structure(&t.expr),
             Expr::GetAttr(g) => {
                 // Keep walking; nested expressions can hide structure checks
                 self.inspect_expr_for_structure(&g.expr);
