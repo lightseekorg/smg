@@ -1,6 +1,6 @@
-"""Harmony Logprobs E2E Tests for Responses API.
+"""Logprobs E2E Tests for Responses API.
 
-Tests for logprobs support with Harmony models (gpt-oss) through the Responses API.
+Tests for logprobs support with GPT-OSS (Harmony) models through the Responses API.
 
 The Responses API requires:
 1. top_logprobs parameter in request
@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
     extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"]
 )
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
-class TestHarmonyResponsesLogprobs:
-    """Tests for logprobs support with Harmony models via Responses API."""
+class TestLogprobsGptOss:
+    """Tests for logprobs support with GPT-OSS (Harmony) models via Responses API."""
 
     def test_responses_with_logprobs(self, setup_backend):
         """Test non-streaming Responses API returns logprobs when requested."""
