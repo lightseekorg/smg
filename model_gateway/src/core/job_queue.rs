@@ -604,7 +604,7 @@ impl JobQueue {
                         model_id: None,
                         priority: None,
                         cost: None,
-                        runtime: router_config.runtime.clone(),
+                        runtime: None,
                         tokenizer_path: None,
                         reasoning_parser: None,
                         tool_parser: None,

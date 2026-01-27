@@ -86,10 +86,6 @@ pub struct RouterConfig {
     /// Enable WASM support
     #[serde(default)]
     pub enable_wasm: bool,
-    /// Runtime type for gRPC workers (sglang, vllm, trtllm)
-    /// When set, skips auto-detection and uses the specified runtime
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<String>,
 }
 
 /// Tokenizer cache configuration
@@ -524,7 +520,6 @@ impl Default for RouterConfig {
             enable_wasm: false,
             server_cert: None,
             server_key: None,
-            runtime: None,
         }
     }
 }
