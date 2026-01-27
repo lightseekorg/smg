@@ -754,6 +754,8 @@ mod tests {
             prompt_tokens: 5,
             completion_tokens: 2,
             cached_tokens: 3,
+            output_logprobs: None,
+            input_logprobs: None,
         };
 
         assert_eq!(chunk.token_ids, vec![1234, 5678]);
