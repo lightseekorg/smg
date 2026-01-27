@@ -184,9 +184,11 @@ impl HarmonyStreamingProcessor {
 
                     // Convert logprobs if present and requested
                     let chunk_logprobs = if original_request.logprobs {
-                        chunk_wrapper
-                            .output_logprobs()
-                            .and_then(|lp| convert_harmony_logprobs(lp).ok())
+                        chunk_wrapper.output_logprobs().and_then(|lp| {
+                            convert_harmony_logprobs(lp)
+                                .map_err(|e| error!("Failed to convert streaming logprobs: {}", e))
+                                .ok()
+                        })
                     } else {
                         None
                     };
@@ -355,9 +357,11 @@ impl HarmonyStreamingProcessor {
 
                     // Convert logprobs if present and requested
                     let chunk_logprobs = if original_request.logprobs {
-                        chunk_wrapper
-                            .output_logprobs()
-                            .and_then(|lp| convert_harmony_logprobs(lp).ok())
+                        chunk_wrapper.output_logprobs().and_then(|lp| {
+                            convert_harmony_logprobs(lp)
+                                .map_err(|e| error!("Failed to convert streaming logprobs: {}", e))
+                                .ok()
+                        })
                     } else {
                         None
                     };

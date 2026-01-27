@@ -104,18 +104,15 @@ impl HarmonyResponseProcessor {
                 })?;
 
             // Convert output logprobs if present
-            let logprobs: Option<ChatLogProbs> =
-                if request_logprobs && complete.output_logprobs().is_some() {
-                    match convert_harmony_logprobs(complete.output_logprobs().unwrap()) {
-                        Ok(lp) => Some(lp),
-                        Err(e) => {
-                            error!("Failed to convert logprobs: {}", e);
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
+            let logprobs: Option<ChatLogProbs> = if request_logprobs {
+                complete.output_logprobs().and_then(|lp| {
+                    convert_harmony_logprobs(lp)
+                        .map_err(|e| error!("Failed to convert logprobs: {}", e))
+                        .ok()
+                })
+            } else {
+                None
+            };
 
             // Build response message (assistant)
             let message = ChatCompletionMessage {
@@ -321,18 +318,15 @@ impl HarmonyResponseProcessor {
         }
 
         // Convert output logprobs if present
-        let logprobs: Option<ChatLogProbs> =
-            if request_logprobs && complete.output_logprobs().is_some() {
-                match convert_harmony_logprobs(complete.output_logprobs().unwrap()) {
-                    Ok(lp) => Some(lp),
-                    Err(e) => {
-                        error!("Failed to convert logprobs: {}", e);
-                        None
-                    }
-                }
-            } else {
-                None
-            };
+        let logprobs: Option<ChatLogProbs> = if request_logprobs {
+            complete.output_logprobs().and_then(|lp| {
+                convert_harmony_logprobs(lp)
+                    .map_err(|e| error!("Failed to convert logprobs: {}", e))
+                    .ok()
+            })
+        } else {
+            None
+        };
 
         // Map final channel → ResponseOutputItem::Message
         if !parsed.final_text.is_empty() {
