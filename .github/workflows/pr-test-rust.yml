@@ -55,6 +55,14 @@ jobs:
           python3 -m pip install --upgrade pip maturin
           maturin build --profile ci --features vendored-openssl --out dist
 
+      - name: Build Go FFI library
+        run: |
+          source "$HOME/.cargo/env"
+          cd bindings/golang
+          make build
+          echo "Go FFI library built successfully"
+          ls -la target/release/libsmg_go.*
+
       - name: List built wheel
         run: ls -lh bindings/python/dist/
 
@@ -63,6 +71,13 @@ jobs:
         with:
           name: smg-wheel
           path: bindings/python/dist/*.whl
+          retention-days: 1
+
+      - name: Upload Go FFI library artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: go-ffi-library
+          path: bindings/golang/target/release/libsmg_go.*
           retention-days: 1
 
       - name: Test wheel install
@@ -285,7 +300,7 @@ jobs:
 
   go-unit-tests:
     name: go-unit-tests
-    needs: [check-ci]
+    needs: [check-ci, build-wheel]
     if: needs.check-ci.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -302,16 +317,14 @@ jobs:
           cache: true
           cache-dependency-path: bindings/golang/go.sum
 
-      - name: Setup Rust
-        uses: ./.github/actions/setup-rust
+      - name: Download Go FFI library
+        uses: actions/download-artifact@v7
+        with:
+          name: go-ffi-library
+          path: bindings/golang/target/release/
 
-      - name: Build Go FFI library
-        run: |
-          source "$HOME/.cargo/env"
-          cd bindings/golang
-          make build
-          echo "Go FFI library built successfully"
-          ls -la target/release/libsmg_go.*
+      - name: Verify Go FFI library
+        run: ls -la bindings/golang/target/release/libsmg_go.*
 
       - name: Run Go unit tests
         run: |
@@ -347,16 +360,14 @@ jobs:
           cache: true
           cache-dependency-path: bindings/golang/go.sum
 
-      - name: Setup Rust
-        uses: ./.github/actions/setup-rust
+      - name: Download Go FFI library
+        uses: actions/download-artifact@v7
+        with:
+          name: go-ffi-library
+          path: bindings/golang/target/release/
 
-      - name: Build Go FFI library
-        run: |
-          source "$HOME/.cargo/env"
-          cd bindings/golang
-          make build
-          echo "Go FFI library built successfully"
-          ls -la target/release/libsmg_go.*
+      - name: Verify Go FFI library
+        run: ls -la bindings/golang/target/release/libsmg_go.*
 
       - name: Download wheel artifact
         uses: actions/download-artifact@v7
