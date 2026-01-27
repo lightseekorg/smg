@@ -145,22 +145,6 @@ fn configure_genai_oci_oracle_client(config: &OracleConfig) -> Result<(), String
             ));
         }
 
-        // Update sqlnet.ora to replace placeholder directory with actual path
-        let sqlnet_path = path.join("sqlnet.ora");
-        if sqlnet_path.exists() {
-            let content = std::fs::read_to_string(&sqlnet_path)
-                .map_err(|e| format!("Failed to read sqlnet.ora: {}", e))?;
-
-            // Replace placeholder "?" with actual wallet directory
-            let updated_content =
-                content.replace("DIRECTORY=\"?\"", &format!("DIRECTORY=\"{}\"", wallet_path));
-
-            if updated_content != content {
-                std::fs::write(&sqlnet_path, updated_content)
-                    .map_err(|e| format!("Failed to update sqlnet.ora: {}", e))?;
-            }
-        }
-
         std::env::set_var("TNS_ADMIN", wallet_path);
     }
     Ok(())
@@ -908,59 +892,21 @@ impl ResponseStorage for GenaiOciOracleResponseStorage {
 
     async fn list_identifier_responses(
         &self,
-        identifier: &str,
-        limit: Option<usize>,
+        _identifier: &str,
+        _limit: Option<usize>,
     ) -> Result<Vec<StoredResponse>, ResponseStorageError> {
-        let identifier = identifier.to_string();
-
-        self.store
-            .execute(move |conn| {
-                let sql = if let Some(limit) = limit {
-                    format!(
-                        "SELECT * FROM ({} WHERE safety_identifier = :1 ORDER BY created_at DESC) WHERE ROWNUM <= {}",
-                        SELECT_BASE, limit
-                    )
-                } else {
-                    format!("{} WHERE safety_identifier = :1 ORDER BY created_at DESC", SELECT_BASE)
-                };
-
-                let mut stmt = conn.statement(&sql).build().map_err(map_genai_oci_oracle_error)?;
-                let mut rows = stmt.query(&[&identifier]).map_err(map_genai_oci_oracle_error)?;
-                let mut results = Vec::new();
-
-                for row in &mut rows {
-                    let row = row.map_err(map_genai_oci_oracle_error)?;
-                    results.push(Self::build_response_from_row(&row)?);
-                }
-
-                Ok(results)
-            })
-            .await
-            .map_err(ResponseStorageError::StorageError)
+        Err(ResponseStorageError::StorageError(
+            "list_identifier_responses not supported: RESPONSES table does not have safety_identifier column".to_string(),
+        ))
     }
 
     async fn delete_identifier_responses(
         &self,
-        identifier: &str,
+        _identifier: &str,
     ) -> Result<usize, ResponseStorageError> {
-        let identifier = identifier.to_string();
-        let affected = self
-            .store
-            .execute(move |conn| {
-                conn.execute(
-                    "DELETE FROM responses WHERE safety_identifier = :1",
-                    &[&identifier],
-                )
-                .map_err(map_genai_oci_oracle_error)
-            })
-            .await
-            .map_err(ResponseStorageError::StorageError)?;
-
-        let deleted = affected
-            .row_count()
-            .map_err(|e| ResponseStorageError::StorageError(map_genai_oci_oracle_error(e)))?
-            as usize;
-        Ok(deleted)
+        Err(ResponseStorageError::StorageError(
+            "delete_identifier_responses not supported: RESPONSES table does not have safety_identifier column".to_string(),
+        ))
     }
 }
 
