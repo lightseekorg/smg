@@ -5,12 +5,17 @@ use std::sync::Arc;
 use axum::response::Response;
 use tracing::error;
 
-use super::HarmonyParserAdapter;
+use super::{builder::get_harmony_encoding, HarmonyParserAdapter};
 use crate::{
-    grpc_client::sglang_proto::generate_complete::MatchedStop::{MatchedStopStr, MatchedTokenId},
+    grpc_client::sglang_proto::{
+        generate_complete::MatchedStop::{MatchedStopStr, MatchedTokenId},
+        OutputLogProbs,
+    },
     protocols::{
         chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
-        common::{CompletionTokensDetails, ToolCall, Usage},
+        common::{
+            ChatLogProbs, ChatLogProbsContent, CompletionTokensDetails, ToolCall, TopLogProb, Usage,
+        },
         responses::{
             OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
             ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
@@ -24,6 +29,61 @@ use crate::{
         },
     },
 };
+
+/// Convert OutputLogProbs to OpenAI ChatLogProbs format using Harmony's tokenizer
+///
+/// This function decodes token IDs using the Harmony encoding's tokenizer and builds
+/// the logprobs structure expected by the OpenAI API format.
+fn convert_harmony_logprobs(proto_logprobs: &OutputLogProbs) -> Result<ChatLogProbs, String> {
+    let encoding = get_harmony_encoding();
+    let tokenizer = encoding.tokenizer();
+
+    let mut content_items = Vec::with_capacity(proto_logprobs.token_logprobs.len());
+
+    // Build ChatLogProbsContent for each token
+    for (i, &logprob) in proto_logprobs.token_logprobs.iter().enumerate() {
+        let token_id = proto_logprobs.token_ids.get(i).copied().unwrap_or(0);
+
+        // Decode single token to text
+        let token_text = tokenizer
+            .decode_utf8(&[token_id as u32])
+            .unwrap_or_else(|_| format!("<token_{}>", token_id));
+
+        let bytes = Some(token_text.as_bytes().to_vec());
+
+        // Build top_logprobs for this position
+        let top_logprobs = if let Some(top_logprobs_entry) = proto_logprobs.top_logprobs.get(i) {
+            let mut top_logprobs = Vec::with_capacity(top_logprobs_entry.values.len());
+
+            for (j, &top_logprob) in top_logprobs_entry.values.iter().enumerate() {
+                let top_token_id = top_logprobs_entry.token_ids.get(j).copied().unwrap_or(0);
+                let top_token_text = tokenizer
+                    .decode_utf8(&[top_token_id as u32])
+                    .unwrap_or_else(|_| format!("<token_{}>", top_token_id));
+
+                top_logprobs.push(TopLogProb {
+                    token: top_token_text.clone(),
+                    logprob: top_logprob,
+                    bytes: Some(top_token_text.as_bytes().to_vec()),
+                });
+            }
+            top_logprobs
+        } else {
+            Vec::new()
+        };
+
+        content_items.push(ChatLogProbsContent {
+            token: token_text,
+            logprob,
+            bytes,
+            top_logprobs,
+        });
+    }
+
+    Ok(ChatLogProbs::Detailed {
+        content: (!content_items.is_empty()).then_some(content_items),
+    })
+}
 
 /// Processor for non-streaming Harmony responses
 ///
@@ -44,8 +104,11 @@ impl HarmonyResponseProcessor {
         chat_request: Arc<ChatCompletionRequest>,
         dispatch: DispatchMetadata,
     ) -> Result<ChatCompletionResponse, Response> {
+        let request_logprobs = chat_request.logprobs;
+
         // Collect all completed responses (one per choice)
-        let all_responses = response_collection::collect_responses(execution_result, false).await?;
+        let all_responses =
+            response_collection::collect_responses(execution_result, request_logprobs).await?;
         if all_responses.is_empty() {
             return Err(error::internal_error(
                 "no_responses_from_server",
@@ -100,6 +163,20 @@ impl HarmonyResponseProcessor {
                     )
                 })?;
 
+            // Convert output logprobs if present
+            let logprobs: Option<ChatLogProbs> =
+                if request_logprobs && complete.output_logprobs().is_some() {
+                    match convert_harmony_logprobs(complete.output_logprobs().unwrap()) {
+                        Ok(lp) => Some(lp),
+                        Err(e) => {
+                            error!("Failed to convert logprobs: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
             // Build response message (assistant)
             let message = ChatCompletionMessage {
                 role: "assistant".to_string(),
@@ -116,7 +193,7 @@ impl HarmonyResponseProcessor {
             choices.push(ChatChoice {
                 index: index as u32,
                 message,
-                logprobs: None,
+                logprobs,
                 finish_reason: Some(finish_reason),
                 matched_stop,
                 hidden_states: None,
@@ -193,8 +270,11 @@ impl HarmonyResponseProcessor {
         responses_request: Arc<ResponsesRequest>,
         dispatch: DispatchMetadata,
     ) -> Result<ResponsesIterationResult, Response> {
+        let request_logprobs = responses_request.top_logprobs.is_some();
+
         // Collect all completed responses
-        let all_responses = response_collection::collect_responses(execution_result, false).await?;
+        let all_responses =
+            response_collection::collect_responses(execution_result, request_logprobs).await?;
         if all_responses.is_empty() {
             return Err(error::internal_error(
                 "no_responses_from_server",
@@ -300,6 +380,20 @@ impl HarmonyResponseProcessor {
             output.push(reasoning_item);
         }
 
+        // Convert output logprobs if present
+        let logprobs: Option<ChatLogProbs> =
+            if request_logprobs && complete.output_logprobs().is_some() {
+                match convert_harmony_logprobs(complete.output_logprobs().unwrap()) {
+                    Ok(lp) => Some(lp),
+                    Err(e) => {
+                        error!("Failed to convert logprobs: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
         // Map final channel → ResponseOutputItem::Message
         if !parsed.final_text.is_empty() {
             let message_item = ResponseOutputItem::Message {
@@ -308,7 +402,7 @@ impl HarmonyResponseProcessor {
                 content: vec![ResponseContentPart::OutputText {
                     text: parsed.final_text,
                     annotations: vec![],
-                    logprobs: None,
+                    logprobs,
                 }],
                 status: "completed".to_string(),
             };
