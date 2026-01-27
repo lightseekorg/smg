@@ -317,11 +317,16 @@ impl HarmonyResponseProcessor {
             output.push(reasoning_item);
         }
 
-        // TODO: Logprobs for Responses API is not fully supported yet.
-        // The Chat Completions API logprobs work, but Responses API needs more testing.
-        // For now, we disable logprobs in Responses API output.
-        let logprobs: Option<ChatLogProbs> = None;
-        let _ = request_logprobs; // silence unused variable warning
+        // Convert output logprobs if present
+        let logprobs: Option<ChatLogProbs> = if request_logprobs {
+            complete.output_logprobs().and_then(|lp| {
+                convert_harmony_logprobs(lp)
+                    .map_err(|e| error!("Failed to convert logprobs: {}", e))
+                    .ok()
+            })
+        } else {
+            None
+        };
 
         // Map final channel → ResponseOutputItem::Message
         if !parsed.final_text.is_empty() {
