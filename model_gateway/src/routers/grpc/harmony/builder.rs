@@ -15,13 +15,16 @@ use openai_harmony::{
 use tracing::{debug, trace};
 
 use super::types::HarmonyBuildOutput;
-use crate::protocols::{
-    chat::{ChatCompletionRequest, ChatMessage, MessageContent},
-    common::{ContentPart, Tool},
-    responses::{
-        ReasoningEffort as ResponsesReasoningEffort, ResponseContentPart, ResponseInput,
-        ResponseInputOutputItem, ResponseReasoningContent, ResponseTool, ResponseToolType,
-        ResponsesRequest, StringOrContentParts,
+use crate::{
+    grpc_client::sglang_proto::OutputLogProbs,
+    protocols::{
+        chat::{ChatCompletionRequest, ChatMessage, MessageContent},
+        common::{ChatLogProbs, ChatLogProbsContent, ContentPart, Tool, TopLogProb},
+        responses::{
+            ReasoningEffort as ResponsesReasoningEffort, ResponseContentPart, ResponseInput,
+            ResponseInputOutputItem, ResponseReasoningContent, ResponseTool, ResponseToolType,
+            ResponsesRequest, StringOrContentParts,
+        },
     },
 };
 
@@ -31,12 +34,69 @@ static HARMONY_ENCODING: OnceLock<HarmonyEncoding> = OnceLock::new();
 /// Get or initialize the Harmony encoding
 ///
 /// Uses HarmonyGptOss encoding which supports the gpt-oss model family.
-pub(super) fn get_harmony_encoding() -> &'static HarmonyEncoding {
+pub(crate) fn get_harmony_encoding() -> &'static HarmonyEncoding {
     HARMONY_ENCODING.get_or_init(|| {
         tokio::task::block_in_place(|| {
             openai_harmony::load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss)
                 .expect("Failed to load Harmony encoding")
         })
+    })
+}
+
+/// Convert OutputLogProbs to OpenAI ChatLogProbs format using Harmony's tokenizer
+///
+/// This function decodes token IDs using the Harmony encoding's tokenizer and builds
+/// the logprobs structure expected by the OpenAI API format.
+pub(crate) fn convert_harmony_logprobs(
+    proto_logprobs: &OutputLogProbs,
+) -> Result<ChatLogProbs, String> {
+    let encoding = get_harmony_encoding();
+    let tokenizer = encoding.tokenizer();
+
+    let mut content_items = Vec::with_capacity(proto_logprobs.token_logprobs.len());
+
+    // Build ChatLogProbsContent for each token
+    for (i, &logprob) in proto_logprobs.token_logprobs.iter().enumerate() {
+        let token_id = proto_logprobs.token_ids.get(i).copied().unwrap_or(0);
+
+        // Decode single token to text
+        let token_text = tokenizer
+            .decode_utf8([token_id as u32])
+            .unwrap_or_else(|_| format!("<token_{}>", token_id));
+
+        let bytes = Some(token_text.as_bytes().to_vec());
+
+        // Build top_logprobs for this position
+        let top_logprobs = if let Some(top_logprobs_entry) = proto_logprobs.top_logprobs.get(i) {
+            let mut top_logprobs = Vec::with_capacity(top_logprobs_entry.values.len());
+
+            for (j, &top_logprob) in top_logprobs_entry.values.iter().enumerate() {
+                let top_token_id = top_logprobs_entry.token_ids.get(j).copied().unwrap_or(0);
+                let top_token_text = tokenizer
+                    .decode_utf8([top_token_id as u32])
+                    .unwrap_or_else(|_| format!("<token_{}>", top_token_id));
+
+                top_logprobs.push(TopLogProb {
+                    token: top_token_text.clone(),
+                    logprob: top_logprob,
+                    bytes: Some(top_token_text.as_bytes().to_vec()),
+                });
+            }
+            top_logprobs
+        } else {
+            Vec::new()
+        };
+
+        content_items.push(ChatLogProbsContent {
+            token: token_text,
+            logprob,
+            bytes,
+            top_logprobs,
+        });
+    }
+
+    Ok(ChatLogProbs::Detailed {
+        content: (!content_items.is_empty()).then_some(content_items),
     })
 }
 
