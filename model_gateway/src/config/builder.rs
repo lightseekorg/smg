@@ -413,6 +413,21 @@ impl RouterConfigBuilder {
         self
     }
 
+    // ==================== Runtime ====================
+
+    /// Set the gRPC runtime type (sglang, vllm, trtllm)
+    /// When set, workers skip auto-detection and use the specified runtime
+    pub fn runtime<S: Into<String>>(mut self, runtime: S) -> Self {
+        self.config.runtime = Some(runtime.into());
+        self
+    }
+
+    /// Set the gRPC runtime type from an Option
+    pub fn maybe_runtime<S: Into<String>>(mut self, runtime: Option<S>) -> Self {
+        self.config.runtime = runtime.map(|s| s.into());
+        self
+    }
+
     // ==================== Tokenizer Cache ====================
 
     pub fn tokenizer_cache(mut self, cache: TokenizerCacheConfig) -> Self {
