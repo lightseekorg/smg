@@ -448,6 +448,8 @@ pub enum RuntimeType {
     Sglang,
     /// vLLM runtime
     Vllm,
+    /// TensorRT-LLM runtime
+    Trtllm,
     /// External OpenAI-compatible API (not local inference)
     /// Used for routing to external providers like OpenAI, Azure OpenAI, xAI, etc.
     External,
@@ -458,6 +460,7 @@ impl fmt::Display for RuntimeType {
         match self {
             RuntimeType::Sglang => write!(f, "sglang"),
             RuntimeType::Vllm => write!(f, "vllm"),
+            RuntimeType::Trtllm => write!(f, "trtllm"),
             RuntimeType::External => write!(f, "external"),
         }
     }
@@ -472,6 +475,8 @@ impl std::str::FromStr for RuntimeType {
             Ok(RuntimeType::Sglang)
         } else if s.eq_ignore_ascii_case("vllm") {
             Ok(RuntimeType::Vllm)
+        } else if s.eq_ignore_ascii_case("trtllm") || s.eq_ignore_ascii_case("tensorrt-llm") {
+            Ok(RuntimeType::Trtllm)
         } else if s.eq_ignore_ascii_case("external") {
             Ok(RuntimeType::External)
         } else {

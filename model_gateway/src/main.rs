@@ -425,9 +425,9 @@ struct CliArgs {
     mcp_config_path: Option<String>,
 
     // ==================== Backend ====================
-    /// Backend runtime to use
-    #[arg(long, value_enum, default_value_t = Backend::Sglang, alias = "runtime", help_heading = "Backend")]
-    backend: Backend,
+    /// Backend runtime to use (auto-detected if not specified)
+    #[arg(long, value_enum, alias = "runtime", help_heading = "Backend")]
+    backend: Option<Backend>,
 
     /// History storage backend
     #[arg(long, default_value = "memory", value_parser = ["memory", "none", "oracle", "postgres", "redis"], help_heading = "Backend")]
@@ -866,7 +866,7 @@ impl CliArgs {
     ) -> ConfigResult<RouterConfig> {
         // Determine routing mode based on backend type and PD disaggregation flag
         // IGW mode doesn't change routing mode, only affects router initialization
-        let mode = if matches!(self.backend, Backend::Openai) {
+        let mode = if matches!(self.backend, Some(Backend::Openai)) {
             RoutingMode::OpenAI {
                 worker_urls: self.worker_urls.clone(),
             }
@@ -1187,24 +1187,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Host: {}:{}", cli_args.host, cli_args.port);
     let mode_str = if cli_args.enable_igw {
         "IGW (Inference Gateway)".to_string()
-    } else if matches!(cli_args.backend, Backend::Openai) {
+    } else if matches!(cli_args.backend, Some(Backend::Openai)) {
         "OpenAI Backend".to_string()
     } else if cli_args.pd_disaggregation {
         "PD Disaggregated".to_string()
+    } else if let Some(backend) = &cli_args.backend {
+        format!("Regular ({})", backend)
     } else {
-        format!("Regular ({})", cli_args.backend)
+        "Regular".to_string()
     };
     println!("Mode: {}", mode_str);
 
-    match cli_args.backend {
-        Backend::Vllm | Backend::Trtllm | Backend::Anthropic => {
+    if let Some(backend) = &cli_args.backend {
+        if matches!(backend, Backend::Anthropic) {
             println!(
                 "WARNING: runtime '{}' not implemented yet; falling back to regular routing. \
 Provide --worker-urls or PD flags as usual.",
-                cli_args.backend
+                backend
             );
         }
-        Backend::Sglang | Backend::Openai => {}
     }
 
     if !cli_args.enable_igw {

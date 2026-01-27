@@ -56,12 +56,13 @@ async fn do_grpc_health_check(
     Ok(())
 }
 
-/// Try gRPC health check (tries SGLang first, then vLLM if not specified).
+/// Try gRPC health check (tries SGLang first, then vLLM, then TensorRT-LLM if not specified).
+/// Returns the detected runtime type on success.
 async fn try_grpc_health_check(
     url: &str,
     timeout_secs: u64,
     runtime_type: Option<&str>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let grpc_url = if url.starts_with("grpc://") {
         url.to_string()
     } else {
@@ -69,15 +70,30 @@ async fn try_grpc_health_check(
     };
 
     match runtime_type {
-        Some(runtime) => do_grpc_health_check(&grpc_url, timeout_secs, runtime).await,
+        Some(runtime) => {
+            do_grpc_health_check(&grpc_url, timeout_secs, runtime).await?;
+            Ok(runtime.to_string())
+        }
         None => {
-            // Try SGLang first, then vLLM as fallback
-            if let Ok(()) = do_grpc_health_check(&grpc_url, timeout_secs, "sglang").await {
-                return Ok(());
-            }
-            do_grpc_health_check(&grpc_url, timeout_secs, "vllm")
+            // Try SGLang first, then vLLM, then TensorRT-LLM as fallback
+            if do_grpc_health_check(&grpc_url, timeout_secs, "sglang")
                 .await
-                .map_err(|e| format!("gRPC failed (tried SGLang and vLLM): {}", e))
+                .is_ok()
+            {
+                return Ok("sglang".to_string());
+            }
+            if do_grpc_health_check(&grpc_url, timeout_secs, "vllm")
+                .await
+                .is_ok()
+            {
+                return Ok("vllm".to_string());
+            }
+            do_grpc_health_check(&grpc_url, timeout_secs, "trtllm")
+                .await
+                .map_err(|e| {
+                    format!("gRPC failed (tried SGLang, vLLM, and TensorRT-LLM): {}", e)
+                })?;
+            Ok("trtllm".to_string())
         }
     }
 }
@@ -114,14 +130,14 @@ impl StepExecutor<LocalWorkerWorkflowData> for DetectConnectionModeStep {
             try_grpc_health_check(&url, timeout, runtime_type)
         );
 
-        let connection_mode = match (http_result, grpc_result) {
+        let (connection_mode, detected_runtime) = match (http_result, grpc_result) {
             (Ok(_), _) => {
                 debug!("{} detected as HTTP", config.url);
-                ConnectionMode::Http
+                (ConnectionMode::Http, None)
             }
-            (_, Ok(_)) => {
-                debug!("{} detected as gRPC", config.url);
-                ConnectionMode::Grpc { port: None }
+            (_, Ok(runtime)) => {
+                debug!("{} detected as gRPC (runtime: {})", config.url, runtime);
+                (ConnectionMode::Grpc { port: None }, Some(runtime))
             }
             (Err(http_err), Err(grpc_err)) => {
                 return Err(WorkflowError::StepFailed {
@@ -135,6 +151,10 @@ impl StepExecutor<LocalWorkerWorkflowData> for DetectConnectionModeStep {
         };
 
         context.data.connection_mode = Some(connection_mode);
+        // Save detected runtime type from health check for use in metadata discovery
+        if let Some(runtime) = detected_runtime {
+            context.data.detected_runtime_type = Some(runtime);
+        }
         Ok(StepResult::Success)
     }
 

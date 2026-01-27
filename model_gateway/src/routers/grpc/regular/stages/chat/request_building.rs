@@ -99,6 +99,21 @@ impl PipelineStage for ChatRequestBuildingStage {
                     })?;
                 ProtoGenerateRequest::Vllm(Box::new(req))
             }
+            GrpcClient::Trtllm(trtllm_client) => {
+                let req = trtllm_client
+                    .build_generate_request_from_chat(
+                        request_id,
+                        body_ref,
+                        prep.processed_messages.as_ref().unwrap().text.clone(),
+                        prep.token_ids.clone(),
+                        prep.tool_constraints.clone(),
+                    )
+                    .map_err(|e| {
+                        error!(function = "ChatRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request");
+                        error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {}", e))
+                    })?;
+                ProtoGenerateRequest::Trtllm(Box::new(req))
+            }
         };
 
         // Inject PD metadata if needed

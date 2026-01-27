@@ -1,13 +1,15 @@
-//! Protocol buffer type wrappers for SGLang and vLLM backends
+//! Protocol buffer type wrappers for SGLang, vLLM, and TensorRT-LLM backends
 //!
-//! This module provides unified enums that wrap proto types from both SGLang and vLLM,
-//! allowing the router to work with either backend transparently.
+//! This module provides unified enums that wrap proto types from SGLang, vLLM, and TensorRT-LLM,
+//! allowing the router to work with any backend transparently.
 
 use futures_util::StreamExt;
 
 use crate::grpc_client::{
     sglang_proto::{self as sglang, generate_complete::MatchedStop},
     sglang_scheduler::AbortOnDropStream as SglangStream,
+    trtllm_engine::AbortOnDropStream as TrtllmStream,
+    trtllm_proto as trtllm,
     vllm_engine::AbortOnDropStream as VllmStream,
     vllm_proto as vllm,
 };
@@ -29,43 +31,60 @@ impl ProtoRequest {
     }
 }
 
-/// Unified GenerateRequest that works with both backends
+/// Unified GenerateRequest that works with all backends
 #[derive(Clone)]
 pub enum ProtoGenerateRequest {
     Sglang(Box<sglang::GenerateRequest>),
     Vllm(Box<vllm::GenerateRequest>),
+    Trtllm(Box<trtllm::GenerateRequest>),
 }
 
 impl ProtoGenerateRequest {
-    /// Get SGLang variant (panics if vLLM)
+    /// Get SGLang variant (panics if not SGLang)
     pub fn as_sglang(&self) -> &sglang::GenerateRequest {
         match self {
             Self::Sglang(req) => req,
-            Self::Vllm(_) => panic!("Expected SGLang GenerateRequest, got vLLM"),
+            _ => panic!("Expected SGLang GenerateRequest"),
         }
     }
 
-    /// Get mutable SGLang variant (panics if vLLM)
+    /// Get mutable SGLang variant (panics if not SGLang)
     pub fn as_sglang_mut(&mut self) -> &mut sglang::GenerateRequest {
         match self {
             Self::Sglang(req) => req,
-            Self::Vllm(_) => panic!("Expected SGLang GenerateRequest, got vLLM"),
+            _ => panic!("Expected SGLang GenerateRequest"),
         }
     }
 
-    /// Get vLLM variant (panics if SGLang)
+    /// Get vLLM variant (panics if not vLLM)
     pub fn as_vllm(&self) -> &vllm::GenerateRequest {
         match self {
             Self::Vllm(req) => req,
-            Self::Sglang(_) => panic!("Expected vLLM GenerateRequest, got SGLang"),
+            _ => panic!("Expected vLLM GenerateRequest"),
         }
     }
 
-    /// Get mutable vLLM variant (panics if SGLang)
+    /// Get mutable vLLM variant (panics if not vLLM)
     pub fn as_vllm_mut(&mut self) -> &mut vllm::GenerateRequest {
         match self {
             Self::Vllm(req) => req,
-            Self::Sglang(_) => panic!("Expected vLLM GenerateRequest, got SGLang"),
+            _ => panic!("Expected vLLM GenerateRequest"),
+        }
+    }
+
+    /// Get TensorRT-LLM variant (panics if not TensorRT-LLM)
+    pub fn as_trtllm(&self) -> &trtllm::GenerateRequest {
+        match self {
+            Self::Trtllm(req) => req,
+            _ => panic!("Expected TensorRT-LLM GenerateRequest"),
+        }
+    }
+
+    /// Get mutable TensorRT-LLM variant (panics if not TensorRT-LLM)
+    pub fn as_trtllm_mut(&mut self) -> &mut trtllm::GenerateRequest {
+        match self {
+            Self::Trtllm(req) => req,
+            _ => panic!("Expected TensorRT-LLM GenerateRequest"),
         }
     }
 
@@ -79,6 +98,11 @@ impl ProtoGenerateRequest {
         matches!(self, Self::Vllm(_))
     }
 
+    /// Check if this is TensorRT-LLM
+    pub fn is_trtllm(&self) -> bool {
+        matches!(self, Self::Trtllm(_))
+    }
+
     /// Clone the inner request (for passing to generate())
     pub fn clone_inner(&self) -> Self {
         self.clone()
@@ -89,6 +113,7 @@ impl ProtoGenerateRequest {
         match self {
             Self::Sglang(req) => &req.request_id,
             Self::Vllm(req) => &req.request_id,
+            Self::Trtllm(req) => &req.request_id,
         }
     }
 }
@@ -97,6 +122,7 @@ impl ProtoGenerateRequest {
 pub enum ProtoGenerateResponse {
     Sglang(Box<sglang::GenerateResponse>),
     Vllm(vllm::GenerateResponse),
+    Trtllm(Box<trtllm::GenerateResponse>),
 }
 
 impl ProtoGenerateResponse {
@@ -127,6 +153,18 @@ impl ProtoGenerateResponse {
                 // Note: vLLM proto no longer has Error variant in GenerateResponse
                 None => ProtoResponseVariant::None,
             },
+            Self::Trtllm(resp) => match resp.response {
+                Some(trtllm::generate_response::Response::Chunk(chunk)) => {
+                    ProtoResponseVariant::Chunk(ProtoGenerateStreamChunk::Trtllm(chunk))
+                }
+                Some(trtllm::generate_response::Response::Complete(complete)) => {
+                    ProtoResponseVariant::Complete(ProtoGenerateComplete::Trtllm(complete))
+                }
+                Some(trtllm::generate_response::Response::Error(error)) => {
+                    ProtoResponseVariant::Error(ProtoGenerateError::Trtllm(error))
+                }
+                None => ProtoResponseVariant::None,
+            },
         }
     }
 }
@@ -144,22 +182,31 @@ pub enum ProtoResponseVariant {
 pub enum ProtoGenerateStreamChunk {
     Sglang(sglang::GenerateStreamChunk),
     Vllm(vllm::GenerateStreamChunk),
+    Trtllm(trtllm::GenerateStreamChunk),
 }
 
 impl ProtoGenerateStreamChunk {
-    /// Get SGLang variant (panics if vLLM)
+    /// Get SGLang variant (panics if not SGLang)
     pub fn as_sglang(&self) -> &sglang::GenerateStreamChunk {
         match self {
             Self::Sglang(chunk) => chunk,
-            Self::Vllm(_) => panic!("Expected SGLang GenerateStreamChunk, got vLLM"),
+            _ => panic!("Expected SGLang GenerateStreamChunk"),
         }
     }
 
-    /// Get vLLM variant (panics if SGLang)
+    /// Get vLLM variant (panics if not vLLM)
     pub fn as_vllm(&self) -> &vllm::GenerateStreamChunk {
         match self {
             Self::Vllm(chunk) => chunk,
-            Self::Sglang(_) => panic!("Expected vLLM GenerateStreamChunk, got SGLang"),
+            _ => panic!("Expected vLLM GenerateStreamChunk"),
+        }
+    }
+
+    /// Get TensorRT-LLM variant (panics if not TensorRT-LLM)
+    pub fn as_trtllm(&self) -> &trtllm::GenerateStreamChunk {
+        match self {
+            Self::Trtllm(chunk) => chunk,
+            _ => panic!("Expected TensorRT-LLM GenerateStreamChunk"),
         }
     }
 
@@ -173,11 +220,17 @@ impl ProtoGenerateStreamChunk {
         matches!(self, Self::Vllm(_))
     }
 
+    /// Check if this is TensorRT-LLM
+    pub fn is_trtllm(&self) -> bool {
+        matches!(self, Self::Trtllm(_))
+    }
+
     /// Get token IDs from chunk (common field)
     pub fn token_ids(&self) -> &[u32] {
         match self {
             Self::Sglang(c) => &c.token_ids,
             Self::Vllm(c) => &c.token_ids,
+            Self::Trtllm(c) => &c.token_ids,
         }
     }
 
@@ -186,15 +239,16 @@ impl ProtoGenerateStreamChunk {
     pub fn index(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.index,
-            Self::Vllm(_) => 0, // vLLM doesn't support n>1
+            Self::Vllm(_) => 0,
+            Self::Trtllm(c) => c.sequence_index as u32,
         }
     }
 
-    /// Get output logprobs (SGLang only, returns None for vLLM)
+    /// Get output logprobs (SGLang only, returns None for vLLM and TensorRT-LLM)
     pub fn output_logprobs(&self) -> Option<&sglang::OutputLogProbs> {
         match self {
             Self::Sglang(c) => c.output_logprobs.as_ref(),
-            Self::Vllm(_) => None, // TODO: vLLM logprobs mapping
+            Self::Vllm(_) | Self::Trtllm(_) => None,
         }
     }
 
@@ -203,6 +257,7 @@ impl ProtoGenerateStreamChunk {
         match self {
             Self::Sglang(c) => c.prompt_tokens,
             Self::Vllm(c) => c.prompt_tokens as i32,
+            Self::Trtllm(c) => c.prompt_tokens,
         }
     }
 
@@ -211,6 +266,7 @@ impl ProtoGenerateStreamChunk {
         match self {
             Self::Sglang(c) => c.completion_tokens,
             Self::Vllm(c) => c.completion_tokens as i32,
+            Self::Trtllm(c) => c.completion_tokens,
         }
     }
 
@@ -219,6 +275,7 @@ impl ProtoGenerateStreamChunk {
         match self {
             Self::Sglang(c) => c.cached_tokens,
             Self::Vllm(c) => c.cached_tokens as i32,
+            Self::Trtllm(c) => c.cached_tokens,
         }
     }
 }
@@ -228,30 +285,39 @@ impl ProtoGenerateStreamChunk {
 pub enum ProtoGenerateComplete {
     Sglang(sglang::GenerateComplete),
     Vllm(vllm::GenerateComplete),
+    Trtllm(trtllm::GenerateComplete),
 }
 
 impl ProtoGenerateComplete {
-    /// Get SGLang variant (panics if vLLM)
+    /// Get SGLang variant (panics if not SGLang)
     pub fn as_sglang(&self) -> &sglang::GenerateComplete {
         match self {
             Self::Sglang(complete) => complete,
-            Self::Vllm(_) => panic!("Expected SGLang GenerateComplete, got vLLM"),
+            _ => panic!("Expected SGLang GenerateComplete"),
         }
     }
 
-    /// Get mutable SGLang variant (panics if vLLM)
+    /// Get mutable SGLang variant (panics if not SGLang)
     pub fn as_sglang_mut(&mut self) -> &mut sglang::GenerateComplete {
         match self {
             Self::Sglang(complete) => complete,
-            Self::Vllm(_) => panic!("Expected SGLang GenerateComplete, got vLLM"),
+            _ => panic!("Expected SGLang GenerateComplete"),
         }
     }
 
-    /// Get vLLM variant (panics if SGLang)
+    /// Get vLLM variant (panics if not vLLM)
     pub fn as_vllm(&self) -> &vllm::GenerateComplete {
         match self {
             Self::Vllm(complete) => complete,
-            Self::Sglang(_) => panic!("Expected vLLM GenerateComplete, got SGLang"),
+            _ => panic!("Expected vLLM GenerateComplete"),
+        }
+    }
+
+    /// Get TensorRT-LLM variant (panics if not TensorRT-LLM)
+    pub fn as_trtllm(&self) -> &trtllm::GenerateComplete {
+        match self {
+            Self::Trtllm(complete) => complete,
+            _ => panic!("Expected TensorRT-LLM GenerateComplete"),
         }
     }
 
@@ -265,11 +331,17 @@ impl ProtoGenerateComplete {
         matches!(self, Self::Vllm(_))
     }
 
+    /// Check if this is TensorRT-LLM
+    pub fn is_trtllm(&self) -> bool {
+        matches!(self, Self::Trtllm(_))
+    }
+
     /// Get token IDs from either backend (output_ids in proto)
     pub fn token_ids(&self) -> &[u32] {
         match self {
             Self::Sglang(c) => &c.output_ids,
             Self::Vllm(c) => &c.output_ids,
+            Self::Trtllm(c) => &c.output_token_ids,
         }
     }
 
@@ -278,6 +350,7 @@ impl ProtoGenerateComplete {
         match self {
             Self::Sglang(c) => c.prompt_tokens,
             Self::Vllm(c) => c.prompt_tokens as i32,
+            Self::Trtllm(c) => c.prompt_tokens,
         }
     }
 
@@ -286,6 +359,7 @@ impl ProtoGenerateComplete {
         match self {
             Self::Sglang(c) => c.completion_tokens,
             Self::Vllm(c) => c.completion_tokens as i32,
+            Self::Trtllm(c) => c.completion_tokens,
         }
     }
 
@@ -294,6 +368,7 @@ impl ProtoGenerateComplete {
         match self {
             Self::Sglang(c) => &c.finish_reason,
             Self::Vllm(c) => &c.finish_reason,
+            Self::Trtllm(c) => &c.finish_reason,
         }
     }
 
@@ -302,16 +377,17 @@ impl ProtoGenerateComplete {
     pub fn index(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.index,
-            Self::Vllm(_) => 0, // vLLM doesn't have index field (n>1 not supported)
+            Self::Vllm(_) => 0,
+            Self::Trtllm(c) => c.sequence_index as u32,
         }
     }
 
     /// Get matched stop (SGLang only, returns oneof)
-    /// vLLM doesn't have matched_stop, returns None
+    /// vLLM and TensorRT-LLM don't have matched_stop, returns None
     pub fn matched_stop(&self) -> Option<&MatchedStop> {
         match self {
             Self::Sglang(c) => c.matched_stop.as_ref(),
-            Self::Vllm(_) => None, // vLLM doesn't have matched_stop
+            Self::Vllm(_) | Self::Trtllm(_) => None,
         }
     }
 
@@ -320,6 +396,7 @@ impl ProtoGenerateComplete {
         match self {
             Self::Sglang(c) => &c.output_ids,
             Self::Vllm(c) => &c.output_ids,
+            Self::Trtllm(c) => &c.output_token_ids,
         }
     }
 
@@ -328,6 +405,7 @@ impl ProtoGenerateComplete {
         match self {
             Self::Sglang(c) => c.cached_tokens,
             Self::Vllm(c) => c.cached_tokens as i32,
+            Self::Trtllm(c) => c.cached_tokens,
         }
     }
 
@@ -335,15 +413,15 @@ impl ProtoGenerateComplete {
     pub fn input_logprobs(&self) -> Option<&sglang::InputLogProbs> {
         match self {
             Self::Sglang(c) => c.input_logprobs.as_ref(),
-            Self::Vllm(_) => None, // vLLM doesn't have input_logprobs
+            Self::Vllm(_) | Self::Trtllm(_) => None,
         }
     }
 
-    /// Get output logprobs
+    /// Get output logprobs (SGLang only for now)
     pub fn output_logprobs(&self) -> Option<&sglang::OutputLogProbs> {
         match self {
             Self::Sglang(c) => c.output_logprobs.as_ref(),
-            Self::Vllm(_) => None, // TODO: vLLM logprobs mapping
+            Self::Vllm(_) | Self::Trtllm(_) => None,
         }
     }
 }
@@ -353,6 +431,7 @@ impl ProtoGenerateComplete {
 #[derive(Clone)]
 pub enum ProtoGenerateError {
     Sglang(sglang::GenerateError),
+    Trtllm(trtllm::GenerateError),
 }
 
 impl ProtoGenerateError {
@@ -360,6 +439,7 @@ impl ProtoGenerateError {
     pub fn message(&self) -> &str {
         match self {
             Self::Sglang(e) => &e.message,
+            Self::Trtllm(e) => &e.message,
         }
     }
 }
@@ -368,6 +448,7 @@ impl ProtoGenerateError {
 pub enum ProtoStream {
     Sglang(SglangStream),
     Vllm(VllmStream),
+    Trtllm(TrtllmStream),
 }
 
 impl ProtoStream {
@@ -382,6 +463,10 @@ impl ProtoStream {
                 .next()
                 .await
                 .map(|result| result.map(ProtoGenerateResponse::Vllm)),
+            Self::Trtllm(stream) => stream
+                .next()
+                .await
+                .map(|result| result.map(|r| ProtoGenerateResponse::Trtllm(Box::new(r)))),
         }
     }
 
@@ -390,6 +475,7 @@ impl ProtoStream {
         match self {
             Self::Sglang(stream) => stream.mark_completed(),
             Self::Vllm(stream) => stream.mark_completed(),
+            Self::Trtllm(stream) => stream.mark_completed(),
         }
     }
 }

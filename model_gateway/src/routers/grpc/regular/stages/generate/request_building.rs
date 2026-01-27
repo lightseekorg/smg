@@ -94,6 +94,20 @@ impl PipelineStage for GenerateRequestBuildingStage {
                     })?;
                 ProtoGenerateRequest::Vllm(Box::new(req))
             }
+            GrpcClient::Trtllm(trtllm_client) => {
+                let req = trtllm_client
+                    .build_plain_generate_request(
+                        request_id,
+                        &generate_request,
+                        prep.original_text.clone(),
+                        prep.token_ids.clone(),
+                    )
+                    .map_err(|e| {
+                        error!(function = "GenerateRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request");
+                        error::bad_request("build_request_failed", e)
+                    })?;
+                ProtoGenerateRequest::Trtllm(Box::new(req))
+            }
         };
 
         // Inject PD metadata if needed
