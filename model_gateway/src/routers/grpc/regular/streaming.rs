@@ -726,8 +726,8 @@ impl StreamingProcessor {
         build_sse_response(rx)
     }
 
-    //TODO add streaming logprob support
     /// Process streaming chunks for generate endpoint (no tool/reasoning parsing)
+    /// TODO: add streaming logprob support
     async fn process_generate_streaming(
         tokenizer: Arc<dyn Tokenizer>,
         mut stream: ProtoStream,
