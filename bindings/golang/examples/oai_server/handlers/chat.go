@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	sglang "github.com/sglang/sglang-go-grpc-sdk"
+	smg "github.com/lightseek/smg/go-grpc-sdk"
 	"github.com/valyala/fasthttp"
 	"go.uber.org/zap"
 
@@ -21,11 +21,11 @@ import (
 // ChatHandler handles chat completion requests
 type ChatHandler struct {
 	logger  *zap.Logger
-	service *service.SGLangService
+	service *service.SMGService
 }
 
 // NewChatHandler creates a new chat handler
-func NewChatHandler(logger *zap.Logger, svc *service.SGLangService) *ChatHandler {
+func NewChatHandler(logger *zap.Logger, svc *service.SMGService) *ChatHandler {
 	return &ChatHandler{
 		logger:  logger,
 		service: svc,
@@ -58,7 +58,7 @@ func (h *ChatHandler) HandleChatCompletion(ctx *fasthttp.RequestCtx) {
 	}()
 
 	// Convert to SGLang format
-	messages := make([]sglang.ChatMessage, len(req.Messages))
+	messages := make([]smg.ChatMessage, len(req.Messages))
 	for i, msg := range req.Messages {
 		role, roleOk := msg["role"]
 		content, contentOk := msg["content"]
@@ -78,13 +78,13 @@ func (h *ChatHandler) HandleChatCompletion(ctx *fasthttp.RequestCtx) {
 			contentStr = content
 		}
 
-		messages[i] = sglang.ChatMessage{
+		messages[i] = smg.ChatMessage{
 			Role:    role,
 			Content: contentStr,
 		}
 	}
 
-	sglReq := sglang.ChatCompletionRequest{
+	sglReq := smg.ChatCompletionRequest{
 		Model:    req.Model,
 		Messages: messages,
 		Stream:   req.Stream,
@@ -153,7 +153,7 @@ func (h *ChatHandler) logHTTPResponse(statusCode int, path string) {
 	h.logger.Info(msg)
 }
 
-func (h *ChatHandler) handleStreamingCompletion(ctx *fasthttp.RequestCtx, requestCtx context.Context, req sglang.ChatCompletionRequest) {
+func (h *ChatHandler) handleStreamingCompletion(ctx *fasthttp.RequestCtx, requestCtx context.Context, req smg.ChatCompletionRequest) {
 
 	ctx.SetContentType("text/event-stream")
 	ctx.Response.Header.Set("Cache-Control", "no-cache")
@@ -345,7 +345,7 @@ func (h *ChatHandler) handleStreamingCompletion(ctx *fasthttp.RequestCtx, reques
 	})
 }
 
-func (h *ChatHandler) handleNonStreamingCompletion(ctx *fasthttp.RequestCtx, requestCtx context.Context, req sglang.ChatCompletionRequest) {
+func (h *ChatHandler) handleNonStreamingCompletion(ctx *fasthttp.RequestCtx, requestCtx context.Context, req smg.ChatCompletionRequest) {
 	resp, err := h.service.Client().CreateChatCompletion(requestCtx, req)
 	if err != nil {
 		h.logger.Error("Failed to create chat completion",
@@ -494,9 +494,9 @@ func (h *ChatHandler) HandleGenerate(ctx *fasthttp.RequestCtx) {
 	}
 
 	// Convert to chat completion format for processing
-	chatReq := sglang.ChatCompletionRequest{
+	chatReq := smg.ChatCompletionRequest{
 		Model:    "default",
-		Messages: []sglang.ChatMessage{{Role: "user", Content: text}},
+		Messages: []smg.ChatMessage{{Role: "user", Content: text}},
 		Stream:   false,
 	}
 

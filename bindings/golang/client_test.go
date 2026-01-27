@@ -1,4 +1,4 @@
-package sglang
+package smg
 
 import (
 	"context"

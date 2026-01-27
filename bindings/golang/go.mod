@@ -1,4 +1,4 @@
-module github.com/sglang/sglang-go-grpc-sdk
+module github.com/lightseek/smg/go-grpc-sdk
 
 go 1.24.0
 

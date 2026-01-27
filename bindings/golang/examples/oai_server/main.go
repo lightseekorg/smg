@@ -1,4 +1,4 @@
-// OpenAI-compatible chat server using SGLang Go SDK and fasthttp framework
+// OpenAI-compatible chat server using SMG Go SDK and fasthttp framework
 package main
 
 import (
@@ -41,14 +41,14 @@ func main() {
 		zap.String("port", cfg.Port),
 	)
 
-	// Initialize SGLang service
-	sglangService, err := service.NewSGLangService(cfg.Endpoint, cfg.TokenizerPath)
+	// Initialize SMG service
+	smgService, err := service.NewSMGService(cfg.Endpoint, cfg.TokenizerPath)
 	if err != nil {
-		appLogger.Fatal("Failed to create SGLang client", zap.Error(err))
+		appLogger.Fatal("Failed to create SMG client", zap.Error(err))
 	}
-	defer sglangService.Close()
+	defer smgService.Close()
 
-	appLogger.Info("SGLang client created successfully")
+	appLogger.Info("SMG client created successfully")
 
 	// Enable pprof if requested
 	if os.Getenv("PPROF_ENABLED") == "true" {
@@ -69,7 +69,7 @@ func main() {
 	// Initialize handlers
 	healthHandler := handlers.NewHealthHandler(appLogger)
 	modelsHandler := handlers.NewModelsHandler(appLogger, cfg.TokenizerPath)
-	chatHandler := handlers.NewChatHandler(appLogger, sglangService)
+	chatHandler := handlers.NewChatHandler(appLogger, smgService)
 
 	// Setup fasthttp router
 	router := func(ctx *fasthttp.RequestCtx) {

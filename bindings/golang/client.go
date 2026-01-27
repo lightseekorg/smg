@@ -1,11 +1,11 @@
-// Package sglang provides a Go SDK for SGLang gRPC API.
+// Package smg provides a Go SDK for SMG (Shepherd Model Gateway) gRPC API.
 //
-// SGLang is a fast language model serving framework. This package provides a Go client
-// library for interacting with SGLang's gRPC API, following the style of OpenAI's Go SDK.
+// SMG is a fast language model serving framework. This package provides a Go client
+// library for interacting with SMG's gRPC API, following the style of OpenAI's Go SDK.
 //
 // Basic usage:
 //
-//	client, err := sglang.NewClient(sglang.ClientConfig{
+//	client, err := smg.NewClient(smg.ClientConfig{
 //		Endpoint:      "grpc://localhost:20000",
 //		TokenizerPath: "/path/to/tokenizer",
 //	})
@@ -14,15 +14,15 @@
 //	}
 //	defer client.Close()
 //
-//	resp, err := client.CreateChatCompletion(ctx, sglang.ChatCompletionRequest{
+//	resp, err := client.CreateChatCompletion(ctx, smg.ChatCompletionRequest{
 //		Model: "default",
-//		Messages: []sglang.ChatMessage{
+//		Messages: []smg.ChatMessage{
 //			{Role: "user", Content: "Hello"},
 //		},
 //	})
 //
 // For streaming responses, use CreateChatCompletionStream instead.
-package sglang
+package smg
 
 import (
 	"context"
@@ -34,7 +34,7 @@ import (
 	"sync"
 	"time"
 
-	grpcclient "github.com/sglang/sglang-go-grpc-sdk/internal/grpc"
+	grpcclient "github.com/lightseek/smg/go-grpc-sdk/internal/grpc"
 )
 
 // Client is the main client for interacting with SGLang gRPC API.

@@ -1,4 +1,4 @@
-// Simple example demonstrating basic usage of SGLang Go SDK
+// Simple example demonstrating basic usage of SMG Go SDK
 package main
 
 import (
@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/sglang/sglang-go-grpc-sdk"
+	"github.com/lightseek/smg/go-grpc-sdk"
 )
 
 func main() {
@@ -23,7 +23,7 @@ func main() {
 	}
 
 	// Create client
-	client, err := sglang.NewClient(sglang.ClientConfig{
+	client, err := smg.NewClient(smg.ClientConfig{
 		Endpoint:      endpoint,
 		TokenizerPath: tokenizerPath,
 	})
@@ -33,16 +33,16 @@ func main() {
 	defer client.Close()
 
 	// Create chat completion request
-	req := sglang.ChatCompletionRequest{
+	req := smg.ChatCompletionRequest{
 		Model: "default",
-		Messages: []sglang.ChatMessage{
+		Messages: []smg.ChatMessage{
 			{
 				Role:    "system",
 				Content: "You are a helpful assistant.",
 			},
 			{
 				Role:    "user",
-				Content: "写一首歌关于夏天",
+				Content: "Write a short poem about summer",
 			},
 		},
 		Stream:              false,

@@ -1,8 +1,9 @@
-// Streaming example demonstrating real-time streaming with SGLang Go SDK
+// Streaming example demonstrating real-time streaming with SMG Go SDK
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -10,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sglang/sglang-go-grpc-sdk"
+	smg "github.com/lightseek/smg/go-grpc-sdk"
 )
 
 func main() {
@@ -26,7 +27,7 @@ func main() {
 	}
 
 	// Create client
-	client, err := sglang.NewClient(sglang.ClientConfig{
+	client, err := smg.NewClient(smg.ClientConfig{
 		Endpoint:      endpoint,
 		TokenizerPath: tokenizerPath,
 	})
@@ -36,16 +37,16 @@ func main() {
 	defer client.Close()
 
 	// Create streaming chat completion request
-	req := sglang.ChatCompletionRequest{
+	req := smg.ChatCompletionRequest{
 		Model: "default",
-		Messages: []sglang.ChatMessage{
+		Messages: []smg.ChatMessage{
 			{
 				Role:    "system",
 				Content: "You are a helpful assistant.",
 			},
 			{
 				Role:    "user",
-				Content: "写一首春天的诗歌",
+				Content: "Write a short poem about spring",
 			},
 		},
 		Stream:              true,
@@ -73,12 +74,19 @@ func main() {
 	firstTokenReceived := false
 
 	for {
-		chunk, err := stream.Recv()
+		jsonStr, err := stream.RecvJSON()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			log.Fatalf("Stream error: %v", err)
+		}
+
+		// Parse the JSON response
+		var chunk smg.ChatCompletionStreamResponse
+		if err := json.Unmarshal([]byte(jsonStr), &chunk); err != nil {
+			log.Printf("Failed to parse chunk: %v", err)
+			continue
 		}
 
 		chunkCount++
