@@ -94,9 +94,7 @@ impl GrpcClient {
         match runtime_type {
             "sglang" => Ok(Self::Sglang(SglangSchedulerClient::connect(url).await?)),
             "vllm" => Ok(Self::Vllm(VllmEngineClient::connect(url).await?)),
-            "trtllm" | "tensorrt-llm" => {
-                Ok(Self::Trtllm(TrtllmEngineClient::connect(url).await?))
-            }
+            "trtllm" | "tensorrt-llm" => Ok(Self::Trtllm(TrtllmEngineClient::connect(url).await?)),
             _ => Err(format!("Unknown runtime type: {}", runtime_type).into()),
         }
     }
