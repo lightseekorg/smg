@@ -88,9 +88,10 @@ def go_oai_binary(go_ffi_library: Path) -> Path:
     env["LD_LIBRARY_PATH"] = f"{go_ffi_library}:{env.get('LD_LIBRARY_PATH', '')}"
 
     # Build the binary
+    # Use -buildvcs=false to avoid VCS stamping issues in CI environments
     logger.info("Building Go OAI server...")
     result = subprocess.run(
-        ["go", "build", "-o", "oai_server", "."],
+        ["go", "build", "-buildvcs=false", "-o", "oai_server", "."],
         cwd=_GO_OAI_SERVER,
         capture_output=True,
         text=True,
