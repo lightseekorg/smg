@@ -73,12 +73,16 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
             final_labels.insert(key.clone(), value.clone());
         }
 
-        // Determine model_id: config > served_model_name > model_path > UNKNOWN_MODEL_ID
+        // Determine model_id: config > served_model_name > model_id > model_path > UNKNOWN_MODEL_ID
+        // TODO: Normalize field names in ModelInfo::to_labels() so all backends use consistent
+        // names (e.g., always "model_id"). This would eliminate the need for backend-specific
+        // fallback chains here.
         let model_id = config
             .model_id
             .clone()
-            .or_else(|| final_labels.get("served_model_name").cloned())
-            .or_else(|| final_labels.get("model_path").cloned())
+            .or_else(|| final_labels.get("served_model_name").cloned()) // SGLang
+            .or_else(|| final_labels.get("model_id").cloned()) // TensorRT-LLM
+            .or_else(|| final_labels.get("model_path").cloned()) // vLLM
             .unwrap_or_else(|| UNKNOWN_MODEL_ID.to_string());
 
         if model_id != UNKNOWN_MODEL_ID {
