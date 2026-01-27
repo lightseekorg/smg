@@ -1197,14 +1197,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Mode: {}", mode_str);
 
     match cli_args.backend {
-        Backend::Vllm | Backend::Trtllm | Backend::Anthropic => {
+        Backend::Anthropic => {
             println!(
                 "WARNING: runtime '{}' not implemented yet; falling back to regular routing. \
 Provide --worker-urls or PD flags as usual.",
                 cli_args.backend
             );
         }
-        Backend::Sglang | Backend::Openai => {}
+        Backend::Sglang | Backend::Vllm | Backend::Trtllm | Backend::Openai => {}
     }
 
     if !cli_args.enable_igw {
