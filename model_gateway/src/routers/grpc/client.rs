@@ -1,7 +1,7 @@
 //! Unified gRPC client wrapper for SGLang, vLLM, and TensorRT-LLM backends
 
 use crate::{
-    grpc_client::{SglangSchedulerClient, TrtllmEngineClient, VllmEngineClient},
+    grpc_client::{SglangSchedulerClient, TrtllmServiceClient, VllmEngineClient},
     routers::grpc::proto_wrapper::{
         ProtoEmbedRequest, ProtoEmbedResponse, ProtoGenerateRequest, ProtoStream,
     },
@@ -19,7 +19,7 @@ pub struct HealthCheckResponse {
 pub enum GrpcClient {
     Sglang(SglangSchedulerClient),
     Vllm(VllmEngineClient),
-    Trtllm(TrtllmEngineClient),
+    Trtllm(TrtllmServiceClient),
 }
 
 impl GrpcClient {
@@ -56,7 +56,7 @@ impl GrpcClient {
     }
 
     /// Get reference to TensorRT-LLM client (panics if not TensorRT-LLM)
-    pub fn as_trtllm(&self) -> &TrtllmEngineClient {
+    pub fn as_trtllm(&self) -> &TrtllmServiceClient {
         match self {
             Self::Trtllm(client) => client,
             _ => panic!("Expected TensorRT-LLM client"),
@@ -64,7 +64,7 @@ impl GrpcClient {
     }
 
     /// Get mutable reference to TensorRT-LLM client (panics if not TensorRT-LLM)
-    pub fn as_trtllm_mut(&mut self) -> &mut TrtllmEngineClient {
+    pub fn as_trtllm_mut(&mut self) -> &mut TrtllmServiceClient {
         match self {
             Self::Trtllm(client) => client,
             _ => panic!("Expected TensorRT-LLM client"),
@@ -94,7 +94,7 @@ impl GrpcClient {
         match runtime_type {
             "sglang" => Ok(Self::Sglang(SglangSchedulerClient::connect(url).await?)),
             "vllm" => Ok(Self::Vllm(VllmEngineClient::connect(url).await?)),
-            "trtllm" | "tensorrt-llm" => Ok(Self::Trtllm(TrtllmEngineClient::connect(url).await?)),
+            "trtllm" | "tensorrt-llm" => Ok(Self::Trtllm(TrtllmServiceClient::connect(url).await?)),
             _ => Err(format!("Unknown runtime type: {}", runtime_type).into()),
         }
     }
