@@ -196,7 +196,11 @@ pub(super) fn rewrite_streaming_block(
 }
 
 /// Helper to insert an optional string field into a JSON map
-fn insert_optional_string(map: &mut Map<String, Value>, key: &str, value: &Option<String>) {
+pub(super) fn insert_optional_string(
+    map: &mut Map<String, Value>,
+    key: &str,
+    value: &Option<String>,
+) {
     if let Some(v) = value {
         map.insert(key.to_string(), Value::String(v.clone()));
     }

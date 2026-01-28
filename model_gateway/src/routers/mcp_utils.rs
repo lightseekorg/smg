@@ -61,6 +61,34 @@ pub fn extract_server_label(tools: Option<&[ResponseTool]>, default_label: &str)
         .unwrap_or_else(|| default_label.to_string())
 }
 
+/// Resolve the MCP server label for a tool name.
+///
+/// Uses orchestrator inventory to find the tool's server key, then maps it to the
+/// request's MCP server label. Falls back to the first MCP server label (or "mcp").
+pub fn resolve_tool_server_label(
+    orchestrator: Option<&McpOrchestrator>,
+    tool_name: &str,
+    mcp_servers: &[(String, String)],
+) -> String {
+    let fallback_label = mcp_servers
+        .first()
+        .map(|(label, _)| label.as_str())
+        .unwrap_or("mcp");
+    let Some(orchestrator) = orchestrator else {
+        return fallback_label.to_string();
+    };
+    let server_keys: Vec<String> = mcp_servers.iter().map(|(_, key)| key.clone()).collect();
+    let Some(entry) = orchestrator.find_tool_by_name(tool_name, &server_keys) else {
+        return fallback_label.to_string();
+    };
+    let server_key = entry.qualified_name.server_key();
+    mcp_servers
+        .iter()
+        .find(|(_, key)| key == server_key)
+        .map(|(label, _)| label.clone())
+        .unwrap_or_else(|| fallback_label.to_string())
+}
+
 /// Collect routing information for built-in tools in a request.
 ///
 /// Scans request tools for built-in types (web_search_preview, code_interpreter, file_search)
@@ -312,6 +340,38 @@ mod tests {
     fn test_extract_server_label_none_tools() {
         let label = extract_server_label(None, "default");
         assert_eq!(label, "default");
+    }
+
+    #[test]
+    fn test_resolve_tool_server_label_no_orchestrator_uses_first() {
+        let mcp_servers = vec![
+            ("brave".to_string(), "http://localhost:8001/sse".to_string()),
+            ("deepwiki".to_string(), "https://mcp.deepwiki.com/mcp".to_string()),
+        ];
+
+        let label = resolve_tool_server_label(None, "search", &mcp_servers);
+        assert_eq!(label, "brave");
+    }
+
+    #[test]
+    fn test_resolve_tool_server_label_empty_servers_falls_back_mcp() {
+        let mcp_servers: Vec<(String, String)> = Vec::new();
+
+        let label = resolve_tool_server_label(None, "search", &mcp_servers);
+        assert_eq!(label, "mcp");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_tool_server_label_missing_tool_fallbacks() {
+        let orchestrator = create_test_orchestrator_no_builtin().await;
+        let mcp_servers = vec![(
+            "brave".to_string(),
+            "http://localhost:8001/sse".to_string(),
+        )];
+
+        let label =
+            resolve_tool_server_label(Some(orchestrator.as_ref()), "missing_tool", &mcp_servers);
+        assert_eq!(label, "brave");
     }
 
     #[tokio::test]
