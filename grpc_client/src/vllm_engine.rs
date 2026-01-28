@@ -367,6 +367,14 @@ impl VllmEngineClient {
             request.skip_special_tokens
         };
 
+        // Map logprobs: if request.logprobs is true, use top_logprobs value (or 1 if not specified)
+        // OpenAI API only exposes output logprobs, not prompt logprobs, for chat completions
+        let logprobs = if request.logprobs {
+            Some(request.top_logprobs.unwrap_or(1) as i32)
+        } else {
+            None
+        };
+
         Ok(proto::SamplingParams {
             temperature: request.temperature,
             top_p: request.top_p.unwrap_or(1.0),
@@ -382,6 +390,7 @@ impl VllmEngineClient {
             spaces_between_special_tokens: true, // Default from Python SamplingParams
             ignore_eos: request.ignore_eos,
             n: request.n.unwrap_or(1),
+            logprobs,
             constraint: self.build_constraint_for_chat(request, tool_call_constraint)?,
             ..Default::default()
         })
