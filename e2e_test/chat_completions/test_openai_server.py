@@ -30,6 +30,13 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion(self, setup_backend, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
+        import os
+
+        # vLLM doesn't support parallel sampling (n>1) with temperature=0
+        runtime = os.environ.get("E2E_RUNTIME", "sglang")
+        if runtime == "vllm" and parallel_sample_num > 1:
+            parallel_sample_num = 1  # Force n=1 for vLLM
+
         _, model, client, gateway = setup_backend
         self._run_chat_completion(client, model, logprobs, parallel_sample_num)
 
@@ -37,6 +44,13 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion_stream(self, setup_backend, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
+        import os
+
+        # vLLM doesn't support parallel sampling (n>1) with temperature=0
+        runtime = os.environ.get("E2E_RUNTIME", "sglang")
+        if runtime == "vllm" and parallel_sample_num > 1:
+            parallel_sample_num = 1  # Force n=1 for vLLM
+
         _, model, client, gateway = setup_backend
         self._run_chat_completion_stream(client, model, logprobs, parallel_sample_num)
 
