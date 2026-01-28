@@ -1139,7 +1139,7 @@ class ModelPool:
             "--tensor-parallel-size",
             str(tp_size),
             "--max-model-len",
-            "512",
+            "2048",
             "--gpu-memory-utilization",
             "0.9",
         ]

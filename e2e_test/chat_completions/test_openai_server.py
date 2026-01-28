@@ -30,6 +30,13 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion(self, setup_backend, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
+        import os
+
+        # vLLM gRPC doesn't support logprobs in v0.14.0
+        runtime = os.environ.get("E2E_RUNTIME", "sglang")
+        if runtime == "vllm" and logprobs:
+            pytest.skip("vLLM gRPC doesn't support logprobs")
+
         _, model, client, gateway = setup_backend
         self._run_chat_completion(client, model, logprobs, parallel_sample_num)
 
@@ -37,6 +44,13 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion_stream(self, setup_backend, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
+        import os
+
+        # vLLM gRPC doesn't support logprobs in v0.14.0
+        runtime = os.environ.get("E2E_RUNTIME", "sglang")
+        if runtime == "vllm" and logprobs:
+            pytest.skip("vLLM gRPC doesn't support logprobs")
+
         _, model, client, gateway = setup_backend
         self._run_chat_completion_stream(client, model, logprobs, parallel_sample_num)
 
