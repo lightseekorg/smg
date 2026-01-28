@@ -306,6 +306,7 @@ The SmartHome Mini is a compact smart home assistant available in black or white
 @pytest.mark.gateway(
     extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"]
 )
+@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestChatCompletionGptOss(TestChatCompletion):
     """Tests for chat completions API with GPT-OSS model (Harmony).
 
