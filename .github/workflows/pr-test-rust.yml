@@ -186,7 +186,6 @@ jobs:
             reruns: ""
             upload_benchmarks: true
             parallel_opts: ""  # No parallel for benchmarks (performance measurement)
-            setup_sglang: true
           - name: responses
             timeout: 45
             test_dirs: "e2e_test/responses"
@@ -196,7 +195,6 @@ jobs:
             setup_oracle: true
             setup_brave: true
             parallel_opts: ""  # Cloud backend tests not compatible with parallel execution
-            setup_sglang: true
           - name: e2e
             timeout: 45
             test_dirs: "e2e_test/router e2e_test/embeddings"
@@ -204,7 +202,6 @@ jobs:
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"  # Thread-based parallelism
-            setup_sglang: true
           - name: chat-completions-sglang
             timeout: 45
             test_dirs: "e2e_test/chat_completions"
@@ -212,8 +209,6 @@ jobs:
             env_vars: "E2E_RUNTIME=sglang SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: ""
-            test_filter: ""
-            setup_sglang: true
           - name: chat-completions-vllm
             timeout: 45
             test_dirs: "e2e_test/chat_completions"
@@ -221,7 +216,6 @@ jobs:
             env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: ""
-            test_filter: ""
             setup_vllm: true
     runs-on: 4-gpu-a10
     timeout-minutes: ${{ matrix.timeout }}
@@ -229,20 +223,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Clone SGLang repository
-        if: matrix.setup_sglang
+      - name: Install inference backend (SGLang or vLLM)
         run: |
-          git clone https://github.com/sgl-project/sglang.git
-
-      - name: Install SGLang dependencies
-        if: matrix.setup_sglang
-        run: |
-          cd sglang
-          sudo --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
-
-      - name: Install vLLM for gRPC testing
-        if: matrix.setup_vllm
-        run: python3 -m pip install vllm
+          if [ "${{ matrix.setup_vllm }}" == "true" ]; then
+            echo "Installing vLLM for gRPC testing..."
+            python3 -m pip install vllm
+          else
+            echo "Installing SGLang..."
+            git clone https://github.com/sgl-project/sglang.git
+            cd sglang
+            sudo --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
+          fi
 
       - name: Cache flash-attn build
         if: matrix.setup_vllm
@@ -322,7 +313,7 @@ jobs:
       - name: Run E2E tests
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
+          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.test_dirs }} -s -vv -o log_cli=true --log-cli-level=INFO
 
       - name: Upload benchmark results
         if: matrix.upload_benchmarks && success()
