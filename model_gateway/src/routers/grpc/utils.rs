@@ -11,12 +11,11 @@ use uuid::Uuid;
 use super::{
     client::GrpcClient,
     context::RequestContext,
-    proto_wrapper::{ProtoGenerateComplete, ProtoStream},
+    proto_wrapper::{ProtoGenerateComplete, ProtoInputLogProbs, ProtoOutputLogProbs, ProtoStream},
     ProcessedMessages,
 };
 use crate::{
     core::Worker,
-    grpc_client::sglang_proto::{InputLogProbs, OutputLogProbs},
     observability::metrics::metrics_labels,
     protocols::{
         chat::{ChatCompletionRequest, ChatMessage},
@@ -875,7 +874,7 @@ pub(crate) fn create_tool_parser(
 /// This function decodes token IDs using the tokenizer and builds the logprobs structure
 /// expected by the OpenAI API format.
 pub(crate) fn convert_proto_to_openai_logprobs(
-    proto_logprobs: &OutputLogProbs,
+    proto_logprobs: &ProtoOutputLogProbs,
     tokenizer: &Arc<dyn Tokenizer>,
 ) -> Result<ChatLogProbs, String> {
     let mut content_items = Vec::with_capacity(proto_logprobs.token_logprobs.len());
@@ -952,7 +951,7 @@ pub(crate) fn convert_proto_to_openai_logprobs(
 /// Generate format: [[logprob, token_id, ...], [logprob, token_id, ...], ...]
 /// Each inner vec contains [logprob (f64), token_id (i32), ...]
 pub(crate) fn convert_generate_output_logprobs(
-    proto_logprobs: &OutputLogProbs,
+    proto_logprobs: &ProtoOutputLogProbs,
 ) -> Vec<Vec<Option<f64>>> {
     proto_logprobs
         .token_logprobs
@@ -967,15 +966,15 @@ pub(crate) fn convert_generate_output_logprobs(
 /// Generate format: [[logprob, token_id, ...], [logprob, token_id, ...], ...]
 /// First token has null logprob: [[null, token_id], [logprob, token_id], ...]
 pub(crate) fn convert_generate_input_logprobs(
-    proto_logprobs: &InputLogProbs,
+    proto_logprobs: &ProtoInputLogProbs,
 ) -> Vec<Vec<Option<f64>>> {
     proto_logprobs
         .token_logprobs
         .iter()
         .zip(proto_logprobs.token_ids.iter())
-        .map(|(token_logprob, &token_id)| {
-            // InputTokenLogProb has optional value field
-            let logprob_value = token_logprob.value.map(|v| v as f64);
+        .map(|(&token_logprob, &token_id)| {
+            // token_logprob is Option<f32> in unified type
+            let logprob_value = token_logprob.map(|v| v as f64);
             vec![logprob_value, Some(token_id as f64)]
         })
         .collect()
