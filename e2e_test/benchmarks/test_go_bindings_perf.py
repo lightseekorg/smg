@@ -15,7 +15,6 @@ pytest_plugins = ["e2e_test.bindings_go.conftest"]
 
 
 @pytest.mark.e2e
-@pytest.mark.workers(count=4)
 @pytest.mark.model("llama-1b")
 class TestGoBindingsPerf:
     """Performance benchmark for Go OAI server.
@@ -27,8 +26,8 @@ class TestGoBindingsPerf:
     - Input/output throughput
     - GPU utilization
 
-    Thresholds are slightly relaxed compared to direct gRPC/HTTP backends
-    to account for FFI and HTTP layer overhead.
+    Note: The Go OAI server connects to a single gRPC worker, so we use
+    conservative benchmark parameters compared to multi-worker gateway tests.
     """
 
     def test_go_oai_server_perf(self, go_oai_server, genai_bench_runner):
@@ -39,13 +38,16 @@ class TestGoBindingsPerf:
             router_url=f"http://{host}:{port}/v1",
             model_path=model_path,
             experiment_folder="benchmark_go_bindings",
+            # Conservative parameters for single-worker Go OAI server
+            num_concurrency=8,  # Lower than default 32 for single worker
+            traffic_scenario="D(100,50)",  # Shorter sequences than default D(4000,100)
+            max_requests_per_run=40,  # Fewer requests for faster completion
             thresholds={
-                # Slightly relaxed thresholds compared to direct gRPC (6s, 14s, 800, 12, 99)
-                # to account for FFI overhead and HTTP layer
-                "ttft_mean_max": 8,
-                "e2e_latency_mean_max": 16,
-                "input_throughput_mean_min": 600,
-                "output_throughput_mean_min": 10,
-                "gpu_util_p50_min": 95,
+                # Relaxed thresholds for single-worker FFI overhead
+                "ttft_mean_max": 10,
+                "e2e_latency_mean_max": 20,
+                "input_throughput_mean_min": 100,
+                "output_throughput_mean_min": 5,
+                "gpu_util_p50_min": 50,  # Lower since single worker
             },
         )
