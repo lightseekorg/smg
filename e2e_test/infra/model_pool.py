@@ -27,6 +27,8 @@ from .constants import (
     LOCAL_MODES,
     ConnectionMode,
     WorkerType,
+    get_runtime,
+    is_vllm,
 )
 from .gpu_allocator import GPUAllocator, GPUSlot, get_open_port
 from .model_specs import MODEL_SPECS, get_model_spec
@@ -503,18 +505,14 @@ class ModelPool:
         Returns:
             The launched ModelInstance.
         """
-        # Check if we should use vLLM runtime for gRPC workers
-        from .constants import DEFAULT_RUNTIME, ENV_RUNTIME
-
-        runtime = os.environ.get(ENV_RUNTIME, DEFAULT_RUNTIME)
         if mode == ConnectionMode.GRPC:
             logger.info(
                 "gRPC worker requested for %s: E2E_RUNTIME=%s, routing to %s backend",
                 model_id,
-                runtime,
-                "vLLM" if runtime == "vllm" else "SGLang",
+                get_runtime(),
+                "vLLM" if is_vllm() else "SGLang",
             )
-            if runtime == "vllm":
+            if is_vllm():
                 # Launch vLLM gRPC worker instead of SGLang
                 spec = get_model_spec(model_id)
                 # vLLM startup can be slow, use longer timeout

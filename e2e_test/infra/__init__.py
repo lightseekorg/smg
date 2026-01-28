@@ -27,6 +27,9 @@ from .constants import (  # Enums; Convenience sets; Fixture parameters; Default
     ConnectionMode,
     Runtime,
     WorkerType,
+    get_runtime,
+    is_sglang,
+    is_vllm,
 )
 from .gateway import Gateway, WorkerInfo, launch_cloud_gateway
 from .gpu_allocator import (
@@ -100,6 +103,10 @@ __all__ = [
     "ENV_SKIP_BACKEND_SETUP",
     "ENV_SHOW_ROUTER_LOGS",
     "ENV_SHOW_WORKER_LOGS",
+    # Runtime helpers
+    "get_runtime",
+    "is_vllm",
+    "is_sglang",
     # GPU allocation
     "GPUAllocator",
     "GPUInfo",

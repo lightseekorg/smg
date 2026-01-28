@@ -14,6 +14,8 @@ import pytest
 if TYPE_CHECKING:
     from infra import ModelPool
 
+from infra import get_runtime, is_vllm
+
 from .markers import get_marker_kwargs, get_marker_value
 
 logger = logging.getLogger(__name__)
@@ -106,17 +108,15 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
     if is_local:
         # For gRPC mode, check E2E_RUNTIME environment variable
         if connection_mode == ConnectionMode.GRPC:
-            from infra import DEFAULT_RUNTIME, ENV_RUNTIME
-
-            runtime = os.environ.get(ENV_RUNTIME, DEFAULT_RUNTIME)
+            runtime = get_runtime()
             logger.info(
                 "gRPC backend detected: E2E_RUNTIME=%s, routing to %s backend",
                 runtime,
-                "vLLM" if runtime == "vllm" else "SGLang",
+                "vLLM" if is_vllm() else "SGLang",
             )
 
             # Route to vLLM gRPC if runtime is vllm
-            if runtime == "vllm":
+            if is_vllm():
                 yield from _setup_vllm_grpc_backend(
                     request, model_pool, model_id, workers_config, gateway_config
                 )

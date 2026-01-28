@@ -12,7 +12,7 @@ import logging
 
 import pytest
 
-from fixtures import is_vllm
+from infra import is_vllm
 
 logger = logging.getLogger(__name__)
 

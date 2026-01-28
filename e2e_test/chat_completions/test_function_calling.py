@@ -14,7 +14,7 @@ import logging
 import openai
 import pytest
 
-from fixtures import is_vllm
+from infra import is_vllm
 
 logger = logging.getLogger(__name__)
 
@@ -538,10 +538,7 @@ class TestOpenAIServerFunctionCalling:
 
         This tests the fix for the bug where only the last index got a finish_reason chunk.
         """
-        import os
 
-        # vLLM gRPC doesn't properly support n>1 (returns only 1 choice)
-        # This test specifically tests n=2 behavior, so skip for vLLM
         if is_vllm():
             pytest.skip("vLLM doesn't support n>1, this test requires n=2")
 
@@ -686,10 +683,7 @@ class TestOpenAIServerFunctionCalling:
 
         This tests the fix for regular content streaming with multiple choices.
         """
-        import os
 
-        # vLLM gRPC doesn't properly support n>1 (returns only 1 choice)
-        # This test specifically tests n=2 behavior, so skip for vLLM
         if is_vllm():
             pytest.skip("vLLM doesn't support n>1, this test requires n=2")
 
