@@ -14,17 +14,14 @@ use openai_harmony::{
 };
 use tracing::{debug, trace};
 
-use super::types::HarmonyBuildOutput;
-use crate::{
-    grpc_client::sglang_proto::OutputLogProbs,
-    protocols::{
-        chat::{ChatCompletionRequest, ChatMessage, MessageContent},
-        common::{ChatLogProbs, ChatLogProbsContent, ContentPart, Tool, TopLogProb},
-        responses::{
-            ReasoningEffort as ResponsesReasoningEffort, ResponseContentPart, ResponseInput,
-            ResponseInputOutputItem, ResponseReasoningContent, ResponseTool, ResponseToolType,
-            ResponsesRequest, StringOrContentParts,
-        },
+use super::{super::proto_wrapper::ProtoOutputLogProbs, types::HarmonyBuildOutput};
+use crate::protocols::{
+    chat::{ChatCompletionRequest, ChatMessage, MessageContent},
+    common::{ChatLogProbs, ChatLogProbsContent, ContentPart, Tool, TopLogProb},
+    responses::{
+        ReasoningEffort as ResponsesReasoningEffort, ResponseContentPart, ResponseInput,
+        ResponseInputOutputItem, ResponseReasoningContent, ResponseTool, ResponseToolType,
+        ResponsesRequest, StringOrContentParts,
     },
 };
 
@@ -43,12 +40,12 @@ pub(crate) fn get_harmony_encoding() -> &'static HarmonyEncoding {
     })
 }
 
-/// Convert OutputLogProbs to OpenAI ChatLogProbs format using Harmony's tokenizer
+/// Convert ProtoOutputLogProbs to OpenAI ChatLogProbs format using Harmony's tokenizer
 ///
 /// This function decodes token IDs using the Harmony encoding's tokenizer and builds
 /// the logprobs structure expected by the OpenAI API format.
 pub(crate) fn convert_harmony_logprobs(
-    proto_logprobs: &OutputLogProbs,
+    proto_logprobs: &ProtoOutputLogProbs,
 ) -> Result<ChatLogProbs, String> {
     let encoding = get_harmony_encoding();
     let tokenizer = encoding.tokenizer();
