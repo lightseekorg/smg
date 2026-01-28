@@ -119,21 +119,12 @@ def pytest_collection_modifyitems(
 
     for item in items:
         # Extract model from marker or use default
-        # First check the class directly (handles inheritance correctly)
+        # Use get_closest_marker which correctly handles inheritance
+        # (returns marker from child class before parent class)
         model_id = None
-        if hasattr(item, "cls") and item.cls is not None:
-            for marker in (
-                item.cls.pytestmark if hasattr(item.cls, "pytestmark") else []
-            ):
-                if marker.name == PARAM_MODEL and marker.args:
-                    model_id = marker.args[0]
-                    break
-        # Fall back to get_closest_marker for method-level markers
-        if model_id is None:
-            model_marker = item.get_closest_marker(PARAM_MODEL)
-            model_id = (
-                model_marker.args[0] if model_marker and model_marker.args else None
-            )
+        model_marker = item.get_closest_marker(PARAM_MODEL)
+        if model_marker and model_marker.args:
+            model_id = model_marker.args[0]
 
         # Check parametrize for model
         if model_id is None:

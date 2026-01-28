@@ -185,7 +185,7 @@ jobs:
             env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: ""
-            test_filter: "--ignore=e2e_test/chat_completions/test_enable_thinking.py"
+            test_filter: ""
             setup_vllm: true
     runs-on: 4-gpu-a10
     timeout-minutes: ${{ matrix.timeout }}

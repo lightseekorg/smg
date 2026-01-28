@@ -1147,7 +1147,7 @@ class ModelPool:
             "--tensor-parallel-size",
             str(tp_size),
             "--max-model-len",
-            "512",  # Reduced to minimize GPU memory usage
+            "2048",  # Reduced to minimize GPU memory usage
             "--gpu-memory-utilization",
             "0.9",
             "--enforce-eager",  # Disable CUDA graph to save memory
