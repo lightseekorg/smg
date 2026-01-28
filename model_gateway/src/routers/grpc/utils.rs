@@ -992,7 +992,7 @@ pub(crate) fn convert_generate_input_logprobs(
 /// For backward compatibility, also handles simple string "stop" -> Stop
 pub(crate) fn parse_finish_reason(
     reason_str: &str,
-    completion_tokens: i32,
+    completion_tokens: u32,
 ) -> GenerateFinishReason {
     if reason_str == "stop" {
         return GenerateFinishReason::Stop;
@@ -1000,7 +1000,7 @@ pub(crate) fn parse_finish_reason(
 
     if reason_str == "length" {
         return GenerateFinishReason::Length {
-            length: completion_tokens.max(0) as u32,
+            length: completion_tokens,
         };
     }
 

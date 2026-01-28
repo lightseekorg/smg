@@ -471,17 +471,17 @@ impl StreamingProcessor {
                     }
 
                     // Store metadata
-                    prompt_tokens.insert(index, complete.prompt_tokens() as u32);
+                    prompt_tokens.insert(index, complete.prompt_tokens());
 
                     // For vLLM, use accumulated count (we tracked deltas)
                     // For SGLang, use complete value (already cumulative)
                     if complete.is_vllm() {
                         completion_tokens.entry(index).or_insert(0);
                     } else {
-                        completion_tokens.insert(index, complete.completion_tokens() as u32);
+                        completion_tokens.insert(index, complete.completion_tokens());
                     }
 
-                    cached_tokens.insert(index, complete.cached_tokens() as u32);
+                    cached_tokens.insert(index, complete.cached_tokens());
                     finish_reasons.insert(index, complete.finish_reason().to_string());
 
                     // Extract matched_stop

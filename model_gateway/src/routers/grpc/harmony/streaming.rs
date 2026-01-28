@@ -236,9 +236,9 @@ impl HarmonyStreamingProcessor {
                             }
                         }),
                     );
-                    prompt_tokens.insert(index, complete_wrapper.prompt_tokens() as u32);
+                    prompt_tokens.insert(index, complete_wrapper.prompt_tokens());
                     *completion_tokens.entry(index).or_insert(0) =
-                        complete_wrapper.completion_tokens() as u32;
+                        complete_wrapper.completion_tokens();
 
                     // Finalize parser and emit final chunk
                     if let Some(parser) = parsers.get_mut(&index) {
@@ -319,10 +319,7 @@ impl HarmonyStreamingProcessor {
             let response = result.map_err(|e| format!("Prefill stream error: {}", e))?;
 
             if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
-                prompt_tokens.insert(
-                    complete_wrapper.index(),
-                    complete_wrapper.prompt_tokens() as u32,
-                );
+                prompt_tokens.insert(complete_wrapper.index(), complete_wrapper.prompt_tokens());
             }
         }
 
@@ -411,7 +408,7 @@ impl HarmonyStreamingProcessor {
                         }),
                     );
                     *completion_tokens.entry(index).or_insert(0) =
-                        complete_wrapper.completion_tokens() as u32;
+                        complete_wrapper.completion_tokens();
 
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
@@ -949,8 +946,8 @@ impl HarmonyStreamingProcessor {
                             json!(s)
                         }
                     });
-                    prompt_tokens = complete_wrapper.prompt_tokens() as u32;
-                    completion_tokens = complete_wrapper.completion_tokens() as u32;
+                    prompt_tokens = complete_wrapper.prompt_tokens();
+                    completion_tokens = complete_wrapper.completion_tokens();
 
                     // Finalize parser and get complete output
                     let final_output = parser

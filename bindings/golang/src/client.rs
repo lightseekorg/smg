@@ -173,7 +173,7 @@ pub unsafe extern "C" fn sgl_client_chat_completion_stream(
             return SglErrorCode::TokenizationError;
         }
     };
-    let prompt_tokens = token_ids.len() as i32; // Save prompt token count
+    let prompt_tokens = token_ids.len() as u32; // Save prompt token count
 
     // Generate tool constraints if needed
     let tool_constraint = if let Some(tools) = chat_request.tools.as_ref() {

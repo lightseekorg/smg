@@ -442,15 +442,15 @@ impl ResponseProcessor {
             let meta_info = GenerateMetaInfo {
                 id: dispatch.request_id.clone(),
                 finish_reason,
-                prompt_tokens: complete.prompt_tokens() as u32,
+                prompt_tokens: complete.prompt_tokens(),
                 weight_version: dispatch
                     .weight_version
                     .clone()
                     .unwrap_or_else(|| "default".to_string()),
                 input_token_logprobs,
                 output_token_logprobs,
-                completion_tokens: complete.completion_tokens() as u32,
-                cached_tokens: complete.cached_tokens() as u32,
+                completion_tokens: complete.completion_tokens(),
+                cached_tokens: complete.cached_tokens(),
                 e2e_latency: start_time.elapsed().as_secs_f64(),
                 matched_stop,
             };

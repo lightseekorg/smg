@@ -51,18 +51,18 @@ fn parse_chunk(json: &Value) -> proto::GenerateStreamChunk {
             .unwrap_or_default(),
         prompt_tokens: json
             .get("prompt_tokens")
-            .and_then(|v| v.as_i64())
-            .map(|n| n as i32)
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
             .unwrap_or(0),
         completion_tokens: json
             .get("completion_tokens")
-            .and_then(|v| v.as_i64())
-            .map(|n| n as i32)
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
             .unwrap_or(0),
         cached_tokens: json
             .get("cached_tokens")
-            .and_then(|v| v.as_i64())
-            .map(|n| n as i32)
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
             .unwrap_or(0),
         output_logprobs: None,
         hidden_states: vec![],
@@ -89,18 +89,18 @@ fn parse_complete(json: &Value) -> proto::GenerateComplete {
             .to_string(),
         prompt_tokens: json
             .get("prompt_tokens")
-            .and_then(|v| v.as_i64())
-            .map(|n| n as i32)
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
             .unwrap_or(0),
         completion_tokens: json
             .get("completion_tokens")
-            .and_then(|v| v.as_i64())
-            .map(|n| n as i32)
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
             .unwrap_or(0),
         cached_tokens: json
             .get("cached_tokens")
-            .and_then(|v| v.as_i64())
-            .map(|n| n as i32)
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
             .unwrap_or(0),
         output_logprobs: None,
         all_hidden_states: vec![],

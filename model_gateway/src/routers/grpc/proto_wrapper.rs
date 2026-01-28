@@ -306,7 +306,7 @@ impl ProtoGenerateStreamChunk {
         match self {
             Self::Sglang(c) => c.index,
             Self::Vllm(c) => c.index,
-            Self::Trtllm(c) => c.sequence_index as u32,
+            Self::Trtllm(c) => c.sequence_index,
         }
     }
 
@@ -363,28 +363,28 @@ impl ProtoGenerateStreamChunk {
     }
 
     /// Get prompt tokens (cumulative)
-    pub fn prompt_tokens(&self) -> i32 {
+    pub fn prompt_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.prompt_tokens,
-            Self::Vllm(c) => c.prompt_tokens as i32,
+            Self::Vllm(c) => c.prompt_tokens,
             Self::Trtllm(c) => c.prompt_tokens,
         }
     }
 
     /// Get completion tokens (cumulative)
-    pub fn completion_tokens(&self) -> i32 {
+    pub fn completion_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.completion_tokens,
-            Self::Vllm(c) => c.completion_tokens as i32,
+            Self::Vllm(c) => c.completion_tokens,
             Self::Trtllm(c) => c.completion_tokens,
         }
     }
 
     /// Get cached tokens (cumulative)
-    pub fn cached_tokens(&self) -> i32 {
+    pub fn cached_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.cached_tokens,
-            Self::Vllm(c) => c.cached_tokens as i32,
+            Self::Vllm(c) => c.cached_tokens,
             Self::Trtllm(c) => c.cached_tokens,
         }
     }
@@ -456,19 +456,19 @@ impl ProtoGenerateComplete {
     }
 
     /// Get prompt tokens
-    pub fn prompt_tokens(&self) -> i32 {
+    pub fn prompt_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.prompt_tokens,
-            Self::Vllm(c) => c.prompt_tokens as i32,
+            Self::Vllm(c) => c.prompt_tokens,
             Self::Trtllm(c) => c.prompt_tokens,
         }
     }
 
     /// Get completion tokens
-    pub fn completion_tokens(&self) -> i32 {
+    pub fn completion_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.completion_tokens,
-            Self::Vllm(c) => c.completion_tokens as i32,
+            Self::Vllm(c) => c.completion_tokens,
             Self::Trtllm(c) => c.completion_tokens,
         }
     }
@@ -488,7 +488,7 @@ impl ProtoGenerateComplete {
         match self {
             Self::Sglang(c) => c.index,
             Self::Vllm(c) => c.index,
-            Self::Trtllm(c) => c.sequence_index as u32,
+            Self::Trtllm(c) => c.sequence_index,
         }
     }
 
@@ -511,10 +511,10 @@ impl ProtoGenerateComplete {
     }
 
     /// Get cached tokens
-    pub fn cached_tokens(&self) -> i32 {
+    pub fn cached_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.cached_tokens,
-            Self::Vllm(c) => c.cached_tokens as i32,
+            Self::Vllm(c) => c.cached_tokens,
             Self::Trtllm(c) => c.cached_tokens,
         }
     }
@@ -771,21 +771,21 @@ impl ProtoEmbedComplete {
     }
 
     /// Get prompt tokens
-    pub fn prompt_tokens(&self) -> i32 {
+    pub fn prompt_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.prompt_tokens,
         }
     }
 
     /// Get cached tokens
-    pub fn cached_tokens(&self) -> i32 {
+    pub fn cached_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.cached_tokens,
         }
     }
 
     /// Get embedding dimension
-    pub fn embedding_dim(&self) -> i32 {
+    pub fn embedding_dim(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.embedding_dim,
         }
