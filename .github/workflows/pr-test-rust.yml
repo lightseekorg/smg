@@ -212,7 +212,7 @@ jobs:
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: ""
-            test_filter: "-k 'not vllm-grpc'"  # SGLang gRPC only
+            test_filter: "-k 'grpc and not vllm'"
             setup_sglang: true
           - name: chat-completions-vllm
             timeout: 45
@@ -221,7 +221,7 @@ jobs:
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: ""
-            test_filter: "-k 'vllm-grpc' --ignore=e2e_test/chat_completions/test_enable_thinking.py"  # vLLM gRPC only, skip qwen-30b
+            test_filter: "-k 'vllm-grpc' --ignore=e2e_test/chat_completions/test_enable_thinking.py"
             setup_vllm: true
     runs-on: 4-gpu-a10
     timeout-minutes: ${{ matrix.timeout }}
