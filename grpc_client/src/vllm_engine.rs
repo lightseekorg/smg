@@ -370,7 +370,7 @@ impl VllmEngineClient {
         // Map logprobs: if request.logprobs is true, use top_logprobs value (or 1 if not specified)
         // OpenAI API only exposes output logprobs, not prompt logprobs, for chat completions
         let logprobs = if request.logprobs {
-            Some(request.top_logprobs.unwrap_or(1) as i32)
+            Some(request.top_logprobs.unwrap_or(1).min(20) as i32)
         } else {
             None
         };

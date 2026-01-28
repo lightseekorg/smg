@@ -41,6 +41,45 @@ pub struct ProtoInputLogProbs {
     pub top_logprobs: Vec<ProtoTopLogProbs>,
 }
 
+/// Helper macro to convert output logprobs from proto types to unified type.
+/// Both SGLang and vLLM have identical OutputLogProbs structure.
+/// Note: Cloning is necessary as we convert from borrowed proto types to owned unified types.
+/// OOM risk is mitigated by capping top_logprobs at 20 in sampling params.
+macro_rules! convert_output_logprobs {
+    ($lp:expr) => {
+        ProtoOutputLogProbs {
+            token_logprobs: $lp.token_logprobs.clone(),
+            token_ids: $lp.token_ids.clone(),
+            top_logprobs: $lp
+                .top_logprobs
+                .iter()
+                .map(|t| ProtoTopLogProbs {
+                    values: t.values.clone(),
+                    token_ids: t.token_ids.clone(),
+                })
+                .collect(),
+        }
+    };
+}
+
+/// Helper macro to convert input logprobs from proto types to unified type.
+macro_rules! convert_input_logprobs {
+    ($lp:expr) => {
+        ProtoInputLogProbs {
+            token_logprobs: $lp.token_logprobs.iter().map(|t| t.value).collect(),
+            token_ids: $lp.token_ids.clone(),
+            top_logprobs: $lp
+                .top_logprobs
+                .iter()
+                .map(|t| ProtoTopLogProbs {
+                    values: t.values.clone(),
+                    token_ids: t.token_ids.clone(),
+                })
+                .collect(),
+        }
+    };
+}
+
 /// Unified ProtoRequest
 #[derive(Clone)]
 pub enum ProtoRequest {
@@ -274,30 +313,14 @@ impl ProtoGenerateStreamChunk {
     /// Get output logprobs (SGLang and vLLM, returns None for TensorRT-LLM)
     pub fn output_logprobs(&self) -> Option<ProtoOutputLogProbs> {
         match self {
-            Self::Sglang(c) => c.output_logprobs.as_ref().map(|lp| ProtoOutputLogProbs {
-                token_logprobs: lp.token_logprobs.clone(),
-                token_ids: lp.token_ids.clone(),
-                top_logprobs: lp
-                    .top_logprobs
-                    .iter()
-                    .map(|t| ProtoTopLogProbs {
-                        values: t.values.clone(),
-                        token_ids: t.token_ids.clone(),
-                    })
-                    .collect(),
-            }),
-            Self::Vllm(c) => c.output_logprobs.as_ref().map(|lp| ProtoOutputLogProbs {
-                token_logprobs: lp.token_logprobs.clone(),
-                token_ids: lp.token_ids.clone(),
-                top_logprobs: lp
-                    .top_logprobs
-                    .iter()
-                    .map(|t| ProtoTopLogProbs {
-                        values: t.values.clone(),
-                        token_ids: t.token_ids.clone(),
-                    })
-                    .collect(),
-            }),
+            Self::Sglang(c) => c
+                .output_logprobs
+                .as_ref()
+                .map(|lp| convert_output_logprobs!(lp)),
+            Self::Vllm(c) => c
+                .output_logprobs
+                .as_ref()
+                .map(|lp| convert_output_logprobs!(lp)),
             Self::Trtllm(_) => None,
         }
     }
@@ -305,30 +328,14 @@ impl ProtoGenerateStreamChunk {
     /// Get input logprobs (SGLang and vLLM only, returns None for TensorRT-LLM)
     pub fn input_logprobs(&self) -> Option<ProtoInputLogProbs> {
         match self {
-            Self::Sglang(c) => c.input_logprobs.as_ref().map(|lp| ProtoInputLogProbs {
-                token_logprobs: lp.token_logprobs.iter().map(|t| t.value).collect(),
-                token_ids: lp.token_ids.clone(),
-                top_logprobs: lp
-                    .top_logprobs
-                    .iter()
-                    .map(|t| ProtoTopLogProbs {
-                        values: t.values.clone(),
-                        token_ids: t.token_ids.clone(),
-                    })
-                    .collect(),
-            }),
-            Self::Vllm(c) => c.input_logprobs.as_ref().map(|lp| ProtoInputLogProbs {
-                token_logprobs: lp.token_logprobs.iter().map(|t| t.value).collect(),
-                token_ids: lp.token_ids.clone(),
-                top_logprobs: lp
-                    .top_logprobs
-                    .iter()
-                    .map(|t| ProtoTopLogProbs {
-                        values: t.values.clone(),
-                        token_ids: t.token_ids.clone(),
-                    })
-                    .collect(),
-            }),
+            Self::Sglang(c) => c
+                .input_logprobs
+                .as_ref()
+                .map(|lp| convert_input_logprobs!(lp)),
+            Self::Vllm(c) => c
+                .input_logprobs
+                .as_ref()
+                .map(|lp| convert_input_logprobs!(lp)),
             Self::Trtllm(_) => None,
         }
     }
