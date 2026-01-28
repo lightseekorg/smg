@@ -539,8 +539,10 @@ class TestOpenAIServerFunctionCalling:
         import os
 
         # vLLM gRPC doesn't properly support n>1 (returns only 1 choice)
+        # This test specifically tests n=2 behavior, so skip for vLLM
         runtime = os.environ.get("E2E_RUNTIME", "sglang")
-        n_choices = 1 if runtime == "vllm" else 2
+        if runtime == "vllm":
+            pytest.skip("vLLM doesn't support n>1, this test requires n=2")
 
         _, model, client, _ = setup_backend
 
@@ -572,7 +574,7 @@ class TestOpenAIServerFunctionCalling:
             {"role": "user", "content": "What is the weather like in Los Angeles?"}
         ]
 
-        # Request with n=2 to get multiple choices (n=1 for vLLM)
+        # Request with n=2 to get multiple choices
         response_stream = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -581,7 +583,7 @@ class TestOpenAIServerFunctionCalling:
             stream=True,
             tools=tools,
             tool_choice="required",  # Force tool calls
-            n=n_choices,  # Multiple choices (or 1 for vLLM)
+            n=2,  # Multiple choices
         )
 
         chunks = list(response_stream)
@@ -597,17 +599,14 @@ class TestOpenAIServerFunctionCalling:
                             finish_reason_chunks[index] = []
                         finish_reason_chunks[index].append(choice.finish_reason)
 
-        # Verify we got finish_reason chunks for expected number of indices
+        # Verify we got finish_reason chunks for both indices
         assert (
-            len(finish_reason_chunks) == n_choices
-        ), f"Expected finish_reason chunks for {n_choices} indices, got {len(finish_reason_chunks)}"
+            len(finish_reason_chunks) == 2
+        ), f"Expected finish_reason chunks for 2 indices, got {len(finish_reason_chunks)}"
 
-        # Verify index 0 has finish_reason (always expected)
+        # Verify both index 0 and 1 have finish_reason
         assert 0 in finish_reason_chunks, "Missing finish_reason chunk for index 0"
-
-        # Verify index 1 if we requested n=2
-        if n_choices == 2:
-            assert 1 in finish_reason_chunks, "Missing finish_reason chunk for index 1"
+        assert 1 in finish_reason_chunks, "Missing finish_reason chunk for index 1"
 
         # Verify the finish_reason is "tool_calls" since we forced tool calls
         for index, reasons in finish_reason_chunks.items():
@@ -689,21 +688,23 @@ class TestOpenAIServerFunctionCalling:
         import os
 
         # vLLM gRPC doesn't properly support n>1 (returns only 1 choice)
+        # This test specifically tests n=2 behavior, so skip for vLLM
         runtime = os.environ.get("E2E_RUNTIME", "sglang")
-        n_choices = 1 if runtime == "vllm" else 2
+        if runtime == "vllm":
+            pytest.skip("vLLM doesn't support n>1, this test requires n=2")
 
         _, model, client, _ = setup_backend
 
         messages = [{"role": "user", "content": "Say hello in one word."}]
 
-        # Request with n=2 to get multiple choices, no tools (n=1 for vLLM)
+        # Request with n=2 to get multiple choices, no tools
         response_stream = client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=0.8,
             stream=True,
             max_tokens=10,  # Keep it short
-            n=n_choices,  # Multiple choices (or 1 for vLLM)
+            n=2,  # Multiple choices
         )
 
         chunks = list(response_stream)
@@ -719,17 +720,14 @@ class TestOpenAIServerFunctionCalling:
                             finish_reason_chunks[index] = []
                         finish_reason_chunks[index].append(choice.finish_reason)
 
-        # Verify we got finish_reason chunks for expected number of indices
+        # Verify we got finish_reason chunks for both indices
         assert (
-            len(finish_reason_chunks) == n_choices
-        ), f"Expected finish_reason chunks for {n_choices} indices, got {len(finish_reason_chunks)}"
+            len(finish_reason_chunks) == 2
+        ), f"Expected finish_reason chunks for 2 indices, got {len(finish_reason_chunks)}"
 
-        # Verify index 0 has finish_reason (always expected)
+        # Verify both index 0 and 1 have finish_reason
         assert 0 in finish_reason_chunks, "Missing finish_reason chunk for index 0"
-
-        # Verify index 1 if we requested n=2
-        if n_choices == 2:
-            assert 1 in finish_reason_chunks, "Missing finish_reason chunk for index 1"
+        assert 1 in finish_reason_chunks, "Missing finish_reason chunk for index 1"
 
         # Verify the finish_reason is "stop" (regular completion)
         for index, reasons in finish_reason_chunks.items():
