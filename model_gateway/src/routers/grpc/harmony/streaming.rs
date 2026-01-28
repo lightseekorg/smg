@@ -162,8 +162,7 @@ impl HarmonyStreamingProcessor {
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
-                    let chunk = chunk_wrapper.as_sglang();
-                    let index = chunk.index;
+                    let index = chunk_wrapper.index();
 
                     // Track first token time for TTFT metric
                     if first_token_time.is_none() {
@@ -199,7 +198,7 @@ impl HarmonyStreamingProcessor {
                         .ok_or("Parser not found for index")?;
 
                     let delta_result = parser
-                        .parse_chunk(&chunk.token_ids)
+                        .parse_chunk(chunk_wrapper.token_ids())
                         .map_err(|e| format!("Parse error: {}", e))?;
 
                     // Emit SSE event if there's a delta
@@ -221,14 +220,14 @@ impl HarmonyStreamingProcessor {
                     }
                 }
                 ProtoResponseVariant::Complete(complete_wrapper) => {
-                    let complete = complete_wrapper.as_sglang();
-                    let index = complete.index;
+                    let index = complete_wrapper.index();
 
                     // Store final metadata
-                    finish_reasons.insert(index, Some(complete.finish_reason.clone()));
+                    finish_reasons
+                        .insert(index, Some(complete_wrapper.finish_reason().to_string()));
                     matched_stops.insert(
                         index,
-                        complete.matched_stop.as_ref().map(|m| match m {
+                        complete_wrapper.matched_stop().map(|m| match m {
                             MatchedTokenId(id) => {
                                 json!(id)
                             }
@@ -237,15 +236,18 @@ impl HarmonyStreamingProcessor {
                             }
                         }),
                     );
-                    prompt_tokens.insert(index, complete.prompt_tokens as u32);
+                    prompt_tokens.insert(index, complete_wrapper.prompt_tokens() as u32);
                     *completion_tokens.entry(index).or_insert(0) =
-                        complete.completion_tokens as u32;
+                        complete_wrapper.completion_tokens() as u32;
 
                     // Finalize parser and emit final chunk
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
                         let final_output = parser
-                            .finalize(complete.finish_reason.clone(), matched_stop.clone())
+                            .finalize(
+                                complete_wrapper.finish_reason().to_string(),
+                                matched_stop.clone(),
+                            )
                             .map_err(|e| format!("Finalize error: {}", e))?;
 
                         Self::emit_final_chunk(
@@ -317,8 +319,10 @@ impl HarmonyStreamingProcessor {
             let response = result.map_err(|e| format!("Prefill stream error: {}", e))?;
 
             if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
-                let complete = complete_wrapper.as_sglang();
-                prompt_tokens.insert(complete.index, complete.prompt_tokens as u32);
+                prompt_tokens.insert(
+                    complete_wrapper.index(),
+                    complete_wrapper.prompt_tokens() as u32,
+                );
             }
         }
 
@@ -336,8 +340,7 @@ impl HarmonyStreamingProcessor {
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
-                    let chunk = chunk_wrapper.as_sglang();
-                    let index = chunk.index;
+                    let index = chunk_wrapper.index();
 
                     // Track first token time for TTFT metric
                     if first_token_time.is_none() {
@@ -371,7 +374,7 @@ impl HarmonyStreamingProcessor {
                         .ok_or("Parser not found for index")?;
 
                     let delta_result = parser
-                        .parse_chunk(&chunk.token_ids)
+                        .parse_chunk(chunk_wrapper.token_ids())
                         .map_err(|e| format!("Parse error: {}", e))?;
 
                     if let Some(delta) = delta_result {
@@ -392,13 +395,13 @@ impl HarmonyStreamingProcessor {
                     }
                 }
                 ProtoResponseVariant::Complete(complete_wrapper) => {
-                    let complete = complete_wrapper.as_sglang();
-                    let index = complete.index;
+                    let index = complete_wrapper.index();
 
-                    finish_reasons.insert(index, Some(complete.finish_reason.clone()));
+                    finish_reasons
+                        .insert(index, Some(complete_wrapper.finish_reason().to_string()));
                     matched_stops.insert(
                         index,
-                        complete.matched_stop.as_ref().map(|m| match m {
+                        complete_wrapper.matched_stop().map(|m| match m {
                             MatchedTokenId(id) => {
                                 json!(id)
                             }
@@ -408,12 +411,15 @@ impl HarmonyStreamingProcessor {
                         }),
                     );
                     *completion_tokens.entry(index).or_insert(0) =
-                        complete.completion_tokens as u32;
+                        complete_wrapper.completion_tokens() as u32;
 
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
                         let final_output = parser
-                            .finalize(complete.finish_reason.clone(), matched_stop.clone())
+                            .finalize(
+                                complete_wrapper.finish_reason().to_string(),
+                                matched_stop.clone(),
+                            )
                             .map_err(|e| format!("Finalize error: {}", e))?;
 
                         Self::emit_final_chunk(
@@ -713,10 +719,9 @@ impl HarmonyStreamingProcessor {
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
-                    let chunk = chunk_wrapper.as_sglang();
                     // Parse chunk via Harmony parser
                     let delta_result = parser
-                        .parse_chunk(&chunk.token_ids)
+                        .parse_chunk(chunk_wrapper.token_ids())
                         .map_err(|e| format!("Parse error: {}", e))?;
 
                     // Emit SSE events if there's a delta
@@ -934,10 +939,9 @@ impl HarmonyStreamingProcessor {
                     }
                 }
                 ProtoResponseVariant::Complete(complete_wrapper) => {
-                    let complete = complete_wrapper.as_sglang();
                     // Store final metadata
-                    finish_reason = complete.finish_reason.clone();
-                    matched_stop = complete.matched_stop.as_ref().map(|m| match m {
+                    finish_reason = complete_wrapper.finish_reason().to_string();
+                    matched_stop = complete_wrapper.matched_stop().map(|m| match m {
                         MatchedTokenId(id) => {
                             json!(id)
                         }
@@ -945,8 +949,8 @@ impl HarmonyStreamingProcessor {
                             json!(s)
                         }
                     });
-                    prompt_tokens = complete.prompt_tokens as u32;
-                    completion_tokens = complete.completion_tokens as u32;
+                    prompt_tokens = complete_wrapper.prompt_tokens() as u32;
+                    completion_tokens = complete_wrapper.completion_tokens() as u32;
 
                     // Finalize parser and get complete output
                     let final_output = parser
