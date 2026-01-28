@@ -4,7 +4,7 @@
 //! SGLang scheduler, vLLM engine, and TensorRT-LLM engine backends.
 
 pub mod sglang_scheduler;
-pub mod trtllm_engine;
+pub mod trtllm_service;
 pub mod vllm_engine;
 
 // Re-export clients
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 pub use sglang_scheduler::{proto as sglang_proto, SglangSchedulerClient};
 use tonic::metadata::MetadataMap;
-pub use trtllm_engine::{proto as trtllm_proto, TrtllmEngineClient};
+pub use trtllm_service::{proto as trtllm_proto, TrtllmServiceClient};
 pub use vllm_engine::{proto as vllm_proto, VllmEngineClient};
 
 /// Trait for injecting trace context into gRPC metadata.

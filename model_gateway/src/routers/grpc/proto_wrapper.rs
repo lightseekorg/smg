@@ -8,8 +8,8 @@ use futures_util::StreamExt;
 use crate::grpc_client::{
     sglang_proto::{self as sglang, generate_complete::MatchedStop},
     sglang_scheduler::AbortOnDropStream as SglangStream,
-    trtllm_engine::AbortOnDropStream as TrtllmStream,
     trtllm_proto as trtllm,
+    trtllm_service::AbortOnDropStream as TrtllmStream,
     vllm_engine::AbortOnDropStream as VllmStream,
     vllm_proto as vllm,
 };
