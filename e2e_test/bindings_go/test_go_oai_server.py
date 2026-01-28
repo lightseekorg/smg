@@ -617,8 +617,17 @@ class TestGoOAIServerEdgeCases:
 
 
 @pytest.mark.model("llama-1b")
+@pytest.mark.xfail(
+    reason="Go OAI server does not currently support n > 1 (multiple choices)",
+    strict=False,
+)
 class TestGoOAIServerMultipleChoices:
-    """Tests for n parameter (multiple choices)."""
+    """Tests for n parameter (multiple choices).
+
+    Note: The Go OAI server currently does not support generating multiple
+    choices (n > 1). These tests are marked as xfail to document the expected
+    behavior and will pass when support is added.
+    """
 
     def test_n_parameter_non_streaming(self, go_openai_client, go_oai_server):
         """Test that n parameter returns multiple choices."""

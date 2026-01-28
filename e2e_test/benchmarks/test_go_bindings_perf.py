@@ -3,9 +3,15 @@
 Tests the performance of the Go OAI server which connects directly to a gRPC worker.
 This benchmark measures the overhead introduced by the Go FFI layer and HTTP server
 compared to direct gRPC communication.
+
+NOTE: This test requires Go toolchain and FFI library to be available.
+It should only be run by the go-bindings-benchmark CI job, not the regular benchmarks job.
 """
 
 import pytest
+
+# Import Go bindings fixtures for this specific test file
+pytest_plugins = ["e2e_test.bindings_go.conftest"]
 
 
 @pytest.mark.e2e
