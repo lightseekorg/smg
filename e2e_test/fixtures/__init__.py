@@ -23,7 +23,7 @@ from .hooks import (
 )
 
 # Marker helpers
-from .markers import get_marker_kwargs, get_marker_value
+from .markers import get_marker_kwargs, get_marker_value, get_runtime, is_sglang, is_vllm
 
 # Fixtures (imported by conftest.py)
 from .pool import model_base_url, model_client, model_pool
@@ -48,4 +48,8 @@ __all__ = [
     # Marker helpers
     "get_marker_value",
     "get_marker_kwargs",
+    # Runtime helpers
+    "get_runtime",
+    "is_vllm",
+    "is_sglang",
 ]

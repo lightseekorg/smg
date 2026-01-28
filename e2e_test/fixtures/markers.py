@@ -1,10 +1,12 @@
 """Marker helper utilities for E2E tests.
 
-This module provides helper functions for extracting values from pytest markers.
+This module provides helper functions for extracting values from pytest markers
+and runtime configuration.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pytest
@@ -55,3 +57,37 @@ def get_marker_kwargs(
     if marker is not None:
         result.update(marker.kwargs)
     return result
+
+
+# Runtime configuration helpers
+_RUNTIME_CACHE = None
+
+
+def get_runtime() -> str:
+    """Get the current test runtime (sglang or vllm).
+
+    Returns:
+        Runtime name from E2E_RUNTIME environment variable, defaults to "sglang".
+    """
+    global _RUNTIME_CACHE
+    if _RUNTIME_CACHE is None:
+        _RUNTIME_CACHE = os.environ.get("E2E_RUNTIME", "sglang")
+    return _RUNTIME_CACHE
+
+
+def is_vllm() -> bool:
+    """Check if tests are running with vLLM runtime.
+
+    Returns:
+        True if E2E_RUNTIME is "vllm", False otherwise.
+    """
+    return get_runtime() == "vllm"
+
+
+def is_sglang() -> bool:
+    """Check if tests are running with SGLang runtime.
+
+    Returns:
+        True if E2E_RUNTIME is "sglang", False otherwise.
+    """
+    return get_runtime() == "sglang"

@@ -12,6 +12,8 @@ import logging
 
 import pytest
 
+from fixtures import is_vllm
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,12 +32,8 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion(self, setup_backend, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
-        import os
-
-        runtime = os.environ.get("E2E_RUNTIME", "sglang")
-
         # Skip if vLLM with logprobs or n>1 (unsupported features)
-        if runtime == "vllm" and (logprobs is not None or parallel_sample_num > 1):
+        if is_vllm() and (logprobs is not None or parallel_sample_num > 1):
             pytest.skip("vLLM doesn't support logprobs or n>1")
 
         _, model, client, gateway = setup_backend
@@ -45,12 +43,8 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion_stream(self, setup_backend, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
-        import os
-
-        runtime = os.environ.get("E2E_RUNTIME", "sglang")
-
         # Skip if vLLM with logprobs or n>1 (unsupported features)
-        if runtime == "vllm" and (logprobs is not None or parallel_sample_num > 1):
+        if is_vllm() and (logprobs is not None or parallel_sample_num > 1):
             pytest.skip("vLLM doesn't support logprobs or n>1")
 
         _, model, client, gateway = setup_backend

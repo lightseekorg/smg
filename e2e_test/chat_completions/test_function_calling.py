@@ -14,6 +14,8 @@ import logging
 import openai
 import pytest
 
+from fixtures import is_vllm
+
 logger = logging.getLogger(__name__)
 
 
@@ -540,8 +542,7 @@ class TestOpenAIServerFunctionCalling:
 
         # vLLM gRPC doesn't properly support n>1 (returns only 1 choice)
         # This test specifically tests n=2 behavior, so skip for vLLM
-        runtime = os.environ.get("E2E_RUNTIME", "sglang")
-        if runtime == "vllm":
+        if is_vllm():
             pytest.skip("vLLM doesn't support n>1, this test requires n=2")
 
         _, model, client, _ = setup_backend
@@ -689,8 +690,7 @@ class TestOpenAIServerFunctionCalling:
 
         # vLLM gRPC doesn't properly support n>1 (returns only 1 choice)
         # This test specifically tests n=2 behavior, so skip for vLLM
-        runtime = os.environ.get("E2E_RUNTIME", "sglang")
-        if runtime == "vllm":
+        if is_vllm():
             pytest.skip("vLLM doesn't support n>1, this test requires n=2")
 
         _, model, client, _ = setup_backend
