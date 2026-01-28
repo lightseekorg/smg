@@ -35,7 +35,7 @@ class TestGoBindingsPerf:
         host, port, model_path = go_oai_server
 
         genai_bench_runner(
-            router_url=f"http://{host}:{port}/v1",
+            router_url=f"http://{host}:{port}",
             model_path=model_path,
             experiment_folder="benchmark_go_bindings",
             # Conservative parameters for single-worker Go OAI server
