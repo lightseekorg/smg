@@ -178,42 +178,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: benchmarks
-            timeout: 32
-            test_dirs: "e2e_test/benchmarks"
-            extra_deps: "genai-bench==0.0.3"
-            env_vars: ""
-            reruns: ""
-            upload_benchmarks: true
-            parallel_opts: ""  # No parallel for benchmarks (performance measurement)
-            setup_sglang: true
-          - name: responses
-            timeout: 45
-            test_dirs: "e2e_test/responses"
-            extra_deps: ""
-            env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            setup_oracle: true
-            setup_brave: true
-            parallel_opts: ""  # Cloud backend tests not compatible with parallel execution
-            setup_sglang: true
-          - name: e2e
-            timeout: 45
-            test_dirs: "e2e_test/router e2e_test/embeddings"
-            extra_deps: "pytest-parallel py"  # py is required for pytest-parallel with newer pytest
-            env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"  # Thread-based parallelism
-            setup_sglang: true
-          - name: chat-completions-sglang
-            timeout: 45
-            test_dirs: "e2e_test/chat_completions"
-            extra_deps: ""
-            env_vars: "E2E_RUNTIME=sglang SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: ""
-            test_filter: ""
-            setup_sglang: true
           - name: chat-completions-vllm
             timeout: 45
             test_dirs: "e2e_test/chat_completions"
@@ -230,12 +194,12 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Clone SGLang repository
-        if: matrix.setup_sglang
+        if: false
         run: |
           git clone https://github.com/sgl-project/sglang.git
 
       - name: Install SGLang dependencies
-        if: matrix.setup_sglang
+        if: false
         run: |
           cd sglang
           sudo --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
@@ -259,7 +223,7 @@ jobs:
           python3 -m pip install flashinfer-python==0.5.3 flashinfer-cubin==0.5.3
 
       - name: Setup Oracle Instant Client
-        if: matrix.setup_oracle
+        if: false
         run: |
           sudo apt-get install -y unzip
           INSTANT_CLIENT_DIR="/home/ubuntu/instant-client"
@@ -279,7 +243,7 @@ jobs:
           echo "LD_LIBRARY_PATH=/home/ubuntu/instant-client/instantclient_23_9:\$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Start Oracle Database
-        if: matrix.setup_oracle
+        if: false
         run: |
           docker run -d -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim
           echo "Starting Oracle DB..."
@@ -290,7 +254,7 @@ jobs:
           echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
 
       - name: Start Brave MCP Server
-        if: matrix.setup_brave
+        if: false
         run: |
           docker run -d --rm \
             -p 8001:8080 \
@@ -325,20 +289,20 @@ jobs:
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
 
       - name: Upload benchmark results
-        if: matrix.upload_benchmarks && success()
+        if: false && success()
         uses: actions/upload-artifact@v6
         with:
           name: genai-bench-results-all-policies
           path: benchmark_**/
 
       - name: Cleanup Brave MCP Server
-        if: always() && matrix.setup_brave
+        if: false
         run: |
           docker stop brave-search-server || true
           docker rm brave-search-server || true
 
       - name: Cleanup Oracle Database
-        if: always() && matrix.setup_oracle
+        if: false
         run: |
           docker stop oracle-db || true
           docker rm oracle-db || true

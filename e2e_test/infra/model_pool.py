@@ -507,10 +507,18 @@ class ModelPool:
         from .constants import DEFAULT_RUNTIME, ENV_RUNTIME
 
         runtime = os.environ.get(ENV_RUNTIME, DEFAULT_RUNTIME)
-        if mode == ConnectionMode.GRPC and runtime == "vllm":
-            # Launch vLLM gRPC worker instead of SGLang
-            spec = get_model_spec(model_id)
-            return self._launch_vllm_grpc_worker(model_id, spec, gpu_slot, 300)
+        if mode == ConnectionMode.GRPC:
+            logger.info(
+                "gRPC worker requested for %s: E2E_RUNTIME=%s, routing to %s backend",
+                model_id,
+                runtime,
+                "vLLM" if runtime == "vllm" else "SGLang",
+            )
+            if runtime == "vllm":
+                # Launch vLLM gRPC worker instead of SGLang
+                spec = get_model_spec(model_id)
+                # vLLM startup can be slow, use longer timeout
+                return self._launch_vllm_grpc_worker(model_id, spec, gpu_slot, 600)
 
         spec = get_model_spec(model_id)
         model_path = spec["model"]
@@ -1139,9 +1147,10 @@ class ModelPool:
             "--tensor-parallel-size",
             str(tp_size),
             "--max-model-len",
-            "2048",
+            "512",  # Reduced to minimize GPU memory usage
             "--gpu-memory-utilization",
             "0.9",
+            "--enforce-eager",  # Disable CUDA graph to save memory
         ]
 
         # Add vllm_args from model spec if present
