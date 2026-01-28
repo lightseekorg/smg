@@ -25,7 +25,6 @@ from .constants import (
     INITIAL_GRACE_PERIOD,
     LAUNCH_STAGGER_DELAY,
     LOCAL_MODES,
-    VLLM_GRPC_BACKEND,
     ConnectionMode,
     WorkerType,
 )
@@ -203,7 +202,10 @@ class ModelInstance:
             return False
 
     def _grpc_health_check(self, timeout: float = 5.0) -> bool:
-        """Check health via gRPC health check protocol."""
+        """Check health via gRPC health check protocol.
+
+        Falls back to connection test if health service is not implemented (vLLM).
+        """
         try:
             import grpc
             from grpc_health.v1 import health_pb2, health_pb2_grpc
@@ -227,6 +229,27 @@ class ModelInstance:
             finally:
                 channel.close()
         except grpc.RpcError as e:
+            # Check if health service is not implemented (e.g., vLLM gRPC server)
+            if hasattr(e, "code") and e.code() == grpc.StatusCode.UNIMPLEMENTED:
+                logger.debug(
+                    "gRPC health service not implemented for port %d, checking connection instead",
+                    self.port,
+                )
+                # Fallback: just check if we can connect to the port
+                try:
+                    channel = grpc.insecure_channel(f"{DEFAULT_HOST}:{self.port}")
+                    # Try to get channel state - if server is up, this should work
+                    try:
+                        grpc.channel_ready_future(channel).result(timeout=timeout)
+                        logger.debug(
+                            "gRPC connection check passed for port %d", self.port
+                        )
+                        return True
+                    finally:
+                        channel.close()
+                except Exception:
+                    return False
+
             # gRPC-specific errors (connection refused, deadline exceeded, etc.)
             logger.debug(
                 "gRPC health check failed for port %d: %s",
@@ -480,6 +503,15 @@ class ModelPool:
         Returns:
             The launched ModelInstance.
         """
+        # Check if we should use vLLM runtime for gRPC workers
+        from .constants import DEFAULT_RUNTIME, ENV_RUNTIME
+
+        runtime = os.environ.get(ENV_RUNTIME, DEFAULT_RUNTIME)
+        if mode == ConnectionMode.GRPC and runtime == "vllm":
+            # Launch vLLM gRPC worker instead of SGLang
+            spec = get_model_spec(model_id)
+            return self._launch_vllm_grpc_worker(model_id, spec, gpu_slot, 300)
+
         spec = get_model_spec(model_id)
         model_path = spec["model"]
         tp_size = spec.get("tp", 1)
@@ -1086,6 +1118,7 @@ class ModelPool:
         """
         model_path = model_spec["model"]
         tp_size = model_spec.get("tp", 1)
+        memory_gb = model_spec.get("memory_gb", 16)
         port = gpu_slot.port
 
         # Build environment
@@ -1106,9 +1139,9 @@ class ModelPool:
             "--tensor-parallel-size",
             str(tp_size),
             "--max-model-len",
-            "4096",  # Reduce max length to fit in GPU memory
+            "512",
             "--gpu-memory-utilization",
-            "0.85",  # Reduce memory utilization
+            "0.9",
         ]
 
         # Add vllm_args from model spec if present
@@ -1116,7 +1149,7 @@ class ModelPool:
         if vllm_args:
             cmd.extend(vllm_args)
 
-        key = f"{model_id}:{VLLM_GRPC_BACKEND}"
+        key = f"{model_id}:vllm-grpc"
         logger.info(
             "Launching vLLM gRPC worker %s on GPUs %s port %d",
             key,
@@ -1178,7 +1211,7 @@ class ModelPool:
         Raises:
             RuntimeError: If worker cannot be launched.
         """
-        key = f"{model_id}:{VLLM_GRPC_BACKEND}"
+        key = f"{model_id}:vllm-grpc"
 
         with self._lock:
             # Check if already exists

@@ -94,13 +94,6 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         )
         return
 
-    # vLLM gRPC backend
-    if backend_name == "vllm-grpc":
-        yield from _setup_vllm_grpc_backend(
-            request, model_pool, model_id, workers_config, gateway_config
-        )
-        return
-
     # Check if this is a local backend (grpc, http)
     try:
         connection_mode = ConnectionMode(backend_name)
@@ -109,8 +102,27 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         is_local = False
         connection_mode = None
 
-    # Local backends: use worker from pool + launch gateway
+    # Local backends: check runtime environment variable for gRPC mode
     if is_local:
+        # For gRPC mode, check E2E_RUNTIME environment variable
+        if connection_mode == ConnectionMode.GRPC:
+            from infra import DEFAULT_RUNTIME, ENV_RUNTIME
+
+            runtime = os.environ.get(ENV_RUNTIME, DEFAULT_RUNTIME)
+            logger.info(
+                "gRPC backend detected: E2E_RUNTIME=%s, routing to %s backend",
+                runtime,
+                "vLLM" if runtime == "vllm" else "SGLang",
+            )
+
+            # Route to vLLM gRPC if runtime is vllm
+            if runtime == "vllm":
+                yield from _setup_vllm_grpc_backend(
+                    request, model_pool, model_id, workers_config, gateway_config
+                )
+                return
+
+        # Otherwise use regular local backend (sglang grpc or http)
         yield from _setup_local_backend(
             request,
             model_pool,
@@ -316,7 +328,7 @@ def _setup_vllm_grpc_backend(
     )
 
     try:
-        yield "vllm-grpc", model_path, client, gateway
+        yield "grpc", model_path, client, gateway
     finally:
         logger.info("Tearing down vLLM gRPC gateway")
         gateway.shutdown()

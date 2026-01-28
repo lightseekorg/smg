@@ -96,35 +96,6 @@ def pytest_collection_modifyitems(
         WorkerType,
     )
 
-    # pytest's -k filter applies after this hook, but model pool needs to scan
-    # worker requirements before that. Apply backend filtering early to prevent
-    # launching workers for tests that will be filtered out by -k.
-    keyword_expr = config.getoption("keyword")
-    if keyword_expr and PARAM_SETUP_BACKEND:
-        filtered_items = []
-        for item in items:
-            # For backend-parametrized tests, filter based on -k expression
-            if hasattr(item, "callspec") and PARAM_SETUP_BACKEND in item.callspec.params:
-                backend = item.callspec.params[PARAM_SETUP_BACKEND]
-                # Match backend against keyword expression
-                should_include = False
-                if "vllm-grpc" in keyword_expr:
-                    # -k "vllm-grpc" -> only vllm-grpc tests
-                    should_include = (backend == "vllm-grpc")
-                elif "grpc and not vllm" in keyword_expr:
-                    # -k "grpc and not vllm" -> only grpc tests (exclude vllm-grpc)
-                    should_include = (backend == "grpc")
-                else:
-                    # For other expressions, do simple substring match
-                    should_include = (backend in keyword_expr)
-
-                if should_include:
-                    filtered_items.append(item)
-            else:
-                # Always keep non-parametrized tests
-                filtered_items.append(item)
-
-        items[:] = filtered_items
 
     def track_worker(
         model_id: str, mode: ConnectionMode, worker_type: WorkerType, count: int
@@ -216,14 +187,10 @@ def pytest_collection_modifyitems(
                     )
                 else:
                     # Map backend names to ConnectionMode
-                    # vllm-grpc uses GRPC connection mode
-                    if backend == "vllm-grpc":
-                        mode = ConnectionMode.GRPC
-                    else:
-                        try:
-                            mode = ConnectionMode(backend)
-                        except ValueError:
-                            continue
+                    try:
+                        mode = ConnectionMode(backend)
+                    except ValueError:
+                        continue
 
                     if prefill_count > 0 or decode_count > 0:
                         track_worker(model_id, mode, WorkerType.PREFILL, prefill_count)
@@ -306,6 +273,7 @@ def get_pool_requirements() -> list["WorkerIdentity"]:
         for i in range(count):
             requirements.append(WorkerIdentity(model_id, mode, worker_type, i))
 
+    # Add default worker only if no requirements
     if not requirements:
         requirements.append(WorkerIdentity(DEFAULT_MODEL, ConnectionMode.HTTP))
 

@@ -41,10 +41,14 @@ PARAM_MODEL = "model"
 # Default model
 DEFAULT_MODEL = "llama-8b"
 
+# Default runtime for gRPC tests
+DEFAULT_RUNTIME = "sglang"
+
 # Environment variable names
 ENV_MODELS = "E2E_MODELS"
 ENV_BACKENDS = "E2E_BACKENDS"
 ENV_MODEL = "E2E_MODEL"
+ENV_RUNTIME = "E2E_RUNTIME"  # Runtime for gRPC tests: "sglang" or "vllm"
 ENV_STARTUP_TIMEOUT = "E2E_STARTUP_TIMEOUT"
 ENV_SKIP_MODEL_POOL = "SKIP_MODEL_POOL"
 ENV_SKIP_BACKEND_SETUP = "SKIP_BACKEND_SETUP"
@@ -72,6 +76,3 @@ MAX_RETRY_ATTEMPTS = (
 
 # Display formatting
 LOG_SEPARATOR_WIDTH = 60  # Width for log separator lines (e.g., "="*60)
-
-# Backend types
-VLLM_GRPC_BACKEND = "vllm-grpc"  # vLLM worker with native gRPC
