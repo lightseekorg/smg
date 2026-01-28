@@ -16,7 +16,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error};
 
 use super::{
-    processor::ResponsesIterationResult, types::HarmonyChannelDelta, HarmonyParserAdapter,
+    builder::convert_harmony_logprobs, processor::ResponsesIterationResult,
+    types::HarmonyChannelDelta, HarmonyParserAdapter,
 };
 use crate::{
     grpc_client::sglang_proto::generate_complete::MatchedStop::{MatchedStopStr, MatchedTokenId},
@@ -26,7 +27,10 @@ use crate::{
         chat::{
             ChatCompletionRequest, ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice,
         },
-        common::{CompletionTokensDetails, FunctionCallDelta, ToolCall, ToolCallDelta, Usage},
+        common::{
+            ChatLogProbs, CompletionTokensDetails, FunctionCallDelta, ToolCall, ToolCallDelta,
+            Usage,
+        },
         responses::{
             OutputTokensDetails, ResponseStatus, ResponseUsage, ResponsesResponse, ResponsesUsage,
         },
@@ -178,6 +182,17 @@ impl HarmonyStreamingProcessor {
                     // Track token counts
                     *completion_tokens.entry(index).or_insert(0) += 1;
 
+                    // Convert logprobs if present and requested
+                    let chunk_logprobs = if original_request.logprobs {
+                        chunk_wrapper.output_logprobs().and_then(|lp| {
+                            convert_harmony_logprobs(lp)
+                                .map_err(|e| error!("Failed to convert streaming logprobs: {}", e))
+                                .ok()
+                        })
+                    } else {
+                        None
+                    };
+
                     // Parse chunk via Harmony parser
                     let parser = parsers
                         .get_mut(&index)
@@ -197,6 +212,7 @@ impl HarmonyStreamingProcessor {
                             &dispatch,
                             &original_request,
                             tx,
+                            chunk_logprobs,
                         )?;
 
                         if is_first {
@@ -339,6 +355,17 @@ impl HarmonyStreamingProcessor {
 
                     *completion_tokens.entry(index).or_insert(0) += 1;
 
+                    // Convert logprobs if present and requested
+                    let chunk_logprobs = if original_request.logprobs {
+                        chunk_wrapper.output_logprobs().and_then(|lp| {
+                            convert_harmony_logprobs(lp)
+                                .map_err(|e| error!("Failed to convert streaming logprobs: {}", e))
+                                .ok()
+                        })
+                    } else {
+                        None
+                    };
+
                     let parser = parsers
                         .get_mut(&index)
                         .ok_or("Parser not found for index")?;
@@ -356,6 +383,7 @@ impl HarmonyStreamingProcessor {
                             &dispatch,
                             &original_request,
                             tx,
+                            chunk_logprobs,
                         )?;
 
                         if is_first {
@@ -449,6 +477,7 @@ impl HarmonyStreamingProcessor {
         dispatch: &context::DispatchMetadata,
         original_request: &ChatCompletionRequest,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        logprobs: Option<ChatLogProbs>,
     ) -> Result<(), String> {
         // On first chunk, emit role announcement separately
         if is_first {
@@ -494,7 +523,7 @@ impl HarmonyStreamingProcessor {
                 .add_choice(ChatStreamChoice {
                     index,
                     delta: chat_delta,
-                    logprobs: None,
+                    logprobs,
                     finish_reason: None,
                     matched_stop: None,
                 })
@@ -1016,7 +1045,7 @@ impl HarmonyStreamingProcessor {
                             "type": "message",
                             "role": "assistant",
                             "content": [{
-                                "type": "text",
+                                "type": "output_text",
                                 "text": accumulated_final_text.clone()
                             }]
                         });

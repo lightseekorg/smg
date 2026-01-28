@@ -64,10 +64,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use kv_index::{TokenTree, Tree};
 use rand::Rng;
-use smg_mesh::{
-    tree_ops::{TreeInsertOp, TreeOperation},
-    OptionalMeshSyncManager,
-};
+use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeOperation};
 use tracing::{debug, warn};
 
 use super::{
@@ -776,7 +773,7 @@ mod tests {
     fn test_cache_aware_sync_tree_operation_to_mesh() {
         use std::sync::Arc;
 
-        use smg_mesh::{stores::StateStores, sync::MeshSyncManager};
+        use smg_mesh::{MeshSyncManager, StateStores};
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
@@ -819,11 +816,7 @@ mod tests {
     fn test_cache_aware_restore_tree_state_from_mesh() {
         use std::sync::Arc;
 
-        use smg_mesh::{
-            stores::StateStores,
-            sync::MeshSyncManager,
-            tree_ops::{TreeInsertOp, TreeOperation},
-        };
+        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeOperation};
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
@@ -878,11 +871,7 @@ mod tests {
     fn test_cache_aware_apply_remote_tree_operation() {
         use std::sync::Arc;
 
-        use smg_mesh::{
-            stores::StateStores,
-            sync::MeshSyncManager,
-            tree_ops::{TreeInsertOp, TreeOperation},
-        };
+        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeOperation};
 
         let stores = Arc::new(StateStores::with_self_name("node1".to_string()));
         let mesh_sync = Arc::new(MeshSyncManager::new(stores, "node1".to_string()));
@@ -911,11 +900,7 @@ mod tests {
     fn test_cache_aware_multi_node_consistency() {
         use std::sync::Arc;
 
-        use smg_mesh::{
-            stores::StateStores,
-            sync::MeshSyncManager,
-            tree_ops::{TreeInsertOp, TreeOperation},
-        };
+        use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeOperation};
 
         // Simulate two nodes
         let stores1 = Arc::new(StateStores::with_self_name("node1".to_string()));

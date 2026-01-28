@@ -122,9 +122,9 @@ pub async fn get_mesh_health(State(app_state): State<Arc<AppState>>) -> Response
 
 /// Get worker states from mesh store
 pub async fn get_worker_states(State(app_state): State<Arc<AppState>>) -> Response {
-    match &app_state.mesh_sync_manager {
-        Some(manager) => {
-            let workers = manager.get_all_worker_states();
+    match &app_state.mesh_handler {
+        Some(handler) => {
+            let workers = handler.sync_manager.get_all_worker_states();
             (StatusCode::OK, Json(workers)).into_response()
         }
         None => (
@@ -137,9 +137,9 @@ pub async fn get_worker_states(State(app_state): State<Arc<AppState>>) -> Respon
 
 /// Get policy states from mesh store
 pub async fn get_policy_states(State(app_state): State<Arc<AppState>>) -> Response {
-    match &app_state.mesh_sync_manager {
-        Some(manager) => {
-            let policies = manager.get_all_policy_states();
+    match &app_state.mesh_handler {
+        Some(handler) => {
+            let policies = handler.sync_manager.get_all_policy_states();
             (StatusCode::OK, Json(policies)).into_response()
         }
         None => (
@@ -155,8 +155,8 @@ pub async fn get_worker_state(
     Path(worker_id): Path<String>,
     State(app_state): State<Arc<AppState>>,
 ) -> Response {
-    match &app_state.mesh_sync_manager {
-        Some(manager) => match manager.get_worker_state(&worker_id) {
+    match &app_state.mesh_handler {
+        Some(handler) => match handler.sync_manager.get_worker_state(&worker_id) {
             Some(state) => (StatusCode::OK, Json(state)).into_response(),
             None => (
                 StatusCode::NOT_FOUND,
@@ -177,8 +177,8 @@ pub async fn get_policy_state(
     Path(model_id): Path<String>,
     State(app_state): State<Arc<AppState>>,
 ) -> Response {
-    match &app_state.mesh_sync_manager {
-        Some(manager) => match manager.get_policy_state(&model_id) {
+    match &app_state.mesh_handler {
+        Some(handler) => match handler.sync_manager.get_policy_state(&model_id) {
             Some(state) => (StatusCode::OK, Json(state)).into_response(),
             None => (
                 StatusCode::NOT_FOUND,
@@ -367,17 +367,6 @@ pub async fn get_global_rate_limit(State(app_state): State<Arc<AppState>>) -> Re
 
 /// Get global rate limit statistics
 pub async fn get_global_rate_limit_stats(State(app_state): State<Arc<AppState>>) -> Response {
-    let sync_manager = match &app_state.mesh_sync_manager {
-        Some(m) => m,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": "mesh sync manager not available"})),
-            )
-                .into_response();
-        }
-    };
-
     // Get configuration
     let handler = match &app_state.mesh_handler {
         Some(h) => h,
@@ -396,7 +385,8 @@ pub async fn get_global_rate_limit_stats(State(app_state): State<Arc<AppState>>)
         .unwrap_or_default();
 
     // Get current counter value
-    let current_count = sync_manager
+    let current_count = handler
+        .sync_manager
         .get_rate_limit_value(GLOBAL_RATE_LIMIT_COUNTER_KEY)
         .unwrap_or(0);
 

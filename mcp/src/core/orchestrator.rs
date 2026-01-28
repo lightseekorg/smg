@@ -44,7 +44,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use super::{
-    config::{BuiltinToolType, McpConfig, McpServerConfig, McpTransport},
+    config::{BuiltinToolType, McpConfig, McpProxyConfig, McpServerConfig, McpTransport},
     handler::{HandlerRequestContext, RefreshRequest, SmgClientHandler},
     metrics::McpMetrics,
     pool::{McpConnectionPool, PoolKey},
@@ -89,6 +89,28 @@ fn build_request_headers(
     }
 
     Ok(headers)
+}
+
+/// Build HTTP client with default headers.
+fn build_http_client(
+    proxy_config: Option<&McpProxyConfig>,
+    token: &Option<String>,
+    custom_headers: &std::collections::HashMap<String, String>,
+) -> McpResult<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
+
+    if let Some(proxy_cfg) = proxy_config {
+        builder = super::proxy::apply_proxy_to_builder(builder, proxy_cfg)?;
+    }
+
+    let req_headers = build_request_headers(token, custom_headers)?;
+    if !req_headers.is_empty() {
+        builder = builder.default_headers(req_headers);
+    }
+
+    builder
+        .build()
+        .map_err(|e| McpError::Transport(format!("build HTTP client: {}", e)))
 }
 
 /// Type alias for MCP client with handler.
@@ -575,22 +597,7 @@ impl McpOrchestrator {
             } => {
                 let proxy_config =
                     super::proxy::resolve_proxy_config(config, self.config.proxy.as_ref());
-
-                let mut builder =
-                    reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
-
-                if let Some(proxy_cfg) = proxy_config {
-                    builder = super::proxy::apply_proxy_to_builder(builder, proxy_cfg)?;
-                }
-
-                let req_headers = build_request_headers(token, custom_headers)?;
-                if !req_headers.is_empty() {
-                    builder = builder.default_headers(req_headers);
-                }
-
-                let http_client = builder
-                    .build()
-                    .map_err(|e| McpError::Transport(format!("build HTTP client: {}", e)))?;
+                let http_client = build_http_client(proxy_config, token, custom_headers)?;
 
                 let sse_config = SseClientConfig {
                     sse_endpoint: url.clone().into(),
@@ -611,23 +618,12 @@ impl McpOrchestrator {
                 token,
                 headers: custom_headers,
             } => {
-                let mut cfg = StreamableHttpClientTransportConfig::with_uri(url.as_str());
+                let proxy_config =
+                    super::proxy::resolve_proxy_config(config, self.config.proxy.as_ref());
+                let http_client = build_http_client(proxy_config, token, custom_headers)?;
+                let cfg = StreamableHttpClientTransportConfig::with_uri(url.as_str());
 
-                // Set auth header from token
-                if let Some(tok) = token {
-                    cfg.auth_header = Some(format!("Bearer {}", tok));
-                }
-
-                // Streamable transport only supports auth_header, not custom headers
-                // Custom headers are still included in pool key hash for correct isolation
-                if !custom_headers.is_empty() {
-                    warn!(
-                        "Streamable transport does not support custom headers, {} headers ignored (use SSE for custom headers)",
-                        custom_headers.len()
-                    );
-                }
-
-                let transport = StreamableHttpClientTransport::from_config(cfg);
+                let transport = StreamableHttpClientTransport::with_client(http_client, cfg);
 
                 handler.serve(transport).await.map_err(|e| {
                     McpError::ConnectionFailed(format!("initialize streamable client: {}", e))
@@ -1473,22 +1469,13 @@ impl McpOrchestrator {
                         token,
                         headers: custom_headers,
                     } => {
-                        let mut cfg_http =
-                            StreamableHttpClientTransportConfig::with_uri(url.as_str());
+                        let proxy_config =
+                            super::proxy::resolve_proxy_config(&cfg, global_proxy.as_ref());
+                        let http_client = build_http_client(proxy_config, token, custom_headers)?;
+                        let cfg_http = StreamableHttpClientTransportConfig::with_uri(url.as_str());
 
-                        if let Some(tok) = token {
-                            cfg_http.auth_header = Some(format!("Bearer {}", tok));
-                        }
-
-                        // Streamable transport only supports auth_header, not custom headers
-                        if !custom_headers.is_empty() {
-                            warn!(
-                                "Streamable transport does not support custom headers, {} headers ignored",
-                                custom_headers.len()
-                            );
-                        }
-
-                        let transport = StreamableHttpClientTransport::from_config(cfg_http);
+                        let transport =
+                            StreamableHttpClientTransport::with_client(http_client, cfg_http);
 
                         ().serve(transport)
                             .await
@@ -1501,22 +1488,7 @@ impl McpOrchestrator {
                     } => {
                         let proxy_config =
                             super::proxy::resolve_proxy_config(&cfg, global_proxy.as_ref());
-
-                        let mut builder =
-                            reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
-
-                        if let Some(proxy_cfg) = proxy_config {
-                            builder = super::proxy::apply_proxy_to_builder(builder, proxy_cfg)?;
-                        }
-
-                        let req_headers = build_request_headers(token, custom_headers)?;
-                        if !req_headers.is_empty() {
-                            builder = builder.default_headers(req_headers);
-                        }
-
-                        let http_client = builder.build().map_err(|e| {
-                            McpError::Transport(format!("build HTTP client: {}", e))
-                        })?;
+                        let http_client = build_http_client(proxy_config, token, custom_headers)?;
 
                         let sse_config = SseClientConfig {
                             sse_endpoint: url.clone().into(),

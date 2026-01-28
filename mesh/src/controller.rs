@@ -11,9 +11,11 @@ use tracing::instrument;
 
 use super::{
     flow_control::RetryManager,
-    gossip::{gossip_message, NodeState, NodeStatus, Ping, PingReq, StateSync},
-    service::{broadcast_node_states, try_ping},
-    ClusterState,
+    service::{
+        broadcast_node_states,
+        gossip::{gossip_message, NodeState, NodeStatus, Ping, PingReq, StateSync},
+        try_ping, ClusterState,
+    },
 };
 
 pub struct MeshController {

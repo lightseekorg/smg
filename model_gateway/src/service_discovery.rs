@@ -21,7 +21,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     app_context::AppContext,
     core::Job,
-    mesh::service::{
+    mesh::{
         gossip::{NodeState, NodeStatus},
         ClusterState,
     },

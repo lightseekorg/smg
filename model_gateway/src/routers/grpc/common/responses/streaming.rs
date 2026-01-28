@@ -209,7 +209,7 @@ impl ResponseStreamEventEmitter {
             "item_id": item_id,
             "content_index": content_index,
             "part": {
-                "type": "text",
+                "type": "output_text",
                 "text": ""
             }
         })
@@ -262,7 +262,7 @@ impl ResponseStreamEventEmitter {
             "item_id": item_id,
             "content_index": content_index,
             "part": {
-                "type": "text",
+                "type": "output_text",
                 "text": self.accumulated_text.clone()
             }
         })
@@ -289,7 +289,7 @@ impl ResponseStreamEventEmitter {
                 "type": "message",
                 "role": "assistant",
                 "content": [{
-                    "type": "text",
+                    "type": "output_text",
                     "text": self.accumulated_text.clone()
                 }]
             })]
@@ -813,7 +813,7 @@ impl ResponseStreamEventEmitter {
                             "type": "message",
                             "role": "assistant",
                             "content": [{
-                                "type": "text",
+                                "type": "output_text",
                                 "text": self.accumulated_text.clone()
                             }]
                         });

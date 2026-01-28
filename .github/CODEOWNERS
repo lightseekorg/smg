@@ -6,9 +6,13 @@
 
 # Python bindings
 /bindings/python @CatherineSue @key4ng @slin1237
+/bindings/golang @whybeyoung @slin1237
 
 # E2E tests
-/e2e_test @CatherineSue @key4ng
+/e2e_test @CatherineSue @key4ng @XinyueZhang369 @slin1237
+
+# Github workflows
+/.github/workflows @CatherineSue @key4ng @XinyueZhang369 @slin1237
 
 # Main source code (model_gateway)
 /model_gateway/src/config @slin1237
@@ -32,4 +36,4 @@
 /workflow @slin1237 @CatherineSue
 
 # Examples
-/examples/wasm @slin1237 @tonyluj
+/examples/wasm @tonyluj @slin1237

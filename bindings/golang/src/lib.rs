@@ -4,7 +4,6 @@
 //! This module provides C-compatible function signatures for:
 //! - Tokenizer operations (encode, decode, chat template)
 //! - Tool parser operations (parse tool calls)
-//! - Tool constraint generation
 //! - gRPC client SDK (complete request-response flow)
 //!
 //! # Safety
@@ -44,8 +43,6 @@ pub use tool_parser::{
     sgl_tool_parser_create, sgl_tool_parser_free, sgl_tool_parser_parse_complete,
     sgl_tool_parser_parse_incremental, sgl_tool_parser_reset, ToolParserHandle,
 };
-// Re-export utility functions
-pub use utils::sgl_generate_tool_constraints;
 
 // Sub-modules
 mod client;
@@ -54,7 +51,10 @@ mod grpc_converter;
 mod memory;
 mod postprocessor;
 mod preprocessor;
+mod proto_parse;
+mod runtime;
 mod stream;
+mod stream_state;
 mod tokenizer;
 mod tool_parser;
 mod utils;

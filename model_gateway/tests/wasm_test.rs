@@ -181,7 +181,6 @@ async fn create_test_app_with_wasm() -> (axum::Router, Arc<AppContext>, TempDir)
         concurrency_queue_tx: None,
         router_manager: None,
         mesh_handler: None,
-        mesh_sync_manager: None,
     });
 
     let request_id_headers = vec!["x-request-id".to_string(), "x-correlation-id".to_string()];

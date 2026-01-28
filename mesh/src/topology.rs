@@ -14,6 +14,7 @@ use tracing::debug;
 
 use super::{service::ClusterState, stores::MembershipState};
 
+#[allow(dead_code)]
 /// Topology configuration
 #[derive(Debug, Clone)]
 pub struct TopologyConfig {
@@ -35,6 +36,7 @@ impl Default for TopologyConfig {
     }
 }
 
+#[allow(dead_code)]
 /// Topology manager
 pub struct TopologyManager {
     config: TopologyConfig,
@@ -45,6 +47,7 @@ pub struct TopologyManager {
 }
 
 impl TopologyManager {
+    #[allow(dead_code)]
     pub fn new(config: TopologyConfig, state: ClusterState, self_name: String) -> Self {
         Self {
             config,
@@ -54,6 +57,7 @@ impl TopologyManager {
         }
     }
 
+    #[allow(dead_code)]
     /// Get peers to connect to based on topology
     pub fn get_peers(&self, count: usize) -> Vec<MembershipState> {
         let state = self.state.read();
@@ -68,10 +72,11 @@ impl TopologyManager {
         }
     }
 
+    #[allow(dead_code)]
     /// Get peers for full mesh topology
     fn get_full_mesh_peers(
         &self,
-        state: &BTreeMap<String, super::gossip::NodeState>,
+        state: &BTreeMap<String, super::service::gossip::NodeState>,
         count: usize,
     ) -> Vec<MembershipState> {
         let mut peers = Vec::new();
@@ -79,7 +84,7 @@ impl TopologyManager {
 
         for (name, node) in state.iter() {
             if name != &self.self_name
-                && node.status == super::gossip::NodeStatus::Alive as i32
+                && node.status == super::service::gossip::NodeStatus::Alive as i32
                 && !active.contains(name)
             {
                 let metadata: BTreeMap<String, Vec<u8>> = node
@@ -106,7 +111,7 @@ impl TopologyManager {
     /// Get peers for sparse mesh topology (by region/AZ)
     fn get_sparse_mesh_peers(
         &self,
-        state: &BTreeMap<String, super::gossip::NodeState>,
+        state: &BTreeMap<String, super::service::gossip::NodeState>,
         count: usize,
     ) -> Vec<MembershipState> {
         let mut peers = Vec::new();
@@ -118,7 +123,7 @@ impl TopologyManager {
         {
             for (name, node) in state.iter() {
                 if name != &self.self_name
-                    && node.status == super::gossip::NodeStatus::Alive as i32
+                    && node.status == super::service::gossip::NodeStatus::Alive as i32
                     && !active.contains(name)
                 {
                     // Check if node is in same region/AZ (from metadata)
@@ -156,7 +161,7 @@ impl TopologyManager {
         if peers.len() < count {
             for (name, node) in state.iter() {
                 if name != &self.self_name
-                    && node.status == super::gossip::NodeStatus::Alive as i32
+                    && node.status == super::service::gossip::NodeStatus::Alive as i32
                     && !active.contains(name)
                     && !peers.iter().any(|p| p.name == node.name)
                 {
@@ -182,23 +187,27 @@ impl TopologyManager {
         peers
     }
 
+    #[allow(dead_code)]
     /// Mark peer as active
     pub fn mark_peer_active(&self, peer_name: &str) {
         self.active_peers.write().insert(peer_name.to_string());
         debug!("Marked peer {} as active", peer_name);
     }
 
+    #[allow(dead_code)]
     /// Mark peer as inactive
     pub fn mark_peer_inactive(&self, peer_name: &str) {
         self.active_peers.write().remove(peer_name);
         debug!("Marked peer {} as inactive", peer_name);
     }
 
+    #[allow(dead_code)]
     /// Get number of active peers
     pub fn active_peer_count(&self) -> usize {
         self.active_peers.read().len()
     }
 
+    #[allow(dead_code)]
     /// Check if we should use full mesh
     pub fn is_full_mesh(&self) -> bool {
         let state = self.state.read();

@@ -11,7 +11,7 @@ use smg::{
         TraceConfig,
     },
     core::ConnectionMode,
-    mesh::service::MeshServerConfig,
+    mesh::MeshServerConfig,
     observability::{
         metrics::PrometheusConfig,
         otel_trace::{is_otel_enabled, shutdown_otel},

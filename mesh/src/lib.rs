@@ -6,34 +6,34 @@
 //! - Consistent hashing for request routing
 //! - Partition detection and recovery
 
-pub mod consistent_hash;
-pub mod controller;
-pub mod crdt;
-pub mod flow_control;
-pub mod incremental;
-pub mod metrics;
-pub mod mtls;
-pub mod node_state_machine;
-pub mod partition;
+mod consistent_hash;
+mod controller;
+mod crdt;
+mod flow_control;
+mod incremental;
+mod metrics;
+mod mtls;
+mod node_state_machine;
+mod partition;
 mod ping_server;
-pub mod rate_limit_window;
-pub mod service;
-pub mod stores;
-pub mod sync;
-pub mod topology;
-pub mod tree_ops;
+mod rate_limit_window;
+mod service;
+mod stores;
+mod sync;
+mod topology;
+mod tree_ops;
 
 #[cfg(test)]
 mod test_utils;
 
 // Re-export commonly used types
-pub use crdt::{CRDTMap, CRDTPNCounter, SKey, SyncCRDTMap, SyncPNCounter};
-pub use service::{
-    broadcast_node_states, gossip, try_ping, ClusterState, MeshServerConfig, MeshServerHandler,
-};
+pub use crdt::SKey;
+pub use metrics::init_mesh_metrics;
+pub use partition::PartitionDetector;
+pub use rate_limit_window::RateLimitWindow;
+pub use service::{gossip, ClusterState, MeshServerBuilder, MeshServerConfig, MeshServerHandler};
 pub use stores::{
-    tree_state_key, AppStore, MembershipState, MembershipStore, PolicyState, PolicyStore,
-    RateLimitConfig, RateLimitStore, StateStores, StoreType, WorkerState, WorkerStore,
+    AppState, MembershipState, RateLimitConfig, StateStores, WorkerState,
     GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
 };
 pub use sync::{MeshSyncManager, OptionalMeshSyncManager};

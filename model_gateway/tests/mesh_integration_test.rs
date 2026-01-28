@@ -6,14 +6,9 @@
 use std::sync::Arc;
 
 use smg::mesh::{
-    crdt::SKey,
-    gossip::NodeStatus,
-    stores::{
-        AppState, MembershipState, RateLimitConfig, StateStores, WorkerState,
-        GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
-    },
-    sync::MeshSyncManager,
-    tree_ops::{TreeInsertOp, TreeOperation},
+    gossip::NodeStatus, AppState, MembershipState, MeshSyncManager, RateLimitConfig, SKey,
+    StateStores, TreeInsertOp, TreeOperation, WorkerState, GLOBAL_RATE_LIMIT_COUNTER_KEY,
+    GLOBAL_RATE_LIMIT_KEY,
 };
 
 /// Create test stores for a node
@@ -372,8 +367,8 @@ async fn test_rate_limit_window_reset() {
     manager.sync_rate_limit_inc(GLOBAL_RATE_LIMIT_COUNTER_KEY.to_string(), 50);
     let value_before = manager.get_rate_limit_value(GLOBAL_RATE_LIMIT_COUNTER_KEY);
     // Value may be None if not owner, or Some if owner
-    if value_before.is_some() {
-        assert!(value_before.unwrap() > 0);
+    if let Some(value) = value_before {
+        assert!(value > 0);
 
         // Reset counter
         manager.reset_global_rate_limit_counter();

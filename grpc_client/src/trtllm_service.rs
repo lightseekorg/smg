@@ -32,7 +32,7 @@ pub mod proto {
 pub struct AbortOnDropStream {
     inner: Streaming<proto::GenerateResponse>,
     request_id: String,
-    client: TrtllmEngineClient,
+    client: TrtllmServiceClient,
     aborted: Arc<AtomicBool>,
 }
 
@@ -41,7 +41,7 @@ impl AbortOnDropStream {
     pub fn new(
         stream: Streaming<proto::GenerateResponse>,
         request_id: String,
-        client: TrtllmEngineClient,
+        client: TrtllmServiceClient,
     ) -> Self {
         debug!("Created AbortOnDropStream for request {}", request_id);
         Self {
@@ -107,14 +107,14 @@ impl futures::Stream for AbortOnDropStream {
     }
 }
 
-/// gRPC client for TensorRT-LLM engine
+/// gRPC client for TensorRT-LLM service
 #[derive(Clone)]
-pub struct TrtllmEngineClient {
-    client: proto::trt_llm_engine_client::TrtLlmEngineClient<Channel>,
+pub struct TrtllmServiceClient {
+    client: proto::trtllm_service_client::TrtllmServiceClient<Channel>,
     trace_injector: BoxedTraceInjector,
 }
 
-impl TrtllmEngineClient {
+impl TrtllmServiceClient {
     /// Create a new client and connect to the TensorRT-LLM server
     pub async fn connect(endpoint: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Self::connect_with_trace_injector(endpoint, Arc::new(NoopTraceInjector)).await
@@ -146,7 +146,7 @@ impl TrtllmEngineClient {
             .connect()
             .await?;
 
-        let client = proto::trt_llm_engine_client::TrtLlmEngineClient::new(channel);
+        let client = proto::trtllm_service_client::TrtllmServiceClient::new(channel);
 
         Ok(Self {
             client,
@@ -760,7 +760,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_client_connect_invalid_endpoint() {
-        let result = TrtllmEngineClient::connect("invalid://endpoint").await;
+        let result = TrtllmServiceClient::connect("invalid://endpoint").await;
         assert!(result.is_err());
     }
 

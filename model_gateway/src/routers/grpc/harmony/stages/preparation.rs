@@ -85,18 +85,6 @@ impl HarmonyPreparationStage {
         ctx: &mut RequestContext,
         request: &ChatCompletionRequest,
     ) -> Result<Option<Response>, Response> {
-        // Validate - reject logprobs
-        if request.logprobs {
-            error!(
-                function = "prepare_chat",
-                "logprobs requested but not supported for Harmony models"
-            );
-            return Err(error::bad_request(
-                "harmony_logprobs_not_supported",
-                "logprobs are not supported for Harmony models".to_string(),
-            ));
-        }
-
         // Step 1: Filter tools if needed
         let body_ref = utils::filter_chat_request_by_tool_choice(request);
 

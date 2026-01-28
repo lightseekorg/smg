@@ -395,9 +395,10 @@ impl SglangSchedulerClient {
             }),
             mm_inputs: None, // Responses API doesn't support multimodal yet
             sampling_params: Some(sampling_params),
-            return_logprob: false, // Responses API uses top_logprobs field instead
+            // TODO: Logprobs for Responses API is not fully supported yet
+            return_logprob: false,
             logprob_start_len: -1,
-            top_logprobs_num: body.top_logprobs.unwrap_or(0) as i32,
+            top_logprobs_num: 0,
             return_hidden_states: false,
             stream: body.stream.unwrap_or(false),
             ..Default::default()

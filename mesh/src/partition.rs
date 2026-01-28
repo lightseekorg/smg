@@ -11,7 +11,7 @@ use std::{
 use parking_lot::RwLock;
 use tracing::warn;
 
-use super::gossip::{NodeState, NodeStatus};
+use super::service::gossip::{NodeState, NodeStatus};
 
 /// Partition detection configuration
 #[derive(Debug, Clone)]
