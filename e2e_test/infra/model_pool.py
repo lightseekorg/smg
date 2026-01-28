@@ -231,16 +231,11 @@ class ModelInstance:
             finally:
                 channel.close()
         except grpc.RpcError as e:
-            # Check if health service is not implemented (e.g., vLLM gRPC server)
+
             if hasattr(e, "code") and e.code() == grpc.StatusCode.UNIMPLEMENTED:
-                logger.debug(
-                    "gRPC health service not implemented for port %d, checking connection instead",
-                    self.port,
-                )
-                # Fallback: just check if we can connect to the port
+
                 try:
                     channel = grpc.insecure_channel(f"{DEFAULT_HOST}:{self.port}")
-                    # Try to get channel state - if server is up, this should work
                     try:
                         grpc.channel_ready_future(channel).result(timeout=timeout)
                         logger.debug(
@@ -250,6 +245,7 @@ class ModelInstance:
                     finally:
                         channel.close()
                 except Exception:
+                    logger.debug("gRPC connection check for port %d failed: %s", self.port, e)
                     return False
 
             # gRPC-specific errors (connection refused, deadline exceeded, etc.)
