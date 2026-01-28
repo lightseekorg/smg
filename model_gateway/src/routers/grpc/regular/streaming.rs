@@ -939,16 +939,30 @@ impl StreamingProcessor {
                     let accumulated_text = accumulated_texts.entry(index).or_default();
                     accumulated_text.push_str(&chunk_text);
 
-                    // Store latest output logprobs (cumulative from proto, convert to universal format)
+                    // Handle output logprobs based on backend behavior:
+                    // - SGLang sends cumulative logprobs (replace is correct)
+                    // - vLLM sends delta logprobs (need to extend/accumulate)
                     if let Some(ref output_logprobs) = chunk.output_logprobs() {
                         let converted = utils::convert_generate_output_logprobs(output_logprobs);
-                        accumulated_output_logprobs.insert(index, Some(converted));
+                        if chunk.is_vllm() {
+                            // vLLM sends delta - extend existing logprobs
+                            if let Some(v) = accumulated_output_logprobs
+                                .entry(index)
+                                .or_insert_with(|| Some(Vec::new()))
+                                .as_mut()
+                            {
+                                v.extend(converted);
+                            }
+                        } else {
+                            // SGLang sends cumulative - replace
+                            accumulated_output_logprobs.insert(index, Some(converted));
+                        }
                     }
 
                     // Generate unique ID per index
                     let index_id = format!("{}-{}", ctx.request_id, index);
 
-                    // Build streaming response chunk with cumulative logprobs
+                    // Build streaming response chunk with accumulated logprobs
                     let current_output_logprobs = accumulated_output_logprobs
                         .get(&index)
                         .and_then(|o| o.as_ref());

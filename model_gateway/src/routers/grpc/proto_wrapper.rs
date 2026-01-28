@@ -262,11 +262,11 @@ impl ProtoGenerateStreamChunk {
     }
 
     /// Get index (for n>1 support)
-    /// vLLM doesn't support n>1, so always returns 0
+    /// Returns the index of this output when n>1 was requested (0-indexed)
     pub fn index(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.index,
-            Self::Vllm(_) => 0,
+            Self::Vllm(c) => c.index,
             Self::Trtllm(c) => c.sequence_index as u32,
         }
     }
@@ -454,11 +454,11 @@ impl ProtoGenerateComplete {
     }
 
     /// Get index (for n>1 support)
-    /// vLLM doesn't support n>1, so always returns 0
+    /// Returns the index of this output when n>1 was requested (0-indexed)
     pub fn index(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.index,
-            Self::Vllm(_) => 0,
+            Self::Vllm(c) => c.index,
             Self::Trtllm(c) => c.sequence_index as u32,
         }
     }

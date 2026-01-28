@@ -756,12 +756,14 @@ mod tests {
             cached_tokens: 3,
             output_logprobs: None,
             input_logprobs: None,
+            index: 0,
         };
 
         assert_eq!(chunk.token_ids, vec![1234, 5678]);
         assert_eq!(chunk.prompt_tokens, 5);
         assert_eq!(chunk.completion_tokens, 2);
         assert_eq!(chunk.cached_tokens, 3);
+        assert_eq!(chunk.index, 0);
     }
 
     // TODO: ModelInfo not in current proto - skip test
