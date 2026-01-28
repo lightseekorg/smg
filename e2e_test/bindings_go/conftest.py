@@ -197,12 +197,18 @@ def grpc_workers(request, model_pool: "ModelPool") -> Generator[list["ModelInsta
 
             if not instances:
                 pytest.fail(f"Failed to get {num_workers} gRPC workers for {model_id}")
+            if len(instances) < num_workers:
+                pytest.fail(
+                    f"Expected {num_workers} gRPC workers but only got {len(instances)} for {model_id}. "
+                    f"Available workers may be insufficient."
+                )
         else:
             # Single worker - use simple get()
             instance = model_pool.get(model_id, ConnectionMode.GRPC)
             instances = [instance]
 
         logger.info(f"Got {len(instances)} gRPC workers at ports: {[inst.port for inst in instances]}")
+        assert len(instances) == num_workers, f"Worker count mismatch: got {len(instances)}, expected {num_workers}"
 
         yield instances
 
@@ -318,6 +324,15 @@ def go_oai_server_multi(
     env["SGL_TOKENIZER_PATH"] = grpc_workers[0].model_path
     env["SGL_POLICY_NAME"] = policy_name
     env["PORT"] = str(oai_port)
+
+    # Verify we got the expected number of workers
+    workers_config = get_marker_kwargs(request, "workers", defaults={"count": 1})
+    expected_workers = workers_config.get("count") or 1
+    if len(grpc_workers) != expected_workers:
+        pytest.fail(
+            f"Expected {expected_workers} gRPC workers but got {len(grpc_workers)}. "
+            f"Check that the model pool has enough resources."
+        )
 
     logger.info(
         f"Starting Go OAI server on port {oai_port}, connecting to {len(grpc_workers)} gRPC workers "
