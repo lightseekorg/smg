@@ -310,7 +310,7 @@ impl ProtoGenerateStreamChunk {
         }
     }
 
-    /// Get output logprobs (SGLang and vLLM, returns None for TensorRT-LLM)
+    /// Get output logprobs (SGLang, vLLM, and TensorRT-LLM)
     pub fn output_logprobs(&self) -> Option<ProtoOutputLogProbs> {
         match self {
             Self::Sglang(c) => c
@@ -321,11 +321,32 @@ impl ProtoGenerateStreamChunk {
                 .output_logprobs
                 .as_ref()
                 .map(|lp| convert_output_logprobs!(lp)),
-            Self::Trtllm(_) => None,
+            Self::Trtllm(c) => {
+                if c.logprobs.is_empty() {
+                    None
+                } else {
+                    Some(ProtoOutputLogProbs {
+                        token_logprobs: c.logprobs.iter().map(|lp| lp.logprob).collect(),
+                        token_ids: c.logprobs.iter().map(|lp| lp.token_id as i32).collect(),
+                        top_logprobs: c
+                            .logprobs
+                            .iter()
+                            .map(|lp| ProtoTopLogProbs {
+                                values: lp.top_logprobs.iter().map(|t| t.logprob).collect(),
+                                token_ids: lp
+                                    .top_logprobs
+                                    .iter()
+                                    .map(|t| t.token_id as i32)
+                                    .collect(),
+                            })
+                            .collect(),
+                    })
+                }
+            }
         }
     }
 
-    /// Get input logprobs (SGLang and vLLM only, returns None for TensorRT-LLM)
+    /// Get input logprobs (SGLang and vLLM only - streaming chunks don't have prompt logprobs)
     pub fn input_logprobs(&self) -> Option<ProtoInputLogProbs> {
         match self {
             Self::Sglang(c) => c
@@ -336,6 +357,7 @@ impl ProtoGenerateStreamChunk {
                 .input_logprobs
                 .as_ref()
                 .map(|lp| convert_input_logprobs!(lp)),
+            // TRT-LLM streaming chunks don't have prompt_logprobs
             Self::Trtllm(_) => None,
         }
     }
@@ -497,7 +519,7 @@ impl ProtoGenerateComplete {
         }
     }
 
-    /// Get input logprobs (SGLang and vLLM, returns None for TensorRT-LLM)
+    /// Get input/prompt logprobs (SGLang, vLLM, and TensorRT-LLM)
     pub fn input_logprobs(&self) -> Option<ProtoInputLogProbs> {
         match self {
             Self::Sglang(c) => c.input_logprobs.as_ref().map(|lp| ProtoInputLogProbs {
@@ -524,11 +546,42 @@ impl ProtoGenerateComplete {
                     })
                     .collect(),
             }),
-            Self::Trtllm(_) => None,
+            Self::Trtllm(c) => {
+                if c.prompt_logprobs.is_empty() {
+                    None
+                } else {
+                    Some(ProtoInputLogProbs {
+                        // First token has None logprob (no prior context)
+                        token_logprobs: c
+                            .prompt_logprobs
+                            .iter()
+                            .enumerate()
+                            .map(|(i, lp)| if i == 0 { None } else { Some(lp.logprob) })
+                            .collect(),
+                        token_ids: c
+                            .prompt_logprobs
+                            .iter()
+                            .map(|lp| lp.token_id as i32)
+                            .collect(),
+                        top_logprobs: c
+                            .prompt_logprobs
+                            .iter()
+                            .map(|lp| ProtoTopLogProbs {
+                                values: lp.top_logprobs.iter().map(|t| t.logprob).collect(),
+                                token_ids: lp
+                                    .top_logprobs
+                                    .iter()
+                                    .map(|t| t.token_id as i32)
+                                    .collect(),
+                            })
+                            .collect(),
+                    })
+                }
+            }
         }
     }
 
-    /// Get output logprobs (SGLang and vLLM, returns None for TensorRT-LLM)
+    /// Get output logprobs (SGLang, vLLM, and TensorRT-LLM)
     pub fn output_logprobs(&self) -> Option<ProtoOutputLogProbs> {
         match self {
             Self::Sglang(c) => c.output_logprobs.as_ref().map(|lp| ProtoOutputLogProbs {
@@ -555,7 +608,28 @@ impl ProtoGenerateComplete {
                     })
                     .collect(),
             }),
-            Self::Trtllm(_) => None,
+            Self::Trtllm(c) => {
+                if c.logprobs.is_empty() {
+                    None
+                } else {
+                    Some(ProtoOutputLogProbs {
+                        token_logprobs: c.logprobs.iter().map(|lp| lp.logprob).collect(),
+                        token_ids: c.logprobs.iter().map(|lp| lp.token_id as i32).collect(),
+                        top_logprobs: c
+                            .logprobs
+                            .iter()
+                            .map(|lp| ProtoTopLogProbs {
+                                values: lp.top_logprobs.iter().map(|t| t.logprob).collect(),
+                                token_ids: lp
+                                    .top_logprobs
+                                    .iter()
+                                    .map(|t| t.token_id as i32)
+                                    .collect(),
+                            })
+                            .collect(),
+                    })
+                }
+            }
         }
     }
 }
