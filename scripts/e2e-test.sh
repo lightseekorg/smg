@@ -22,11 +22,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+# Colors for output (only if stdout is a terminal)
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    NC='\033[0m' # No Color
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    NC=''
+fi
 
 # Default environment variables
 export SHOW_WORKER_LOGS="${SHOW_WORKER_LOGS:-0}"
@@ -73,7 +80,7 @@ check_dependencies() {
 cleanup_processes() {
     info "Cleaning up any stale processes..."
     if [[ -f "$SCRIPT_DIR/ci_killall_sglang.sh" ]]; then
-        bash "$SCRIPT_DIR/ci_killall_sglang.sh" "nuk_gpus" 2>/dev/null || true
+        bash "$SCRIPT_DIR/ci_killall_sglang.sh" "nuke_gpus" 2>/dev/null || true
     fi
 }
 
@@ -84,23 +91,20 @@ run_pytest() {
     info "Running tests in: $test_dirs"
     info "Model path: $ROUTER_LOCAL_MODEL_PATH"
 
-    # Build pytest command
-    local pytest_cmd="python3 -m pytest"
-    pytest_cmd+=" --reruns 2 --reruns-delay 5"
-    pytest_cmd+=" -s -vv"
-    pytest_cmd+=" -o log_cli=true --log-cli-level=INFO"
+    # Build pytest command as array to avoid eval and handle paths safely
+    local pytest_cmd=(python3 -m pytest --reruns 2 --reruns-delay 5 -s -vv -o log_cli=true --log-cli-level=INFO)
 
     if [[ -n "$extra_args" ]]; then
-        pytest_cmd+=" $extra_args"
+        pytest_cmd+=($extra_args)
     fi
 
-    pytest_cmd+=" $test_dirs"
+    pytest_cmd+=($test_dirs)
 
     echo ""
-    info "Command: $pytest_cmd"
+    info "Command: ${pytest_cmd[*]}"
     echo ""
 
-    eval "$pytest_cmd"
+    "${pytest_cmd[@]}"
 }
 
 run_go_e2e() {
@@ -122,7 +126,7 @@ run_go_e2e() {
     export LD_LIBRARY_PATH="$(pwd)/target/release:${LD_LIBRARY_PATH:-}"
 
     cd "$ROOT_DIR"
-    python3 -m pytest --reruns 2 --reruns-delay 5 e2e_test/bindings_go -s -vv -o log_cli=true --log-cli-level=INFO
+    run_pytest "$E2E_DIR/bindings_go"
 }
 
 print_usage() {
