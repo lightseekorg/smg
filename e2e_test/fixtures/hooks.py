@@ -177,7 +177,6 @@ def pytest_collection_modifyitems(
                         test_gpus, calculate_test_gpus(model_id, p_count, d_count, 0)
                     )
                 else:
-                    # Map backend names to ConnectionMode
                     try:
                         mode = ConnectionMode(backend)
                     except ValueError:
@@ -264,7 +263,6 @@ def get_pool_requirements() -> list["WorkerIdentity"]:
         for i in range(count):
             requirements.append(WorkerIdentity(model_id, mode, worker_type, i))
 
-    # Add default worker only if no requirements
     if not requirements:
         requirements.append(WorkerIdentity(DEFAULT_MODEL, ConnectionMode.HTTP))
 
