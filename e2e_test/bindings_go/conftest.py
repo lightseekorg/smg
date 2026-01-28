@@ -138,13 +138,90 @@ def grpc_worker(request, model_pool: "ModelPool") -> Generator["ModelInstance", 
 
 
 @pytest.fixture(scope="class")
+def grpc_workers(request, model_pool: "ModelPool") -> Generator[list["ModelInstance"], None, None]:
+    """Get multiple gRPC workers from the model pool.
+
+    Uses markers to determine configuration:
+    - @pytest.mark.model("model-id"): Which model to use
+    - @pytest.mark.workers(count=N): How many workers (default 1)
+    """
+    from fixtures.markers import get_marker_kwargs, get_marker_value
+    from infra import DEFAULT_MODEL, ENV_MODEL, ConnectionMode, WorkerIdentity, WorkerType
+
+    # Get model from marker or env var or default
+    model_id = get_marker_value(request, "model")
+    if model_id is None:
+        model_id = os.environ.get(ENV_MODEL, DEFAULT_MODEL)
+
+    # Get worker count from marker
+    workers_config = get_marker_kwargs(request, "workers", defaults={"count": 1})
+    num_workers = workers_config.get("count") or 1
+
+    logger.info(f"Getting {num_workers} gRPC workers for model: {model_id}")
+
+    instances: list = []
+
+    try:
+        if num_workers > 1:
+            # Get existing workers of this mode
+            all_existing = model_pool.get_workers_by_type(model_id, WorkerType.REGULAR)
+            existing_for_mode = [w for w in all_existing if w.mode == ConnectionMode.GRPC]
+
+            # Release workers with wrong mode
+            for w in all_existing:
+                if w not in existing_for_mode:
+                    w.release()
+
+            if len(existing_for_mode) >= num_workers:
+                instances = existing_for_mode[:num_workers]
+                # Release excess workers
+                for w in existing_for_mode[num_workers:]:
+                    w.release()
+            else:
+                # Need to launch more workers
+                missing = num_workers - len(existing_for_mode)
+                workers_to_launch = [
+                    WorkerIdentity(
+                        model_id,
+                        ConnectionMode.GRPC,
+                        WorkerType.REGULAR,
+                        len(existing_for_mode) + i,
+                    )
+                    for i in range(missing)
+                ]
+                new_instances = model_pool.launch_workers(workers_to_launch, startup_timeout=300)
+                # Acquire newly launched instances
+                for inst in new_instances:
+                    inst.acquire()
+                instances = existing_for_mode + new_instances
+
+            if not instances:
+                pytest.fail(f"Failed to get {num_workers} gRPC workers for {model_id}")
+        else:
+            # Single worker - use simple get()
+            instance = model_pool.get(model_id, ConnectionMode.GRPC)
+            instances = [instance]
+
+        logger.info(f"Got {len(instances)} gRPC workers at ports: {[inst.port for inst in instances]}")
+
+        yield instances
+
+    except (KeyError, RuntimeError) as e:
+        pytest.fail(f"Failed to get gRPC workers for {model_id}: {e}")
+
+    finally:
+        for inst in instances:
+            inst.release()
+
+
+@pytest.fixture(scope="class")
 def go_oai_server(
     request,
     grpc_worker: "ModelInstance",
     go_oai_binary: Path,
     go_ffi_library: Path,
 ) -> Generator[tuple[str, int, str], None, None]:
-    """Start the Go OAI server connected to the gRPC worker.
+    """Start the Go OAI server connected to a single gRPC worker.
 
     Yields:
         Tuple of (host, port, model_path) for the Go OAI server.
@@ -194,6 +271,88 @@ def go_oai_server(
 
     finally:
         # Shutdown the server
+        logger.info("Shutting down Go OAI server...")
+        process.send_signal(signal.SIGTERM)
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+@pytest.fixture(scope="class")
+def go_oai_server_multi(
+    request,
+    grpc_workers: list["ModelInstance"],
+    go_oai_binary: Path,
+    go_ffi_library: Path,
+) -> Generator[tuple[str, int, str], None, None]:
+    """Start the Go OAI server connected to multiple gRPC workers with load balancing.
+
+    Uses @pytest.mark.workers(count=N) to determine worker count.
+    Uses @pytest.mark.gateway(policy="round_robin") to determine policy (default: round_robin).
+
+    Yields:
+        Tuple of (host, port, model_path) for the Go OAI server.
+    """
+    from fixtures.markers import get_marker_kwargs
+
+    # Get policy from gateway marker
+    gateway_config = get_marker_kwargs(request, "gateway", defaults={"policy": "round_robin"})
+    policy_name = gateway_config.get("policy", "round_robin")
+
+    # Build comma-separated endpoints
+    grpc_endpoints = ",".join(f"grpc://localhost:{w.port}" for w in grpc_workers)
+
+    # Find a free port for the Go OAI server
+    oai_port = _find_free_port()
+
+    # Set up environment
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = f"{go_ffi_library}:{env.get('LD_LIBRARY_PATH', '')}"
+    env["DYLD_LIBRARY_PATH"] = f"{go_ffi_library}:{env.get('DYLD_LIBRARY_PATH', '')}"
+
+    # Configuration via environment variables
+    # Use SGL_GRPC_ENDPOINTS (plural) for multi-worker support
+    env["SGL_GRPC_ENDPOINTS"] = grpc_endpoints
+    env["SGL_TOKENIZER_PATH"] = grpc_workers[0].model_path
+    env["SGL_POLICY_NAME"] = policy_name
+    env["PORT"] = str(oai_port)
+
+    logger.info(
+        f"Starting Go OAI server on port {oai_port}, connecting to {len(grpc_workers)} gRPC workers "
+        f"with policy={policy_name}"
+    )
+    logger.info(f"gRPC endpoints: {grpc_endpoints}")
+    logger.info(f"Tokenizer path: {grpc_workers[0].model_path}")
+
+    cmd = [str(go_oai_binary)]
+
+    process = subprocess.Popen(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    try:
+        # Wait for server to start
+        if not _wait_for_server("localhost", oai_port, timeout=60.0):
+            stdout, stderr = process.communicate(timeout=5)
+            pytest.fail(
+                f"Go OAI server failed to start.\n"
+                f"Command: {' '.join(cmd)}\n"
+                f"stdout: {stdout.decode()}\n"
+                f"stderr: {stderr.decode()}"
+            )
+
+        logger.info(
+            f"Go OAI server started on port {oai_port} with {len(grpc_workers)} workers "
+            f"and policy={policy_name}"
+        )
+        yield ("localhost", oai_port, grpc_workers[0].model_path)
+
+    finally:
         logger.info("Shutting down Go OAI server...")
         process.send_signal(signal.SIGTERM)
         try:

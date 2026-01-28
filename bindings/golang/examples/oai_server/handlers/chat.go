@@ -170,7 +170,7 @@ func (h *ChatHandler) handleStreamingCompletion(ctx *fasthttp.RequestCtx, reques
 		streamCtx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		stream, err := h.service.Client().CreateChatCompletionStream(streamCtx, req)
+		stream, err := h.service.ChatClient().CreateChatCompletionStream(streamCtx, req)
 		if err != nil {
 			h.logger.Error("Failed to create chat completion stream",
 				zap.Error(err),
@@ -346,7 +346,7 @@ func (h *ChatHandler) handleStreamingCompletion(ctx *fasthttp.RequestCtx, reques
 }
 
 func (h *ChatHandler) handleNonStreamingCompletion(ctx *fasthttp.RequestCtx, requestCtx context.Context, req smg.ChatCompletionRequest) {
-	resp, err := h.service.Client().CreateChatCompletion(requestCtx, req)
+	resp, err := h.service.ChatClient().CreateChatCompletion(requestCtx, req)
 	if err != nil {
 		h.logger.Error("Failed to create chat completion",
 			zap.Error(err),
@@ -521,7 +521,7 @@ func (h *ChatHandler) HandleGenerate(ctx *fasthttp.RequestCtx) {
 	requestCtx := context.Background()
 
 	// Use non-streaming completion for /generate endpoint
-	resp, err := h.service.Client().CreateChatCompletion(requestCtx, chatReq)
+	resp, err := h.service.ChatClient().CreateChatCompletion(requestCtx, chatReq)
 	if err != nil {
 		h.logger.Error("Failed to create completion",
 			zap.Error(err),

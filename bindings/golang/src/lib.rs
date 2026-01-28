@@ -15,7 +15,14 @@
 pub use client::sgl_client_chat_completion_stream;
 // Re-export client SDK functions
 pub use client::{sgl_client_create, sgl_client_free, SglangClientHandle};
+// Re-export multi-worker client with load balancing
 pub use error::{clear_error_message, set_error_message, set_error_message_fmt, SglErrorCode};
+pub use policy::{
+    sgl_multi_client_chat_completion_stream, sgl_multi_client_create, sgl_multi_client_free,
+    sgl_multi_client_healthy_count, sgl_multi_client_policy_name,
+    sgl_multi_client_set_worker_health, sgl_multi_client_tokenizer_path,
+    sgl_multi_client_worker_count, MultiWorkerClientHandle,
+};
 // Re-export gRPC converter functions
 pub use grpc_converter::{
     sgl_grpc_response_converter_convert_chunk, sgl_grpc_response_converter_create,
@@ -49,6 +56,7 @@ mod client;
 mod error;
 mod grpc_converter;
 mod memory;
+mod policy;
 mod postprocessor;
 mod preprocessor;
 mod proto_parse;
