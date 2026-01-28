@@ -30,13 +30,6 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion(self, setup_backend, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
-        import os
-
-        # vLLM gRPC doesn't support logprobs in v0.14.0
-        runtime = os.environ.get("E2E_RUNTIME", "sglang")
-        if runtime == "vllm" and logprobs:
-            pytest.skip("vLLM gRPC doesn't support logprobs")
-
         _, model, client, gateway = setup_backend
         self._run_chat_completion(client, model, logprobs, parallel_sample_num)
 
@@ -44,13 +37,6 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion_stream(self, setup_backend, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
-        import os
-
-        # vLLM gRPC doesn't support logprobs in v0.14.0
-        runtime = os.environ.get("E2E_RUNTIME", "sglang")
-        if runtime == "vllm" and logprobs:
-            pytest.skip("vLLM gRPC doesn't support logprobs")
-
         _, model, client, gateway = setup_backend
         self._run_chat_completion_stream(client, model, logprobs, parallel_sample_num)
 
@@ -163,6 +149,8 @@ The SmartHome Mini is a compact smart home assistant available in black or white
 
     def _run_chat_completion(self, client, model, logprobs, parallel_sample_num):
         """Run a non-streaming chat completion and verify response."""
+        import os
+
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -178,7 +166,9 @@ The SmartHome Mini is a compact smart home assistant available in black or white
             n=parallel_sample_num,
         )
 
-        if logprobs:
+        # vLLM gRPC doesn't support logprobs in v0.14.0, skip validation
+        runtime = os.environ.get("E2E_RUNTIME", "sglang")
+        if logprobs and runtime != "vllm":
             assert isinstance(
                 response.choices[0].logprobs.content[0].top_logprobs[0].token, str
             )
@@ -203,6 +193,8 @@ The SmartHome Mini is a compact smart home assistant available in black or white
         self, client, model, logprobs, parallel_sample_num=1
     ):
         """Run a streaming chat completion and verify response chunks."""
+        import os
+
         generator = client.chat.completions.create(
             model=model,
             messages=[
@@ -216,6 +208,9 @@ The SmartHome Mini is a compact smart home assistant available in black or white
             stream_options={"include_usage": True},
             n=parallel_sample_num,
         )
+
+        # vLLM gRPC doesn't support logprobs in v0.14.0
+        runtime = os.environ.get("E2E_RUNTIME", "sglang")
 
         is_firsts = {}
         is_finished = {}
@@ -243,7 +238,8 @@ The SmartHome Mini is a compact smart home assistant available in black or white
                 is_firsts[index] = False
                 continue
 
-            if logprobs and not is_finished.get(index, False):
+            # Skip logprobs validation for vLLM (not supported in v0.14.0)
+            if logprobs and runtime != "vllm" and not is_finished.get(index, False):
                 assert response.choices[0].logprobs, "logprobs was not returned"
                 assert isinstance(
                     response.choices[0].logprobs.content[0].top_logprobs[0].token, str
