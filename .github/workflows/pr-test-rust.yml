@@ -393,8 +393,75 @@ jobs:
           SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
             pytest --reruns 2 --reruns-delay 5 e2e_test/bindings_go -s -vv -o log_cli=true --log-cli-level=INFO
 
+  go-bindings-benchmark:
+    name: go-bindings-benchmark
+    needs: [check-ci, build-wheel]
+    if: needs.check-ci.outputs.should_run == 'true'
+    runs-on: 4-gpu-a10
+    timeout-minutes: 32
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Clone SGLang repository
+        run: git clone https://github.com/sgl-project/sglang.git
+
+      - name: Install SGLang dependencies
+        run: |
+          cd sglang
+          sudo --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+          cache-dependency-path: bindings/golang/go.sum
+
+      - name: Download Go FFI library
+        uses: actions/download-artifact@v7
+        with:
+          name: go-ffi-library
+          path: bindings/golang/target/release/
+
+      - name: Verify Go FFI library
+        run: ls -la bindings/golang/target/release/libsmg_go.*
+
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: smg-wheel
+          path: wheel/
+
+      - name: Install wheel
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+
+      - name: Install test dependencies
+        run: |
+          python3 -m pip install pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy
+          python3 -m pip --no-cache-dir install --upgrade genai-bench==0.0.3
+
+      - name: Run Go bindings benchmark
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
+          export LD_LIBRARY_PATH="$(pwd)/bindings/golang/target/release:$LD_LIBRARY_PATH"
+          SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+            pytest e2e_test/benchmarks/test_go_bindings_perf.py -s -vv -o log_cli=true --log-cli-level=INFO
+
+      - name: Upload benchmark results
+        if: success()
+        uses: actions/upload-artifact@v6
+        with:
+          name: genai-bench-results-go-bindings
+          path: benchmark_go_bindings/
+
   finish:
-    needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
+    needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e, go-bindings-benchmark]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
@@ -404,7 +471,7 @@ jobs:
           if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
             echo "CI was skipped (external contributor without run-ci label)"
             exit 0
-          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
+          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" || "${{ needs.go-bindings-benchmark.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else

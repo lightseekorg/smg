@@ -14,6 +14,9 @@ from infra import GPUMonitor, should_monitor_gpu, terminate_process
 
 from .results import BenchmarkResult
 
+# Import Go bindings fixtures to make them available for Go benchmark tests
+pytest_plugins = ["e2e_test.bindings_go.conftest"]
+
 logger = logging.getLogger(__name__)
 
 
