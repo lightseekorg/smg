@@ -8,10 +8,8 @@ use uuid::Uuid;
 use crate::routers::{
     error,
     grpc::{
-        client::GrpcClient,
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, RequestContext, WorkerSelection},
-        proto_wrapper::ProtoGenerateRequest,
     },
 };
 
@@ -64,51 +62,18 @@ impl PipelineStage for GenerateRequestBuildingStage {
             .clone()
             .unwrap_or_else(|| format!("gen-{}", Uuid::new_v4()));
 
-        // Dispatch to the appropriate client based on backend type
-        let mut proto_request = match builder_client {
-            GrpcClient::Sglang(sglang_client) => {
-                let req = sglang_client
-                    .build_plain_generate_request(
-                        request_id,
-                        &generate_request,
-                        prep.original_text.clone(),
-                        prep.token_ids.clone(),
-                    )
-                    .map_err(|e| {
-                        error!(function = "GenerateRequestBuildingStage::execute", error = %e, "Failed to build SGLang generate request");
-                        error::bad_request("build_request_failed", e)
-                    })?;
-                ProtoGenerateRequest::Sglang(Box::new(req))
-            }
-            GrpcClient::Vllm(vllm_client) => {
-                let req = vllm_client
-                    .build_plain_generate_request(
-                        request_id,
-                        &generate_request,
-                        prep.original_text.clone(),
-                        prep.token_ids.clone(),
-                    )
-                    .map_err(|e| {
-                        error!(function = "GenerateRequestBuildingStage::execute", error = %e, "Failed to build vLLM generate request");
-                        error::bad_request("build_request_failed", e)
-                    })?;
-                ProtoGenerateRequest::Vllm(Box::new(req))
-            }
-            GrpcClient::Trtllm(trtllm_client) => {
-                let req = trtllm_client
-                    .build_plain_generate_request(
-                        request_id,
-                        &generate_request,
-                        prep.original_text.clone(),
-                        prep.token_ids.clone(),
-                    )
-                    .map_err(|e| {
-                        error!(function = "GenerateRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request");
-                        error::bad_request("build_request_failed", e)
-                    })?;
-                ProtoGenerateRequest::Trtllm(Box::new(req))
-            }
-        };
+        // Build proto request using centralized dispatch
+        let mut proto_request = builder_client
+            .build_generate_request(
+                request_id,
+                &generate_request,
+                prep.original_text.clone(),
+                prep.token_ids.clone(),
+            )
+            .map_err(|e| {
+                error!(function = "GenerateRequestBuildingStage::execute", error = %e, "Failed to build generate request");
+                error::bad_request("build_request_failed", e)
+            })?;
 
         // Inject PD metadata if needed
         if self.inject_pd_metadata {

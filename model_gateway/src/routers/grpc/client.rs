@@ -1,7 +1,12 @@
 //! Unified gRPC client wrapper for SGLang, vLLM, and TensorRT-LLM backends
 
+use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
+
 use crate::{
-    grpc_client::{SglangSchedulerClient, TrtllmServiceClient, VllmEngineClient},
+    grpc_client::{
+        sglang_proto::MultimodalInputs, SglangSchedulerClient, TrtllmServiceClient,
+        VllmEngineClient,
+    },
     routers::grpc::proto_wrapper::{
         ProtoEmbedRequest, ProtoEmbedResponse, ProtoGenerateRequest, ProtoStream,
     },
@@ -186,6 +191,95 @@ impl GrpcClient {
                 Ok(ProtoEmbedResponse::Sglang(resp))
             }
             _ => panic!("Mismatched client and request types or unsupported embedding backend"),
+        }
+    }
+
+    /// Build a generate request from a chat completion request
+    ///
+    /// Dispatches to the appropriate backend client and wraps the result.
+    /// Note: `multimodal_inputs` is only used by SGLang, other backends ignore it.
+    pub fn build_chat_request(
+        &self,
+        request_id: String,
+        body: &ChatCompletionRequest,
+        processed_text: String,
+        token_ids: Vec<u32>,
+        multimodal_inputs: Option<MultimodalInputs>,
+        tool_constraints: Option<(String, String)>,
+    ) -> Result<ProtoGenerateRequest, String> {
+        match self {
+            Self::Sglang(client) => {
+                let req = client.build_generate_request_from_chat(
+                    request_id,
+                    body,
+                    processed_text,
+                    token_ids,
+                    multimodal_inputs,
+                    tool_constraints,
+                )?;
+                Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
+            }
+            Self::Vllm(client) => {
+                let req = client.build_generate_request_from_chat(
+                    request_id,
+                    body,
+                    processed_text,
+                    token_ids,
+                    tool_constraints,
+                )?;
+                Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
+            }
+            Self::Trtllm(client) => {
+                let req = client.build_generate_request_from_chat(
+                    request_id,
+                    body,
+                    processed_text,
+                    token_ids,
+                    tool_constraints,
+                )?;
+                Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
+            }
+        }
+    }
+
+    /// Build a plain generate request (non-chat)
+    ///
+    /// Dispatches to the appropriate backend client and wraps the result.
+    pub fn build_generate_request(
+        &self,
+        request_id: String,
+        body: &GenerateRequest,
+        original_text: Option<String>,
+        token_ids: Vec<u32>,
+    ) -> Result<ProtoGenerateRequest, String> {
+        match self {
+            Self::Sglang(client) => {
+                let req = client.build_plain_generate_request(
+                    request_id,
+                    body,
+                    original_text,
+                    token_ids,
+                )?;
+                Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
+            }
+            Self::Vllm(client) => {
+                let req = client.build_plain_generate_request(
+                    request_id,
+                    body,
+                    original_text,
+                    token_ids,
+                )?;
+                Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
+            }
+            Self::Trtllm(client) => {
+                let req = client.build_plain_generate_request(
+                    request_id,
+                    body,
+                    original_text,
+                    token_ids,
+                )?;
+                Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))
+            }
         }
     }
 }
