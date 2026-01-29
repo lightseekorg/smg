@@ -24,19 +24,23 @@ class TestGoBindingsPerf:
     Uses the exact same configuration as TestRegularPerf:
     - 4 workers
     - cache_aware policy
-    - Default genai-bench parameters (32 concurrency, D(4000,100))
+    - 32 concurrency, D(4000,100) traffic scenario
     - Same thresholds
+    - Higher max_requests to ensure sustained GPU load for monitoring
     """
 
     def test_go_oai_server_perf(self, go_oai_server_multi, genai_bench_runner):
         """Run genai-bench against Go OAI server with 4 workers and validate metrics."""
         host, port, model_path = go_oai_server_multi
 
-        # Use exact same call as test_regular_perf.py - no explicit parameters
+        # The Go OAI server bypasses gateway overhead, so it completes requests
+        # much faster. We increase max_requests to ensure the benchmark runs long
+        # enough for the GPU monitor to capture sustained utilization samples.
         genai_bench_runner(
             router_url=f"http://{host}:{port}",
             model_path=model_path,
             experiment_folder="benchmark_go_bindings",
+            max_requests_per_run=640,
             thresholds={
                 # Same thresholds as regular benchmark
                 "ttft_mean_max": 6,
