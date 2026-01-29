@@ -269,17 +269,45 @@ jobs:
         if: matrix.setup_vllm
         run: |
           # Ensure CUDA toolkit (nvcc) is available for building flash-attn
-          if ! command -v nvcc &> /dev/null; then
-            echo "nvcc not found, installing CUDA toolkit..."
-            # Find the CUDA version from the driver
-            CUDA_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 | cut -d'.' -f1)
-            # Install CUDA toolkit matching the runtime
+          # flash-attn's setup.py expects nvcc at /usr/local/cuda/bin/nvcc
+          if [ ! -f /usr/local/cuda/bin/nvcc ]; then
+            echo "nvcc not found at /usr/local/cuda/bin/nvcc, setting up CUDA toolkit..."
             sudo apt-get update
             sudo apt-get install -y cuda-nvcc-12-8 cuda-cudart-dev-12-8 || \
               sudo apt-get install -y nvidia-cuda-toolkit
-          fi
-          export PATH=/usr/local/cuda/bin:$PATH
 
+            # Find where nvcc was installed and create symlinks
+            NVCC_PATH=$(which nvcc 2>/dev/null || find /usr -name nvcc -type f 2>/dev/null | head -1)
+            if [ -n "$NVCC_PATH" ]; then
+              echo "Found nvcc at: $NVCC_PATH"
+              CUDA_BIN_DIR=$(dirname "$NVCC_PATH")
+              CUDA_DIR=$(dirname "$CUDA_BIN_DIR")
+
+              # Create /usr/local/cuda symlink if it doesn't exist
+              if [ ! -e /usr/local/cuda ]; then
+                sudo ln -sf "$CUDA_DIR" /usr/local/cuda
+                echo "Created symlink: /usr/local/cuda -> $CUDA_DIR"
+              elif [ ! -f /usr/local/cuda/bin/nvcc ]; then
+                # /usr/local/cuda exists but nvcc is missing, create bin symlink
+                sudo mkdir -p /usr/local/cuda/bin
+                sudo ln -sf "$NVCC_PATH" /usr/local/cuda/bin/nvcc
+                echo "Created symlink: /usr/local/cuda/bin/nvcc -> $NVCC_PATH"
+              fi
+            else
+              echo "ERROR: nvcc not found after installation"
+              exit 1
+            fi
+          fi
+
+          # Verify nvcc is accessible
+          echo "CUDA setup:"
+          ls -la /usr/local/cuda/bin/nvcc || true
+          /usr/local/cuda/bin/nvcc --version || true
+
+          export PATH=/usr/local/cuda/bin:$PATH
+          export CUDA_HOME=/usr/local/cuda
+
+          source .venv/bin/activate
           python3 -m pip install flash-attn --no-build-isolation
           python3 -m pip uninstall -y flashinfer flashinfer-python flashinfer-cubin flashinfer-jit-cache 2>/dev/null || true
           python3 -m pip install flashinfer-python==0.5.3 flashinfer-cubin==0.5.3
@@ -342,7 +370,7 @@ jobs:
 
       - name: Install e2e test dependencies
         run: |
-          python3 -m pip install pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy
+          python3 -m pip install pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy pandas
           if [ -n "${{ matrix.extra_deps }}" ]; then
             python3 -m pip --no-cache-dir install --upgrade ${{ matrix.extra_deps }}
           fi
