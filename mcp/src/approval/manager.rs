@@ -12,7 +12,7 @@ use std::{
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
-use tracing::{debug, info, warn};
+use tracing::info;
 
 use super::{
     audit::{AuditLog, DecisionResult, DecisionSource},
@@ -302,7 +302,7 @@ impl ApprovalManager {
     }
     /// Cancels all pending approvals, sending a denial to all waiting handlers.
     pub fn cancel_all_pending(&self) {
-        tracing::info!(
+        info!(
             "Cancelling {} pending approvals due to shutdown",
             self.pending.len()
         );
