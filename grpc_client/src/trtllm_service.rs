@@ -650,9 +650,7 @@ impl TrtllmServiceClient {
         if let Some(val) = p.min_p {
             config.min_p = Some(val);
         }
-        if let Some(val) = p.min_new_tokens {
-            config.min_tokens = Some(val);
-        }
+        config.min_tokens = p.min_new_tokens;
         if let Some(n) = p.n {
             config.num_return_sequences = n;
         }

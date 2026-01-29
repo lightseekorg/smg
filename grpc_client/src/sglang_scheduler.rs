@@ -654,9 +654,7 @@ impl SglangSchedulerClient {
         }
 
         // Handle max_new_tokens
-        if let Some(max_new_tokens) = p.max_new_tokens {
-            sampling.max_new_tokens = Some(max_new_tokens);
-        }
+        sampling.max_new_tokens = p.max_new_tokens;
 
         // Handle min_new_tokens
         if let Some(min_new_tokens) = p.min_new_tokens {
