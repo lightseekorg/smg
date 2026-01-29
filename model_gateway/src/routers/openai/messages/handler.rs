@@ -14,7 +14,6 @@ use crate::protocols::messages::CreateMessageRequest;
 pub struct MessagesHandler;
 
 impl MessagesHandler {
-
     pub async fn handle_non_streaming(
         _headers: Option<&HeaderMap>,
         _request: &CreateMessageRequest,

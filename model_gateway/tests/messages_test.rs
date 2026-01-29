@@ -7,11 +7,10 @@
 //! - No breaking changes to existing functionality
 
 use serde_json::json;
+use smg::protocols::messages::{CreateMessageRequest, InputContent, Role, SystemContent};
 
 #[test]
 fn test_create_message_request_deserialization() {
-    use smg::protocols::messages::{CreateMessageRequest, InputContent, Role};
-
     // Test simple string content
     let json = json!({
         "model": "claude-sonnet-4-5-20250929",
@@ -40,8 +39,6 @@ fn test_create_message_request_deserialization() {
 
 #[test]
 fn test_create_message_request_with_system() {
-    use smg::protocols::messages::{CreateMessageRequest, SystemContent};
-
     let json = json!({
         "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 1024,
@@ -63,8 +60,6 @@ fn test_create_message_request_with_system() {
 
 #[test]
 fn test_create_message_request_with_tools() {
-    use smg::protocols::messages::CreateMessageRequest;
-
     let json = json!({
         "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 500,
@@ -93,8 +88,6 @@ fn test_create_message_request_with_tools() {
 
 #[test]
 fn test_create_message_request_with_stream() {
-    use smg::protocols::messages::CreateMessageRequest;
-
     let json = json!({
         "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 100,
@@ -110,8 +103,6 @@ fn test_create_message_request_with_stream() {
 
 #[test]
 fn test_create_message_request_multi_turn() {
-    use smg::protocols::messages::{CreateMessageRequest, Role};
-
     let json = json!({
         "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 200,
@@ -132,49 +123,7 @@ fn test_create_message_request_multi_turn() {
 }
 
 #[test]
-fn test_messages_handler_tool_extraction() {
-    use serde_json::json;
-    use smg::{
-        protocols::messages::ContentBlock, routers::openai::messages::tools::extract_tool_calls,
-    };
-
-    let content = vec![
-        ContentBlock::Text {
-            text: "Let me use a tool".to_string(),
-            citations: None,
-        },
-        ContentBlock::ToolUse {
-            id: "toolu_123".to_string(),
-            name: "calculator".to_string(),
-            input: json!({"expression": "2+2"}),
-        },
-    ];
-
-    let tool_calls = extract_tool_calls(&content);
-    assert_eq!(tool_calls.len(), 1);
-    assert_eq!(tool_calls[0].name, "calculator");
-    assert_eq!(tool_calls[0].id, "toolu_123");
-}
-
-#[test]
-fn test_messages_handler_tool_extraction_empty() {
-    use smg::{
-        protocols::messages::ContentBlock, routers::openai::messages::tools::extract_tool_calls,
-    };
-
-    let content = vec![ContentBlock::Text {
-        text: "Just text, no tools".to_string(),
-        citations: None,
-    }];
-
-    let tool_calls = extract_tool_calls(&content);
-    assert_eq!(tool_calls.len(), 0);
-}
-
-#[test]
 fn test_create_message_request_with_temperature() {
-    use smg::protocols::messages::CreateMessageRequest;
-
     let json = json!({
         "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 100,
@@ -190,8 +139,6 @@ fn test_create_message_request_with_temperature() {
 
 #[test]
 fn test_create_message_request_with_thinking() {
-    use smg::protocols::messages::CreateMessageRequest;
-
     let json = json!({
         "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 2048,

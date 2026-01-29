@@ -253,15 +253,9 @@ async fn v1_messages(
     headers: http::HeaderMap,
     Json(body): Json<CreateMessageRequest>,
 ) -> Response {
-    // Extract model_id from headers if present (for manual routing)
-    let model_id = headers
-        .get("x-model-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
     state
         .router
-        .route_messages(Some(&headers), &body, model_id.as_deref())
+        .route_messages(Some(&headers), &body, Some(body.model.as_str()))
         .await
 }
 
