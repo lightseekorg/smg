@@ -305,13 +305,18 @@ impl ApprovalManager {
             "Cancelling {} pending approvals due to shutdown",
             self.pending.len()
         );
-
-        self.pending.retain(|_key, pending| {
-            let _ = pending.response_tx.send(ApprovalDecision::Denied {
-                reason: "System shutdown".to_string(),
-            });
-            false
-        });
+        let keys: Vec<_> = self
+            .pending
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        for key in keys {
+            if let Some((_, pending)) = self.pending.remove(&key) {
+                let _ = pending
+                    .response_tx
+                    .send(ApprovalDecision::denied("System shutdown"));
+            }
+        }
     }
 }
 
