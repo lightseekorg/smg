@@ -24,6 +24,6 @@ class TestPDPerf:
                 "e2e_latency_mean_max": 16,
                 "input_throughput_mean_min": 350,
                 "output_throughput_mean_min": 18,
-                "gpu_util_p50_min": 20,
+                "gpu_util_mean_min": 30,
             },
         )

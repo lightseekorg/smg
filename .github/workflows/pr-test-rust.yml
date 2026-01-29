@@ -268,6 +268,18 @@ jobs:
       - name: Install flash-attn for vLLM
         if: matrix.setup_vllm
         run: |
+          # Ensure CUDA toolkit (nvcc) is available for building flash-attn
+          if ! command -v nvcc &> /dev/null; then
+            echo "nvcc not found, installing CUDA toolkit..."
+            # Find the CUDA version from the driver
+            CUDA_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 | cut -d'.' -f1)
+            # Install CUDA toolkit matching the runtime
+            sudo apt-get update
+            sudo apt-get install -y cuda-nvcc-12-8 cuda-cudart-dev-12-8 || \
+              sudo apt-get install -y nvidia-cuda-toolkit
+          fi
+          export PATH=/usr/local/cuda/bin:$PATH
+
           python3 -m pip install flash-attn --no-build-isolation
           python3 -m pip uninstall -y flashinfer flashinfer-python flashinfer-cubin flashinfer-jit-cache 2>/dev/null || true
           python3 -m pip install flashinfer-python==0.5.3 flashinfer-cubin==0.5.3

@@ -328,18 +328,12 @@ class GPUMonitor:
             result.get("count", 0),
         )
 
-    def assert_thresholds(
-        self,
-        thresholds: dict[str, float] | None,
-    ) -> None:
+    def assert_thresholds(self, thresholds: dict[str, float] | None) -> None:
         """Assert GPU utilization meets thresholds.
 
         Supported thresholds:
             - gpu_util_mean_min: Minimum mean GPU utilization %
             - gpu_util_p50_min: Minimum p50 GPU utilization %
-
-        Args:
-            thresholds: Dictionary of threshold values
         """
         if not thresholds:
             return
@@ -349,7 +343,6 @@ class GPUMonitor:
             logger.warning("GPU utilization monitor produced no samples")
             return
 
-        # Stats are already trimmed in _read_result()
         overall = result.get("overall", {})
 
         mean_threshold = thresholds.get("gpu_util_mean_min")
