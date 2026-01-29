@@ -40,7 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chron
 uuid = { version = "1.10" }
 wasmtime = { version = "41.0", features = ["component-model", "async"] }
 wasmtime-wasi = "41.0"
-tokio-util = { version = "0.7", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 scopeguard = "1.2"
 
 [profile.release]
