@@ -103,6 +103,11 @@ func (h *ChatHandler) HandleChatCompletion(ctx *fasthttp.RequestCtx) {
 	} else if req.MaxTokens != nil {
 		sglReq.MaxCompletionTokens = req.MaxTokens
 	}
+	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage != nil {
+		sglReq.StreamOptions = &smg.StreamOptions{
+			IncludeUsage: req.StreamOptions.IncludeUsage,
+		}
+	}
 
 	requestCtx := context.Background()
 

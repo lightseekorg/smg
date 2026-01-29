@@ -174,24 +174,31 @@ type ChatCompletionRequest struct {
 	// Model specifies the model to use for completion (e.g., "default")
 	Model string `json:"model"`
 	// Messages is the list of messages in the conversation
-	Messages            []ChatMessage   `json:"messages"`
-	Temperature         *float32        `json:"temperature,omitempty"`
-	TopP                *float32        `json:"top_p,omitempty"`
-	TopK                *int            `json:"top_k,omitempty"`
-	MaxCompletionTokens *int            `json:"max_completion_tokens,omitempty"`
-	Stream              bool            `json:"stream"`
-	Tools               []Tool          `json:"tools,omitempty"`
-	ToolChoice          interface{}     `json:"tool_choice,omitempty"`
-	Stop                interface{}     `json:"stop,omitempty"`
-	StopTokenIDs        []int           `json:"stop_token_ids,omitempty"`
-	SkipSpecialTokens   bool            `json:"skip_special_tokens,omitempty"`
-	FrequencyPenalty    *float32        `json:"frequency_penalty,omitempty"`
-	PresencePenalty     *float32        `json:"presence_penalty,omitempty"`
-	ResponseFormat      *ResponseFormat `json:"response_format,omitempty"`
-	Seed                *int            `json:"seed,omitempty"`
-	Logprobs            bool            `json:"logprobs,omitempty"`
-	TopLogprobs         *int            `json:"top_logprobs,omitempty"`
-	User                string          `json:"user,omitempty"`
+	Messages            []ChatMessage    `json:"messages"`
+	Temperature         *float32         `json:"temperature,omitempty"`
+	TopP                *float32         `json:"top_p,omitempty"`
+	TopK                *int             `json:"top_k,omitempty"`
+	MaxCompletionTokens *int             `json:"max_completion_tokens,omitempty"`
+	Stream              bool             `json:"stream"`
+	StreamOptions       *StreamOptions   `json:"stream_options,omitempty"`
+	Tools               []Tool           `json:"tools,omitempty"`
+	ToolChoice          interface{}      `json:"tool_choice,omitempty"`
+	Stop                interface{}      `json:"stop,omitempty"`
+	StopTokenIDs        []int            `json:"stop_token_ids,omitempty"`
+	SkipSpecialTokens   bool             `json:"skip_special_tokens,omitempty"`
+	FrequencyPenalty    *float32         `json:"frequency_penalty,omitempty"`
+	PresencePenalty     *float32         `json:"presence_penalty,omitempty"`
+	ResponseFormat      *ResponseFormat  `json:"response_format,omitempty"`
+	Seed                *int             `json:"seed,omitempty"`
+	Logprobs            bool             `json:"logprobs,omitempty"`
+	TopLogprobs         *int             `json:"top_logprobs,omitempty"`
+	User                string           `json:"user,omitempty"`
+}
+
+// StreamOptions controls streaming behavior options.
+type StreamOptions struct {
+	// IncludeUsage, when true, includes token usage in the final streaming chunk.
+	IncludeUsage *bool `json:"include_usage,omitempty"`
 }
 
 // ChatMessage represents a single message in a chat conversation

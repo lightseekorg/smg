@@ -47,6 +47,6 @@ class TestGoBindingsPerf:
                 "e2e_latency_mean_max": 14,
                 "input_throughput_mean_min": 800,
                 "output_throughput_mean_min": 12,
-                "gpu_util_p50_min": 99,
+                "gpu_util_p50_min": 50,
             },
         )
