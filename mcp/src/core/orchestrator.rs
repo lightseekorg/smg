@@ -28,7 +28,10 @@
 
 use std::{
     borrow::Cow,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -41,6 +44,7 @@ use rmcp::{
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::{
@@ -275,6 +279,8 @@ pub struct McpOrchestrator {
     metrics: Arc<McpMetrics>,
     /// Channel for refresh requests from handlers.
     refresh_tx: mpsc::Sender<RefreshRequest>,
+    active_executions: Arc<AtomicUsize>,
+    shutdown_token: CancellationToken,
     /// Original config for reference.
     config: McpConfig,
 }
@@ -326,6 +332,8 @@ impl McpOrchestrator {
             connection_pool,
             metrics,
             refresh_tx,
+            active_executions: Arc::new(AtomicUsize::new(0)),
+            shutdown_token: CancellationToken::new(),
             config: config.clone(),
         };
 
@@ -370,6 +378,8 @@ impl McpOrchestrator {
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
             refresh_tx,
+            active_executions: Arc::new(AtomicUsize::new(0)),
+            shutdown_token: CancellationToken::new(),
             config: McpConfig::default(),
         }
     }
@@ -684,38 +694,51 @@ impl McpOrchestrator {
 
     /// Spawn background handler for inventory refresh requests.
     fn spawn_refresh_handler(&self, mut rx: mpsc::Receiver<RefreshRequest>) {
+        let token = self.shutdown_token.clone(); //
         let tool_inventory = Arc::clone(&self.tool_inventory);
         let static_servers = self.static_servers.clone();
 
         tokio::spawn(async move {
-            while let Some(request) = rx.recv().await {
-                debug!("Processing refresh request for '{}'", request.server_key);
+            loop {
+                tokio::select! {
+                    // Stop the loop if the shutdown token is triggered
+                    _ = token.cancelled() => { //
+                        debug!("Refresh handler shutting down");
+                        break;
+                    }
+                    // Process refresh requests as they arrive
+                    Some(request) = rx.recv() => {
+                        debug!("Processing refresh request for '{}'", request.server_key);
 
-                if let Some(entry) = static_servers.get(&request.server_key) {
-                    // Clear existing tools for this server
-                    tool_inventory.clear_server_tools(&request.server_key);
+                        if let Some(entry) = static_servers.get(&request.server_key) {
+                            // Clear existing tools for this server
+                            tool_inventory.clear_server_tools(&request.server_key);
 
-                    // Reload tools
-                    match entry.client.peer().list_all_tools().await {
-                        Ok(tools) => {
-                            for tool in tools {
-                                let entry = ToolEntry::from_server_tool(&request.server_key, tool)
-                                    .with_category(ToolCategory::Static);
-                                tool_inventory.insert_entry(entry);
+                            // Reload tools
+                            match entry.client.peer().list_all_tools().await {
+                                Ok(tools) => {
+                                    for tool in tools {
+                                        let entry = ToolEntry::from_server_tool(&request.server_key, tool)
+                                            .with_category(ToolCategory::Static);
+                                        tool_inventory.insert_entry(entry);
+                                    }
+                                    info!(
+                                        "Refreshed inventory for '{}': {} tools",
+                                        request.server_key,
+                                        tool_inventory.counts().0
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to refresh tools for '{}': {}",
+                                        request.server_key, e
+                                    );
+                                }
                             }
-                            info!(
-                                "Refreshed inventory for '{}': {} tools",
-                                request.server_key,
-                                tool_inventory.counts().0
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to refresh tools for '{}': {}",
-                                request.server_key, e
-                            );
                         }
                     }
+
+                    else => break,
                 }
             }
         });
@@ -743,6 +766,10 @@ impl McpOrchestrator {
         server_label: &str,
         request_ctx: &McpRequestContext<'_>,
     ) -> McpResult<ToolCallResult> {
+        self.active_executions.fetch_add(1, Ordering::SeqCst);
+        let _guard = scopeguard::guard(Arc::clone(&self.active_executions), |count| {
+            count.fetch_sub(1, Ordering::SeqCst);
+        });
         let qualified = QualifiedToolName::new(server_key, tool_name);
 
         // Get tool entry
@@ -1698,21 +1725,36 @@ impl McpOrchestrator {
 
     /// Shutdown the orchestrator gracefully.
     pub async fn shutdown(&self) {
-        info!("Shutting down McpOrchestrator");
+        tracing::info!("Starting graceful shutdown of McpOrchestrator");
 
-        // Close static server connections
-        for _entry in self.static_servers.iter() {
+        self.shutdown_token.cancel();
+
+        // Wait for active executions (30s timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30);
+        while self.active_executions.load(Ordering::SeqCst) > 0 {
+            if start.elapsed() >= timeout {
+                tracing::warn!(
+                    "Shutdown timeout reached; {} executions still active",
+                    self.active_executions.load(Ordering::SeqCst)
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        // Cancel pending approvals
+        self.approval_manager.cancel_all_pending();
+
+        for _ in self.static_servers.iter() {
             self.metrics.record_connection_closed();
         }
         self.static_servers.clear();
-
-        // Clear connection pool
         self.connection_pool.clear();
 
-        // Clear inventory
         self.tool_inventory.clear_all();
 
-        info!("McpOrchestrator shutdown complete");
+        tracing::info!("McpOrchestrator shutdown complete");
     }
 }
 
@@ -1802,6 +1844,12 @@ impl<'a> McpRequestContext<'a> {
         arguments: Value,
         server_label: &str,
     ) -> McpResult<ToolCallResult> {
+        self.orchestrator
+            .active_executions
+            .fetch_add(1, Ordering::SeqCst);
+        let _guard = scopeguard::guard(Arc::clone(&self.orchestrator.active_executions), |count| {
+            count.fetch_sub(1, Ordering::SeqCst);
+        });
         // Check dynamic tools first
         let qualified = QualifiedToolName::new(server_key, tool_name);
         if let Some(entry) = self.dynamic_tools.get(&qualified) {
@@ -1906,6 +1954,10 @@ impl<'a> Drop for McpRequestContext<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
     use super::*;
 
     fn create_test_tool(name: &str) -> crate::core::config::Tool {
@@ -1920,6 +1972,75 @@ mod tests {
             annotations: None,
             icons: None,
         }
+    }
+    #[tokio::test]
+    async fn test_orchestrator_graceful_shutdown_flow() {
+        let orchestrator = McpOrchestrator::new_test();
+        let tenant = TenantContext::new("test-tenant");
+        let ctx = orchestrator.create_request_context(
+            "req-shutdown-test",
+            tenant,
+            ApprovalMode::Interactive,
+        );
+
+        let hints = crate::annotations::ToolAnnotations::new();
+        let params = ApprovalParams {
+            request_id: "req-shutdown-test",
+            server_key: "test-server",
+            elicitation_id: "elicit-1",
+            tool_name: "test_tool",
+            hints: &hints,
+            message: "Allow tool execution?",
+            tenant_ctx: &ctx.tenant_ctx,
+        };
+
+        // Use the approval manager directly to simulate a real pending state
+        let outcome = orchestrator
+            .approval_manager()
+            .handle_approval(ApprovalMode::Interactive, params)
+            .await
+            .expect("Failed to create pending approval");
+
+        let rx = match outcome {
+            ApprovalOutcome::Pending { rx, .. } => rx,
+            _ => panic!("Expected the outcome to be Pending for interactive mode"),
+        };
+
+        let shutdown_result = timeout(Duration::from_secs(5), orchestrator.shutdown()).await;
+        assert!(shutdown_result.is_ok(), "Orchestrator shutdown timed out");
+
+        let decision = rx
+            .await
+            .expect("The approval channel should have received a response before closing");
+        match decision {
+            ApprovalDecision::Denied { reason } => {
+                assert_eq!(
+                    reason, "System shutdown",
+                    "Denial reason should be 'System shutdown'"
+                );
+            }
+            _ => panic!("Expected the tool call to be Denied, but it was Approved"),
+        }
+
+        assert_eq!(
+            orchestrator.active_executions.load(Ordering::SeqCst),
+            0,
+            "Active execution counter must be zero"
+        );
+        assert_eq!(
+            orchestrator.pending_approval_count(),
+            0,
+            "Pending approvals were not cleared"
+        );
+        assert!(
+            orchestrator.list_servers().is_empty(),
+            "Server registry was not cleared"
+        );
+        assert_eq!(
+            orchestrator.tool_inventory().counts().0,
+            0,
+            "Tool inventory was not cleared"
+        );
     }
 
     #[test]
@@ -2192,6 +2313,8 @@ mod tests {
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
             refresh_tx,
+            active_executions: Arc::new(AtomicUsize::new(0)),
+            shutdown_token: CancellationToken::new(),
             config,
         };
 
@@ -2258,6 +2381,8 @@ mod tests {
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
             refresh_tx,
+            active_executions: Arc::new(AtomicUsize::new(0)),
+            shutdown_token: CancellationToken::new(),
             config,
         };
 
@@ -2326,6 +2451,8 @@ mod tests {
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
             refresh_tx,
+            active_executions: Arc::new(AtomicUsize::new(0)),
+            shutdown_token: CancellationToken::new(),
             config,
         };
 
@@ -2400,6 +2527,8 @@ mod tests {
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
             refresh_tx,
+            active_executions: Arc::new(AtomicUsize::new(0)),
+            shutdown_token: CancellationToken::new(),
             config,
         };
 
