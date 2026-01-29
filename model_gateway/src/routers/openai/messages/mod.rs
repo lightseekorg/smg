@@ -9,13 +9,6 @@
 //! - `handler.rs`: Core request handling (non-streaming)
 //! - `streaming.rs`: SSE streaming support
 //! - `tools.rs`: Tool use and MCP integration
-//!
-//! ## Status
-//!
-//! - [x] Foundation (PR #1)
-//! - [ ] Non-streaming (PR #2)
-//! - [ ] Streaming (PR #3)
-//! - [ ] Tools (PR #4)
 
 pub mod handler;
 pub mod streaming;

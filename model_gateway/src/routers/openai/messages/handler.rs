@@ -14,16 +14,7 @@ use crate::protocols::messages::CreateMessageRequest;
 pub struct MessagesHandler;
 
 impl MessagesHandler {
-    /// Handle non-streaming Messages API request
-    ///
-    /// # Arguments
-    ///
-    /// * `headers` - Request headers (for auth, routing hints, etc.)
-    /// * `request` - Parsed Messages API request
-    ///
-    /// # Returns
-    ///
-    /// HTTP response (currently 501 Not Implemented)
+
     pub async fn handle_non_streaming(
         _headers: Option<&HeaderMap>,
         _request: &CreateMessageRequest,
@@ -35,16 +26,6 @@ impl MessagesHandler {
             .into_response()
     }
 
-    /// Handle streaming Messages API request (SSE)
-    ///
-    /// # Arguments
-    ///
-    /// * `headers` - Request headers
-    /// * `request` - Parsed Messages API request
-    ///
-    /// # Returns
-    ///
-    /// SSE stream response (currently 501 Not Implemented)
     pub async fn handle_streaming(
         _headers: Option<&HeaderMap>,
         _request: &CreateMessageRequest,

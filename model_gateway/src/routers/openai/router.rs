@@ -1048,8 +1048,6 @@ impl crate::routers::RouterTrait for OpenAIRouter {
     ) -> Response {
         use crate::routers::openai::messages::MessagesHandler;
 
-        // For PR #1, just call the stub handler
-        // PR #2 will add real implementation with policy selection and worker routing
         if body.stream.unwrap_or(false) {
             MessagesHandler::handle_streaming(headers, body).await
         } else {

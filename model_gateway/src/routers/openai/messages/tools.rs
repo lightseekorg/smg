@@ -4,20 +4,9 @@
 //! - Converting MCP tools to Messages API format
 //! - Executing tool calls via MCP orchestrator
 //! - Assembling tool results
-//!
-//! Implementation coming in PR #4.
 
 use crate::protocols::messages::{ContentBlock, ToolUseBlock};
 
-/// Extract tool use blocks from message content (placeholder)
-///
-/// # Arguments
-///
-/// * `content` - Message content blocks
-///
-/// # Returns
-///
-/// Vector of tool use blocks
 pub fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> {
     content
         .iter()

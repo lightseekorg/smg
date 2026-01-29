@@ -1,4 +1,4 @@
-//! Foundation tests for Messages API (PR #1)
+//! Basic tests for Messages API
 //!
 //! These tests verify:
 //! - /v1/messages endpoint exists

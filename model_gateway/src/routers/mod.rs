@@ -198,15 +198,6 @@ pub trait RouterTrait: Send + Sync + Debug {
     }
 
     /// Route Anthropic Messages API requests (/v1/messages)
-    ///
-    /// This endpoint implements the Anthropic Messages API, supporting:
-    /// - Non-streaming and streaming (SSE) responses
-    /// - Tool use with MCP integration
-    /// - Prompt caching
-    /// - Extended thinking
-    /// - Citations
-    ///
-    /// Default implementation returns 501 Not Implemented.
     async fn route_messages(
         &self,
         _headers: Option<&HeaderMap>,
