@@ -106,7 +106,7 @@ impl HarmonyResponseProcessor {
             // Convert output logprobs if present
             let logprobs: Option<ChatLogProbs> = if request_logprobs {
                 complete.output_logprobs().and_then(|lp| {
-                    convert_harmony_logprobs(lp)
+                    convert_harmony_logprobs(&lp)
                         .map_err(|e| error!("Failed to convert logprobs: {}", e))
                         .ok()
                 })

@@ -317,7 +317,8 @@ impl StreamingProcessor {
                     }
 
                     // Process logprobs if present
-                    let choice_logprobs = if let Some(proto_logprobs) = chunk.output_logprobs() {
+                    let choice_logprobs = if let Some(ref proto_logprobs) = chunk.output_logprobs()
+                    {
                         match utils::convert_proto_to_openai_logprobs(proto_logprobs, &tokenizer) {
                             Ok(logprobs) => Some(logprobs),
                             Err(e) => {
@@ -470,17 +471,17 @@ impl StreamingProcessor {
                     }
 
                     // Store metadata
-                    prompt_tokens.insert(index, complete.prompt_tokens() as u32);
+                    prompt_tokens.insert(index, complete.prompt_tokens());
 
                     // For vLLM, use accumulated count (we tracked deltas)
                     // For SGLang, use complete value (already cumulative)
                     if complete.is_vllm() {
                         completion_tokens.entry(index).or_insert(0);
                     } else {
-                        completion_tokens.insert(index, complete.completion_tokens() as u32);
+                        completion_tokens.insert(index, complete.completion_tokens());
                     }
 
-                    cached_tokens.insert(index, complete.cached_tokens() as u32);
+                    cached_tokens.insert(index, complete.cached_tokens());
                     finish_reasons.insert(index, complete.finish_reason().to_string());
 
                     // Extract matched_stop
@@ -726,8 +727,8 @@ impl StreamingProcessor {
         build_sse_response(rx)
     }
 
-    //TODO add streaming logprob support
     /// Process streaming chunks for generate endpoint (no tool/reasoning parsing)
+    /// TODO: add streaming logprob support
     async fn process_generate_streaming(
         tokenizer: Arc<dyn Tokenizer>,
         mut stream: ProtoStream,
@@ -860,6 +861,7 @@ impl StreamingProcessor {
                         // Extract input_logprobs from prefill Complete message (convert proto to SGLang format)
                         input_logprobs = complete
                             .input_logprobs()
+                            .as_ref()
                             .map(utils::convert_generate_input_logprobs);
                         break;
                     }
@@ -937,16 +939,30 @@ impl StreamingProcessor {
                     let accumulated_text = accumulated_texts.entry(index).or_default();
                     accumulated_text.push_str(&chunk_text);
 
-                    // Store latest output logprobs (cumulative from proto, convert to SGLang format)
-                    if let Some(output_logprobs) = chunk.output_logprobs() {
+                    // Handle output logprobs based on backend behavior:
+                    // - SGLang sends cumulative logprobs (replace is correct)
+                    // - vLLM sends delta logprobs (need to extend/accumulate)
+                    if let Some(ref output_logprobs) = chunk.output_logprobs() {
                         let converted = utils::convert_generate_output_logprobs(output_logprobs);
-                        accumulated_output_logprobs.insert(index, Some(converted));
+                        if chunk.is_vllm() {
+                            // vLLM sends delta - extend existing logprobs
+                            if let Some(v) = accumulated_output_logprobs
+                                .entry(index)
+                                .or_insert_with(|| Some(Vec::new()))
+                                .as_mut()
+                            {
+                                v.extend(converted);
+                            }
+                        } else {
+                            // SGLang sends cumulative - replace
+                            accumulated_output_logprobs.insert(index, Some(converted));
+                        }
                     }
 
                     // Generate unique ID per index
                     let index_id = format!("{}-{}", ctx.request_id, index);
 
-                    // Build streaming response chunk with cumulative logprobs
+                    // Build streaming response chunk with accumulated logprobs
                     let current_output_logprobs = accumulated_output_logprobs
                         .get(&index)
                         .and_then(|o| o.as_ref());

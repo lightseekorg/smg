@@ -40,7 +40,7 @@ pub struct GrpcResponseConverterHandle {
     pub(crate) tool_choice: Option<ToolChoice>,
     pub(crate) history_tool_calls_count: usize,
     pub(crate) stream_state: StreamStateManager,
-    pub(crate) initial_prompt_tokens: Option<i32>,
+    pub(crate) initial_prompt_tokens: Option<u32>,
     pub(crate) skip_special_tokens: bool,
 }
 
@@ -568,7 +568,7 @@ pub(crate) async fn convert_proto_chunk_to_openai(
             } else if complete.completion_tokens > 0 {
                 complete.completion_tokens
             } else if !complete.output_ids.is_empty() {
-                complete.output_ids.len() as i32
+                complete.output_ids.len() as u32
             } else {
                 0
             };
@@ -582,9 +582,9 @@ pub(crate) async fn convert_proto_chunk_to_openai(
 
             // Always create usage, even if values are 0 (defensive)
             let usage = Some(Usage {
-                prompt_tokens: prompt_tokens.max(0) as u32,
-                completion_tokens: completion_tokens.max(0) as u32,
-                total_tokens: (prompt_tokens.max(0) + completion_tokens.max(0)) as u32,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
                 completion_tokens_details: None,
             });
 

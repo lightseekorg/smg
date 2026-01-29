@@ -14,6 +14,72 @@ use crate::grpc_client::{
     vllm_proto as vllm,
 };
 
+// =====================
+// Unified Logprobs Types
+// =====================
+
+/// Unified output logprobs (backend-agnostic)
+#[derive(Clone, Debug)]
+pub struct ProtoOutputLogProbs {
+    pub token_logprobs: Vec<f32>,
+    pub token_ids: Vec<i32>,
+    pub top_logprobs: Vec<ProtoTopLogProbs>,
+}
+
+/// Unified top logprobs per position
+#[derive(Clone, Debug)]
+pub struct ProtoTopLogProbs {
+    pub values: Vec<f32>,
+    pub token_ids: Vec<i32>,
+}
+
+/// Unified input (prompt) logprobs
+#[derive(Clone, Debug)]
+pub struct ProtoInputLogProbs {
+    pub token_logprobs: Vec<Option<f32>>, // First token is None
+    pub token_ids: Vec<i32>,
+    pub top_logprobs: Vec<ProtoTopLogProbs>,
+}
+
+/// Helper macro to convert output logprobs from proto types to unified type.
+/// Both SGLang and vLLM have identical OutputLogProbs structure.
+/// Note: Cloning is necessary as we convert from borrowed proto types to owned unified types.
+/// OOM risk is mitigated by capping top_logprobs at 20 in sampling params.
+macro_rules! convert_output_logprobs {
+    ($lp:expr) => {
+        ProtoOutputLogProbs {
+            token_logprobs: $lp.token_logprobs.clone(),
+            token_ids: $lp.token_ids.clone(),
+            top_logprobs: $lp
+                .top_logprobs
+                .iter()
+                .map(|t| ProtoTopLogProbs {
+                    values: t.values.clone(),
+                    token_ids: t.token_ids.clone(),
+                })
+                .collect(),
+        }
+    };
+}
+
+/// Helper macro to convert input logprobs from proto types to unified type.
+macro_rules! convert_input_logprobs {
+    ($lp:expr) => {
+        ProtoInputLogProbs {
+            token_logprobs: $lp.token_logprobs.iter().map(|t| t.value).collect(),
+            token_ids: $lp.token_ids.clone(),
+            top_logprobs: $lp
+                .top_logprobs
+                .iter()
+                .map(|t| ProtoTopLogProbs {
+                    values: t.values.clone(),
+                    token_ids: t.token_ids.clone(),
+                })
+                .collect(),
+        }
+    };
+}
+
 /// Unified ProtoRequest
 #[derive(Clone)]
 pub enum ProtoRequest {
@@ -235,46 +301,90 @@ impl ProtoGenerateStreamChunk {
     }
 
     /// Get index (for n>1 support)
-    /// vLLM doesn't support n>1, so always returns 0
+    /// Returns the index of this output when n>1 was requested (0-indexed)
     pub fn index(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.index,
-            Self::Vllm(_) => 0,
-            Self::Trtllm(c) => c.sequence_index as u32,
+            Self::Vllm(c) => c.index,
+            Self::Trtllm(c) => c.sequence_index,
         }
     }
 
-    /// Get output logprobs (SGLang only, returns None for vLLM and TensorRT-LLM)
-    pub fn output_logprobs(&self) -> Option<&sglang::OutputLogProbs> {
+    /// Get output logprobs (SGLang, vLLM, and TensorRT-LLM)
+    pub fn output_logprobs(&self) -> Option<ProtoOutputLogProbs> {
         match self {
-            Self::Sglang(c) => c.output_logprobs.as_ref(),
-            Self::Vllm(_) | Self::Trtllm(_) => None,
+            Self::Sglang(c) => c
+                .output_logprobs
+                .as_ref()
+                .map(|lp| convert_output_logprobs!(lp)),
+            Self::Vllm(c) => c
+                .output_logprobs
+                .as_ref()
+                .map(|lp| convert_output_logprobs!(lp)),
+            Self::Trtllm(c) => {
+                if c.logprobs.is_empty() {
+                    None
+                } else {
+                    Some(ProtoOutputLogProbs {
+                        token_logprobs: c.logprobs.iter().map(|lp| lp.logprob).collect(),
+                        token_ids: c.logprobs.iter().map(|lp| lp.token_id as i32).collect(),
+                        top_logprobs: c
+                            .logprobs
+                            .iter()
+                            .map(|lp| ProtoTopLogProbs {
+                                values: lp.top_logprobs.iter().map(|t| t.logprob).collect(),
+                                token_ids: lp
+                                    .top_logprobs
+                                    .iter()
+                                    .map(|t| t.token_id as i32)
+                                    .collect(),
+                            })
+                            .collect(),
+                    })
+                }
+            }
+        }
+    }
+
+    /// Get input logprobs (SGLang and vLLM only - streaming chunks don't have prompt logprobs)
+    pub fn input_logprobs(&self) -> Option<ProtoInputLogProbs> {
+        match self {
+            Self::Sglang(c) => c
+                .input_logprobs
+                .as_ref()
+                .map(|lp| convert_input_logprobs!(lp)),
+            Self::Vllm(c) => c
+                .input_logprobs
+                .as_ref()
+                .map(|lp| convert_input_logprobs!(lp)),
+            // TRT-LLM streaming chunks don't have prompt_logprobs
+            Self::Trtllm(_) => None,
         }
     }
 
     /// Get prompt tokens (cumulative)
-    pub fn prompt_tokens(&self) -> i32 {
+    pub fn prompt_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.prompt_tokens,
-            Self::Vllm(c) => c.prompt_tokens as i32,
+            Self::Vllm(c) => c.prompt_tokens,
             Self::Trtllm(c) => c.prompt_tokens,
         }
     }
 
     /// Get completion tokens (cumulative)
-    pub fn completion_tokens(&self) -> i32 {
+    pub fn completion_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.completion_tokens,
-            Self::Vllm(c) => c.completion_tokens as i32,
+            Self::Vllm(c) => c.completion_tokens,
             Self::Trtllm(c) => c.completion_tokens,
         }
     }
 
     /// Get cached tokens (cumulative)
-    pub fn cached_tokens(&self) -> i32 {
+    pub fn cached_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.cached_tokens,
-            Self::Vllm(c) => c.cached_tokens as i32,
+            Self::Vllm(c) => c.cached_tokens,
             Self::Trtllm(c) => c.cached_tokens,
         }
     }
@@ -346,19 +456,19 @@ impl ProtoGenerateComplete {
     }
 
     /// Get prompt tokens
-    pub fn prompt_tokens(&self) -> i32 {
+    pub fn prompt_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.prompt_tokens,
-            Self::Vllm(c) => c.prompt_tokens as i32,
+            Self::Vllm(c) => c.prompt_tokens,
             Self::Trtllm(c) => c.prompt_tokens,
         }
     }
 
     /// Get completion tokens
-    pub fn completion_tokens(&self) -> i32 {
+    pub fn completion_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.completion_tokens,
-            Self::Vllm(c) => c.completion_tokens as i32,
+            Self::Vllm(c) => c.completion_tokens,
             Self::Trtllm(c) => c.completion_tokens,
         }
     }
@@ -373,12 +483,12 @@ impl ProtoGenerateComplete {
     }
 
     /// Get index (for n>1 support)
-    /// vLLM doesn't support n>1, so always returns 0
+    /// Returns the index of this output when n>1 was requested (0-indexed)
     pub fn index(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.index,
-            Self::Vllm(_) => 0,
-            Self::Trtllm(c) => c.sequence_index as u32,
+            Self::Vllm(c) => c.index,
+            Self::Trtllm(c) => c.sequence_index,
         }
     }
 
@@ -401,27 +511,125 @@ impl ProtoGenerateComplete {
     }
 
     /// Get cached tokens
-    pub fn cached_tokens(&self) -> i32 {
+    pub fn cached_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.cached_tokens,
-            Self::Vllm(c) => c.cached_tokens as i32,
+            Self::Vllm(c) => c.cached_tokens,
             Self::Trtllm(c) => c.cached_tokens,
         }
     }
 
-    /// Get input logprobs (SGLang only)
-    pub fn input_logprobs(&self) -> Option<&sglang::InputLogProbs> {
+    /// Get input/prompt logprobs (SGLang, vLLM, and TensorRT-LLM)
+    pub fn input_logprobs(&self) -> Option<ProtoInputLogProbs> {
         match self {
-            Self::Sglang(c) => c.input_logprobs.as_ref(),
-            Self::Vllm(_) | Self::Trtllm(_) => None,
+            Self::Sglang(c) => c.input_logprobs.as_ref().map(|lp| ProtoInputLogProbs {
+                token_logprobs: lp.token_logprobs.iter().map(|t| t.value).collect(),
+                token_ids: lp.token_ids.clone(),
+                top_logprobs: lp
+                    .top_logprobs
+                    .iter()
+                    .map(|t| ProtoTopLogProbs {
+                        values: t.values.clone(),
+                        token_ids: t.token_ids.clone(),
+                    })
+                    .collect(),
+            }),
+            Self::Vllm(c) => c.input_logprobs.as_ref().map(|lp| ProtoInputLogProbs {
+                token_logprobs: lp.token_logprobs.iter().map(|t| t.value).collect(),
+                token_ids: lp.token_ids.clone(),
+                top_logprobs: lp
+                    .top_logprobs
+                    .iter()
+                    .map(|t| ProtoTopLogProbs {
+                        values: t.values.clone(),
+                        token_ids: t.token_ids.clone(),
+                    })
+                    .collect(),
+            }),
+            Self::Trtllm(c) => {
+                if c.prompt_logprobs.is_empty() {
+                    None
+                } else {
+                    Some(ProtoInputLogProbs {
+                        // First token has None logprob (no prior context)
+                        token_logprobs: c
+                            .prompt_logprobs
+                            .iter()
+                            .enumerate()
+                            .map(|(i, lp)| if i == 0 { None } else { Some(lp.logprob) })
+                            .collect(),
+                        token_ids: c
+                            .prompt_logprobs
+                            .iter()
+                            .map(|lp| lp.token_id as i32)
+                            .collect(),
+                        top_logprobs: c
+                            .prompt_logprobs
+                            .iter()
+                            .map(|lp| ProtoTopLogProbs {
+                                values: lp.top_logprobs.iter().map(|t| t.logprob).collect(),
+                                token_ids: lp
+                                    .top_logprobs
+                                    .iter()
+                                    .map(|t| t.token_id as i32)
+                                    .collect(),
+                            })
+                            .collect(),
+                    })
+                }
+            }
         }
     }
 
-    /// Get output logprobs (SGLang only for now)
-    pub fn output_logprobs(&self) -> Option<&sglang::OutputLogProbs> {
+    /// Get output logprobs (SGLang, vLLM, and TensorRT-LLM)
+    pub fn output_logprobs(&self) -> Option<ProtoOutputLogProbs> {
         match self {
-            Self::Sglang(c) => c.output_logprobs.as_ref(),
-            Self::Vllm(_) | Self::Trtllm(_) => None,
+            Self::Sglang(c) => c.output_logprobs.as_ref().map(|lp| ProtoOutputLogProbs {
+                token_logprobs: lp.token_logprobs.clone(),
+                token_ids: lp.token_ids.clone(),
+                top_logprobs: lp
+                    .top_logprobs
+                    .iter()
+                    .map(|t| ProtoTopLogProbs {
+                        values: t.values.clone(),
+                        token_ids: t.token_ids.clone(),
+                    })
+                    .collect(),
+            }),
+            Self::Vllm(c) => c.output_logprobs.as_ref().map(|lp| ProtoOutputLogProbs {
+                token_logprobs: lp.token_logprobs.clone(),
+                token_ids: lp.token_ids.clone(),
+                top_logprobs: lp
+                    .top_logprobs
+                    .iter()
+                    .map(|t| ProtoTopLogProbs {
+                        values: t.values.clone(),
+                        token_ids: t.token_ids.clone(),
+                    })
+                    .collect(),
+            }),
+            Self::Trtllm(c) => {
+                if c.logprobs.is_empty() {
+                    None
+                } else {
+                    Some(ProtoOutputLogProbs {
+                        token_logprobs: c.logprobs.iter().map(|lp| lp.logprob).collect(),
+                        token_ids: c.logprobs.iter().map(|lp| lp.token_id as i32).collect(),
+                        top_logprobs: c
+                            .logprobs
+                            .iter()
+                            .map(|lp| ProtoTopLogProbs {
+                                values: lp.top_logprobs.iter().map(|t| t.logprob).collect(),
+                                token_ids: lp
+                                    .top_logprobs
+                                    .iter()
+                                    .map(|t| t.token_id as i32)
+                                    .collect(),
+                            })
+                            .collect(),
+                    })
+                }
+            }
         }
     }
 }
@@ -563,21 +771,21 @@ impl ProtoEmbedComplete {
     }
 
     /// Get prompt tokens
-    pub fn prompt_tokens(&self) -> i32 {
+    pub fn prompt_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.prompt_tokens,
         }
     }
 
     /// Get cached tokens
-    pub fn cached_tokens(&self) -> i32 {
+    pub fn cached_tokens(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.cached_tokens,
         }
     }
 
     /// Get embedding dimension
-    pub fn embedding_dim(&self) -> i32 {
+    pub fn embedding_dim(&self) -> u32 {
         match self {
             Self::Sglang(c) => c.embedding_dim,
         }

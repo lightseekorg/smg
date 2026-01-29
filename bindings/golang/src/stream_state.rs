@@ -10,8 +10,8 @@ pub struct StreamIndexState {
     pub decode_stream: Option<DecodeStream>,
     pub has_tool_calls: bool,
     pub is_first_chunk: bool,
-    pub prompt_tokens: i32,
-    pub completion_tokens: i32,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
 }
 
 impl Default for StreamIndexState {

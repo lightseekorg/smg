@@ -36,7 +36,7 @@ pub struct SglangStreamHandle {
     #[allow(dead_code)]
     pub(crate) client: Arc<SglangSchedulerClient>,
     #[allow(dead_code)]
-    pub(crate) prompt_tokens: i32, // Number of prompt tokens for this request
+    pub(crate) prompt_tokens: u32, // Number of prompt tokens for this request
 }
 
 /// Read next chunk from stream and convert to OpenAI format.
