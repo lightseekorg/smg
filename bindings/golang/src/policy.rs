@@ -15,10 +15,17 @@ use std::{
     },
 };
 
+use async_trait::async_trait;
 use smg::{
+    core::{
+        circuit_breaker::CircuitBreaker,
+        worker::{WorkerMetadata, WorkerRoutingKeyLoad},
+        ConnectionMode, HealthConfig, Worker, WorkerType,
+    },
     grpc_client::sglang_scheduler::SglangSchedulerClient,
     policies::{
-        CacheAwarePolicy, LoadBalancingPolicy, PolicyFactory, RandomPolicy, RoundRobinPolicy,
+        BucketPolicy, CacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
+        RoundRobinPolicy, SelectWorkerInfo,
     },
     protocols::chat::ChatCompletionRequest,
     routers::grpc::utils::{generate_tool_constraints, process_chat_messages},
@@ -34,71 +41,159 @@ use super::{
     tokenizer::TokenizerHandle,
 };
 
-/// Simplified worker for Go SDK - wraps a gRPC client with health tracking
+/// FFI worker that implements the gateway's `Worker` trait so policies
+/// can select workers using their real selection logic (not a fallback).
 pub struct GrpcWorker {
     pub(crate) client: Arc<SglangSchedulerClient>,
     pub(crate) endpoint: String,
     pub(crate) healthy: AtomicBool,
+    pub(crate) load: AtomicUsize,
+    pub(crate) processed: AtomicUsize,
+    pub(crate) circuit_breaker: CircuitBreaker,
+    pub(crate) metadata: WorkerMetadata,
+    pub(crate) routing_key_load: WorkerRoutingKeyLoad,
+    pub(crate) api_key: Option<String>,
 }
 
 impl GrpcWorker {
     pub fn new(client: Arc<SglangSchedulerClient>, endpoint: String) -> Self {
+        let metadata = WorkerMetadata {
+            url: endpoint.clone(),
+            worker_type: WorkerType::Regular,
+            connection_mode: ConnectionMode::Grpc { port: None },
+            runtime_type: smg::core::worker::RuntimeType::Sglang,
+            labels: std::collections::HashMap::new(),
+            health_config: HealthConfig::default(),
+            api_key: None,
+            bootstrap_host: String::new(),
+            bootstrap_port: None,
+            models: Vec::new(),
+            default_provider: None,
+            default_model_type: smg::core::model_type::ModelType::LLM,
+        };
         Self {
             client,
+            routing_key_load: WorkerRoutingKeyLoad::new(&endpoint),
             endpoint,
             healthy: AtomicBool::new(true),
+            load: AtomicUsize::new(0),
+            processed: AtomicUsize::new(0),
+            circuit_breaker: CircuitBreaker::new(),
+            metadata,
+            api_key: None,
         }
-    }
-
-    pub fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Relaxed)
-    }
-
-    pub fn set_healthy(&self, healthy: bool) {
-        self.healthy.store(healthy, Ordering::Relaxed);
     }
 }
 
-/// Adapter to make GrpcWorker compatible with LoadBalancingPolicy
-/// The gateway's policies expect Arc<dyn Worker>, but we have a simpler GrpcWorker.
-/// We implement a minimal Worker-like interface here.
 impl std::fmt::Debug for GrpcWorker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GrpcWorker")
             .field("endpoint", &self.endpoint)
-            .field("healthy", &self.is_healthy())
+            .field("healthy", &self.healthy.load(Ordering::Relaxed))
             .finish()
     }
 }
 
-/// Handle for a multi-worker client with load balancing
+#[async_trait]
+impl Worker for GrpcWorker {
+    fn url(&self) -> &str {
+        &self.endpoint
+    }
+
+    fn api_key(&self) -> &Option<String> {
+        &self.api_key
+    }
+
+    fn worker_type(&self) -> &WorkerType {
+        &self.metadata.worker_type
+    }
+
+    fn connection_mode(&self) -> &ConnectionMode {
+        &self.metadata.connection_mode
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed)
+    }
+
+    fn set_healthy(&self, healthy: bool) {
+        self.healthy.store(healthy, Ordering::Relaxed);
+    }
+
+    async fn check_health_async(&self) -> smg::core::WorkerResult<()> {
+        // FFI workers don't do their own health checks
+        Ok(())
+    }
+
+    fn load(&self) -> usize {
+        self.load.load(Ordering::Relaxed)
+    }
+
+    fn increment_load(&self) {
+        self.load.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn decrement_load(&self) {
+        self.load.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn worker_routing_key_load(&self) -> &WorkerRoutingKeyLoad {
+        &self.routing_key_load
+    }
+
+    fn processed_requests(&self) -> usize {
+        self.processed.load(Ordering::Relaxed)
+    }
+
+    fn increment_processed(&self) {
+        self.processed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn metadata(&self) -> &WorkerMetadata {
+        &self.metadata
+    }
+
+    fn circuit_breaker(&self) -> &CircuitBreaker {
+        &self.circuit_breaker
+    }
+
+    async fn get_grpc_client(
+        &self,
+    ) -> smg::core::WorkerResult<Option<Arc<smg::routers::grpc::client::GrpcClient>>> {
+        // Not used by policies — the FFI layer handles gRPC directly
+        Ok(None)
+    }
+
+    async fn grpc_health_check(&self) -> smg::core::WorkerResult<bool> {
+        Ok(self.healthy.load(Ordering::Relaxed))
+    }
+
+    async fn http_health_check(&self) -> smg::core::WorkerResult<bool> {
+        Ok(self.healthy.load(Ordering::Relaxed))
+    }
+}
+
+/// Handle for a multi-worker client with load balancing.
+///
+/// Workers implement the gateway's `Worker` trait so that the real
+/// `LoadBalancingPolicy::select_worker` is used — no fallback logic needed.
 pub struct MultiWorkerClientHandle {
-    pub(crate) workers: Vec<Arc<GrpcWorker>>,
+    /// Workers as trait objects so policies can use them directly
+    pub(crate) workers: Vec<Arc<dyn Worker>>,
+    /// Concrete workers for accessing the gRPC client
+    pub(crate) grpc_workers: Vec<Arc<GrpcWorker>>,
     pub(crate) policy: Arc<dyn LoadBalancingPolicy>,
     pub(crate) tokenizer_path: String,
-    pub(crate) counter: AtomicUsize, // For round-robin fallback
 }
 
 impl MultiWorkerClientHandle {
-    /// Select a worker using the configured policy
-    /// Falls back to round-robin if policy selection fails
-    pub fn select_worker(&self) -> Option<Arc<GrpcWorker>> {
-        let healthy_workers: Vec<(usize, &Arc<GrpcWorker>)> = self
-            .workers
-            .iter()
-            .enumerate()
-            .filter(|(_, w)| w.is_healthy())
-            .collect();
-
-        if healthy_workers.is_empty() {
-            return None;
-        }
-
-        // Use round-robin for now since the policy's select_worker expects Arc<dyn Worker>
-        // TODO: Implement proper policy integration when Worker trait is exposed via FFI
-        let count = self.counter.fetch_add(1, Ordering::Relaxed);
-        let idx = count % healthy_workers.len();
-        Some(Arc::clone(healthy_workers[idx].1))
+    /// Select a worker using the configured policy.
+    ///
+    /// Delegates to `LoadBalancingPolicy::select_worker` with real `Arc<dyn Worker>`
+    /// objects, so all policies (round_robin, random, cache_aware, etc.) work natively.
+    pub fn select_worker(&self, info: &SelectWorkerInfo) -> Option<Arc<GrpcWorker>> {
+        let idx = self.policy.select_worker(&self.workers, info)?;
+        Some(Arc::clone(&self.grpc_workers[idx]))
     }
 }
 
@@ -165,30 +260,50 @@ pub unsafe extern "C" fn sgl_multi_client_create(
     }
 
     // Create policy
+    //
+    // Supported policies are those that work with the SDK's SelectWorkerInfo
+    // (request_text + tokens). Policies requiring HTTP headers or a pre-computed
+    // hash ring are not supported because the SDK operates below the HTTP layer.
+    //
+    // TODO: Support consistent_hashing, prefix_hash, and manual policies.
+    // These require SelectWorkerInfo.headers and/or SelectWorkerInfo.hash_ring
+    // which are not available in the SDK. To support them we would need to:
+    // - Forward HTTP headers from the Go HTTP server through the FFI boundary
+    // - Build and cache a HashRing from the worker list (like WorkerRegistry does)
     let policy: Arc<dyn LoadBalancingPolicy> = match policy_name_str {
-        "round_robin" => Arc::new(RoundRobinPolicy::new()),
+        "round_robin" | "roundrobin" => Arc::new(RoundRobinPolicy::new()),
         "random" => Arc::new(RandomPolicy::new()),
-        "cache_aware" => Arc::new(CacheAwarePolicy::new()),
+        "power_of_two" | "poweroftwo" => Arc::new(PowerOfTwoPolicy::new()),
+        "cache_aware" | "cacheaware" => Arc::new(CacheAwarePolicy::new()),
+        "bucket" => Arc::new(BucketPolicy::new()),
+        "consistent_hashing" | "consistenthashing" | "prefix_hash" | "prefixhash" | "manual" => {
+            set_error_message(
+                error_out,
+                &format!(
+                    "Policy '{}' is not supported in the SDK. It requires HTTP headers \
+                     and/or a hash ring which are not available at the FFI layer. \
+                     Supported policies: round_robin, random, power_of_two, cache_aware, bucket",
+                    policy_name_str
+                ),
+            );
+            return ptr::null_mut();
+        }
         _ => {
-            // Try factory
-            match PolicyFactory::create_by_name(policy_name_str) {
-                Some(p) => p,
-                None => {
-                    set_error_message(
-                        error_out,
-                        &format!(
-                            "Unknown policy: {}. Available: round_robin, random, cache_aware",
-                            policy_name_str
-                        ),
-                    );
-                    return ptr::null_mut();
-                }
-            }
+            set_error_message(
+                error_out,
+                &format!(
+                    "Unknown policy: '{}'. \
+                     Supported policies: round_robin, random, power_of_two, cache_aware, bucket",
+                    policy_name_str
+                ),
+            );
+            return ptr::null_mut();
         }
     };
 
     // Create gRPC clients for all endpoints
-    let mut workers = Vec::with_capacity(endpoint_list.len());
+    let mut grpc_workers = Vec::with_capacity(endpoint_list.len());
+    let mut workers: Vec<Arc<dyn Worker>> = Vec::with_capacity(endpoint_list.len());
     for endpoint in endpoint_list {
         let client =
             match RUNTIME.block_on(async { SglangSchedulerClient::connect(endpoint).await }) {
@@ -201,14 +316,16 @@ pub unsafe extern "C" fn sgl_multi_client_create(
                     return ptr::null_mut();
                 }
             };
-        workers.push(Arc::new(GrpcWorker::new(client, endpoint.to_string())));
+        let grpc_worker = Arc::new(GrpcWorker::new(client, endpoint.to_string()));
+        workers.push(Arc::clone(&grpc_worker) as Arc<dyn Worker>);
+        grpc_workers.push(grpc_worker);
     }
 
     Box::into_raw(Box::new(MultiWorkerClientHandle {
         workers,
+        grpc_workers,
         policy,
         tokenizer_path: tokenizer_path_str,
-        counter: AtomicUsize::new(0),
     }))
 }
 
@@ -235,7 +352,7 @@ pub unsafe extern "C" fn sgl_multi_client_worker_count(
     if handle.is_null() {
         return 0;
     }
-    (*handle).workers.len()
+    (*handle).grpc_workers.len()
 }
 
 /// Get the number of healthy workers in the multi-worker client
@@ -249,7 +366,11 @@ pub unsafe extern "C" fn sgl_multi_client_healthy_count(
     if handle.is_null() {
         return 0;
     }
-    (*handle).workers.iter().filter(|w| w.is_healthy()).count()
+    (*handle)
+        .grpc_workers
+        .iter()
+        .filter(|w| w.healthy.load(Ordering::Relaxed))
+        .count()
 }
 
 /// Mark a worker as unhealthy by index
@@ -266,10 +387,12 @@ pub unsafe extern "C" fn sgl_multi_client_set_worker_health(
         return SglErrorCode::InvalidArgument;
     }
     let client = &*handle;
-    if worker_index >= client.workers.len() {
+    if worker_index >= client.grpc_workers.len() {
         return SglErrorCode::InvalidArgument;
     }
-    client.workers[worker_index].set_healthy(healthy);
+    client.grpc_workers[worker_index]
+        .healthy
+        .store(healthy, Ordering::Relaxed);
     SglErrorCode::Success
 }
 
@@ -348,17 +471,6 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
 
     let multi_client = &*client_handle;
 
-    // Select a worker using the policy
-    let worker = match multi_client.select_worker() {
-        Some(w) => w,
-        None => {
-            set_error_message(error_out, "No healthy workers available");
-            return SglErrorCode::UnknownError;
-        }
-    };
-
-    let client = Arc::clone(&worker.client);
-
     // Create tokenizer
     let tokenizer: Arc<dyn Tokenizer> =
         match create_tokenizer_from_file(&multi_client.tokenizer_path) {
@@ -395,7 +507,26 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
             return SglErrorCode::TokenizationError;
         }
     };
-    let prompt_tokens = token_ids.len() as i32;
+    let prompt_tokens = token_ids.len() as u32;
+
+    // Select a worker using the real policy with request context
+    let select_info = SelectWorkerInfo {
+        request_text: Some(&processed_messages.text),
+        tokens: Some(&token_ids),
+        ..Default::default()
+    };
+    let worker = match multi_client.select_worker(&select_info) {
+        Some(w) => w,
+        None => {
+            set_error_message(error_out, "No healthy workers available");
+            return SglErrorCode::UnknownError;
+        }
+    };
+
+    // Track load so policies like cache_aware and power_of_two can make informed decisions
+    worker.increment_load();
+
+    let client = Arc::clone(&worker.client);
 
     // Generate tool constraints if needed
     let tool_constraint = if let Some(tools) = chat_request.tools.as_ref() {
@@ -446,36 +577,58 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
     };
 
     // Create response converter
+    // Use and_then with CString::new to safely handle potential null bytes in JSON strings
     let tools_json = chat_request
         .tools
         .as_ref()
         .and_then(|t| serde_json::to_string(t).ok())
-        .map(|s| CString::new(s).unwrap().into_raw());
+        .and_then(|s| CString::new(s).ok())
+        .map(|s| s.into_raw());
     let tool_choice_json = chat_request
         .tool_choice
         .as_ref()
         .and_then(|tc| serde_json::to_string(tc).ok())
-        .map(|s| CString::new(s).unwrap().into_raw());
+        .and_then(|s| CString::new(s).ok())
+        .map(|s| s.into_raw());
     let stop_json = chat_request
         .stop
         .as_ref()
         .and_then(|s| serde_json::to_string(s).ok())
-        .map(|s| CString::new(s).unwrap().into_raw());
+        .and_then(|s| CString::new(s).ok())
+        .map(|s| s.into_raw());
     let stop_token_ids_json = chat_request
         .stop_token_ids
         .as_ref()
         .and_then(|ids| serde_json::to_string(ids).ok())
-        .map(|s| CString::new(s).unwrap().into_raw());
+        .and_then(|s| CString::new(s).ok())
+        .map(|s| s.into_raw());
 
     // Create tokenizer handle for converter
     let tokenizer_handle = Box::into_raw(Box::new(TokenizerHandle {
         tokenizer: Arc::clone(&tokenizer),
     }));
 
+    let model_cstr = match CString::new(chat_request.model.clone()) {
+        Ok(s) => s,
+        Err(_) => {
+            set_error_message(error_out, "Invalid model name: contains null byte");
+            let _ = Box::from_raw(tokenizer_handle);
+            return SglErrorCode::InvalidArgument;
+        }
+    };
+    let request_id_cstr = match CString::new(request_id.clone()) {
+        Ok(s) => s,
+        Err(_) => {
+            set_error_message(error_out, "Invalid request ID: contains null byte");
+            let _ = Box::from_raw(tokenizer_handle);
+            return SglErrorCode::InvalidArgument;
+        }
+    };
+
     let converter = sgl_grpc_response_converter_create(
         tokenizer_handle,
-        CString::new(chat_request.model.clone()).unwrap().as_ptr(),
-        CString::new(request_id.clone()).unwrap().as_ptr(),
+        model_cstr.as_ptr(),
+        request_id_cstr.as_ptr(),
         tools_json.unwrap_or(ptr::null_mut()),
         tool_choice_json.unwrap_or(ptr::null_mut()),
         stop_json.unwrap_or(ptr::null_mut()),
@@ -513,12 +666,13 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
     let mut converter_handle = *Box::from_raw(converter);
     converter_handle.initial_prompt_tokens = Some(prompt_tokens);
 
-    // Create stream handle
+    // Create stream handle with worker reference for load tracking
     *stream_handle_out = Box::into_raw(Box::new(SglangStreamHandle {
         stream: Arc::new(tokio::sync::Mutex::new(stream)),
         converter: Arc::new(tokio::sync::Mutex::new(converter_handle)),
         client: Arc::clone(&client),
         prompt_tokens,
+        worker: Some(Arc::clone(&worker)),
     }));
 
     SglErrorCode::Success

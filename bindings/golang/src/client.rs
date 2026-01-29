@@ -224,36 +224,58 @@ pub unsafe extern "C" fn sgl_client_chat_completion_stream(
     };
 
     // Create response converter
+    // Use and_then with CString::new to safely handle potential null bytes in JSON strings
     let tools_json = chat_request
         .tools
         .as_ref()
         .and_then(|t| serde_json::to_string(t).ok())
-        .map(|s| CString::new(s).unwrap().into_raw());
+        .and_then(|s| CString::new(s).ok())
+        .map(|s| s.into_raw());
     let tool_choice_json = chat_request
         .tool_choice
         .as_ref()
         .and_then(|tc| serde_json::to_string(tc).ok())
-        .map(|s| CString::new(s).unwrap().into_raw());
+        .and_then(|s| CString::new(s).ok())
+        .map(|s| s.into_raw());
     let stop_json = chat_request
         .stop
         .as_ref()
         .and_then(|s| serde_json::to_string(s).ok())
-        .map(|s| CString::new(s).unwrap().into_raw());
+        .and_then(|s| CString::new(s).ok())
+        .map(|s| s.into_raw());
     let stop_token_ids_json = chat_request
         .stop_token_ids
         .as_ref()
         .and_then(|ids| serde_json::to_string(ids).ok())
-        .map(|s| CString::new(s).unwrap().into_raw());
+        .and_then(|s| CString::new(s).ok())
+        .map(|s| s.into_raw());
 
     // Create tokenizer handle for converter (we'll create a temporary one)
     let tokenizer_handle = Box::into_raw(Box::new(TokenizerHandle {
         tokenizer: Arc::clone(&tokenizer),
     }));
 
+    let model_cstr = match CString::new(chat_request.model.clone()) {
+        Ok(s) => s,
+        Err(_) => {
+            set_error_message(error_out, "Invalid model name: contains null byte");
+            let _ = Box::from_raw(tokenizer_handle);
+            return SglErrorCode::InvalidArgument;
+        }
+    };
+    let request_id_cstr = match CString::new(request_id.clone()) {
+        Ok(s) => s,
+        Err(_) => {
+            set_error_message(error_out, "Invalid request ID: contains null byte");
+            let _ = Box::from_raw(tokenizer_handle);
+            return SglErrorCode::InvalidArgument;
+        }
+    };
+
     let converter = sgl_grpc_response_converter_create(
         tokenizer_handle,
-        CString::new(chat_request.model.clone()).unwrap().as_ptr(),
-        CString::new(request_id.clone()).unwrap().as_ptr(),
+        model_cstr.as_ptr(),
+        request_id_cstr.as_ptr(),
         tools_json.unwrap_or(ptr::null_mut()),
         tool_choice_json.unwrap_or(ptr::null_mut()),
         stop_json.unwrap_or(ptr::null_mut()),
@@ -297,6 +319,7 @@ pub unsafe extern "C" fn sgl_client_chat_completion_stream(
         converter: Arc::new(tokio::sync::Mutex::new(converter_handle)),
         client: Arc::clone(&client),
         prompt_tokens,
+        worker: None, // Single-client doesn't need load tracking
     }));
 
     SglErrorCode::Success

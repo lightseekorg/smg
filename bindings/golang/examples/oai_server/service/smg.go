@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	smg "github.com/lightseek/smg/go-grpc-sdk"
@@ -80,6 +81,10 @@ func NewSMGService(endpoints, tokenizerPath, policyName string) (*SMGService, er
 		if ep != "" {
 			validEndpoints = append(validEndpoints, ep)
 		}
+	}
+
+	if len(validEndpoints) == 0 {
+		return nil, fmt.Errorf("no valid gRPC endpoints provided in endpoints string: %q", endpoints)
 	}
 
 	if len(validEndpoints) > 1 {
