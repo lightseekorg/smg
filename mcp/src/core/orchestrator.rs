@@ -2313,6 +2313,8 @@ mod tests {
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
             refresh_tx,
+            active_executions: Arc::new(AtomicUsize::new(0)),
+            shutdown_token: CancellationToken::new(),
             config,
         };
 
@@ -2379,6 +2381,8 @@ mod tests {
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
             refresh_tx,
+            active_executions: Arc::new(AtomicUsize::new(0)),
+            shutdown_token: CancellationToken::new(),
             config,
         };
 
@@ -2447,6 +2451,8 @@ mod tests {
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
             refresh_tx,
+            active_executions: Arc::new(AtomicUsize::new(0)),
+            shutdown_token: CancellationToken::new(),
             config,
         };
 
@@ -2521,6 +2527,8 @@ mod tests {
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
             refresh_tx,
+            active_executions: Arc::new(AtomicUsize::new(0)),
+            shutdown_token: CancellationToken::new(),
             config,
         };
 
