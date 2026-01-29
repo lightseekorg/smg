@@ -119,12 +119,26 @@ def pytest_collection_modifyitems(
 
     for item in items:
         # Extract model from marker or use default
-        # Use get_closest_marker which correctly handles inheritance
-        # (returns marker from child class before parent class)
+        # Walk class MRO to prioritize child class markers over parent class
         model_id = None
-        model_marker = item.get_closest_marker(PARAM_MODEL)
-        if model_marker and model_marker.args:
-            model_id = model_marker.args[0]
+        if hasattr(item, "cls") and item.cls is not None:
+            # Walk the class MRO to find model marker
+            # MRO lists classes from most specific (child) to least specific (parent)
+            for cls in item.cls.__mro__:
+                if hasattr(cls, "pytestmark"):
+                    markers = cls.pytestmark if isinstance(cls.pytestmark, list) else [cls.pytestmark]
+                    for marker in markers:
+                        if marker.name == PARAM_MODEL and marker.args:
+                            model_id = marker.args[0]
+                            break
+                if model_id:
+                    break
+
+        # Fallback to get_closest_marker if not found via MRO
+        if model_id is None:
+            model_marker = item.get_closest_marker(PARAM_MODEL)
+            if model_marker and model_marker.args:
+                model_id = model_marker.args[0]
 
         # Check parametrize for model
         if model_id is None:
