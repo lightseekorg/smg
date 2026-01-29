@@ -16,6 +16,7 @@ use crate::protocols::{
     completion::CompletionRequest,
     embedding::EmbeddingRequest,
     generate::GenerateRequest,
+    messages::CreateMessageRequest,
     rerank::RerankRequest,
     responses::{ResponsesGetParams, ResponsesRequest},
 };
@@ -194,6 +195,29 @@ pub trait RouterTrait: Send + Sync + Debug {
         _model_id: Option<&str>,
     ) -> Response {
         (StatusCode::NOT_IMPLEMENTED, "Rerank not implemented").into_response()
+    }
+
+    /// Route Anthropic Messages API requests (/v1/messages)
+    ///
+    /// This endpoint implements the Anthropic Messages API, supporting:
+    /// - Non-streaming and streaming (SSE) responses
+    /// - Tool use with MCP integration
+    /// - Prompt caching
+    /// - Extended thinking
+    /// - Citations
+    ///
+    /// Default implementation returns 501 Not Implemented.
+    async fn route_messages(
+        &self,
+        _headers: Option<&HeaderMap>,
+        _body: &CreateMessageRequest,
+        _model_id: Option<&str>,
+    ) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Messages API not yet implemented for this router",
+        )
+            .into_response()
     }
 
     /// Get router type name
