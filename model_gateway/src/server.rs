@@ -44,6 +44,7 @@ use crate::{
         completion::CompletionRequest,
         embedding::EmbeddingRequest,
         generate::GenerateRequest,
+        messages::CreateMessageRequest,
         parser::{ParseFunctionCallRequest, SeparateReasoningRequest},
         rerank::{RerankRequest, V1RerankReqInput},
         responses::{ResponsesGetParams, ResponsesRequest},
@@ -117,6 +118,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
             }
             RoutingMode::Regular { .. } => !healthy_workers.is_empty(),
             RoutingMode::OpenAI { .. } => !healthy_workers.is_empty(),
+            RoutingMode::Anthropic { .. } => !healthy_workers.is_empty(),
         }
     };
 
@@ -244,6 +246,17 @@ async fn v1_embeddings(
     state
         .router
         .route_embeddings(Some(&headers), &body, Some(&body.model))
+        .await
+}
+
+async fn v1_messages(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    Json(body): Json<CreateMessageRequest>,
+) -> Response {
+    state
+        .router
+        .route_messages(Some(&headers), &body, Some(body.model.as_str()))
         .await
 }
 
@@ -558,6 +571,7 @@ pub fn build_app(
         .route("/v1/rerank", post(v1_rerank))
         .route("/v1/responses", post(v1_responses))
         .route("/v1/embeddings", post(v1_embeddings))
+        .route("/v1/messages", post(v1_messages))
         .route("/v1/classify", post(v1_classify))
         .route("/v1/responses/{response_id}", get(v1_responses_get))
         .route(

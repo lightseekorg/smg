@@ -586,6 +586,74 @@ impl JobQueue {
                             submitted_count
                         ));
                     }
+                    RoutingMode::Anthropic { worker_urls } => {
+                        // Anthropic mode: similar to OpenAI, submit AddWorker jobs with runtime: "external"
+                        let api_key = router_config.api_key.clone();
+                        let mut submitted_count = 0;
+
+                        for url in worker_urls {
+                            let url_for_error = url.clone();
+                            let config = WorkerConfigRequest {
+                                url: url.clone(),
+                                api_key: api_key.clone(),
+                                worker_type: Some("regular".to_string()),
+                                labels: HashMap::new(),
+                                model_id: None,
+                                priority: None,
+                                cost: None,
+                                runtime: Some("external".to_string()),
+                                tokenizer_path: None,
+                                reasoning_parser: None,
+                                tool_parser: None,
+                                chat_template: router_config.chat_template.clone(),
+                                bootstrap_port: None,
+                                health_check_timeout_secs: router_config.health_check.timeout_secs,
+                                health_check_interval_secs: router_config
+                                    .health_check
+                                    .check_interval_secs,
+                                health_success_threshold: router_config
+                                    .health_check
+                                    .success_threshold,
+                                health_failure_threshold: router_config
+                                    .health_check
+                                    .failure_threshold,
+                                disable_health_check: router_config
+                                    .health_check
+                                    .disable_health_check,
+                                max_connection_attempts: router_config
+                                    .health_check
+                                    .success_threshold
+                                    * 10,
+                                dp_aware: false,
+                            };
+
+                            let job = Job::AddWorker {
+                                config: Box::new(config),
+                            };
+
+                            if let Some(queue) = context.worker_job_queue.get() {
+                                queue.submit(job).await.map_err(|e| {
+                                    format!(
+                                        "Failed to submit AddWorker job for Anthropic endpoint {}: {}",
+                                        url_for_error, e
+                                    )
+                                })?;
+                                submitted_count += 1;
+                            } else {
+                                return Err("JobQueue not available".to_string());
+                            }
+                        }
+
+                        if submitted_count == 0 {
+                            info!("Anthropic mode: no worker URLs provided");
+                            return Ok("Anthropic mode: no worker URLs to initialize".to_string());
+                        }
+
+                        return Ok(format!(
+                            "Submitted {} AddWorker jobs for Anthropic endpoints",
+                            submitted_count
+                        ));
+                    }
                 };
 
                 debug!(
