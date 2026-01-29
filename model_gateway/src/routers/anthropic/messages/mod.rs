@@ -17,7 +17,7 @@ pub use handler::MessagesHandler;
 
 /// Handle non-streaming Messages API request
 pub async fn handle_non_streaming(
-    headers: Option<&axum::http::HeaderMap>,
+    headers: Option<&http::HeaderMap>,
     request: &crate::protocols::messages::CreateMessageRequest,
 ) -> axum::response::Response {
     MessagesHandler::handle_non_streaming(headers, request).await
@@ -25,7 +25,7 @@ pub async fn handle_non_streaming(
 
 /// Handle streaming Messages API request
 pub async fn handle_streaming(
-    headers: Option<&axum::http::HeaderMap>,
+    headers: Option<&http::HeaderMap>,
     request: &crate::protocols::messages::CreateMessageRequest,
 ) -> axum::response::Response {
     MessagesHandler::handle_streaming(headers, request).await

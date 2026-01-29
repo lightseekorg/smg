@@ -9,8 +9,6 @@ use std::{any::Any, sync::Arc};
 
 use async_trait::async_trait;
 use axum::{
-    body::Body,
-    extract::Request,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -32,6 +30,7 @@ use crate::{
 /// - Citations
 #[derive(Debug)]
 pub struct AnthropicRouter {
+    #[allow(dead_code)]
     context: Arc<AppContext>,
 }
 
