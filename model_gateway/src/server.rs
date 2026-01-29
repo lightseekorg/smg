@@ -1042,7 +1042,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         handle_clone.graceful_shutdown(Some(grace_period));
     });
 
-    if let (Some(cert), Some(key)) = (
+    let server_result = if let (Some(cert), Some(key)) = (
         &config.router_config.server_cert,
         &config.router_config.server_key,
     ) {
@@ -1059,19 +1059,28 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
             .handle(handle)
             .serve(app.into_make_service())
             .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     } else {
         axum_server::bind(addr)
             .handle(handle)
             .serve(app.into_make_service())
             .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    };
+
+    // ==========================================================
+    // End-to-End Graceful Shutdown Wiring
+    // ==========================================================
+    info!("HTTP server stopped. Starting component cleanup...");
+
+    // 1. Shutdown MCP Orchestrator
+    // This triggers background task cancellation, waits for tools, and denies approvals
+    if let Some(orchestrator) = app_context.mcp_orchestrator.get() {
+        orchestrator.shutdown().await;
     }
 
-    // HA handler shutdown is handled by the signal in mesh_run! macro
-    // No need to manually shutdown here
+    info!("Cleanup complete. Process exiting.");
 
-    Ok(())
+    // Return original server error if any, otherwise Ok
+    server_result.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
 }
 
 async fn shutdown_signal() {

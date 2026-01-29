@@ -299,6 +299,20 @@ impl ApprovalManager {
     pub fn audit_log(&self) -> &Arc<AuditLog> {
         &self.audit_log
     }
+    /// Cancels all pending approvals, sending a denial to all waiting handlers.
+    pub fn cancel_all_pending(&self) {
+        tracing::info!(
+            "Cancelling {} pending approvals due to shutdown",
+            self.pending.len()
+        );
+
+        self.pending.retain(|_key, pending| {
+            let _ = pending.response_tx.send(ApprovalDecision::Denied {
+                reason: "System shutdown".to_string(),
+            });
+            false
+        });
+    }
 }
 
 #[cfg(test)]
