@@ -1746,6 +1746,9 @@ impl McpOrchestrator {
         // Cancel pending approvals
         self.approval_manager.cancel_all_pending();
 
+        for _ in self.static_servers.iter() {
+            self.metrics.record_connection_closed();
+        }
         self.static_servers.clear();
         self.connection_pool.clear();
 
