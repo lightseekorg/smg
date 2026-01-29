@@ -218,8 +218,8 @@ jobs:
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: ""
             # TODO: Remove filter when vLLM supports logprobs and n>1 with greedy sampling
-            # Excludes: 5-grpc (logprobs=5), 2-grpc (n=2 parallel sampling), multiple_choices (n=2 tests)
-            test_filter: "-k 'not (5-grpc or 2-grpc or multiple_choices)'"
+            # Excludes: 5-grpc (logprobs=5), 2-None-grpc (n=2 with no logprobs), multiple_choices (n=2 tests)
+            test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
             setup_vllm: true
     runs-on: 4-gpu-a10
     timeout-minutes: ${{ matrix.timeout }}
