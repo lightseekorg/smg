@@ -16,31 +16,26 @@ pytest_plugins = ["e2e_test.bindings_go.conftest"]
 
 @pytest.mark.e2e
 @pytest.mark.workers(count=4)
-@pytest.mark.gateway(policy="cache_aware")
+@pytest.mark.gateway(policy="round_robin")
 @pytest.mark.model("llama-1b")
 class TestGoBindingsPerf:
     """Performance benchmark for Go OAI server.
 
     Uses the exact same configuration as TestRegularPerf:
     - 4 workers
-    - cache_aware policy
+    - round_robin policy
     - 32 concurrency, D(4000,100) traffic scenario
-    - Same thresholds
-    - Higher max_requests to ensure sustained GPU load for monitoring
+    - Same thresholds and default max_requests (160)
     """
 
     def test_go_oai_server_perf(self, go_oai_server_multi, genai_bench_runner):
         """Run genai-bench against Go OAI server with 4 workers and validate metrics."""
         host, port, model_path = go_oai_server_multi
 
-        # The Go OAI server bypasses gateway overhead, so it completes requests
-        # much faster. We increase max_requests to ensure the benchmark runs long
-        # enough for the GPU monitor to capture sustained utilization samples.
         genai_bench_runner(
             router_url=f"http://{host}:{port}",
             model_path=model_path,
             experiment_folder="benchmark_go_bindings",
-            max_requests_per_run=640,
             thresholds={
                 # Same thresholds as regular benchmark
                 "ttft_mean_max": 6,

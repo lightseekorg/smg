@@ -402,7 +402,7 @@ jobs:
     name: go-bindings-benchmark
     needs: [check-ci, build-wheel]
     if: needs.check-ci.outputs.should_run == 'true'
-    runs-on: 4-gpu-a10
+    runs-on: k8s-runner-gpu
     timeout-minutes: 32
     permissions:
       contents: read
