@@ -4,7 +4,7 @@
 // 	protoc        v6.32.0
 // source: sglang_scheduler.proto
 
-package __
+package proto
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
