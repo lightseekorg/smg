@@ -14,8 +14,6 @@ import logging
 import openai
 import pytest
 
-from infra import is_vllm
-
 logger = logging.getLogger(__name__)
 
 
@@ -538,10 +536,6 @@ class TestOpenAIServerFunctionCalling:
 
         This tests the fix for the bug where only the last index got a finish_reason chunk.
         """
-
-        if is_vllm():
-            pytest.skip("vLLM doesn't support n>1, this test requires n=2")
-
         _, model, client, _ = setup_backend
 
         tools = [
@@ -683,10 +677,6 @@ class TestOpenAIServerFunctionCalling:
 
         This tests the fix for regular content streaming with multiple choices.
         """
-
-        if is_vllm():
-            pytest.skip("vLLM doesn't support n>1, this test requires n=2")
-
         _, model, client, _ = setup_backend
 
         messages = [{"role": "user", "content": "Say hello in one word."}]
