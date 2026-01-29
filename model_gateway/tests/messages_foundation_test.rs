@@ -10,7 +10,7 @@ use serde_json::json;
 
 #[test]
 fn test_create_message_request_deserialization() {
-    use smg::protocols::messages::{CreateMessageRequest, InputContent, InputMessage, Role};
+    use smg::protocols::messages::{CreateMessageRequest, InputContent, Role};
 
     // Test simple string content
     let json = json!({
@@ -110,7 +110,7 @@ fn test_create_message_request_with_stream() {
 
 #[test]
 fn test_create_message_request_multi_turn() {
-    use smg::protocols::messages::{CreateMessageRequest, InputContent, Role};
+    use smg::protocols::messages::{CreateMessageRequest, Role};
 
     let json = json!({
         "model": "claude-sonnet-4-5-20250929",
@@ -133,9 +133,10 @@ fn test_create_message_request_multi_turn() {
 
 #[test]
 fn test_messages_handler_tool_extraction() {
-    use smg::protocols::messages::ContentBlock;
-    use smg::routers::openai::messages::tools::extract_tool_calls;
     use serde_json::json;
+    use smg::{
+        protocols::messages::ContentBlock, routers::openai::messages::tools::extract_tool_calls,
+    };
 
     let content = vec![
         ContentBlock::Text {
@@ -157,8 +158,9 @@ fn test_messages_handler_tool_extraction() {
 
 #[test]
 fn test_messages_handler_tool_extraction_empty() {
-    use smg::protocols::messages::ContentBlock;
-    use smg::routers::openai::messages::tools::extract_tool_calls;
+    use smg::{
+        protocols::messages::ContentBlock, routers::openai::messages::tools::extract_tool_calls,
+    };
 
     let content = vec![ContentBlock::Text {
         text: "Just text, no tools".to_string(),

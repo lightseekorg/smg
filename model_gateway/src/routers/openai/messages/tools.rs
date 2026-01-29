@@ -35,8 +35,9 @@ pub fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn test_extract_tool_calls_empty() {

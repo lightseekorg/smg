@@ -3,8 +3,10 @@
 //! This module handles Server-Sent Events (SSE) streaming for the Messages API.
 //! Implementation coming in PR #3.
 
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::{
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
 
 use crate::protocols::messages::CreateMessageRequest;
 

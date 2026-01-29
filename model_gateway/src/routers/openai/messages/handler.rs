@@ -3,8 +3,10 @@
 //! This module handles non-streaming requests to the `/v1/messages` endpoint.
 //! It coordinates with routing policies, worker selection, and response processing.
 
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::{
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
 
 use crate::protocols::messages::CreateMessageRequest;
 
@@ -76,7 +78,19 @@ mod tests {
                 content: InputContent::String("test".to_string()),
             }],
             max_tokens: 100,
-            ..Default::default()
+            metadata: None,
+            service_tier: None,
+            stop_sequences: None,
+            stream: None,
+            system: None,
+            temperature: None,
+            thinking: None,
+            tool_choice: None,
+            tools: None,
+            top_k: None,
+            top_p: None,
+            container: None,
+            mcp_servers: None,
         };
 
         let response = MessagesHandler::handle_non_streaming(None, &request).await;
