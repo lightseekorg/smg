@@ -270,7 +270,7 @@ impl TrtllmServiceClient {
         // Extract stop words
         let stop_words = self.extract_stop_words(body);
 
-        let max_tokens = body.max_completion_tokens.unwrap_or(2048) as i32;
+        let max_tokens = body.max_completion_tokens.unwrap_or(2048);
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -337,7 +337,7 @@ impl TrtllmServiceClient {
             .sampling_params
             .as_ref()
             .and_then(|p| p.max_new_tokens)
-            .unwrap_or(2048) as i32;
+            .unwrap_or(2048);
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -392,7 +392,7 @@ impl TrtllmServiceClient {
 
         let guided_decoding = self.build_guided_decoding_from_responses(constraint)?;
 
-        let max_tokens = body.max_output_tokens.unwrap_or(2048) as i32;
+        let max_tokens = body.max_output_tokens.unwrap_or(2048);
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -436,7 +436,7 @@ impl TrtllmServiceClient {
     ) -> Result<proto::SamplingConfig, String> {
         Ok(proto::SamplingConfig {
             beam_width: 1,
-            num_return_sequences: request.n.unwrap_or(1) as i32,
+            num_return_sequences: request.n.unwrap_or(1),
             top_k: request.top_k.map(|v| v.max(0)),
             top_p: Some(request.top_p.unwrap_or(1.0)),
             top_p_min: None,
@@ -650,11 +650,9 @@ impl TrtllmServiceClient {
         if let Some(val) = p.min_p {
             config.min_p = Some(val);
         }
-        if let Some(val) = p.min_new_tokens {
-            config.min_tokens = Some(val as i32);
-        }
+        config.min_tokens = p.min_new_tokens;
         if let Some(n) = p.n {
-            config.num_return_sequences = n as i32;
+            config.num_return_sequences = n;
         }
 
         Ok(config)

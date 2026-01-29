@@ -1,5 +1,4 @@
 use std::{
-    convert::TryFrom,
     pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -415,7 +414,7 @@ impl SglangSchedulerClient {
     ) -> Result<proto::SamplingParams, String> {
         let stop_sequences = self.extract_stop_strings(request);
 
-        let max_new_tokens = request.max_completion_tokens.map(|v| v as i32);
+        let max_new_tokens = request.max_completion_tokens;
 
         // Handle skip_special_tokens: set to false if tools are present and tool_choice is not "none"
         let skip_special_tokens = if request.tools.is_some() {
@@ -443,7 +442,7 @@ impl SglangSchedulerClient {
             spaces_between_special_tokens: true, // Default from Python SamplingParams
             ignore_eos: request.ignore_eos,
             no_stop_trim: request.no_stop_trim,
-            n: request.n.unwrap_or(1) as i32,
+            n: request.n.unwrap_or(1),
             constraint: self.build_constraint_for_chat(request, tool_call_constraint)?,
             ..Default::default()
         })
@@ -528,7 +527,7 @@ impl SglangSchedulerClient {
         // Used by Harmony models only. Regular models use Chat API path.
         // Constraints come from Harmony preparation stage (structural_tag) or tool handling.
 
-        let max_new_tokens = request.max_output_tokens.map(|v| v as i32);
+        let max_new_tokens = request.max_output_tokens;
 
         Ok(proto::SamplingParams {
             temperature: request.temperature.unwrap_or(1.0),
@@ -654,24 +653,17 @@ impl SglangSchedulerClient {
             sampling.stop_token_ids = stop_token_ids.clone();
         }
 
-        // Handle max_new_tokens with conversion
-        if let Some(max_new_tokens) = p.max_new_tokens {
-            sampling.max_new_tokens =
-                Some(i32::try_from(max_new_tokens).map_err(|_| {
-                    "max_new_tokens must fit into a 32-bit signed integer".to_string()
-                })?);
-        }
+        // Handle max_new_tokens
+        sampling.max_new_tokens = p.max_new_tokens;
 
-        // Handle min_new_tokens with conversion
+        // Handle min_new_tokens
         if let Some(min_new_tokens) = p.min_new_tokens {
-            sampling.min_new_tokens = i32::try_from(min_new_tokens)
-                .map_err(|_| "min_new_tokens must fit into a 32-bit signed integer".to_string())?;
+            sampling.min_new_tokens = min_new_tokens;
         }
 
-        // Handle n with conversion
+        // Handle n
         if let Some(n) = p.n {
-            sampling.n = i32::try_from(n)
-                .map_err(|_| "n must fit into a 32-bit signed integer".to_string())?;
+            sampling.n = n;
         }
 
         // Handle constraints (exactly one allowed)

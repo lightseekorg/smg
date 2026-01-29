@@ -50,7 +50,7 @@ message SamplingParams {
   float presence_penalty = 6;
   float repetition_penalty = 7;
 
-  optional int32 max_new_tokens = 8;
+  optional uint32 max_new_tokens = 8;
   repeated string stop = 9;
   repeated uint32 stop_token_ids = 10;
   bool skip_special_tokens = 11;
@@ -65,10 +65,10 @@ message SamplingParams {
   }
 
   // Speculative decoding
-  int32 n = 17;  // Number of samples
+  uint32 n = 17;  // Number of samples
 
   // Additional parameters
-  int32 min_new_tokens = 18;
+  uint32 min_new_tokens = 18;
   bool ignore_eos = 19;
   bool no_stop_trim = 20;
   optional int32 stream_interval = 21;

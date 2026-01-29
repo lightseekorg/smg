@@ -163,12 +163,12 @@ func (c *GrpcClient) CreateChatCompletionStream(ctx context.Context, reqJSON str
 	if topK, ok := reqMap["top_k"].(float64); ok {
 		samplingParams.TopK = int32(topK)
 	}
-	var maxTokensInt *int32
+	var maxTokensInt *uint32
 	if maxCompletionTokens, ok := reqMap["max_completion_tokens"].(float64); ok {
-		tokens := int32(maxCompletionTokens)
+		tokens := uint32(maxCompletionTokens)
 		maxTokensInt = &tokens
 	} else if maxTokens, ok := reqMap["max_tokens"].(float64); ok {
-		tokens := int32(maxTokens)
+		tokens := uint32(maxTokens)
 		maxTokensInt = &tokens
 	}
 	if maxTokensInt != nil {
