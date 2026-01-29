@@ -261,10 +261,12 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             }
         }
 
-        // Inject PD metadata if needed
+        // Inject PD metadata if needed (only SGLang supports PD mode)
         if self.inject_pd_metadata {
             if let Some(WorkerSelection::Dual { prefill, .. }) = ctx.state.workers.as_ref() {
-                helpers::inject_bootstrap_metadata(&mut proto_request, prefill);
+                if proto_request.is_sglang() {
+                    helpers::inject_bootstrap_metadata(&mut proto_request, prefill);
+                }
             }
         }
 
