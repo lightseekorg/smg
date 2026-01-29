@@ -118,6 +118,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
             }
             RoutingMode::Regular { .. } => !healthy_workers.is_empty(),
             RoutingMode::OpenAI { .. } => !healthy_workers.is_empty(),
+            RoutingMode::Anthropic { .. } => !healthy_workers.is_empty(),
         }
     };
 

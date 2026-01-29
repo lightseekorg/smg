@@ -870,6 +870,10 @@ impl CliArgs {
             RoutingMode::OpenAI {
                 worker_urls: self.worker_urls.clone(),
             }
+        } else if matches!(self.backend, Some(Backend::Anthropic)) {
+            RoutingMode::Anthropic {
+                worker_urls: self.worker_urls.clone(),
+            }
         } else if self.pd_disaggregation {
             RoutingMode::PrefillDecode {
                 prefill_urls,
@@ -927,7 +931,12 @@ impl CliArgs {
                 }
                 all_urls.extend(decode_urls.clone());
             }
-            RoutingMode::OpenAI { .. } => {}
+            RoutingMode::OpenAI { worker_urls } => {
+                all_urls.extend(worker_urls.clone());
+            }
+            RoutingMode::Anthropic { worker_urls } => {
+                all_urls.extend(worker_urls.clone());
+            }
         }
         let connection_mode = match &mode {
             RoutingMode::OpenAI { .. } => ConnectionMode::Http,
@@ -1189,6 +1198,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "IGW (Inference Gateway)".to_string()
     } else if matches!(cli_args.backend, Some(Backend::Openai)) {
         "OpenAI Backend".to_string()
+    } else if matches!(cli_args.backend, Some(Backend::Anthropic)) {
+        "Anthropic Backend".to_string()
     } else if cli_args.pd_disaggregation {
         "PD Disaggregated".to_string()
     } else if let Some(backend) = &cli_args.backend {
@@ -1197,16 +1208,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Regular".to_string()
     };
     println!("Mode: {}", mode_str);
-
-    if let Some(backend) = &cli_args.backend {
-        if matches!(backend, Backend::Anthropic) {
-            println!(
-                "WARNING: runtime '{}' not implemented yet; falling back to regular routing. \
-Provide --worker-urls or PD flags as usual.",
-                backend
-            );
-        }
-    }
 
     if !cli_args.enable_igw {
         println!("Policy: {}", cli_args.policy);
