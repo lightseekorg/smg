@@ -1066,12 +1066,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
             .await
     };
 
-    // ==========================================================
-    // End-to-End Graceful Shutdown Wiring
-    // ==========================================================
+    // Graceful Shutdown
+
     info!("HTTP server stopped. Starting component cleanup...");
 
-    // 1. Shutdown MCP Orchestrator
     // This triggers background task cancellation, waits for tools, and denies approvals
     if let Some(orchestrator) = app_context.mcp_orchestrator.get() {
         orchestrator.shutdown().await;
