@@ -61,17 +61,14 @@ impl PipelineStage for ChatRequestBuildingStage {
         let body_ref = prep.filtered_request.as_ref().unwrap_or(&chat_request);
 
         // Build proto request using centralized dispatch
+        let processed_messages = prep.processed_messages.as_ref().unwrap();
         let mut proto_request = builder_client
             .build_chat_request(
                 request_id,
                 body_ref,
-                prep.processed_messages.as_ref().unwrap().text.clone(),
+                processed_messages.text.clone(),
                 prep.token_ids.clone(),
-                prep.processed_messages
-                    .as_ref()
-                    .unwrap()
-                    .multimodal_inputs
-                    .clone(),
+                processed_messages.multimodal_inputs.clone(),
                 prep.tool_constraints.clone(),
             )
             .map_err(|e| {
