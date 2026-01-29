@@ -502,6 +502,7 @@ jobs:
       uses: actions/download-artifact@v7
       with:
         name: genai-bench-results-go-bindings
+        path: benchmark_go_bindings
 
     - name: Create benchmark summary
       run: python3 e2e_test/benchmarks/summarize.py .
