@@ -37,7 +37,6 @@ use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     protocols::{
         chat::ChatCompletionRequest,
-        messages::CreateMessageRequest,
         responses::{
             generate_id, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
             ResponsesGetParams, ResponsesRequest,
@@ -1037,21 +1036,6 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                 warn!("Failed to retrieve input items for {}: {}", response_id, e);
                 error_responses::internal_error(format!("Failed to retrieve input items: {}", e))
             }
-        }
-    }
-
-    async fn route_messages(
-        &self,
-        headers: Option<&HeaderMap>,
-        body: &CreateMessageRequest,
-        _model_id: Option<&str>,
-    ) -> Response {
-        use crate::routers::anthropic::messages::MessagesHandler;
-
-        if body.stream.unwrap_or(false) {
-            MessagesHandler::handle_streaming(headers, body).await
-        } else {
-            MessagesHandler::handle_non_streaming(headers, body).await
         }
     }
 
