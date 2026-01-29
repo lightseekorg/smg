@@ -186,8 +186,12 @@ type ChatCompletionRequest struct {
 	Stop                interface{}      `json:"stop,omitempty"`
 	StopTokenIDs        []int            `json:"stop_token_ids,omitempty"`
 	SkipSpecialTokens   bool             `json:"skip_special_tokens,omitempty"`
+	IgnoreEos           bool             `json:"ignore_eos,omitempty"`
+	NoStopTrim          bool             `json:"no_stop_trim,omitempty"`
 	FrequencyPenalty    *float32         `json:"frequency_penalty,omitempty"`
 	PresencePenalty     *float32         `json:"presence_penalty,omitempty"`
+	MinP                *float32         `json:"min_p,omitempty"`
+	RepetitionPenalty   *float32         `json:"repetition_penalty,omitempty"`
 	ResponseFormat      *ResponseFormat  `json:"response_format,omitempty"`
 	Seed                *int             `json:"seed,omitempty"`
 	Logprobs            bool             `json:"logprobs,omitempty"`
