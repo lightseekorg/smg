@@ -1046,7 +1046,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         body: &CreateMessageRequest,
         _model_id: Option<&str>,
     ) -> Response {
-        use crate::routers::openai::messages::MessagesHandler;
+        use crate::routers::anthropic::messages::MessagesHandler;
 
         if body.stream.unwrap_or(false) {
             MessagesHandler::handle_streaming(headers, body).await

@@ -21,6 +21,7 @@ use crate::protocols::{
     responses::{ResponsesGetParams, ResponsesRequest},
 };
 
+pub mod anthropic;
 pub mod conversations;
 pub mod error;
 pub mod factory;

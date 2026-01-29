@@ -8,7 +8,6 @@
 //! - SSE (Server-Sent Events) streaming
 
 mod context;
-pub mod messages;
 mod provider;
 pub mod responses;
 mod router;
