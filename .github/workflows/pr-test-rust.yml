@@ -484,7 +484,7 @@ jobs:
           fi
 
   summarize-benchmarks:
-    needs: gateway-e2e
+    needs: [gateway-e2e, go-bindings-benchmark]
     runs-on: ubuntu-latest
     if: success()
     permissions:
@@ -493,10 +493,15 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v6
 
-    - name: Download benchmark results
+    - name: Download gateway benchmark results
       uses: actions/download-artifact@v7
       with:
         name: genai-bench-results-all-policies
+
+    - name: Download Go bindings benchmark results
+      uses: actions/download-artifact@v7
+      with:
+        name: genai-bench-results-go-bindings
 
     - name: Create benchmark summary
       run: python3 e2e_test/benchmarks/summarize.py .
