@@ -41,13 +41,53 @@ PARAM_MODEL = "model"
 # Default model
 DEFAULT_MODEL = "llama-8b"
 
+# Default runtime for gRPC tests
+DEFAULT_RUNTIME = "sglang"
+
 # Environment variable names
 ENV_MODELS = "E2E_MODELS"
 ENV_BACKENDS = "E2E_BACKENDS"
 ENV_MODEL = "E2E_MODEL"
+ENV_RUNTIME = "E2E_RUNTIME"  # Runtime for gRPC tests: "sglang" or "vllm"
 ENV_STARTUP_TIMEOUT = "E2E_STARTUP_TIMEOUT"
 ENV_SKIP_MODEL_POOL = "SKIP_MODEL_POOL"
 ENV_SKIP_BACKEND_SETUP = "SKIP_BACKEND_SETUP"
+
+
+# Runtime detection helpers
+_RUNTIME_CACHE = None
+
+
+def get_runtime() -> str:
+    """Get the current test runtime (sglang or vllm).
+
+    Returns:
+        Runtime name from E2E_RUNTIME environment variable, defaults to "sglang".
+    """
+    global _RUNTIME_CACHE
+    if _RUNTIME_CACHE is None:
+        import os
+
+        _RUNTIME_CACHE = os.environ.get(ENV_RUNTIME, DEFAULT_RUNTIME)
+    return _RUNTIME_CACHE
+
+
+def is_vllm() -> bool:
+    """Check if tests are running with vLLM runtime.
+
+    Returns:
+        True if E2E_RUNTIME is "vllm", False otherwise.
+    """
+    return get_runtime() == "vllm"
+
+
+def is_sglang() -> bool:
+    """Check if tests are running with SGLang runtime.
+
+    Returns:
+        True if E2E_RUNTIME is "sglang", False otherwise.
+    """
+    return get_runtime() == "sglang"
 ENV_SHOW_ROUTER_LOGS = "SHOW_ROUTER_LOGS"
 ENV_SHOW_WORKER_LOGS = "SHOW_WORKER_LOGS"
 
