@@ -16,9 +16,7 @@ use axum::{
 use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use smg_mesh::{
-    MeshServerBuilder, MeshServerConfig, MeshServerHandler, PartitionDetector, RateLimitWindow,
-};
+use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
 use tokio::{signal, spawn};
 use tracing::{debug, error, info, warn, Level};
 
@@ -751,33 +749,16 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         metrics::start_prometheus(prometheus_config.clone());
     }
 
+    // Initialize mesh server if configured, it will return a handler for mesh management
     let mesh_handler = if let Some(mesh_server_config) = &config.mesh_server_config {
-        // Create partition detector
-        let partition_detector = Arc::new(PartitionDetector::default());
-
         // Create mesh server builder and build with stores
-        let builder = MeshServerBuilder::new(
-            mesh_server_config.self_name.clone(),
-            mesh_server_config.self_addr,
-            mesh_server_config.init_peer,
-        );
-        let (mesh_server, handler) = builder.build();
+        let (mesh_server, handler) = MeshServerBuilder::from(mesh_server_config).build();
 
-        // Initialize rate-limit hash ring with current membership
-        handler.sync_manager.update_rate_limit_membership();
+        // Start rate limit window reset task (managed by handler)
+        handler.start_rate_limit_task(1); // Reset every 1 second
 
-        // Start rate limit window reset task
-        let window_manager = RateLimitWindow::new(handler.sync_manager.clone(), 1); // Reset every 1 second
         spawn(async move {
-            window_manager.start_reset_task().await;
-        });
-
-        let partition_detector_for_server = partition_detector.clone();
-        spawn(async move {
-            if let Err(e) = mesh_server
-                .start_serve_with_stores(Some(partition_detector_for_server))
-                .await
-            {
+            if let Err(e) = mesh_server.start().await {
                 tracing::error!("Mesh server failed: {}", e);
             }
         });

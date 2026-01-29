@@ -26,7 +26,10 @@ impl RateLimitWindow {
 
     /// Start the window reset task
     /// This task periodically resets the global rate limit counter
-    pub async fn start_reset_task(self) {
+    ///
+    /// # Arguments
+    /// * `shutdown_rx` - A watch receiver that signals when to stop the task
+    pub async fn start_reset_task(self, mut shutdown_rx: tokio::sync::watch::Receiver<()>) {
         let mut interval_timer = interval(Duration::from_secs(self.window_seconds));
         info!(
             "Starting rate limit window reset task with {}s interval",
@@ -34,11 +37,19 @@ impl RateLimitWindow {
         );
 
         loop {
-            interval_timer.tick().await;
-
-            debug!("Resetting global rate limit counter");
-            self.sync_manager.reset_global_rate_limit_counter();
+            tokio::select! {
+                _ = interval_timer.tick() => {
+                    debug!("Resetting global rate limit counter");
+                    self.sync_manager.reset_global_rate_limit_counter();
+                }
+                _ = shutdown_rx.changed() => {
+                    info!("Rate limit window reset task received shutdown signal");
+                    break;
+                }
+            }
         }
+
+        info!("Rate limit window reset task stopped");
     }
 }
 
@@ -83,20 +94,24 @@ mod tests {
         // Set a very short window for testing (1 second)
         let window = RateLimitWindow::new(sync_manager, 1);
 
+        // Create shutdown channel
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+
         // Spawn the reset task
         let task_handle = tokio::spawn(async move {
-            window.start_reset_task().await;
+            window.start_reset_task(shutdown_rx).await;
         });
 
         // Wait a bit to allow the task to run
         sleep(Duration::from_millis(1500)).await;
 
-        // Cancel the task
-        task_handle.abort();
+        // Send shutdown signal
+        shutdown_tx.send(()).ok();
 
-        // The task should have started (we can't easily verify it ran without
-        // more complex mocking, but we can verify it doesn't panic)
-        // In a real scenario, you'd use a mock to track reset calls
+        // Wait for task to complete gracefully
+        let _ = tokio::time::timeout(Duration::from_secs(1), task_handle).await;
+
+        // The task should have started and stopped gracefully
     }
 
     #[tokio::test]
@@ -132,9 +147,12 @@ mod tests {
             // Create window manager with short interval for testing
             let window = RateLimitWindow::new(sync_manager.clone(), 1); // 1 second
 
+            // Create shutdown channel
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+
             // Start reset task in background
             let reset_handle = tokio::spawn(async move {
-                window.start_reset_task().await;
+                window.start_reset_task(shutdown_rx).await;
             });
 
             // Wait a bit for reset to happen
@@ -145,8 +163,11 @@ mod tests {
             // Counter should be reset or significantly reduced
             // Note: The exact value depends on timing, but it should be less than initial
 
-            // Cancel the task
-            reset_handle.abort();
+            // Send shutdown signal
+            shutdown_tx.send(()).ok();
+
+            // Wait for task to complete gracefully
+            let _ = tokio::time::timeout(Duration::from_secs(1), reset_handle).await;
         }
     }
 

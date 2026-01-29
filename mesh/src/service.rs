@@ -50,6 +50,7 @@ pub struct MeshServerHandler {
     signal_tx: tokio::sync::watch::Sender<()>,
     partition_detector: Option<Arc<PartitionDetector>>,
     state_machine: Option<Arc<NodeStateMachine>>,
+    rate_limit_task_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl MeshServerHandler {
@@ -66,6 +67,8 @@ impl MeshServerHandler {
             stores.clone(),
             ConvergenceConfig::default(),
         ));
+        // Initialize rate-limit hash ring with current membership
+        sync_manager.update_rate_limit_membership();
         Self {
             state,
             stores,
@@ -75,6 +78,7 @@ impl MeshServerHandler {
             signal_tx,
             partition_detector,
             state_machine: Some(state_machine),
+            rate_limit_task_handle: std::sync::Mutex::new(None),
         }
     }
 
@@ -104,8 +108,35 @@ impl MeshServerHandler {
             .unwrap_or(true) // If no partition detector, consider should serve
     }
 
+    /// Start rate limit window reset task
+    /// This task will periodically reset the global rate limit counter
+    pub fn start_rate_limit_task(&self, window_seconds: u64) {
+        use crate::rate_limit_window::RateLimitWindow;
+
+        let window_manager = RateLimitWindow::new(self.sync_manager.clone(), window_seconds);
+        let shutdown_rx = self.signal_tx.subscribe();
+
+        let handle = tokio::spawn(async move {
+            window_manager.start_reset_task(shutdown_rx).await;
+        });
+
+        if let Ok(mut task_handle) = self.rate_limit_task_handle.lock() {
+            *task_handle = Some(handle);
+        }
+    }
+
+    /// Stop rate limit window reset task
+    pub fn stop_rate_limit_task(&self) {
+        if let Ok(mut task_handle) = self.rate_limit_task_handle.lock() {
+            if let Some(handle) = task_handle.take() {
+                handle.abort();
+            }
+        }
+    }
+
     /// Shutdown immediately without graceful shutdown
     pub fn shutdown(&self) {
+        self.stop_rate_limit_task();
         self.signal_tx.send(()).ok();
     }
 
@@ -169,6 +200,9 @@ impl MeshServerHandler {
         );
         tokio::time::sleep(propagation_delay).await;
 
+        log::info!("Stopping rate limit task");
+        self.stop_rate_limit_task();
+
         log::info!("Sending shutdown signal");
         self.signal_tx.send(()).ok();
         Ok(())
@@ -220,10 +254,6 @@ impl MeshServerBuilder {
         }
     }
 
-    // pub fn build(&self) -> (MeshServer, MeshServerHandler) {
-    //     self.build_with_stores(None)
-    // }
-
     pub fn build(&self) -> (MeshServer, MeshServerHandler) {
         let (signal_tx, signal_rx) = tokio::sync::watch::channel(());
         let sync_manager = Arc::new(MeshSyncManager::new(
@@ -249,6 +279,12 @@ impl MeshServerBuilder {
                 signal_tx,
             ),
         )
+    }
+}
+
+impl From<&MeshServerConfig> for MeshServerBuilder {
+    fn from(value: &MeshServerConfig) -> Self {
+        MeshServerBuilder::new(value.self_name.clone(), value.self_addr, value.init_peer)
     }
 }
 
@@ -296,22 +332,20 @@ impl MeshServer {
         )
     }
 
-    pub async fn start_serve_with_stores(
-        self,
-        partition_detector: Option<Arc<PartitionDetector>>,
-    ) -> Result<()> {
+    pub async fn start(self) -> Result<()> {
         log::info!("Mesh server listening on {}", self.self_addr);
         let self_name = self.self_name.clone();
         let self_address = self.self_addr;
+
+        // Create partition detector
+        let partition_detector = Arc::new(PartitionDetector::default());
 
         let mut service = self.build_ping_server();
         service = service.with_stores(self.stores.clone());
 
         service = service.with_sync_manager(self.sync_manager.clone());
 
-        if let Some(partition_detector) = partition_detector {
-            service = service.with_partition_detector(partition_detector);
-        }
+        service = service.with_partition_detector(partition_detector);
         let controller = self.build_controller();
 
         let mut service_shutdown = self.signal_rx.clone();
@@ -434,141 +468,142 @@ pub async fn try_ping(
     Ok(response.into_inner())
 }
 
-// #[macro_export]
-// macro_rules! mesh_run {
-//     ($addr:expr, $init_peer:expr) => {{
-//         mesh_run!($addr.to_string(), $addr, $init_peer)
-//     }};
+#[macro_export]
+macro_rules! mesh_run {
+    ($addr:expr, $init_peer:expr) => {{
+        mesh_run!($addr.to_string(), $addr, $init_peer)
+    }};
 
-//     ($name:expr, $addr:expr, $init_peer:expr) => {{
-//         tracing::info!("Starting mesh server : {}", $addr);
-//         let (server, handler) =
-//             $crate::service::MeshServerBuilder::new($name.to_string(), $addr, $init_peer).build();
-//         tokio::spawn(async move {
-//             if let Err(e) = server.start_serve().await {
-//                 tracing::error!("Mesh server failed: {}", e);
-//             }
-//         });
-//         handler
-//     }};
-// }
+    ($name:expr, $addr:expr, $init_peer:expr) => {{
+        tracing::info!("Starting mesh server : {}", $addr);
+        let (server, handler) =
+            $crate::service::MeshServerBuilder::new($name.to_string(), $addr, $init_peer).build();
+        tokio::spawn(async move {
+            if let Err(e) = server.start().await {
+                tracing::error!("Mesh server failed: {}", e);
+            }
+        });
+        handler
+    }};
+}
 
-// #[cfg(test)]
-// mod tests {
-//     use std::sync::Once;
+#[cfg(test)]
+mod tests {
+    use std::sync::Once;
 
-//     use tokio::net::TcpListener;
-//     use tracing as log;
-//     use tracing_subscriber::{
-//         filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
-//     };
+    use tokio::net::TcpListener;
+    use tracing as log;
+    use tracing_subscriber::{
+        filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
+    };
 
-//     use super::*;
-//     static INIT: Once = Once::new();
-//     fn init() {
-//         INIT.call_once(|| {
-//             let _ = tracing_subscriber::registry()
-//                 .with(tracing_subscriber::fmt::layer())
-//                 .with(
-//                     EnvFilter::builder()
-//                         .with_default_directive(LevelFilter::INFO.into())
-//                         .from_env_lossy(),
-//                 )
-//                 .try_init();
-//         });
-//     }
-//     async fn find_free_port() -> (TcpListener, u16) {
-//         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-//         let port = listener.local_addr().unwrap().port();
-//         log::info!("Found free port: {}", port);
-//         (listener, port)
-//     }
+    use super::*;
+    static INIT: Once = Once::new();
+    fn init() {
+        INIT.call_once(|| {
+            let _ = tracing_subscriber::registry()
+                .with(tracing_subscriber::fmt::layer())
+                .with(
+                    EnvFilter::builder()
+                        .with_default_directive(LevelFilter::INFO.into())
+                        .from_env_lossy(),
+                )
+                .try_init();
+        });
+    }
+    async fn find_free_port() -> (TcpListener, u16) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        log::info!("Found free port: {}", port);
+        (listener, port)
+    }
 
-//     async fn get_node() -> SocketAddr {
-//         let (_listener, port) = find_free_port().await;
-//         format!("127.0.0.1:{}", port).parse().unwrap()
-//     }
+    async fn get_node() -> SocketAddr {
+        let (_listener, port) = find_free_port().await;
+        format!("127.0.0.1:{}", port).parse().unwrap()
+    }
 
-//     fn print_state(handler: &MeshServerHandler) -> String {
-//         let state = handler.state.read();
-//         let mut res = vec![];
-//         for (k, v) in state.iter() {
-//             res.push(format!(
-//                 "{}: {:?} - {:?}",
-//                 k,
-//                 NodeStatus::try_from(v.status).unwrap(),
-//                 v.metadata
-//             ));
-//         }
-//         res.join(", ")
-//     }
+    fn print_state(handler: &MeshServerHandler) -> String {
+        let state = handler.state.read();
+        let mut res = vec![];
+        for (k, v) in state.iter() {
+            res.push(format!(
+                "{}: {:?} - {:?}",
+                k,
+                NodeStatus::try_from(v.status).unwrap(),
+                v.metadata
+            ));
+        }
+        res.join(", ")
+    }
 
-//     #[tokio::test]
-//     async fn test_state_synchronization() {
-//         init();
-//         log::info!("Starting test_state_synchronization");
+    #[tokio::test]
+    #[ignore = "reason: only run manually due to flakiness"]
+    async fn test_state_synchronization() {
+        init();
+        log::info!("Starting test_state_synchronization");
 
-//         // 1. setup node A and B for initial cluster
-//         let addr_a = get_node().await;
-//         let handler_a = mesh_run!("A", addr_a, None);
-//         let addr_b = get_node().await;
-//         let handler_b = mesh_run!("B", addr_b, Some(addr_a));
+        // 1. setup node A and B for initial cluster
+        let addr_a = get_node().await;
+        let handler_a = mesh_run!("A", addr_a, None);
+        let addr_b = get_node().await;
+        let handler_b = mesh_run!("B", addr_b, Some(addr_a));
 
-//         // 2. wait for node A and B to sync and write some data
-//         tokio::time::sleep(Duration::from_secs(2)).await;
-//         handler_a.write_data("hello".into(), "world".into());
-//         log::info!("================================================");
+        // 2. wait for node A and B to sync and write some data
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        handler_a.write_data("hello".into(), "world".into());
+        log::info!("================================================");
 
-//         // 3. add node C and D and wait for them to sync
-//         let addr_c = get_node().await;
-//         let handler_c = mesh_run!("C", addr_c, Some(addr_a));
-//         let addr_d = get_node().await;
-//         let handler_d = mesh_run!("D", addr_d, Some(addr_c));
-//         tokio::time::sleep(Duration::from_secs(2)).await;
-//         log::info!("================================================");
+        // 3. add node C and D and wait for them to sync
+        let addr_c = get_node().await;
+        let handler_c = mesh_run!("C", addr_c, Some(addr_a));
+        let addr_d = get_node().await;
+        let handler_d = mesh_run!("D", addr_d, Some(addr_c));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        log::info!("================================================");
 
-//         // 4. add node E and wait for it to sync and kill it
-//         {
-//             let addr_e = get_node().await;
-//             let handler_e = mesh_run!("E", addr_e, Some(addr_d));
-//             tokio::time::sleep(Duration::from_secs(3)).await;
-//             log::info!("State E: {:?}", print_state(&handler_e));
-//             // killing_button.send(()).unwrap();
-//             handler_e.shutdown();
-//         }
+        // 4. add node E and wait for it to sync and kill it
+        {
+            let addr_e = get_node().await;
+            let handler_e = mesh_run!("E", addr_e, Some(addr_d));
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            log::info!("State E: {:?}", print_state(&handler_e));
+            // killing_button.send(()).unwrap();
+            handler_e.shutdown();
+        }
 
-//         handler_d.graceful_shutdown().await.unwrap();
-//         tokio::time::sleep(Duration::from_secs(2)).await;
-//         log::info!("================================================");
+        handler_d.graceful_shutdown().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        log::info!("================================================");
 
-//         // 5. Poll until expected state is reached (with timeout)
-//         // Note: D stays in Leaving status because gracefully shutdown nodes are not pinged anymore (by design)
-//         //       E transitions Alive → Suspected → Down because it was abruptly shutdown
-//         let final_state = String::from("A: Alive - {\"hello\": [119, 111, 114, 108, 100]}, B: Alive - {}, C: Alive - {}, D: Leaving - {}, E: Down - {}");
+        // 5. Poll until expected state is reached (with timeout)
+        // Note: D stays in Leaving status because gracefully shutdown nodes are not pinged anymore (by design)
+        //       E transitions Alive → Suspected → Down because it was abruptly shutdown
+        let final_state = String::from("A: Alive - {\"hello\": [119, 111, 114, 108, 100]}, B: Alive - {}, C: Alive - {}, D: Leaving - {}, E: Down - {}");
 
-//         let max_wait = Duration::from_secs(30);
-//         let poll_interval = Duration::from_millis(500);
-//         let start = std::time::Instant::now();
+        let max_wait = Duration::from_secs(30);
+        let poll_interval = Duration::from_millis(500);
+        let start = std::time::Instant::now();
 
-//         loop {
-//             let state_a = print_state(&handler_a);
-//             let state_b = print_state(&handler_b);
-//             let state_c = print_state(&handler_c);
+        loop {
+            let state_a = print_state(&handler_a);
+            let state_b = print_state(&handler_b);
+            let state_c = print_state(&handler_c);
 
-//             if state_a == final_state && state_b == final_state && state_c == final_state {
-//                 log::info!("All nodes converged to expected state");
-//                 break;
-//             }
+            if state_a == final_state && state_b == final_state && state_c == final_state {
+                log::info!("All nodes converged to expected state");
+                break;
+            }
 
-//             if start.elapsed() > max_wait {
-//                 log::info!("================================================");
-//                 panic!(
-//                     "Timeout waiting for state convergence.\nExpected: {:?}\nState A: {:?}\nState B: {:?}\nState C: {:?}",
-//                     final_state, state_a, state_b, state_c
-//                 );
-//             }
+            if start.elapsed() > max_wait {
+                log::info!("================================================");
+                panic!(
+                    "Timeout waiting for state convergence.\nExpected: {:?}\nState A: {:?}\nState B: {:?}\nState C: {:?}",
+                    final_state, state_a, state_b, state_c
+                );
+            }
 
-//             tokio::time::sleep(poll_interval).await;
-//         }
-//     }
-// }
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+}
