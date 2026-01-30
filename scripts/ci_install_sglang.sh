@@ -31,6 +31,19 @@ fi
 echo "Installing SGLang dependencies..."
 sudo apt update
 cd "$SGLANG_DIR"
-sudo CUDA_HOME=/usr/local/cuda IS_BLACKWELL=1 --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
+
+# Handle script path differences between sglang versions
+if [ -f "scripts/ci/cuda/ci_install_dependency.sh" ]; then
+    INSTALL_SCRIPT="scripts/ci/cuda/ci_install_dependency.sh"
+elif [ -f "scripts/ci_install_dependency.sh" ]; then
+    INSTALL_SCRIPT="scripts/ci_install_dependency.sh"
+else
+    echo "ERROR: Could not find ci_install_dependency.sh in sglang repo"
+    find scripts -name "ci_install_dependency*" 2>/dev/null || true
+    exit 1
+fi
+
+echo "Using install script: $INSTALL_SCRIPT"
+sudo CUDA_HOME=/usr/local/cuda IS_BLACKWELL=1 --preserve-env=PATH bash "$INSTALL_SCRIPT"
 
 echo "SGLang installation complete"
