@@ -11,10 +11,7 @@ use tracing::{debug, warn};
 use super::{utils::should_propagate_header, AnthropicRouter};
 
 /// Handle /v1/models request
-pub async fn handle_list_models(
-    router: &AnthropicRouter,
-    req: Request<Body>,
-) -> Response {
+pub async fn handle_list_models(router: &AnthropicRouter, req: Request<Body>) -> Response {
     debug!("Handling list models request");
 
     // Extract headers from the request
@@ -45,9 +42,7 @@ pub async fn handle_list_models(
 
     debug!("Forwarding list models request to: {}", url);
 
-    let mut req_builder = router
-        .http_client()
-        .get(&url);
+    let mut req_builder = router.http_client().get(&url);
 
     // Propagate relevant headers
     for (key, value) in headers {

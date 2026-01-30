@@ -9,9 +9,12 @@ use std::{any::Any, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use axum::{
+    body::Body,
+    extract::Request,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use tracing::debug;
 
 use super::{messages, models};
 use crate::{
@@ -20,8 +23,6 @@ use crate::{
     protocols::{chat::ChatCompletionRequest, messages::CreateMessageRequest},
     routers::RouterTrait,
 };
-use axum::{body::Body, extract::Request};
-use tracing::debug;
 
 /// Router for Anthropic-specific APIs
 ///
@@ -95,12 +96,8 @@ impl AnthropicRouter {
     pub fn select_worker_for_model(&self, model_id: &str) -> Result<Arc<dyn Worker>, String> {
         debug!("Selecting worker for model: {}", model_id);
 
-        self.find_best_worker_for_model(model_id).ok_or_else(|| {
-            format!(
-                "No healthy workers available for model '{}'",
-                model_id
-            )
-        })
+        self.find_best_worker_for_model(model_id)
+            .ok_or_else(|| format!("No healthy workers available for model '{}'", model_id))
     }
 }
 

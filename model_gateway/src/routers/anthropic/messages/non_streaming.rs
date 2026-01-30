@@ -6,8 +6,10 @@
 //! - Response parsing and error handling
 //! - Metrics and observability
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     http::{HeaderMap, StatusCode},
@@ -16,14 +18,13 @@ use axum::{
 };
 use tracing::{debug, error, info, warn};
 
+#[cfg(test)]
+use crate::protocols::messages::{InputMessage, Role};
 use crate::{
     core::Worker,
     protocols::messages::{CreateMessageRequest, Message},
     routers::anthropic::{utils::should_propagate_header, AnthropicRouter},
 };
-
-#[cfg(test)]
-use crate::protocols::messages::{InputMessage, Role};
 
 // ============================================================================
 // Worker Selection
@@ -94,7 +95,10 @@ async fn parse_response(response: reqwest::Response) -> Response {
     // Parse JSON response
     match response.json::<Message>().await {
         Ok(msg_response) => {
-            debug!("Successfully parsed response for message: {}", msg_response.id);
+            debug!(
+                "Successfully parsed response for message: {}",
+                msg_response.id
+            );
 
             // Return successful response
             (StatusCode::OK, Json(msg_response)).into_response()
@@ -218,16 +222,15 @@ pub async fn handle_non_streaming(
     };
 
     // 2. Forward request to worker
-    let worker_response = match forward_to_worker(router.http_client(), &worker, headers, request)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            error!("Request forwarding failed: {}", e);
-            record_error(model, "forward_error");
-            return (StatusCode::BAD_GATEWAY, e).into_response();
-        }
-    };
+    let worker_response =
+        match forward_to_worker(router.http_client(), &worker, headers, request).await {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Request forwarding failed: {}", e);
+                record_error(model, "forward_error");
+                return (StatusCode::BAD_GATEWAY, e).into_response();
+            }
+        };
 
     // 3. Parse and return response
     let response = parse_response(worker_response).await;
