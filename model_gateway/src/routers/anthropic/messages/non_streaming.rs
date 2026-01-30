@@ -1,7 +1,6 @@
 //! Non-streaming Messages API handler
 //!
 //! This module handles all aspects of non-streaming Messages API requests:
-//! - Request validation
 //! - Worker selection via routing policies
 //! - Request forwarding to Anthropic-compatible workers
 //! - Response parsing and error handling
@@ -19,118 +18,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     core::Worker,
-    protocols::messages::{CreateMessageRequest, InputMessage, Message, Role, Tool},
+    protocols::messages::{CreateMessageRequest, Message},
     routers::anthropic::AnthropicRouter,
 };
 
 #[cfg(test)]
-use crate::protocols::messages::{CustomTool, InputSchema};
-
-// ============================================================================
-// Request Validation
-// ============================================================================
-
-/// Validate Messages API request
-fn validate_request(request: &CreateMessageRequest) -> Result<(), String> {
-    // Check required fields
-    if request.messages.is_empty() {
-        return Err("messages array cannot be empty".to_string());
-    }
-
-    if request.max_tokens == 0 {
-        return Err("max_tokens must be greater than 0".to_string());
-    }
-
-    if request.model.is_empty() {
-        return Err("model cannot be empty".to_string());
-    }
-
-    // Validate message sequence
-    validate_message_sequence(&request.messages)?;
-
-    // Validate tools if present
-    if let Some(tools) = &request.tools {
-        validate_tools(tools)?;
-    }
-
-    Ok(())
-}
-
-/// Validate message role sequence
-///
-/// Rules:
-/// 1. Must start with user message
-/// 2. Messages must alternate between user and assistant
-/// 3. Must end with user message
-fn validate_message_sequence(messages: &[InputMessage]) -> Result<(), String> {
-    if messages.is_empty() {
-        return Err("messages array cannot be empty".to_string());
-    }
-
-    // Must start with user message
-    if messages[0].role != Role::User {
-        return Err("First message must have role 'user'".to_string());
-    }
-
-    // Must end with user message
-    if messages.last().unwrap().role != Role::User {
-        return Err("Last message must have role 'user'".to_string());
-    }
-
-    // Validate alternating roles
-    for window in messages.windows(2) {
-        if window[0].role == window[1].role {
-            return Err(format!(
-                "Messages must alternate between 'user' and 'assistant' roles. Found consecutive {:?} messages.",
-                window[0].role
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-/// Validate tool definitions
-fn validate_tools(tools: &[Tool]) -> Result<(), String> {
-    if tools.is_empty() {
-        return Err("tools array cannot be empty if provided".to_string());
-    }
-
-    for (idx, tool) in tools.iter().enumerate() {
-        // Extract name based on tool variant
-        let name = match tool {
-            Tool::Custom(t) => &t.name,
-            Tool::Bash(t) => &t.name,
-            Tool::TextEditor(t) => &t.name,
-            Tool::WebSearch(t) => &t.name,
-        };
-
-        if name.is_empty() {
-            return Err(format!("Tool at index {} has empty name", idx));
-        }
-
-        // Tool name should be valid (alphanumeric, underscore, hyphen)
-        if !name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        {
-            return Err(format!(
-                "Tool '{}' has invalid name. Only alphanumeric, underscore, and hyphen allowed.",
-                name
-            ));
-        }
-
-        // Validate input_schema for Custom tools
-        if let Tool::Custom(custom_tool) = tool {
-            // InputSchema must have a valid schema_type
-            if custom_tool.input_schema.schema_type.is_empty() {
-                return Err(format!("Tool '{}' has invalid input_schema", name));
-            }
-        }
-    }
-
-    Ok(())
-}
+use crate::protocols::messages::{InputMessage, Role};
 
 // ============================================================================
 // Worker Selection
@@ -319,14 +212,7 @@ pub async fn handle_non_streaming(
     // Record incoming request
     record_request(model);
 
-    // 1. Validate request
-    if let Err(e) = validate_request(request) {
-        error!("Request validation failed: {}", e);
-        record_error(model, "validation_error");
-        return (StatusCode::BAD_REQUEST, e).into_response();
-    }
-
-    // 2. Select worker via policy
+    // 1. Select worker via policy
     let worker = match select_worker(router, model_id, request).await {
         Ok(w) => {
             debug!("Selected worker: {}", w.url());
@@ -339,7 +225,7 @@ pub async fn handle_non_streaming(
         }
     };
 
-    // 3. Forward request to worker
+    // 2. Forward request to worker
     let worker_response = match forward_to_worker(router.http_client(), &worker, headers, request)
         .await
     {
@@ -351,7 +237,7 @@ pub async fn handle_non_streaming(
         }
     };
 
-    // 4. Parse and return response
+    // 3. Parse and return response
     let response = parse_response(worker_response).await;
 
     // Record response metrics
@@ -374,283 +260,12 @@ pub async fn handle_non_streaming(
 mod tests {
     use super::*;
     use crate::{app_context::AppContext, config::RouterConfig, protocols::messages::InputContent};
-    use std::collections::HashMap;
-
-    // ========================================================================
-    // Validation Tests
-    // ========================================================================
 
     fn create_test_message(role: Role, content: &str) -> InputMessage {
         InputMessage {
             role,
             content: InputContent::String(content.to_string()),
         }
-    }
-
-    #[test]
-    fn test_valid_request() {
-        let request = CreateMessageRequest {
-            model: "claude-sonnet-4-5-20250929".to_string(),
-            messages: vec![create_test_message(Role::User, "Hello")],
-            max_tokens: 100,
-            metadata: None,
-            service_tier: None,
-            stop_sequences: None,
-            stream: None,
-            system: None,
-            temperature: None,
-            thinking: None,
-            tool_choice: None,
-            tools: None,
-            top_k: None,
-            top_p: None,
-            container: None,
-            mcp_servers: None,
-        };
-
-        assert!(validate_request(&request).is_ok());
-    }
-
-    #[test]
-    fn test_empty_messages() {
-        let request = CreateMessageRequest {
-            model: "test".to_string(),
-            messages: vec![],
-            max_tokens: 100,
-            metadata: None,
-            service_tier: None,
-            stop_sequences: None,
-            stream: None,
-            system: None,
-            temperature: None,
-            thinking: None,
-            tool_choice: None,
-            tools: None,
-            top_k: None,
-            top_p: None,
-            container: None,
-            mcp_servers: None,
-        };
-
-        assert!(validate_request(&request).is_err());
-    }
-
-    #[test]
-    fn test_zero_max_tokens() {
-        let request = CreateMessageRequest {
-            model: "test".to_string(),
-            messages: vec![create_test_message(Role::User, "Hello")],
-            max_tokens: 0,
-            metadata: None,
-            service_tier: None,
-            stop_sequences: None,
-            stream: None,
-            system: None,
-            temperature: None,
-            thinking: None,
-            tool_choice: None,
-            tools: None,
-            top_k: None,
-            top_p: None,
-            container: None,
-            mcp_servers: None,
-        };
-
-        assert!(validate_request(&request).is_err());
-    }
-
-    #[test]
-    fn test_must_start_with_user() {
-        let request = CreateMessageRequest {
-            model: "test".to_string(),
-            messages: vec![create_test_message(Role::Assistant, "Hello")],
-            max_tokens: 100,
-            metadata: None,
-            service_tier: None,
-            stop_sequences: None,
-            stream: None,
-            system: None,
-            temperature: None,
-            thinking: None,
-            tool_choice: None,
-            tools: None,
-            top_k: None,
-            top_p: None,
-            container: None,
-            mcp_servers: None,
-        };
-
-        let result = validate_request(&request);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("First message must have role 'user'"));
-    }
-
-    #[test]
-    fn test_must_end_with_user() {
-        let request = CreateMessageRequest {
-            model: "test".to_string(),
-            messages: vec![
-                create_test_message(Role::User, "Hello"),
-                create_test_message(Role::Assistant, "Hi"),
-            ],
-            max_tokens: 100,
-            metadata: None,
-            service_tier: None,
-            stop_sequences: None,
-            stream: None,
-            system: None,
-            temperature: None,
-            thinking: None,
-            tool_choice: None,
-            tools: None,
-            top_k: None,
-            top_p: None,
-            container: None,
-            mcp_servers: None,
-        };
-
-        let result = validate_request(&request);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("Last message must have role 'user'"));
-    }
-
-    #[test]
-    fn test_alternating_roles() {
-        let request = CreateMessageRequest {
-            model: "test".to_string(),
-            messages: vec![
-                create_test_message(Role::User, "Hello"),
-                create_test_message(Role::User, "Again"),
-            ],
-            max_tokens: 100,
-            metadata: None,
-            service_tier: None,
-            stop_sequences: None,
-            stream: None,
-            system: None,
-            temperature: None,
-            thinking: None,
-            tool_choice: None,
-            tools: None,
-            top_k: None,
-            top_p: None,
-            container: None,
-            mcp_servers: None,
-        };
-
-        let result = validate_request(&request);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must alternate"));
-    }
-
-    #[test]
-    fn test_valid_multi_turn() {
-        let request = CreateMessageRequest {
-            model: "test".to_string(),
-            messages: vec![
-                create_test_message(Role::User, "Hello"),
-                create_test_message(Role::Assistant, "Hi"),
-                create_test_message(Role::User, "How are you?"),
-            ],
-            max_tokens: 100,
-            metadata: None,
-            service_tier: None,
-            stop_sequences: None,
-            stream: None,
-            system: None,
-            temperature: None,
-            thinking: None,
-            tool_choice: None,
-            tools: None,
-            top_k: None,
-            top_p: None,
-            container: None,
-            mcp_servers: None,
-        };
-
-        assert!(validate_request(&request).is_ok());
-    }
-
-    #[test]
-    fn test_valid_tools() {
-        let tools = vec![Tool::Custom(CustomTool {
-            name: "get_weather".to_string(),
-            tool_type: None,
-            description: Some("Get weather".to_string()),
-            input_schema: InputSchema {
-                schema_type: "object".to_string(),
-                properties: Some(HashMap::new()),
-                required: None,
-                additional: HashMap::new(),
-            },
-            cache_control: None,
-        })];
-
-        assert!(validate_tools(&tools).is_ok());
-    }
-
-    #[test]
-    fn test_empty_tools_array() {
-        let tools = vec![];
-        assert!(validate_tools(&tools).is_err());
-    }
-
-    #[test]
-    fn test_tool_with_empty_name() {
-        let tools = vec![Tool::Custom(CustomTool {
-            name: "".to_string(),
-            tool_type: None,
-            description: None,
-            input_schema: InputSchema {
-                schema_type: "object".to_string(),
-                properties: None,
-                required: None,
-                additional: HashMap::new(),
-            },
-            cache_control: None,
-        })];
-
-        assert!(validate_tools(&tools).is_err());
-    }
-
-    #[test]
-    fn test_tool_with_invalid_name() {
-        let tools = vec![Tool::Custom(CustomTool {
-            name: "get@weather".to_string(), // @ not allowed
-            tool_type: None,
-            description: None,
-            input_schema: InputSchema {
-                schema_type: "object".to_string(),
-                properties: None,
-                required: None,
-                additional: HashMap::new(),
-            },
-            cache_control: None,
-        })];
-
-        assert!(validate_tools(&tools).is_err());
-    }
-
-    #[test]
-    fn test_tool_with_empty_schema_type() {
-        let tools = vec![Tool::Custom(CustomTool {
-            name: "test_tool".to_string(),
-            tool_type: None,
-            description: None,
-            input_schema: InputSchema {
-                schema_type: "".to_string(), // Empty schema type
-                properties: None,
-                required: None,
-                additional: HashMap::new(),
-            },
-            cache_control: None,
-        })];
-
-        assert!(validate_tools(&tools).is_err());
     }
 
     // ========================================================================
@@ -675,36 +290,6 @@ mod tests {
     // ========================================================================
     // Handler Tests
     // ========================================================================
-
-    #[tokio::test]
-    async fn test_validation_error() {
-        let config = RouterConfig::default();
-        let context = Arc::new(AppContext::from_config(config, 120).await.unwrap());
-        let router = AnthropicRouter::new(context);
-
-        // Create invalid request (empty messages)
-        let request = CreateMessageRequest {
-            model: "test-model".to_string(),
-            messages: vec![],
-            max_tokens: 100,
-            metadata: None,
-            service_tier: None,
-            stop_sequences: None,
-            stream: None,
-            system: None,
-            temperature: None,
-            thinking: None,
-            tool_choice: None,
-            tools: None,
-            top_k: None,
-            top_p: None,
-            container: None,
-            mcp_servers: None,
-        };
-
-        let response = handle_non_streaming(&router, None, &request, None).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
 
     #[tokio::test]
     async fn test_worker_selection_error() {
