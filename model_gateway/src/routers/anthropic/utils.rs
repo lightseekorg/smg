@@ -11,21 +11,6 @@
 ///
 /// Only propagates authentication and Anthropic-specific headers.
 /// This prevents leaking sensitive headers like cookies or internal routing info.
-///
-/// # Allowed headers
-/// - `authorization` - Bearer tokens
-/// - `x-api-key` - Anthropic API keys (case-insensitive)
-/// - `anthropic-version` - API version selector
-/// - `anthropic-beta` - Beta feature flags
-///
-/// # Examples
-/// ```
-/// use smg::routers::anthropic::utils::should_propagate_header;
-///
-/// assert!(should_propagate_header("x-api-key"));
-/// assert!(should_propagate_header("X-API-KEY"));
-/// assert!(!should_propagate_header("cookie"));
-/// ```
 pub fn should_propagate_header(key: &str) -> bool {
     matches!(
         key.to_lowercase().as_str(),
