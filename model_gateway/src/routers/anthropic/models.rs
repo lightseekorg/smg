@@ -20,18 +20,25 @@ pub async fn handle_list_models(
     // Extract headers from the request
     let headers = req.headers();
 
-    // Get a worker - prefer any healthy worker
-    let workers = router.context().worker_registry.get_all();
+    // Get a healthy worker to avoid credential leakage and ensure reliability
+    let healthy_workers = router.context().worker_registry.get_workers_filtered(
+        None, // model_id
+        None, // provider
+        None, // connection_mode
+        None, // runtime_type
+        true, // healthy_only
+    );
 
-    if workers.is_empty() {
+    if healthy_workers.is_empty() {
+        warn!("No healthy workers available for /v1/models request");
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            "No workers available",
+            "No healthy workers available",
         )
             .into_response();
     }
 
-    let worker = &workers[0];
+    let worker = &healthy_workers[0];
 
     // Forward request to backend
     let url = format!("{}/v1/models", worker.url());
