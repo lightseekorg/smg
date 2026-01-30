@@ -23,8 +23,9 @@ mod sync;
 mod topology;
 mod tree_ops;
 
+// Internal tests module with full access to private types
 #[cfg(test)]
-mod test_utils;
+mod tests;
 
 // Re-export commonly used types
 pub use crdt::SKey;
