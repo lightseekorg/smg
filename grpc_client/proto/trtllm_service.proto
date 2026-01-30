@@ -16,7 +16,7 @@
 syntax = "proto3";
 package trtllm;
 
-// TensorRT-LLM gRPC Engine Service
+// TensorRT-LLM gRPC Service
 //
 // This service provides high-performance inference for LLMs using TensorRT-LLM.
 // It accepts pre-tokenized requests and returns raw token IDs, enabling efficient
@@ -27,7 +27,7 @@ package trtllm;
 // - Streaming delta mode: Chunks contain only new tokens since last chunk
 // - Full feature support: All TensorRT-LLM capabilities exposed
 
-service TrtLlmEngine {
+service TrtllmService {
   // Generate tokens from pre-tokenized input
   // Returns a stream of responses containing token IDs
   rpc Generate(GenerateRequest) returns (stream GenerateResponse);
@@ -66,7 +66,7 @@ message GenerateRequest {
   OutputConfig output_config = 4;
 
   // Maximum tokens to generate (REQUIRED)
-  int32 max_tokens = 5;
+  uint32 max_tokens = 5;
 
   // Enable streaming mode
   bool streaming = 6;
@@ -141,7 +141,7 @@ message SamplingConfig {
   int32 beam_width = 1;
 
   // Number of sequences to return
-  int32 num_return_sequences = 2;
+  uint32 num_return_sequences = 2;
 
   // Top-K sampling (0 = disabled, considers all tokens)
   optional int32 top_k = 3;
@@ -165,7 +165,7 @@ message SamplingConfig {
   optional float temperature = 9;
 
   // Minimum tokens to generate before stopping
-  optional int32 min_tokens = 10;
+  optional uint32 min_tokens = 10;
 
   // Beam search diversity rate
   optional float beam_search_diversity_rate = 11;
@@ -216,7 +216,7 @@ message OutputConfig {
   // Return generation logits tensor (large, use with caution)
   bool return_generation_logits = 4;
 
-  // Exclude input tokens from output (default: true)
+  // Exclude input tokens from output (set to true to enable; TRT-LLM defaults to true internally)
   bool exclude_input_from_output = 5;
 
   // Return encoder output (for encoder-decoder models)
@@ -359,12 +359,12 @@ message GenerateStreamChunk {
   repeated uint32 token_ids = 1;
 
   // Beam/sequence index (for beam_width > 1 or n > 1)
-  int32 sequence_index = 2;
+  uint32 sequence_index = 2;
 
   // Token counts for usage tracking
-  int32 prompt_tokens = 3;
-  int32 completion_tokens = 4;
-  int32 cached_tokens = 5;
+  uint32 prompt_tokens = 3;
+  uint32 completion_tokens = 4;
+  uint32 cached_tokens = 5;
 
   // Log probabilities for this chunk's tokens (if requested)
   repeated TokenLogprob logprobs = 6;
@@ -376,7 +376,7 @@ message GenerateComplete {
   repeated uint32 output_token_ids = 1;
 
   // Beam/sequence index
-  int32 sequence_index = 2;
+  uint32 sequence_index = 2;
 
   // Finish reason: "stop", "length", "stop_word"
   string finish_reason = 3;
@@ -385,9 +385,9 @@ message GenerateComplete {
   optional string stop_reason = 4;
 
   // Token counts for usage tracking
-  int32 prompt_tokens = 5;
-  int32 completion_tokens = 6;
-  int32 cached_tokens = 7;
+  uint32 prompt_tokens = 5;
+  uint32 completion_tokens = 6;
+  uint32 cached_tokens = 7;
 
   // Generation log probabilities (if requested)
   repeated TokenLogprob logprobs = 8;
@@ -449,7 +449,7 @@ message EmbedRequest {
 message EmbedResponse {
   string request_id = 1;
   repeated float embedding = 2;  // Embedding vector
-  int32 prompt_tokens = 3;
+  uint32 prompt_tokens = 3;
 }
 
 // ============================================================================

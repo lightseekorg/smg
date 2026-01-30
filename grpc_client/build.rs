@@ -2,7 +2,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Rebuild triggers
     println!("cargo:rerun-if-changed=proto/sglang_scheduler.proto");
     println!("cargo:rerun-if-changed=proto/vllm_engine.proto");
-    println!("cargo:rerun-if-changed=proto/trtllm_engine.proto");
+    println!("cargo:rerun-if-changed=proto/trtllm_service.proto");
 
     // Compile protobuf files
     tonic_prost_build::configure()
@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[
                 "proto/sglang_scheduler.proto",
                 "proto/vllm_engine.proto",
-                "proto/trtllm_engine.proto",
+                "proto/trtllm_service.proto",
             ],
             &["proto"],
         )?;

@@ -15,12 +15,6 @@ use tracing::instrument;
 use super::{
     crdt::SKey,
     flow_control::MessageSizeValidator,
-    gossip::{
-        self,
-        gossip_server::{Gossip, GossipServer},
-        GossipMessage, IncrementalUpdate, NodeState, NodeStatus, NodeUpdate, PingReq,
-        SnapshotChunk, SnapshotRequest, StateUpdate, StreamAck, StreamMessage, StreamMessageType,
-    },
     incremental::IncrementalUpdateCollector,
     metrics::{
         record_ack, record_batch_sent, record_nack, record_peer_reconnect, record_snapshot_bytes,
@@ -29,9 +23,18 @@ use super::{
     },
     node_state_machine::NodeStateMachine,
     partition::PartitionDetector,
+    service::{
+        gossip::{
+            self,
+            gossip_server::{Gossip, GossipServer},
+            GossipMessage, IncrementalUpdate, NodeState, NodeStatus, NodeUpdate, PingReq,
+            SnapshotChunk, SnapshotRequest, StateUpdate, StreamAck, StreamMessage,
+            StreamMessageType,
+        },
+        try_ping, ClusterState,
+    },
     stores::{StateStores, StoreType as LocalStoreType},
     sync::MeshSyncManager,
-    try_ping, ClusterState,
 };
 
 #[derive(Debug)]

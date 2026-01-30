@@ -1,12 +1,4 @@
 //! Postprocessing FFI functions for gRPC stream chunks
-//!
-//! This module provides C-compatible functions for postprocessing gRPC stream chunks:
-//! - Parse tool calls from model output
-//! - Convert proto format to OpenAI format
-//! - Handle reasoning content parsing
-//!
-//! These functions are designed to be called for each stream chunk, but can be optimized
-//! with batching in the future.
 
 use std::{
     ffi::{CStr, CString},
@@ -15,19 +7,14 @@ use std::{
     sync::Arc,
 };
 
-use once_cell::sync::Lazy;
 use serde_json::Value;
-use smg::grpc_client::sglang_proto as proto;
-use tokio::runtime::Runtime;
 
 use super::{
     error::{set_error_message, SglErrorCode},
     grpc_converter::GrpcResponseConverterHandle,
+    proto_parse::{is_terminal_response, parse_proto_response},
+    runtime::RUNTIME,
 };
-
-/// Global tokio runtime for async operations
-static RUNTIME: Lazy<Runtime> =
-    Lazy::new(|| Runtime::new().expect("Failed to create tokio runtime for postprocessor FFI"));
 
 /// Postprocess a gRPC stream chunk to OpenAI format
 ///
@@ -77,7 +64,7 @@ pub unsafe extern "C" fn sgl_postprocess_stream_chunk(
         }
     };
 
-    // Parse proto.GenerateResponse from JSON
+    // Parse JSON to check if terminal
     let json_value: Value = match serde_json::from_str(proto_chunk_str) {
         Ok(v) => v,
         Err(e) => {
@@ -89,119 +76,10 @@ pub unsafe extern "C" fn sgl_postprocess_stream_chunk(
         }
     };
 
-    // Build proto::GenerateResponse from JSON value
-    let mut proto_response = proto::GenerateResponse {
-        request_id: json_value
-            .get("request_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        response: None,
-    };
+    // Check if stream is done (complete or error)
+    let is_done = is_terminal_response(&json_value);
 
-    // Parse the response oneof field
-    let is_done = if let Some(chunk_json) = json_value.get("chunk") {
-        let chunk = proto::GenerateStreamChunk {
-            token_ids: chunk_json
-                .get("token_ids")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_u64().map(|n| n as u32))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            prompt_tokens: chunk_json
-                .get("prompt_tokens")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32)
-                .unwrap_or(0),
-            completion_tokens: chunk_json
-                .get("completion_tokens")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32)
-                .unwrap_or(0),
-            cached_tokens: chunk_json
-                .get("cached_tokens")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32)
-                .unwrap_or(0),
-            output_logprobs: None,
-            hidden_states: vec![],
-            input_logprobs: None,
-            index: 0,
-        };
-        proto_response.response = Some(proto::generate_response::Response::Chunk(chunk));
-        false
-    } else if let Some(complete_json) = json_value.get("complete") {
-        let complete = proto::GenerateComplete {
-            output_ids: complete_json
-                .get("output_ids")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_u64().map(|n| n as u32))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            finish_reason: complete_json
-                .get("finish_reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            prompt_tokens: complete_json
-                .get("prompt_tokens")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32)
-                .unwrap_or(0),
-            completion_tokens: complete_json
-                .get("completion_tokens")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32)
-                .unwrap_or(0),
-            cached_tokens: complete_json
-                .get("cached_tokens")
-                .and_then(|v| v.as_i64())
-                .map(|n| n as i32)
-                .unwrap_or(0),
-            output_logprobs: None,
-            all_hidden_states: vec![],
-            input_logprobs: None,
-            matched_stop: None,
-            index: 0,
-        };
-        proto_response.response = Some(proto::generate_response::Response::Complete(complete));
-        true
-    } else if let Some(error_json) = json_value.get("error") {
-        let error = proto::GenerateError {
-            message: error_json
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            http_status_code: error_json
-                .get("http_status_code")
-                .and_then(|v| v.as_str())
-                .unwrap_or("500")
-                .to_string(),
-            details: error_json
-                .get("details")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        };
-        proto_response.response = Some(proto::generate_response::Response::Error(error));
-        true
-    } else {
-        set_error_message(
-            error_out,
-            "Proto chunk JSON must contain 'chunk', 'complete', or 'error' field",
-        );
-        return SglErrorCode::ParsingError;
-    };
-
-    // Convert proto chunk to OpenAI format using the converter's convert_chunk function
-    // We'll use the existing converter API instead of calling the internal function directly
+    // Create C string for converter
     let proto_chunk_json_cstr = match CString::new(proto_chunk_str) {
         Ok(s) => s,
         Err(e) => {
@@ -300,10 +178,6 @@ pub unsafe extern "C" fn sgl_postprocess_stream_chunks_batch(
 
     let handle_ref = &mut *converter_handle;
     let tokenizer = Arc::clone(&handle_ref.tokenizer);
-    let model = handle_ref.model.clone();
-    let request_id = handle_ref.request_id.clone();
-    let created = handle_ref.created;
-    let system_fingerprint = handle_ref.system_fingerprint.clone();
 
     // Process chunks in batch
     let mut results = Vec::new();
@@ -311,116 +185,14 @@ pub unsafe extern "C" fn sgl_postprocess_stream_chunks_batch(
     let mut error_msg = String::new();
 
     for chunk_json in chunks_to_process {
-        // Parse proto.GenerateResponse from JSON
-        let mut proto_response = proto::GenerateResponse {
-            request_id: chunk_json
-                .get("request_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            response: None,
-        };
-
-        // Parse the response oneof field (same logic as single chunk processing)
-        let _is_done = if let Some(chunk_json) = chunk_json.get("chunk") {
-            let chunk = proto::GenerateStreamChunk {
-                token_ids: chunk_json
-                    .get("token_ids")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_u64().map(|n| n as u32))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                prompt_tokens: chunk_json
-                    .get("prompt_tokens")
-                    .and_then(|v| v.as_i64())
-                    .map(|n| n as i32)
-                    .unwrap_or(0),
-                completion_tokens: chunk_json
-                    .get("completion_tokens")
-                    .and_then(|v| v.as_i64())
-                    .map(|n| n as i32)
-                    .unwrap_or(0),
-                cached_tokens: chunk_json
-                    .get("cached_tokens")
-                    .and_then(|v| v.as_i64())
-                    .map(|n| n as i32)
-                    .unwrap_or(0),
-                output_logprobs: None,
-                hidden_states: vec![],
-                input_logprobs: None,
-                index: 0,
-            };
-            proto_response.response = Some(proto::generate_response::Response::Chunk(chunk));
-            false
-        } else if let Some(complete_json) = chunk_json.get("complete") {
-            let complete = proto::GenerateComplete {
-                output_ids: complete_json
-                    .get("output_ids")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_u64().map(|n| n as u32))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                finish_reason: complete_json
-                    .get("finish_reason")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                prompt_tokens: complete_json
-                    .get("prompt_tokens")
-                    .and_then(|v| v.as_i64())
-                    .map(|n| n as i32)
-                    .unwrap_or(0),
-                completion_tokens: complete_json
-                    .get("completion_tokens")
-                    .and_then(|v| v.as_i64())
-                    .map(|n| n as i32)
-                    .unwrap_or(0),
-                cached_tokens: complete_json
-                    .get("cached_tokens")
-                    .and_then(|v| v.as_i64())
-                    .map(|n| n as i32)
-                    .unwrap_or(0),
-                output_logprobs: None,
-                all_hidden_states: vec![],
-                input_logprobs: None,
-                matched_stop: None,
-                index: 0,
-            };
-            proto_response.response = Some(proto::generate_response::Response::Complete(complete));
-            true
-        } else if let Some(error_json) = chunk_json.get("error") {
-            let error = proto::GenerateError {
-                message: error_json
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                http_status_code: error_json
-                    .get("http_status_code")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("500")
-                    .to_string(),
-                details: error_json
-                    .get("details")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            };
-            proto_response.response = Some(proto::generate_response::Response::Error(error));
-            true
-        } else {
-            error_msg = format!(
-                "Chunk JSON must contain 'chunk', 'complete', or 'error' field: {}",
-                chunk_json
-            );
-            has_error = true;
-            break;
+        // Parse proto.GenerateResponse using shared function
+        let proto_response = match parse_proto_response(chunk_json) {
+            Ok(r) => r,
+            Err(e) => {
+                error_msg = format!("{}: {}", e, chunk_json);
+                has_error = true;
+                break;
+            }
         };
 
         // Convert proto chunk to OpenAI format
@@ -429,10 +201,6 @@ pub unsafe extern "C" fn sgl_postprocess_stream_chunks_batch(
                 proto_response,
                 handle_ref,
                 &tokenizer,
-                &model,
-                &request_id,
-                created,
-                system_fingerprint.as_deref(),
             )
             .await
         });

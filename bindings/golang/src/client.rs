@@ -7,38 +7,27 @@ use std::{
     sync::Arc,
 };
 
-use once_cell::sync::Lazy;
 use smg::{
     grpc_client::sglang_scheduler::SglangSchedulerClient,
     protocols::chat::ChatCompletionRequest,
     routers::grpc::utils::{generate_tool_constraints, process_chat_messages},
     tokenizer::{create_tokenizer_from_file, traits::Tokenizer},
 };
-use tokio::runtime::Runtime;
 use uuid::Uuid;
 
 use super::{
     error::{set_error_message, SglErrorCode},
     grpc_converter::sgl_grpc_response_converter_create,
+    runtime::RUNTIME,
     stream::SglangStreamHandle,
     tokenizer::TokenizerHandle,
 };
-
-/// Global tokio runtime for async operations
-static RUNTIME: Lazy<Runtime> =
-    Lazy::new(|| Runtime::new().expect("Failed to create tokio runtime for client FFI"));
 
 /// Handle for complete client SDK (gRPC client + tokenizer)
 /// This handle manages the connection to sglang and provides a complete SDK interface
 pub struct SglangClientHandle {
     pub(crate) client: Arc<SglangSchedulerClient>,
     pub(crate) tokenizer: Arc<dyn Tokenizer>,
-}
-
-/// Handle for streaming request (includes prompt token count)
-#[allow(dead_code)]
-pub struct StreamRequestState {
-    pub(crate) prompt_tokens: i32, // Number of prompt tokens for this request
 }
 
 /// Create a new SGLang client handle
@@ -184,7 +173,7 @@ pub unsafe extern "C" fn sgl_client_chat_completion_stream(
             return SglErrorCode::TokenizationError;
         }
     };
-    let prompt_tokens = token_ids.len() as i32; // Save prompt token count
+    let prompt_tokens = token_ids.len() as u32; // Save prompt token count
 
     // Generate tool constraints if needed
     let tool_constraint = if let Some(tools) = chat_request.tools.as_ref() {
@@ -235,36 +224,58 @@ pub unsafe extern "C" fn sgl_client_chat_completion_stream(
     };
 
     // Create response converter
+    // Use and_then with CString::new to safely handle potential null bytes in JSON strings
     let tools_json = chat_request
         .tools
         .as_ref()
         .and_then(|t| serde_json::to_string(t).ok())
-        .map(|s| CString::new(s).unwrap().into_raw());
+        .and_then(|s| CString::new(s).ok())
+        .map(|s| s.into_raw());
     let tool_choice_json = chat_request
         .tool_choice
         .as_ref()
         .and_then(|tc| serde_json::to_string(tc).ok())
-        .map(|s| CString::new(s).unwrap().into_raw());
+        .and_then(|s| CString::new(s).ok())
+        .map(|s| s.into_raw());
     let stop_json = chat_request
         .stop
         .as_ref()
         .and_then(|s| serde_json::to_string(s).ok())
-        .map(|s| CString::new(s).unwrap().into_raw());
+        .and_then(|s| CString::new(s).ok())
+        .map(|s| s.into_raw());
     let stop_token_ids_json = chat_request
         .stop_token_ids
         .as_ref()
         .and_then(|ids| serde_json::to_string(ids).ok())
-        .map(|s| CString::new(s).unwrap().into_raw());
+        .and_then(|s| CString::new(s).ok())
+        .map(|s| s.into_raw());
 
     // Create tokenizer handle for converter (we'll create a temporary one)
     let tokenizer_handle = Box::into_raw(Box::new(TokenizerHandle {
         tokenizer: Arc::clone(&tokenizer),
     }));
 
+    let model_cstr = match CString::new(chat_request.model.clone()) {
+        Ok(s) => s,
+        Err(_) => {
+            set_error_message(error_out, "Invalid model name: contains null byte");
+            let _ = Box::from_raw(tokenizer_handle);
+            return SglErrorCode::InvalidArgument;
+        }
+    };
+    let request_id_cstr = match CString::new(request_id.clone()) {
+        Ok(s) => s,
+        Err(_) => {
+            set_error_message(error_out, "Invalid request ID: contains null byte");
+            let _ = Box::from_raw(tokenizer_handle);
+            return SglErrorCode::InvalidArgument;
+        }
+    };
+
     let converter = sgl_grpc_response_converter_create(
         tokenizer_handle,
-        CString::new(chat_request.model.clone()).unwrap().as_ptr(),
-        CString::new(request_id.clone()).unwrap().as_ptr(),
+        model_cstr.as_ptr(),
+        request_id_cstr.as_ptr(),
         tools_json.unwrap_or(ptr::null_mut()),
         tool_choice_json.unwrap_or(ptr::null_mut()),
         stop_json.unwrap_or(ptr::null_mut()),
@@ -308,6 +319,7 @@ pub unsafe extern "C" fn sgl_client_chat_completion_stream(
         converter: Arc::new(tokio::sync::Mutex::new(converter_handle)),
         client: Arc::clone(&client),
         prompt_tokens,
+        worker: None, // Single-client doesn't need load tracking
     }));
 
     SglErrorCode::Success

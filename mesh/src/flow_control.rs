@@ -15,9 +15,11 @@ use parking_lot::RwLock;
 /// Maximum message size in bytes (default: 10MB)
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
+#[allow(dead_code)]
 /// Channel capacity threshold for backpressure (default: 20% remaining)
 pub const BACKPRESSURE_THRESHOLD: usize = 25; // 25 out of 128 = ~20%
 
+#[allow(dead_code)]
 /// Backpressure controller for managing channel capacity
 #[derive(Debug, Clone)]
 pub struct BackpressureController {
@@ -33,12 +35,14 @@ impl BackpressureController {
         }
     }
 
+    #[allow(dead_code)]
     /// Check if channel has capacity for sending
     pub fn can_send(&self, current_len: usize) -> bool {
         let remaining = self.channel_capacity.saturating_sub(current_len);
         remaining > self.threshold
     }
 
+    #[allow(dead_code)]
     /// Get remaining capacity
     pub fn remaining_capacity(&self, current_len: usize) -> usize {
         self.channel_capacity.saturating_sub(current_len)

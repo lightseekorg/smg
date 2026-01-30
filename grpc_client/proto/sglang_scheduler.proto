@@ -50,7 +50,7 @@ message SamplingParams {
   float presence_penalty = 6;
   float repetition_penalty = 7;
 
-  optional int32 max_new_tokens = 8;
+  optional uint32 max_new_tokens = 8;
   repeated string stop = 9;
   repeated uint32 stop_token_ids = 10;
   bool skip_special_tokens = 11;
@@ -65,10 +65,10 @@ message SamplingParams {
   }
 
   // Speculative decoding
-  int32 n = 17;  // Number of samples
+  uint32 n = 17;  // Number of samples
 
   // Additional parameters
-  int32 min_new_tokens = 18;
+  uint32 min_new_tokens = 18;
   bool ignore_eos = 19;
   bool no_stop_trim = 20;
   optional int32 stream_interval = 21;
@@ -175,9 +175,9 @@ message GenerateStreamChunk {
   repeated uint32 token_ids = 1;
 
   // Cumulative counts
-  int32 prompt_tokens = 2;
-  int32 completion_tokens = 3;
-  int32 cached_tokens = 4;
+  uint32 prompt_tokens = 2;
+  uint32 completion_tokens = 3;
+  uint32 cached_tokens = 4;
 
   // Output logprobs (if requested) - incremental for streaming
   OutputLogProbs output_logprobs = 5;
@@ -200,9 +200,9 @@ message GenerateComplete {
   string finish_reason = 2;
 
   // Token usage counts
-  int32 prompt_tokens = 3;
-  int32 completion_tokens = 4;
-  int32 cached_tokens = 5;
+  uint32 prompt_tokens = 3;
+  uint32 completion_tokens = 4;
+  uint32 cached_tokens = 5;
 
   // Output logprobs if requested (cumulative)
   OutputLogProbs output_logprobs = 6;
@@ -304,11 +304,11 @@ message EmbedResponse {
 
 message EmbedComplete {
   repeated float embedding = 1;
-  int32 prompt_tokens = 2;
-  int32 cached_tokens = 3;
+  uint32 prompt_tokens = 2;
+  uint32 cached_tokens = 3;
 
   // Additional metadata
-  int32 embedding_dim = 4;
+  uint32 embedding_dim = 4;
 
   // For batch embeddings
   repeated Embedding batch_embeddings = 5;

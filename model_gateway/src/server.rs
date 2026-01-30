@@ -17,8 +17,7 @@ use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use smg_mesh::{
-    partition::PartitionDetector, rate_limit_window::RateLimitWindow, service::MeshServerBuilder,
-    MeshServerConfig, MeshServerHandler, MeshSyncManager, StateStores,
+    MeshServerBuilder, MeshServerConfig, MeshServerHandler, PartitionDetector, RateLimitWindow,
 };
 use tokio::{signal, spawn};
 use tracing::{debug, error, info, warn, Level};
@@ -45,6 +44,7 @@ use crate::{
         completion::CompletionRequest,
         embedding::EmbeddingRequest,
         generate::GenerateRequest,
+        messages::CreateMessageRequest,
         parser::{ParseFunctionCallRequest, SeparateReasoningRequest},
         rerank::{RerankRequest, V1RerankReqInput},
         responses::{ResponsesGetParams, ResponsesRequest},
@@ -75,7 +75,6 @@ pub struct AppState {
     pub concurrency_queue_tx: Option<tokio::sync::mpsc::Sender<QueuedRequest>>,
     pub router_manager: Option<Arc<RouterManager>>,
     pub mesh_handler: Option<Arc<MeshServerHandler>>,
-    pub mesh_sync_manager: Option<Arc<MeshSyncManager>>,
 }
 
 async fn parse_function_call(
@@ -119,6 +118,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
             }
             RoutingMode::Regular { .. } => !healthy_workers.is_empty(),
             RoutingMode::OpenAI { .. } => !healthy_workers.is_empty(),
+            RoutingMode::Anthropic { .. } => !healthy_workers.is_empty(),
         }
     };
 
@@ -246,6 +246,17 @@ async fn v1_embeddings(
     state
         .router
         .route_embeddings(Some(&headers), &body, Some(&body.model))
+        .await
+}
+
+async fn v1_messages(
+    State(state): State<Arc<AppState>>,
+    headers: http::HeaderMap,
+    Json(body): Json<CreateMessageRequest>,
+) -> Response {
+    state
+        .router
+        .route_messages(Some(&headers), &body, Some(body.model.as_str()))
         .await
 }
 
@@ -560,6 +571,7 @@ pub fn build_app(
         .route("/v1/rerank", post(v1_rerank))
         .route("/v1/responses", post(v1_responses))
         .route("/v1/embeddings", post(v1_embeddings))
+        .route("/v1/messages", post(v1_messages))
         .route("/v1/classify", post(v1_classify))
         .route("/v1/responses/{response_id}", get(v1_responses_get))
         .route(
@@ -739,58 +751,41 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         metrics::start_prometheus(prometheus_config.clone());
     }
 
-    let (mesh_handler, mesh_sync_manager) =
-        if let Some(mesh_server_config) = &config.mesh_server_config {
-            // Create HA sync manager with stores first
-            let stores = Arc::new(StateStores::with_self_name(
-                mesh_server_config.self_name.clone(),
-            ));
-            let sync_manager = Arc::new(MeshSyncManager::new(
-                stores.clone(),
-                mesh_server_config.self_name.clone(),
-            ));
+    let mesh_handler = if let Some(mesh_server_config) = &config.mesh_server_config {
+        // Create partition detector
+        let partition_detector = Arc::new(PartitionDetector::default());
 
-            // Create partition detector
-            let partition_detector = Arc::new(PartitionDetector::default());
+        // Create mesh server builder and build with stores
+        let builder = MeshServerBuilder::new(
+            mesh_server_config.self_name.clone(),
+            mesh_server_config.self_addr,
+            mesh_server_config.init_peer,
+        );
+        let (mesh_server, handler) = builder.build();
 
-            // Initialize rate-limit hash ring with current membership
-            sync_manager.update_rate_limit_membership();
+        // Initialize rate-limit hash ring with current membership
+        handler.sync_manager.update_rate_limit_membership();
 
-            // Start rate limit window reset task
-            let window_manager = RateLimitWindow::new(sync_manager.clone(), 1); // Reset every 1 second
-            spawn(async move {
-                window_manager.start_reset_task().await;
-            });
+        // Start rate limit window reset task
+        let window_manager = RateLimitWindow::new(handler.sync_manager.clone(), 1); // Reset every 1 second
+        spawn(async move {
+            window_manager.start_reset_task().await;
+        });
 
-            // Create mesh server builder and build with stores
-            let builder = MeshServerBuilder::new(
-                mesh_server_config.self_name.clone(),
-                mesh_server_config.self_addr,
-                mesh_server_config.init_peer,
-            );
-            let (mesh_server, handler) = builder.build_with_stores(Some(stores.clone()));
+        let partition_detector_for_server = partition_detector.clone();
+        spawn(async move {
+            if let Err(e) = mesh_server
+                .start_serve_with_stores(Some(partition_detector_for_server))
+                .await
+            {
+                tracing::error!("Mesh server failed: {}", e);
+            }
+        });
 
-            // Spawn the mesh server with stores and partition detector
-            let stores_for_server = stores.clone();
-            let sync_manager_for_server = sync_manager.clone();
-            let partition_detector_for_server = partition_detector.clone();
-            spawn(async move {
-                if let Err(e) = mesh_server
-                    .start_serve_with_stores(
-                        Some(stores_for_server),
-                        Some(sync_manager_for_server),
-                        Some(partition_detector_for_server),
-                    )
-                    .await
-                {
-                    tracing::error!("Mesh server failed: {}", e);
-                }
-            });
-
-            (Some(Arc::new(handler)), Some(sync_manager))
-        } else {
-            (None, None)
-        };
+        Some(Arc::new(handler))
+    } else {
+        None
+    };
 
     info!(
         "Starting router on {}:{} | mode: {:?} | policy: {:?} | max_payload: {}MB",
@@ -959,15 +954,15 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     // This allows these components to sync state across mesh nodes when mesh is enabled,
     // but they work independently without mesh when mesh is disabled.
     // Using thread-safe set_mesh_sync method that works with Arc-wrapped registries
-    if let Some(ref sync_manager) = mesh_sync_manager {
+    if let Some(ref handle) = mesh_handler {
         app_context
             .worker_registry
-            .set_mesh_sync(Some(sync_manager.clone()));
+            .set_mesh_sync(Some(handle.sync_manager.clone()));
         info!("Mesh sync manager set on worker registry");
 
         app_context
             .policy_registry
-            .set_mesh_sync(Some(sync_manager.clone()));
+            .set_mesh_sync(Some(handle.sync_manager.clone()));
         info!("Mesh sync manager set on policy registry");
     }
 
@@ -984,7 +979,6 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         concurrency_queue_tx: limiter.queue_tx.clone(),
         router_manager: Some(router_manager),
         mesh_handler,
-        mesh_sync_manager,
     });
     if let Some(service_discovery_config) = config.service_discovery_config {
         if service_discovery_config.enabled {
@@ -1062,7 +1056,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         handle_clone.graceful_shutdown(Some(grace_period));
     });
 
-    if let (Some(cert), Some(key)) = (
+    let server_result = if let (Some(cert), Some(key)) = (
         &config.router_config.server_cert,
         &config.router_config.server_key,
     ) {
@@ -1079,19 +1073,26 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
             .handle(handle)
             .serve(app.into_make_service())
             .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     } else {
         axum_server::bind(addr)
             .handle(handle)
             .serve(app.into_make_service())
             .await
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    };
+
+    // Graceful Shutdown
+
+    info!("HTTP server stopped. Starting component cleanup...");
+
+    // This triggers background task cancellation, waits for tools, and denies approvals
+    if let Some(orchestrator) = app_context.mcp_orchestrator.get() {
+        orchestrator.shutdown().await;
     }
 
-    // HA handler shutdown is handled by the signal in mesh_run! macro
-    // No need to manually shutdown here
+    info!("Cleanup complete. Process exiting.");
 
-    Ok(())
+    // Return original server error if any, otherwise Ok
+    server_result.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
 }
 
 async fn shutdown_signal() {

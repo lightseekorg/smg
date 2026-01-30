@@ -8,25 +8,14 @@ use std::{
     sync::Arc,
 };
 
-use once_cell::sync::Lazy;
 use serde_json::{json, Value};
-use smg::{
-    protocols::common::Tool,
-    tool_parser::{ParserFactory, ToolParser},
-};
-use tokio::runtime::Runtime;
+use smg::{protocols::common::Tool, tool_parser::ToolParser};
 
 use super::{
     error::{clear_error_message, set_error_message, SglErrorCode},
+    runtime::{PARSER_FACTORY, RUNTIME},
     utils::generate_tool_call_id,
 };
-
-/// Global parser factory (initialized once)
-static PARSER_FACTORY: Lazy<ParserFactory> = Lazy::new(ParserFactory::new);
-
-/// Global tokio runtime for async operations
-static RUNTIME: Lazy<Runtime> =
-    Lazy::new(|| Runtime::new().expect("Failed to create tokio runtime for tool parser FFI"));
 
 /// Opaque handle for a tool parser instance
 /// Note: For streaming, we need mutable access, so we use Arc<Mutex<>> internally

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use super::{
+    anthropic::AnthropicRouter,
     grpc::{pd_router::GrpcPDRouter, router::GrpcRouter},
     http::{pd_router::PDRouter, router::Router},
     openai::OpenAIRouter,
@@ -40,6 +41,9 @@ impl RouterFactory {
                 RoutingMode::OpenAI { .. } => {
                     Err("OpenAI mode requires HTTP connection_mode".to_string())
                 }
+                RoutingMode::Anthropic { .. } => {
+                    Err("Anthropic mode requires HTTP connection_mode".to_string())
+                }
             },
             ConnectionMode::Http => match &ctx.router_config.mode {
                 RoutingMode::Regular { .. } => Self::create_regular_router(ctx).await,
@@ -57,6 +61,7 @@ impl RouterFactory {
                     .await
                 }
                 RoutingMode::OpenAI { .. } => Self::create_openai_router(ctx).await,
+                RoutingMode::Anthropic { .. } => Self::create_anthropic_router(ctx).await,
             },
         }
     }
@@ -125,6 +130,17 @@ impl RouterFactory {
         ctx: &Arc<AppContext>,
     ) -> Result<Box<dyn RouterTrait>, String> {
         let router = OpenAIRouter::new(ctx).await?;
+        Ok(Box::new(router))
+    }
+
+    /// Create an Anthropic router
+    ///
+    /// Handles Anthropic Messages API (/v1/messages) with support for streaming,
+    /// tool use, extended thinking, and other Anthropic-specific features.
+    pub async fn create_anthropic_router(
+        ctx: &Arc<AppContext>,
+    ) -> Result<Box<dyn RouterTrait>, String> {
+        let router = AnthropicRouter::new(ctx.clone());
         Ok(Box::new(router))
     }
 }

@@ -5,10 +5,12 @@ from .constants import (  # Enums; Convenience sets; Fixture parameters; Default
     DEFAULT_HOST,
     DEFAULT_MODEL,
     DEFAULT_ROUTER_TIMEOUT,
+    DEFAULT_RUNTIME,
     DEFAULT_STARTUP_TIMEOUT,
     ENV_BACKENDS,
     ENV_MODEL,
     ENV_MODELS,
+    ENV_RUNTIME,
     ENV_SHOW_ROUTER_LOGS,
     ENV_SHOW_WORKER_LOGS,
     ENV_SKIP_BACKEND_SETUP,
@@ -25,6 +27,9 @@ from .constants import (  # Enums; Convenience sets; Fixture parameters; Default
     ConnectionMode,
     Runtime,
     WorkerType,
+    get_runtime,
+    is_sglang,
+    is_vllm,
 )
 from .gateway import Gateway, WorkerInfo, launch_cloud_gateway
 from .gpu_allocator import (
@@ -82,6 +87,7 @@ __all__ = [
     # Defaults
     "DEFAULT_MODEL",
     "DEFAULT_HOST",
+    "DEFAULT_RUNTIME",
     "DEFAULT_STARTUP_TIMEOUT",
     "DEFAULT_ROUTER_TIMEOUT",
     "HEALTH_CHECK_INTERVAL",
@@ -91,11 +97,16 @@ __all__ = [
     "ENV_MODELS",
     "ENV_BACKENDS",
     "ENV_MODEL",
+    "ENV_RUNTIME",
     "ENV_STARTUP_TIMEOUT",
     "ENV_SKIP_MODEL_POOL",
     "ENV_SKIP_BACKEND_SETUP",
     "ENV_SHOW_ROUTER_LOGS",
     "ENV_SHOW_WORKER_LOGS",
+    # Runtime helpers
+    "get_runtime",
+    "is_vllm",
+    "is_sglang",
     # GPU allocation
     "GPUAllocator",
     "GPUInfo",

@@ -17,8 +17,8 @@ use crate::{protocols::common::Usage, routers::grpc::proto_wrapper::ProtoGenerat
 /// # Returns
 /// Usage object with aggregated token counts
 pub(crate) fn build_usage(responses: &[ProtoGenerateComplete]) -> Usage {
-    let total_prompt_tokens: u32 = responses.iter().map(|r| r.prompt_tokens() as u32).sum();
-    let total_completion_tokens: u32 = responses.iter().map(|r| r.completion_tokens() as u32).sum();
+    let total_prompt_tokens: u32 = responses.iter().map(|r| r.prompt_tokens()).sum();
+    let total_completion_tokens: u32 = responses.iter().map(|r| r.completion_tokens()).sum();
 
     Usage {
         prompt_tokens: total_prompt_tokens,

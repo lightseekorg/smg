@@ -12,9 +12,9 @@ use parking_lot::RwLock;
 use tracing::{debug, trace};
 
 use super::{
-    gossip::StateUpdate,
+    crdt::SKey,
+    service::gossip::StateUpdate,
     stores::{MembershipState, PolicyState, StateStores, StoreType, WorkerState},
-    SKey,
 };
 
 /// Tracks the last sent version for each key in each store

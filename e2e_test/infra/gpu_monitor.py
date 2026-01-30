@@ -34,8 +34,16 @@ def _percentile(samples: list[float], p: float) -> float:
     return float(sorted_samples[idx])
 
 
-def _compute_stats(samples: list[float]) -> dict[str, float]:
-    """Compute statistics for a list of samples."""
+def _compute_stats(
+    samples: list[float], trim_start: int = 0, trim_end: int = 0
+) -> dict[str, float]:
+    """Compute statistics for a list of samples.
+
+    Args:
+        samples: List of GPU utilization samples
+        trim_start: Number of samples to exclude from the beginning (startup period)
+        trim_end: Number of samples to exclude from the end (shutdown period)
+    """
     if not samples:
         return {
             "mean": 0.0,
@@ -50,18 +58,26 @@ def _compute_stats(samples: list[float]) -> dict[str, float]:
             "p95": 0.0,
             "count": 0,
         }
+
+    # Trim startup and shutdown samples
+    end_idx = len(samples) - trim_end if trim_end > 0 else len(samples)
+    trimmed = samples[trim_start:end_idx]
+
+    if not trimmed:
+        trimmed = samples  # Fallback to original if trimming removes all samples
+
     return {
-        "mean": sum(samples) / len(samples),
-        "min": min(samples),
-        "max": max(samples),
-        "p5": _percentile(samples, 5),
-        "p10": _percentile(samples, 10),
-        "p25": _percentile(samples, 25),
-        "p50": _percentile(samples, 50),
-        "p75": _percentile(samples, 75),
-        "p90": _percentile(samples, 90),
-        "p95": _percentile(samples, 95),
-        "count": len(samples),
+        "mean": sum(trimmed) / len(trimmed),
+        "min": min(trimmed),
+        "max": max(trimmed),
+        "p5": _percentile(trimmed, 5),
+        "p10": _percentile(trimmed, 10),
+        "p25": _percentile(trimmed, 25),
+        "p50": _percentile(trimmed, 50),
+        "p75": _percentile(trimmed, 75),
+        "p90": _percentile(trimmed, 90),
+        "p95": _percentile(trimmed, 95),
+        "count": len(trimmed),
     }
 
 
@@ -209,9 +225,13 @@ class GPUMonitor:
         self,
         output_dir: str | Path = ".",
         interval: float = 2.0,
+        trim_start: int = 3,
+        trim_end: int = 2,
     ):
         self.output_dir = Path(output_dir)
         self.interval = interval
+        self.trim_start = trim_start
+        self.trim_end = trim_end
         self._process: Process | None = None
         self._output_path: str | None = None
         self._result: dict[str, Any] | None = None
@@ -255,12 +275,40 @@ class GPUMonitor:
         return self._result
 
     def _read_result(self) -> dict[str, Any] | None:
-        """Read results from output file."""
+        """Read results from output file and apply trimming.
+
+        Trims startup/shutdown samples and recomputes stats to exclude
+        periods where GPU is idle during initialization/teardown.
+        """
         if not self._output_path or not os.path.exists(self._output_path):
             return None
         try:
             with open(self._output_path) as f:
-                return json.load(f)
+                result = json.load(f)
+
+            # Apply trimming to raw samples and recompute stats
+            raw_samples = result.get("raw", {}).get("overall", [])
+            if raw_samples and len(raw_samples) > (self.trim_start + self.trim_end + 2):
+                # Recompute overall stats with trimming
+                result["overall"] = _compute_stats(raw_samples, self.trim_start, self.trim_end)
+
+                # Also trim per-GPU stats
+                raw_per_gpu = result.get("raw", {}).get("per_gpu", {})
+                if raw_per_gpu:
+                    result["per_gpu"] = {
+                        k: _compute_stats(v, self.trim_start, self.trim_end)
+                        for k, v in raw_per_gpu.items()
+                    }
+
+                logger.debug(
+                    "GPU stats after trimming %d start, %d end samples: mean=%.2f%% p50=%.2f%%",
+                    self.trim_start,
+                    self.trim_end,
+                    result["overall"].get("mean", 0.0),
+                    result["overall"].get("p50", 0.0),
+                )
+
+            return result
         except Exception as e:
             logger.warning("Failed to read GPU monitor result: %s", e)
             return None

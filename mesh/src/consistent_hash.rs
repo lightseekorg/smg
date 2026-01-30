@@ -90,11 +90,13 @@ impl ConsistentHashRing {
         self.get_owners(key).contains(&node_name.to_string())
     }
 
+    #[allow(dead_code)]
     /// Get all nodes in the ring
     pub fn get_nodes(&self) -> Vec<String> {
         self.node_hashes.keys().cloned().collect()
     }
 
+    #[allow(dead_code)]
     /// Check if a node exists in the ring
     pub fn has_node(&self, node_name: &str) -> bool {
         self.node_hashes.contains_key(node_name)

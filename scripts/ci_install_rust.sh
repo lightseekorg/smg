@@ -18,6 +18,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --defaul
 . "$HOME/.cargo/env"
 source $HOME/.cargo/env
 
+# Add cargo bin to GITHUB_PATH so subsequent steps can find rustc/cargo
+echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
 # Verify installation
 rustc --version
 cargo --version

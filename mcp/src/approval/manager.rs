@@ -12,6 +12,7 @@ use std::{
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+use tracing::info;
 
 use super::{
     audit::{AuditLog, DecisionResult, DecisionSource},
@@ -298,6 +299,25 @@ impl ApprovalManager {
 
     pub fn audit_log(&self) -> &Arc<AuditLog> {
         &self.audit_log
+    }
+    /// Cancels all pending approvals, sending a denial to all waiting handlers.
+    pub fn cancel_all_pending(&self) {
+        info!(
+            "Cancelling {} pending approvals due to shutdown",
+            self.pending.len()
+        );
+        let keys: Vec<_> = self
+            .pending
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        for key in keys {
+            if let Some((_, pending)) = self.pending.remove(&key) {
+                let _ = pending
+                    .response_tx
+                    .send(ApprovalDecision::denied("System shutdown"));
+            }
+        }
     }
 }
 

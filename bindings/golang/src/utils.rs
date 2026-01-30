@@ -21,37 +21,3 @@ pub fn generate_tool_call_id(
         format!("call_{}", &Uuid::new_v4().simple().to_string()[..24])
     }
 }
-
-/// Generate tool constraints (placeholder implementation)
-///
-/// # Arguments
-/// * `tools_json` - JSON array of tools
-/// * `tool_choice_json` - JSON object representing tool_choice
-/// * `constraint_type_out` - Pointer to receive constraint type (e.g., "json_schema")
-/// * `constraint_schema_out` - Pointer to receive constraint schema JSON
-/// * `error_out` - Optional pointer to receive error message
-///
-/// # Returns
-/// * SglErrorCode::Success on success, error code on failure
-///
-/// # Safety
-/// - `tools_json` and `tool_choice_json` must be valid null-terminated C strings or null
-/// - `constraint_type_out` and `constraint_schema_out` must be valid pointers to writable memory
-/// - `error_out` may be null; if non-null, must point to writable memory
-/// - Caller is responsible for freeing any allocated strings using `sgl_free_string`
-#[no_mangle]
-pub unsafe extern "C" fn sgl_generate_tool_constraints(
-    _tools_json: *const std::os::raw::c_char,
-    _tool_choice_json: *const std::os::raw::c_char,
-    _constraint_type_out: *mut *mut std::os::raw::c_char,
-    _constraint_schema_out: *mut *mut std::os::raw::c_char,
-    error_out: *mut *mut std::os::raw::c_char,
-) -> super::error::SglErrorCode {
-    // Implementation would parse JSON and call generate_tool_constraints
-    // This is a placeholder
-    super::error::set_error_message(
-        error_out,
-        "Tool constraint generation not yet implemented in FFI",
-    );
-    super::error::SglErrorCode::UnknownError
-}

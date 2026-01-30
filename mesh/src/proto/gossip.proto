@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package sglang.mesh.gossip;
+package mesh.gossip;
 
 service Gossip {
   rpc PingServer(GossipMessage) returns (NodeUpdate);

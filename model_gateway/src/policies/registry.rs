@@ -388,11 +388,7 @@ impl PolicyRegistry {
 
     /// Apply remote tree operation to cache-aware policy for a model
     /// This is called when receiving tree state updates from mesh
-    pub fn apply_remote_tree_operation(
-        &self,
-        model_id: &str,
-        operation: &smg_mesh::tree_ops::TreeOperation,
-    ) {
+    pub fn apply_remote_tree_operation(&self, model_id: &str, operation: &smg_mesh::TreeOperation) {
         // Try to find the policy for this model
         if let Some(policy) = self.get_policy(model_id) {
             if policy.name() == "cache_aware" {

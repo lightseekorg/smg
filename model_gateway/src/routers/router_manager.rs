@@ -28,6 +28,7 @@ use crate::{
         completion::CompletionRequest,
         embedding::EmbeddingRequest,
         generate::GenerateRequest,
+        messages::CreateMessageRequest,
         rerank::RerankRequest,
         responses::{ResponsesGetParams, ResponsesRequest},
     },
@@ -55,6 +56,7 @@ pub mod router_ids {
     pub const HTTP_REGULAR: RouterId = RouterId::new("http-regular");
     pub const HTTP_PD: RouterId = RouterId::new("http-pd");
     pub const HTTP_OPENAI: RouterId = RouterId::new("http-openai");
+    pub const HTTP_ANTHROPIC: RouterId = RouterId::new("http-anthropic");
     pub const GRPC_REGULAR: RouterId = RouterId::new("grpc-regular");
     pub const GRPC_PD: RouterId = RouterId::new("grpc-pd");
 }
@@ -194,9 +196,13 @@ impl RouterManager {
             (ConnectionMode::Http, RoutingMode::Regular { .. }) => router_ids::HTTP_REGULAR,
             (ConnectionMode::Http, RoutingMode::PrefillDecode { .. }) => router_ids::HTTP_PD,
             (ConnectionMode::Http, RoutingMode::OpenAI { .. }) => router_ids::HTTP_OPENAI,
+            (ConnectionMode::Http, RoutingMode::Anthropic { .. }) => router_ids::HTTP_ANTHROPIC,
             (ConnectionMode::Grpc { .. }, RoutingMode::Regular { .. }) => router_ids::GRPC_REGULAR,
             (ConnectionMode::Grpc { .. }, RoutingMode::PrefillDecode { .. }) => router_ids::GRPC_PD,
             (ConnectionMode::Grpc { .. }, RoutingMode::OpenAI { .. }) => router_ids::GRPC_REGULAR,
+            (ConnectionMode::Grpc { .. }, RoutingMode::Anthropic { .. }) => {
+                router_ids::GRPC_REGULAR
+            }
         }
     }
 
@@ -437,7 +443,28 @@ impl RouterTrait for RouterManager {
             .into_response()
     }
 
-    async fn get_models(&self, _req: Request<Body>) -> Response {
+    async fn get_models(&self, req: Request<Body>) -> Response {
+        // Try delegating to router first (for routers with custom implementations)
+        let router_id = {
+            let default_router = self
+                .default_router
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            default_router.clone()
+        };
+
+        if let Some(router_id) = router_id {
+            if let Some(router) = self.routers.get(&router_id) {
+                let response = router.get_models(req).await;
+                // If router implements get_models, use its response
+                // Otherwise fall back to worker registry
+                if response.status() != StatusCode::NOT_IMPLEMENTED {
+                    return response;
+                }
+            }
+        }
+
+        // Fallback: return OpenAI-compatible format from worker registry
         let model_names = self.worker_registry.get_models();
 
         if model_names.is_empty() {
@@ -584,6 +611,41 @@ impl RouterTrait for RouterManager {
         if let Some(router) = router {
             router
                 .route_completion(headers, body, effective_model_id.as_deref().or(model_id))
+                .await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Model '{}' not found or no router available", body.model),
+            )
+                .into_response()
+        }
+    }
+
+    async fn route_messages(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: &CreateMessageRequest,
+        model_id: Option<&str>,
+    ) -> Response {
+        // In IGW mode, resolve model_id and fail fast if not resolvable
+        // In non-IGW mode, pass through to router (router handles validation)
+        let effective_model_id = if self.enable_igw {
+            // Use provided model_id or fall back to body.model
+            let model = model_id.or(Some(&body.model));
+            match self.resolve_model_id(model) {
+                Ok(id) => Some(id),
+                Err(err_response) => return *err_response,
+            }
+        } else {
+            None
+        };
+
+        let router =
+            self.select_router_for_request(headers, effective_model_id.as_deref().or(model_id));
+
+        if let Some(router) = router {
+            router
+                .route_messages(headers, body, effective_model_id.as_deref().or(model_id))
                 .await
         } else {
             (

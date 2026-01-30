@@ -8,7 +8,7 @@ use tracing::debug;
 
 use super::{
     crdt::SKey,
-    gossip::NodeStatus,
+    service::gossip::NodeStatus,
     stores::{
         tree_state_key, PolicyState, RateLimitConfig, StateStores, WorkerState,
         GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,

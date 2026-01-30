@@ -36,19 +36,27 @@ func main() {
 	defer appLogger.Sync()
 
 	appLogger.Info("Starting OpenAI-compatible server",
-		zap.String("endpoint", cfg.Endpoint),
+		zap.String("endpoints", cfg.Endpoints),
 		zap.String("tokenizer", cfg.TokenizerPath),
 		zap.String("port", cfg.Port),
+		zap.String("policy", cfg.PolicyName),
 	)
 
 	// Initialize SMG service
-	smgService, err := service.NewSMGService(cfg.Endpoint, cfg.TokenizerPath)
+	smgService, err := service.NewSMGService(cfg.Endpoints, cfg.TokenizerPath, cfg.PolicyName)
 	if err != nil {
 		appLogger.Fatal("Failed to create SMG client", zap.Error(err))
 	}
 	defer smgService.Close()
 
-	appLogger.Info("SMG client created successfully")
+	if smgService.IsMultiWorker() {
+		appLogger.Info("SMG multi-worker client created successfully",
+			zap.Int("worker_count", smgService.WorkerCount()),
+			zap.String("policy", smgService.PolicyName()),
+		)
+	} else {
+		appLogger.Info("SMG single-worker client created successfully")
+	}
 
 	// Enable pprof if requested
 	if os.Getenv("PPROF_ENABLED") == "true" {

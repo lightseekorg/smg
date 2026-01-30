@@ -184,7 +184,7 @@ impl PipelineStage for ClassifyResponseProcessingStage {
         })?;
 
         // Build usage info
-        let prompt_tokens = proto_response.prompt_tokens().max(0) as u32;
+        let prompt_tokens = proto_response.prompt_tokens();
         let usage = UsageInfo {
             prompt_tokens,
             total_tokens: prompt_tokens,

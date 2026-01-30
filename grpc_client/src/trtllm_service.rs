@@ -32,7 +32,7 @@ pub mod proto {
 pub struct AbortOnDropStream {
     inner: Streaming<proto::GenerateResponse>,
     request_id: String,
-    client: TrtllmEngineClient,
+    client: TrtllmServiceClient,
     aborted: Arc<AtomicBool>,
 }
 
@@ -41,7 +41,7 @@ impl AbortOnDropStream {
     pub fn new(
         stream: Streaming<proto::GenerateResponse>,
         request_id: String,
-        client: TrtllmEngineClient,
+        client: TrtllmServiceClient,
     ) -> Self {
         debug!("Created AbortOnDropStream for request {}", request_id);
         Self {
@@ -107,14 +107,14 @@ impl futures::Stream for AbortOnDropStream {
     }
 }
 
-/// gRPC client for TensorRT-LLM engine
+/// gRPC client for TensorRT-LLM service
 #[derive(Clone)]
-pub struct TrtllmEngineClient {
-    client: proto::trt_llm_engine_client::TrtLlmEngineClient<Channel>,
+pub struct TrtllmServiceClient {
+    client: proto::trtllm_service_client::TrtllmServiceClient<Channel>,
     trace_injector: BoxedTraceInjector,
 }
 
-impl TrtllmEngineClient {
+impl TrtllmServiceClient {
     /// Create a new client and connect to the TensorRT-LLM server
     pub async fn connect(endpoint: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Self::connect_with_trace_injector(endpoint, Arc::new(NoopTraceInjector)).await
@@ -146,7 +146,7 @@ impl TrtllmEngineClient {
             .connect()
             .await?;
 
-        let client = proto::trt_llm_engine_client::TrtLlmEngineClient::new(channel);
+        let client = proto::trtllm_service_client::TrtllmServiceClient::new(channel);
 
         Ok(Self {
             client,
@@ -270,7 +270,7 @@ impl TrtllmEngineClient {
         // Extract stop words
         let stop_words = self.extract_stop_words(body);
 
-        let max_tokens = body.max_completion_tokens.unwrap_or(2048) as i32;
+        let max_tokens = body.max_completion_tokens.unwrap_or(2048);
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -337,7 +337,7 @@ impl TrtllmEngineClient {
             .sampling_params
             .as_ref()
             .and_then(|p| p.max_new_tokens)
-            .unwrap_or(2048) as i32;
+            .unwrap_or(2048);
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -392,7 +392,7 @@ impl TrtllmEngineClient {
 
         let guided_decoding = self.build_guided_decoding_from_responses(constraint)?;
 
-        let max_tokens = body.max_output_tokens.unwrap_or(2048) as i32;
+        let max_tokens = body.max_output_tokens.unwrap_or(2048);
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -436,7 +436,7 @@ impl TrtllmEngineClient {
     ) -> Result<proto::SamplingConfig, String> {
         Ok(proto::SamplingConfig {
             beam_width: 1,
-            num_return_sequences: request.n.unwrap_or(1) as i32,
+            num_return_sequences: request.n.unwrap_or(1),
             top_k: request.top_k.map(|v| v.max(0)),
             top_p: Some(request.top_p.unwrap_or(1.0)),
             top_p_min: None,
@@ -650,11 +650,9 @@ impl TrtllmEngineClient {
         if let Some(val) = p.min_p {
             config.min_p = Some(val);
         }
-        if let Some(val) = p.min_new_tokens {
-            config.min_tokens = Some(val as i32);
-        }
+        config.min_tokens = p.min_new_tokens;
         if let Some(n) = p.n {
-            config.num_return_sequences = n as i32;
+            config.num_return_sequences = n;
         }
 
         Ok(config)
@@ -760,7 +758,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_client_connect_invalid_endpoint() {
-        let result = TrtllmEngineClient::connect("invalid://endpoint").await;
+        let result = TrtllmServiceClient::connect("invalid://endpoint").await;
         assert!(result.is_err());
     }
 

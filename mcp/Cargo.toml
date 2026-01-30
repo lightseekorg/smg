@@ -43,6 +43,8 @@ rmcp = { version = "0.8.3", features = ["client", "server",
 chrono = { workspace = true, features = ["serde"] }
 regex = "1.12"
 uuid = { workspace = true, features = ["v4"] }
+tokio-util = { workspace = true }
+scopeguard = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

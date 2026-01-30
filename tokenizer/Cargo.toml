@@ -35,7 +35,7 @@ hf-hub = { version = "0.4.3", features = ["tokio"] }
 minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins"] }
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }
 rayon = "1.10"
-tiktoken-rs = "0.7.0"
+tiktoken-rs = "0.9.1"
 tokenizers = "0.22.0"
 
 [dev-dependencies]

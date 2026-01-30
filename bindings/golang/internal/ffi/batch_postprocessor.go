@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
 // BatchPostprocessor handles batch postprocessing of stream chunks to reduce FFI overhead
 type BatchPostprocessor struct {
+	mu            sync.Mutex // Protects concurrent access to the FFI converter
 	converter     *GrpcResponseConverterHandle
 	buffer        []string
 	batchSize     int
@@ -38,6 +40,9 @@ func NewBatchPostprocessor(converter *GrpcResponseConverterHandle, batchSize int
 
 // AddChunk adds a chunk to the buffer and processes if batch is full
 func (b *BatchPostprocessor) AddChunk(chunkJSON string) (results []string, shouldFlush bool, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	if b.batchSize == 1 {
 		openaiJSON, _, err := PostprocessStreamChunk(b.converter, chunkJSON)
 		if err != nil {
@@ -51,7 +56,7 @@ func (b *BatchPostprocessor) AddChunk(chunkJSON string) (results []string, shoul
 	shouldFlushTimeout := b.flushInterval > 0 && time.Since(b.lastFlush) >= b.flushInterval
 
 	if shouldProcess || shouldFlushTimeout {
-		return b.processBatch()
+		return b.processBatchLocked()
 	}
 
 	return nil, false, nil
@@ -59,16 +64,20 @@ func (b *BatchPostprocessor) AddChunk(chunkJSON string) (results []string, shoul
 
 // Flush processes any remaining chunks in the buffer
 func (b *BatchPostprocessor) Flush() (results []string, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	if len(b.buffer) == 0 {
 		return nil, nil
 	}
 
-	res, _, err := b.processBatch()
+	res, _, err := b.processBatchLocked()
 	return res, err
 }
 
-// processBatch processes the current buffer and returns results
-func (b *BatchPostprocessor) processBatch() (results []string, shouldFlush bool, err error) {
+// processBatchLocked processes the current buffer and returns results
+// Must be called with b.mu held
+func (b *BatchPostprocessor) processBatchLocked() (results []string, shouldFlush bool, err error) {
 	if len(b.buffer) == 0 {
 		return nil, false, nil
 	}
@@ -117,6 +126,9 @@ func (b *BatchPostprocessor) processBatch() (results []string, shouldFlush bool,
 
 // Reset clears the buffer and resets the postprocessor state
 func (b *BatchPostprocessor) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	b.buffer = b.buffer[:0]
 	b.lastFlush = time.Now()
 	if b.timer != nil {

@@ -18,6 +18,7 @@ use rustls_pemfile::{certs, pkcs8_private_keys};
 use tokio::{fs, sync::RwLock};
 use tracing::{info, warn};
 
+#[allow(dead_code)]
 /// mTLS configuration
 #[derive(Debug, Clone)]
 pub struct MTLSConfig {
@@ -45,6 +46,7 @@ impl Default for MTLSConfig {
     }
 }
 
+#[allow(dead_code)]
 /// mTLS certificate manager
 pub struct MTLSManager {
     config: MTLSConfig,
@@ -53,6 +55,7 @@ pub struct MTLSManager {
 }
 
 impl MTLSManager {
+    #[allow(dead_code)]
     /// Create a new mTLS manager
     pub fn new(config: MTLSConfig) -> Self {
         Self {
@@ -62,6 +65,7 @@ impl MTLSManager {
         }
     }
 
+    #[allow(dead_code)]
     /// Load server TLS configuration
     pub async fn load_server_config(&self) -> Result<Arc<ServerConfig>> {
         let certs = self.load_certs(&self.config.server_cert_path).await?;
@@ -79,6 +83,7 @@ impl MTLSManager {
         Ok(config)
     }
 
+    #[allow(dead_code)]
     /// Load client TLS configuration
     pub async fn load_client_config(&self) -> Result<Arc<ClientConfig>> {
         let mut root_store = RootCertStore::empty();
@@ -121,6 +126,7 @@ impl MTLSManager {
         Ok(PrivateKeyDer::Pkcs8(keys.remove(0)))
     }
 
+    #[allow(dead_code)]
     /// Start certificate rotation monitoring
     pub async fn start_rotation_monitor(&self) {
         let config = self.config.clone();
@@ -142,6 +148,7 @@ impl MTLSManager {
         });
     }
 
+    #[allow(dead_code)]
     /// Check and reload certificates if they have changed
     async fn check_and_reload_certs(
         config: &MTLSConfig,
@@ -165,16 +172,19 @@ impl MTLSManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     /// Get current server config (for use with tonic)
     pub async fn get_server_config(&self) -> Option<Arc<ServerConfig>> {
         self.server_config.read().await.clone()
     }
 
+    #[allow(dead_code)]
     /// Get current client config (for use with tonic)
     pub async fn get_client_config(&self) -> Option<Arc<ClientConfig>> {
         self.client_config.read().await.clone()
     }
 }
 
+#[allow(dead_code)]
 /// Optional mTLS manager
 pub type OptionalMTLSManager = Option<Arc<MTLSManager>>;

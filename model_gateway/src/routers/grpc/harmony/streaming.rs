@@ -16,7 +16,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error};
 
 use super::{
-    processor::ResponsesIterationResult, types::HarmonyChannelDelta, HarmonyParserAdapter,
+    builder::convert_harmony_logprobs, processor::ResponsesIterationResult,
+    types::HarmonyChannelDelta, HarmonyParserAdapter,
 };
 use crate::{
     grpc_client::sglang_proto::generate_complete::MatchedStop::{MatchedStopStr, MatchedTokenId},
@@ -26,7 +27,10 @@ use crate::{
         chat::{
             ChatCompletionRequest, ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice,
         },
-        common::{CompletionTokensDetails, FunctionCallDelta, ToolCall, ToolCallDelta, Usage},
+        common::{
+            ChatLogProbs, CompletionTokensDetails, FunctionCallDelta, ToolCall, ToolCallDelta,
+            Usage,
+        },
         responses::{
             OutputTokensDetails, ResponseStatus, ResponseUsage, ResponsesResponse, ResponsesUsage,
         },
@@ -158,8 +162,7 @@ impl HarmonyStreamingProcessor {
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
-                    let chunk = chunk_wrapper.as_sglang();
-                    let index = chunk.index;
+                    let index = chunk_wrapper.index();
 
                     // Track first token time for TTFT metric
                     if first_token_time.is_none() {
@@ -178,13 +181,24 @@ impl HarmonyStreamingProcessor {
                     // Track token counts
                     *completion_tokens.entry(index).or_insert(0) += 1;
 
+                    // Convert logprobs if present and requested
+                    let chunk_logprobs = if original_request.logprobs {
+                        chunk_wrapper.output_logprobs().and_then(|lp| {
+                            convert_harmony_logprobs(&lp)
+                                .map_err(|e| error!("Failed to convert streaming logprobs: {}", e))
+                                .ok()
+                        })
+                    } else {
+                        None
+                    };
+
                     // Parse chunk via Harmony parser
                     let parser = parsers
                         .get_mut(&index)
                         .ok_or("Parser not found for index")?;
 
                     let delta_result = parser
-                        .parse_chunk(&chunk.token_ids)
+                        .parse_chunk(chunk_wrapper.token_ids())
                         .map_err(|e| format!("Parse error: {}", e))?;
 
                     // Emit SSE event if there's a delta
@@ -197,6 +211,7 @@ impl HarmonyStreamingProcessor {
                             &dispatch,
                             &original_request,
                             tx,
+                            chunk_logprobs,
                         )?;
 
                         if is_first {
@@ -205,14 +220,14 @@ impl HarmonyStreamingProcessor {
                     }
                 }
                 ProtoResponseVariant::Complete(complete_wrapper) => {
-                    let complete = complete_wrapper.as_sglang();
-                    let index = complete.index;
+                    let index = complete_wrapper.index();
 
                     // Store final metadata
-                    finish_reasons.insert(index, Some(complete.finish_reason.clone()));
+                    finish_reasons
+                        .insert(index, Some(complete_wrapper.finish_reason().to_string()));
                     matched_stops.insert(
                         index,
-                        complete.matched_stop.as_ref().map(|m| match m {
+                        complete_wrapper.matched_stop().map(|m| match m {
                             MatchedTokenId(id) => {
                                 json!(id)
                             }
@@ -221,15 +236,18 @@ impl HarmonyStreamingProcessor {
                             }
                         }),
                     );
-                    prompt_tokens.insert(index, complete.prompt_tokens as u32);
+                    prompt_tokens.insert(index, complete_wrapper.prompt_tokens());
                     *completion_tokens.entry(index).or_insert(0) =
-                        complete.completion_tokens as u32;
+                        complete_wrapper.completion_tokens();
 
                     // Finalize parser and emit final chunk
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
                         let final_output = parser
-                            .finalize(complete.finish_reason.clone(), matched_stop.clone())
+                            .finalize(
+                                complete_wrapper.finish_reason().to_string(),
+                                matched_stop.clone(),
+                            )
                             .map_err(|e| format!("Finalize error: {}", e))?;
 
                         Self::emit_final_chunk(
@@ -301,8 +319,7 @@ impl HarmonyStreamingProcessor {
             let response = result.map_err(|e| format!("Prefill stream error: {}", e))?;
 
             if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
-                let complete = complete_wrapper.as_sglang();
-                prompt_tokens.insert(complete.index, complete.prompt_tokens as u32);
+                prompt_tokens.insert(complete_wrapper.index(), complete_wrapper.prompt_tokens());
             }
         }
 
@@ -320,8 +337,7 @@ impl HarmonyStreamingProcessor {
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
-                    let chunk = chunk_wrapper.as_sglang();
-                    let index = chunk.index;
+                    let index = chunk_wrapper.index();
 
                     // Track first token time for TTFT metric
                     if first_token_time.is_none() {
@@ -339,12 +355,23 @@ impl HarmonyStreamingProcessor {
 
                     *completion_tokens.entry(index).or_insert(0) += 1;
 
+                    // Convert logprobs if present and requested
+                    let chunk_logprobs = if original_request.logprobs {
+                        chunk_wrapper.output_logprobs().and_then(|lp| {
+                            convert_harmony_logprobs(&lp)
+                                .map_err(|e| error!("Failed to convert streaming logprobs: {}", e))
+                                .ok()
+                        })
+                    } else {
+                        None
+                    };
+
                     let parser = parsers
                         .get_mut(&index)
                         .ok_or("Parser not found for index")?;
 
                     let delta_result = parser
-                        .parse_chunk(&chunk.token_ids)
+                        .parse_chunk(chunk_wrapper.token_ids())
                         .map_err(|e| format!("Parse error: {}", e))?;
 
                     if let Some(delta) = delta_result {
@@ -356,6 +383,7 @@ impl HarmonyStreamingProcessor {
                             &dispatch,
                             &original_request,
                             tx,
+                            chunk_logprobs,
                         )?;
 
                         if is_first {
@@ -364,13 +392,13 @@ impl HarmonyStreamingProcessor {
                     }
                 }
                 ProtoResponseVariant::Complete(complete_wrapper) => {
-                    let complete = complete_wrapper.as_sglang();
-                    let index = complete.index;
+                    let index = complete_wrapper.index();
 
-                    finish_reasons.insert(index, Some(complete.finish_reason.clone()));
+                    finish_reasons
+                        .insert(index, Some(complete_wrapper.finish_reason().to_string()));
                     matched_stops.insert(
                         index,
-                        complete.matched_stop.as_ref().map(|m| match m {
+                        complete_wrapper.matched_stop().map(|m| match m {
                             MatchedTokenId(id) => {
                                 json!(id)
                             }
@@ -380,12 +408,15 @@ impl HarmonyStreamingProcessor {
                         }),
                     );
                     *completion_tokens.entry(index).or_insert(0) =
-                        complete.completion_tokens as u32;
+                        complete_wrapper.completion_tokens();
 
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
                         let final_output = parser
-                            .finalize(complete.finish_reason.clone(), matched_stop.clone())
+                            .finalize(
+                                complete_wrapper.finish_reason().to_string(),
+                                matched_stop.clone(),
+                            )
                             .map_err(|e| format!("Finalize error: {}", e))?;
 
                         Self::emit_final_chunk(
@@ -449,6 +480,7 @@ impl HarmonyStreamingProcessor {
         dispatch: &context::DispatchMetadata,
         original_request: &ChatCompletionRequest,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        logprobs: Option<ChatLogProbs>,
     ) -> Result<(), String> {
         // On first chunk, emit role announcement separately
         if is_first {
@@ -494,7 +526,7 @@ impl HarmonyStreamingProcessor {
                 .add_choice(ChatStreamChoice {
                     index,
                     delta: chat_delta,
-                    logprobs: None,
+                    logprobs,
                     finish_reason: None,
                     matched_stop: None,
                 })
@@ -684,10 +716,9 @@ impl HarmonyStreamingProcessor {
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
-                    let chunk = chunk_wrapper.as_sglang();
                     // Parse chunk via Harmony parser
                     let delta_result = parser
-                        .parse_chunk(&chunk.token_ids)
+                        .parse_chunk(chunk_wrapper.token_ids())
                         .map_err(|e| format!("Parse error: {}", e))?;
 
                     // Emit SSE events if there's a delta
@@ -905,10 +936,9 @@ impl HarmonyStreamingProcessor {
                     }
                 }
                 ProtoResponseVariant::Complete(complete_wrapper) => {
-                    let complete = complete_wrapper.as_sglang();
                     // Store final metadata
-                    finish_reason = complete.finish_reason.clone();
-                    matched_stop = complete.matched_stop.as_ref().map(|m| match m {
+                    finish_reason = complete_wrapper.finish_reason().to_string();
+                    matched_stop = complete_wrapper.matched_stop().map(|m| match m {
                         MatchedTokenId(id) => {
                             json!(id)
                         }
@@ -916,8 +946,8 @@ impl HarmonyStreamingProcessor {
                             json!(s)
                         }
                     });
-                    prompt_tokens = complete.prompt_tokens as u32;
-                    completion_tokens = complete.completion_tokens as u32;
+                    prompt_tokens = complete_wrapper.prompt_tokens();
+                    completion_tokens = complete_wrapper.completion_tokens();
 
                     // Finalize parser and get complete output
                     let final_output = parser
@@ -1016,7 +1046,7 @@ impl HarmonyStreamingProcessor {
                             "type": "message",
                             "role": "assistant",
                             "content": [{
-                                "type": "text",
+                                "type": "output_text",
                                 "text": accumulated_final_text.clone()
                             }]
                         });

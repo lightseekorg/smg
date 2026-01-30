@@ -288,6 +288,7 @@ impl<T: Clone + Serialize + DeserializeOwned> SyncCRDTMap<T> {
         self.inner.write().remove(key);
     }
 
+    #[allow(dead_code)]
     pub fn contains_key(&self, key: &SKey) -> bool {
         self.inner.read().contains_key(key)
     }
@@ -304,6 +305,7 @@ impl<T: Clone + Serialize + DeserializeOwned> SyncCRDTMap<T> {
         self.inner.read().len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.inner.read().is_empty()
     }

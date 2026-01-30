@@ -141,6 +141,13 @@ impl ConfigValidator {
                     Self::validate_urls(worker_urls)?;
                 }
             }
+            RoutingMode::Anthropic { worker_urls } => {
+                // Allow empty URLs to support dynamic worker addition
+                // URLs will be validated if provided
+                if !worker_urls.is_empty() {
+                    Self::validate_urls(worker_urls)?;
+                }
+            }
         }
         Ok(())
     }
@@ -356,6 +363,11 @@ impl ConfigValidator {
             RoutingMode::OpenAI { .. } => {
                 return Err(ConfigError::ValidationFailed {
                     reason: "OpenAI mode does not support service discovery".to_string(),
+                });
+            }
+            RoutingMode::Anthropic { .. } => {
+                return Err(ConfigError::ValidationFailed {
+                    reason: "Anthropic mode does not support service discovery".to_string(),
                 });
             }
         }

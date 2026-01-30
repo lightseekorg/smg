@@ -235,10 +235,10 @@ impl RequestContext {
 }
 
 pub struct StreamingEventContext<'a> {
-    pub server_label: &'a str,
     pub original_request: &'a ResponsesRequest,
     pub previous_response_id: Option<&'a str>,
     pub server_keys: &'a [String],
+    pub mcp_servers: &'a [(String, String)],
     pub orchestrator: Option<&'a Arc<McpOrchestrator>>,
 }
 

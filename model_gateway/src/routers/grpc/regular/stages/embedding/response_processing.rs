@@ -98,8 +98,7 @@ impl EmbeddingResponseProcessingStage {
             index: 0,
         };
 
-        // Casting i32 to u32 for usage stats
-        let prompt_tokens = proto.prompt_tokens().max(0) as u32;
+        let prompt_tokens = proto.prompt_tokens();
 
         let usage = crate::protocols::common::UsageInfo {
             prompt_tokens,
