@@ -5,28 +5,34 @@
 //!
 //! ## Architecture
 //!
-//! - `handler.rs`: Core request handling (non-streaming and streaming)
-//! - `streaming.rs`: SSE streaming support
-//! - `tools.rs`: Tool use and MCP integration
+//! - `non_streaming.rs`: Non-streaming request handling with validation, worker selection, and forwarding
+//! - `streaming.rs`: SSE streaming support (PR #3)
+//! - `tools.rs`: Tool use and MCP integration (PR #4)
 
-pub mod handler;
+pub mod non_streaming;
 pub mod streaming;
 pub mod tools;
 
-pub use handler::MessagesHandler;
+use axum::http::HeaderMap;
+
+use crate::{protocols::messages::CreateMessageRequest, routers::anthropic::AnthropicRouter};
 
 /// Handle non-streaming Messages API request
 pub async fn handle_non_streaming(
-    headers: Option<&http::HeaderMap>,
-    request: &crate::protocols::messages::CreateMessageRequest,
+    router: &AnthropicRouter,
+    headers: Option<&HeaderMap>,
+    request: &CreateMessageRequest,
+    model_id: Option<&str>,
 ) -> axum::response::Response {
-    MessagesHandler::handle_non_streaming(headers, request).await
+    non_streaming::handle_non_streaming(router, headers, request, model_id).await
 }
 
 /// Handle streaming Messages API request
 pub async fn handle_streaming(
-    headers: Option<&http::HeaderMap>,
-    request: &crate::protocols::messages::CreateMessageRequest,
+    router: &AnthropicRouter,
+    headers: Option<&HeaderMap>,
+    request: &CreateMessageRequest,
+    model_id: Option<&str>,
 ) -> axum::response::Response {
-    MessagesHandler::handle_streaming(headers, request).await
+    streaming::handle_streaming(router, headers, request, model_id).await
 }
