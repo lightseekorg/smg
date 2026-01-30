@@ -18,7 +18,7 @@ else
     $(info sccache not found. Install it for faster builds: cargo install sccache)
 endif
 
-.PHONY: help build test clean docs check fmt dev-setup pre-commit setup-sccache sccache-stats sccache-clean sccache-stop \
+.PHONY: help build test clean docs check fmt lint dev-setup pre-commit setup-rust setup-sccache sccache-stats sccache-clean sccache-stop \
         python-dev python-build python-build-release python-install python-clean python-test python-check \
         show-version bump-version release-notes
 
@@ -29,12 +29,16 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 
+setup-rust: ## Install Rust toolchain and deps (Oracle Linux)
+	@bash scripts/ci_install_rust_oracle.sh
+
 build: ## Build the project in release mode
 	@echo "Building Shepherd Model Gateway..."
 	@cargo build --release
 
-test: ## Simple hello-world target for CI smoke tests
-	@echo "hello-world"
+test: ## Run all tests
+	@echo "Running tests..."
+	@source "$$HOME/.cargo/env" && cargo test
 
 clean: ## Clean build artifacts
 	@echo "Cleaning build artifacts..."
@@ -44,15 +48,18 @@ docs: ## Generate and open documentation
 	@echo "Generating documentation..."
 	@cargo doc --open
 
-check: ## Run cargo check and clippy
-	@echo "Running cargo check..."
-	@cargo check
-	@echo "Running clippy..."
-	@cargo clippy --all-targets --all-features -- -D warnings
+check: ## Run cargo check
+	@source "$$HOME/.cargo/env" && cargo check
+
+lint: ## Run clippy lint checks
+	@source "$$HOME/.cargo/env" && rustup component add clippy
+	@source "$$HOME/.cargo/env" && cargo clippy --all-targets --all-features -- -D warnings
 
 fmt: ## Format code with rustfmt
 	@echo "Formatting code..."
-	@rustup run nightly cargo fmt
+	@source "$$HOME/.cargo/env" && rustup component add --toolchain nightly-x86_64-unknown-linux-gnu rustfmt
+	@source "$$HOME/.cargo/env" && rustup toolchain install nightly --profile minimal
+	@source "$$HOME/.cargo/env" && cargo +nightly fmt -- --check
 
 # Development workflow shortcuts
 dev-setup: build test ## Set up development environment

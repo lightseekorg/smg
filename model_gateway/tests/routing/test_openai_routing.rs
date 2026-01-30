@@ -795,11 +795,7 @@ async fn test_openai_router_chat_streaming_with_mock() {
 #[tokio::test]
 async fn test_openai_router_circuit_breaker() {
     let ctx = crate::common::test_app::create_test_app_context().await;
-    crate::common::test_app::register_external_worker(
-        &ctx,
-        "http://invalid-url-that-will-fail",
-        None,
-    );
+    crate::common::test_app::register_external_worker(&ctx, "http://127.0.0.1:9", None);
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
     let chat_request = create_minimal_chat_request();
