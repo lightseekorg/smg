@@ -64,259 +64,50 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# Shared markers
+# Model configurations: (model_id, class_name_fragment, multi_workers, extra_kwargs)
 # ---------------------------------------------------------------------------
 
-_nightly = pytest.mark.nightly
-_e2e = pytest.mark.e2e
-_backends = pytest.mark.parametrize("setup_backend", ["http", "grpc"], indirect=True)
-_gateway = pytest.mark.gateway(policy="round_robin")
-
-
-# ---------------------------------------------------------------------------
-# llama-8b (tp=1 → single=1, multi=8)
-# ---------------------------------------------------------------------------
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("llama-8b")
-@pytest.mark.workers(count=1)
-@_gateway
-@_backends
-class TestNightlyLlama8bSingle:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "llama-8b")
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("llama-8b")
-@pytest.mark.workers(count=8)
-@_gateway
-@_backends
-class TestNightlyLlama8bMulti:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "llama-8b")
+_NIGHTLY_MODELS = [
+    ("llama-8b",    "Llama8b",    8, {}),
+    ("llama-1b",    "Llama1b",    8, {}),
+    ("qwen-7b",     "Qwen7b",     8, {}),
+    ("qwen-14b",    "Qwen14b",    4, {}),
+    ("deepseek-7b", "Deepseek7b", 8, {}),
+    ("qwen-30b",    "Qwen30b",    2, {}),
+    ("mistral-7b",  "Mistral7b",  8, {}),
+    ("embedding",   "Embedding",  8, {"task": "text-to-embeddings"}),
+    ("gpt-oss",     "GptOss",     4, {}),
+]
 
 
 # ---------------------------------------------------------------------------
-# llama-1b (tp=1 → single=1, multi=8)
+# Dynamic test class generation
 # ---------------------------------------------------------------------------
 
 
-@_nightly
-@_e2e
-@pytest.mark.model("llama-1b")
-@pytest.mark.workers(count=1)
-@_gateway
-@_backends
-class TestNightlyLlama1bSingle:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "llama-1b")
+def _make_test_class(model_id, worker_count, extra_kwargs):
+    """Create a nightly benchmark test class for a model/worker configuration."""
+
+    @pytest.mark.nightly
+    @pytest.mark.e2e
+    @pytest.mark.model(model_id)
+    @pytest.mark.workers(count=worker_count)
+    @pytest.mark.gateway(policy="round_robin")
+    @pytest.mark.parametrize("setup_backend", ["http", "grpc"], indirect=True)
+    class _NightlyTest:
+        def test_nightly_perf(self, setup_backend, genai_bench_runner):
+            _run_nightly(setup_backend, genai_bench_runner, model_id, **extra_kwargs)
+
+    return _NightlyTest
 
 
-@_nightly
-@_e2e
-@pytest.mark.model("llama-1b")
-@pytest.mark.workers(count=8)
-@_gateway
-@_backends
-class TestNightlyLlama1bMulti:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "llama-1b")
+for _model_id, _name, _multi_workers, _extra in _NIGHTLY_MODELS:
+    for _suffix, _count in [("Single", 1), ("Multi", _multi_workers)]:
+        _cls_name = f"TestNightly{_name}{_suffix}"
+        _cls = _make_test_class(_model_id, _count, _extra)
+        _cls.__name__ = _cls_name
+        _cls.__qualname__ = _cls_name
+        globals()[_cls_name] = _cls
 
-
-# ---------------------------------------------------------------------------
-# qwen-7b (tp=1 → single=1, multi=8)
-# ---------------------------------------------------------------------------
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("qwen-7b")
-@pytest.mark.workers(count=1)
-@_gateway
-@_backends
-class TestNightlyQwen7bSingle:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "qwen-7b")
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("qwen-7b")
-@pytest.mark.workers(count=8)
-@_gateway
-@_backends
-class TestNightlyQwen7bMulti:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "qwen-7b")
-
-
-# ---------------------------------------------------------------------------
-# qwen-14b (tp=2 → single=1, multi=4)
-# ---------------------------------------------------------------------------
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("qwen-14b")
-@pytest.mark.workers(count=1)
-@_gateway
-@_backends
-class TestNightlyQwen14bSingle:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "qwen-14b")
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("qwen-14b")
-@pytest.mark.workers(count=4)
-@_gateway
-@_backends
-class TestNightlyQwen14bMulti:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "qwen-14b")
-
-
-# ---------------------------------------------------------------------------
-# deepseek-7b (tp=1 → single=1, multi=8)
-# ---------------------------------------------------------------------------
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("deepseek-7b")
-@pytest.mark.workers(count=1)
-@_gateway
-@_backends
-class TestNightlyDeepseek7bSingle:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "deepseek-7b")
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("deepseek-7b")
-@pytest.mark.workers(count=8)
-@_gateway
-@_backends
-class TestNightlyDeepseek7bMulti:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "deepseek-7b")
-
-
-# ---------------------------------------------------------------------------
-# qwen-30b (tp=4 → single=1, multi=2)
-# ---------------------------------------------------------------------------
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("qwen-30b")
-@pytest.mark.workers(count=1)
-@_gateway
-@_backends
-class TestNightlyQwen30bSingle:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "qwen-30b")
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("qwen-30b")
-@pytest.mark.workers(count=2)
-@_gateway
-@_backends
-class TestNightlyQwen30bMulti:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "qwen-30b")
-
-
-# ---------------------------------------------------------------------------
-# mistral-7b (tp=1 → single=1, multi=8)
-# ---------------------------------------------------------------------------
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("mistral-7b")
-@pytest.mark.workers(count=1)
-@_gateway
-@_backends
-class TestNightlyMistral7bSingle:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "mistral-7b")
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("mistral-7b")
-@pytest.mark.workers(count=8)
-@_gateway
-@_backends
-class TestNightlyMistral7bMulti:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "mistral-7b")
-
-
-# ---------------------------------------------------------------------------
-# embedding (tp=1 → single=1, multi=8)
-# ---------------------------------------------------------------------------
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("embedding")
-@pytest.mark.workers(count=1)
-@_gateway
-@_backends
-class TestNightlyEmbeddingSingle:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(
-            setup_backend, genai_bench_runner, "embedding",
-            task="text-to-embeddings",
-        )
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("embedding")
-@pytest.mark.workers(count=8)
-@_gateway
-@_backends
-class TestNightlyEmbeddingMulti:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(
-            setup_backend, genai_bench_runner, "embedding",
-            task="text-to-embeddings",
-        )
-
-
-# ---------------------------------------------------------------------------
-# gpt-oss (tp=2 → single=1, multi=4)
-# ---------------------------------------------------------------------------
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("gpt-oss")
-@pytest.mark.workers(count=1)
-@_gateway
-@_backends
-class TestNightlyGptOssSingle:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "gpt-oss")
-
-
-@_nightly
-@_e2e
-@pytest.mark.model("gpt-oss")
-@pytest.mark.workers(count=4)
-@_gateway
-@_backends
-class TestNightlyGptOssMulti:
-    def test_nightly_perf(self, setup_backend, genai_bench_runner):
-        _run_nightly(setup_backend, genai_bench_runner, "gpt-oss")
+# Clean up loop variables from module namespace
+del _model_id, _name, _multi_workers, _extra, _suffix, _count, _cls_name, _cls
