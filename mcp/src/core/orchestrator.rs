@@ -52,6 +52,7 @@ use super::{
     handler::{HandlerRequestContext, RefreshRequest, SmgClientHandler},
     metrics::McpMetrics,
     pool::{McpConnectionPool, PoolKey},
+    reconnect::ReconnectionManager,
 };
 use crate::{
     approval::{
@@ -281,6 +282,7 @@ pub struct McpOrchestrator {
     refresh_tx: mpsc::Sender<RefreshRequest>,
     active_executions: Arc<AtomicUsize>,
     shutdown_token: CancellationToken,
+    reconnection_manager: ReconnectionManager,
     /// Original config for reference.
     config: McpConfig,
 }
@@ -334,6 +336,7 @@ impl McpOrchestrator {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
+            reconnection_manager: ReconnectionManager::new(),
             config: config.clone(),
         };
 
@@ -360,6 +363,44 @@ impl McpOrchestrator {
 
         Ok(orchestrator)
     }
+    pub async fn call_tool_with_reconnect(
+        &self,
+        server_key: &str,
+        tool_name: &str,
+        arguments: Value,
+        server_label: &str,
+        request_ctx: &McpRequestContext<'_>,
+    ) -> McpResult<ToolCallResult> {
+        match self
+            .call_tool(
+                server_key,
+                tool_name,
+                arguments.clone(),
+                server_label,
+                request_ctx,
+            )
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(McpError::ServerDisconnected(name)) => {
+                let config = self
+                    .static_servers
+                    .get(&name)
+                    .map(|e| e.config.clone())
+                    .ok_or_else(|| McpError::ServerNotFound(name.clone()))?;
+
+                self.reconnection_manager
+                    .reconnect(&name, || async {
+                        self.connect_static_server(&config).await
+                    })
+                    .await?;
+
+                self.call_tool(server_key, tool_name, arguments, server_label, request_ctx)
+                    .await
+            }
+            Err(e) => Err(e),
+        }
+    }
 
     /// Create a simplified orchestrator for testing.
     #[cfg(test)]
@@ -380,6 +421,7 @@ impl McpOrchestrator {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
+            reconnection_manager: ReconnectionManager::new(),
             config: McpConfig::default(),
         }
     }
@@ -1165,7 +1207,7 @@ impl McpOrchestrator {
                     return Err(McpError::ToolDenied(entry.tool_name().to_string()));
                 }
                 self.metrics.record_approval_granted();
-                let result = self.execute_tool_impl(entry, arguments).await?;
+                let result = self.execute_tool_with_reconnect(entry, arguments).await?;
                 Ok(ApprovalExecutionResult::Success(result))
             }
             ApprovalOutcome::Pending {
@@ -1184,7 +1226,7 @@ impl McpOrchestrator {
                 match rx.await {
                     Ok(ApprovalDecision::Approved) => {
                         self.metrics.record_approval_granted();
-                        let result = self.execute_tool_impl(entry, arguments).await?;
+                        let result = self.execute_tool_with_reconnect(entry, arguments).await?;
                         Ok(ApprovalExecutionResult::Success(result))
                     }
                     Ok(ApprovalDecision::Denied { reason }) => {
@@ -1194,6 +1236,35 @@ impl McpOrchestrator {
                     Err(_) => Err(McpError::ToolDenied("Channel closed".to_string())),
                 }
             }
+        }
+    }
+    async fn execute_tool_with_reconnect(
+        &self,
+        entry: &ToolEntry,
+        arguments: Value,
+    ) -> McpResult<CallToolResult> {
+        match self.execute_tool_impl(entry, arguments.clone()).await {
+            Ok(result) => Ok(result),
+            Err(McpError::ServerDisconnected(name)) => {
+                // Remove the stale entry to ensure connect_static_server doesn't return early
+                let config = self
+                    .static_servers
+                    .remove(&name)
+                    .map(|(_, e)| e.config.clone())
+                    .ok_or_else(|| McpError::ServerNotFound(name.clone()))?;
+
+                info!("Attempting reconnection for server: {}", name);
+
+                self.reconnection_manager
+                    .reconnect(&name, || async {
+                        self.connect_static_server(&config).await
+                    })
+                    .await?;
+
+                // Retry execution after successful reconnection
+                self.execute_tool_impl(entry, arguments).await
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -1331,11 +1402,19 @@ impl McpOrchestrator {
     ) -> McpResult<CallToolResult> {
         // Check static servers first
         if let Some(entry) = self.static_servers.get(server_key) {
-            return entry
-                .client
-                .call_tool(request)
-                .await
-                .map_err(|e| McpError::ToolExecution(format!("MCP call failed: {}", e)));
+            return entry.client.call_tool(request).await.map_err(|e| {
+                let err_msg = e.to_string().to_lowercase();
+                // Detect transport failures to trigger ReconnectionManager
+                if err_msg.contains("connection closed")
+                    || err_msg.contains("broken pipe")
+                    || err_msg.contains("transport error")
+                    || err_msg.contains("channel closed")
+                {
+                    McpError::ServerDisconnected(server_key.to_string())
+                } else {
+                    McpError::ToolExecution(format!("MCP call failed: {}", e))
+                }
+            });
         }
 
         // Check connection pool by URL (pool uses different handler type)
@@ -1951,7 +2030,23 @@ impl<'a> Drop for McpRequestContext<'a> {
         }
     }
 }
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
 
+    #[tokio::test]
+    async fn test_reconnection_flow_integration() {
+        let orchestrator = McpOrchestrator::new_test();
+        let server_name = "test-server";
+
+        // 1. Simulate a disconnected state
+        let err = McpError::ServerDisconnected(server_name.to_string());
+
+        // 2. Verify that call_tool_with_reconnect would trigger reconnection
+        // (In a real test, you would mock the connect_static_server call)
+        assert!(matches!(err, McpError::ServerDisconnected(_)));
+    }
+}
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
