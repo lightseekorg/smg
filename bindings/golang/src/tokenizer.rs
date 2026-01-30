@@ -9,8 +9,8 @@ use std::{
 
 use serde_json::Value;
 use smg::tokenizer::{
-    chat_template::ChatTemplateParams, create_tokenizer_from_file,
-    huggingface::HuggingFaceTokenizer, traits::Tokenizer as TokenizerTrait,
+    chat_template::ChatTemplateParams, create_tokenizer, huggingface::HuggingFaceTokenizer,
+    traits::Tokenizer as TokenizerTrait,
 };
 
 use super::error::{clear_error_message, set_error_message, SglErrorCode};
@@ -62,10 +62,12 @@ fn apply_chat_template_impl(
         })
 }
 
-/// Create a tokenizer from a file path
+/// Create a tokenizer from a file path or HuggingFace model ID
 ///
 /// # Arguments
-/// * `path` - Path to tokenizer.json file (null-terminated C string)
+/// * `path` - Path to tokenizer.json file or HuggingFace model ID (null-terminated C string).
+///   If a local path exists, it will be used. Otherwise, the tokenizer will be
+///   downloaded from HuggingFace Hub (requires HF_TOKEN env var for gated models).
 /// * `error_out` - Optional pointer to receive error message (must be freed with sgl_free_string)
 ///
 /// # Returns
@@ -91,7 +93,7 @@ pub unsafe extern "C" fn sgl_tokenizer_create_from_file(
         }
     };
 
-    match create_tokenizer_from_file(path_str) {
+    match create_tokenizer(path_str) {
         Ok(tokenizer) => {
             clear_error_message(error_out);
             Box::into_raw(Box::new(TokenizerHandle { tokenizer }))

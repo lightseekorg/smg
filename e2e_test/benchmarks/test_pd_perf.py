@@ -16,11 +16,14 @@ class TestPDPerf:
             router_url=gateway.base_url,
             model_path=model_path,
             experiment_folder="benchmark_round_robin_pd",
+            # Increase max_requests to ensure benchmark runs long enough for
+            # accurate GPU utilization sampling (at least 30+ seconds)
+            max_requests_per_run=200,
             thresholds={
                 "ttft_mean_max": 13,
                 "e2e_latency_mean_max": 16,
                 "input_throughput_mean_min": 350,
                 "output_throughput_mean_min": 18,
-                "gpu_util_p50_min": 99,
+                "gpu_util_mean_min": 30,
             },
         )

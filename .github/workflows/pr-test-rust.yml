@@ -38,7 +38,7 @@ jobs:
   build-wheel:
     needs: check-ci
     if: needs.check-ci.outputs.should_run == 'true'
-    runs-on: 4-gpu-a10
+    runs-on: k8s-runner-gpu
     permissions:
       contents: read
     steps:
@@ -47,35 +47,10 @@ jobs:
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
 
-      - name: Build Python wheel and Go FFI library (parallel)
+      - name: Build Python wheel and Go FFI library
         run: |
-          source "$HOME/.cargo/env"
-          export RUSTC_WRAPPER=sccache
-
-          # Install maturin first
-          python3 -m pip install --upgrade pip maturin
-
-          # Start Go FFI build in background
-          echo "Starting Go FFI build in background..."
-          (cd bindings/golang && make build && echo "Go FFI: OK" && ls -la target/release/libsmg_go.*) &
-          GO_PID=$!
-
-          # Build Python wheel in foreground
-          echo "Building Python wheel..."
-          cd bindings/python
-          maturin build --profile ci --features vendored-openssl --out dist
-          echo "Python wheel: OK"
-          ls -lh dist/
-
-          # Wait for Go build to complete
-          echo "Waiting for Go FFI build..."
-          wait $GO_PID
-          GO_EXIT=$?
-          if [ $GO_EXIT -ne 0 ]; then
-            echo "Go FFI build failed with exit code $GO_EXIT"
-            exit $GO_EXIT
-          fi
-          echo "Both builds completed successfully"
+          bash scripts/ci_setup_python_venv.sh
+          bash scripts/ci_build_wheel.sh
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v6
@@ -221,23 +196,11 @@ jobs:
             # Excludes: 5-grpc (logprobs=5), 2-None-grpc (n=2 with no logprobs), multiple_choices (n=2 tests)
             test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
             setup_vllm: true
-    runs-on: 4-gpu-a10
+    runs-on: k8s-runner-gpu
     timeout-minutes: ${{ matrix.timeout }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
-
-      - name: Install inference backend (SGLang or vLLM)
-        run: |
-          if [ "${{ matrix.setup_vllm }}" == "true" ]; then
-            echo "Installing vLLM for gRPC testing..."
-            python3 -m pip install vllm
-          else
-            echo "Installing SGLang..."
-            git clone https://github.com/sgl-project/sglang.git
-            cd sglang
-            sudo --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
-          fi
 
       - name: Cache flash-attn build
         if: matrix.setup_vllm
@@ -246,18 +209,21 @@ jobs:
           path: ~/.cache/pip/wheels
           key: flash-attn-${{ runner.os }}-py310-${{ hashFiles('**/setup.py') }}
 
-      - name: Install flash-attn for vLLM
-        if: matrix.setup_vllm
+      - name: Install inference backend
         run: |
-          python3 -m pip install flash-attn --no-build-isolation
-          python3 -m pip uninstall -y flashinfer flashinfer-python flashinfer-cubin flashinfer-jit-cache 2>/dev/null || true
-          python3 -m pip install flashinfer-python==0.5.3 flashinfer-cubin==0.5.3
+          bash scripts/ci_setup_python_venv.sh
+          source .venv/bin/activate
+          if [ "${{ matrix.setup_vllm }}" == "true" ]; then
+            bash scripts/ci_install_vllm.sh
+          else
+            bash scripts/ci_install_sglang.sh
+          fi
 
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
         run: |
           sudo apt-get install -y unzip
-          INSTANT_CLIENT_DIR="/home/ubuntu/instant-client"
+          INSTANT_CLIENT_DIR="$HOME/instant-client"
           INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.9.0.25.07.zip"
 
           if [ ! -d "$INSTANT_CLIENT_DIR/instantclient_23_9" ]; then
@@ -271,7 +237,7 @@ jobs:
             echo "Oracle Instant Client already exists, skipping download"
           fi
 
-          echo "LD_LIBRARY_PATH=/home/ubuntu/instant-client/instantclient_23_9:\$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_9:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Start Oracle Database
         if: matrix.setup_oracle
@@ -286,6 +252,8 @@ jobs:
 
       - name: Start Brave MCP Server
         if: matrix.setup_brave
+        env:
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
         run: |
           docker run -d --rm \
             -p 8001:8080 \
@@ -302,19 +270,15 @@ jobs:
           name: smg-wheel
           path: wheel/
 
-      - name: Install wheel
+      - name: Install wheel and test dependencies
         run: |
           pip uninstall -y smg || true
           pip install wheel/*.whl
-
-      - name: Install e2e test dependencies
-        run: |
-          python3 -m pip install pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy
-          if [ -n "${{ matrix.extra_deps }}" ]; then
-            python3 -m pip --no-cache-dir install --upgrade ${{ matrix.extra_deps }}
-          fi
+          bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
 
       - name: Run E2E tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
@@ -377,7 +341,7 @@ jobs:
     name: go-bindings-e2e
     needs: [check-ci, build-wheel]
     if: needs.check-ci.outputs.should_run == 'true'
-    runs-on: 4-gpu-a10
+    runs-on: k8s-runner-gpu
     timeout-minutes: 45
     permissions:
       contents: read
@@ -385,13 +349,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Clone SGLang repository
-        run: git clone https://github.com/sgl-project/sglang.git
-
-      - name: Install SGLang dependencies
+      - name: Setup Python venv and SGLang
         run: |
-          cd sglang
-          sudo --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
+          bash scripts/ci_setup_python_venv.sh
+          source .venv/bin/activate
+          bash scripts/ci_install_sglang.sh
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -415,16 +377,15 @@ jobs:
           name: smg-wheel
           path: wheel/
 
-      - name: Install wheel
+      - name: Install wheel and test dependencies
         run: |
           pip uninstall -y smg || true
           pip install wheel/*.whl
-
-      - name: Install test dependencies
-        run: |
-          python3 -m pip install pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy
+          bash scripts/ci_install_e2e_deps.sh
 
       - name: Run Go OAI server E2E tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           export CGO_LDFLAGS="-L$(pwd)/bindings/golang/target/release"
