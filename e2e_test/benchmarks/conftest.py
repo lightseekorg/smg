@@ -22,12 +22,14 @@ def _build_command(
     router_url: str,
     model_path: str,
     experiment_folder: str,
-    num_concurrency: int,
-    traffic_scenario: str,
+    num_concurrency: int | None,
+    traffic_scenario: str | None,
     max_requests: int,
+    task: str = "text-to-text",
+    max_time_per_run: int = 3,
 ) -> list[str]:
     """Build genai-bench command."""
-    return [
+    cmd = [
         cli,
         "benchmark",
         "--api-backend",
@@ -41,20 +43,21 @@ def _build_command(
         "--model-tokenizer",
         model_path,
         "--task",
-        "text-to-text",
-        "--num-concurrency",
-        str(num_concurrency),
-        "--traffic-scenario",
-        traffic_scenario,
+        task,
         "--max-requests-per-run",
         str(max_requests),
         "--max-time-per-run",
-        "3",
+        str(max_time_per_run),
         "--experiment-folder-name",
         experiment_folder,
         "--experiment-base-dir",
         str(Path.cwd()),
     ]
+    if num_concurrency is not None:
+        cmd.extend(["--num-concurrency", str(num_concurrency)])
+    if traffic_scenario is not None:
+        cmd.extend(["--traffic-scenario", traffic_scenario])
+    return cmd
 
 
 def _find_results(experiment_folder: str, timeout: int = 10) -> list[Path]:
@@ -124,9 +127,11 @@ def genai_bench_runner():
         experiment_folder: str,
         thresholds: dict | None = None,
         timeout_sec: int | None = None,
-        num_concurrency: int = 32,
-        traffic_scenario: str = "D(4000,100)",
+        num_concurrency: int | None = 32,
+        traffic_scenario: str | None = "D(4000,100)",
         max_requests_per_run: int | None = None,
+        task: str = "text-to-text",
+        max_time_per_run: int = 3,
         kill_procs: list | None = None,
         drain_delay_sec: int = 6,
     ) -> None:
@@ -140,7 +145,7 @@ def genai_bench_runner():
             shutil.rmtree(exp_dir, ignore_errors=True)
 
         # Build and run command
-        max_requests = max_requests_per_run or num_concurrency * 5
+        max_requests = max_requests_per_run or (num_concurrency or 32) * 5
         cmd = _build_command(
             cli,
             router_url,
@@ -149,6 +154,8 @@ def genai_bench_runner():
             num_concurrency,
             traffic_scenario,
             max_requests,
+            task=task,
+            max_time_per_run=max_time_per_run,
         )
         timeout = timeout_sec or int(os.environ.get("GENAI_BENCH_TEST_TIMEOUT", "120"))
 

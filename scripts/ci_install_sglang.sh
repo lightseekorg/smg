@@ -17,6 +17,16 @@ if [ ! -d "$SGLANG_DIR" ]; then
     git clone https://github.com/sgl-project/sglang.git "$SGLANG_DIR"
 fi
 
+# Optionally check out the latest release tag
+SGLANG_USE_LATEST_TAG="${SGLANG_USE_LATEST_TAG:-0}"
+if [ "$SGLANG_USE_LATEST_TAG" = "1" ]; then
+    cd "$SGLANG_DIR"
+    LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
+    echo "Checking out latest SGLang tag: $LATEST_TAG"
+    git checkout "$LATEST_TAG"
+    cd -
+fi
+
 # Install SGLang dependencies
 echo "Installing SGLang dependencies..."
 sudo apt update
