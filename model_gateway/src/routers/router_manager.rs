@@ -444,7 +444,7 @@ impl RouterTrait for RouterManager {
     }
 
     async fn get_models(&self, req: Request<Body>) -> Response {
-        // If there's a default router, delegate to it to get backend-specific format
+        // Try delegating to router first (for routers with custom implementations)
         let router_id = {
             let default_router = self
                 .default_router
@@ -455,7 +455,12 @@ impl RouterTrait for RouterManager {
 
         if let Some(router_id) = router_id {
             if let Some(router) = self.routers.get(&router_id) {
-                return router.get_models(req).await;
+                let response = router.get_models(req).await;
+                // If router implements get_models, use its response
+                // Otherwise fall back to worker registry
+                if response.status() != StatusCode::NOT_IMPLEMENTED {
+                    return response;
+                }
             }
         }
 
