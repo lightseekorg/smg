@@ -10,12 +10,16 @@ const HF_TOKEN_ENV: &str = "HF_TOKEN";
 
 /// Build an ApiBuilder with token from HF_TOKEN environment variable if set
 fn build_api() -> anyhow::Result<hf_hub::api::tokio::Api> {
-    let token = std::env::var(HF_TOKEN_ENV).ok();
-    ApiBuilder::from_env()
-        .with_token(token)
-        .with_progress(true)
-        .build()
-        .map_err(Into::into)
+    let mut builder = ApiBuilder::from_env().with_progress(true);
+
+    // Only override token if HF_TOKEN env var is set and non-empty
+    if let Ok(token) = std::env::var(HF_TOKEN_ENV) {
+        if !token.is_empty() {
+            builder = builder.with_token(Some(token));
+        }
+    }
+
+    Ok(builder.build()?)
 }
 
 const IGNORED: [&str; 5] = [

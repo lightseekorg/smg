@@ -44,47 +44,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install pip & venv
-        run: |
-          sudo apt update
-          sudo apt install -y python3-pip python3-venv
-
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
 
-      - name: Build Python wheel and Go FFI library (parallel)
+      - name: Build Python wheel and Go FFI library
         run: |
-          source "$HOME/.cargo/env"
-          export RUSTC_WRAPPER=sccache
-          
-          # Create venv
-          python3 -m venv .venv
-          source .venv/bin/activate
-
-          # Install maturin and zig for manylinux cross-compilation
-          python3 -m pip install --upgrade pip maturin ziglang
-
-          # Start Go FFI build in background
-          echo "Starting Go FFI build in background..."
-          (cd bindings/golang && make build && echo "Go FFI: OK" && ls -la target/release/libsmg_go.*) &
-          GO_PID=$!
-
-          # Build Python wheel in foreground
-          echo "Building Python wheel..."
-          cd bindings/python
-          maturin build --profile ci --features vendored-openssl --manylinux 2_28 --zig --out dist
-          echo "Python wheel: OK"
-          ls -lh dist/
-
-          # Wait for Go build to complete
-          echo "Waiting for Go FFI build..."
-          wait $GO_PID
-          GO_EXIT=$?
-          if [ $GO_EXIT -ne 0 ]; then
-            echo "Go FFI build failed with exit code $GO_EXIT"
-            exit $GO_EXIT
-          fi
-          echo "Both builds completed successfully"
+          bash scripts/ci_setup_python_venv.sh
+          bash scripts/ci_build_wheel.sh
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v6
@@ -102,7 +68,6 @@ jobs:
 
       - name: Test wheel install
         run: |
-          source .venv/bin/activate
           pip install bindings/python/dist/*.whl
           python3 -c "import smg; print('Python package: OK')"
           python3 -c "from smg.smg_rs import Router; print('Rust extension: OK')"
@@ -237,27 +202,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install pip & venv
-        run: |
-          sudo apt update
-          sudo apt install -y python3-pip python3-venv
-          python3 -m venv .venv
-          echo "$PWD/.venv/bin" >> $GITHUB_PATH
-          echo "CUDA_HOME=/usr/local/cuda" >> $GITHUB_ENV
-
-      - name: Install inference backend (SGLang or vLLM)
-        run: |
-          if [ "${{ matrix.setup_vllm }}" == "true" ]; then
-            echo "Installing vLLM for gRPC testing..."
-            python3 -m pip install vllm
-          else
-            echo "Installing SGLang..."
-            git clone https://github.com/sgl-project/sglang.git
-            sudo apt update
-            cd sglang
-            sudo CUDA_HOME=/usr/local/cuda IS_BLACKWELL=1 --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
-          fi
-
       - name: Cache flash-attn build
         if: matrix.setup_vllm
         uses: actions/cache@v4
@@ -265,52 +209,15 @@ jobs:
           path: ~/.cache/pip/wheels
           key: flash-attn-${{ runner.os }}-py310-${{ hashFiles('**/setup.py') }}
 
-      - name: Install flash-attn for vLLM
-        if: matrix.setup_vllm
+      - name: Install inference backend
         run: |
-          # Ensure CUDA toolkit (nvcc) is available for building flash-attn
-          # flash-attn's setup.py expects nvcc at /usr/local/cuda/bin/nvcc
-          if [ ! -f /usr/local/cuda/bin/nvcc ]; then
-            echo "nvcc not found at /usr/local/cuda/bin/nvcc, setting up CUDA toolkit..."
-            sudo apt-get update
-            sudo apt-get install -y cuda-nvcc-12-8 cuda-cudart-dev-12-8 || \
-              sudo apt-get install -y nvidia-cuda-toolkit
-
-            # Find where nvcc was installed and create symlinks
-            NVCC_PATH=$(which nvcc 2>/dev/null || find /usr -name nvcc -type f 2>/dev/null | head -1)
-            if [ -n "$NVCC_PATH" ]; then
-              echo "Found nvcc at: $NVCC_PATH"
-              CUDA_BIN_DIR=$(dirname "$NVCC_PATH")
-              CUDA_DIR=$(dirname "$CUDA_BIN_DIR")
-
-              # Create /usr/local/cuda symlink if it doesn't exist
-              if [ ! -e /usr/local/cuda ]; then
-                sudo ln -sf "$CUDA_DIR" /usr/local/cuda
-                echo "Created symlink: /usr/local/cuda -> $CUDA_DIR"
-              elif [ ! -f /usr/local/cuda/bin/nvcc ]; then
-                # /usr/local/cuda exists but nvcc is missing, create bin symlink
-                sudo mkdir -p /usr/local/cuda/bin
-                sudo ln -sf "$NVCC_PATH" /usr/local/cuda/bin/nvcc
-                echo "Created symlink: /usr/local/cuda/bin/nvcc -> $NVCC_PATH"
-              fi
-            else
-              echo "ERROR: nvcc not found after installation"
-              exit 1
-            fi
-          fi
-
-          # Verify nvcc is accessible
-          echo "CUDA setup:"
-          ls -la /usr/local/cuda/bin/nvcc || true
-          /usr/local/cuda/bin/nvcc --version || true
-
-          export PATH=/usr/local/cuda/bin:$PATH
-          export CUDA_HOME=/usr/local/cuda
-
+          bash scripts/ci_setup_python_venv.sh
           source .venv/bin/activate
-          python3 -m pip install flash-attn --no-build-isolation
-          python3 -m pip uninstall -y flashinfer flashinfer-python flashinfer-cubin flashinfer-jit-cache 2>/dev/null || true
-          python3 -m pip install flashinfer-python==0.5.3 flashinfer-cubin==0.5.3
+          if [ "${{ matrix.setup_vllm }}" == "true" ]; then
+            bash scripts/ci_install_vllm.sh
+          else
+            bash scripts/ci_install_sglang.sh
+          fi
 
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
@@ -363,17 +270,11 @@ jobs:
           name: smg-wheel
           path: wheel/
 
-      - name: Install wheel
+      - name: Install wheel and test dependencies
         run: |
           pip uninstall -y smg || true
           pip install wheel/*.whl
-
-      - name: Install e2e test dependencies
-        run: |
-          python3 -m pip install pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy pandas
-          if [ -n "${{ matrix.extra_deps }}" ]; then
-            python3 -m pip --no-cache-dir install --upgrade ${{ matrix.extra_deps }}
-          fi
+          bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
 
       - name: Run E2E tests
         env:
@@ -448,22 +349,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Clone SGLang repository
-        run: git clone https://github.com/sgl-project/sglang.git
-
-      - name: Install pip & venv
+      - name: Setup Python venv and SGLang
         run: |
-          sudo apt update
-          sudo apt install -y python3-pip python3-venv
-          python3 -m venv .venv
-          echo "$PWD/.venv/bin" >> $GITHUB_PATH
-          echo "CUDA_HOME=/usr/local/cuda" >> $GITHUB_ENV
-
-      - name: Install SGLang dependencies
-        run: |
-          sudo apt update
-          cd sglang
-          sudo CUDA_HOME=/usr/local/cuda IS_BLACKWELL=1 --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
+          bash scripts/ci_setup_python_venv.sh
+          source .venv/bin/activate
+          bash scripts/ci_install_sglang.sh
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -487,14 +377,11 @@ jobs:
           name: smg-wheel
           path: wheel/
 
-      - name: Install wheel
+      - name: Install wheel and test dependencies
         run: |
           pip uninstall -y smg || true
           pip install wheel/*.whl
-
-      - name: Install test dependencies
-        run: |
-          python3 -m pip install pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy
+          bash scripts/ci_install_e2e_deps.sh
 
       - name: Run Go OAI server E2E tests
         env:
