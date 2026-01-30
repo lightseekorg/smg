@@ -103,6 +103,38 @@ func (h *ChatHandler) HandleChatCompletion(ctx *fasthttp.RequestCtx) {
 	} else if req.MaxTokens != nil {
 		sglReq.MaxCompletionTokens = req.MaxTokens
 	}
+	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage != nil {
+		sglReq.StreamOptions = &smg.StreamOptions{
+			IncludeUsage: req.StreamOptions.IncludeUsage,
+		}
+	}
+	sglReq.IgnoreEos = req.IgnoreEos
+	sglReq.NoStopTrim = req.NoStopTrim
+	if req.Stop != nil {
+		sglReq.Stop = req.Stop
+	}
+	if len(req.StopTokenIDs) > 0 {
+		sglReq.StopTokenIDs = req.StopTokenIDs
+	}
+	if req.FrequencyPenalty != nil {
+		fp := float32(*req.FrequencyPenalty)
+		sglReq.FrequencyPenalty = &fp
+	}
+	if req.PresencePenalty != nil {
+		pp := float32(*req.PresencePenalty)
+		sglReq.PresencePenalty = &pp
+	}
+	if req.TopK != nil {
+		sglReq.TopK = req.TopK
+	}
+	if req.MinP != nil {
+		mp := float32(*req.MinP)
+		sglReq.MinP = &mp
+	}
+	if req.RepetitionPenalty != nil {
+		rp := float32(*req.RepetitionPenalty)
+		sglReq.RepetitionPenalty = &rp
+	}
 
 	requestCtx := context.Background()
 
@@ -170,7 +202,7 @@ func (h *ChatHandler) handleStreamingCompletion(ctx *fasthttp.RequestCtx, reques
 		streamCtx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		stream, err := h.service.Client().CreateChatCompletionStream(streamCtx, req)
+		stream, err := h.service.ChatClient().CreateChatCompletionStream(streamCtx, req)
 		if err != nil {
 			h.logger.Error("Failed to create chat completion stream",
 				zap.Error(err),
@@ -346,7 +378,7 @@ func (h *ChatHandler) handleStreamingCompletion(ctx *fasthttp.RequestCtx, reques
 }
 
 func (h *ChatHandler) handleNonStreamingCompletion(ctx *fasthttp.RequestCtx, requestCtx context.Context, req smg.ChatCompletionRequest) {
-	resp, err := h.service.Client().CreateChatCompletion(requestCtx, req)
+	resp, err := h.service.ChatClient().CreateChatCompletion(requestCtx, req)
 	if err != nil {
 		h.logger.Error("Failed to create chat completion",
 			zap.Error(err),
@@ -521,7 +553,7 @@ func (h *ChatHandler) HandleGenerate(ctx *fasthttp.RequestCtx) {
 	requestCtx := context.Background()
 
 	// Use non-streaming completion for /generate endpoint
-	resp, err := h.service.Client().CreateChatCompletion(requestCtx, chatReq)
+	resp, err := h.service.ChatClient().CreateChatCompletion(requestCtx, chatReq)
 	if err != nil {
 		h.logger.Error("Failed to create completion",
 			zap.Error(err),

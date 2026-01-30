@@ -174,6 +174,24 @@ func (c *GrpcClient) CreateChatCompletionStream(ctx context.Context, reqJSON str
 	if maxTokensInt != nil {
 		samplingParams.MaxNewTokens = maxTokensInt
 	}
+	if ignoreEos, ok := reqMap["ignore_eos"].(bool); ok {
+		samplingParams.IgnoreEos = ignoreEos
+	}
+	if noStopTrim, ok := reqMap["no_stop_trim"].(bool); ok {
+		samplingParams.NoStopTrim = noStopTrim
+	}
+	if freqPenalty, ok := reqMap["frequency_penalty"].(float64); ok {
+		samplingParams.FrequencyPenalty = float32(freqPenalty)
+	}
+	if presPenalty, ok := reqMap["presence_penalty"].(float64); ok {
+		samplingParams.PresencePenalty = float32(presPenalty)
+	}
+	if minP, ok := reqMap["min_p"].(float64); ok {
+		samplingParams.MinP = float32(minP)
+	}
+	if repPenalty, ok := reqMap["repetition_penalty"].(float64); ok {
+		samplingParams.RepetitionPenalty = float32(repPenalty)
+	}
 
 	// Parse tool constraints if available
 	if preprocessed.ToolConstraintsJSON != "" {

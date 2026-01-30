@@ -8,14 +8,18 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use smg::grpc_client::{
-    sglang_proto as proto,
-    sglang_scheduler::{AbortOnDropStream, SglangSchedulerClient},
+use smg::{
+    core::Worker,
+    grpc_client::{
+        sglang_proto as proto,
+        sglang_scheduler::{AbortOnDropStream, SglangSchedulerClient},
+    },
 };
 
 use super::{
     error::{set_error_message, SglErrorCode},
     grpc_converter::{convert_proto_chunk_to_openai, GrpcResponseConverterHandle},
+    policy::GrpcWorker,
     runtime::RUNTIME,
 };
 
@@ -37,6 +41,8 @@ pub struct SglangStreamHandle {
     pub(crate) client: Arc<SglangSchedulerClient>,
     #[allow(dead_code)]
     pub(crate) prompt_tokens: u32, // Number of prompt tokens for this request
+    /// Worker that owns this stream (for load tracking). None for single-client streams.
+    pub(crate) worker: Option<Arc<GrpcWorker>>,
 }
 
 /// Read next chunk from stream and convert to OpenAI format.
@@ -222,6 +228,12 @@ pub unsafe extern "C" fn sgl_stream_read_next(
 pub unsafe extern "C" fn sgl_stream_free(handle: *mut SglangStreamHandle) {
     if !handle.is_null() {
         let handle_ref = Box::from_raw(handle);
+
+        // Decrement worker load (multi-worker load tracking)
+        if let Some(ref worker) = handle_ref.worker {
+            worker.decrement_load();
+            worker.increment_processed();
+        }
 
         // Mark stream as completed to prevent abort on drop
         // (should already be marked by ReadNext, but ensure it for safety)
