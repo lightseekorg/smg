@@ -91,6 +91,36 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 2,
         "features": ["chat", "streaming", "reasoning", "harmony"],
     },
+    # Llama-4-Maverick (17B with 128 experts) - Nightly benchmarks
+    "llama-4-maverick-17b": {
+        "model": _resolve_model_path("meta-llama/Llama-4-Maverick-17B-128E-Instruct"),
+        "memory_gb": 34,  # ~2 bytes per parameter for 17B params
+        "tp": 8,  # Tensor parallelism across 8 GPUs
+        "features": ["chat", "streaming", "function_calling", "moe"],
+        "worker_args": [
+            "--context-length=163840",  # 160K context length (SGLang)
+            "--cuda-graph-max-bs=256",  # CUDA graph batch size optimization
+            "--mem-fraction-static=0.9",  # 90% GPU memory for static allocation
+        ],
+        "vllm_args": [
+            "--max-model-len=163840",  # 160K context length (vLLM)
+        ],
+    },
+    # DeepSeek-V3.2-Exp (large model) - Nightly benchmarks
+    "deepseek-v3-2-exp": {
+        "model": _resolve_model_path("deepseek-ai/DeepSeek-V3.2-Exp"),
+        "memory_gb": 48,  # Estimate based on model size
+        "tp": 8,  # Tensor parallelism across 8 GPUs
+        "features": ["chat", "streaming", "reasoning"],
+        "worker_args": [
+            "--context-length=163840",  # 160K context length (SGLang)
+            "--cuda-graph-max-bs=256",  # CUDA graph batch size optimization
+            "--mem-fraction-static=0.9",  # 90% GPU memory for static allocation
+        ],
+        "vllm_args": [
+            "--max-model-len=163840",  # 160K context length (vLLM)
+        ],
+    },
 }
 
 

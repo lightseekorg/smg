@@ -77,6 +77,8 @@ _NIGHTLY_MODELS = [
     ("mistral-7b",  "Mistral7b",  8, {}),
     ("embedding",   "Embedding",  8, {"task": "text-to-embeddings"}),
     ("gpt-oss",     "GptOss",     4, {}),
+    ("llama-4-maverick-17b", "Llama4Maverick", 1, {}),  # 1 worker uses all 8 GPUs (tp=8)
+    ("deepseek-v3-2-exp",    "DeepseekV32",    1, {}),  # 1 worker uses all 8 GPUs (tp=8)
 ]
 
 
