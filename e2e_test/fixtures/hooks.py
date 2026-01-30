@@ -406,6 +406,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "storage(backend): mark test to use a specific history storage backend "
         "(memory, oracle). Default is memory.",
     )
+    config.addinivalue_line(
+        "markers",
+        "nightly: mark test as a nightly comprehensive benchmark",
+    )
 
 
 # ---------------------------------------------------------------------------
