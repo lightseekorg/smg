@@ -91,10 +91,10 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 2,
         "features": ["chat", "streaming", "reasoning", "harmony"],
     },
-    # Llama-4-Maverick (17B with 128 experts) - Nightly benchmarks
+    # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
     "llama-4-maverick-17b": {
-        "model": _resolve_model_path("meta-llama/Llama-4-Maverick-17B-128E-Instruct"),
-        "memory_gb": 34,  # ~2 bytes per parameter for 17B params
+        "model": _resolve_model_path("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
+        "memory_gb": 34,  # ~1 byte per parameter for FP8 quantized 17B params
         "tp": 8,  # Tensor parallelism across 8 GPUs
         "features": ["chat", "streaming", "function_calling", "moe"],
         "worker_args": [
