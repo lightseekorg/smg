@@ -22,9 +22,11 @@ use gossip::{
 
 use crate::{
     controller::MeshController,
+    crdt::SKey,
     node_state_machine::{ConvergenceConfig, NodeStateMachine},
     partition::PartitionDetector,
     ping_server::GossipService,
+    stores::AppState,
     stores::StateStores,
     sync::MeshSyncManager,
 };
@@ -143,7 +145,7 @@ impl MeshServerHandler {
     /// Graceful shutdown: broadcast LEAVING status to all alive nodes,
     /// wait for propagation, then shutdown
     pub async fn graceful_shutdown(&self) -> Result<()> {
-        log::info!("Starting graceful shutdown for node {}", self.self_name);
+        log::info!("Graceful shutdown for node {}", self.self_name);
 
         let (leaving_node, alive_nodes) = {
             let state = self.state.read();
@@ -162,7 +164,8 @@ impl MeshServerHandler {
                 let alive_nodes = state
                     .values()
                     .filter(|node| {
-                        node.status == NodeStatus::Alive as i32 // include self
+                        node.status == NodeStatus::Alive as i32 && node.name != self.self_name
+                        // exclude self from broadcast targets
                     })
                     .cloned()
                     .collect::<Vec<NodeState>>();
@@ -209,18 +212,39 @@ impl MeshServerHandler {
     }
 
     pub fn write_data(&self, key: String, value: Vec<u8>) {
-        let mut state = self.state.write();
-        state.entry(self.self_name.clone()).and_modify(|e| {
-            e.version += 1;
-            e.metadata.insert(key, value);
-        });
+        // Write to the app store
+        let app_state = AppState {
+            key: key.clone(),
+            value,
+            version: 1,
+        };
+        self.stores
+            .app
+            .insert(SKey(key), app_state, self.self_name.clone());
     }
 
     pub fn read_data(&self, key: String) -> Option<Vec<u8>> {
-        let state = self.state.read();
-        state
-            .get(&self.self_name)
-            .and_then(|e| e.metadata.get(&key).cloned())
+        // Read from the app store
+        self.stores
+            .app
+            .get(&SKey(key))
+            .map(|app_state| app_state.value.clone())
+    }
+
+    /// Get a snapshot of the app store for synchronization
+    /// Returns a CRDT snapshot that can be merged into other nodes
+    pub fn snapshot(&self) -> crate::crdt::CRDTMap<crate::stores::AppState> {
+        self.stores.app.snapshot()
+    }
+
+    /// Sync app store data from a snapshot (for testing and manual sync)
+    /// This will be replaced by automatic sync stream in the future
+    pub fn sync_app_from_snapshot(
+        &self,
+        snapshot: &crate::crdt::CRDTMap<crate::stores::AppState>,
+    ) {
+        // Merge snapshot into our app store using CRDT merge
+        self.stores.app.merge(snapshot);
     }
 }
 
@@ -476,8 +500,9 @@ macro_rules! mesh_run {
 
     ($name:expr, $addr:expr, $init_peer:expr) => {{
         tracing::info!("Starting mesh server : {}", $addr);
+        use $crate::MeshServerBuilder;
         let (server, handler) =
-            $crate::service::MeshServerBuilder::new($name.to_string(), $addr, $init_peer).build();
+            MeshServerBuilder::new($name.to_string(), $addr, $init_peer).build();
         tokio::spawn(async move {
             if let Err(e) = server.start().await {
                 tracing::error!("Mesh server failed: {}", e);
