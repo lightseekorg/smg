@@ -19,11 +19,12 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     core::Worker,
-    protocols::messages::{
-        CreateMessageRequest, CustomTool, InputMessage, InputSchema, Message, Role, Tool,
-    },
+    protocols::messages::{CreateMessageRequest, InputMessage, Message, Role, Tool},
     routers::anthropic::AnthropicRouter,
 };
+
+#[cfg(test)]
+use crate::protocols::messages::{CustomTool, InputSchema};
 
 // ============================================================================
 // Request Validation

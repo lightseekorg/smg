@@ -3,7 +3,7 @@
 use axum::{
     body::Body,
     extract::Request,
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use tracing::{debug, warn};
