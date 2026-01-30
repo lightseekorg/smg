@@ -8,7 +8,7 @@ use axum::{
 };
 use tracing::{debug, warn};
 
-use super::AnthropicRouter;
+use super::{utils::should_propagate_header, AnthropicRouter};
 
 /// Handle /v1/models request
 pub async fn handle_list_models(
@@ -76,33 +76,5 @@ pub async fn handle_list_models(
             )
                 .into_response()
         }
-    }
-}
-
-/// Check if header should be propagated to backend
-fn should_propagate_header(key: &str) -> bool {
-    matches!(
-        key.to_lowercase().as_str(),
-        "authorization" | "x-api-key" | "anthropic-version" | "anthropic-beta"
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_should_propagate_header() {
-        assert!(should_propagate_header("authorization"));
-        assert!(should_propagate_header("Authorization"));
-        assert!(should_propagate_header("x-api-key"));
-        assert!(should_propagate_header("X-Api-Key"));
-        assert!(should_propagate_header("X-API-KEY"));
-        assert!(should_propagate_header("anthropic-version"));
-        assert!(should_propagate_header("anthropic-beta"));
-
-        assert!(!should_propagate_header("cookie"));
-        assert!(!should_propagate_header("user-agent"));
-        assert!(!should_propagate_header("host"));
     }
 }

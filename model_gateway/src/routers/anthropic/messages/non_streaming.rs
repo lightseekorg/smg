@@ -19,7 +19,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     core::Worker,
     protocols::messages::{CreateMessageRequest, Message},
-    routers::anthropic::AnthropicRouter,
+    routers::anthropic::{utils::should_propagate_header, AnthropicRouter},
 };
 
 #[cfg(test)]
@@ -75,14 +75,6 @@ async fn forward_to_worker(
         warn!("Request to worker {} failed: {}", worker.url(), e);
         format!("Request failed: {}", e)
     })
-}
-
-/// Check if header should be propagated to worker
-fn should_propagate_header(key: &str) -> bool {
-    matches!(
-        key.to_lowercase().as_str(),
-        "authorization" | "x-api-key" | "anthropic-version" | "anthropic-beta"
-    )
 }
 
 // ============================================================================
@@ -266,25 +258,6 @@ mod tests {
             role,
             content: InputContent::String(content.to_string()),
         }
-    }
-
-    // ========================================================================
-    // Header Propagation Tests
-    // ========================================================================
-
-    #[test]
-    fn test_should_propagate_header() {
-        assert!(should_propagate_header("authorization"));
-        assert!(should_propagate_header("Authorization"));
-        assert!(should_propagate_header("x-api-key"));
-        assert!(should_propagate_header("X-API-Key"));
-        assert!(should_propagate_header("anthropic-version"));
-        assert!(should_propagate_header("anthropic-beta"));
-
-        assert!(!should_propagate_header("cookie"));
-        assert!(!should_propagate_header("user-agent"));
-        assert!(!should_propagate_header("host"));
-        assert!(!should_propagate_header("content-length"));
     }
 
     // ========================================================================
