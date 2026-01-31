@@ -330,67 +330,56 @@ if let Some((server_name, tool_name, format)) =
 ### Basic Usage with Orchestrator
 
 ```rust
-use smg_mcp::{McpOrchestrator, McpConfig, ApprovalMode, TenantContext};
+use std::collections::HashMap;
+use smg_mcp::{McpOrchestrator, McpConfig, ApprovalMode, TenantContext, ToolCallContext};
 
 // Create orchestrator (policy loaded from config.policy)
 let config = McpConfig::from_file("mcp.yaml").await?;
 let orchestrator = McpOrchestrator::new(config).await?;
 
-// Create per-request context
-let tenant_ctx = TenantContext::new("customer-123");
-let request_ctx = orchestrator.create_request_context(
-    "req-001",
-    tenant_ctx,
-    ApprovalMode::PolicyOnly,
-);
+// Build per-request context
+let allowed_servers = vec!["brave".to_string()];
+let approval_modes = HashMap::from([("brave".to_string(), ApprovalMode::PolicyOnly)]);
+let ctx = ToolCallContext {
+    allowed_servers: &allowed_servers,
+    server_label: "brave",          // user-facing name in API responses
+    request_id: "req-001",
+    tenant_ctx: TenantContext::default(),
+    approval_modes: &approval_modes,
+};
 
-// Call a tool
-// server_label is the user-facing name shown in API responses
-let result = orchestrator.call_tool(
-    "brave",           // server_key (internal identifier)
-    "web_search",      // tool_name
+// Call a tool by name (resolves server automatically)
+let result = orchestrator.call_tool_by_name(
+    "web_search",
     json!({"query": "rust programming"}),
-    "brave",           // server_label (user-facing)
-    &request_ctx,
+    &ctx,
 ).await?;
 ```
 
 ### Interactive Mode (OpenAI Responses API)
 
+When using Interactive mode, tools may return `PendingApproval` instead of executing.
+The client responds via `mcp_approval_response`, then call `process_approval_responses`:
+
 ```rust
-use smg_mcp::{ApprovalMode, ToolCallResult};
+use smg_mcp::{ApprovalResponseInput, ToolExecutionOutcome, ToolExecutionOutput};
 
-// Determine mode based on API capability
-let mode = McpOrchestrator::determine_approval_mode(supports_mcp_approval);
+// Process approval responses from client input
+let approvals = vec![ApprovalResponseInput {
+    approval_request_id: "elicit-123".to_string(),
+    approve: true,
+    reason: None,
+}];
 
-let request_ctx = orchestrator.create_request_context(
-    "req-002",
-    tenant_ctx,
-    mode,
-);
+let outcomes: Vec<ToolExecutionOutcome> = orchestrator
+    .process_approval_responses(approvals, "my-server")
+    .await;
 
-match orchestrator.call_tool("server", "dangerous_tool", args, "server", &request_ctx).await? {
-    ToolCallResult::Success(output) => {
-        // Tool executed successfully
+// Each executed outcome can be transformed to ResponseOutputItem
+for outcome in outcomes {
+    if let ToolExecutionOutcome::Executed(output) = outcome {
+        let item = output.to_response_item();
     }
-    ToolCallResult::PendingApproval(approval_request) => {
-        // Send approval_request to client, wait for response
-        // Then resolve:
-        orchestrator.resolve_approval(
-            "req-002",
-            &approval_request.server_key,
-            &approval_request.elicitation_id,
-            true,  // approved
-            None,  // reason
-            &tenant_ctx,
-        ).await?;
-
-        // Continue execution
-        let result = orchestrator.continue_tool_execution(
-            "server", "dangerous_tool", args, &request_ctx
-        ).await?;
-    }
-    _ => { /* other variants */ }
 }
 ```
 
@@ -411,8 +400,14 @@ orchestrator.register_alias(
 )?;
 
 // Now callable as just "search"
-// server_label is the user-facing name for API responses
-let result = orchestrator.call_tool_by_name("search", args, &allowed_servers, "my-search", &request_ctx).await?;
+let ctx = ToolCallContext {
+    allowed_servers: &allowed_servers,
+    server_label: "my-search",
+    request_id: "req-1",
+    tenant_ctx: TenantContext::default(),
+    approval_modes: &approval_modes,
+};
+let result = orchestrator.call_tool_by_name("search", args, &ctx).await?;
 ```
 
 ### Batch Tool Execution
@@ -420,7 +415,7 @@ let result = orchestrator.call_tool_by_name("search", args, &allowed_servers, "m
 For executing multiple tools efficiently (e.g., parallel tool calls from LLM):
 
 ```rust
-use smg_mcp::{ToolExecutionInput, ToolExecutionOutput};
+use smg_mcp::{ToolCallContext, ToolExecutionInput, ToolExecutionOutcome, TenantContext};
 
 // Convert tool calls to inputs
 let inputs: Vec<ToolExecutionInput> = tool_calls
@@ -433,12 +428,21 @@ let inputs: Vec<ToolExecutionInput> = tool_calls
     .collect();
 
 // Execute all tools (sequential, with approval checking)
-let outputs: Vec<ToolExecutionOutput> = orchestrator
-    .execute_tools(inputs, &server_keys, "my-server", &request_ctx)
+let ctx = ToolCallContext {
+    allowed_servers: &server_keys,
+    server_label: "my-server",
+    request_id: "req-1",
+    tenant_ctx: TenantContext::default(),
+    approval_modes: &approval_modes,
+};
+let outcomes: Vec<ToolExecutionOutcome> = orchestrator
+    .execute_tools(inputs, &ctx)
     .await;
 
 // Process results
-for output in outputs {
+for outcome in outcomes {
+    let ToolExecutionOutcome::Executed(output) = outcome else { continue };
+
     // Get transformed ResponseOutputItem (uses server_label for API response)
     let item = output.to_response_item();
 

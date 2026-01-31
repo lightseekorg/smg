@@ -1,8 +1,4 @@
-//! Approval manager for MCP tool execution.
-//!
-//! Provides a dual-mode approval system:
-//! - **Interactive mode**: Returns approval requests to the caller for user confirmation
-//! - **Policy-only mode**: Auto-decides using the PolicyEngine
+//! Approval manager for MCP tool execution (interactive + policy-only modes).
 
 use std::{
     sync::Arc,
@@ -58,13 +54,13 @@ impl std::fmt::Display for ApprovalKey {
     }
 }
 
-/// A pending approval awaiting user response.
 #[derive(Debug)]
 pub struct PendingApproval {
     pub key: ApprovalKey,
     pub tool_name: String,
+    pub arguments: serde_json::Value,
     pub hints: ToolAnnotations,
-    pub message: String,
+    pub tenant_ctx: TenantContext,
     pub created_at: Instant,
     response_tx: oneshot::Sender<ApprovalDecision>,
 }
@@ -104,8 +100,8 @@ pub struct ApprovalParams<'a> {
     pub server_key: &'a str,
     pub elicitation_id: &'a str,
     pub tool_name: &'a str,
+    pub arguments: serde_json::Value,
     pub hints: &'a ToolAnnotations,
-    pub message: &'a str,
     pub tenant_ctx: &'a TenantContext,
 }
 
@@ -114,7 +110,6 @@ pub struct ApprovalParams<'a> {
 pub struct McpApprovalRequest {
     pub server_key: String,
     pub tool_name: String,
-    pub message: String,
     pub elicitation_id: String,
 }
 
@@ -123,6 +118,15 @@ pub struct McpApprovalRequest {
 pub struct McpApprovalResponse {
     pub approve: bool,
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingApprovalInfo {
+    pub server_key: String,
+    pub tool_name: String,
+    pub request_id: String,
+    pub arguments: serde_json::Value,
+    pub tenant_ctx: TenantContext,
 }
 
 #[derive(Debug)]
@@ -195,8 +199,9 @@ impl ApprovalManager {
         let pending = PendingApproval {
             key: key.clone(),
             tool_name: params.tool_name.to_string(),
+            arguments: params.arguments.clone(),
             hints: params.hints.clone(),
-            message: params.message.to_string(),
+            tenant_ctx: params.tenant_ctx.clone(),
             created_at: Instant::now(),
             response_tx: tx,
         };
@@ -214,7 +219,6 @@ impl ApprovalManager {
         let approval_request = McpApprovalRequest {
             server_key: params.server_key.to_string(),
             tool_name: params.tool_name.to_string(),
-            message: params.message.to_string(),
             elicitation_id: params.elicitation_id.to_string(),
         };
 
@@ -319,6 +323,24 @@ impl ApprovalManager {
             }
         }
     }
+
+    /// Remove and return pending approval by elicitation_id. Single O(n) scan.
+    pub fn take_pending(&self, elicitation_id: &str) -> Option<PendingApprovalInfo> {
+        let key = self
+            .pending
+            .iter()
+            .find(|entry| entry.key().elicitation_id == elicitation_id)
+            .map(|entry| entry.key().clone());
+        key.and_then(|k| {
+            self.pending.remove(&k).map(|(_, p)| PendingApprovalInfo {
+                server_key: p.key.server_key,
+                tool_name: p.tool_name,
+                request_id: p.key.request_id,
+                arguments: p.arguments,
+                tenant_ctx: p.tenant_ctx,
+            })
+        })
+    }
 }
 
 #[cfg(test)]
@@ -342,8 +364,8 @@ mod tests {
             server_key: "server",
             elicitation_id: "elicit-1",
             tool_name: "read_tool",
+            arguments: serde_json::json!({}),
             hints: &hints,
-            message: "Allow read?",
             tenant_ctx: &tenant,
         };
 
@@ -369,8 +391,8 @@ mod tests {
             server_key: "server",
             elicitation_id: "elicit-1",
             tool_name: "delete_tool",
+            arguments: serde_json::json!({}),
             hints: &hints,
-            message: "Allow delete?",
             tenant_ctx: &tenant,
         };
 
@@ -404,8 +426,8 @@ mod tests {
             server_key: "server",
             elicitation_id: "elicit-1",
             tool_name: "tool",
+            arguments: serde_json::json!({}),
             hints: &hints,
-            message: "Allow?",
             tenant_ctx: &tenant,
         };
 
@@ -451,8 +473,8 @@ mod tests {
             server_key: "server",
             elicitation_id: "elicit-1",
             tool_name: "tool",
+            arguments: serde_json::json!({}),
             hints: &hints,
-            message: "Allow?",
             tenant_ctx: &tenant,
         };
 
@@ -466,8 +488,8 @@ mod tests {
             server_key: "server",
             elicitation_id: "elicit-1",
             tool_name: "tool",
+            arguments: serde_json::json!({}),
             hints: &hints,
-            message: "Allow?",
             tenant_ctx: &tenant,
         };
 

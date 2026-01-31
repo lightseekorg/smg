@@ -145,6 +145,10 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                             tool_call_id: call_id.clone(),
                         });
                     }
+                    ResponseInputOutputItem::McpApprovalResponse { .. } => {
+                        // MCP approval responses are processed by the gateway, not sent to the model
+                        // Skip these items in the chat conversion
+                    }
                 }
             }
         }

@@ -159,6 +159,21 @@ pub enum ResponseInputOutputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
     },
+    /// MCP approval response - sent by client to approve or reject a tool execution.
+    /// References an `mcp_approval_request` via `approval_request_id`.
+    #[serde(rename = "mcp_approval_response")]
+    McpApprovalResponse {
+        /// Optional ID for this response
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// ID of the approval request being answered
+        approval_request_id: String,
+        /// Whether the request was approved
+        approve: bool,
+        /// Optional reason for the decision
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     #[serde(untagged)]
     SimpleInputMessage {
         content: StringOrContentParts,
@@ -254,6 +269,19 @@ pub enum ResponseOutputItem {
         name: String,
         output: String,
         server_label: String,
+    },
+    /// MCP approval request - returned when a tool requires user approval before execution.
+    /// The client should respond with an `mcp_approval_response` input item.
+    #[serde(rename = "mcp_approval_request")]
+    McpApprovalRequest {
+        /// Unique ID of this approval request
+        id: String,
+        /// Label of the MCP server making the request
+        server_label: String,
+        /// Name of the tool to run
+        name: String,
+        /// JSON string of arguments for the tool
+        arguments: String,
     },
     #[serde(rename = "web_search_call")]
     WebSearchCall {
@@ -878,6 +906,10 @@ impl GenerationRequest for ResponsesRequest {
                     }
                     ResponseInputOutputItem::FunctionCallOutput { output, .. } => {
                         Some(output.clone())
+                    }
+                    ResponseInputOutputItem::McpApprovalResponse { .. } => {
+                        // Approval responses don't contain user text for routing
+                        None
                     }
                 })
                 .collect::<Vec<String>>()

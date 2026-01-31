@@ -2,12 +2,15 @@
 //!
 //! This context is used by both regular and harmony response implementations.
 
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::Arc;
 
 use crate::{
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
     mcp::McpOrchestrator,
-    routers::grpc::{context::SharedComponents, pipeline::RequestPipeline},
+    routers::{
+        grpc::{context::SharedComponents, pipeline::RequestPipeline},
+        mcp_utils::McpConnectionResult,
+    },
 };
 
 /// Context for /v1/responses endpoint
@@ -34,12 +37,11 @@ pub(crate) struct ResponsesContext {
     /// MCP orchestrator for tool support
     pub mcp_orchestrator: Arc<McpOrchestrator>,
 
-    /// Server keys for MCP tools requested in this context
-    pub requested_servers: Arc<StdRwLock<Vec<String>>>,
+    /// MCP connection result (server keys + approval modes), set after ensure_mcp_connection
+    pub mcp_connection: Arc<std::sync::RwLock<McpConnectionResult>>,
 }
 
 impl ResponsesContext {
-    /// Create a new responses context
     pub fn new(
         pipeline: Arc<RequestPipeline>,
         components: Arc<SharedComponents>,
@@ -55,7 +57,19 @@ impl ResponsesContext {
             conversation_storage,
             conversation_item_storage,
             mcp_orchestrator,
-            requested_servers: Arc::new(StdRwLock::new(Vec::new())),
+            mcp_connection: Arc::new(std::sync::RwLock::new(McpConnectionResult::empty())),
         }
+    }
+
+    pub fn set_mcp_connection(&self, conn: McpConnectionResult) {
+        *self.mcp_connection.write().unwrap() = conn;
+    }
+
+    pub fn server_keys(&self) -> Vec<String> {
+        self.mcp_connection.read().unwrap().server_keys()
+    }
+
+    pub fn mcp_connection(&self) -> McpConnectionResult {
+        self.mcp_connection.read().unwrap().clone()
     }
 }

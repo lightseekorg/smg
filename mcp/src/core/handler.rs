@@ -133,7 +133,7 @@ impl SmgClientHandler {
 impl ClientHandler for SmgClientHandler {
     async fn create_elicitation(
         &self,
-        request: CreateElicitationRequestParam,
+        _request: CreateElicitationRequestParam,
         context: RequestContext<RoleClient>,
     ) -> Result<CreateElicitationResult, rmcp::ErrorData> {
         use crate::annotations::ToolAnnotations;
@@ -148,10 +148,6 @@ impl ClientHandler for SmgClientHandler {
             rmcp::ErrorData::internal_error("No request context set for elicitation", None)
         })?;
 
-        // Use message as the tool identifier (elicitation doesn't have tool name directly)
-        let message = &request.message;
-
-        // Default annotations (conservative - not read-only, potentially destructive)
         let hints = ToolAnnotations::default();
 
         let params = ApprovalParams {
@@ -159,8 +155,8 @@ impl ClientHandler for SmgClientHandler {
             server_key: &self.server_key,
             elicitation_id: &elicitation_id,
             tool_name: "elicitation",
+            arguments: serde_json::json!({}),
             hints: &hints,
-            message,
             tenant_ctx: &req_ctx.tenant_ctx,
         };
 

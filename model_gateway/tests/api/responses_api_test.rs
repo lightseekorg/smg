@@ -89,7 +89,7 @@ async fn test_non_streaming_mcp_minimal_e2e_with_persistence() {
             headers: None,
             server_label: Some("mock".to_string()),
             server_description: None,
-            require_approval: None,
+            require_approval: Some("never".to_string()),
             allowed_tools: None,
         }]),
         top_logprobs: Some(0),

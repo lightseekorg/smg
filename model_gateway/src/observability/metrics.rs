@@ -413,6 +413,7 @@ pub mod metrics_labels {
     pub const RESULT_ERROR: &str = "error";
     pub const RESULT_TIMEOUT: &str = "timeout";
     pub const RESULT_NOT_FOUND: &str = "not_found";
+    pub const RESULT_PENDING: &str = "pending";
 
     // Discovery sources
     pub const DISCOVERY_STATIC: &str = "static";

@@ -723,6 +723,32 @@ impl HarmonyBuilder {
                     content_type: None,
                 })
             }
+
+            // MCP approval response - this is metadata for the gateway, not content for the model
+            // Create an empty user message as a placeholder (will be processed by gateway)
+            ResponseInputOutputItem::McpApprovalResponse {
+                approval_request_id,
+                approve,
+                ..
+            } => {
+                // Create a metadata message indicating the approval status
+                // This helps maintain conversation flow without sending actual content to model
+                let text = format!(
+                    "[MCP approval {} for request {}]",
+                    if *approve { "granted" } else { "denied" },
+                    approval_request_id
+                );
+                Ok(HarmonyMessage {
+                    author: Author {
+                        role: Role::User,
+                        name: None,
+                    },
+                    recipient: None,
+                    content: vec![Content::Text(TextContent { text })],
+                    channel: None,
+                    content_type: None,
+                })
+            }
         }
     }
 

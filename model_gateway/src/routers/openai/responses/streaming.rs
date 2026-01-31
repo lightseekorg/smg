@@ -990,6 +990,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                 request_id,
                 &loop_config.mcp_servers,
                 &server_keys_clone,
+                &loop_config.approval_modes,
             )
             .await
             {
@@ -1041,11 +1042,12 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     let mcp_orchestrator = ctx
         .components
         .mcp_orchestrator()
-        .expect("MCP orchestrator required");
+        .expect("MCP orchestrator required")
+        .clone();
 
     // Check for MCP tools and create request context if needed
     let mcp_result = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(mcp_orchestrator, tools).await
+        ensure_request_mcp_client(&mcp_orchestrator, tools).await
     } else {
         None
     };
@@ -1054,7 +1056,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     let req = ctx.into_streaming_context();
 
     // If no MCP tools, use simple passthrough
-    let Some((orchestrator, mcp_servers)) = mcp_result else {
+    let Some(conn_result) = mcp_result else {
         return handle_simple_streaming_passthrough(
             &client,
             circuit_breaker,
@@ -1069,9 +1071,10 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         &client,
         headers.as_ref(),
         req,
-        &orchestrator,
+        &mcp_orchestrator,
         McpLoopConfig {
-            mcp_servers,
+            mcp_servers: conn_result.mcp_servers,
+            approval_modes: conn_result.approval_modes,
             ..McpLoopConfig::default()
         },
     )
