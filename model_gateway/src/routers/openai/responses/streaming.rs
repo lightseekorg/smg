@@ -26,7 +26,8 @@ use super::{
     common::{extract_output_index, get_event_type, parse_sse_block, ChunkProcessor},
     mcp::{
         build_resume_payload, execute_streaming_tool_calls, inject_mcp_metadata_streaming,
-        prepare_mcp_tools_as_functions, send_mcp_list_tools_events, ToolLoopState,
+        prepare_mcp_tools_as_functions, send_mcp_list_tools_events, StreamingToolCallResult,
+        ToolLoopState,
     },
     tool_handler::{StreamAction, StreamingToolHandler},
     utils::{
@@ -981,7 +982,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
             let request_id = preserved_response_id
                 .as_deref()
                 .unwrap_or("streaming-request");
-            if !execute_streaming_tool_calls(
+            match execute_streaming_tool_calls(
                 pending_calls,
                 &orchestrator_clone,
                 &tx,
@@ -994,8 +995,14 @@ pub(super) async fn handle_streaming_with_tool_interception(
             )
             .await
             {
-                // Client disconnected during tool execution
-                return;
+                StreamingToolCallResult::Continue => {}
+                StreamingToolCallResult::ClientDisconnected => return,
+                StreamingToolCallResult::ApprovalRequired => {
+                    // Approval request events already sent to client.
+                    // Stop the loop so the user can resolve the approval.
+                    let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
+                    return;
+                }
             }
 
             // Build resume payload

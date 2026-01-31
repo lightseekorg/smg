@@ -134,8 +134,17 @@ impl FunctionCallInProgress {
 // Tool Execution
 // ============================================================================
 
+/// Result of executing streaming tool calls
+pub(super) enum StreamingToolCallResult {
+    /// All calls executed successfully, continue the tool loop
+    Continue,
+    /// Client disconnected during execution
+    ClientDisconnected,
+    /// One or more calls require approval, stop the loop
+    ApprovalRequired,
+}
+
 /// Execute detected tool calls and send completion events to client
-/// Returns false if client disconnected during execution
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_streaming_tool_calls(
     pending_calls: Vec<FunctionCallInProgress>,
@@ -147,7 +156,7 @@ pub(super) async fn execute_streaming_tool_calls(
     mcp_servers: &[(String, String)],
     server_keys: &[String],
     approval_modes: &std::collections::HashMap<String, crate::mcp::ApprovalMode>,
-) -> bool {
+) -> StreamingToolCallResult {
     let server_label = mcp_servers
         .first()
         .map(|(label, _)| label.as_str())
@@ -214,7 +223,7 @@ pub(super) async fn execute_streaming_tool_calls(
                     mcp_call_item.clone(),
                     sequence_number,
                 ) {
-                    return false;
+                    return StreamingToolCallResult::ClientDisconnected;
                 }
                 state.record_call(
                     call.call_id,
@@ -229,7 +238,7 @@ pub(super) async fn execute_streaming_tool_calls(
 
         // Emit the intermediate event before tool execution (searching/interpreting)
         if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
-            return false;
+            return StreamingToolCallResult::ClientDisconnected;
         }
 
         // Call tool by name within allowed servers
@@ -252,7 +261,8 @@ pub(super) async fn execute_streaming_tool_calls(
                 (item_value, output_str)
             }
             Ok(ToolCallResult::PendingApproval(approval_req)) => {
-                // Build an mcp_approval_request output item
+                // Build an mcp_approval_request output item and stop the loop.
+                // The user must resolve the approval before tool execution continues.
                 let item = json!({
                     "type": "mcp_approval_request",
                     "server_label": server_label,
@@ -261,7 +271,18 @@ pub(super) async fn execute_streaming_tool_calls(
                     "approval_request_id": approval_req.elicitation_id,
                     "arguments": call.arguments_buffer,
                 });
-                (item.clone(), item.to_string())
+
+                // Send the approval request event to the client
+                if !send_tool_call_completion_events(tx, &call, item.clone(), sequence_number) {
+                    return StreamingToolCallResult::ClientDisconnected;
+                }
+                state.mcp_call_items.push(item);
+
+                info!(
+                    "Streaming tool loop stopping: approval required for '{}'",
+                    call.name
+                );
+                return StreamingToolCallResult::ApprovalRequired;
             }
             Err(err) => {
                 let err_str = format!("tool call failed: {}", err);
@@ -283,7 +304,7 @@ pub(super) async fn execute_streaming_tool_calls(
         // Send mcp_call completion event to client
         if !send_tool_call_completion_events(tx, &call, mcp_call_item.clone(), sequence_number) {
             // Client disconnected, no point continuing tool execution
-            return false;
+            return StreamingToolCallResult::ClientDisconnected;
         }
 
         // Record the call with transformed item (avoids re-transformation later)
@@ -295,7 +316,7 @@ pub(super) async fn execute_streaming_tool_calls(
             mcp_call_item,
         );
     }
-    true
+    StreamingToolCallResult::Continue
 }
 
 // ============================================================================
@@ -810,16 +831,30 @@ pub(super) async fn execute_tool_loop(
                     (item_value, output_str)
                 }
                 Ok(ToolCallResult::PendingApproval(approval_req)) => {
-                    // Build an mcp_approval_request output item
+                    // Build an mcp_approval_request output item and stop the loop.
+                    // The user must resolve the approval before tool execution continues.
                     let item = json!({
                         "type": "mcp_approval_request",
-                        "server_label": server_label,
+                        "server_label": resolved_label,
                         "name": tool_name,
                         "id": generate_id("mcpr"),
                         "approval_request_id": approval_req.elicitation_id,
                         "arguments": args_json_str,
                     });
-                    (item.clone(), item.to_string())
+                    state.mcp_call_items.push(item);
+
+                    info!(
+                        "Tool loop stopping: approval required for '{}', returning to caller",
+                        tool_name
+                    );
+                    return build_incomplete_response(
+                        response_json,
+                        state,
+                        "approval_required",
+                        orchestrator,
+                        original_body,
+                        &config.mcp_servers,
+                    );
                 }
                 Err(err) => {
                     warn!("Tool execution failed: {}", err);
