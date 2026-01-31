@@ -37,6 +37,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+
       - name: Setup Python venv
         run: bash scripts/ci_setup_python_venv.sh
 
