@@ -386,7 +386,7 @@ impl McpOrchestrator {
                 let config = self
                     .static_servers
                     .remove(&name)
-                    .map(|e| e.config.clone())
+                    .map(|(_, entry)| entry.config.clone())
                     .ok_or_else(|| McpError::ServerNotFound(name.clone()))?;
                 info!(
                     "Server '{}' disconnected, initiating reconnection with backoff",
@@ -465,6 +465,7 @@ impl McpOrchestrator {
 
         let client = self.connect_server_impl(config, (*handler).clone()).await?;
         let client = Arc::new(client);
+        self.tool_inventory.clear_server_tools(&config.name);
 
         // Load tools from server
         self.load_server_inventory(&config.name, &client).await;
