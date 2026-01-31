@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SGLang Model Gateway CLI
+Shepherd Model Gateway CLI
 
 Provides convenient command-line interface for launching the router and server.
 
@@ -26,7 +26,7 @@ def create_parser() -> argparse.ArgumentParser:
     prog_name = os.path.basename(sys.argv[0]) if sys.argv else "smg"
     parser = argparse.ArgumentParser(
         prog=prog_name,
-        description="SGLang Model Gateway - High-performance inference router",
+        description="Shepherd Model Gateway - High-performance inference router",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -36,7 +36,7 @@ def create_parser() -> argparse.ArgumentParser:
     launch_parser = subparsers.add_parser(
         "launch",
         help="Launch router only (requires existing worker URLs)",
-        description="Launch the SGLang router with existing worker instances",
+        description="Launch the Shepherd router with existing worker instances",
         add_help=False,  # Let router handle --help
     )
 
@@ -44,7 +44,7 @@ def create_parser() -> argparse.ArgumentParser:
     server_parser = subparsers.add_parser(
         "server",
         help="Launch router and server processes together",
-        description="Launch both SGLang router and server processes",
+        description="Launch both Shepherd router and server processes",
         add_help=False,  # Let server handle --help
     )
 
