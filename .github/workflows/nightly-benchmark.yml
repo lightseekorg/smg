@@ -189,10 +189,9 @@ jobs:
         #   - { id: deepseek-7b, test_class: TestNightlyDeepseek7bMulti }
         #   - { id: qwen-30b,    test_class: TestNightlyQwen30bMulti }
         #   - { id: mistral-7b,  test_class: TestNightlyMistral7bMulti }
-        #   - { id: embedding,   test_class: TestNightlyEmbeddingMulti }
+        #   # - { id: embedding,   test_class: TestNightlyEmbeddingMulti }  # Skipped
         #   - { id: gpt-oss,     test_class: TestNightlyGptOssMulti }
         #   - { id: llama-4-maverick-17b, test_class: TestNightlyLlama4MaverickMulti }
-        #   - { id: deepseek-v3-2-exp,    test_class: TestNightlyDeepseekV32Multi }
         # variant:
         #   - { id: sglang, runtime: sglang, grpc_only: "false" }
         #   - { id: vllm,   runtime: vllm,   grpc_only: "true" }

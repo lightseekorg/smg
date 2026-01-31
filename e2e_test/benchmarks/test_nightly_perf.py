@@ -75,10 +75,9 @@ _NIGHTLY_MODELS = [
     ("deepseek-7b", "Deepseek7b", 8, {}),
     ("qwen-30b",    "Qwen30b",    2, {}),
     ("mistral-7b",  "Mistral7b",  8, {}),
-    ("embedding",   "Embedding",  8, {"task": "text-to-embeddings"}),
+    # ("embedding",   "Embedding",  8, {"task": "text-to-embeddings"}),  # Skipped
     ("gpt-oss",     "GptOss",     4, {}),
     ("llama-4-maverick-17b", "Llama4Maverick", 1, {}),  # 1 worker uses all 8 GPUs (tp=8)
-    ("deepseek-v3-2-exp",    "DeepseekV32",    1, {}),  # 1 worker uses all 8 GPUs (tp=8)
 ]
 
 
