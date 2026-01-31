@@ -5,7 +5,7 @@ import pytest
 
 @pytest.mark.e2e
 @pytest.mark.workers(count=4)
-@pytest.mark.gateway(policy="cache_aware")
+@pytest.mark.gateway(policy="round_robin")
 @pytest.mark.parametrize("setup_backend", ["http", "grpc"], indirect=True)
 class TestRegularPerf:
     """Performance benchmark for regular (non-PD) router."""
@@ -16,7 +16,7 @@ class TestRegularPerf:
         genai_bench_runner(
             router_url=gateway.base_url,
             model_path=model_path,
-            experiment_folder=f"benchmark_cache_aware_regular_{backend}",
+            experiment_folder=f"benchmark_round_robin_regular_{backend}",
             # Increase max_requests to ensure benchmark runs long enough for
             # accurate GPU utilization sampling (at least 30+ seconds)
             max_requests_per_run=200,

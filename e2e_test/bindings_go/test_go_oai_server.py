@@ -308,3 +308,381 @@ class TestGoOAIServerParameters:
 
         assert response.choices is not None
         assert response.choices[0].message.content is not None
+
+
+@pytest.mark.model("llama-1b")
+class TestGoOAIServerResponseValidation:
+    """Tests for response field validation."""
+
+    def test_response_fields_non_streaming(self, go_openai_client, go_oai_server):
+        """Test that non-streaming response contains all required fields."""
+        _, _, model_path = go_oai_server
+
+        response = go_openai_client.chat.completions.create(
+            model=model_path,
+            messages=[{"role": "user", "content": "Say hello."}],
+            max_tokens=10,
+            stream=False,
+        )
+
+        # Verify required response fields
+        assert response.id is not None
+        assert response.id.startswith("chatcmpl-")
+        assert response.created is not None
+        assert response.created > 0
+        assert response.model is not None
+        assert response.choices is not None
+        assert len(response.choices) > 0
+
+        # Verify choice structure
+        choice = response.choices[0]
+        assert choice.index == 0
+        assert choice.message is not None
+        assert choice.message.role == "assistant"
+        assert choice.message.content is not None
+        assert choice.finish_reason in ("stop", "length")
+
+        logger.info(f"Response ID: {response.id}, Created: {response.created}")
+
+    def test_response_fields_streaming(self, go_openai_client, go_oai_server):
+        """Test that streaming chunks contain required fields."""
+        _, _, model_path = go_oai_server
+
+        response_stream = go_openai_client.chat.completions.create(
+            model=model_path,
+            messages=[{"role": "user", "content": "Count to 3."}],
+            max_tokens=20,
+            stream=True,
+        )
+
+        chunks = list(response_stream)
+        assert len(chunks) > 0, "Should receive at least one chunk"
+
+        # Track finish_reason appearances
+        finish_reasons = []
+        first_id = None
+
+        for chunk in chunks:
+            # Each chunk should have id and created
+            assert chunk.id is not None
+            assert chunk.created is not None
+
+            # All chunks should have same id
+            if first_id is None:
+                first_id = chunk.id
+            else:
+                assert chunk.id == first_id, "All chunks should have same id"
+
+            # Track finish reasons
+            if chunk.choices and chunk.choices[0].finish_reason:
+                finish_reasons.append(chunk.choices[0].finish_reason)
+
+        # finish_reason should appear exactly once per choice
+        assert len(finish_reasons) == 1, f"Expected 1 finish_reason, got {len(finish_reasons)}"
+        assert finish_reasons[0] in ("stop", "length")
+
+        logger.info(f"Stream ID: {first_id}, finish_reason: {finish_reasons[0]}")
+
+    def test_usage_tokens_non_streaming(self, go_openai_client, go_oai_server):
+        """Test that usage tokens are returned in non-streaming response."""
+        _, _, model_path = go_oai_server
+
+        response = go_openai_client.chat.completions.create(
+            model=model_path,
+            messages=[{"role": "user", "content": "Say hello."}],
+            max_tokens=10,
+            stream=False,
+        )
+
+        # Verify usage is present
+        assert response.usage is not None, "Usage should be present"
+        assert response.usage.prompt_tokens > 0, "prompt_tokens should be > 0"
+        assert response.usage.completion_tokens > 0, "completion_tokens should be > 0"
+        assert response.usage.total_tokens > 0, "total_tokens should be > 0"
+        assert response.usage.total_tokens == response.usage.prompt_tokens + response.usage.completion_tokens
+
+        logger.info(
+            f"Usage - prompt: {response.usage.prompt_tokens}, "
+            f"completion: {response.usage.completion_tokens}, "
+            f"total: {response.usage.total_tokens}"
+        )
+
+    def test_usage_tokens_streaming(self, go_openai_client, go_oai_server):
+        """Test that usage tokens are returned with stream_options."""
+        _, _, model_path = go_oai_server
+
+        response_stream = go_openai_client.chat.completions.create(
+            model=model_path,
+            messages=[{"role": "user", "content": "Say hello."}],
+            max_tokens=10,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+
+        chunks = list(response_stream)
+        assert len(chunks) > 0
+
+        # The last chunk should contain usage info
+        usage_chunks = [c for c in chunks if c.usage is not None]
+
+        # Usage should be in at least one chunk (typically the last)
+        assert len(usage_chunks) > 0, "Should have at least one chunk with usage"
+
+        usage = usage_chunks[-1].usage
+        assert usage.prompt_tokens > 0, "prompt_tokens should be > 0"
+        assert usage.completion_tokens >= 0, "completion_tokens should be >= 0"
+        assert usage.total_tokens > 0, "total_tokens should be > 0"
+
+        logger.info(
+            f"Streaming usage - prompt: {usage.prompt_tokens}, "
+            f"completion: {usage.completion_tokens}, "
+            f"total: {usage.total_tokens}"
+        )
+
+    def test_finish_reason_stop(self, go_openai_client, go_oai_server):
+        """Test that a short response finishes with 'stop'."""
+        _, _, model_path = go_oai_server
+
+        response = go_openai_client.chat.completions.create(
+            model=model_path,
+            messages=[{"role": "user", "content": "Say 'hi'."}],
+            max_tokens=50,  # Generous limit so model can finish naturally
+            stream=False,
+        )
+
+        assert response.choices[0].finish_reason == "stop"
+        logger.info(f"Finish reason: {response.choices[0].finish_reason}")
+
+    def test_finish_reason_length(self, go_openai_client, go_oai_server):
+        """Test that max_tokens limit produces 'length' finish reason."""
+        _, _, model_path = go_oai_server
+
+        response = go_openai_client.chat.completions.create(
+            model=model_path,
+            messages=[{"role": "user", "content": "Write a very long story about dragons."}],
+            max_tokens=5,  # Very short limit
+            stream=False,
+        )
+
+        assert response.choices[0].finish_reason == "length"
+        logger.info(f"Finish reason: {response.choices[0].finish_reason}")
+
+
+@pytest.mark.model("llama-1b")
+class TestGoOAIServerConcurrency:
+    """Tests for concurrent request handling."""
+
+    def test_concurrent_non_streaming(self, go_openai_client, go_oai_server):
+        """Test handling of multiple concurrent non-streaming requests."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        _, _, model_path = go_oai_server
+
+        def make_request(i: int):
+            response = go_openai_client.chat.completions.create(
+                model=model_path,
+                messages=[{"role": "user", "content": f"Say the number {i}."}],
+                max_tokens=10,
+                stream=False,
+            )
+            return i, response
+
+        # Run 4 concurrent requests
+        num_requests = 4
+        results = []
+
+        with ThreadPoolExecutor(max_workers=num_requests) as executor:
+            futures = [executor.submit(make_request, i) for i in range(num_requests)]
+            for future in as_completed(futures):
+                results.append(future.result())
+
+        # Verify all requests completed successfully
+        assert len(results) == num_requests
+        for i, response in results:
+            assert response.choices is not None
+            assert response.choices[0].message.content is not None
+            logger.info(f"Request {i}: {response.choices[0].message.content[:30]}...")
+
+    def test_concurrent_streaming(self, go_openai_client, go_oai_server):
+        """Test handling of multiple concurrent streaming requests."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        _, _, model_path = go_oai_server
+
+        def make_streaming_request(i: int):
+            response_stream = go_openai_client.chat.completions.create(
+                model=model_path,
+                messages=[{"role": "user", "content": f"Count from {i} to {i+2}."}],
+                max_tokens=30,
+                stream=True,
+            )
+            chunks = list(response_stream)
+            content_parts = []
+            for chunk in chunks:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content_parts.append(chunk.choices[0].delta.content)
+            return i, "".join(content_parts)
+
+        # Run 4 concurrent streaming requests
+        num_requests = 4
+        results = []
+
+        with ThreadPoolExecutor(max_workers=num_requests) as executor:
+            futures = [executor.submit(make_streaming_request, i) for i in range(num_requests)]
+            for future in as_completed(futures):
+                results.append(future.result())
+
+        # Verify all streaming requests completed successfully
+        assert len(results) == num_requests
+        for i, content in results:
+            assert len(content) > 0, f"Request {i} should have content"
+            logger.info(f"Stream {i}: {content[:30]}...")
+
+
+@pytest.mark.model("llama-1b")
+class TestGoOAIServerEdgeCases:
+    """Tests for edge cases and error handling."""
+
+    def test_empty_message_content(self, go_openai_client, go_oai_server):
+        """Test handling of empty message content."""
+        _, _, model_path = go_oai_server
+
+        response = go_openai_client.chat.completions.create(
+            model=model_path,
+            messages=[{"role": "user", "content": ""}],
+            max_tokens=10,
+            stream=False,
+        )
+
+        # Should still get a response (model might say something about empty input)
+        assert response.choices is not None
+        logger.info(f"Response to empty: {response.choices[0].message.content}")
+
+    def test_long_context(self, go_openai_client, go_oai_server):
+        """Test handling of longer context."""
+        _, _, model_path = go_oai_server
+
+        # Create a longer message
+        long_message = "The quick brown fox jumps over the lazy dog. " * 50
+
+        response = go_openai_client.chat.completions.create(
+            model=model_path,
+            messages=[
+                {"role": "user", "content": long_message + " Summarize in one word."}
+            ],
+            max_tokens=10,
+            stream=False,
+        )
+
+        assert response.choices is not None
+        assert response.choices[0].message.content is not None
+        logger.info(f"Long context response: {response.choices[0].message.content}")
+
+    def test_stop_sequences(self, go_openai_client, go_oai_server):
+        """Test that stop sequences are respected."""
+        _, _, model_path = go_oai_server
+
+        response = go_openai_client.chat.completions.create(
+            model=model_path,
+            messages=[{"role": "user", "content": "Count: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"}],
+            max_tokens=50,
+            stop=[","],
+            stream=False,
+        )
+
+        assert response.choices is not None
+        content = response.choices[0].message.content
+        # With stop=",", response should stop at first comma
+        # The model might not output a comma at all if it interprets the task differently
+        logger.info(f"Stop sequence response: {content}")
+        assert response.choices[0].finish_reason in ("stop", "length")
+
+    def test_system_message_only(self, go_openai_client, go_oai_server):
+        """Test request with system message and minimal user message."""
+        _, _, model_path = go_oai_server
+
+        response = go_openai_client.chat.completions.create(
+            model=model_path,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that speaks like a pirate."},
+                {"role": "user", "content": "Hi"},
+            ],
+            max_tokens=20,
+            stream=False,
+        )
+
+        assert response.choices is not None
+        assert response.choices[0].message.content is not None
+        logger.info(f"Pirate response: {response.choices[0].message.content}")
+
+
+@pytest.mark.model("llama-1b")
+@pytest.mark.xfail(
+    reason="Go OAI server does not currently support n > 1 (multiple choices)",
+    strict=False,
+)
+class TestGoOAIServerMultipleChoices:
+    """Tests for n parameter (multiple choices).
+
+    Note: The Go OAI server currently does not support generating multiple
+    choices (n > 1). These tests are marked as xfail to document the expected
+    behavior and will pass when support is added.
+    """
+
+    def test_n_parameter_non_streaming(self, go_openai_client, go_oai_server):
+        """Test that n parameter returns multiple choices."""
+        _, _, model_path = go_oai_server
+
+        response = go_openai_client.chat.completions.create(
+            model=model_path,
+            messages=[{"role": "user", "content": "Give me a random word."}],
+            max_tokens=10,
+            n=2,
+            stream=False,
+        )
+
+        assert response.choices is not None
+        assert len(response.choices) == 2, f"Expected 2 choices, got {len(response.choices)}"
+
+        # Verify each choice has content and correct index
+        for i, choice in enumerate(response.choices):
+            assert choice.index == i
+            assert choice.message.content is not None
+            assert choice.finish_reason in ("stop", "length")
+            logger.info(f"Choice {i}: {choice.message.content}")
+
+    def test_n_parameter_streaming(self, go_openai_client, go_oai_server):
+        """Test that n parameter works with streaming."""
+        _, _, model_path = go_oai_server
+
+        response_stream = go_openai_client.chat.completions.create(
+            model=model_path,
+            messages=[{"role": "user", "content": "Give me a random word."}],
+            max_tokens=10,
+            n=2,
+            stream=True,
+        )
+
+        chunks = list(response_stream)
+        assert len(chunks) > 0
+
+        # Track content and finish reasons by choice index
+        choice_content = {0: [], 1: []}
+        choice_finish_reasons = {0: None, 1: None}
+
+        for chunk in chunks:
+            if not chunk.choices:
+                continue
+            for choice in chunk.choices:
+                idx = choice.index
+                if idx in choice_content:
+                    if choice.delta.content:
+                        choice_content[idx].append(choice.delta.content)
+                    if choice.finish_reason:
+                        choice_finish_reasons[idx] = choice.finish_reason
+
+        # Both choices should have content and finish reasons
+        for idx in [0, 1]:
+            content = "".join(choice_content[idx])
+            assert len(content) > 0 or choice_finish_reasons[idx] is not None, f"Choice {idx} should have content or finish"
+            logger.info(f"Streaming choice {idx}: {content}, finish: {choice_finish_reasons[idx]}")

@@ -83,13 +83,13 @@ That's it. SMG is now load-balancing requests across your workers.
 
 | Feature | Description |
 |---------|-------------|
-| **[8 Routing Policies](docs/configuration/routing.md)** | cache_aware, round_robin, power_of_two, consistent_hashing, prefix_hash, manual, random, bucket |
-| **[gRPC Pipeline](docs/configuration/grpc-pipeline.md)** | Native gRPC with streaming, reasoning extraction, and tool call parsing |
-| **[MCP Integration](docs/configuration/mcp.md)** | Connect external tool servers via Model Context Protocol |
-| **[High Availability](docs/configuration/high-availability.md)** | Mesh networking with SWIM protocol for multi-node deployments |
-| **[Chat History](docs/configuration/storage.md)** | Pluggable storage: PostgreSQL, Oracle, Redis, or in-memory |
-| **[WASM Plugins](docs/configuration/wasm-plugins.md)** | Extend with custom WebAssembly logic |
-| **[Resilience](docs/configuration/resilience.md)** | Circuit breakers, retries with backoff, rate limiting |
+| **[8 Routing Policies](docs/concepts/routing/load-balancing.md)** | cache_aware, round_robin, power_of_two, consistent_hashing, prefix_hash, manual, random, bucket |
+| **[gRPC Pipeline](docs/concepts/architecture/grpc-pipeline.md)** | Native gRPC with streaming, reasoning extraction, and tool call parsing |
+| **[MCP Integration](docs/concepts/extensibility/mcp.md)** | Connect external tool servers via Model Context Protocol |
+| **[High Availability](docs/concepts/architecture/high-availability.md)** | Mesh networking with SWIM protocol for multi-node deployments |
+| **[Chat History](docs/concepts/data/chat-history.md)** | Pluggable storage: PostgreSQL, Oracle, Redis, or in-memory |
+| **[WASM Plugins](docs/concepts/extensibility/wasm-plugins.md)** | Extend with custom WebAssembly logic |
+| **[Resilience](docs/concepts/reliability/index.md)** | Circuit breakers, retries with backoff, rate limiting |
 
 ## Documentation
 
