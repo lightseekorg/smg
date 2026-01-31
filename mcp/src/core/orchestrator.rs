@@ -385,10 +385,13 @@ impl McpOrchestrator {
             Err(McpError::ServerDisconnected(name)) => {
                 let config = self
                     .static_servers
-                    .get(&name)
+                    .remove(&name)
                     .map(|e| e.config.clone())
                     .ok_or_else(|| McpError::ServerNotFound(name.clone()))?;
-
+                info!(
+                    "Server '{}' disconnected, initiating reconnection with backoff",
+                    name
+                );
                 self.reconnection_manager
                     .reconnect(&name, || async {
                         self.connect_static_server(&config).await
@@ -2410,6 +2413,7 @@ mod tests {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
+            reconnection_manager: ReconnectionManager::new(),
             config,
         };
 
@@ -2478,6 +2482,7 @@ mod tests {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
+            reconnection_manager: ReconnectionManager::new(),
             config,
         };
 
@@ -2548,6 +2553,7 @@ mod tests {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
+            reconnection_manager: ReconnectionManager::new(),
             config,
         };
 
@@ -2624,6 +2630,7 @@ mod tests {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
+            reconnection_manager: ReconnectionManager::new(),
             config,
         };
 
