@@ -415,6 +415,7 @@ jobs:
 
       - name: Install SGLang dependencies
         run: |
+          sudo apt-get update
           cd sglang
           sudo --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
 
