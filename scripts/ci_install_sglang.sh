@@ -14,7 +14,7 @@ SGLANG_DIR="${1:-sglang}"
 # Clone SGLang if not already present
 if [ ! -d "$SGLANG_DIR" ]; then
     echo "Cloning SGLang repository..."
-    git clone https://github.com/sgl-project/sglang.git "$SGLANG_DIR"
+    git clone --depth 1 https://github.com/sgl-project/sglang.git "$SGLANG_DIR"
 fi
 
 # Install SGLang dependencies
