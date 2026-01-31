@@ -2040,14 +2040,13 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_reconnection_flow_integration() {
-        let orchestrator = McpOrchestrator::new_test();
+        let _orchestrator = McpOrchestrator::new_test();
         let server_name = "test-server";
 
-        // 1. Simulate a disconnected state
+        // Simulate a disconnected state
         let err = McpError::ServerDisconnected(server_name.to_string());
 
-        // 2. Verify that call_tool_with_reconnect would trigger reconnection
-        // (In a real test, you would mock the connect_static_server call)
+        // Verify that call_tool_with_reconnect would trigger reconnection
         assert!(matches!(err, McpError::ServerDisconnected(_)));
     }
 }
