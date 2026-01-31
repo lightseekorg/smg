@@ -561,8 +561,16 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                     t.clear_waiting(idx);
                 }
 
-                // Collect steps ready to launch
-                let mut ready = newly_ready_from_wait;
+                // Collect steps ready to launch, deduplicating indices.
+                // A step with depends_on_any([A, B]) appears in pending_check once
+                // per completed dependency, but must only launch once.
+                let mut seen = std::collections::HashSet::new();
+                let mut ready: Vec<usize> = Vec::new();
+                for idx in newly_ready_from_wait {
+                    if seen.insert(idx) {
+                        ready.push(idx);
+                    }
+                }
 
                 for idx in deps_ready_indices {
                     let step = &definition.steps[idx];
@@ -582,7 +590,9 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                             continue;
                         }
                     }
-                    ready.push(idx);
+                    if seen.insert(idx) {
+                        ready.push(idx);
+                    }
                 }
 
                 (ready, added_to_waiting)
