@@ -363,47 +363,6 @@ impl McpOrchestrator {
 
         Ok(orchestrator)
     }
-    pub async fn call_tool_with_reconnect(
-        &self,
-        server_key: &str,
-        tool_name: &str,
-        arguments: Value,
-        server_label: &str,
-        request_ctx: &McpRequestContext<'_>,
-    ) -> McpResult<ToolCallResult> {
-        match self
-            .call_tool(
-                server_key,
-                tool_name,
-                arguments.clone(),
-                server_label,
-                request_ctx,
-            )
-            .await
-        {
-            Ok(result) => Ok(result),
-            Err(McpError::ServerDisconnected(name)) => {
-                let config = self
-                    .static_servers
-                    .remove(&name)
-                    .map(|(_, entry)| entry.config.clone())
-                    .ok_or_else(|| McpError::ServerNotFound(name.clone()))?;
-                info!(
-                    "Server '{}' disconnected, initiating reconnection with backoff",
-                    name
-                );
-                self.reconnection_manager
-                    .reconnect(&name, || async {
-                        self.connect_static_server(&config).await
-                    })
-                    .await?;
-
-                self.call_tool(server_key, tool_name, arguments, server_label, request_ctx)
-                    .await
-            }
-            Err(e) => Err(e),
-        }
-    }
 
     /// Create a simplified orchestrator for testing.
     #[cfg(test)]
@@ -1250,23 +1209,35 @@ impl McpOrchestrator {
         match self.execute_tool_impl(entry, arguments.clone()).await {
             Ok(result) => Ok(result),
             Err(McpError::ServerDisconnected(name)) => {
-                // Remove the stale entry to ensure connect_static_server doesn't return early
                 let config = self
                     .static_servers
-                    .remove(&name)
-                    .map(|(_, e)| e.config.clone())
+                    .get(&name)
+                    .map(|e| e.config.clone())
                     .ok_or_else(|| McpError::ServerNotFound(name.clone()))?;
 
-                info!("Attempting reconnection for server: {}", name);
+                warn!(
+                    "Server '{}' disconnected, initiating reconnection with backoff",
+                    name
+                );
 
-                self.reconnection_manager
+                let reconnect_result = self
+                    .reconnection_manager
                     .reconnect(&name, || async {
+                        self.static_servers.remove(&name);
                         self.connect_static_server(&config).await
                     })
-                    .await?;
+                    .await;
 
-                // Retry execution after successful reconnection
-                self.execute_tool_impl(entry, arguments).await
+                match reconnect_result {
+                    Ok(_) => self.execute_tool_impl(entry, arguments).await,
+                    Err(e) => {
+                        error!(
+                            "Permanent reconnection failure for server '{}': {}",
+                            name, e
+                        );
+                        Err(e)
+                    }
+                }
             }
             Err(e) => Err(e),
         }
