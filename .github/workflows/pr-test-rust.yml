@@ -410,14 +410,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Clone SGLang repository
-        run: git clone https://github.com/sgl-project/sglang.git
-
-      - name: Install SGLang dependencies
+      - name: Install inference backend
         run: |
-          sudo apt-get update
-          cd sglang
-          sudo --preserve-env=PATH bash scripts/ci/cuda/ci_install_dependency.sh
+          bash scripts/ci_setup_python_venv.sh
+          source .venv/bin/activate
+          bash scripts/ci_install_sglang.sh
 
       - name: Setup Go
         uses: actions/setup-go@v5
