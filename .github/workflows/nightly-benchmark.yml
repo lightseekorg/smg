@@ -60,7 +60,7 @@ jobs:
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           E2E_RUNTIME=sglang \
-          ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+          ROUTER_LOCAL_MODEL_PATH="/raid/models" \
             pytest e2e_test/benchmarks/test_nightly_perf.py \
               -k "Single" \
               -s -vv -o log_cli=true --log-cli-level=INFO
@@ -107,7 +107,7 @@ jobs:
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           E2E_RUNTIME=vllm \
-          ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+          ROUTER_LOCAL_MODEL_PATH="/raid/models" \
             pytest e2e_test/benchmarks/test_nightly_perf.py \
               -k "Single and grpc" \
               -s -vv -o log_cli=true --log-cli-level=INFO
