@@ -308,8 +308,9 @@ pub async fn ensure_request_mcp_client(
         let server_name = routing.server_name;
         if !mcp_servers.iter().any(|(_, key)| key == &server_name) {
             mcp_servers.push((server_name.clone(), server_name.clone()));
-            // Built-in tools use default Interactive mode (safest default)
-            approval_modes.insert(server_name, ApprovalMode::Interactive);
+            // Built-in tools use PolicyOnly mode — they are server-configured,
+            // not user-requested, so they should auto-execute without approval.
+            approval_modes.insert(server_name, ApprovalMode::PolicyOnly);
         }
     }
 
@@ -692,10 +693,10 @@ mod tests {
         assert_eq!(label, "search-server");
         assert_eq!(key, "search-server");
 
-        // Built-in tools should default to Interactive mode
+        // Built-in tools should default to PolicyOnly mode (server-configured, auto-execute)
         assert_eq!(
             conn_result.approval_modes.get("search-server"),
-            Some(&ApprovalMode::Interactive)
+            Some(&ApprovalMode::PolicyOnly)
         );
     }
 
