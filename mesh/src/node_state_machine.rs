@@ -94,9 +94,8 @@ impl ConvergenceTracker {
         }
 
         self.last_state_hash = Some(state_hash);
-        self.last_update_time = Some(now);
 
-        // Check if we've been stable long enough
+        // Check elapsed time since the first stable update, not since this update
         if let Some(last_time) = self.last_update_time {
             let elapsed = now.duration_since(last_time);
             if elapsed >= config.convergence_window
@@ -104,6 +103,11 @@ impl ConvergenceTracker {
             {
                 return true;
             }
+        }
+
+        // Only set the timestamp if this is the first update or state changed
+        if self.last_update_time.is_none() || self.stable_update_count == 0 {
+            self.last_update_time = Some(now);
         }
 
         false

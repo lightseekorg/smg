@@ -61,10 +61,9 @@ pub fn create_error(
     let message_str = message.into();
 
     let mut headers = HeaderMap::with_capacity(1);
-    headers.insert(
-        HEADER_X_SMG_ERROR_CODE,
-        HeaderValue::from_str(&code_str).unwrap(),
-    );
+    if let Ok(val) = HeaderValue::from_str(&code_str) {
+        headers.insert(HEADER_X_SMG_ERROR_CODE, val);
+    }
 
     (
         status,

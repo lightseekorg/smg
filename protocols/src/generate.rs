@@ -286,12 +286,23 @@ pub struct GenerateMetaInfo {
 
 /// Finish reason for generate endpoint
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(untagged)]
 pub enum GenerateFinishReason {
     Length {
+        #[serde(rename = "type")]
+        finish_type: GenerateFinishType,
         length: u32,
     },
-    Stop,
-    #[serde(untagged)]
+    Stop {
+        #[serde(rename = "type")]
+        finish_type: GenerateFinishType,
+    },
     Other(Value),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GenerateFinishType {
+    Length,
+    Stop,
 }

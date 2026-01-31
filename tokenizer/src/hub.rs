@@ -41,12 +41,8 @@ fn is_weight_file(filename: &str) -> bool {
 
 /// Checks if a file is an image file
 fn is_image(filename: &str) -> bool {
-    filename.ends_with(".png")
-        || filename.ends_with("PNG")
-        || filename.ends_with(".jpg")
-        || filename.ends_with("JPG")
-        || filename.ends_with(".jpeg")
-        || filename.ends_with("JPEG")
+    let lower = filename.to_lowercase();
+    lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg")
 }
 
 /// Checks if a file is a tokenizer file
