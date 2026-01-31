@@ -33,9 +33,9 @@ impl ReconnectionManager {
         if attempt == 0 {
             return Duration::ZERO;
         }
-        let exponent = attempt.saturating_sub(1);
-        let factor = 2u64.pow(exponent);
-        let delay = self.base_delay.as_millis() as u64 * factor;
+        let exponent = attempt.saturating_sub(1).min(63);
+        let factor = 2u64.saturating_pow(exponent);
+        let delay = (self.base_delay.as_millis() as u64).saturating_mul(factor);
         Duration::from_millis(delay.min(self.max_delay.as_millis() as u64))
     }
 
