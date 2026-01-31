@@ -32,7 +32,8 @@ pub(crate) struct PostgresStore {
 
 impl PostgresStore {
     pub fn new(config: PostgresConfig) -> Result<Self, String> {
-        let pg_config = tokio_postgres::Config::from_str(config.db_url.as_str()).unwrap();
+        let pg_config = tokio_postgres::Config::from_str(config.db_url.as_str())
+            .map_err(|e| format!("Invalid PostgreSQL connection URL: {}", e))?;
         let mgr_config = ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         };
@@ -40,7 +41,7 @@ impl PostgresStore {
         let pool = Pool::builder(mgr)
             .max_size(config.pool_max)
             .build()
-            .unwrap();
+            .map_err(|e| format!("Failed to build PostgreSQL connection pool: {}", e))?;
 
         Ok(Self { pool })
     }
@@ -66,7 +67,11 @@ impl PostgresConversationStorage {
     }
 
     async fn initialize_schema(store: PostgresStore) -> Result<(), ConversationStorageError> {
-        let client = store.pool.get().await.unwrap();
+        let client = store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         client
             .batch_execute(
                 "
@@ -77,7 +82,7 @@ impl PostgresConversationStorage {
             );",
             )
             .await
-            .unwrap();
+            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
 
         Ok(())
     }
@@ -114,14 +119,19 @@ impl ConversationStorage for PostgresConversationStorage {
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
-        let client = self.store.pool.get().await.unwrap();
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         client
             .execute(
                 "INSERT INTO conversations (id, created_at, metadata) VALUES ($1, $2, $3)",
                 &[&id_str, &created_at, &metadata_json],
             )
             .await
-            .unwrap();
+            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         Ok(conversation)
     }
 
@@ -130,14 +140,19 @@ impl ConversationStorage for PostgresConversationStorage {
         id: &ConversationId,
     ) -> Result<Option<Conversation>, ConversationStorageError> {
         let conversation_id = id.0.clone();
-        let client = self.store.pool.get().await.unwrap();
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         let rows = client
             .query(
                 "SELECT id, created_at, metadata FROM conversations WHERE id = $1",
                 &[&conversation_id],
             )
             .await
-            .unwrap();
+            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         if rows.is_empty() {
             return Ok(None);
         }
@@ -160,14 +175,19 @@ impl ConversationStorage for PostgresConversationStorage {
     ) -> Result<Option<Conversation>, ConversationStorageError> {
         let conversation_id = id.0.clone();
         let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
-        let client = self.store.pool.get().await.unwrap();
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         let rows = client
             .query(
                 "UPDATE conversations SET metadata = $1 WHERE id = $2 RETURNING created_at",
                 &[&metadata_json, &conversation_id],
             )
             .await
-            .unwrap();
+            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         if rows.is_empty() {
             return Ok(None);
         }
@@ -182,14 +202,19 @@ impl ConversationStorage for PostgresConversationStorage {
 
     async fn delete_conversation(&self, id: &ConversationId) -> ConversationResult<bool> {
         let conversation_id = id.0.clone();
-        let client = self.store.pool.get().await.unwrap();
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         let rows_deleted = client
             .execute(
                 "DELETE FROM conversations WHERE id = $1",
                 &[&conversation_id],
             )
             .await
-            .unwrap();
+            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         Ok(rows_deleted > 0)
     }
 }
@@ -206,7 +231,11 @@ impl PostgresConversationItemStorage {
     }
 
     async fn initialize_schema(store: PostgresStore) -> Result<(), ConversationItemStorageError> {
-        let client = store.pool.get().await.unwrap();
+        let client = store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         client
             .batch_execute(
                 "
@@ -221,7 +250,7 @@ impl PostgresConversationItemStorage {
             );",
             )
             .await
-            .unwrap();
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
 
         // Create conversation_item_links table
         client
@@ -236,7 +265,7 @@ impl PostgresConversationItemStorage {
             CREATE INDEX IF NOT EXISTS conv_item_links_conv_idx ON conversation_item_links (conversation_id, added_at);",
             )
             .await
-            .unwrap();
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         Ok(())
     }
 }
@@ -268,11 +297,16 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         let role = conversation_item.role.clone();
         let status = conversation_item.status.clone();
 
-        let client = self.store.pool.get().await.unwrap();
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         client.execute("INSERT INTO conversation_items (id, response_id, item_type, role, content, status, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
             &[&id_str, &response_id, &item_type, &role, &content_json, &status, &created_at])
             .await
-            .unwrap();
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         Ok(conversation_item)
     }
 
@@ -284,11 +318,16 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
     ) -> ConversationItemResult<()> {
         let cid = conversation_id.0.clone();
         let iid = item_id.0.clone();
-        let client = self.store.pool.get().await.unwrap();
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         client.execute("INSERT INTO conversation_item_links (conversation_id, item_id, added_at) VALUES ($1, $2, $3)",
             &[&cid, &iid, &added_at])
             .await
-            .unwrap();
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         Ok(())
     }
 
@@ -305,14 +344,19 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         let after_key: Option<(DateTime<Utc>, String)> = if let Some(ref aid) = after_id {
             let cid = cid.clone();
             let aid = aid.clone();
-            let client = self.store.pool.get().await.unwrap();
+            let client = self
+                .store
+                .pool
+                .get()
+                .await
+                .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
             let rows = client
                 .query(
                     "SELECT added_at FROM conversation_item_links WHERE conversation_id = $1 AND item_id = $2",
                     &[&cid, &aid],
                 )
                 .await
-                .unwrap();
+                .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
             if !rows.is_empty() {
                 let row = &rows[0];
                 let ts: DateTime<Utc> = row.get(0);
@@ -351,11 +395,22 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         } else {
             sql.push_str(" LIMIT $2");
         }
-        let client = self.store.pool.get().await.unwrap();
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         let rows = if let Some((ts, iid)) = &after_key {
-            client.query(&sql, &[&cid, ts, iid, &limit]).await.unwrap()
+            client
+                .query(&sql, &[&cid, ts, iid, &limit])
+                .await
+                .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?
         } else {
-            client.query(&sql, &[&cid, &limit]).await.unwrap()
+            client
+                .query(&sql, &[&cid, &limit])
+                .await
+                .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?
         };
         let mut out = Vec::new();
         for row in rows {
@@ -404,11 +459,23 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         item_id: &ConversationItemId,
     ) -> Result<Option<ConversationItem>, ConversationItemStorageError> {
         let iid = item_id.0.clone();
-        let client = self.store.pool.get().await.unwrap();
-        let row = client.query_one("SELECT id, response_id, item_type, role, content, status, created_at FROM converstation_items WHERE id = $1", &[&iid]).await.unwrap();
-        if row.is_empty() {
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
+        let rows = client
+            .query(
+                "SELECT id, response_id, item_type, role, content, status, created_at FROM conversation_items WHERE id = $1",
+                &[&iid],
+            )
+            .await
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
+        if rows.is_empty() {
             Ok(None)
         } else {
+            let row = &rows[0];
             let id: String = row.get(0);
             let response_id: Option<String> = row.get(1);
             let item_type: String = row.get(2);
@@ -442,14 +509,19 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
     ) -> ConversationItemResult<bool> {
         let cid = conversation_id.0.clone();
         let iid = item_id.0.clone();
-        let client = self.store.pool.get().await.unwrap();
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         let row = client
             .query_one(
                 "SELECT COUNT(*) FROM conversation_item_links WHERE conversation_id = $1 AND item_id = $2",
                 &[&cid, &iid],
             )
             .await
-            .unwrap();
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         let count: i64 = row.get(0);
         Ok(count > 0)
     }
@@ -461,14 +533,19 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
     ) -> ConversationItemResult<()> {
         let cid = conversation_id.0.clone();
         let iid = item_id.0.clone();
-        let client = self.store.pool.get().await.unwrap();
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         client
             .execute(
                 "DELETE FROM conversation_item_links WHERE conversation_id = $1 AND item_id = $2",
                 &[&cid, &iid],
             )
             .await
-            .unwrap();
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         Ok(())
     }
 }
@@ -485,7 +562,11 @@ impl PostgresResponseStorage {
     }
 
     async fn initialize_schema(store: PostgresStore) -> Result<(), ResponseStorageError> {
-        let client = store.pool.get().await.unwrap();
+        let client = store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         client
             .batch_execute(
                 "
@@ -505,7 +586,7 @@ impl PostgresResponseStorage {
             );",
             )
             .await
-            .unwrap();
+            .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         Ok(())
     }
 
@@ -566,7 +647,12 @@ impl ResponseStorage for PostgresResponseStorage {
         let safety_identifier = response.safety_identifier.clone();
         let model = response.model.clone();
         let conversation_id = response.conversation_id.clone();
-        let client = self.store.pool.get().await.unwrap();
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         let insert_count = client.execute(
             "INSERT INTO responses (id, previous_response_id, input, instructions, output, \
                     tool_calls, metadata, created_at, safety_identifier, model, conversation_id, raw_response) \
@@ -584,7 +670,7 @@ impl ResponseStorage for PostgresResponseStorage {
                 &model,
                 &conversation_id,
                 &json_raw_response,
-            ]).await.unwrap();
+            ]).await.map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         tracing::debug!(rows_affected = insert_count, "Response stored in Postgres");
         Ok(response_id)
     }
@@ -594,23 +680,36 @@ impl ResponseStorage for PostgresResponseStorage {
         response_id: &ResponseId,
     ) -> Result<Option<StoredResponse>, ResponseStorageError> {
         let id = response_id.0.clone();
-        let client = self.store.pool.get().await.unwrap();
-        let row = client
-            .query_one("SELECT * FROM responses WHERE id = $1", &[&id])
+        let client = self
+            .store
+            .pool
+            .get()
             .await
-            .unwrap();
-        Self::build_response_from_now(&row)
+            .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+        let rows = client
+            .query("SELECT * FROM responses WHERE id = $1", &[&id])
+            .await
+            .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        Self::build_response_from_now(&rows[0])
             .map(Some)
             .map_err(|err| ResponseStorageError::StorageError(err.to_string()))
     }
 
     async fn delete_response(&self, response_id: &ResponseId) -> ResponseResult<()> {
         let id = response_id.0.clone();
-        let client = self.store.pool.get().await.unwrap();
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         client
             .execute("DELETE FROM responses WHERE id = $1", &[&id])
             .await
-            .unwrap();
+            .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         Ok(())
     }
 
@@ -651,7 +750,12 @@ impl ResponseStorage for PostgresResponseStorage {
         limit: Option<usize>,
     ) -> ResponseResult<Vec<StoredResponse>> {
         let identifier = identifier.to_string();
-        let client = self.store.pool.get().await.unwrap();
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         let rows = if let Some(l) = limit {
             let l_i64: i64 = l as i64;
             client
@@ -660,7 +764,7 @@ impl ResponseStorage for PostgresResponseStorage {
                     &[&identifier, &l_i64],
                 )
                 .await
-                .unwrap()
+                .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?
         } else {
             client
                 .query(
@@ -668,7 +772,7 @@ impl ResponseStorage for PostgresResponseStorage {
                     &[&identifier],
                 )
                 .await
-                .unwrap()
+                .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?
         };
 
         let mut out = Vec::with_capacity(rows.len());
@@ -683,14 +787,19 @@ impl ResponseStorage for PostgresResponseStorage {
 
     async fn delete_identifier_responses(&self, identifier: &str) -> ResponseResult<usize> {
         let identifier = identifier.to_string();
-        let client = self.store.pool.get().await.unwrap();
+        let client = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         let rows_deleted = client
             .execute(
                 "DELETE FROM responses WHERE safety_identifier = $1",
                 &[&identifier],
             )
             .await
-            .unwrap();
+            .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         Ok(rows_deleted as usize)
     }
 }

@@ -242,6 +242,10 @@ impl MeshController {
                             total_count
                         );
                     }
+                    return Err(anyhow::anyhow!(
+                        "Failed to connect to peer {}: direct ping and ping-req both failed",
+                        peer_name
+                    ));
                 }
             }
         }
