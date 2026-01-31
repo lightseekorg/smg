@@ -10,14 +10,50 @@ from typing import List, Optional, Tuple
 from smg.router_args import RouterArgs
 
 
+def _add_sglang_args(parser: argparse.ArgumentParser) -> None:
+    """Add sglang-specific arguments."""
+    try:
+        from sglang.srt.server_args import ServerArgs
+
+        ServerArgs.add_cli_args(parser)
+    except ImportError:
+        parser.error("sglang is not installed. Install it with: pip install sglang")
+
+
+def _add_vllm_args(parser: argparse.ArgumentParser) -> None:
+    """Add vllm-specific arguments."""
+    try:
+        from vllm.engine.arg_utils import EngineArgs
+
+        EngineArgs.add_cli_args(parser)
+    except ImportError:
+        parser.error("vllm is not installed. Install it with: pip install vllm")
+
+
+def _add_trtllm_stub_args(parser: argparse.ArgumentParser) -> None:
+    """Stub for TRT-LLM args until full integration."""
+    group = parser.add_argument_group("TRT-LLM Options (stub)")
+    group.add_argument("--model", type=str, help="Model path")
+
+
+BACKEND_ARG_ADDERS = {
+    "sglang": _add_sglang_args,
+    "vllm": _add_vllm_args,
+    "trtllm": _add_trtllm_stub_args,
+}
+
+BACKEND_CHOICES = list(BACKEND_ARG_ADDERS.keys())
+DEFAULT_BACKEND = "sglang"
+
+
 def add_serve_args(parser: argparse.ArgumentParser) -> None:
     """Add serve-specific arguments (not from any backend)."""
     group = parser.add_argument_group("Serve Options")
     group.add_argument(
         "--backend",
-        default="sglang",
-        choices=["sglang", "vllm", "trtllm"],
-        help="Inference backend to use (default: sglang)",
+        default=DEFAULT_BACKEND,
+        choices=BACKEND_CHOICES,
+        help=f"Inference backend to use (default: {DEFAULT_BACKEND})",
     )
     group.add_argument(
         "--dp-size",
@@ -46,33 +82,7 @@ def add_serve_args(parser: argparse.ArgumentParser) -> None:
 
 def _import_backend_args(backend: str, parser: argparse.ArgumentParser) -> None:
     """Conditionally import and add backend-native args to parser."""
-    match backend:
-        case "sglang":
-            try:
-                from sglang.srt.server_args import ServerArgs
-
-                ServerArgs.add_cli_args(parser)
-            except ImportError:
-                parser.error(
-                    "sglang is not installed. Install it with: pip install sglang"
-                )
-        case "vllm":
-            try:
-                from vllm.engine.arg_utils import EngineArgs
-
-                EngineArgs.add_cli_args(parser)
-            except ImportError:
-                parser.error(
-                    "vllm is not installed. Install it with: pip install vllm"
-                )
-        case "trtllm":
-            _add_trtllm_stub_args(parser)
-
-
-def _add_trtllm_stub_args(parser: argparse.ArgumentParser) -> None:
-    """Stub for TRT-LLM args until full integration."""
-    group = parser.add_argument_group("TRT-LLM Options (stub)")
-    group.add_argument("--model", type=str, help="Model path")
+    BACKEND_ARG_ADDERS[backend](parser)
 
 
 def parse_serve_args(
@@ -92,7 +102,7 @@ def parse_serve_args(
     # Pass 1: extract --backend (lightweight, no backend imports)
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument(
-        "--backend", default="sglang", choices=["sglang", "vllm", "trtllm"]
+        "--backend", default=DEFAULT_BACKEND, choices=BACKEND_CHOICES
     )
     pre_args, _ = pre_parser.parse_known_args(argv)
     backend = pre_args.backend
