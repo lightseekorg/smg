@@ -19,7 +19,7 @@ on:
 
 concurrency:
   group: nightly-benchmark
-  cancel-in-progress: false
+  cancel-in-progress: true #TODO: revert before merge — cancel-in-progress: false
 
 permissions:
   contents: read
