@@ -48,6 +48,21 @@ class WorkerLauncher(ABC):
         """Return the URL used by the router to reach this worker."""
         ...
 
+    def _get_tp_size(self, args: argparse.Namespace) -> int:
+        """Return tensor-parallel size for GPU assignment. Default 1."""
+        return 1
+
+    def gpu_env(
+        self, args: argparse.Namespace, dp_rank: int, env: Optional[dict] = None
+    ) -> dict:
+        """Build env dict with CUDA_VISIBLE_DEVICES for this worker's dp_rank."""
+        env = dict(env) if env is not None else os.environ.copy()
+        tp_size = self._get_tp_size(args)
+        base_gpu = dp_rank * tp_size
+        gpu_ids = range(base_gpu, base_gpu + tp_size)
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
+        return env
+
     def launch(
         self,
         args: argparse.Namespace,
@@ -64,6 +79,9 @@ class WorkerLauncher(ABC):
 
 class SglangWorkerLauncher(WorkerLauncher):
     """Launcher for sglang inference workers."""
+
+    def _get_tp_size(self, args: argparse.Namespace) -> int:
+        return getattr(args, "tp_size", 1)
 
     def build_command(
         self, args: argparse.Namespace, host: str, port: int
@@ -93,6 +111,9 @@ class SglangWorkerLauncher(WorkerLauncher):
 class VllmWorkerLauncher(WorkerLauncher):
     """Launcher for vLLM inference workers (gRPC mode)."""
 
+    def _get_tp_size(self, args: argparse.Namespace) -> int:
+        return getattr(args, "tensor_parallel_size", 1)
+
     def build_command(
         self, args: argparse.Namespace, host: str, port: int
     ) -> List[str]:
@@ -121,6 +142,9 @@ class TrtllmWorkerLauncher(WorkerLauncher):
     Uses ``python3 -m tensorrt_llm.commands.serve <model> --grpc ...``.
     See https://github.com/NVIDIA/TensorRT-LLM/pull/11037
     """
+
+    def _get_tp_size(self, args: argparse.Namespace) -> int:
+        return getattr(args, "tp_size", 1)
 
     def build_command(
         self, args: argparse.Namespace, host: str, port: int
@@ -399,11 +423,14 @@ class ServeOrchestrator:
     def _launch_workers(self) -> None:
         ports = _find_available_ports(self.args.worker_base_port, self.args.dp_size)
         host = self.args.worker_host
-        for port in ports:
-            env = os.environ.copy()
+        for dp_rank, port in enumerate(ports):
+            env = self.launcher.gpu_env(self.args, dp_rank)
             proc = self.launcher.launch(self.args, host, port, env)
             self.workers.append((proc, port))
-            logger.info("Launched %s worker on %s:%d (pid %d)", self.backend, host, port, proc.pid)
+            logger.info(
+                "Launched %s worker on %s:%d (pid %d, GPUs: %s)",
+                self.backend, host, port, proc.pid, env["CUDA_VISIBLE_DEVICES"],
+            )
 
     def _wait_healthy(self) -> None:
         host = self.args.worker_host
