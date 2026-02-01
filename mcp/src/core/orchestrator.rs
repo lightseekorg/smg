@@ -34,12 +34,12 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use rmcp::service::{ServiceError, RunningService};
+
 use dashmap::DashMap;
 use openai_protocol::responses::ResponseOutputItem;
 use rmcp::{
     model::{CallToolRequestParam, CallToolResult},
-    service::RunningService,
+    service::{RunningService, ServiceError},
     RoleClient,
 };
 use serde_json::Value;
@@ -1210,7 +1210,8 @@ impl McpOrchestrator {
             Ok(result) => Ok(result),
             Err(McpError::ServerDisconnected(name)) => {
                 // Acquire/Create the mutex for this server
-                let lock = self.reconnection_locks
+                let lock = self
+                    .reconnection_locks
                     .entry(name.clone())
                     .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                     .value()
@@ -1221,23 +1222,34 @@ impl McpOrchestrator {
                 // Check if another thread already reconnected the server while we waited
                 if let Some(current_entry) = self.static_servers.get(&name) {
                     if !current_entry.client.is_closed() {
-                        debug!("Server '{}' already reconnected by another task, retrying call", name);
+                        debug!(
+                            "Server '{}' already reconnected by another task, retrying call",
+                            name
+                        );
                         return self.execute_tool_impl(entry, arguments).await;
                     }
                 }
 
                 // Read the config from the immutable root config so it can’t be abused.
                 // Even if reconnection fails, the orchestrator still remembers this server.
-                let server_config = self.config.servers.iter()
+                let server_config = self
+                    .config
+                    .servers
+                    .iter()
                     .find(|s| s.name == name)
                     .cloned()
                     .ok_or_else(|| McpError::ServerNotFound(name.clone()))?;
 
-                warn!("Server '{}' disconnected, initiating thread-safe recovery", name);
-                ReconnectionManager::default().reconnect(&name, || async {
-                    self.static_servers.remove(&name);
-                    self.connect_static_server(&server_config).await
-                }).await?;
+                warn!(
+                    "Server '{}' disconnected, initiating thread-safe recovery",
+                    name
+                );
+                ReconnectionManager::default()
+                    .reconnect(&name, || async {
+                        self.static_servers.remove(&name);
+                        self.connect_static_server(&server_config).await
+                    })
+                    .await?;
 
                 // Retry execution after successful reconnection
                 self.execute_tool_impl(entry, arguments).await
@@ -1391,7 +1403,7 @@ impl McpOrchestrator {
         if let Some(client) = self.connection_pool.get_by_url(server_key) {
             return client.call_tool(request).await.map_err(|e| match e {
                 ServiceError::TransportClosed | ServiceError::TransportSend(_) => {
-                    // Note: Pooled connections trigger Disconnected but 
+                    // Note: Pooled connections trigger Disconnected but
                     // recovery logic is currently scoped to static servers.
                     McpError::ServerDisconnected(server_key.to_string())
                 }
@@ -2004,34 +2016,37 @@ impl<'a> Drop for McpRequestContext<'a> {
 }
 #[cfg(test)]
 mod integration_tests {
-    use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
 
     #[tokio::test]
     async fn test_reconnection_logic_flow() {
         let orchestrator = McpOrchestrator::new_test();
         let name = "test-server";
-        
+
         // simulate a server in the registry
         let manager = ReconnectionManager {
             base_delay: Duration::from_millis(1),
             max_retries: 3,
             ..Default::default()
         };
-        
+
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_clone = Arc::clone(&attempts);
 
-        let result = manager.reconnect(name, || {
-            let count = attempts_clone.fetch_add(1, Ordering::SeqCst);
-            async move {
-                if count < 1 {
-                    Err(McpError::Transport("Handshake failed".to_string()))
-                } else {
-                    Ok(())
+        let result = manager
+            .reconnect(name, || {
+                let count = attempts_clone.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if count < 1 {
+                        Err(McpError::Transport("Handshake failed".to_string()))
+                    } else {
+                        Ok(())
+                    }
                 }
-            }
-        }).await;
+            })
+            .await;
 
         assert!(result.is_ok());
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
