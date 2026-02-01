@@ -34,7 +34,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-
+use rmcp::service::{ServiceError, RunningService};
 use dashmap::DashMap;
 use openai_protocol::responses::ResponseOutputItem;
 use rmcp::{
@@ -282,7 +282,7 @@ pub struct McpOrchestrator {
     refresh_tx: mpsc::Sender<RefreshRequest>,
     active_executions: Arc<AtomicUsize>,
     shutdown_token: CancellationToken,
-    reconnection_manager: ReconnectionManager,
+    reconnection_locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
     /// Original config for reference.
     config: McpConfig,
 }
@@ -336,7 +336,7 @@ impl McpOrchestrator {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
-            reconnection_manager: ReconnectionManager::new(),
+            reconnection_locks: DashMap::new(),
             config: config.clone(),
         };
 
@@ -383,7 +383,7 @@ impl McpOrchestrator {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
-            reconnection_manager: ReconnectionManager::new(),
+            reconnection_locks: DashMap::new(),
             config: McpConfig::default(),
         }
     }
@@ -1209,35 +1209,38 @@ impl McpOrchestrator {
         match self.execute_tool_impl(entry, arguments.clone()).await {
             Ok(result) => Ok(result),
             Err(McpError::ServerDisconnected(name)) => {
-                let config = self
-                    .static_servers
-                    .get(&name)
-                    .map(|e| e.config.clone())
-                    .ok_or_else(|| McpError::ServerNotFound(name.clone()))?;
+                // Acquire/Create the mutex for this server
+                let lock = self.reconnection_locks
+                    .entry(name.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .value()
+                    .clone();
 
-                warn!(
-                    "Server '{}' disconnected, initiating reconnection with backoff",
-                    name
-                );
+                let _guard = lock.lock().await;
 
-                let reconnect_result = self
-                    .reconnection_manager
-                    .reconnect(&name, || async {
-                        self.static_servers.remove(&name);
-                        self.connect_static_server(&config).await
-                    })
-                    .await;
-
-                match reconnect_result {
-                    Ok(_) => self.execute_tool_impl(entry, arguments).await,
-                    Err(e) => {
-                        error!(
-                            "Permanent reconnection failure for server '{}': {}",
-                            name, e
-                        );
-                        Err(e)
+                // Check if another thread already reconnected the server while we waited
+                if let Some(current_entry) = self.static_servers.get(&name) {
+                    if !current_entry.client.is_closed() {
+                        debug!("Server '{}' already reconnected by another task, retrying call", name);
+                        return self.execute_tool_impl(entry, arguments).await;
                     }
                 }
+
+                // Read the config from the immutable root config so it can’t be abused.
+                // Even if reconnection fails, the orchestrator still remembers this server.
+                let server_config = self.config.servers.iter()
+                    .find(|s| s.name == name)
+                    .cloned()
+                    .ok_or_else(|| McpError::ServerNotFound(name.clone()))?;
+
+                warn!("Server '{}' disconnected, initiating thread-safe recovery", name);
+                ReconnectionManager::default().reconnect(&name, || async {
+                    self.static_servers.remove(&name);
+                    self.connect_static_server(&server_config).await
+                }).await?;
+
+                // Retry execution after successful reconnection
+                self.execute_tool_impl(entry, arguments).await
             }
             Err(e) => Err(e),
         }
@@ -1375,31 +1378,25 @@ impl McpOrchestrator {
         server_key: &str,
         request: CallToolRequestParam,
     ) -> McpResult<CallToolResult> {
-        // Check static servers first
         if let Some(entry) = self.static_servers.get(server_key) {
-            return entry.client.call_tool(request).await.map_err(|e| {
-                let err_msg = e.to_string().to_lowercase();
-                // Detect transport failures to trigger ReconnectionManager
-                if err_msg.contains("connection closed")
-                    || err_msg.contains("broken pipe")
-                    || err_msg.contains("transport error")
-                    || err_msg.contains("channel closed")
-                {
+            return entry.client.call_tool(request).await.map_err(|e| match e {
+                // Typed detection for transport-level failures
+                ServiceError::TransportClosed | ServiceError::TransportSend(_) => {
                     McpError::ServerDisconnected(server_key.to_string())
-                } else {
-                    McpError::ToolExecution(format!("MCP call failed: {}", e))
                 }
+                _ => McpError::ToolExecution(format!("MCP call failed: {}", e)),
             });
         }
 
-        // Check connection pool by URL (pool uses different handler type)
-        // Note: This uses URL-based lookup for backward compatibility.
-        // For full auth/tenant isolation, use PoolKey-based lookup.
         if let Some(client) = self.connection_pool.get_by_url(server_key) {
-            return client
-                .call_tool(request)
-                .await
-                .map_err(|e| McpError::ToolExecution(format!("MCP call failed: {}", e)));
+            return client.call_tool(request).await.map_err(|e| match e {
+                ServiceError::TransportClosed | ServiceError::TransportSend(_) => {
+                    // Note: Pooled connections trigger Disconnected but 
+                    // recovery logic is currently scoped to static servers.
+                    McpError::ServerDisconnected(server_key.to_string())
+                }
+                _ => McpError::ToolExecution(format!("MCP call failed: {}", e)),
+            });
         }
 
         Err(McpError::ServerNotFound(server_key.to_string()))
@@ -2008,17 +2005,36 @@ impl<'a> Drop for McpRequestContext<'a> {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
-    async fn test_reconnection_flow_integration() {
-        let _orchestrator = McpOrchestrator::new_test();
-        let server_name = "test-server";
+    async fn test_reconnection_logic_flow() {
+        let orchestrator = McpOrchestrator::new_test();
+        let name = "test-server";
+        
+        // simulate a server in the registry
+        let manager = ReconnectionManager {
+            base_delay: Duration::from_millis(1),
+            max_retries: 3,
+            ..Default::default()
+        };
+        
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = Arc::clone(&attempts);
 
-        // Simulate a disconnected state
-        let err = McpError::ServerDisconnected(server_name.to_string());
+        let result = manager.reconnect(name, || {
+            let count = attempts_clone.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if count < 1 {
+                    Err(McpError::Transport("Handshake failed".to_string()))
+                } else {
+                    Ok(())
+                }
+            }
+        }).await;
 
-        // Verify that call_tool_with_reconnect would trigger reconnection
-        assert!(matches!(err, McpError::ServerDisconnected(_)));
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }
 #[cfg(test)]
@@ -2384,7 +2400,7 @@ mod tests {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
-            reconnection_manager: ReconnectionManager::new(),
+            reconnection_locks: DashMap::new(),
             config,
         };
 
@@ -2453,7 +2469,7 @@ mod tests {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
-            reconnection_manager: ReconnectionManager::new(),
+            reconnection_locks: DashMap::new(),
             config,
         };
 
@@ -2524,7 +2540,7 @@ mod tests {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
-            reconnection_manager: ReconnectionManager::new(),
+            reconnection_locks: DashMap::new(),
             config,
         };
 
@@ -2601,7 +2617,7 @@ mod tests {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
-            reconnection_manager: ReconnectionManager::new(),
+            reconnection_locks: DashMap::new(),
             config,
         };
 
