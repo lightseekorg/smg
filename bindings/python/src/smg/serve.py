@@ -164,7 +164,8 @@ def _http_health_check(url: str, timeout: float) -> bool:
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status == 200
-    except Exception:
+    except Exception as e:
+        logger.debug("HTTP health check for %s failed: %s", url, e)
         return False
 
 
@@ -196,10 +197,13 @@ def _grpc_health_check(host: str, port: int, timeout: float) -> bool:
                     return True
                 finally:
                     channel.close()
-            except Exception:
+            except Exception as e:
+                logger.debug("gRPC channel_ready fallback for %s:%d failed: %s", host, port, e)
                 return False
+        logger.debug("gRPC health check for %s:%d failed: %s", host, port, e)
         return False
-    except Exception:
+    except Exception as e:
+        logger.debug("gRPC health check error for %s:%d: %s", host, port, e)
         return False
 
 
@@ -402,9 +406,9 @@ class ServeOrchestrator:
             logger.info("Launched %s worker on %s:%d (pid %d)", self.backend, host, port, proc.pid)
 
     def _wait_healthy(self) -> None:
-        deadline = time.monotonic() + self.args.worker_startup_timeout
         host = self.args.worker_host
         for proc, port in self.workers:
+            deadline = time.monotonic() + self.args.worker_startup_timeout
             while time.monotonic() < deadline:
                 if proc.poll() is not None:
                     raise RuntimeError(
