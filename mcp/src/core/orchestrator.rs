@@ -2036,7 +2036,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn test_reconnection_logic_flow() {
-        let orchestrator = McpOrchestrator::new_test();
+        let _orchestrator = McpOrchestrator::new_test();
         let name = "test-server";
 
         // simulate a server in the registry
