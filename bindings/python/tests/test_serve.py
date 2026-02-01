@@ -6,15 +6,25 @@ and the backend registry (BACKEND_ARG_ADDERS, BACKEND_CHOICES, DEFAULT_BACKEND).
 """
 
 import argparse
-from unittest.mock import patch
+import signal
+import subprocess
+from unittest.mock import MagicMock, patch
 
 import pytest
 from smg.serve import (
     BACKEND_ARG_ADDERS,
     BACKEND_CHOICES,
+    BACKEND_LAUNCHERS,
     DEFAULT_BACKEND,
+    ServeOrchestrator,
+    SglangWorkerLauncher,
+    TrtllmWorkerLauncher,
+    VllmWorkerLauncher,
     _add_trtllm_stub_args,
+    _find_available_ports,
+    _http_health_check,
     _import_backend_args,
+    _is_port_available,
     add_serve_args,
     parse_serve_args,
 )
@@ -37,6 +47,20 @@ class TestBackendRegistry:
     def test_registry_values_are_callable(self):
         for name, adder in BACKEND_ARG_ADDERS.items():
             assert callable(adder), f"Backend {name} adder is not callable"
+
+
+class TestBackendLauncherRegistry:
+    """Test the BACKEND_LAUNCHERS registry."""
+
+    def test_all_backends_have_launchers(self):
+        assert "sglang" in BACKEND_LAUNCHERS
+        assert "vllm" in BACKEND_LAUNCHERS
+        assert "trtllm" in BACKEND_LAUNCHERS
+
+    def test_launcher_classes(self):
+        assert BACKEND_LAUNCHERS["sglang"] is SglangWorkerLauncher
+        assert BACKEND_LAUNCHERS["vllm"] is VllmWorkerLauncher
+        assert BACKEND_LAUNCHERS["trtllm"] is TrtllmWorkerLauncher
 
 
 class TestAddServeArgs:
@@ -241,3 +265,317 @@ class TestParseServeArgs:
         """Unknown args should be rejected by the full parser in pass 2."""
         with pytest.raises(SystemExit):
             parse_serve_args(["--backend", "trtllm", "--totally-unknown-flag"])
+
+
+# ---------------------------------------------------------------------------
+# Worker launcher tests
+# ---------------------------------------------------------------------------
+
+
+class TestSglangWorkerLauncher:
+    """Test SglangWorkerLauncher.build_command()."""
+
+    def test_build_command_basic(self):
+        launcher = SglangWorkerLauncher()
+        args = argparse.Namespace(model_path="/tmp/model", grpc_mode=False)
+        cmd = launcher.build_command(args, "127.0.0.1", 31000)
+        assert "--model-path" in cmd
+        assert "/tmp/model" in cmd
+        assert "--host" in cmd
+        assert "127.0.0.1" in cmd
+        assert "--port" in cmd
+        assert "31000" in cmd
+        assert "--grpc-mode" not in cmd
+
+    def test_build_command_grpc_mode(self):
+        launcher = SglangWorkerLauncher()
+        args = argparse.Namespace(model_path="/tmp/model", grpc_mode=True)
+        cmd = launcher.build_command(args, "127.0.0.1", 31000)
+        assert "--grpc-mode" in cmd
+
+    def test_worker_url(self):
+        launcher = SglangWorkerLauncher()
+        assert launcher.worker_url("127.0.0.1", 31000) == "http://127.0.0.1:31000"
+
+    def test_health_check_delegates_to_http(self):
+        launcher = SglangWorkerLauncher()
+        with patch("smg.serve._http_health_check", return_value=True) as mock:
+            result = launcher.health_check("127.0.0.1", 31000, 5.0)
+        assert result is True
+        mock.assert_called_once_with("http://127.0.0.1:31000/health", 5.0)
+
+
+class TestVllmWorkerLauncher:
+    """Test VllmWorkerLauncher.build_command()."""
+
+    def test_build_command(self):
+        launcher = VllmWorkerLauncher()
+        args = argparse.Namespace(model="/tmp/model")
+        cmd = launcher.build_command(args, "0.0.0.0", 32000)
+        assert "vllm.entrypoints.grpc_server" in cmd
+        assert "--model" in cmd
+        assert "/tmp/model" in cmd
+        assert "--host" in cmd
+        assert "0.0.0.0" in cmd
+        assert "--port" in cmd
+        assert "32000" in cmd
+
+    def test_worker_url(self):
+        launcher = VllmWorkerLauncher()
+        assert launcher.worker_url("127.0.0.1", 32000) == "grpc://127.0.0.1:32000"
+
+    def test_health_check_delegates_to_grpc(self):
+        launcher = VllmWorkerLauncher()
+        with patch("smg.serve._grpc_health_check", return_value=True) as mock:
+            result = launcher.health_check("127.0.0.1", 32000, 5.0)
+        assert result is True
+        mock.assert_called_once_with("127.0.0.1", 32000, 5.0)
+
+
+class TestTrtllmWorkerLauncher:
+    """Test TrtllmWorkerLauncher.build_command()."""
+
+    def test_build_command(self):
+        launcher = TrtllmWorkerLauncher()
+        args = argparse.Namespace(model="/tmp/model")
+        cmd = launcher.build_command(args, "0.0.0.0", 50051)
+        assert "tensorrt_llm.commands.serve" in cmd
+        assert "/tmp/model" in cmd
+        assert "--grpc" in cmd
+        assert "--host" in cmd
+        assert "0.0.0.0" in cmd
+        assert "--port" in cmd
+        assert "50051" in cmd
+
+    def test_worker_url(self):
+        launcher = TrtllmWorkerLauncher()
+        assert launcher.worker_url("127.0.0.1", 50051) == "grpc://127.0.0.1:50051"
+
+    def test_health_check_delegates_to_grpc(self):
+        launcher = TrtllmWorkerLauncher()
+        with patch("smg.serve._grpc_health_check", return_value=True) as mock:
+            result = launcher.health_check("127.0.0.1", 50051, 5.0)
+        assert result is True
+        mock.assert_called_once_with("127.0.0.1", 50051, 5.0)
+
+
+# ---------------------------------------------------------------------------
+# Health check utility tests
+# ---------------------------------------------------------------------------
+
+
+class TestHttpHealthCheck:
+    """Test _http_health_check with mocked urllib."""
+
+    def test_returns_true_on_200(self):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            assert _http_health_check("http://localhost:31000/health", 5.0) is True
+
+    def test_returns_false_on_error(self):
+        with patch("urllib.request.urlopen", side_effect=ConnectionError):
+            assert _http_health_check("http://localhost:31000/health", 5.0) is False
+
+    def test_returns_false_on_non_200(self):
+        mock_resp = MagicMock()
+        mock_resp.status = 503
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            assert _http_health_check("http://localhost:31000/health", 5.0) is False
+
+
+# ---------------------------------------------------------------------------
+# Port discovery tests
+# ---------------------------------------------------------------------------
+
+
+class TestFindAvailablePorts:
+    """Test _find_available_ports returns correct count of ports."""
+
+    def test_returns_requested_count(self):
+        with patch("smg.serve._is_port_available", return_value=True):
+            ports = _find_available_ports(31000, 3)
+        assert len(ports) == 3
+
+    def test_first_port_is_base(self):
+        with patch("smg.serve._is_port_available", return_value=True):
+            ports = _find_available_ports(31000, 1)
+        assert ports[0] == 31000
+
+    def test_skips_unavailable_ports(self):
+        # First call: port 31000 unavailable, then 31001 available
+        call_count = 0
+
+        def mock_available(port):
+            nonlocal call_count
+            call_count += 1
+            return port != 31000
+
+        with patch("smg.serve._is_port_available", side_effect=mock_available):
+            ports = _find_available_ports(31000, 1)
+        assert ports[0] == 31001
+
+    def test_ports_are_unique(self):
+        with patch("smg.serve._is_port_available", return_value=True):
+            ports = _find_available_ports(31000, 5)
+        assert len(set(ports)) == 5
+
+    def test_raises_when_no_ports_available(self):
+        with patch("smg.serve._is_port_available", return_value=False):
+            with pytest.raises(RuntimeError, match="Could not find"):
+                _find_available_ports(65530, 10)
+
+
+class TestIsPortAvailable:
+    """Test _is_port_available socket check."""
+
+    def test_available_port(self):
+        # Port 0 lets the OS pick a free port; we test a high ephemeral port
+        # that is almost certainly free
+        assert isinstance(_is_port_available(39999), bool)
+
+    def test_occupied_port(self):
+        import socket
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        try:
+            assert _is_port_available(port) is False
+        finally:
+            s.close()
+
+
+# ---------------------------------------------------------------------------
+# ServeOrchestrator tests
+# ---------------------------------------------------------------------------
+
+
+def _make_args(**overrides):
+    """Create a minimal argparse.Namespace for orchestrator tests."""
+    defaults = {
+        "backend": "sglang",
+        "dp_size": 2,
+        "worker_host": "127.0.0.1",
+        "worker_base_port": 31000,
+        "worker_startup_timeout": 10,
+        "model_path": "/tmp/model",
+        # router args with router_ prefix
+        "router_policy": "cache_aware",
+        "router_pd_disaggregation": False,
+        "router_disable_retries": False,
+    }
+    defaults.update(overrides)
+    return argparse.Namespace(**defaults)
+
+
+class TestServeOrchestrator:
+    """Test ServeOrchestrator lifecycle methods."""
+
+    def test_build_router_args_injects_worker_urls(self):
+        args = _make_args(dp_size=2)
+        orch = ServeOrchestrator("sglang", args)
+        # Simulate workers already launched
+        mock_proc1 = MagicMock()
+        mock_proc2 = MagicMock()
+        orch.workers = [(mock_proc1, 31000), (mock_proc2, 31003)]
+
+        with patch("smg.serve.RouterArgs.from_cli_args") as mock_from_cli:
+            mock_router_args = MagicMock()
+            mock_from_cli.return_value = mock_router_args
+            result = orch._build_router_args()
+
+        mock_from_cli.assert_called_once_with(args, use_router_prefix=True)
+        assert mock_router_args.worker_urls == [
+            "http://127.0.0.1:31000",
+            "http://127.0.0.1:31003",
+        ]
+        assert result is mock_router_args
+
+    def test_build_router_args_vllm_grpc_urls(self):
+        args = _make_args(backend="vllm", dp_size=2, model="/tmp/m")
+        orch = ServeOrchestrator("vllm", args)
+        mock_proc = MagicMock()
+        orch.workers = [(mock_proc, 32000), (mock_proc, 32003)]
+
+        with patch("smg.serve.RouterArgs.from_cli_args") as mock_from_cli:
+            mock_router_args = MagicMock()
+            mock_from_cli.return_value = mock_router_args
+            orch._build_router_args()
+
+        assert mock_router_args.worker_urls == [
+            "grpc://127.0.0.1:32000",
+            "grpc://127.0.0.1:32003",
+        ]
+
+    def test_cleanup_workers_handles_already_dead_process(self):
+        args = _make_args()
+        orch = ServeOrchestrator("sglang", args)
+        mock_proc = MagicMock()
+        mock_proc.pid = 99999
+        mock_proc.wait.return_value = 0
+        orch.workers = [(mock_proc, 31000)]
+
+        # killpg raises ProcessLookupError (process already dead)
+        with patch("os.killpg", side_effect=ProcessLookupError):
+            orch._cleanup_workers()  # should not raise
+
+        mock_proc.wait.assert_called_once()
+
+    def test_cleanup_workers_sigkill_on_timeout(self):
+        args = _make_args()
+        orch = ServeOrchestrator("sglang", args)
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.wait.side_effect = subprocess.TimeoutExpired(cmd="test", timeout=30)
+        orch.workers = [(mock_proc, 31000)]
+
+        with patch("os.killpg") as mock_killpg:
+            orch._cleanup_workers()
+
+        # First call is SIGTERM, second is SIGKILL after timeout
+        assert mock_killpg.call_count == 2
+        mock_killpg.assert_any_call(12345, signal.SIGTERM)
+        mock_killpg.assert_any_call(12345, signal.SIGKILL)
+
+    def test_cleanup_workers_empty_list(self):
+        args = _make_args()
+        orch = ServeOrchestrator("sglang", args)
+        orch.workers = []
+        # Should be a no-op
+        orch._cleanup_workers()
+
+    def test_signal_handler_sets_guard_flag(self):
+        args = _make_args()
+        orch = ServeOrchestrator("sglang", args)
+        orch.workers = []
+
+        assert orch._shutting_down is False
+        with pytest.raises(SystemExit) as exc_info:
+            orch._signal_handler(signal.SIGINT, None)
+        assert exc_info.value.code == 128 + signal.SIGINT
+        assert orch._shutting_down is True
+
+    def test_signal_handler_guard_prevents_reentry(self):
+        args = _make_args()
+        orch = ServeOrchestrator("sglang", args)
+        orch._shutting_down = True
+
+        # Should return immediately without calling sys.exit
+        orch._signal_handler(signal.SIGINT, None)
+
+    def test_trtllm_orchestrator_launches_grpc_workers(self):
+        args = _make_args(backend="trtllm", dp_size=1, model="/tmp/m")
+        orch = ServeOrchestrator("trtllm", args)
+
+        with patch("smg.serve._find_available_ports", return_value=[50051]):
+            with patch.object(orch.launcher, "launch") as mock_launch:
+                mock_launch.return_value = MagicMock(pid=1234)
+                orch._launch_workers()
+
+        assert len(orch.workers) == 1
+        assert orch.workers[0][1] == 50051

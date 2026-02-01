@@ -107,12 +107,9 @@ def main(argv: Optional[List[str]] = None) -> None:
             sys.argv = original_argv
 
     elif args.command == "serve":
-        from smg.serve import parse_serve_args
+        from smg.serve import serve_main
 
-        backend, serve_args = parse_serve_args(unknown)
-        # Orchestrator launch will be added in subsequent tasks
-        print(f"Serve command parsed: backend={backend}")
-        print(f"Args: {serve_args}")
+        serve_main(unknown)
 
     else:
         parser.print_help()
