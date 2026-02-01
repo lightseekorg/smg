@@ -275,26 +275,21 @@ class TestParseServeArgs:
 class TestWorkerLauncherGpuEnv:
     """Test GPU assignment via _get_tp_size() and gpu_env()."""
 
-    def test_abc_default_tp_size(self):
-        """ABC _get_tp_size returns 1 when attribute is missing."""
-        launcher = SglangWorkerLauncher()
-        args = argparse.Namespace()  # no tp_size attr
-        assert launcher._get_tp_size(args) == 1
-
-    def test_sglang_tp_size(self):
-        launcher = SglangWorkerLauncher()
-        args = argparse.Namespace(tp_size=4)
-        assert launcher._get_tp_size(args) == 4
-
-    def test_vllm_tp_size(self):
-        launcher = VllmWorkerLauncher()
-        args = argparse.Namespace(tensor_parallel_size=2)
-        assert launcher._get_tp_size(args) == 2
-
-    def test_trtllm_tp_size(self):
-        launcher = TrtllmWorkerLauncher()
-        args = argparse.Namespace(tp_size=8)
-        assert launcher._get_tp_size(args) == 8
+    @pytest.mark.parametrize(
+        "launcher_class, args, expected_tp",
+        [
+            (SglangWorkerLauncher, argparse.Namespace(tp_size=4), 4),
+            (SglangWorkerLauncher, argparse.Namespace(), 1),
+            (VllmWorkerLauncher, argparse.Namespace(tensor_parallel_size=2), 2),
+            (VllmWorkerLauncher, argparse.Namespace(), 1),
+            (TrtllmWorkerLauncher, argparse.Namespace(tp_size=8), 8),
+            (TrtllmWorkerLauncher, argparse.Namespace(), 1),
+        ],
+    )
+    def test_get_tp_size(self, launcher_class, args, expected_tp):
+        """_get_tp_size returns the correct value from args or defaults to 1."""
+        launcher = launcher_class()
+        assert launcher._get_tp_size(args) == expected_tp
 
     def test_gpu_env_dp_rank_0_tp_2(self):
         launcher = SglangWorkerLauncher()
