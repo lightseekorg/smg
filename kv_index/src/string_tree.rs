@@ -629,8 +629,10 @@ impl Tree {
 
         // Update timestamp probabilistically (1 in 8 matches) to reduce DashMap contention.
         // LRU eviction doesn't need perfect accuracy - approximate timestamps suffice.
+        // Skip the update for the synthetic "empty" tenant to avoid polluting the tree
+        // with a tenant that was never inserted via insert_text.
         let epoch = get_epoch();
-        if epoch & 0x7 == 0 {
+        if epoch & 0x7 == 0 && tenant.as_ref() != "empty" {
             curr.tenant_last_access_time
                 .insert(Arc::clone(&tenant), epoch);
         }

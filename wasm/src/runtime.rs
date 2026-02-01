@@ -18,7 +18,6 @@ use tracing::{debug, error};
 use wasmtime::{
     component::{Component, Linker, ResourceTable},
     Config, Engine, InstanceAllocationStrategy, PoolingAllocationConfig, Store, StoreLimitsBuilder,
-    UpdateDeadline,
 };
 use wasmtime_wasi::WasiCtx;
 
@@ -414,8 +413,10 @@ impl WasmThreadPool {
         let deadline_epochs = (config.max_execution_time_ms / EPOCH_INTERVAL_MS).max(1);
         store.set_epoch_deadline(deadline_epochs);
 
-        // Configure what happens when the deadline is reached during async yields
-        store.epoch_deadline_callback(|_store| Ok(UpdateDeadline::Yield(1)));
+        // When the epoch deadline is reached, trap to enforce the execution timeout.
+        store.epoch_deadline_callback(|_store| {
+            Err(wasmtime::Error::msg("execution time limit exceeded"))
+        });
 
         let output = match attach_point {
             WasmModuleAttachPoint::Middleware(MiddlewareAttachPoint::OnRequest) => {

@@ -995,11 +995,14 @@ pub(crate) fn parse_finish_reason(
     completion_tokens: u32,
 ) -> GenerateFinishReason {
     if reason_str == "stop" {
-        return GenerateFinishReason::Stop;
+        return GenerateFinishReason::Stop {
+            finish_type: openai_protocol::generate::GenerateFinishType::Stop,
+        };
     }
 
     if reason_str == "length" {
         return GenerateFinishReason::Length {
+            finish_type: openai_protocol::generate::GenerateFinishType::Length,
             length: completion_tokens,
         };
     }

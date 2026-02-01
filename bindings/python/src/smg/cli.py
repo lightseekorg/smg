@@ -48,6 +48,14 @@ def create_parser() -> argparse.ArgumentParser:
         add_help=False,  # Let server handle --help
     )
 
+    # Serve subcommand (two-pass parsing with lazy backend import)
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Launch backend worker(s) + gateway router",
+        description="Launch inference backend workers and gateway router",
+        add_help=False,  # Let serve handle --help with backend-specific args
+    )
+
     return parser
 
 
@@ -65,7 +73,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit(0)
 
     # Handle empty command - show help
-    if not argv or argv[0] not in ["launch", "server", "-h", "--help"]:
+    if not argv or argv[0] not in ["launch", "server", "serve", "-h", "--help"]:
         parser = create_parser()
         parser.print_help()
         sys.exit(1)
@@ -97,6 +105,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         finally:
             # Restore original sys.argv
             sys.argv = original_argv
+
+    elif args.command == "serve":
+        from smg.serve import serve_main
+
+        serve_main(unknown)
 
     else:
         parser.print_help()

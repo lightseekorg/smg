@@ -10,13 +10,13 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
-        args: [--allow-multiple-documents]
+        args: [--allow-multiple-documents, --unsafe]
       - id: check-toml
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: check-shebang-scripts-are-executable
       - id: detect-private-key
-        exclude: ^tests/.*_test\.rs$
+        exclude: .*tests/.*_test\.rs$
       - id: mixed-line-ending
       - id: no-commit-to-branch
 
@@ -25,7 +25,7 @@ repos:
     hooks:
       - id: codespell
         additional_dependencies: ['tomli']
-        args: ['-L', 'cann,thi,makro,wil,rouge,PRIS,hel,te,ans']
+        args: ['-L', 'cann,thi,makro,wil,rouge,PRIS,hel,te,ans,ser']
         exclude: |
           (?x)^(
             src/proto/.*\.proto$|
