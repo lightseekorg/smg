@@ -1206,10 +1206,18 @@ impl McpOrchestrator {
         entry: &ToolEntry,
         arguments: Value,
     ) -> McpResult<CallToolResult> {
+        let server_name = entry.server_key();
+
+        // Capture the client instance we are about to use (to detect if it gets replaced)
+        let initial_client = self
+            .static_servers
+            .get(server_name)
+            .map(|e| Arc::clone(&e.client));
+
         match self.execute_tool_impl(entry, arguments.clone()).await {
             Ok(result) => Ok(result),
             Err(McpError::ServerDisconnected(name)) => {
-                // Acquire/Create the mutex for this server
+                // Acquire/Create the mutex for this server to prevent concurrent reconnects
                 let lock = self
                     .reconnection_locks
                     .entry(name.clone())
@@ -1219,9 +1227,16 @@ impl McpOrchestrator {
 
                 let _guard = lock.lock().await;
 
-                // Check if another thread already reconnected the server while we waited
+                // Race condition check:
+                // If the current client in the map is DIFFERENT from the one that failed,
+                // it means another concurrent task already successfully reconnected it.
                 if let Some(current_entry) = self.static_servers.get(&name) {
-                    if !current_entry.client.is_closed() {
+                    let already_reconnected = match &initial_client {
+                        Some(initial) => !Arc::ptr_eq(initial, &current_entry.client),
+                        None => true,
+                    };
+
+                    if already_reconnected {
                         debug!(
                             "Server '{}' already reconnected by another task, retrying call",
                             name
@@ -1230,8 +1245,6 @@ impl McpOrchestrator {
                     }
                 }
 
-                // Read the config from the immutable root config so it can’t be abused.
-                // Even if reconnection fails, the orchestrator still remembers this server.
                 let server_config = self
                     .config
                     .servers
@@ -1244,6 +1257,7 @@ impl McpOrchestrator {
                     "Server '{}' disconnected, initiating thread-safe recovery",
                     name
                 );
+
                 ReconnectionManager::default()
                     .reconnect(&name, || async {
                         self.static_servers.remove(&name);
