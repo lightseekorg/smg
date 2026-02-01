@@ -164,23 +164,9 @@ pub async fn ensure_request_mcp_client(
 ) -> Option<(Arc<McpOrchestrator>, Vec<(String, String)>)> {
     let mut mcp_servers = Vec::new();
 
-    // 1. Process dynamic MCP tools (from request server_url)
+    // 1. Process explicit MCP tools (dynamic via URL, or static via Label)
     for tool in tools {
-        let Some(server_url) = tool
-            .server_url
-            .as_ref()
-            .filter(|_| matches!(tool.r#type, ResponseToolType::Mcp))
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-        else {
-            continue;
-        };
-
-        if !(server_url.starts_with("http://") || server_url.starts_with("https://")) {
-            warn!(
-                "Ignoring MCP server_url with unsupported scheme: {}",
-                server_url
-            );
+        if !matches!(tool.r#type, ResponseToolType::Mcp) {
             continue;
         }
 
@@ -188,45 +174,68 @@ pub async fn ensure_request_mcp_client(
             .server_label
             .clone()
             .unwrap_or_else(|| "mcp".to_string());
-        let token = tool.authorization.clone();
-        // Use headers from tool payload instead of HTTP request headers
-        let headers = tool.headers.clone().unwrap_or_default();
-        let server_url = server_url.to_string();
 
-        let transport = if server_url.contains("/sse") {
-            McpTransport::Sse {
-                url: server_url,
-                token,
-                headers,
+        // Case A: Dynamic Server (Has `server_url`)
+        if let Some(server_url) = tool
+            .server_url
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            if !(server_url.starts_with("http://") || server_url.starts_with("https://")) {
+                warn!(
+                    "Ignoring MCP server_url with unsupported scheme: {}",
+                    server_url
+                );
+                continue;
             }
-        } else {
-            McpTransport::Streamable {
-                url: server_url,
-                token,
-                headers,
-            }
-        };
 
-        let server_config = McpServerConfig {
-            name: label.clone(),
-            transport,
-            proxy: None,
-            required: false,
-            tools: None,
-            builtin_type: None,
-            builtin_tool_name: None,
-        };
+            let token = tool.authorization.clone();
+            // Use headers from tool payload instead of HTTP request headers
+            let headers = tool.headers.clone().unwrap_or_default();
+            let server_url = server_url.to_string();
 
-        let server_key = McpOrchestrator::server_key(&server_config);
+            let transport = if server_url.contains("/sse") {
+                McpTransport::Sse {
+                    url: server_url,
+                    token,
+                    headers,
+                }
+            } else {
+                McpTransport::Streamable {
+                    url: server_url,
+                    token,
+                    headers,
+                }
+            };
 
-        match mcp_orchestrator.connect_dynamic_server(server_config).await {
-            Ok(_) => {
-                if !mcp_servers.iter().any(|(_, key)| key == &server_key) {
-                    mcp_servers.push((label.clone(), server_key));
+            let server_config = McpServerConfig {
+                name: label.clone(),
+                transport,
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+            };
+
+            let server_key = McpOrchestrator::server_key(&server_config);
+
+            match mcp_orchestrator.connect_dynamic_server(server_config).await {
+                Ok(_) => {
+                    if !mcp_servers.iter().any(|(_, key)| key == &server_key) {
+                        mcp_servers.push((label.clone(), server_key));
+                    }
+                }
+                Err(err) => {
+                    warn!("Failed to connect MCP server {}: {}", server_key, err);
                 }
             }
-            Err(err) => {
-                warn!("Failed to connect MCP server {}: {}", server_key, err);
+        }
+        // Case B: Static Server (No `server_url`, but has `server_label`)
+        else if tool.server_label.is_some() {
+            if !mcp_servers.iter().any(|(_, key)| key == &label) {
+                mcp_servers.push((label.clone(), label.clone()));
             }
         }
     }
