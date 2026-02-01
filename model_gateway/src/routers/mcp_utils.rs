@@ -148,10 +148,12 @@ pub fn collect_builtin_routing(
 
 /// Ensure MCP clients are connected for request-level MCP tools and built-in tool routing.
 ///
-/// This function handles two cases:
+/// This function handles three cases:
 /// 1. **Dynamic MCP tools**: Tools with `type: mcp` and `server_url` in the request.
 ///    These require connecting to the MCP server dynamically.
-/// 2. **Built-in tool routing**: Tools like `web_search_preview` that have a static
+/// 2. **Static MCP tools**: Tools with `type: mcp` and `server_label` (but no URL).
+///    These resolve to pre-configured static servers by name.
+/// 3. **Built-in tool routing**: Tools like `web_search_preview` that have a static
 ///    MCP server configured via `builtin_type`. These use pre-connected static servers.
 ///
 /// Headers for MCP servers come from the tool payload (`tool.headers`), not HTTP request headers.
@@ -164,7 +166,7 @@ pub async fn ensure_request_mcp_client(
 ) -> Option<(Arc<McpOrchestrator>, Vec<(String, String)>)> {
     let mut mcp_servers = Vec::new();
 
-    // 1. Process explicit MCP tools (dynamic via URL, or static via Label)
+    // 1. Process explicit MCP tools (dynamic via `server_url`, or static via `server_label`)
     for tool in tools {
         if !matches!(tool.r#type, ResponseToolType::Mcp) {
             continue;
@@ -233,8 +235,8 @@ pub async fn ensure_request_mcp_client(
             }
         }
         // Case B: Static Server (No `server_url`, but has `server_label`)
-        else if tool.server_label.is_some() {
-            if !mcp_servers.iter().any(|(_, key)| key == &label) {
+        else if let Some(label) = &tool.server_label {
+            if !mcp_servers.iter().any(|(_, key)| key == label) {
                 mcp_servers.push((label.clone(), label.clone()));
             }
         }
