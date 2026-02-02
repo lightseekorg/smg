@@ -91,26 +91,26 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 2,
         "features": ["chat", "streaming", "reasoning", "harmony"],
     },
-    # # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
-    # "llama-4-maverick-17b": {
-    #     "model": _resolve_model_path("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
-    #     "memory_gb": 34,  # ~1 byte per parameter for FP8 quantized 17B params
-    #     "tp": 8,  # Tensor parallelism across 8 GPUs
-    #     "features": ["chat", "streaming", "function_calling", "moe"],
-    #     "worker_args": [
-    #         "--trust-remote-code",
-    #         "--context-length=163840",  # 160K context length (SGLang)
-    #         "--prefill-attention-backend=flashinfer",  # MLA attention backend
-    #         "--decode-attention-backend=flashinfer",  # MLA attention backend
-    #         "--flashinfer-mla-disable-ragged",  # Disable ragged attention for MLA
-    #         "--mem-fraction-static=0.9",  # 90% GPU memory for static allocation
-    #         "--cuda-graph-max-bs=256",  # CUDA graph batch size optimization
-    #     ],
-    #     "vllm_args": [
-    #         "--trust-remote-code",
-    #         "--max-model-len=163840",  # 160K context length (vLLM)
-    #     ],
-    # },
+    # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
+    "llama-4-maverick-17b": {
+        "model": _resolve_model_path("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
+        "memory_gb": 34,  # ~1 byte per parameter for FP8 quantized 17B params
+        "tp": 8,  # Tensor parallelism across 8 GPUs
+        "features": ["chat", "streaming", "function_calling", "moe"],
+        "worker_args": [
+            "--trust-remote-code",
+            "--context-length=163840",  # 160K context length (SGLang)
+            "--prefill-attention-backend=flashinfer",  # MLA attention backend
+            "--decode-attention-backend=flashinfer",  # MLA attention backend
+            "--flashinfer-mla-disable-ragged",  # Disable ragged attention for MLA
+            "--mem-fraction-static=0.9",  # 90% GPU memory for static allocation
+            "--cuda-graph-max-bs=256",  # CUDA graph batch size optimization
+        ],
+        "vllm_args": [
+            "--trust-remote-code",
+            "--max-model-len=163840",  # 160K context length (vLLM)
+        ],
+    },
 }
 
 
