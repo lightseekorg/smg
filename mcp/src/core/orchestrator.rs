@@ -1022,10 +1022,15 @@ impl McpOrchestrator {
             // Preserve arguments string for conversation history
             let arguments_str = input.arguments.to_string();
 
-            // Look up tool entry to get server_key, response_format, and entry itself
-            let tool_entry = self.find_tool_by_name(&input.tool_name, allowed_servers);
+            // Look up in dynamic tools first, then fall back to global inventory
+            let entry = request_ctx
+                .dynamic_tools
+                .iter()
+                .find(|e| e.tool_name() == input.tool_name)
+                .map(|e| e.value().clone())
+                .or_else(|| self.find_tool_by_name(&input.tool_name, allowed_servers));
 
-            let (server_key, response_format, entry) = match tool_entry {
+            let (server_key, response_format, entry) = match entry {
                 Some(entry) => (
                     entry.server_key().to_string(),
                     entry.response_format.clone(),
@@ -1882,15 +1887,30 @@ impl<'a> McpRequestContext<'a> {
         let _guard = scopeguard::guard(Arc::clone(&self.orchestrator.active_executions), |count| {
             count.fetch_sub(1, Ordering::SeqCst);
         });
-        // Check dynamic tools first
+
         let qualified = QualifiedToolName::new(server_key, tool_name);
+
+        // Check dynamic tools first
         if let Some(entry) = self.dynamic_tools.get(&qualified) {
+            // Enforce rate limits for dynamic tools
+            self.orchestrator
+                .rate_limiter
+                .check(&self.tenant_ctx, &qualified)?;
+            let _permit = self
+                .orchestrator
+                .rate_limiter
+                .acquire_concurrent_permit(&self.tenant_ctx)
+                .await?;
+            self.orchestrator
+                .rate_limiter
+                .record(&self.tenant_ctx.tenant_id, &qualified);
+
             return self
                 .execute_dynamic_tool(&entry, arguments, server_label)
                 .await;
         }
 
-        // Fall back to orchestrator
+        // Fall back to orchestrator (which does its own rate limiting)
         self.orchestrator
             .call_tool(server_key, tool_name, arguments, server_label, self)
             .await
