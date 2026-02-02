@@ -425,7 +425,8 @@ async fn test_two_node_heartbeat_monitoring() {
     let addr_b = get_node_addr().await;
     let handler_b = crate::mesh_run!("heartbeat_b", addr_b, Some(addr_a));
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait for cluster formation sync
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Both nodes should be alive
     let state_a = handler_a.state.read();
@@ -438,7 +439,7 @@ async fn test_two_node_heartbeat_monitoring() {
     handler_b.shutdown();
 
     // Wait for detection
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Node A should detect B as suspected or down
     let state_a = handler_a.state.read();
@@ -447,7 +448,6 @@ async fn test_two_node_heartbeat_monitoring() {
 
     // Status should have changed from Alive
     assert_ne!(node_b_status, Some(NodeStatus::Alive as i32));
-
     handler_a.shutdown();
     log::info!("Two-node heartbeat monitoring test completed");
 }
@@ -480,7 +480,7 @@ async fn test_three_node_cluster_formation() {
     let handler_c = crate::mesh_run!("cluster_c", addr_c, Some(addr_a));
 
     // Wait for full cluster formation
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    tokio::time::sleep(Duration::from_secs(6)).await;
 
     // Verify all nodes see each other
     {
