@@ -99,6 +99,13 @@ def is_trtllm() -> bool:
     """
     return get_runtime() == "trtllm"
 
+# Runtime display labels
+RUNTIME_LABELS = {
+    "sglang": "SGLang",
+    "vllm": "vLLM",
+    "trtllm": "TensorRT-LLM",
+}
+
 ENV_SHOW_ROUTER_LOGS = "SHOW_ROUTER_LOGS"
 ENV_SHOW_WORKER_LOGS = "SHOW_WORKER_LOGS"
 
