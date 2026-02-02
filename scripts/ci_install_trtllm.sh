@@ -5,10 +5,11 @@
 # so we install the latest stable wheel (which has all compiled binaries)
 # and then overlay the Python source from main branch on top. This gives
 # us the gRPC serve command from main + compiled C++/CUDA libs from stable.
-# No Docker or C++ build toolchain required.
 #
-# TRT-LLM 1.1.0 requires CUDA 13 libraries (libcublasLt.so.13 etc.).
-# We install these via NVIDIA's apt repository.
+# Prerequisites (expected on k8s-runner-gpu nodes):
+#   - NVIDIA driver 580+ (CUDA 13)
+#   - CUDA toolkit at /usr/local/cuda
+#   - libopenmpi-dev
 #
 # At runtime we use --backend pytorch, which avoids TRT engine compilation.
 
@@ -19,30 +20,26 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
-# Step 1: Install CUDA 13 libraries via NVIDIA apt repo.
-# TRT-LLM 1.1.0 is built against CUDA 13. The pip packages only provide
-# a subset of CUDA 13 libs (cuda-runtime, nvrtc) but not cublas, cusolver, etc.
-# Install the full CUDA 13 library set via apt.
-echo "Installing CUDA 13 libraries..."
-export DEBIAN_FRONTEND=noninteractive
-if ! dpkg -l cuda-keyring 2>/dev/null | grep -q '^ii'; then
-    curl -fsSL -o cuda-keyring_1.1-1_all.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-    sudo DEBIAN_FRONTEND=noninteractive dpkg -i --force-confnew cuda-keyring_1.1-1_all.deb
-fi
+# System dependencies
 sudo apt-get update
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libopenmpi-dev cuda-libraries-13-1
+sudo apt-get install -y libopenmpi-dev
 
-# Add CUDA 13 libs to LD_LIBRARY_PATH
-export LD_LIBRARY_PATH="/usr/local/cuda-13.1/lib64:${LD_LIBRARY_PATH:-}"
+# Set CUDA_HOME and LD_LIBRARY_PATH from system CUDA
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+echo "CUDA_HOME=$CUDA_HOME"
+echo "CUDA version: $(cat ${CUDA_HOME}/version.json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["cuda"]["version"])' 2>/dev/null || nvcc --version 2>/dev/null | tail -1 || echo 'unknown')"
 
 # Install PyTorch with CUDA support
 pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
-# Step 2: Install the latest stable TRT-LLM wheel from NVIDIA PyPI.
+# Step 1: Install the latest stable TRT-LLM wheel from NVIDIA PyPI.
 echo "Installing stable TensorRT-LLM wheel..."
 pip install --no-cache-dir tensorrt_llm --extra-index-url=https://pypi.nvidia.com
 
-# Step 3: Set LD_LIBRARY_PATH for pip-installed NVIDIA libraries.
+# Step 2: Add pip-installed NVIDIA libraries to LD_LIBRARY_PATH.
+# TRT-LLM pulls in nvidia-* pip packages with .so files that aren't
+# on the default search path.
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
 
 NVIDIA_LIB_DIRS=$(find "$SITE_PACKAGES/nvidia" -name "lib" -type d 2>/dev/null | sort -u | paste -sd':')
@@ -55,21 +52,16 @@ if [ -n "$TRTLLM_LIB_DIR" ]; then
     export LD_LIBRARY_PATH="${TRTLLM_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 fi
 
-# Add system CUDA as fallback
-if [ -d "/usr/local/cuda/lib64" ]; then
-    export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
-fi
-
 echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 
-# Step 4: Clone main branch for gRPC serve command (not in any release yet).
+# Step 3: Clone main branch for gRPC serve command (not in any release yet).
 TRTLLM_DIR="/tmp/tensorrt-llm-src"
 if [ ! -d "$TRTLLM_DIR" ]; then
     echo "Cloning TensorRT-LLM main branch for gRPC source..."
     git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM.git "$TRTLLM_DIR"
 fi
 
-# Step 5: Overlay Python source from main branch onto the installed package.
+# Step 4: Overlay Python source from main branch onto the installed package.
 # This replaces the Python files (including adding gRPC serve command) while
 # preserving all compiled .so/.pyd binaries from the stable wheel.
 INSTALL_DIR=$(python3 -c "import tensorrt_llm, pathlib; print(pathlib.Path(tensorrt_llm.__file__).parent)")
