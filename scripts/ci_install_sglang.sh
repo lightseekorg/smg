@@ -21,6 +21,7 @@ fi
 SGLANG_USE_LATEST_TAG="${SGLANG_USE_LATEST_TAG:-0}"
 if [ "$SGLANG_USE_LATEST_TAG" = "1" ]; then
     cd "$SGLANG_DIR"
+    git fetch --tags
     LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
     echo "Checking out latest SGLang tag: $LATEST_TAG"
     git checkout "$LATEST_TAG"
