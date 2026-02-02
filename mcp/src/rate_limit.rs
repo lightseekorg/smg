@@ -67,7 +67,8 @@ impl CallWindow {
 /// Manages rate limits and concurrency across tenants and tools.
 pub struct RateLimiter {
     tenant_calls: DashMap<TenantId, CallWindow>,
-    tool_calls: DashMap<QualifiedToolName, CallWindow>,
+    /// Tool calls tracked per-tenant for isolation.
+    tool_calls: DashMap<(TenantId, QualifiedToolName), CallWindow>,
     tenant_semaphores: DashMap<TenantId, Arc<Semaphore>>,
     defaults: RateLimits,
 }
@@ -107,21 +108,22 @@ impl RateLimiter {
             }
         }
 
-        // Check Tool-specific limits
-        if let Some(window) = self.tool_calls.get(tool) {
+        // Check Tool-specific limits (isolated per tenant)
+        let key = (ctx.tenant_id.clone(), tool.clone());
+        if let Some(window) = self.tool_calls.get(&key) {
             if let Some(max) = limits.max_calls_per_minute {
                 if window.calls_per_minute() >= max {
                     return Err(McpError::RateLimitExceeded(format!(
-                        "Tool '{}' minute limit reached ({})",
-                        tool, max
+                        "Tool '{}' minute limit reached for tenant '{}' ({})",
+                        tool, ctx.tenant_id, max
                     )));
                 }
             }
             if let Some(max) = limits.max_calls_per_hour {
                 if window.calls_per_hour() >= max {
                     return Err(McpError::RateLimitExceeded(format!(
-                        "Tool '{}' hour limit reached ({})",
-                        tool, max
+                        "Tool '{}' hour limit reached for tenant '{}' ({})",
+                        tool, ctx.tenant_id, max
                     )));
                 }
             }
@@ -136,7 +138,12 @@ impl RateLimiter {
             .entry(tenant_id.clone())
             .or_default()
             .record();
-        self.tool_calls.entry(tool.clone()).or_default().record();
+
+        // Keyed by both tenant and tool for isolation
+        self.tool_calls
+            .entry((tenant_id.clone(), tool.clone()))
+            .or_default()
+            .record();
     }
 
     /// Acquires a permit for concurrent execution.
@@ -172,17 +179,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rate_limiter_check() {
+    async fn test_rate_limiter_isolation() {
         let limits = RateLimits {
             max_calls_per_minute: Some(1),
             ..Default::default()
         };
         let limiter = RateLimiter::new(limits);
-        let ctx = TenantContext::new("t1");
         let tool = QualifiedToolName::new("s1", "t1");
 
-        assert!(limiter.check(&ctx, &tool).is_ok());
-        limiter.record(&ctx.tenant_id, &tool);
-        assert!(limiter.check(&ctx, &tool).is_err());
+        let ctx1 = TenantContext::new("t1");
+        let ctx2 = TenantContext::new("t2");
+
+        // Tenant 1 exhausts their limit
+        assert!(limiter.check(&ctx1, &tool).is_ok());
+        limiter.record(&ctx1.tenant_id, &tool);
+        assert!(limiter.check(&ctx1, &tool).is_err());
+
+        // Tenant 2 should still be allowed (isolation)
+        assert!(limiter.check(&ctx2, &tool).is_ok());
     }
 }
