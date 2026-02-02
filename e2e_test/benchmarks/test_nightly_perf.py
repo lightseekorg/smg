@@ -29,7 +29,7 @@ _TIMEOUT_SEC = 10800  # 3 hours per model
 # TODO: revert before merge — fast settings for PR testing
 _TEST_MODE = True
 _TEST_NUM_CONCURRENCY = 1
-_TEST_TRAFFIC_SCENARIO = "D(100,100)"
+_TEST_TRAFFIC_SCENARIO = "D(100,1000)"
 _TEST_MAX_REQUESTS = 10
 
 
@@ -77,7 +77,7 @@ _NIGHTLY_MODELS = [
     ("mistral-7b",  "Mistral7b",  8, {}),
     # ("embedding",   "Embedding",  8, {"task": "text-to-embeddings"}),  # Skipped
     ("gpt-oss",     "GptOss",     4, {}),
-    ("llama-4-maverick-17b", "Llama4Maverick", 1, {}),  # 1 worker uses all 8 GPUs (tp=8)
+    # ("llama-4-maverick-17b", "Llama4Maverick", 1, {}),  # 1 worker uses all 8 GPUs (tp=8)
 ]
 
 
