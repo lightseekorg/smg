@@ -3,8 +3,9 @@
 #
 # gRPC server support (PR #11037) is not yet in a pip release,
 # so we install the latest stable wheel (which has all compiled binaries)
-# and then overlay the Python source from main branch on top. This gives
-# us the gRPC serve command from main + compiled C++/CUDA libs from stable.
+# and then selectively copy only the gRPC-related modules (grpc/, commands/,
+# serve/) from main branch. This avoids breaking the stable wheel's compiled
+# C++ extensions while adding the gRPC serve command.
 #
 # Prerequisites (expected on k8s-runner-gpu nodes):
 #   - NVIDIA driver 580+ (CUDA 13)
@@ -87,35 +88,22 @@ if [ ! -d "$TRTLLM_DIR" ]; then
     git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM.git "$TRTLLM_DIR"
 fi
 
-# Step 4: Overlay Python source from main branch onto the installed package.
-# This replaces the Python files (including adding gRPC serve command) while
-# preserving all compiled .so/.pyd binaries from the stable wheel.
+# Step 4: Selectively copy ONLY gRPC-related modules from main branch.
+# The full overlay breaks because main branch Python references compiled C++
+# extensions (_rawref, etc.) that don't exist in the 1.1.0 wheel. Instead,
+# we only copy the new/updated modules needed for gRPC serving.
 # TRT-LLM prints a version banner to stdout on import; use tail -1 to get only the path
 INSTALL_DIR=$(python3 -c "import tensorrt_llm, pathlib; print(pathlib.Path(tensorrt_llm.__file__).parent)" 2>/dev/null | tail -1)
 echo "Installed package at: $INSTALL_DIR"
-echo "Overlaying main branch Python source..."
+echo "Copying gRPC-related modules from main branch..."
 
-# Copy .py files only, skip compiled binaries and native dirs (no rsync on runner)
-python3 -c "
-import shutil, pathlib
-src = pathlib.Path('$TRTLLM_DIR/tensorrt_llm')
-dst = pathlib.Path('$INSTALL_DIR')
-skip = {'bindings', 'libs'}
-for f in src.rglob('*.py'):
-    rel = f.relative_to(src)
-    if rel.parts[0] in skip:
-        continue
-    out = dst / rel
-    out.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(f, out)
-"
-
-# Step 5: Copy vendored triton_kernels module (required by main branch __init__.py).
-# The main branch references triton_kernels at the site-packages level.
-if [ -d "$TRTLLM_DIR/triton_kernels" ]; then
-    echo "Installing vendored triton_kernels module..."
-    cp -r "$TRTLLM_DIR/triton_kernels" "$SITE_PACKAGES/triton_kernels"
-fi
+# Copy only the directories needed for gRPC serve support
+for subdir in grpc commands serve; do
+    if [ -d "$TRTLLM_DIR/tensorrt_llm/$subdir" ]; then
+        echo "  Copying $subdir/"
+        cp -r "$TRTLLM_DIR/tensorrt_llm/$subdir/" "$INSTALL_DIR/$subdir/"
+    fi
+done
 
 # Persist LD_LIBRARY_PATH for subsequent CI steps
 if [ -n "${GITHUB_ENV:-}" ]; then
