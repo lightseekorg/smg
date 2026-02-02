@@ -557,6 +557,39 @@ async fn test_multi_node_data_propagation() {
     assert_eq!(val_a, value_b.unwrap().value);
     assert_eq!(val_a, value_c.unwrap().value);
 
+    // Write data on node B to verify continued propagation
+    handler_b.write_data("propagated_key".into(), "propagated_value".into());
+
+    // Wait for automatic sync via sync_stream
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Verify data reached all nodes
+    let value_a = handler_a
+        .stores
+        .app
+        .get(&SKey("propagated_key".to_string()));
+    let value_b = handler_b
+        .stores
+        .app
+        .get(&SKey("propagated_key".to_string()));
+    let value_c = handler_c
+        .stores
+        .app
+        .get(&SKey("propagated_key".to_string()));
+
+    log::info!("Value on A: {:?}", value_a);
+    log::info!("Value on B: {:?}", value_b);
+    log::info!("Value on C: {:?}", value_c);
+
+    assert!(value_a.is_some());
+    assert!(value_b.is_some());
+    assert!(value_c.is_some());
+
+    // Verify all values are the same
+    let val_a = value_a.unwrap().value;
+    assert_eq!(val_a, value_b.unwrap().value);
+    assert_eq!(val_a, value_c.unwrap().value);
+
     handler_a.shutdown();
     handler_b.shutdown();
     handler_c.shutdown();
@@ -564,7 +597,7 @@ async fn test_multi_node_data_propagation() {
 }
 
 #[tokio::test]
-#[ignore = "Long-running test with complex state convergence"]
+//#[ignore = "Long-running test with complex state convergence"]
 async fn test_five_node_cluster_with_failure() {
     init_test_logging();
     log::info!("Starting test_five_node_cluster_with_failure");
@@ -669,8 +702,9 @@ async fn test_cluster_formation_different_join_patterns() {
     let addr_d = get_node_addr().await;
     let handler_d = crate::mesh_run!("pattern_d", addr_d, Some(addr_a));
 
-    // Wait for convergence
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    // Wait for convergence - need more time for gossip to propagate through chain topology
+    // With 4 nodes in different join patterns (chain + star), state needs multiple rounds to converge
+    tokio::time::sleep(Duration::from_secs(8)).await;
 
     // Verify all nodes see all 4 nodes regardless of join pattern
     {
