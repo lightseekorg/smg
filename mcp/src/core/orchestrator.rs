@@ -370,16 +370,23 @@ impl McpOrchestrator {
         tenant_ctx: &TenantContext,
         qualified: &QualifiedToolName,
     ) -> McpResult<tokio::sync::OwnedSemaphorePermit> {
-        // Check if allowed (respects isolation and recovery logic)
-        self.rate_limiter.check(tenant_ctx, qualified)?;
+        // Check if allowed
+        if let Err(e) = self.rate_limiter.check(tenant_ctx, qualified) {
+            self.metrics.record_rate_limited();
+            return Err(e);
+        }
 
-        // Acquire concurrency permit (reflects dynamic changes)
+        // Acquire concurrency permit
         let permit = self
             .rate_limiter
             .acquire_concurrent_permit(tenant_ctx)
-            .await?;
+            .await
+            .map_err(|e| {
+                self.metrics.record_rate_limited();
+                e
+            })?;
 
-        // Record the call in sliding window
+        // Record the call
         self.rate_limiter.record(&tenant_ctx.tenant_id, qualified);
 
         Ok(permit)
@@ -1073,22 +1080,42 @@ impl McpOrchestrator {
                     Some(entry) => {
                         let qualified = &entry.qualified_name;
 
+                        // Start metrics tracking for this specific item in the batch
+                        self.metrics.record_call_start(qualified);
+                        let item_start = Instant::now();
+
                         // Unified Check -> Acquire -> Record sequence
                         match self
                             .check_and_acquire_permit(&request_ctx.tenant_ctx, qualified)
                             .await
                         {
-                            Err(e) => handle_error(e.to_string()),
+                            Err(e) => {
+                                self.metrics.record_call_end(
+                                    qualified,
+                                    false,
+                                    item_start.elapsed().as_millis() as u64,
+                                );
+                                handle_error(e.to_string())
+                            }
                             Ok(_permit) => {
                                 // Execute with approval, getting raw result
-                                match self
+                                let result = self
                                     .execute_tool_with_approval_raw(
                                         &entry,
                                         input.arguments,
                                         request_ctx,
                                     )
-                                    .await
-                                {
+                                    .await;
+
+                                // Record completion metrics
+                                let success = result.is_ok();
+                                self.metrics.record_call_end(
+                                    qualified,
+                                    success,
+                                    item_start.elapsed().as_millis() as u64,
+                                );
+
+                                match result {
                                     Ok(Some(raw_result)) => {
                                         // Convert raw CallToolResult to JSON
                                         let output = self.call_result_to_json(&raw_result);
@@ -1899,7 +1926,7 @@ impl<'a> McpRequestContext<'a> {
 
         // Check dynamic tools first
         if let Some(entry) = self.dynamic_tools.get(&qualified) {
-            // Tracking only for the dynamic tool path
+            // Local tracking only for dynamic tool path to avoid double-counting
             self.orchestrator
                 .active_executions
                 .fetch_add(1, Ordering::SeqCst);
@@ -1908,15 +1935,35 @@ impl<'a> McpRequestContext<'a> {
                     count.fetch_sub(1, Ordering::SeqCst);
                 });
 
-            // Enforce rate limits for dynamic tools using unified orchestrator helper
-            let _permit = self
+            self.orchestrator.metrics.record_call_start(&qualified);
+            let start_time = Instant::now();
+
+            let permit_result = self
                 .orchestrator
                 .check_and_acquire_permit(&self.tenant_ctx, &qualified)
-                .await?;
+                .await;
 
-            return self
+            if let Err(e) = permit_result {
+                self.orchestrator.metrics.record_call_end(
+                    &qualified,
+                    false,
+                    start_time.elapsed().as_millis() as u64,
+                );
+                return Err(e);
+            }
+            let _permit = permit_result.unwrap();
+
+            let result = self
                 .execute_dynamic_tool(&entry, arguments, server_label)
                 .await;
+
+            // Record completion metrics
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+            self.orchestrator
+                .metrics
+                .record_call_end(&qualified, result.is_ok(), duration_ms);
+
+            return result;
         }
 
         self.orchestrator
