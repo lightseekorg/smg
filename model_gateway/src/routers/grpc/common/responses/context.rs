@@ -34,8 +34,8 @@ pub(crate) struct ResponsesContext {
     /// MCP orchestrator for tool support
     pub mcp_orchestrator: Arc<McpOrchestrator>,
 
-    /// Server keys for MCP tools requested in this context
-    pub requested_servers: Arc<StdRwLock<Vec<String>>>,
+    /// MCP servers (label, server_key) requested in this context
+    pub requested_servers: Arc<StdRwLock<Vec<(String, String)>>>,
 }
 
 impl ResponsesContext {

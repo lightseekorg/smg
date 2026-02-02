@@ -38,18 +38,16 @@ pub(super) struct ToolLoopState {
     pub conversation_history: Vec<ResponseInputOutputItem>,
     pub original_input: ResponseInput,
     pub mcp_call_items: Vec<ResponseOutputItem>,
-    pub server_label: String,
 }
 
 impl ToolLoopState {
-    pub fn new(original_input: ResponseInput, server_label: String) -> Self {
+    pub fn new(original_input: ResponseInput) -> Self {
         Self {
             iteration: 0,
             total_calls: 0,
             conversation_history: Vec::new(),
             original_input,
             mcp_call_items: Vec::new(),
-            server_label,
         }
     }
 

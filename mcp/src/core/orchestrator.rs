@@ -28,6 +28,7 @@
 
 use std::{
     borrow::Cow,
+    collections::HashMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -989,7 +990,7 @@ impl McpOrchestrator {
     /// # Arguments
     /// * `inputs` - Tool calls to execute
     /// * `allowed_servers` - Server keys to search within
-    /// * `server_label` - User-facing label for API responses (from request config)
+    /// * `mcp_servers` - MCP servers for this request (label, server_key)
     /// * `request_ctx` - Request context for approval and tenant isolation
     ///
     /// # Returns
@@ -999,9 +1000,17 @@ impl McpOrchestrator {
         &self,
         inputs: Vec<ToolExecutionInput>,
         allowed_servers: &[String],
-        server_label: &str,
+        mcp_servers: &[(String, String)],
         request_ctx: &McpRequestContext<'_>,
     ) -> Vec<ToolExecutionOutput> {
+        let fallback_label = mcp_servers
+            .first()
+            .map(|(label, _)| label.as_str())
+            .unwrap_or("mcp");
+        let mut server_label_map = HashMap::new();
+        for (label, key) in mcp_servers {
+            server_label_map.insert(key.as_str(), label.as_str());
+        }
         let mut results = Vec::with_capacity(inputs.len());
 
         for input in inputs {
@@ -1024,6 +1033,11 @@ impl McpOrchestrator {
                     ("unknown".to_string(), ResponseFormat::Passthrough, None)
                 }
             };
+
+            let server_label = server_label_map
+                .get(server_key.as_str())
+                .copied()
+                .unwrap_or(fallback_label);
 
             let (output, is_error, error_message) = {
                 let handle_error = |err_msg: String| {

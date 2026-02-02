@@ -52,7 +52,7 @@ use crate::{
             streaming::{OutputItemType, ResponseStreamEventEmitter},
             ResponsesContext,
         },
-        mcp_utils::{extract_server_label, DEFAULT_MAX_ITERATIONS},
+        mcp_utils::{resolve_tool_server_label, DEFAULT_MAX_ITERATIONS},
     },
 };
 
@@ -492,10 +492,7 @@ async fn execute_tool_loop_streaming_internal(
     model_id: Option<String>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
-    // Extract server label from original request tools
-    let server_label = extract_server_label(original_request.tools.as_deref(), "request-mcp");
-
-    let mut state = ToolLoopState::new(original_request.input.clone(), server_label.clone());
+    let mut state = ToolLoopState::new(original_request.input.clone());
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
     // Generate response ID first so we can use it for both emitter and request context
@@ -524,10 +521,12 @@ async fn execute_tool_loop_streaming_internal(
     emitter.send_event(&event, &tx)?;
 
     // Get MCP tools and convert to chat format (do this once before loop)
-    let mcp_tools = {
+    let (mcp_servers, server_keys): (Vec<(String, String)>, Vec<String>) = {
         let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_orchestrator.list_tools_for_servers(&servers)
+        let keys = servers.iter().map(|(_, key)| key.clone()).collect();
+        (servers.clone(), keys)
     };
+    let mcp_tools = ctx.mcp_orchestrator.list_tools_for_servers(&server_keys);
     let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&mcp_tools);
     trace!(
         "Streaming: Converted {} MCP tools to chat format",
@@ -554,56 +553,62 @@ async fn execute_tool_loop_streaming_internal(
 
         // Emit mcp_list_tools as first output item (only once, on first iteration)
         if !mcp_list_tools_emitted {
-            let (output_index, item_id) =
-                emitter.allocate_output_index(OutputItemType::McpListTools);
+            for (label, key) in mcp_servers.iter() {
+                let (output_index, item_id) =
+                    emitter.allocate_output_index(OutputItemType::McpListTools);
 
-            // Build tools list for item structure
-            let tool_items: Vec<_> = mcp_tools
-                .iter()
-                .map(|t| {
-                    json!({
-                        "name": t.tool.name,
-                        "description": t.tool.description,
-                        "input_schema": Value::Object((*t.tool.input_schema).clone())
+                let tools_for_server = ctx
+                    .mcp_orchestrator
+                    .list_tools_for_servers(std::slice::from_ref(key));
+
+                // Build tools list for item structure
+                let tool_items: Vec<_> = tools_for_server
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "name": t.tool.name,
+                            "description": t.tool.description,
+                            "input_schema": Value::Object((*t.tool.input_schema).clone())
+                        })
                     })
-                })
-                .collect();
+                    .collect();
 
-            // Build mcp_list_tools item
-            let item = json!({
-                "id": item_id,
-                "type": "mcp_list_tools",
-                "server_label": state.server_label,
-                "status": "in_progress",
-                "tools": []
-            });
+                // Build mcp_list_tools item
+                let item = json!({
+                    "id": item_id,
+                    "type": "mcp_list_tools",
+                    "server_label": label,
+                    "status": "in_progress",
+                    "tools": []
+                });
 
-            // Emit output_item.added
-            let event = emitter.emit_output_item_added(output_index, &item);
-            emitter.send_event(&event, &tx)?;
+                // Emit output_item.added
+                let event = emitter.emit_output_item_added(output_index, &item);
+                emitter.send_event(&event, &tx)?;
 
-            // Emit mcp_list_tools.in_progress
-            let event = emitter.emit_mcp_list_tools_in_progress(output_index);
-            emitter.send_event(&event, &tx)?;
+                // Emit mcp_list_tools.in_progress
+                let event = emitter.emit_mcp_list_tools_in_progress(output_index);
+                emitter.send_event(&event, &tx)?;
 
-            // Emit mcp_list_tools.completed
-            let event = emitter.emit_mcp_list_tools_completed(output_index, &mcp_tools);
-            emitter.send_event(&event, &tx)?;
+                // Emit mcp_list_tools.completed
+                let event = emitter.emit_mcp_list_tools_completed(output_index, &tools_for_server);
+                emitter.send_event(&event, &tx)?;
 
-            // Build complete item with tools
-            let item_done = json!({
-                "id": item_id,
-                "type": "mcp_list_tools",
-                "server_label": state.server_label,
-                "status": "completed",
-                "tools": tool_items
-            });
+                // Build complete item with tools
+                let item_done = json!({
+                    "id": item_id,
+                    "type": "mcp_list_tools",
+                    "server_label": label,
+                    "status": "completed",
+                    "tools": tool_items
+                });
 
-            // Emit output_item.done
-            let event = emitter.emit_output_item_done(output_index, &item_done);
-            emitter.send_event(&event, &tx)?;
+                // Emit output_item.done
+                let event = emitter.emit_output_item_done(output_index, &item_done);
+                emitter.send_event(&event, &tx)?;
 
-            emitter.complete_output_item(output_index);
+                emitter.complete_output_item(output_index);
+            }
             mcp_list_tools_emitted = true;
         }
 
@@ -673,9 +678,10 @@ async fn execute_tool_loop_streaming_internal(
             }
 
             // Get server_keys once before processing tool calls
-            let server_keys: Vec<String> = {
+            let (mcp_servers, server_keys): (Vec<(String, String)>, Vec<String>) = {
                 let servers = ctx.requested_servers.read().unwrap();
-                servers.clone()
+                let keys = servers.iter().map(|(_, key)| key.clone()).collect();
+                (servers.clone(), keys)
             };
 
             // Process each MCP tool call
@@ -716,7 +722,13 @@ async fn execute_tool_loop_streaming_internal(
                 });
                 // Add server_label only for mcp_call
                 if item_type == "mcp_call" {
-                    item["server_label"] = json!(state.server_label);
+                    let resolved_label = resolve_tool_server_label(
+                        Some(ctx.mcp_orchestrator.as_ref()),
+                        &tool_call.name,
+                        &mcp_servers,
+                        &server_keys,
+                    );
+                    item["server_label"] = json!(resolved_label);
                 }
 
                 // Emit output_item.added
@@ -767,13 +779,19 @@ async fn execute_tool_loop_streaming_internal(
                     serde_json::from_str(&tool_call.arguments).unwrap_or_else(|_| json!({}));
 
                 // Execute tool and convert result using unified serialization
+                let resolved_label = resolve_tool_server_label(
+                    Some(ctx.mcp_orchestrator.as_ref()),
+                    &tool_call.name,
+                    &mcp_servers,
+                    &server_keys,
+                );
                 let call_result = ctx
                     .mcp_orchestrator
                     .call_tool_by_name(
                         &tool_call.name,
                         arguments,
                         &server_keys,
-                        &state.server_label,
+                        &resolved_label,
                         &request_ctx,
                     )
                     .await;
@@ -801,7 +819,7 @@ async fn execute_tool_loop_streaming_internal(
                                 "output": output
                             });
                             if item_type == "mcp_call" {
-                                item_done["server_label"] = json!(state.server_label);
+                                item_done["server_label"] = json!(resolved_label);
                             }
 
                             // Emit output_item.done
@@ -827,7 +845,7 @@ async fn execute_tool_loop_streaming_internal(
                                 "error": &output
                             });
                             if item_type == "mcp_call" {
-                                item_done["server_label"] = json!(state.server_label);
+                                item_done["server_label"] = json!(resolved_label);
                             }
 
                             // Emit output_item.done
@@ -855,7 +873,7 @@ async fn execute_tool_loop_streaming_internal(
                             "error": &err_str
                         });
                         if item_type == "mcp_call" {
-                            item_done["server_label"] = json!(state.server_label);
+                            item_done["server_label"] = json!(resolved_label);
                         }
 
                         // Emit output_item.done
@@ -894,7 +912,7 @@ async fn execute_tool_loop_streaming_internal(
                     &output_value,
                     &response_format,
                     &tool_call.call_id,
-                    &state.server_label,
+                    &resolved_label,
                     &tool_call.name,
                     &tool_call.arguments,
                 );

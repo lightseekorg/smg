@@ -25,11 +25,11 @@ use crate::{
 /// code_interpreter), and if so, validates that the MCP clients can be created
 /// and connected.
 ///
-/// Returns Ok((has_mcp_tools, server_keys)) on success.
+/// Returns Ok((has_mcp_tools, mcp_servers)) on success.
 pub(crate) async fn ensure_mcp_connection(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: Option<&[ResponseTool]>,
-) -> Result<(bool, Vec<String>), Response> {
+) -> Result<(bool, Vec<(String, String)>), Response> {
     // Check for explicit MCP tools (must error if connection fails)
     let has_explicit_mcp_tools = tools
         .map(|t| {
@@ -58,9 +58,7 @@ pub(crate) async fn ensure_mcp_connection(
     if let Some(tools) = tools {
         match ensure_request_mcp_client(mcp_orchestrator, tools).await {
             Some((_orchestrator, mcp_servers)) => {
-                let server_keys: Vec<String> =
-                    mcp_servers.into_iter().map(|(_, key)| key).collect();
-                return Ok((true, server_keys));
+                return Ok((true, mcp_servers));
             }
             None => {
                 // No MCP servers available
