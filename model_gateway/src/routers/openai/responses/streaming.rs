@@ -26,8 +26,8 @@ use super::{
     common::{extract_output_index, get_event_type, parse_sse_block, ChunkProcessor},
     mcp::{
         build_resume_payload, execute_streaming_tool_calls, inject_mcp_metadata_streaming,
-        prepare_mcp_tools_as_functions, send_mcp_list_tools_events, StreamingToolCallResult,
-        ToolLoopState,
+        prepare_mcp_tools_as_functions, process_approval_responses_in_payload,
+        send_mcp_list_tools_events, StreamingToolCallResult, ToolLoopState,
     },
     tool_handler::{StreamAction, StreamingToolHandler},
     utils::{
@@ -43,7 +43,7 @@ use crate::{
             FileSearchCallEvent, FunctionCallEvent, ItemType, McpEvent, OutputItemEvent,
             ResponseEvent, WebSearchCallEvent,
         },
-        responses::{ResponseToolType, ResponsesRequest},
+        responses::{ResponseInput, ResponseInputOutputItem, ResponseToolType, ResponsesRequest},
     },
     routers::{
         header_utils::{apply_request_headers, preserve_response_headers},
@@ -698,6 +698,22 @@ pub(super) async fn handle_streaming_with_tool_interception(
     let mut payload = req.payload;
     prepare_mcp_tools_as_functions(&mut payload, orchestrator, &server_keys);
 
+    // Process any mcp_approval_response items before sending to upstream
+    let server_label = loop_config
+        .mcp_servers
+        .first()
+        .map(|(l, _)| l.as_str())
+        .unwrap_or("mcp");
+    if let Err(err) =
+        process_approval_responses_in_payload(&mut payload, orchestrator, server_label).await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to process approval responses: {}", err),
+        )
+            .into_response();
+    }
+
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
     let should_store = req.original_body.store.unwrap_or(false);
     let original_request = req.original_body;
@@ -716,6 +732,14 @@ pub(super) async fn handle_streaming_with_tool_interception(
     // Spawn the streaming loop task
     tokio::spawn(async move {
         let mut state = ToolLoopState::new(original_request.input.clone());
+
+        // Strip approval-related items from original_input so they don't leak into resume payloads
+        if let ResponseInput::Items(ref mut items) = state.original_input {
+            items.retain(|item| {
+                !matches!(item, ResponseInputOutputItem::McpApprovalResponse { .. })
+            });
+        }
+
         let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
         let tools_json = payload_clone.get("tools").cloned().unwrap_or(json!([]));
         let base_payload = payload_clone.clone();

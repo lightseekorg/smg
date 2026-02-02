@@ -18,15 +18,15 @@ use tracing::{debug, info, warn};
 
 use crate::{
     mcp::{
-        McpOrchestrator, ResponseFormat, ResponseTransformer, TenantContext, ToolCallContext,
-        ToolCallResult,
+        ApprovalResponseInput, McpOrchestrator, ResponseFormat, ResponseTransformer,
+        TenantContext, ToolCallContext, ToolCallResult, ToolExecutionOutcome,
     },
     protocols::{
         event_types::{
             is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType,
             McpEvent, OutputItemEvent, WebSearchCallEvent,
         },
-        responses::{generate_id, ResponseInput, ResponsesRequest},
+        responses::{generate_id, ResponseInput, ResponseInputOutputItem, ResponsesRequest},
     },
     routers::{
         header_utils::apply_request_headers,
@@ -370,6 +370,100 @@ pub(super) fn prepare_mcp_tools_as_functions(
     }
 }
 
+/// Process any `mcp_approval_response` items from the payload's input before
+/// sending to the upstream LLM. The upstream doesn't understand our approval
+/// protocol, so we must:
+/// 1. Extract approval response items from the input
+/// 2. Execute approved tools via the orchestrator
+/// 3. Replace approval items with function_call + function_call_output items
+///
+/// Returns true if approvals were found and processed.
+pub(super) async fn process_approval_responses_in_payload(
+    payload: &mut Value,
+    orchestrator: &Arc<McpOrchestrator>,
+    server_label: &str,
+) -> Result<bool, String> {
+    let input_array = match payload.get_mut("input").and_then(|v| v.as_array_mut()) {
+        Some(arr) => arr,
+        None => return Ok(false),
+    };
+
+    // Collect approval responses and track indices to remove
+    let mut approvals = Vec::new();
+    let mut indices_to_remove = Vec::new();
+
+    for (i, item) in input_array.iter().enumerate() {
+        let item_type = item.get("type").and_then(|t| t.as_str());
+        match item_type {
+            Some("mcp_approval_response") => {
+                if let (Some(req_id), Some(approve)) = (
+                    item.get("approval_request_id").and_then(|v| v.as_str()),
+                    item.get("approve").and_then(|v| v.as_bool()),
+                ) {
+                    approvals.push(ApprovalResponseInput {
+                        approval_request_id: req_id.to_string(),
+                        approve,
+                        reason: item
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                    });
+                }
+                indices_to_remove.push(i);
+            }
+            Some("mcp_approval_request") => {
+                // Also strip approval request items — upstream doesn't need them
+                indices_to_remove.push(i);
+            }
+            _ => {}
+        }
+    }
+
+    if approvals.is_empty() {
+        return Ok(false);
+    }
+
+    // Remove approval items in reverse order to preserve indices
+    for &i in indices_to_remove.iter().rev() {
+        input_array.remove(i);
+    }
+
+    info!(
+        "Processing {} approval responses before upstream call",
+        approvals.len()
+    );
+
+    // Execute approved tools through the orchestrator
+    let outcomes = orchestrator
+        .process_approval_responses(approvals, server_label)
+        .await;
+
+    // Inject function_call + function_call_output for executed tools
+    for outcome in outcomes {
+        if let ToolExecutionOutcome::Executed(output) = outcome {
+            input_array.push(json!({
+                "type": "function_call",
+                "id": generate_id("fc"),
+                "call_id": &output.call_id,
+                "name": &output.tool_name,
+                "arguments": &output.arguments_str,
+            }));
+
+            let output_str = match &output.output {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            input_array.push(json!({
+                "type": "function_call_output",
+                "call_id": &output.call_id,
+                "output": output_str,
+            }));
+        }
+    }
+
+    Ok(true)
+}
+
 /// Build a resume payload with conversation history
 pub(super) fn build_resume_payload(
     base_payload: &Value,
@@ -684,6 +778,13 @@ pub(super) async fn execute_tool_loop(
     config: &McpLoopConfig,
 ) -> Result<Value, String> {
     let mut state = ToolLoopState::new(original_body.input.clone());
+
+    // Strip approval-related items from original_input so they don't leak into resume payloads
+    if let ResponseInput::Items(ref mut items) = state.original_input {
+        items.retain(|item| {
+            !matches!(item, ResponseInputOutputItem::McpApprovalResponse { .. })
+        });
+    }
 
     // Create a request context for tool execution (use request's ID if available)
     let request_id = original_body

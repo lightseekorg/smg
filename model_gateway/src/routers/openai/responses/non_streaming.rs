@@ -11,7 +11,10 @@ use serde_json::{json, Value};
 use tracing::warn;
 
 use super::{
-    mcp::{execute_tool_loop, prepare_mcp_tools_as_functions},
+    mcp::{
+        execute_tool_loop, prepare_mcp_tools_as_functions,
+        process_approval_responses_in_payload,
+    },
     utils::{patch_response_with_request_metadata, restore_original_tools},
 };
 use crate::routers::{
@@ -76,6 +79,22 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         };
         let orchestrator = mcp_orchestrator;
         prepare_mcp_tools_as_functions(&mut payload, orchestrator, &server_keys);
+
+        // Process any mcp_approval_response items before sending to upstream
+        let server_label = config
+            .mcp_servers
+            .first()
+            .map(|(l, _)| l.as_str())
+            .unwrap_or("mcp");
+        if let Err(err) =
+            process_approval_responses_in_payload(&mut payload, orchestrator, server_label).await
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": err}})),
+            )
+                .into_response();
+        }
 
         match execute_tool_loop(
             ctx.components.client(),
