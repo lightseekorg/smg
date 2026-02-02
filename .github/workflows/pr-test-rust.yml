@@ -23,7 +23,7 @@ env:
 
 jobs:
   check-ci:
-    runs-on: k8s-runner-cpu
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
@@ -75,7 +75,7 @@ jobs:
 
   python-unit-tests:
     needs: build-wheel
-    runs-on: k8s-runner-cpu
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -104,7 +104,7 @@ jobs:
   unit-tests:
     needs: check-ci
     if: needs.check-ci.outputs.should_run == 'true'
-    runs-on: k8s-runner-cpu
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -311,7 +311,7 @@ jobs:
     name: go-unit-tests
     needs: [check-ci, build-wheel]
     if: needs.check-ci.outputs.should_run == 'true'
-    runs-on: k8s-runner-cpu
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
@@ -466,7 +466,7 @@ jobs:
   finish:
     needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e, go-bindings-benchmark]
     if: always()
-    runs-on: k8s-runner-cpu
+    runs-on: ubuntu-latest
     permissions: {}
     steps:
       - name: Check CI result
@@ -483,7 +483,7 @@ jobs:
 
   summarize-benchmarks:
     needs: [gateway-e2e, go-bindings-benchmark]
-    runs-on: k8s-runner-cpu
+    runs-on: ubuntu-latest
     if: success()
     permissions:
       contents: read
