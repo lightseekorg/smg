@@ -169,12 +169,19 @@ pub(crate) async fn persist_response_if_needed(
     }
 
     if let Ok(response_json) = to_value(response) {
+        // Read conversation_store_id from task-local storage
+        let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
+            .try_with(|id| id.clone())
+            .ok()
+            .flatten();
+
         if let Err(e) = persist_conversation_items(
             conversation_storage,
             conversation_item_storage,
             response_storage,
             &response_json,
             original_request,
+            conversation_store_id,
         )
         .await
         {

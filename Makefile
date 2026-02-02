@@ -57,7 +57,7 @@ lint: ## Run clippy lint checks
 
 fmt: ## Format code with rustfmt
 	@echo "Formatting code..."
-	@source "$$HOME/.cargo/env" && rustup component add --toolchain nightly-x86_64-unknown-linux-gnu rustfmt
+	@source "$$HOME/.cargo/env" && rustup component add --toolchain nightly rustfmt
 	@source "$$HOME/.cargo/env" && rustup toolchain install nightly --profile minimal
 	@source "$$HOME/.cargo/env" && cargo +nightly fmt -- --check
 

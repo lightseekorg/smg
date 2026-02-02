@@ -20,6 +20,9 @@ use bytes::Bytes;
 use http_body::Frame;
 use rand::Rng;
 use serde_json::json;
+// Task-local storage for conversation store ID to avoid passing private data through request structures
+// This is defined in smg_data_connector::core and re-exported through lib.rs
+pub use smg_data_connector::CONVERSATION_STORE_ID;
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tower::{Layer, Service};
@@ -145,6 +148,58 @@ pub async fn auth_middleware(
     }
 
     Ok(next.run(request).await)
+}
+
+/// Constants for headers that need to be extracted and stored in task-local storage
+pub const CONVERSATION_STORE_ID_HEADER: &str = "opc-conversation-store-id";
+
+/// Create a middleware function that extracts specified headers and stores them in task-local storage
+/// This keeps private Oracle data out of public request structures
+pub fn create_header_extraction_middleware(
+    headers_to_extract: Vec<String>,
+) -> impl Fn(Request<Body>, Next) -> Pin<Box<dyn std::future::Future<Output = Response> + Send>>
+       + Clone
+       + Send
+       + Sync
+       + 'static {
+    let headers = Arc::new(headers_to_extract);
+
+    move |request: Request<Body>, next: Next| {
+        let headers = headers.clone();
+        Box::pin(async move {
+            // Extract and store each header in task-local storage
+            for header_name in headers.iter() {
+                let header_value = request
+                    .headers()
+                    .get(header_name)
+                    .and_then(|h| h.to_str().ok())
+                    .map(String::from);
+
+                // Debug logging
+                if let Some(ref value) = header_value {
+                    tracing::debug!("Middleware extracted header {}: {}", header_name, value);
+                } else {
+                    tracing::debug!("Middleware found no {} header", header_name);
+                }
+
+                // Store in task-local storage based on header name
+                match header_name.as_str() {
+                    CONVERSATION_STORE_ID_HEADER => {
+                        return CONVERSATION_STORE_ID
+                            .scope(header_value, next.run(request))
+                            .await;
+                    }
+                    // Add more headers here as needed
+                    _ => {
+                        // For now, skip unknown headers
+                    }
+                }
+            }
+
+            // If no headers were processed, just run the next middleware
+            next.run(request).await
+        })
+    }
 }
 
 /// Alphanumeric characters for request ID generation (as bytes for O(1) indexing)

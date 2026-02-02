@@ -144,6 +144,12 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         previous_response_id.as_deref(),
     );
 
+    // Read conversation_store_id from task-local storage in async context
+    let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
+        .try_with(|id| id.clone())
+        .ok()
+        .flatten();
+
     if let Err(err) = persist_conversation_items(
         ctx.components
             .conversation_storage()
@@ -159,6 +165,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             .clone(),
         &response_json,
         original_body,
+        conversation_store_id,
     )
     .await
     {

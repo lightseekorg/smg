@@ -697,6 +697,11 @@ pub fn build_app(
         .merge(admin_routes)
         .merge(worker_routes)
         .merge(mesh_routes)
+        .layer(axum::middleware::from_fn(
+            middleware::create_header_extraction_middleware(vec![
+                middleware::CONVERSATION_STORE_ID_HEADER.to_string(),
+            ]),
+        ))
         .layer(axum::extract::DefaultBodyLimit::max(max_payload_size))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             max_payload_size,

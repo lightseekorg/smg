@@ -330,21 +330,33 @@ pub async fn create_conversation_items(
         ));
     }
 
-    let mut created_items = Vec::new();
-    let mut warnings = Vec::new();
     let added_at = Utc::now();
 
-    for item_val in items_array {
-        match process_item(item_storage, &conversation_id, item_val, added_at).await {
-            Ok((item_json, warning)) => {
-                created_items.push(item_json);
-                if let Some(w) = warning {
-                    warnings.push(w);
+    // Set conversation_id in task-local storage for Oracle backend
+    let scope_result = crate::data_connector::CURRENT_CONVERSATION_ID
+        .scope(Some(conversation_id.clone()), async move {
+            let mut created_items = Vec::new();
+            let mut warnings = Vec::new();
+
+            for item_val in items_array {
+                match process_item(item_storage, &conversation_id, item_val, added_at).await {
+                    Ok((item_json, warning)) => {
+                        created_items.push(item_json);
+                        if let Some(w) = warning {
+                            warnings.push(w);
+                        }
+                    }
+                    Err(response) => return Err(response),
                 }
             }
-            Err(response) => return response,
-        }
-    }
+            Ok((created_items, warnings))
+        })
+        .await;
+
+    let (created_items, warnings) = match scope_result {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
 
     let mut response = json!({
         "object": "list",
@@ -370,8 +382,10 @@ async fn process_item(
     item_val: &Value,
     added_at: chrono::DateTime<Utc>,
 ) -> Result<(Value, Option<String>), Response> {
+    // Accept both "type" and "item_type" for backward compatibility
     let item_type = item_val
         .get("type")
+        .or_else(|| item_val.get("item_type"))
         .and_then(|v| v.as_str())
         .unwrap_or("message");
 
@@ -413,14 +427,16 @@ async fn process_item_reference(
 
     let item_id = ConversationItemId::from(ref_id);
 
-    let existing_item = match item_storage.get_item(&item_id).await {
-        Ok(Some(item)) => item,
-        Ok(None) => return Err(not_found(format!("Referenced item '{ref_id}' not found"))),
-        Err(e) => {
-            return Err(internal_error(format!(
-                "Failed to get referenced item: {e}"
-            )))
-        }
+    let scoped_result = crate::data_connector::CURRENT_CONVERSATION_ID
+        .scope(Some(conversation_id.clone()), async move {
+            item_storage.get_item(&item_id).await
+        })
+        .await
+        .map_err(|e| internal_error(format!("Failed to get referenced item: {e}")))?;
+
+    let existing_item = match scoped_result {
+        Some(item) => item,
+        None => return Err(not_found(format!("Referenced item '{ref_id}' not found"))),
     };
 
     if let Err(e) = item_storage
@@ -458,23 +474,30 @@ async fn process_item_with_id(
     }
 
     // Check if item exists globally
-    match item_storage.get_item(&item_id).await {
-        Ok(Some(existing)) => Ok((existing, None)),
-        Ok(None) => {
+    let item_id_clone = item_id.clone();
+    let item_result = crate::data_connector::CURRENT_CONVERSATION_ID
+        .scope(Some(conversation_id.clone()), async move {
+            item_storage.get_item(&item_id_clone).await
+        })
+        .await
+        .map_err(|e| internal_error(format!("Failed to check item existence: {e}")))?;
+
+    match item_result {
+        Some(existing) => Ok((existing, None)),
+        None => {
             // Create new item with the provided ID
             let (mut new_item, warning) = parse_item_from_value(item_val).map_err(bad_request)?;
             new_item.id = Some(item_id);
 
-            let created = item_storage
-                .create_item(new_item)
+            let created = crate::data_connector::CURRENT_CONVERSATION_ID
+                .scope(Some(conversation_id.clone()), async move {
+                    item_storage.create_item(new_item).await
+                })
                 .await
                 .map_err(|e| internal_error(format!("Failed to create item: {e}")))?;
 
             Ok((created, warning))
         }
-        Err(e) => Err(internal_error(format!(
-            "Failed to check item existence: {e}"
-        ))),
     }
 }
 
@@ -485,6 +508,8 @@ async fn process_new_item(
 ) -> Result<(ConversationItem, Option<String>), Response> {
     let (new_item, warning) = parse_item_from_value(item_val).map_err(bad_request)?;
 
+    // For Oracle, conversation_id comes from task-local storage set by middleware
+    // For other backends, they may need to implement their own logic
     let created = item_storage
         .create_item(new_item)
         .await
@@ -520,7 +545,13 @@ pub async fn get_conversation_item(
         return not_found("Item not found in this conversation");
     }
 
-    match item_storage.get_item(&item_id).await {
+    let item_result = crate::data_connector::CURRENT_CONVERSATION_ID
+        .scope(Some(conversation_id.clone()), async move {
+            item_storage.get_item(&item_id).await
+        })
+        .await;
+
+    match item_result {
         Ok(Some(item)) => (StatusCode::OK, Json(item_to_json(&item))).into_response(),
         Ok(None) => not_found("Item not found"),
         Err(e) => internal_error(format!("Failed to get item: {e}")),
@@ -562,8 +593,10 @@ pub async fn delete_conversation_item(
 fn parse_item_from_value(
     item_val: &Value,
 ) -> Result<(NewConversationItem, Option<String>), String> {
+    // Accept both "type" and "item_type" for backward compatibility
     let item_type = item_val
         .get("type")
+        .or_else(|| item_val.get("item_type"))
         .and_then(|v| v.as_str())
         .unwrap_or("message");
 
@@ -606,10 +639,15 @@ fn parse_item_from_value(
         item_val.clone()
     };
 
+    let response_id = item_val
+        .get("response_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     Ok((
         NewConversationItem {
             id: None,
-            response_id: None,
+            response_id,
             item_type: item_type.to_string(),
             role,
             content,
