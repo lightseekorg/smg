@@ -8,7 +8,6 @@
 # No Docker or C++ build toolchain required.
 #
 # Prerequisites (expected on k8s-runner-gpu H100 nodes):
-#   - CUDA toolkit (CUDA_HOME=/usr/local/cuda)
 #   - libopenmpi-dev
 #
 # At runtime we use --backend pytorch, which avoids TRT engine compilation.
@@ -32,14 +31,36 @@ pip install --no-cache-dir torch torchvision --index-url https://download.pytorc
 echo "Installing stable TensorRT-LLM wheel..."
 pip install --no-cache-dir tensorrt_llm --extra-index-url=https://pypi.nvidia.com
 
-# Step 2: Clone main branch for gRPC serve command (not in any release yet).
+# Step 2: Set LD_LIBRARY_PATH for pip-installed CUDA toolkit.
+# TRT-LLM pulls in cuda-toolkit as a pip dependency (e.g. CUDA 13.x) whose
+# shared libraries aren't on the default search path. Find and export them.
+SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
+CUDA_LIB_DIR=$(find "$SITE_PACKAGES" -name "libcudart.so*" -exec dirname {} \; 2>/dev/null | head -1)
+if [ -n "$CUDA_LIB_DIR" ]; then
+    export LD_LIBRARY_PATH="${CUDA_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+    echo "Added CUDA libs to LD_LIBRARY_PATH: $CUDA_LIB_DIR"
+else
+    echo "WARNING: Could not find pip-installed libcudart.so, trying system CUDA"
+    export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+fi
+
+# Also find and add TensorRT libs (libnvinfer etc.)
+TRTLLM_LIB_DIR=$(find "$SITE_PACKAGES" -path "*/tensorrt_llm/libs" -type d 2>/dev/null | head -1)
+if [ -n "$TRTLLM_LIB_DIR" ]; then
+    export LD_LIBRARY_PATH="${TRTLLM_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+    echo "Added TRT-LLM libs to LD_LIBRARY_PATH: $TRTLLM_LIB_DIR"
+fi
+
+echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+
+# Step 3: Clone main branch for gRPC serve command (not in any release yet).
 TRTLLM_DIR="/tmp/tensorrt-llm-src"
 if [ ! -d "$TRTLLM_DIR" ]; then
     echo "Cloning TensorRT-LLM main branch for gRPC source..."
     git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM.git "$TRTLLM_DIR"
 fi
 
-# Step 3: Overlay Python source from main branch onto the installed package.
+# Step 4: Overlay Python source from main branch onto the installed package.
 # This replaces the Python files (including adding gRPC serve command) while
 # preserving all compiled .so/.pyd binaries from the stable wheel.
 INSTALL_DIR=$(python3 -c "import tensorrt_llm, pathlib; print(pathlib.Path(tensorrt_llm.__file__).parent)")
@@ -55,6 +76,11 @@ rsync -a \
     --exclude='bindings/' \
     --exclude='libs/' \
     "$TRTLLM_DIR/tensorrt_llm/" "$INSTALL_DIR/"
+
+# Persist LD_LIBRARY_PATH for subsequent CI steps via GITHUB_ENV
+if [ -n "${GITHUB_ENV:-}" ]; then
+    echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+fi
 
 echo "TensorRT-LLM installation complete"
 python3 -c "import tensorrt_llm; print(f'TensorRT-LLM version: {tensorrt_llm.__version__}')"
