@@ -7,8 +7,8 @@
 # us the gRPC serve command from main + compiled C++/CUDA libs from stable.
 # No Docker or C++ build toolchain required.
 #
-# Prerequisites (expected on k8s-runner-gpu H100 nodes):
-#   - libopenmpi-dev
+# TRT-LLM 1.1.0 requires CUDA 13 libraries (libcublasLt.so.13 etc.).
+# We install these via NVIDIA's apt repository.
 #
 # At runtime we use --backend pytorch, which avoids TRT engine compilation.
 
@@ -19,36 +19,39 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
-# System dependencies
+# Step 1: Install CUDA 13 libraries via NVIDIA apt repo.
+# TRT-LLM 1.1.0 is built against CUDA 13. The pip packages only provide
+# a subset of CUDA 13 libs (cuda-runtime, nvrtc) but not cublas, cusolver, etc.
+# Install the full CUDA 13 library set via apt.
+echo "Installing CUDA 13 libraries..."
+if ! dpkg -l cuda-keyring 2>/dev/null | grep -q '^ii'; then
+    wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+    sudo dpkg -i cuda-keyring_1.1-1_all.deb
+fi
 sudo apt-get update
-sudo apt-get install -y libopenmpi-dev
+sudo apt-get install -y libopenmpi-dev cuda-libraries-13-1
 
-# Install PyTorch with CUDA support (TRT-LLM requires torch with CUDA)
+# Add CUDA 13 libs to LD_LIBRARY_PATH
+export LD_LIBRARY_PATH="/usr/local/cuda-13.1/lib64:${LD_LIBRARY_PATH:-}"
+
+# Install PyTorch with CUDA support
 pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
-# Step 1: Install the latest stable TRT-LLM wheel from NVIDIA PyPI.
-# This gives us all compiled binaries (bindings, .so files, CUDA kernels).
+# Step 2: Install the latest stable TRT-LLM wheel from NVIDIA PyPI.
 echo "Installing stable TensorRT-LLM wheel..."
 pip install --no-cache-dir tensorrt_llm --extra-index-url=https://pypi.nvidia.com
 
-# Step 2: Set LD_LIBRARY_PATH for ALL pip-installed NVIDIA/CUDA libraries.
-# TRT-LLM pulls in multiple CUDA packages (cuda-runtime 12.x AND 13.x, TensorRT,
-# nccl, etc.) whose shared libraries aren't on the default search path.
-# We add ALL nvidia `lib` directories to cover every .so dependency.
+# Step 3: Set LD_LIBRARY_PATH for pip-installed NVIDIA libraries.
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
 
 NVIDIA_LIB_DIRS=$(find "$SITE_PACKAGES/nvidia" -name "lib" -type d 2>/dev/null | sort -u | paste -sd':')
 if [ -n "$NVIDIA_LIB_DIRS" ]; then
     export LD_LIBRARY_PATH="${NVIDIA_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
-    echo "Added NVIDIA libs to LD_LIBRARY_PATH:"
-    echo "$NVIDIA_LIB_DIRS" | tr ':' '\n' | while read -r d; do echo "  $d"; done
 fi
 
-# Also add TRT-LLM's own libs directory (libtensorrt_llm.so etc.)
 TRTLLM_LIB_DIR=$(find "$SITE_PACKAGES" -path "*/tensorrt_llm/libs" -type d 2>/dev/null | head -1)
 if [ -n "$TRTLLM_LIB_DIR" ]; then
     export LD_LIBRARY_PATH="${TRTLLM_LIB_DIR}:${LD_LIBRARY_PATH:-}"
-    echo "Added TRT-LLM libs: $TRTLLM_LIB_DIR"
 fi
 
 # Add system CUDA as fallback
@@ -58,21 +61,20 @@ fi
 
 echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 
-# Step 3: Clone main branch for gRPC serve command (not in any release yet).
+# Step 4: Clone main branch for gRPC serve command (not in any release yet).
 TRTLLM_DIR="/tmp/tensorrt-llm-src"
 if [ ! -d "$TRTLLM_DIR" ]; then
     echo "Cloning TensorRT-LLM main branch for gRPC source..."
     git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM.git "$TRTLLM_DIR"
 fi
 
-# Step 4: Overlay Python source from main branch onto the installed package.
+# Step 5: Overlay Python source from main branch onto the installed package.
 # This replaces the Python files (including adding gRPC serve command) while
 # preserving all compiled .so/.pyd binaries from the stable wheel.
 INSTALL_DIR=$(python3 -c "import tensorrt_llm, pathlib; print(pathlib.Path(tensorrt_llm.__file__).parent)")
 echo "Installed package at: $INSTALL_DIR"
 echo "Overlaying main branch Python source..."
 
-# Copy Python files from git source, preserving compiled binaries
 rsync -a \
     --include='*.py' \
     --include='*/' \
@@ -82,7 +84,7 @@ rsync -a \
     --exclude='libs/' \
     "$TRTLLM_DIR/tensorrt_llm/" "$INSTALL_DIR/"
 
-# Persist LD_LIBRARY_PATH for subsequent CI steps via GITHUB_ENV
+# Persist LD_LIBRARY_PATH for subsequent CI steps
 if [ -n "${GITHUB_ENV:-}" ]; then
     echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 fi
