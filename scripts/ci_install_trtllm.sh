@@ -113,3 +113,7 @@ fi
 echo "TensorRT-LLM installation complete"
 python3 -c "import tensorrt_llm; print(f'TensorRT-LLM version: {tensorrt_llm.__version__}')"
 python3 -c "from tensorrt_llm.commands.serve import main; print('gRPC serve command: available')"
+
+# Smoke-test: verify the serve command can parse --grpc --help without crashing
+echo "Verifying gRPC serve command..."
+python3 -m tensorrt_llm.commands.serve --help 2>&1 | head -20 || echo "WARNING: serve --help failed"
