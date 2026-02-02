@@ -31,24 +31,29 @@ pip install --no-cache-dir torch torchvision --index-url https://download.pytorc
 echo "Installing stable TensorRT-LLM wheel..."
 pip install --no-cache-dir tensorrt_llm --extra-index-url=https://pypi.nvidia.com
 
-# Step 2: Set LD_LIBRARY_PATH for pip-installed CUDA toolkit.
-# TRT-LLM pulls in cuda-toolkit as a pip dependency (e.g. CUDA 13.x) whose
-# shared libraries aren't on the default search path. Find and export them.
+# Step 2: Set LD_LIBRARY_PATH for ALL pip-installed NVIDIA/CUDA libraries.
+# TRT-LLM pulls in multiple CUDA packages (cuda-runtime 12.x AND 13.x, TensorRT,
+# nccl, etc.) whose shared libraries aren't on the default search path.
+# We add ALL nvidia `lib` directories to cover every .so dependency.
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
-CUDA_LIB_DIR=$(find "$SITE_PACKAGES" -name "libcudart.so*" -exec dirname {} \; 2>/dev/null | head -1)
-if [ -n "$CUDA_LIB_DIR" ]; then
-    export LD_LIBRARY_PATH="${CUDA_LIB_DIR}:${LD_LIBRARY_PATH:-}"
-    echo "Added CUDA libs to LD_LIBRARY_PATH: $CUDA_LIB_DIR"
-else
-    echo "WARNING: Could not find pip-installed libcudart.so, trying system CUDA"
-    export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+
+NVIDIA_LIB_DIRS=$(find "$SITE_PACKAGES/nvidia" -name "lib" -type d 2>/dev/null | sort -u | paste -sd':')
+if [ -n "$NVIDIA_LIB_DIRS" ]; then
+    export LD_LIBRARY_PATH="${NVIDIA_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
+    echo "Added NVIDIA libs to LD_LIBRARY_PATH:"
+    echo "$NVIDIA_LIB_DIRS" | tr ':' '\n' | while read -r d; do echo "  $d"; done
 fi
 
-# Also find and add TensorRT libs (libnvinfer etc.)
+# Also add TRT-LLM's own libs directory (libtensorrt_llm.so etc.)
 TRTLLM_LIB_DIR=$(find "$SITE_PACKAGES" -path "*/tensorrt_llm/libs" -type d 2>/dev/null | head -1)
 if [ -n "$TRTLLM_LIB_DIR" ]; then
     export LD_LIBRARY_PATH="${TRTLLM_LIB_DIR}:${LD_LIBRARY_PATH:-}"
-    echo "Added TRT-LLM libs to LD_LIBRARY_PATH: $TRTLLM_LIB_DIR"
+    echo "Added TRT-LLM libs: $TRTLLM_LIB_DIR"
+fi
+
+# Add system CUDA as fallback
+if [ -d "/usr/local/cuda/lib64" ]; then
+    export LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
 fi
 
 echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
