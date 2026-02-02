@@ -24,11 +24,29 @@ fi
 sudo apt-get update
 sudo apt-get install -y libopenmpi-dev
 
-# Set CUDA_HOME and LD_LIBRARY_PATH from system CUDA
+# ── CUDA setup ───────────────────────────────────────────────────────────────
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
-export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+export PATH="$CUDA_HOME/bin:$PATH"
+
+# Re-activate venv to keep venv Python first in PATH
+if [ -f ".venv/bin/activate" ]; then
+    source .venv/bin/activate
+fi
+
+# Debug: print what CUDA we actually have
+echo "=== CUDA diagnostics ==="
 echo "CUDA_HOME=$CUDA_HOME"
-echo "CUDA version: $(cat ${CUDA_HOME}/version.json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["cuda"]["version"])' 2>/dev/null || nvcc --version 2>/dev/null | tail -1 || echo 'unknown')"
+ls -la "$CUDA_HOME" 2>/dev/null || echo "WARNING: $CUDA_HOME does not exist!"
+nvidia-smi 2>/dev/null | head -4 || echo "WARNING: nvidia-smi not found"
+nvcc --version 2>/dev/null || echo "WARNING: nvcc not found"
+echo "Looking for libcublasLt.so*:"
+find /usr/local -name "libcublasLt.so*" 2>/dev/null || echo "  not found in /usr/local"
+find /usr -name "libcublasLt.so*" 2>/dev/null | head -5 || echo "  not found in /usr"
+echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
+echo "=== end CUDA diagnostics ==="
+
+# Add CUDA libs to LD_LIBRARY_PATH
+export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH:-}"
 
 # Install PyTorch with CUDA support
 pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu126
@@ -52,7 +70,13 @@ if [ -n "$TRTLLM_LIB_DIR" ]; then
     export LD_LIBRARY_PATH="${TRTLLM_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 fi
 
-echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+echo "Final LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+
+# Debug: verify libcublasLt.so.13 is findable
+echo "Checking libcublasLt.so.13 resolution:"
+ldconfig -p 2>/dev/null | grep libcublasLt || echo "  not in ldconfig cache"
+find "$SITE_PACKAGES/nvidia" -name "libcublasLt.so*" 2>/dev/null || echo "  not in pip nvidia packages"
+find "$CUDA_HOME" -name "libcublasLt.so*" 2>/dev/null || echo "  not in CUDA_HOME"
 
 # Step 3: Clone main branch for gRPC serve command (not in any release yet).
 TRTLLM_DIR="/tmp/tensorrt-llm-src"
