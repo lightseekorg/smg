@@ -62,6 +62,7 @@ use crate::{
     inventory::{
         AliasTarget, ArgMapping, QualifiedToolName, ToolCategory, ToolEntry, ToolInventory,
     },
+    rate_limit::RateLimiter,
     tenant::TenantContext,
     transform::{ResponseFormat, ResponseTransformer},
 };
@@ -277,6 +278,7 @@ pub struct McpOrchestrator {
     connection_pool: Arc<McpConnectionPool>,
     /// Metrics and monitoring.
     metrics: Arc<McpMetrics>,
+    rate_limiter: Arc<RateLimiter>,
     /// Channel for refresh requests from handlers.
     refresh_tx: mpsc::Sender<RefreshRequest>,
     active_executions: Arc<AtomicUsize>,
@@ -297,7 +299,7 @@ impl McpOrchestrator {
 
         let tool_inventory = Arc::new(ToolInventory::new());
         let metrics = Arc::new(McpMetrics::new());
-
+        let rate_limiter = Arc::new(RateLimiter::new(config.rate_limits.unwrap_or_default()));
         // Build approval manager from config
         let audit_log = Arc::new(crate::approval::audit::AuditLog::new());
         let policy_engine = Arc::new(crate::approval::policy::PolicyEngine::from_yaml_config(
@@ -331,6 +333,7 @@ impl McpOrchestrator {
             approval_manager,
             connection_pool,
             metrics,
+            rate_limiter,
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
@@ -377,6 +380,7 @@ impl McpOrchestrator {
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
+            rate_limiter: Arc::new(RateLimiter::new(Default::default())),
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
@@ -771,13 +775,21 @@ impl McpOrchestrator {
             count.fetch_sub(1, Ordering::SeqCst);
         });
         let qualified = QualifiedToolName::new(server_key, tool_name);
+        self.rate_limiter
+            .check(&request_ctx.tenant_ctx, &qualified)?;
+        let _permit = self
+            .rate_limiter
+            .acquire_concurrent_permit(&request_ctx.tenant_ctx)
+            .await?;
+        self.rate_limiter
+            .record(&request_ctx.tenant_ctx.tenant_id, &qualified);
 
         // Get tool entry
         let entry = self
             .tool_inventory
             .get_entry(server_key, tool_name)
             .ok_or_else(|| McpError::ToolNotFound(qualified.to_string()))?;
-
+        self.active_executions.fetch_add(1, Ordering::SeqCst);
         // Record metrics start
         self.metrics.record_call_start(&qualified);
         let start_time = Instant::now();
@@ -1035,21 +1047,43 @@ impl McpOrchestrator {
                 match entry {
                     None => handle_error(format!("Tool '{}' not found", input.tool_name)),
                     Some(entry) => {
-                        // Execute with approval, getting raw result
-                        match self
-                            .execute_tool_with_approval_raw(&entry, input.arguments, request_ctx)
-                            .await
+                        let qualified = entry.qualified_name();
+
+                        if let Err(e) = self.rate_limiter.check(&request_ctx.tenant_ctx, qualified)
                         {
-                            Ok(Some(raw_result)) => {
-                                // Convert raw CallToolResult to JSON
-                                let output = self.call_result_to_json(&raw_result);
-                                (output, raw_result.is_error.unwrap_or(false), None)
+                            handle_error(e.to_string())
+                        } else {
+                            // Concurrency Control (Semaphore)
+                            // Permit is acquired here and held until the end of this loop iteration
+                            match self
+                                .rate_limiter
+                                .acquire_concurrent_permit(&request_ctx.tenant_ctx)
+                                .await
+                            {
+                                Err(e) => handle_error(e.to_string()),
+                                Ok(_permit) => {
+                                    // Record the call in sliding window
+                                    self.rate_limiter
+                                        .record(&request_ctx.tenant_ctx.tenant_id, qualified);
+
+                                    // Execute with approval, getting raw result
+                                    match self
+                                        .execute_tool_with_approval_raw(&entry, input.arguments, request_ctx)
+                                        .await
+                                    {
+                                        Ok(Some(raw_result)) => {
+                                            // Convert raw CallToolResult to JSON
+                                            let output = self.call_result_to_json(&raw_result);
+                                            (output, raw_result.is_error.unwrap_or(false), None)
+                                        }
+                                        Ok(None) => handle_error(
+                                            "Tool requires approval (not supported in this context)"
+                                                .to_string(),
+                                        ),
+                                        Err(e) => handle_error(format!("Tool call failed: {}", e)),
+                                    }
+                                }
                             }
-                            Ok(None) => handle_error(
-                                "Tool requires approval (not supported in this context)"
-                                    .to_string(),
-                            ),
-                            Err(e) => handle_error(format!("Tool call failed: {}", e)),
                         }
                     }
                 }
@@ -2312,6 +2346,7 @@ mod tests {
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
+            rate_limiter: Arc::new(RateLimiter::new(Default::default())),
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
@@ -2380,6 +2415,7 @@ mod tests {
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
+            rate_limiter: Arc::new(RateLimiter::new(Default::default())),
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
@@ -2450,6 +2486,7 @@ mod tests {
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
+            rate_limiter: Arc::new(RateLimiter::new(Default::default())),
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
@@ -2526,6 +2563,7 @@ mod tests {
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
+            rate_limiter: Arc::new(RateLimiter::new(Default::default())),
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),

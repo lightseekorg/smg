@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub struct McpConfig {
     /// Static MCP servers (loaded at startup)
     pub servers: Vec<McpServerConfig>,
+    pub rate_limits: Option<RateLimits>,
 
     /// Connection pool settings
     #[serde(default)]

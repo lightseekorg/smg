@@ -21,6 +21,7 @@ pub mod transform;
 pub mod approval;
 pub mod core;
 pub mod inventory;
+pub mod rate_limit;
 
 // Backward-compatible re-exports (old module paths)
 // These allow `mcp::config::*` to continue working
@@ -47,6 +48,7 @@ pub use error::{ApprovalError, McpError, McpResult};
 pub use inventory::{
     AliasTarget, ArgMapping, QualifiedToolName, ToolCategory, ToolEntry, ToolInventory,
 };
+pub use rate_limit::{RateLimiter, RateLimits};
 pub use tenant::{SessionId, TenantContext, TenantId};
 // Re-export from transform
 pub use transform::{ResponseFormat, ResponseTransformer};
