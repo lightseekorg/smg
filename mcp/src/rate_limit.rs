@@ -69,7 +69,8 @@ pub struct RateLimiter {
     tenant_calls: DashMap<TenantId, CallWindow>,
     /// Tool calls tracked per-tenant for isolation.
     tool_calls: DashMap<(TenantId, QualifiedToolName), CallWindow>,
-    tenant_semaphores: DashMap<TenantId, Arc<Semaphore>>,
+    // Store a tuple of (Semaphore, Current Limit)
+    tenant_semaphores: DashMap<TenantId, (Arc<Semaphore>, usize)>,
     defaults: RateLimits,
 }
 
@@ -157,11 +158,26 @@ impl RateLimiter {
         let limits = ctx.limits.unwrap_or(self.defaults);
         let max_concurrent = limits.max_concurrent.unwrap_or(10);
 
-        let semaphore = self
-            .tenant_semaphores
-            .entry(ctx.tenant_id.clone())
-            .or_insert_with(|| Arc::new(Semaphore::new(max_concurrent)))
-            .clone();
+        //  Get or create the semaphore
+        let semaphore = {
+            let mut entry = self
+                .tenant_semaphores
+                .entry(ctx.tenant_id.clone())
+                .or_insert_with(|| (Arc::new(Semaphore::new(max_concurrent)), max_concurrent));
+
+            let (sem, current_limit) = entry.value_mut();
+
+            // Check if the limit has changed since the last request
+            if *current_limit != max_concurrent {
+                // If the limit changed, replace the semaphore.
+                // Old requests still holding permits to the "old" Arc<Semaphore>
+                // will finish normally, while new requests use the new limit.
+                *sem = Arc::new(Semaphore::new(max_concurrent));
+                *current_limit = max_concurrent;
+            }
+
+            Arc::clone(sem)
+        };
 
         semaphore
             .acquire_owned()

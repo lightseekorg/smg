@@ -364,6 +364,27 @@ impl McpOrchestrator {
         Ok(orchestrator)
     }
 
+    /// Internal helper to enforce rate limits and acquire a concurrency permit.
+    async fn check_and_acquire_permit(
+        &self,
+        tenant_ctx: &TenantContext,
+        qualified: &QualifiedToolName,
+    ) -> McpResult<tokio::sync::OwnedSemaphorePermit> {
+        // Check if allowed (respects isolation and recovery logic)
+        self.rate_limiter.check(tenant_ctx, qualified)?;
+
+        // Acquire concurrency permit (reflects dynamic changes)
+        let permit = self
+            .rate_limiter
+            .acquire_concurrent_permit(tenant_ctx)
+            .await?;
+
+        // Record the call in sliding window
+        self.rate_limiter.record(&tenant_ctx.tenant_id, qualified);
+
+        Ok(permit)
+    }
+
     /// Create a simplified orchestrator for testing.
     #[cfg(test)]
     pub fn new_test() -> Self {
@@ -774,22 +795,20 @@ impl McpOrchestrator {
         let _guard = scopeguard::guard(Arc::clone(&self.active_executions), |count| {
             count.fetch_sub(1, Ordering::SeqCst);
         });
+
         let qualified = QualifiedToolName::new(server_key, tool_name);
-        self.rate_limiter
-            .check(&request_ctx.tenant_ctx, &qualified)?;
+
+        // Enforce rate limits and acquire concurrency permit
         let _permit = self
-            .rate_limiter
-            .acquire_concurrent_permit(&request_ctx.tenant_ctx)
+            .check_and_acquire_permit(&request_ctx.tenant_ctx, &qualified)
             .await?;
-        self.rate_limiter
-            .record(&request_ctx.tenant_ctx.tenant_id, &qualified);
 
         // Get tool entry
         let entry = self
             .tool_inventory
             .get_entry(server_key, tool_name)
             .ok_or_else(|| McpError::ToolNotFound(qualified.to_string()))?;
-        self.active_executions.fetch_add(1, Ordering::SeqCst);
+
         // Record metrics start
         self.metrics.record_call_start(&qualified);
         let start_time = Instant::now();
@@ -1054,37 +1073,32 @@ impl McpOrchestrator {
                     Some(entry) => {
                         let qualified = &entry.qualified_name;
 
-                        if let Err(e) = self.rate_limiter.check(&request_ctx.tenant_ctx, qualified)
+                        // Unified Check -> Acquire -> Record sequence
+                        match self
+                            .check_and_acquire_permit(&request_ctx.tenant_ctx, qualified)
+                            .await
                         {
-                            handle_error(e.to_string())
-                        } else {
-                            // Concurrency Control (Semaphore)
-                            // Permit is acquired here and held until the end of this loop iteration
-                            match self
-                                .rate_limiter
-                                .acquire_concurrent_permit(&request_ctx.tenant_ctx)
-                                .await
-                            {
-                                Err(e) => handle_error(e.to_string()),
-                                Ok(_permit) => {
-                                    // Record the call in sliding window
-                                    self.rate_limiter
-                                        .record(&request_ctx.tenant_ctx.tenant_id, qualified);
-                                    match self
-                                        .execute_tool_with_approval_raw(&entry, input.arguments, request_ctx)
-                                        .await
-                                    {
-                                        Ok(Some(raw_result)) => {
-                                            // Convert raw CallToolResult to JSON
-                                            let output = self.call_result_to_json(&raw_result);
-                                            (output, raw_result.is_error.unwrap_or(false), None)
-                                        }
-                                        Ok(None) => handle_error(
-                                            "Tool requires approval (not supported in this context)"
-                                                .to_string(),
-                                        ),
-                                        Err(e) => handle_error(format!("Tool call failed: {}", e)),
+                            Err(e) => handle_error(e.to_string()),
+                            Ok(_permit) => {
+                                // Execute with approval, getting raw result
+                                match self
+                                    .execute_tool_with_approval_raw(
+                                        &entry,
+                                        input.arguments,
+                                        request_ctx,
+                                    )
+                                    .await
+                                {
+                                    Ok(Some(raw_result)) => {
+                                        // Convert raw CallToolResult to JSON
+                                        let output = self.call_result_to_json(&raw_result);
+                                        (output, raw_result.is_error.unwrap_or(false), None)
                                     }
+                                    Ok(None) => handle_error(
+                                        "Tool requires approval (not supported in this context)"
+                                            .to_string(),
+                                    ),
+                                    Err(e) => handle_error(format!("Tool call failed: {}", e)),
                                 }
                             }
                         }
@@ -1881,36 +1895,30 @@ impl<'a> McpRequestContext<'a> {
         arguments: Value,
         server_label: &str,
     ) -> McpResult<ToolCallResult> {
-        self.orchestrator
-            .active_executions
-            .fetch_add(1, Ordering::SeqCst);
-        let _guard = scopeguard::guard(Arc::clone(&self.orchestrator.active_executions), |count| {
-            count.fetch_sub(1, Ordering::SeqCst);
-        });
-
         let qualified = QualifiedToolName::new(server_key, tool_name);
 
         // Check dynamic tools first
         if let Some(entry) = self.dynamic_tools.get(&qualified) {
-            // Enforce rate limits for dynamic tools
+            // Tracking only for the dynamic tool path
             self.orchestrator
-                .rate_limiter
-                .check(&self.tenant_ctx, &qualified)?;
+                .active_executions
+                .fetch_add(1, Ordering::SeqCst);
+            let _guard =
+                scopeguard::guard(Arc::clone(&self.orchestrator.active_executions), |count| {
+                    count.fetch_sub(1, Ordering::SeqCst);
+                });
+
+            // Enforce rate limits for dynamic tools using unified orchestrator helper
             let _permit = self
                 .orchestrator
-                .rate_limiter
-                .acquire_concurrent_permit(&self.tenant_ctx)
+                .check_and_acquire_permit(&self.tenant_ctx, &qualified)
                 .await?;
-            self.orchestrator
-                .rate_limiter
-                .record(&self.tenant_ctx.tenant_id, &qualified);
 
             return self
                 .execute_dynamic_tool(&entry, arguments, server_label)
                 .await;
         }
 
-        // Fall back to orchestrator (which does its own rate limiting)
         self.orchestrator
             .call_tool(server_key, tool_name, arguments, server_label, self)
             .await
