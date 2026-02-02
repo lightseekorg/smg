@@ -371,20 +371,16 @@ impl McpOrchestrator {
         qualified: &QualifiedToolName,
     ) -> McpResult<tokio::sync::OwnedSemaphorePermit> {
         // Check if allowed
-        if let Err(e) = self.rate_limiter.check(tenant_ctx, qualified) {
-            self.metrics.record_rate_limited();
-            return Err(e);
-        }
+        self.rate_limiter
+            .check(tenant_ctx, qualified)
+            .inspect_err(|_| self.metrics.record_rate_limited())?;
 
         // Acquire concurrency permit
         let permit = self
             .rate_limiter
             .acquire_concurrent_permit(tenant_ctx)
             .await
-            .map_err(|e| {
-                self.metrics.record_rate_limited();
-                e
-            })?;
+            .inspect_err(|_| self.metrics.record_rate_limited())?;
 
         // Record the call
         self.rate_limiter.record(&tenant_ctx.tenant_id, qualified);
