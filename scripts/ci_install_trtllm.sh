@@ -90,7 +90,8 @@ fi
 # Step 4: Overlay Python source from main branch onto the installed package.
 # This replaces the Python files (including adding gRPC serve command) while
 # preserving all compiled .so/.pyd binaries from the stable wheel.
-INSTALL_DIR=$(python3 -c "import tensorrt_llm, pathlib; print(pathlib.Path(tensorrt_llm.__file__).parent)")
+# TRT-LLM prints a version banner to stdout on import; use tail -1 to get only the path
+INSTALL_DIR=$(python3 -c "import tensorrt_llm, pathlib; print(pathlib.Path(tensorrt_llm.__file__).parent)" 2>/dev/null | tail -1)
 echo "Installed package at: $INSTALL_DIR"
 echo "Overlaying main branch Python source..."
 
