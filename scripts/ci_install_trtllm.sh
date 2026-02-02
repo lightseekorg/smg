@@ -2,9 +2,10 @@
 # Install TensorRT-LLM with gRPC support for CI
 #
 # gRPC server support (PR #11037) is not yet in a pip release,
-# so we clone main and do an editable install with TRTLLM_USE_PRECOMPILED=1.
-# This pulls pre-compiled C++/CUDA binaries from the PyPI wheel and layers
-# the Python source (including gRPC server) from the git checkout on top.
+# so we clone main and do an editable install with TRTLLM_PRECOMPILED_LOCATION
+# pointing at the latest stable wheel. This extracts pre-compiled C++/CUDA
+# binaries from the stable wheel and layers the Python source (including gRPC
+# server code) from the git checkout on top.
 # No Docker or C++ build toolchain required.
 #
 # Prerequisites (expected on k8s-runner-gpu H100 nodes):
@@ -34,12 +35,23 @@ if [ ! -d "$TRTLLM_DIR" ]; then
     git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM.git "$TRTLLM_DIR"
 fi
 
-# Install using pre-compiled binaries from PyPI + Python source from git
-# This avoids the full C++ build (63GB Docker image) while getting gRPC support
-# from the main branch that isn't in the PyPI release yet.
+# Download the latest stable TRT-LLM wheel from PyPI/NVIDIA for its compiled binaries.
+# Main branch (1.3.0rc2) isn't on PyPI yet, so we grab the latest available release
+# and use TRTLLM_PRECOMPILED_LOCATION to extract .so files from it.
+WHEEL_DIR="/tmp/trtllm-wheel"
+mkdir -p "$WHEEL_DIR"
+echo "Downloading latest stable TensorRT-LLM wheel for precompiled binaries..."
+pip download tensorrt_llm --dest "$WHEEL_DIR" --no-deps --extra-index-url=https://pypi.nvidia.com
+
+WHEEL_PATH=$(ls "$WHEEL_DIR"/tensorrt_llm-*.whl | head -1)
+echo "Using precompiled wheel: $WHEEL_PATH"
+
+# Install using pre-compiled binaries from the downloaded wheel + Python source from git.
+# TRTLLM_PRECOMPILED_LOCATION tells setup.py to extract compiled .so files from this
+# specific wheel instead of trying to download a version-matched one from PyPI.
 echo "Installing TensorRT-LLM (precompiled binaries + main branch Python source)..."
 cd "$TRTLLM_DIR"
-TRTLLM_USE_PRECOMPILED=1 pip install --no-cache-dir -e .
+TRTLLM_PRECOMPILED_LOCATION="$WHEEL_PATH" pip install --no-cache-dir -e .
 
 echo "TensorRT-LLM installation complete"
 python3 -c "import tensorrt_llm; print(f'TensorRT-LLM version: {tensorrt_llm.__version__}')"
