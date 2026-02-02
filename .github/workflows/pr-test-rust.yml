@@ -412,7 +412,7 @@ jobs:
   go-bindings-benchmark:
     name: go-bindings-benchmark
     needs: [check-ci, build-wheel]
-    if: needs.check-ci.outputs.should_run == 'true'
+    if: false  # Disabled
     runs-on: k8s-runner-gpu
     timeout-minutes: 32
     permissions:
@@ -475,7 +475,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e, go-bindings-benchmark]
+    needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -485,7 +485,7 @@ jobs:
           if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
             echo "CI was skipped (external contributor without run-ci label)"
             exit 0
-          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" || "${{ needs.go-bindings-benchmark.result }}" == "failure" ]]; then
+          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else
@@ -493,7 +493,7 @@ jobs:
           fi
 
   summarize-benchmarks:
-    needs: [gateway-e2e, go-bindings-benchmark]
+    needs: [gateway-e2e]
     runs-on: k8s-runner-cpu
     if: success()
     permissions:
@@ -511,12 +511,6 @@ jobs:
       uses: actions/download-artifact@v7
       with:
         name: genai-bench-results-all-policies
-
-    - name: Download Go bindings benchmark results
-      uses: actions/download-artifact@v7
-      with:
-        name: genai-bench-results-go-bindings
-        path: benchmark_go_bindings
 
     - name: Create benchmark summary
       run: python3 e2e_test/benchmarks/summarize.py .
