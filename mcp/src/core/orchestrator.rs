@@ -1047,7 +1047,7 @@ impl McpOrchestrator {
                 match entry {
                     None => handle_error(format!("Tool '{}' not found", input.tool_name)),
                     Some(entry) => {
-                        let qualified = entry.qualified_name();
+                        let qualified = &entry.qualified_name;
 
                         if let Err(e) = self.rate_limiter.check(&request_ctx.tenant_ctx, qualified)
                         {

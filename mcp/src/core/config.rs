@@ -7,6 +7,8 @@ use std::{collections::HashMap, fmt};
 pub use rmcp::model::{Prompt, RawResource, Tool};
 use serde::{Deserialize, Serialize};
 
+use crate::rate_limit::RateLimits;
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct McpConfig {
     /// Static MCP servers (loaded at startup)
