@@ -26,8 +26,7 @@ use crate::{
     node_state_machine::{ConvergenceConfig, NodeStateMachine},
     partition::PartitionDetector,
     ping_server::GossipService,
-    stores::AppState,
-    stores::StateStores,
+    stores::{AppState, StateStores},
     sync::MeshSyncManager,
 };
 
@@ -211,12 +210,26 @@ impl MeshServerHandler {
         Ok(())
     }
 
+    /// Calculate the next version for a key
+    /// If the key exists, increment its version by 1
+    /// If the key doesn't exist, start with version 1
+    fn next_version(&self, key: &str) -> u64 {
+        self.stores
+            .app
+            .get(&SKey(key.to_string()))
+            .map(|app_state| app_state.version + 1)
+            .unwrap_or(1)
+    }
+
     pub fn write_data(&self, key: String, value: Vec<u8>) {
+        // Calculate the next version based on existing data
+        let version = self.next_version(&key);
+
         // Write to the app store
         let app_state = AppState {
             key: key.clone(),
             value,
-            version: 1,
+            version,
         };
         self.stores
             .app
@@ -239,10 +252,7 @@ impl MeshServerHandler {
 
     /// Sync app store data from a snapshot (for testing and manual sync)
     /// This will be replaced by automatic sync stream in the future
-    pub fn sync_app_from_snapshot(
-        &self,
-        snapshot: &crate::crdt::CRDTMap<crate::stores::AppState>,
-    ) {
+    pub fn sync_app_from_snapshot(&self, snapshot: &crate::crdt::CRDTMap<crate::stores::AppState>) {
         // Merge snapshot into our app store using CRDT merge
         self.stores.app.merge(snapshot);
     }
@@ -353,6 +363,8 @@ impl MeshServer {
             self.self_addr,
             &self.self_name,
             self.init_peer,
+            self.stores.clone(),
+            self.sync_manager.clone(),
         )
     }
 

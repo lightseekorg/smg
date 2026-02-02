@@ -50,7 +50,7 @@ pub struct GossipService {
 
 impl GossipService {
     /// Create snapshot chunks for a store
-    async fn create_snapshot_chunks(
+    pub async fn create_snapshot_chunks(
         &self,
         store_type: LocalStoreType,
         chunk_size: usize,
@@ -559,8 +559,8 @@ impl Gossip for GossipService {
                                     }
 
                                     let store_type = LocalStoreType::from_proto(update.store);
-                                    log::info!("Received incremental update from {}: store={:?}, {} updates",
-                                        peer_id, store_type, update.updates.len());
+                                    log::debug!("Received incremental update from {}: store={:?}, {} updates. Backtrace: {:?}",
+                                        peer_id, store_type, update.updates.len(), std::backtrace::Backtrace::capture());
 
                                     // Apply incremental updates to state stores
                                     // This will be handled by the sync manager if available
@@ -624,6 +624,46 @@ impl Gossip for GossipService {
                                                         }
                                                     }
                                                 }
+                                                LocalStoreType::App => {
+                                                    // Deserialize and apply app state
+                                                    if let Ok(app_state) = serde_json::from_slice::<
+                                                        super::stores::AppState,
+                                                    >(
+                                                        &state_update.value
+                                                    ) {
+                                                        // Apply app state directly to the store
+                                                        if let Some(ref stores) = stores {
+                                                            stores.app.insert(
+                                                                super::crdt::SKey(
+                                                                    app_state.key.clone(),
+                                                                ),
+                                                                app_state,
+                                                                state_update.actor.clone(),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                LocalStoreType::Membership => {
+                                                    // Deserialize and apply membership state
+                                                    if let Ok(membership_state) =
+                                                        serde_json::from_slice::<
+                                                            super::stores::MembershipState,
+                                                        >(
+                                                            &state_update.value
+                                                        )
+                                                    {
+                                                        // Apply membership state directly to the store
+                                                        if let Some(ref stores) = stores {
+                                                            stores.membership.insert(
+                                                                super::crdt::SKey(
+                                                                    membership_state.name.clone(),
+                                                                ),
+                                                                membership_state,
+                                                                state_update.actor.clone(),
+                                                            );
+                                                        }
+                                                    }
+                                                }
                                                 LocalStoreType::RateLimit => {
                                                     // Deserialize and apply rate limit counter
                                                     if let Ok(counter) = serde_json::from_slice::<
@@ -641,9 +681,6 @@ impl Gossip for GossipService {
                                                                 &sync_counter,
                                                             );
                                                     }
-                                                }
-                                                _ => {
-                                                    // Other store types handled elsewhere
                                                 }
                                             }
                                         }

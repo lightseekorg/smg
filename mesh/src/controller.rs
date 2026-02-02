@@ -1,11 +1,13 @@
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
+    sync::Arc,
     time::Duration,
 };
 
 use anyhow::Result;
 use rand::seq::{IndexedRandom, SliceRandom};
+use tokio::sync::Mutex;
 use tracing as log;
 use tracing::instrument;
 
@@ -13,9 +15,14 @@ use super::{
     flow_control::RetryManager,
     service::{
         broadcast_node_states,
-        gossip::{gossip_message, NodeState, NodeStatus, Ping, PingReq, StateSync},
+        gossip::{
+            gossip_client::GossipClient, gossip_message, stream_message::Payload as StreamPayload,
+            NodeState, NodeStatus, Ping, PingReq, StateSync, StreamMessage, StreamMessageType,
+        },
         try_ping, ClusterState,
     },
+    stores::StateStores,
+    sync::MeshSyncManager,
 };
 
 pub struct MeshController {
@@ -23,20 +30,31 @@ pub struct MeshController {
     self_name: String,
     self_addr: SocketAddr,
     init_peer: Option<SocketAddr>,
+    stores: Option<Arc<StateStores>>,
+    sync_manager: Option<Arc<MeshSyncManager>>,
+    // Track active sync_stream connections
+    sync_connections: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
 impl MeshController {
+
+    /// Create a new MeshController with stores and sync manager
     pub fn new(
         state: ClusterState,
         self_addr: SocketAddr,
         self_name: &str,
         init_peer: Option<SocketAddr>,
+        stores: Arc<StateStores>,
+        sync_manager: Arc<MeshSyncManager>,
     ) -> Self {
         Self {
             state,
             self_name: self_name.to_string(),
             self_addr,
             init_peer,
+            stores: Some(stores),
+            sync_manager: Some(sync_manager),
+            sync_connections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -52,6 +70,22 @@ impl MeshController {
 
         loop {
             log::info!("Round {} Status:{:?}", cnt, read_state.read());
+
+            // Clean up finished sync_stream connections
+            {
+                let mut connections = self.sync_connections.lock().await;
+                connections.retain(|peer_name, handle| {
+                    if handle.is_finished() {
+                        log::info!(
+                            "Sync stream connection to {} has finished, removing",
+                            peer_name
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
 
             // Get available peers from cluster state
             let mut map = init_state.read().clone();
@@ -158,16 +192,29 @@ impl MeshController {
                 if node_update.status == NodeStatus::Alive as i32
                     || node_update.status == NodeStatus::Leaving as i32
                 {
-                    let mut s = read_state.write();
-                    s.entry(node_update.name.clone())
-                        .and_modify(|e| e.status = node_update.status)
-                        .or_insert(NodeState {
-                            name: node_update.name,
-                            address: node_update.address,
-                            status: node_update.status,
-                            version: 1,
-                            metadata: HashMap::new(),
-                        });
+                    {
+                        let mut s = read_state.write();
+                        s.entry(node_update.name.clone())
+                            .and_modify(|e| e.status = node_update.status)
+                            .or_insert(NodeState {
+                                name: node_update.name.clone(),
+                                address: node_update.address.clone(),
+                                status: node_update.status,
+                                version: 1,
+                                metadata: HashMap::new(),
+                            });
+                    } // Lock is released here
+
+                    // If node is Alive and we have stores/sync_manager, establish sync_stream connection
+                    if node_update.status == NodeStatus::Alive as i32
+                        && self.stores.is_some()
+                        && self.sync_manager.is_some()
+                    {
+                        if let Err(e) = self.start_sync_stream_connection(peer.clone()).await {
+                            log::warn!("Failed to start sync_stream to {}: {}", peer.name, e);
+                            // Connection failure doesn't affect ping flow, will retry in next cycle
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -252,6 +299,505 @@ impl MeshController {
 
         log::info!("Successfully connected to peer {}", peer_addr);
 
+        Ok(())
+    }
+
+    /// Determine if this node should initiate sync_stream connection
+    /// Use lexicographic ordering to avoid duplicate connections
+    fn should_initiate_connection(&self, peer_name: &str) -> bool {
+        self.self_name.as_str() < peer_name
+    }
+
+    /// Spawn a task to handle sync_stream messages
+    fn spawn_sync_stream_handler(
+        &self,
+        mut incoming_stream: tonic::Streaming<StreamMessage>,
+        tx: tokio::sync::mpsc::Sender<StreamMessage>,
+        self_name: String,
+        peer_name: String,
+    ) -> tokio::task::JoinHandle<()> {
+        let stores = self.stores.clone();
+        let sync_manager = self.sync_manager.clone();
+
+        // Create a span for the spawned task
+        let span = tracing::info_span!(
+            "sync_stream_handler",
+            peer = %peer_name
+        );
+
+        tokio::spawn(async move {
+            use tokio_stream::StreamExt;
+
+            // Enter the span for this task
+            let _enter = span.enter();
+
+            log::info!("Sync stream handler started for peer {}", peer_name);
+
+            let mut sequence: u64 = 0;
+
+            // Send initial heartbeat
+            let heartbeat = StreamMessage {
+                message_type: StreamMessageType::Heartbeat as i32,
+                payload: None,
+                sequence,
+                peer_id: self_name.clone(),
+            };
+            if tx.send(heartbeat).await.is_err() {
+                log::warn!("Failed to send initial heartbeat to {}", peer_name);
+                return;
+            }
+
+            // Spawn a task to periodically send incremental updates (client-side sender)
+            if let (Some(stores), Some(_sync_manager)) = (&stores, &sync_manager) {
+                use super::{
+                    incremental::IncrementalUpdateCollector, service::gossip::IncrementalUpdate,
+                    stores::StoreType as LocalStoreType,
+                };
+
+                let collector = Arc::new(IncrementalUpdateCollector::new(
+                    stores.clone(),
+                    self_name.clone(),
+                ));
+                let tx_incremental = tx.clone();
+                let self_name_incremental = self_name.clone();
+                let peer_name_incremental = peer_name.clone();
+
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(Duration::from_secs(1));
+                    let mut seq_counter: u64 = 1000; // Start from 1000 to avoid conflicts with main sequence
+
+                    loop {
+                        interval.tick().await;
+
+                        // Collect all incremental updates
+                        let all_updates = collector.collect_all_updates();
+
+                        if !all_updates.is_empty() {
+                            for (store_type, updates) in all_updates {
+                                let proto_store_type = match store_type {
+                                    LocalStoreType::Membership => {
+                                        super::service::gossip::StoreType::Membership as i32
+                                    }
+                                    LocalStoreType::App => {
+                                        super::service::gossip::StoreType::App as i32
+                                    }
+                                    LocalStoreType::Worker => {
+                                        super::service::gossip::StoreType::Worker as i32
+                                    }
+                                    LocalStoreType::Policy => {
+                                        super::service::gossip::StoreType::Policy as i32
+                                    }
+                                    LocalStoreType::RateLimit => {
+                                        super::service::gossip::StoreType::RateLimit as i32
+                                    }
+                                };
+
+                                seq_counter += 1;
+
+                                let incremental_update = StreamMessage {
+                                    message_type: StreamMessageType::IncrementalUpdate as i32,
+                                    payload: Some(
+                                        super::service::gossip::stream_message::Payload::Incremental(
+                                            IncrementalUpdate {
+                                                store: proto_store_type,
+                                                updates: updates.clone(),
+                                                version: 0,
+                                            },
+                                        ),
+                                    ),
+                                    sequence: seq_counter,
+                                    peer_id: self_name_incremental.clone(),
+                                };
+
+                                log::info!(
+                                    "Sending incremental update to {}: store={:?}, {} updates, versions: {:?}",
+                                    peer_name_incremental,
+                                    store_type,
+                                    updates.len(),
+                                    updates.iter().map(|u| (u.key.clone(), u.version)).collect::<Vec<_>>()
+                                );
+
+                                match tx_incremental.try_send(incremental_update) {
+                                    Ok(_) => {
+                                        // Mark as sent after successful transmission
+                                        collector.mark_sent(store_type, &updates);
+                                    }
+                                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                        log::debug!(
+                                            "Backpressure: channel full, skipping send (will retry next interval)"
+                                        );
+                                        continue;
+                                    }
+                                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                        log::warn!(
+                                            "Channel closed, stopping incremental update sender"
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Handle incoming messages
+            while let Some(msg_result) = incoming_stream.next().await {
+                match msg_result {
+                    Ok(msg) => {
+                        sequence += 1;
+
+                        match msg.message_type() {
+                            StreamMessageType::IncrementalUpdate => {
+                                log::info!(
+                                    "[CLIENT] Received incremental update from {} (seq: {})",
+                                    peer_name,
+                                    msg.sequence
+                                );
+
+                                // Apply incremental updates to local stores
+                                if let Some(
+                                    super::service::gossip::stream_message::Payload::Incremental(
+                                        update,
+                                    ),
+                                ) = &msg.payload
+                                {
+                                    use super::stores::StoreType as LocalStoreType;
+
+                                    let store_type = LocalStoreType::from_proto(update.store);
+                                    log::info!(
+                                        "[CLIENT] Applying incremental update from {}: store={:?}, {} updates",
+                                        peer_name,
+                                        store_type,
+                                        update.updates.len()
+                                    );
+
+                                    // Apply updates based on store type
+                                    for state_update in &update.updates {
+                                        match store_type {
+                                            LocalStoreType::App => {
+                                                // Deserialize and apply app state
+                                                if let Ok(app_state) = serde_json::from_slice::<
+                                                    super::stores::AppState,
+                                                >(
+                                                    &state_update.value
+                                                ) {
+                                                    if let (Some(ref stores), Some(_)) =
+                                                        (&stores, &sync_manager)
+                                                    {
+                                                        stores.app.insert(
+                                                            super::crdt::SKey(
+                                                                app_state.key.clone(),
+                                                            ),
+                                                            app_state,
+                                                            state_update.actor.clone(),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            LocalStoreType::Membership => {
+                                                // Deserialize and apply membership state
+                                                if let Ok(membership_state) = serde_json::from_slice::<
+                                                    super::stores::MembershipState,
+                                                >(
+                                                    &state_update.value
+                                                ) {
+                                                    if let (Some(ref stores), Some(_)) =
+                                                        (&stores, &sync_manager)
+                                                    {
+                                                        stores.membership.insert(
+                                                            super::crdt::SKey(
+                                                                membership_state.name.clone(),
+                                                            ),
+                                                            membership_state,
+                                                            state_update.actor.clone(),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            LocalStoreType::Worker => {
+                                                // Deserialize and apply worker state
+                                                if let Ok(worker_state) = serde_json::from_slice::<
+                                                    super::stores::WorkerState,
+                                                >(
+                                                    &state_update.value
+                                                ) {
+                                                    if let Some(ref sync_mgr) = sync_manager {
+                                                        let actor =
+                                                            Some(state_update.actor.clone());
+                                                        sync_mgr.apply_remote_worker_state(
+                                                            worker_state,
+                                                            actor,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            LocalStoreType::Policy => {
+                                                // Deserialize and apply policy state
+                                                if let Ok(policy_state) = serde_json::from_slice::<
+                                                    super::stores::PolicyState,
+                                                >(
+                                                    &state_update.value
+                                                ) {
+                                                    if let Some(ref sync_mgr) = sync_manager {
+                                                        let actor =
+                                                            Some(state_update.actor.clone());
+                                                        sync_mgr.apply_remote_policy_state(
+                                                            policy_state,
+                                                            actor,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            LocalStoreType::RateLimit => {
+                                                // Deserialize and apply rate limit counter
+                                                if let Ok(counter) = serde_json::from_slice::<
+                                                    super::crdt::CRDTPNCounter,
+                                                >(
+                                                    &state_update.value
+                                                ) {
+                                                    if let Some(ref sync_mgr) = sync_manager {
+                                                        let sync_counter =
+                                                            super::crdt::SyncPNCounter::new();
+                                                        sync_counter.merge(&counter);
+                                                        sync_mgr.apply_remote_rate_limit_counter(
+                                                            state_update.key.clone(),
+                                                            &sync_counter,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Send ACK
+                                let ack = StreamMessage {
+                                    message_type: StreamMessageType::Ack as i32,
+                                    payload: Some(StreamPayload::Ack(
+                                        super::service::gossip::StreamAck {
+                                            sequence: msg.sequence,
+                                            success: true,
+                                            error_message: String::new(),
+                                        },
+                                    )),
+                                    sequence,
+                                    peer_id: self_name.clone(),
+                                };
+                                if tx.send(ack).await.is_err() {
+                                    log::warn!("Failed to send ACK to {}", peer_name);
+                                    break;
+                                }
+                            }
+                            StreamMessageType::SnapshotChunk => {
+                                log::info!("[CLIENT-CONTROLLER] Entering SnapshotChunk handler");
+                                log::info!(
+                                    "[CLIENT-CONTROLLER-LINE582] Received snapshot chunk from {} (seq: {})",
+                                    peer_name,
+                                    msg.sequence
+                                );
+                                // Server side handles snapshot assembly
+                                // Send ACK
+                                let ack = StreamMessage {
+                                    message_type: StreamMessageType::Ack as i32,
+                                    payload: Some(StreamPayload::Ack(
+                                        super::service::gossip::StreamAck {
+                                            sequence: msg.sequence,
+                                            success: true,
+                                            error_message: String::new(),
+                                        },
+                                    )),
+                                    sequence,
+                                    peer_id: self_name.clone(),
+                                };
+                                if tx.send(ack).await.is_err() {
+                                    log::warn!("Failed to send ACK to {}", peer_name);
+                                    break;
+                                }
+                            }
+                            StreamMessageType::Heartbeat => {
+                                log::trace!("Received heartbeat from {}", peer_name);
+                                // Send heartbeat back
+                                let heartbeat = StreamMessage {
+                                    message_type: StreamMessageType::Heartbeat as i32,
+                                    payload: None,
+                                    sequence,
+                                    peer_id: self_name.clone(),
+                                };
+                                if tx.send(heartbeat).await.is_err() {
+                                    log::warn!("Failed to send heartbeat to {}", peer_name);
+                                    break;
+                                }
+                            }
+                            StreamMessageType::SnapshotRequest => {
+                                log::info!("Received snapshot request from {}", peer_name);
+                                // Handle snapshot request - generate and send snapshot using GossipService
+                                if let (Some(ref stores), Some(ref sync_manager)) =
+                                    (&stores, &sync_manager)
+                                {
+                                    if let Some(StreamPayload::SnapshotRequest(req)) = &msg.payload
+                                    {
+                                        use std::net::SocketAddr;
+
+                                        use super::{
+                                            ping_server::GossipService,
+                                            stores::StoreType as LocalStoreType,
+                                        };
+
+                                        let store_type = LocalStoreType::from_proto(req.store);
+                                        log::info!(
+                                            "Generating snapshot for store {:?}",
+                                            store_type
+                                        );
+
+                                        // Create a temporary GossipService to generate snapshot chunks
+                                        let service = GossipService::new(
+                                            Arc::new(parking_lot::RwLock::new(
+                                                std::collections::BTreeMap::new(),
+                                            )),
+                                            SocketAddr::from(([0, 0, 0, 0], 0)),
+                                            &self_name,
+                                        )
+                                        .with_stores(stores.clone())
+                                        .with_sync_manager(sync_manager.clone());
+
+                                        let chunks =
+                                            service.create_snapshot_chunks(store_type, 100).await;
+                                        let total_chunks = chunks.len() as u64;
+
+                                        log::info!(
+                                            "Sending {} snapshot chunks for store {:?}",
+                                            total_chunks,
+                                            store_type
+                                        );
+
+                                        for (idx, chunk) in chunks.into_iter().enumerate() {
+                                            let snapshot_chunk = StreamMessage {
+                                                message_type: StreamMessageType::SnapshotChunk
+                                                    as i32,
+                                                payload: Some(StreamPayload::SnapshotChunk(chunk)),
+                                                sequence: sequence + idx as u64,
+                                                peer_id: self_name.clone(),
+                                            };
+
+                                            if tx.send(snapshot_chunk).await.is_err() {
+                                                log::warn!(
+                                                    "Failed to send snapshot chunk {} to {}",
+                                                    idx,
+                                                    peer_name
+                                                );
+                                                break;
+                                            }
+                                        }
+
+                                        log::info!(
+                                            "Sent all snapshot chunks for store {:?} to {}",
+                                            store_type,
+                                            peer_name
+                                        );
+                                    }
+                                }
+                            }
+                            StreamMessageType::Ack => {
+                                log::trace!(
+                                    "Received ACK from {} (seq: {})",
+                                    peer_name,
+                                    msg.sequence
+                                );
+                            }
+                            StreamMessageType::Nack => {
+                                log::warn!(
+                                    "Received NACK from {} (seq: {})",
+                                    peer_name,
+                                    msg.sequence
+                                );
+                            }
+                            _ => {
+                                log::debug!(
+                                    "Received message type {:?} from {}",
+                                    msg.message_type,
+                                    peer_name
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Error receiving from sync_stream with {}: {}", peer_name, e);
+                        break;
+                    }
+                }
+            }
+
+            log::info!("Sync stream handler stopped for peer {}", peer_name);
+        })
+    }
+
+    /// Start a sync_stream connection to a peer
+    async fn start_sync_stream_connection(&self, peer: NodeState) -> Result<()> {
+        let peer_name = peer.name.clone();
+        let peer_addr = peer.address.clone();
+
+        // Check if connection already exists
+        {
+            let connections = self.sync_connections.lock().await;
+            if connections.contains_key(&peer_name) {
+                log::debug!("Sync stream connection to {} already exists", peer_name);
+                return Ok(());
+            }
+        }
+
+        // Check if we should initiate connection (avoid duplicates)
+        if !self.should_initiate_connection(&peer_name) {
+            log::debug!(
+                "Skipping sync_stream to {} (peer should initiate)",
+                peer_name
+            );
+            return Ok(());
+        }
+
+        log::info!(
+            "Starting sync_stream connection to peer {} at address {}",
+            peer_name,
+            peer_addr
+        );
+
+        // Connect to peer's gRPC service
+        let connect_url = format!("http://{}", peer_addr);
+        log::info!("Connecting to URL: {}", connect_url);
+        let mut client = GossipClient::connect(connect_url).await.map_err(|e| {
+            log::warn!(
+                "Failed to connect to peer {} for sync_stream: {}",
+                peer_name,
+                e
+            );
+            anyhow::anyhow!("Connection failed: {}", e)
+        })?;
+
+        // Create bidirectional stream
+        let (tx, rx) = tokio::sync::mpsc::channel::<StreamMessage>(128);
+        let outgoing_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        let response = client.sync_stream(outgoing_stream).await.map_err(|e| {
+            log::error!("Failed to establish sync_stream with {}: {}", peer_name, e);
+            anyhow::anyhow!("sync_stream RPC failed: {}", e)
+        })?;
+
+        let incoming_stream = response.into_inner();
+
+        // Spawn task to handle the bidirectional stream
+        let self_name = self.self_name.clone();
+        let peer_name_clone = peer_name.clone();
+
+        let handle =
+            self.spawn_sync_stream_handler(incoming_stream, tx, self_name, peer_name_clone);
+
+        // Store the task handle
+        {
+            let mut connections = self.sync_connections.lock().await;
+            connections.insert(peer_name.clone(), handle);
+        }
+
+        log::info!("Sync stream connection to {} established", peer_name);
         Ok(())
     }
 }

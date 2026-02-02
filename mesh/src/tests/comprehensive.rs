@@ -23,6 +23,7 @@ use tracing_subscriber::{
     filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
 };
 
+use super::test_utils;
 // Internal crate imports - now can access private modules
 use crate::{
     node_state_machine::{ConvergenceConfig, NodeReadiness, NodeStateMachine},
@@ -35,8 +36,6 @@ use crate::{
     sync::MeshSyncManager,
     SKey,
 };
-
-use super::test_utils;
 
 //
 // ====================================================================================
@@ -381,10 +380,21 @@ async fn test_two_node_data_synchronization() {
     // Write data on node A
     handler_a.write_data("shared_key".into(), "shared_value".into());
 
-    // Manually trigger sync: get snapshot from A and apply to B
-    // Note: Automatic sync via sync_stream is not yet fully implemented
-    let snapshot_a = handler_a.snapshot();
-    handler_b.sync_app_from_snapshot(&snapshot_a);
+    // Wait for automatic sync via sync_stream
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Verify data exists on both nodes
+    let value_a = handler_a.stores.app.get(&SKey("shared_key".to_string()));
+    let value_b = handler_b.stores.app.get(&SKey("shared_key".to_string()));
+
+    log::info!("Value on A: {:?}", value_a);
+    log::info!("Value on B: {:?}", value_b);
+
+    // Update data on node A to see if it syncs again
+    handler_a.write_data("shared_key".into(), "shared_value2".into());
+
+    // Wait for the second update to be synced (increased wait time)
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Verify data exists on both nodes
     let value_a = handler_a.stores.app.get(&SKey("shared_key".to_string()));
@@ -517,16 +527,22 @@ async fn test_multi_node_data_propagation() {
     // Write data on node A
     handler_a.write_data("propagated_key".into(), "propagated_value".into());
 
-    // Manually trigger sync: get snapshot from A and apply to B and C
-    // Note: Automatic sync via sync_stream is not yet fully implemented
-    let snapshot_a = handler_a.snapshot();
-    handler_b.sync_app_from_snapshot(&snapshot_a);
-    handler_c.sync_app_from_snapshot(&snapshot_a);
+    // Wait for automatic sync via sync_stream
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Verify data reached all nodes
-    let value_a = handler_a.stores.app.get(&SKey("propagated_key".to_string()));
-    let value_b = handler_b.stores.app.get(&SKey("propagated_key".to_string()));
-    let value_c = handler_c.stores.app.get(&SKey("propagated_key".to_string()));
+    let value_a = handler_a
+        .stores
+        .app
+        .get(&SKey("propagated_key".to_string()));
+    let value_b = handler_b
+        .stores
+        .app
+        .get(&SKey("propagated_key".to_string()));
+    let value_c = handler_c
+        .stores
+        .app
+        .get(&SKey("propagated_key".to_string()));
 
     log::info!("Value on A: {:?}", value_a);
     log::info!("Value on B: {:?}", value_b);
