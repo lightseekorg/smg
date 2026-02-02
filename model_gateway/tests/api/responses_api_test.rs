@@ -727,6 +727,7 @@ async fn test_max_tool_calls_limit() {
             r#type: ResponseToolType::Mcp,
             server_url: Some(mcp.url()),
             server_label: Some("mock".to_string()),
+            require_approval: Some("never".to_string()),
             ..Default::default()
         }]),
         top_logprobs: Some(0),

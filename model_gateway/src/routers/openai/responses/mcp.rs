@@ -847,12 +847,10 @@ pub(super) async fn execute_tool_loop(
                         "Tool loop stopping: approval required for '{}', returning to caller",
                         tool_name
                     );
-                    return build_incomplete_response(
+                    return build_approval_response(
                         response_json,
                         state,
-                        "approval_required",
                         orchestrator,
-                        original_body,
                         &config.mcp_servers,
                     );
                 }
@@ -1020,6 +1018,47 @@ pub(super) fn build_incomplete_response(
             }
         }
     }
+
+    Ok(response)
+}
+
+/// Build a response when tool execution is paused for approval.
+///
+/// Unlike `build_incomplete_response`, this strips the LLM's function_call items
+/// entirely — the output only contains mcp_list_tools + mcp_approval_request items.
+fn build_approval_response(
+    mut response: Value,
+    state: ToolLoopState,
+    orchestrator: &Arc<McpOrchestrator>,
+    mcp_servers: &[(String, String)],
+) -> Result<Value, String> {
+    let obj = response
+        .as_object_mut()
+        .ok_or_else(|| "response not an object".to_string())?;
+
+    obj.insert(
+        "status".to_string(),
+        Value::String("incomplete".to_string()),
+    );
+    obj.insert(
+        "incomplete_details".to_string(),
+        json!({ "reason": "approval_required" }),
+    );
+
+    // Build clean output: mcp_list_tools + mcp_approval_request items only
+    let mut output = Vec::new();
+
+    for (label, key) in mcp_servers {
+        let list_tools_item =
+            build_mcp_list_tools_item(orchestrator, label, slice::from_ref(key));
+        output.push(list_tools_item);
+    }
+
+    for item in &state.mcp_call_items {
+        output.push(item.clone());
+    }
+
+    obj.insert("output".to_string(), Value::Array(output));
 
     Ok(response)
 }
