@@ -1065,8 +1065,6 @@ impl McpOrchestrator {
                                     // Record the call in sliding window
                                     self.rate_limiter
                                         .record(&request_ctx.tenant_ctx.tenant_id, qualified);
-
-                                    // Execute with approval, getting raw result
                                     match self
                                         .execute_tool_with_approval_raw(&entry, input.arguments, request_ctx)
                                         .await
