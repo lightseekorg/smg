@@ -8,7 +8,7 @@
 #
 # Prerequisites (expected on k8s-runner-gpu nodes):
 #   - NVIDIA driver 580+ (CUDA 13)
-#   - CUDA toolkit at /usr/local/cuda
+#   - CUDA 13.1 toolkit at /usr/local/cuda
 #   - libopenmpi-dev
 #
 # At runtime we use --backend pytorch, which avoids TRT engine compilation.
@@ -21,6 +21,8 @@ if [ -f ".venv/bin/activate" ]; then
 fi
 
 # System dependencies
+export DEBIAN_FRONTEND=noninteractive
+sudo dpkg --configure -a --force-confnew 2>/dev/null || true
 sudo apt-get update
 sudo apt-get install -y libopenmpi-dev
 
@@ -48,8 +50,8 @@ echo "=== end CUDA diagnostics ==="
 # Add CUDA libs to LD_LIBRARY_PATH
 export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH:-}"
 
-# Install PyTorch with CUDA support
-pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu126
+# Install PyTorch with CUDA 13 support (TRT-LLM wheels are built against CUDA 13)
+pip install --no-cache-dir torch==2.9.1 torchvision --index-url https://download.pytorch.org/whl/cu130
 
 # Step 1: Install the latest stable TRT-LLM wheel from NVIDIA PyPI.
 echo "Installing stable TensorRT-LLM wheel..."
