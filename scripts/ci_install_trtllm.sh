@@ -2,7 +2,7 @@
 # Install TensorRT-LLM with gRPC support for CI
 #
 # gRPC server support (PR #11037) is not yet in a pip release,
-# so we clone main and do an editable install with TRTLLM_PRECOMPILED_LOCATION
+# so we clone main and install with TRTLLM_PRECOMPILED_LOCATION
 # pointing at the latest stable wheel. This extracts pre-compiled C++/CUDA
 # binaries from the stable wheel and layers the Python source (including gRPC
 # server code) from the git checkout on top.
@@ -51,7 +51,9 @@ echo "Using precompiled wheel: $WHEEL_PATH"
 # specific wheel instead of trying to download a version-matched one from PyPI.
 echo "Installing TensorRT-LLM (precompiled binaries + main branch Python source)..."
 cd "$TRTLLM_DIR"
-TRTLLM_PRECOMPILED_LOCATION="$WHEEL_PATH" pip install --no-cache-dir -e .
+# NOTE: Do NOT use -e (editable) mode — it requires the C++ `bindings` module
+# which needs a full build. Regular install works with precompiled .so files.
+TRTLLM_PRECOMPILED_LOCATION="$WHEEL_PATH" pip install --no-cache-dir .
 
 echo "TensorRT-LLM installation complete"
 python3 -c "import tensorrt_llm; print(f'TensorRT-LLM version: {tensorrt_llm.__version__}')"
