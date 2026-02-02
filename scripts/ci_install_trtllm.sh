@@ -24,12 +24,13 @@ fi
 # a subset of CUDA 13 libs (cuda-runtime, nvrtc) but not cublas, cusolver, etc.
 # Install the full CUDA 13 library set via apt.
 echo "Installing CUDA 13 libraries..."
+export DEBIAN_FRONTEND=noninteractive
 if ! dpkg -l cuda-keyring 2>/dev/null | grep -q '^ii'; then
     wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-    sudo dpkg -i cuda-keyring_1.1-1_all.deb
+    sudo DEBIAN_FRONTEND=noninteractive dpkg -i --force-confnew cuda-keyring_1.1-1_all.deb
 fi
 sudo apt-get update
-sudo apt-get install -y libopenmpi-dev cuda-libraries-13-1
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y libopenmpi-dev cuda-libraries-13-1
 
 # Add CUDA 13 libs to LD_LIBRARY_PATH
 export LD_LIBRARY_PATH="/usr/local/cuda-13.1/lib64:${LD_LIBRARY_PATH:-}"
