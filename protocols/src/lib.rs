@@ -17,6 +17,7 @@ pub mod event_types;
 pub mod generate;
 pub mod messages;
 pub mod parser;
+pub mod realtime;
 pub mod rerank;
 pub mod responses;
 pub mod sampling_params;
