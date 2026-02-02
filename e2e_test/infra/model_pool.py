@@ -28,6 +28,7 @@ from .constants import (
     ConnectionMode,
     WorkerType,
     get_runtime,
+    is_trtllm,
     is_vllm,
 )
 from .gpu_allocator import GPUAllocator, GPUSlot, get_open_port
@@ -501,20 +502,35 @@ class ModelPool:
         Returns:
             The launched ModelInstance.
         """
-        if mode == ConnectionMode.GRPC and is_vllm():
+        if mode == ConnectionMode.GRPC:
+            runtime = get_runtime()
+            runtime_label = {"vllm": "vLLM", "trtllm": "TensorRT-LLM"}.get(
+                runtime, "SGLang"
+            )
             logger.info(
-                "gRPC worker requested for %s: E2E_RUNTIME=%s, routing to vLLM backend",
+                "gRPC worker requested for %s: E2E_RUNTIME=%s, routing to %s backend",
                 model_id,
-                get_runtime(),
+                runtime,
+                runtime_label,
             )
-            # Launch vLLM gRPC worker instead of SGLang
-            spec = get_model_spec(model_id)
-            # vLLM startup can be slow, use longer timeout
-            return self._launch_vllm_grpc_worker(
-                model_id, spec, gpu_slot, 600,
-                worker_type=worker_type,
-                instance_key=instance_key,
-            )
+            if is_vllm():
+                # Launch vLLM gRPC worker instead of SGLang
+                spec = get_model_spec(model_id)
+                # vLLM startup can be slow, use longer timeout
+                return self._launch_vllm_grpc_worker(
+                    model_id, spec, gpu_slot, 600,
+                    worker_type=worker_type,
+                    instance_key=instance_key,
+                )
+            if is_trtllm():
+                # Launch TensorRT-LLM gRPC worker
+                spec = get_model_spec(model_id)
+                # TRT-LLM startup can be slow (model compilation), use longer timeout
+                return self._launch_trtllm_grpc_worker(
+                    model_id, spec, gpu_slot, 600,
+                    worker_type=worker_type,
+                    instance_key=instance_key,
+                )
 
         spec = get_model_spec(model_id)
         model_path = spec["model"]
@@ -1315,6 +1331,186 @@ class ModelPool:
             if instance is None:
                 self.allocator.release_slot(gpu_slot)
                 raise RuntimeError(f"Failed to launch vLLM gRPC worker: {model_id}")
+
+            instance.acquire()
+            return instance
+
+    def _launch_trtllm_grpc_worker(
+        self,
+        model_id: str,
+        model_spec: dict,
+        gpu_slot: GPUSlot,
+        startup_timeout: int,
+        worker_type: WorkerType = WorkerType.REGULAR,
+        instance_key: str | None = None,
+    ) -> ModelInstance | None:
+        """Launch a TensorRT-LLM worker with native gRPC.
+
+        Args:
+            model_id: Model identifier.
+            model_spec: Model specification dict from MODEL_SPECS.
+            gpu_slot: GPU slot assignment.
+            startup_timeout: Timeout for worker to become healthy.
+            worker_type: Type of worker (REGULAR, PREFILL, DECODE).
+            instance_key: Custom instance key, or None to auto-generate.
+
+        Returns:
+            The launched ModelInstance, or None if launch fails.
+        """
+        model_path = model_spec["model"]
+        tp_size = model_spec.get("tp", 1)
+        port = gpu_slot.port
+
+        # Build environment
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = gpu_slot.cuda_visible_devices()
+
+        # Build TensorRT-LLM gRPC command
+        # Model path is positional, uses --backend pytorch (no TRT engine build needed)
+        cmd = [
+            "python3",
+            "-m",
+            "tensorrt_llm.commands.serve",
+            model_path,
+            "--grpc",
+            "--host",
+            DEFAULT_HOST,
+            "--port",
+            str(port),
+            "--backend",
+            "pytorch",
+            "--tp_size",
+            str(tp_size),
+        ]
+
+        # Add trtllm_args from model spec if present
+        trtllm_args = model_spec.get("trtllm_args", [])
+        if trtllm_args:
+            cmd.extend(trtllm_args)
+
+        # Build key based on worker type
+        if instance_key:
+            key = instance_key
+        elif worker_type == WorkerType.REGULAR:
+            key = f"{model_id}:trtllm-grpc"
+        else:
+            key = f"{model_id}:trtllm-grpc:{worker_type.value}"
+
+        logger.info(
+            "Launching TensorRT-LLM gRPC worker %s on GPUs %s port %d",
+            key,
+            gpu_slot.gpu_ids,
+            port,
+        )
+
+        show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
+
+        # Start the process
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=None if show_output else subprocess.PIPE,
+            stderr=None if show_output else subprocess.PIPE,
+            start_new_session=True,
+        )
+
+        # TRT-LLM gRPC uses grpc:// protocol
+        base_url = f"grpc://{DEFAULT_HOST}:{port}"
+        instance = ModelInstance(
+            model_id=model_id,
+            mode=ConnectionMode.GRPC,
+            model_path=model_path,
+            base_url=base_url,
+            port=port,
+            process=proc,
+            gpu_slot=gpu_slot,
+            key=key,
+            worker_type=worker_type,
+            bootstrap_port=None,
+            last_used=time.time(),
+        )
+        self.instances[key] = instance
+
+        # Wait for this worker to become healthy
+        try:
+            self._wait_worker_healthy(instance, startup_timeout)
+            return instance
+        except Exception as e:
+            logger.error("Failed to start TensorRT-LLM gRPC worker %s: %s", key, e)
+            self._evict_instance(key)
+            return None
+
+    def get_trtllm_grpc_worker(
+        self,
+        model_id: str,
+    ) -> ModelInstance:
+        """Get or launch a TensorRT-LLM gRPC worker.
+
+        Thread-safe: Protected by internal lock.
+
+        Args:
+            model_id: The model ID to launch.
+
+        Returns:
+            The acquired ModelInstance.
+
+        Raises:
+            RuntimeError: If worker cannot be launched.
+        """
+        key = f"{model_id}:trtllm-grpc"
+
+        with self._lock:
+            # Check if already exists
+            if key in self.instances:
+                inst = self.instances[key]
+                inst.acquire()
+                inst.last_used = time.time()
+                return inst
+
+            # Need to launch
+            spec = get_model_spec(model_id)
+            tp_size = spec.get("tp", 1)
+
+            # Check if we have enough GPUs
+            available = self.allocator.available_gpus()
+            if len(available) < tp_size:
+                logger.info(
+                    "Need %d GPUs for TRT-LLM worker, only %d available. Evicting...",
+                    tp_size,
+                    len(available),
+                )
+                self._evict_for_gpus(tp_size)
+                available = self.allocator.available_gpus()
+                if len(available) < tp_size:
+                    raise RuntimeError(
+                        f"Insufficient GPUs for TRT-LLM worker: need {tp_size}, only {len(available)} available"
+                    )
+
+            # Allocate GPU slot
+            allocation_specs = {
+                key: {
+                    "model": spec["model"],
+                    "memory_gb": spec.get("memory_gb", 16),
+                    "tp": tp_size,
+                }
+            }
+            slots = self.allocator.allocate_slots(allocation_specs, preserve_order=True)
+            if not slots:
+                raise RuntimeError(f"Failed to allocate GPU slots for TRT-LLM worker: {model_id}")
+
+            gpu_slot = slots[0]
+
+            # Launch worker
+            instance = self._launch_trtllm_grpc_worker(
+                model_id=model_id,
+                model_spec=spec,
+                gpu_slot=gpu_slot,
+                startup_timeout=self._startup_timeout,
+            )
+
+            if instance is None:
+                self.allocator.release_slot(gpu_slot)
+                raise RuntimeError(f"Failed to launch TensorRT-LLM gRPC worker: {model_id}")
 
             instance.acquire()
             return instance

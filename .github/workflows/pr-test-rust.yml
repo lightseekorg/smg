@@ -216,6 +216,16 @@ jobs:
             test_filter: ""
             setup_vllm: true
             ignore_opts: ""
+          - name: chat-completions-trtllm
+            timeout: 90
+            test_dirs: "e2e_test/chat_completions"
+            extra_deps: "pytest-parallel py"
+            env_vars: "E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1"
+            reruns: "--reruns 2 --reruns-delay 5"
+            parallel_opts: "--workers 1 --tests-per-worker 4"
+            test_filter: ""
+            setup_trtllm: true
+            ignore_opts: ""
     runs-on: k8s-runner-gpu
     timeout-minutes: ${{ matrix.timeout }}
     steps:
@@ -235,6 +245,8 @@ jobs:
           source .venv/bin/activate
           if [ "${{ matrix.setup_vllm }}" == "true" ]; then
             bash scripts/ci_install_vllm.sh
+          elif [ "${{ matrix.setup_trtllm }}" == "true" ]; then
+            bash scripts/ci_install_trtllm.sh
           else
             bash scripts/ci_install_sglang.sh
           fi

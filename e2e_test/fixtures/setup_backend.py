@@ -14,7 +14,7 @@ import pytest
 if TYPE_CHECKING:
     from infra import ModelPool
 
-from infra import get_runtime, is_vllm
+from infra import get_runtime, is_trtllm, is_vllm
 
 from .markers import get_marker_kwargs, get_marker_value
 
@@ -116,15 +116,25 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         # For gRPC mode, check E2E_RUNTIME environment variable
         if connection_mode == ConnectionMode.GRPC:
             runtime = get_runtime()
+            runtime_label = {"vllm": "vLLM", "trtllm": "TensorRT-LLM"}.get(
+                runtime, "SGLang"
+            )
             logger.info(
                 "gRPC backend detected: E2E_RUNTIME=%s, routing to %s backend",
                 runtime,
-                "vLLM" if is_vllm() else "SGLang",
+                runtime_label,
             )
 
             # Route to vLLM gRPC if runtime is vllm
             if is_vllm():
                 yield from _setup_vllm_grpc_backend(
+                    request, model_pool, model_id, workers_config, gateway_config
+                )
+                return
+
+            # Route to TensorRT-LLM gRPC if runtime is trtllm
+            if is_trtllm():
+                yield from _setup_trtllm_grpc_backend(
                     request, model_pool, model_id, workers_config, gateway_config
                 )
                 return
@@ -384,6 +394,61 @@ def _setup_vllm_grpc_backend(
         yield "grpc", model_path, client, gateway
     finally:
         logger.info("Tearing down vLLM gRPC gateway")
+        gateway.shutdown()
+        # Release reference to allow eviction
+        instance.release()
+
+
+def _setup_trtllm_grpc_backend(
+    request: pytest.FixtureRequest,
+    model_pool: "ModelPool",
+    model_id: str,
+    workers_config: dict,
+    gateway_config: dict,
+):
+    """Setup TensorRT-LLM gRPC backend."""
+    import openai
+    from infra import Gateway
+
+    logger.info("Setting up TensorRT-LLM gRPC backend for model %s", model_id)
+
+    # TRT-LLM currently only supports single worker per test
+    # get_trtllm_grpc_worker() auto-acquires the returned instance
+    try:
+        instance = model_pool.get_trtllm_grpc_worker(model_id)
+    except RuntimeError as e:
+        pytest.fail(str(e))
+
+    model_path = instance.model_path
+    worker_urls = [instance.worker_url]
+
+    # Launch gateway
+    gateway = Gateway()
+    gateway.start(
+        worker_urls=worker_urls,
+        model_path=model_path,
+        policy=gateway_config["policy"],
+        timeout=gateway_config["timeout"],
+        extra_args=gateway_config["extra_args"],
+    )
+
+    client = openai.OpenAI(
+        base_url=f"{gateway.base_url}/v1",
+        api_key="not-used",
+    )
+
+    logger.info(
+        "Setup TensorRT-LLM gRPC backend: model=%s, worker=%s, gateway=%s, policy=%s",
+        model_id,
+        instance.worker_url,
+        gateway.base_url,
+        gateway_config["policy"],
+    )
+
+    try:
+        yield "grpc", model_path, client, gateway
+    finally:
+        logger.info("Tearing down TensorRT-LLM gRPC gateway")
         gateway.shutdown()
         # Release reference to allow eviction
         instance.release()

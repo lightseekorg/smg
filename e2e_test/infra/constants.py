@@ -23,6 +23,7 @@ class Runtime(str, Enum):
 
     SGLANG = "sglang"
     VLLM = "vllm"
+    TRTLLM = "trtllm"
     OPENAI = "openai"
     XAI = "xai"
     GEMINI = "gemini"
@@ -30,7 +31,7 @@ class Runtime(str, Enum):
 
 # Convenience sets
 LOCAL_MODES = frozenset({ConnectionMode.HTTP, ConnectionMode.GRPC})
-LOCAL_RUNTIMES = frozenset({Runtime.SGLANG, Runtime.VLLM})
+LOCAL_RUNTIMES = frozenset({Runtime.SGLANG, Runtime.VLLM, Runtime.TRTLLM})
 CLOUD_RUNTIMES = frozenset({Runtime.OPENAI, Runtime.XAI, Runtime.GEMINI})
 
 # Fixture parameter names (used in @pytest.mark.parametrize)
@@ -48,7 +49,7 @@ DEFAULT_RUNTIME = "sglang"
 ENV_MODELS = "E2E_MODELS"
 ENV_BACKENDS = "E2E_BACKENDS"
 ENV_MODEL = "E2E_MODEL"
-ENV_RUNTIME = "E2E_RUNTIME"  # Runtime for gRPC tests: "sglang" or "vllm"
+ENV_RUNTIME = "E2E_RUNTIME"  # Runtime for gRPC tests: "sglang", "vllm", or "trtllm"
 ENV_STARTUP_TIMEOUT = "E2E_STARTUP_TIMEOUT"
 ENV_SKIP_MODEL_POOL = "SKIP_MODEL_POOL"
 ENV_SKIP_BACKEND_SETUP = "SKIP_BACKEND_SETUP"
@@ -88,6 +89,16 @@ def is_sglang() -> bool:
         True if E2E_RUNTIME is "sglang", False otherwise.
     """
     return get_runtime() == "sglang"
+
+
+def is_trtllm() -> bool:
+    """Check if tests are running with TensorRT-LLM runtime.
+
+    Returns:
+        True if E2E_RUNTIME is "trtllm", False otherwise.
+    """
+    return get_runtime() == "trtllm"
+
 ENV_SHOW_ROUTER_LOGS = "SHOW_ROUTER_LOGS"
 ENV_SHOW_WORKER_LOGS = "SHOW_WORKER_LOGS"
 

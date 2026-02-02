@@ -29,6 +29,7 @@ from .constants import (  # Enums; Convenience sets; Fixture parameters; Default
     WorkerType,
     get_runtime,
     is_sglang,
+    is_trtllm,
     is_vllm,
 )
 from .gateway import Gateway, WorkerInfo, launch_cloud_gateway
@@ -107,6 +108,7 @@ __all__ = [
     "get_runtime",
     "is_vllm",
     "is_sglang",
+    "is_trtllm",
     # GPU allocation
     "GPUAllocator",
     "GPUInfo",
