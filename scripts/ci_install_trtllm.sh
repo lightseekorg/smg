@@ -104,6 +104,13 @@ rsync -a \
     --exclude='libs/' \
     "$TRTLLM_DIR/tensorrt_llm/" "$INSTALL_DIR/"
 
+# Step 5: Copy vendored triton_kernels module (required by main branch __init__.py).
+# The main branch references triton_kernels at the site-packages level.
+if [ -d "$TRTLLM_DIR/triton_kernels" ]; then
+    echo "Installing vendored triton_kernels module..."
+    cp -r "$TRTLLM_DIR/triton_kernels" "$SITE_PACKAGES/triton_kernels"
+fi
+
 # Persist LD_LIBRARY_PATH for subsequent CI steps
 if [ -n "${GITHUB_ENV:-}" ]; then
     echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
