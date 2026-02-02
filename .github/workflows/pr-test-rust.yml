@@ -331,6 +331,11 @@ jobs:
           cache: true
           cache-dependency-path: bindings/golang/go.sum
 
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
       - name: Download Go FFI library
         uses: actions/download-artifact@v7
         with:
@@ -343,6 +348,7 @@ jobs:
       - name: Run Go unit tests
         run: |
           cd bindings/golang
+          export CGO_ENABLED=1
           export CGO_LDFLAGS="-L$(pwd)/target/release"
           export LD_LIBRARY_PATH="$(pwd)/target/release:$LD_LIBRARY_PATH"
           go test -v ./...
