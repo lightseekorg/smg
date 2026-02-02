@@ -117,6 +117,14 @@ impl RateLimiter {
                     )));
                 }
             }
+            if let Some(max) = limits.max_calls_per_hour {
+                if window.calls_per_hour() >= max {
+                    return Err(McpError::RateLimitExceeded(format!(
+                        "Tool '{}' hour limit reached ({})",
+                        tool, max
+                    )));
+                }
+            }
         }
 
         Ok(())
