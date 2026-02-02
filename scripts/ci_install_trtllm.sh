@@ -95,14 +95,20 @@ INSTALL_DIR=$(python3 -c "import tensorrt_llm, pathlib; print(pathlib.Path(tenso
 echo "Installed package at: $INSTALL_DIR"
 echo "Overlaying main branch Python source..."
 
-rsync -a \
-    --include='*.py' \
-    --include='*/' \
-    --exclude='*.so' \
-    --exclude='*.pyd' \
-    --exclude='bindings/' \
-    --exclude='libs/' \
-    "$TRTLLM_DIR/tensorrt_llm/" "$INSTALL_DIR/"
+# Copy .py files only, skip compiled binaries and native dirs (no rsync on runner)
+python3 -c "
+import shutil, pathlib
+src = pathlib.Path('$TRTLLM_DIR/tensorrt_llm')
+dst = pathlib.Path('$INSTALL_DIR')
+skip = {'bindings', 'libs'}
+for f in src.rglob('*.py'):
+    rel = f.relative_to(src)
+    if rel.parts[0] in skip:
+        continue
+    out = dst / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(f, out)
+"
 
 # Step 5: Copy vendored triton_kernels module (required by main branch __init__.py).
 # The main branch references triton_kernels at the site-packages level.
