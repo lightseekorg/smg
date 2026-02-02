@@ -120,10 +120,11 @@ def pytest_collection_modifyitems(
     # Filter items based on -k expression to only scan tests that will actually run
     keyword = config.option.keyword
     if keyword:
-        from _pytest.mark import KeywordMatcher
+        from _pytest.mark.expression import Expression
 
+        expr = Expression.compile(keyword)
         items_to_scan = [
-            item for item in items if KeywordMatcher.from_item(item).match(keyword)
+            item for item in items if expr.evaluate(lambda x: x in item.keywords)
         ]
     else:
         items_to_scan = items
