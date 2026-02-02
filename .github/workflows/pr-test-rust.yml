@@ -110,6 +110,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
 
@@ -490,6 +495,11 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.13"
 
     - name: Download gateway benchmark results
       uses: actions/download-artifact@v7
