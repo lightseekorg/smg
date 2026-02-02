@@ -64,20 +64,21 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, **kwargs):
 
 
 # ---------------------------------------------------------------------------
-# Model configurations: (model_id, class_name_fragment, multi_workers, extra_kwargs)
+# Model configurations: (model_id, class_name_fragment, multi_workers, backends, extra_kwargs)
+# backends: list of backends to test (default: ["http", "grpc"])
 # ---------------------------------------------------------------------------
 
 _NIGHTLY_MODELS = [
-    ("llama-8b",    "Llama8b",    8, {}),
-    ("llama-1b",    "Llama1b",    8, {}),
-    ("qwen-7b",     "Qwen7b",     8, {}),
-    ("qwen-14b",    "Qwen14b",    4, {}),
-    ("deepseek-7b", "Deepseek7b", 8, {}),
-    ("qwen-30b",    "Qwen30b",    2, {}),
-    ("mistral-7b",  "Mistral7b",  8, {}),
-    # ("embedding",   "Embedding",  8, {"task": "text-to-embeddings"}),  # Skipped
-    ("gpt-oss",     "GptOss",     4, {}),
-    # ("llama-4-maverick-17b", "Llama4Maverick", 1, {}),  # 1 worker uses all 8 GPUs (tp=8)
+    ("llama-8b",    "Llama8b",    8, ["http", "grpc"], {}),
+    ("llama-1b",    "Llama1b",    8, ["http", "grpc"], {}),
+    ("qwen-7b",     "Qwen7b",     8, ["http", "grpc"], {}),
+    ("qwen-14b",    "Qwen14b",    4, ["http", "grpc"], {}),
+    ("deepseek-7b", "Deepseek7b", 8, ["http", "grpc"], {}),
+    ("qwen-30b",    "Qwen30b",    2, ["http", "grpc"], {}),
+    ("mistral-7b",  "Mistral7b",  8, ["http", "grpc"], {}),
+    # ("embedding",   "Embedding",  8, ["http", "grpc"], {"task": "text-to-embeddings"}),  # Skipped
+    ("gpt-oss",     "GptOss",     4, ["http"], {}),  # Skip gRPC (vLLM not supported)
+    # ("llama-4-maverick-17b", "Llama4Maverick", 1, ["http", "grpc"], {}),  # 1 worker uses all 8 GPUs (tp=8)
 ]
 
 
@@ -86,7 +87,7 @@ _NIGHTLY_MODELS = [
 # ---------------------------------------------------------------------------
 
 
-def _make_test_class(model_id, worker_count, extra_kwargs):
+def _make_test_class(model_id, worker_count, backends, extra_kwargs):
     """Create a nightly benchmark test class for a model/worker configuration."""
 
     @pytest.mark.nightly
@@ -94,7 +95,7 @@ def _make_test_class(model_id, worker_count, extra_kwargs):
     @pytest.mark.model(model_id)
     @pytest.mark.workers(count=worker_count)
     @pytest.mark.gateway(policy="round_robin")
-    @pytest.mark.parametrize("setup_backend", ["http", "grpc"], indirect=True)
+    @pytest.mark.parametrize("setup_backend", backends, indirect=True)
     class _NightlyTest:
         def test_nightly_perf(self, setup_backend, genai_bench_runner):
             _run_nightly(setup_backend, genai_bench_runner, model_id, **extra_kwargs)
@@ -102,13 +103,13 @@ def _make_test_class(model_id, worker_count, extra_kwargs):
     return _NightlyTest
 
 
-for _model_id, _name, _multi_workers, _extra in _NIGHTLY_MODELS:
+for _model_id, _name, _multi_workers, _backends, _extra in _NIGHTLY_MODELS:
     for _suffix, _count in [("Single", 1), ("Multi", _multi_workers)]:
         _cls_name = f"TestNightly{_name}{_suffix}"
-        _cls = _make_test_class(_model_id, _count, _extra)
+        _cls = _make_test_class(_model_id, _count, _backends, _extra)
         _cls.__name__ = _cls_name
         _cls.__qualname__ = _cls_name
         globals()[_cls_name] = _cls
 
 # Clean up loop variables from module namespace
-del _model_id, _name, _multi_workers, _extra, _suffix, _count, _cls_name, _cls
+del _model_id, _name, _multi_workers, _backends, _extra, _suffix, _count, _cls_name, _cls
