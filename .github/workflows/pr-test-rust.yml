@@ -6,12 +6,12 @@ on:
     paths-ignore:
       - "docs/**"
       - "*.md"
-  pull_request:
-    branches: [ main ]
-    types: [opened, synchronize, reopened, labeled]
-    paths-ignore:
-      - "docs/**"
-      - "*.md"
+  # pull_request:
+  #   branches: [ main ]
+  #   types: [opened, synchronize, reopened, labeled]
+  #   paths-ignore:
+  #     - "docs/**"
+  #     - "*.md"
   workflow_dispatch:
 
 permissions:

@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
 """Generate nightly benchmark summary for GitHub Actions.
 
-Processes genai-bench output folders and creates a concise markdown report
-showing key performance metrics across models, scenarios, and concurrency levels.
+Produces a concise report with collapsible tables per model/runtime/protocol.
 
 Usage:
     python nightly_summarize.py [base_dir]
-
-The script discovers nightly_* folders and aggregates results into:
-- Model overview table with peak throughput and best latency
-- Per-scenario breakdown with concurrency scaling
-- Error summary if any failures occurred
 """
 
 from __future__ import annotations
@@ -22,326 +16,239 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 
 @dataclass
 class RunResult:
-    """Single benchmark run result (one scenario × concurrency combination)."""
+    """Single benchmark run result."""
 
     scenario: str
     concurrency: int
-    requests_per_second: float
-    output_throughput: float  # tokens/s
-    input_throughput: float  # tokens/s
-    total_throughput: float  # tokens/s
-    ttft_mean: float  # seconds
+    rps: float
+    output_throughput: float
+    ttft_mean: float
     ttft_p99: float
-    e2e_latency_mean: float  # seconds
-    e2e_latency_p99: float
-    tpot_mean: float  # time per output token
-    error_rate: float
-    num_requests: int
-    run_duration: float
+    e2e_mean: float
+    e2e_p99: float
 
 
 @dataclass
-class ExperimentSummary:
-    """Aggregated summary for one experiment folder."""
+class ExperimentInfo:
+    """Parsed experiment metadata."""
 
-    folder_name: str
     model: str
-    server_engine: str
-    server_version: str
+    protocol: str  # http, grpc
+    runtime: str  # sglang, vllm
+    worker_type: str  # single, multi
     gpu_type: str
-    gpu_count: str
-    task: str
-    scenarios: list[str] = field(default_factory=list)
+    gpu_count: int
     runs: list[RunResult] = field(default_factory=list)
 
     @property
-    def peak_output_throughput(self) -> float:
-        """Peak output throughput across all runs."""
-        return max((r.output_throughput for r in self.runs), default=0)
-
-    @property
-    def peak_total_throughput(self) -> float:
-        """Peak total throughput across all runs."""
-        return max((r.total_throughput for r in self.runs), default=0)
-
-    @property
-    def peak_rps(self) -> float:
-        """Peak requests per second across all runs."""
-        return max((r.requests_per_second for r in self.runs), default=0)
-
-    @property
-    def best_ttft(self) -> float:
-        """Best (lowest) mean TTFT across all runs."""
-        return min((r.ttft_mean for r in self.runs), default=float("inf"))
-
-    @property
-    def best_e2e_latency(self) -> float:
-        """Best (lowest) mean E2E latency at concurrency=1."""
-        c1_runs = [r for r in self.runs if r.concurrency == 1]
-        return min((r.e2e_latency_mean for r in c1_runs), default=float("inf"))
-
-    @property
-    def total_errors(self) -> int:
-        """Total error count across all runs."""
-        return sum(
-            int(r.num_requests * r.error_rate) for r in self.runs if r.error_rate > 0
-        )
-
-    @property
-    def has_errors(self) -> bool:
-        """Whether any run had errors."""
-        return any(r.error_rate > 0 for r in self.runs)
+    def table_key(self) -> str:
+        """Key for table grouping."""
+        return f"{self.protocol}_{self.runtime}_{self.worker_type}"
 
 
 def _get_float(d: dict, key: str, default: float = 0.0) -> float:
-    """Get a float value from dict, returning default if missing or None."""
+    """Get float value, handling None."""
     val = d.get(key)
     return float(val) if val is not None else default
 
 
-def parse_run_json(path: Path) -> RunResult | None:
-    """Parse a single benchmark run JSON file."""
-    try:
-        with path.open() as f:
-            data = json.load(f)
+def parse_folder_name(folder_name: str) -> dict:
+    """Parse experiment info from folder name.
 
-        agg = data.get("aggregated_metrics", {})
-        stats = agg.get("stats", {})
-        ttft = stats.get("ttft", {})
-        e2e = stats.get("e2e_latency", {})
-        tpot = stats.get("tpot", {})
+    Expected patterns:
+    - nightly_llama-8b_http -> model=llama-8b, protocol=http
+    - nightly_llama-8b_grpc -> model=llama-8b, protocol=grpc
+    """
+    info = {"model": "unknown", "protocol": "unknown", "worker_type": "single"}
 
-        return RunResult(
-            scenario=agg.get("scenario", "unknown"),
-            concurrency=agg.get("num_concurrency", 0) or 0,
-            requests_per_second=_get_float(agg, "requests_per_second"),
-            output_throughput=_get_float(agg, "mean_output_throughput_tokens_per_s"),
-            input_throughput=_get_float(agg, "mean_input_throughput_tokens_per_s"),
-            total_throughput=_get_float(agg, "mean_total_tokens_throughput_tokens_per_s"),
-            ttft_mean=_get_float(ttft, "mean"),
-            ttft_p99=_get_float(ttft, "p99"),
-            e2e_latency_mean=_get_float(e2e, "mean"),
-            e2e_latency_p99=_get_float(e2e, "p99"),
-            tpot_mean=_get_float(tpot, "mean"),
-            error_rate=_get_float(agg, "error_rate"),
-            num_requests=agg.get("num_requests", 0) or 0,
-            run_duration=_get_float(agg, "run_duration"),
-        )
-    except Exception as e:
-        print(f"Warning: Failed to parse {path}: {e}", file=sys.stderr)
-        return None
+    # Remove nightly_ prefix
+    name = folder_name.replace("nightly_", "")
+
+    # Check for protocol suffix
+    if name.endswith("_http"):
+        info["protocol"] = "http"
+        info["model"] = name[:-5]
+    elif name.endswith("_grpc"):
+        info["protocol"] = "grpc"
+        info["model"] = name[:-5]
+    else:
+        parts = name.rsplit("_", 1)
+        if len(parts) == 2:
+            info["model"] = parts[0]
+            info["protocol"] = parts[1]
+        else:
+            info["model"] = name
+
+    return info
 
 
-def parse_experiment_folder(folder: Path) -> ExperimentSummary | None:
-    """Parse all results from an experiment folder."""
-    # Parse metadata
+def parse_experiment(folder: Path) -> ExperimentInfo | None:
+    """Parse experiment folder into ExperimentInfo."""
     metadata_path = folder / "experiment_metadata.json"
     if not metadata_path.exists():
-        print(f"Warning: No metadata found in {folder}", file=sys.stderr)
         return None
 
     try:
         with metadata_path.open() as f:
-            metadata = json.load(f)
+            meta = json.load(f)
     except Exception as e:
         print(f"Warning: Failed to parse metadata in {folder}: {e}", file=sys.stderr)
         return None
 
-    summary = ExperimentSummary(
-        folder_name=folder.name,
-        model=metadata.get("model", "unknown"),
-        server_engine=metadata.get("server_engine", "unknown"),
-        server_version=metadata.get("server_version", "unknown"),
-        gpu_type=metadata.get("server_gpu_type", "unknown"),
-        gpu_count=metadata.get("server_gpu_count", "?"),
-        task=metadata.get("task", "text-to-text"),
-        scenarios=metadata.get("traffic_scenario", []),
+    # Parse folder name for protocol info
+    folder_info = parse_folder_name(folder.name)
+
+    # Extract model name (short form)
+    model_path = meta.get("model", "unknown")
+    model = model_path.split("/")[-1] if "/" in model_path else model_path
+
+    # Determine runtime from metadata or folder name
+    runtime = meta.get("server_engine") or "unknown"
+    if runtime == "unknown" or runtime is None:
+        if "vllm" in folder.name.lower():
+            runtime = "vllm"
+        else:
+            runtime = "sglang"
+
+    # Determine worker type
+    worker_type = "multi" if "multi" in folder.name.lower() else "single"
+
+    # Get GPU info
+    gpu_type = meta.get("server_gpu_type") or "unknown"
+    gpu_count_str = meta.get("server_gpu_count") or "1"
+    try:
+        gpu_count = int(gpu_count_str)
+    except (ValueError, TypeError):
+        gpu_count = 1
+
+    info = ExperimentInfo(
+        model=model,
+        protocol=folder_info.get("protocol", "unknown"),
+        runtime=runtime,
+        worker_type=worker_type,
+        gpu_type=gpu_type,
+        gpu_count=gpu_count,
     )
 
-    # Parse all run results
+    # Parse run results
     for json_file in folder.glob("*.json"):
-        if "experiment_metadata" in json_file.name:
+        if "experiment_metadata" in json_file.name or "gpu_utilization" in json_file.name:
             continue
-        if "gpu_utilization" in json_file.name:
-            continue
-        result = parse_run_json(json_file)
-        if result:
-            summary.runs.append(result)
 
-    return summary if summary.runs else None
+        try:
+            with json_file.open() as f:
+                data = json.load(f)
+
+            agg = data.get("aggregated_metrics", {})
+            stats = agg.get("stats", {})
+            ttft = stats.get("ttft", {})
+            e2e = stats.get("e2e_latency", {})
+
+            run = RunResult(
+                scenario=agg.get("scenario", "unknown"),
+                concurrency=agg.get("num_concurrency", 0) or 0,
+                rps=_get_float(agg, "requests_per_second"),
+                output_throughput=_get_float(agg, "mean_output_throughput_tokens_per_s"),
+                ttft_mean=_get_float(ttft, "mean"),
+                ttft_p99=_get_float(ttft, "p99"),
+                e2e_mean=_get_float(e2e, "mean"),
+                e2e_p99=_get_float(e2e, "p99"),
+            )
+            info.runs.append(run)
+        except Exception as e:
+            print(f"Warning: Failed to parse {json_file}: {e}", file=sys.stderr)
+
+    return info if info.runs else None
 
 
-def discover_experiments(base_dir: Path) -> list[ExperimentSummary]:
+def discover_experiments(base_dir: Path) -> list[ExperimentInfo]:
     """Discover and parse all nightly experiment folders."""
     experiments = []
 
-    # Look for nightly_* folders (from test_nightly_perf.py)
     for folder in base_dir.rglob("nightly_*"):
         if folder.is_dir():
-            summary = parse_experiment_folder(folder)
-            if summary:
-                experiments.append(summary)
+            exp = parse_experiment(folder)
+            if exp:
+                experiments.append(exp)
 
-    # Also look for genai-bench style folders (openai_*, anthropic_*)
-    for pattern in ["openai_*", "anthropic_*"]:
-        for folder in base_dir.rglob(pattern):
-            if folder.is_dir() and (folder / "experiment_metadata.json").exists():
-                summary = parse_experiment_folder(folder)
-                if summary:
-                    experiments.append(summary)
-
-    return sorted(experiments, key=lambda x: x.folder_name)
+    return experiments
 
 
 def format_throughput(val: float) -> str:
-    """Format throughput value with K suffix for large numbers."""
+    """Format throughput with K suffix."""
     if val >= 1000:
         return f"{val/1000:.1f}K"
     return f"{val:.0f}"
 
 
 def format_latency(val: float) -> str:
-    """Format latency in appropriate units."""
-    if val < 0.001:
-        return f"{val*1000000:.0f}μs"
+    """Format latency in ms or s."""
     if val < 1:
         return f"{val*1000:.0f}ms"
     return f"{val:.2f}s"
 
 
-def generate_overview_table(experiments: list[ExperimentSummary]) -> list[str]:
-    """Generate the main overview table."""
+def generate_table(runs: list[RunResult]) -> list[str]:
+    """Generate a markdown table for runs."""
+    if not runs:
+        return ["*No data*", ""]
+
+    sorted_runs = sorted(runs, key=lambda r: (r.scenario, r.concurrency))
+
     lines = [
-        "## Nightly Benchmark Summary",
-        "",
+        "| Scenario | Concurrency | RPS | Output (tok/s) | TTFT (mean) | TTFT (p99) | E2E (mean) | E2E (p99) |",
+        "|----------|-------------|-----|----------------|-------------|------------|------------|-----------|",
+    ]
+
+    for run in sorted_runs:
+        lines.append(
+            f"| {run.scenario} | {run.concurrency} | "
+            f"{run.rps:.1f} | {format_throughput(run.output_throughput)} | "
+            f"{format_latency(run.ttft_mean)} | {format_latency(run.ttft_p99)} | "
+            f"{format_latency(run.e2e_mean)} | {format_latency(run.e2e_p99)} |"
+        )
+
+    lines.append("")
+    return lines
+
+
+def generate_overview_table(
+    by_model: dict[str, dict[str, ExperimentInfo]],
+    table_order: list[tuple[str, str]],
+) -> list[str]:
+    """Generate overview table with status emojis."""
+    # Header
+    header_cols = ["Model"] + [title for _, title in table_order]
+    lines = [
         "### Overview",
         "",
-        "| Model | Runtime | GPUs | Peak Output (tok/s) | Peak Total (tok/s) | Best TTFT | Best E2E @c1 | Status |",
-        "|-------|---------|------|---------------------|--------------------|-----------|--------------| -------|",
+        "| " + " | ".join(header_cols) + " |",
+        "|" + "|".join(["---"] * len(header_cols)) + "|",
     ]
 
-    for exp in experiments:
-        status = "⚠️ Errors" if exp.has_errors else "✅ OK"
-        lines.append(
-            f"| {exp.model} | {exp.server_engine} {exp.server_version} | "
-            f"{exp.gpu_count}×{exp.gpu_type} | "
-            f"{format_throughput(exp.peak_output_throughput)} | "
-            f"{format_throughput(exp.peak_total_throughput)} | "
-            f"{format_latency(exp.best_ttft)} | "
-            f"{format_latency(exp.best_e2e_latency)} | "
-            f"{status} |"
-        )
+    for model in sorted(by_model.keys()):
+        model_exps = by_model[model]
+        row = [model]
 
-    return lines
+        for table_key, _ in table_order:
+            if table_key not in model_exps:
+                row.append("\u2796")  # Heavy minus sign (skipped)
+            else:
+                exp = model_exps[table_key]
+                # Check if any run had errors (0 RPS or 0 throughput indicates failure)
+                has_errors = any(r.rps == 0 or r.output_throughput == 0 for r in exp.runs)
+                if has_errors:
+                    row.append("\u26A0\uFE0F")  # Warning sign (partial failure)
+                else:
+                    row.append("\u2705")  # Green checkmark (success)
 
+        lines.append("| " + " | ".join(row) + " |")
 
-def generate_scenario_details(experiments: list[ExperimentSummary]) -> list[str]:
-    """Generate per-scenario breakdown tables."""
-    lines = ["", "### Scenario Details", ""]
-
-    for exp in experiments:
-        lines.append(f"#### {exp.model} ({exp.server_engine})")
-        lines.append("")
-
-        # Group runs by scenario
-        by_scenario: dict[str, list[RunResult]] = defaultdict(list)
-        for run in exp.runs:
-            by_scenario[run.scenario].append(run)
-
-        for scenario in sorted(by_scenario.keys()):
-            runs = sorted(by_scenario[scenario], key=lambda r: r.concurrency)
-            lines.append(f"**{scenario}**")
-            lines.append("")
-            lines.append(
-                "| Concurrency | RPS | Output (tok/s) | TTFT (mean) | TTFT (p99) | E2E (mean) | E2E (p99) | Errors |"
-            )
-            lines.append(
-                "|-------------|-----|----------------|-------------|------------|------------|-----------|--------|"
-            )
-
-            for run in runs:
-                err_str = f"{run.error_rate*100:.1f}%" if run.error_rate > 0 else "0"
-                lines.append(
-                    f"| {run.concurrency} | {run.requests_per_second:.1f} | "
-                    f"{format_throughput(run.output_throughput)} | "
-                    f"{format_latency(run.ttft_mean)} | "
-                    f"{format_latency(run.ttft_p99)} | "
-                    f"{format_latency(run.e2e_latency_mean)} | "
-                    f"{format_latency(run.e2e_latency_p99)} | "
-                    f"{err_str} |"
-                )
-            lines.append("")
-
-    return lines
-
-
-def generate_peak_performance_table(experiments: list[ExperimentSummary]) -> list[str]:
-    """Generate table showing peak performance per scenario."""
-    lines = ["", "### Peak Performance by Scenario", ""]
-
-    for exp in experiments:
-        lines.append(f"#### {exp.model} ({exp.server_engine})")
-        lines.append("")
-        lines.append(
-            "| Scenario | Best Concurrency | Peak RPS | Peak Output (tok/s) | Latency @peak |"
-        )
-        lines.append(
-            "|----------|------------------|----------|---------------------|---------------|"
-        )
-
-        # Group runs by scenario
-        by_scenario: dict[str, list[RunResult]] = defaultdict(list)
-        for run in exp.runs:
-            by_scenario[run.scenario].append(run)
-
-        for scenario in sorted(by_scenario.keys()):
-            runs = by_scenario[scenario]
-            # Find run with peak throughput
-            peak_run = max(runs, key=lambda r: r.output_throughput)
-            lines.append(
-                f"| {scenario} | {peak_run.concurrency} | "
-                f"{peak_run.requests_per_second:.1f} | "
-                f"{format_throughput(peak_run.output_throughput)} | "
-                f"{format_latency(peak_run.e2e_latency_mean)} |"
-            )
-        lines.append("")
-
-    return lines
-
-
-def generate_concise_summary(experiments: list[ExperimentSummary]) -> list[str]:
-    """Generate a very concise summary for quick review."""
-    lines = [
-        "",
-        "### Quick Summary",
-        "",
-        "<details>",
-        "<summary>Expand for full details</summary>",
-        "",
-    ]
-
-    for exp in experiments:
-        # Find best throughput scenario and its metrics
-        if not exp.runs:
-            continue
-
-        peak_run = max(exp.runs, key=lambda r: r.output_throughput)
-        c1_runs = [r for r in exp.runs if r.concurrency == 1]
-        best_latency_run = min(c1_runs, key=lambda r: r.e2e_latency_mean) if c1_runs else peak_run
-
-        lines.append(f"**{exp.model}** ({exp.server_engine}, {exp.gpu_count}×{exp.gpu_type})")
-        lines.append(f"- Peak: {format_throughput(peak_run.output_throughput)} tok/s @ concurrency {peak_run.concurrency} ({peak_run.scenario})")
-        lines.append(f"- Latency @c1: TTFT {format_latency(best_latency_run.ttft_mean)}, E2E {format_latency(best_latency_run.e2e_latency_mean)}")
-        if exp.has_errors:
-            lines.append(f"- ⚠️ {exp.total_errors} total errors")
-        lines.append("")
-
-    lines.append("</details>")
+    lines.append("")
     return lines
 
 
@@ -352,14 +259,51 @@ def generate_summary(base_dir: Path) -> str:
     if not experiments:
         return "## Nightly Benchmark Summary\n\nNo benchmark results found."
 
-    lines = []
-    lines.extend(generate_overview_table(experiments))
-    lines.extend(generate_concise_summary(experiments))
-    lines.extend(generate_peak_performance_table(experiments))
-    lines.extend(generate_scenario_details(experiments))
+    # Group by model
+    by_model: dict[str, dict[str, ExperimentInfo]] = defaultdict(dict)
+    for exp in experiments:
+        by_model[exp.model][exp.table_key] = exp
 
-    # Add footer with timestamp
-    lines.append("")
+    # Define table order
+    table_order = [
+        ("http_sglang_single", "HTTP SGLang Single"),
+        ("grpc_sglang_single", "gRPC SGLang Single"),
+        ("grpc_vllm_single", "gRPC vLLM Single"),
+        ("http_sglang_multi", "HTTP SGLang Multi"),
+        ("grpc_sglang_multi", "gRPC SGLang Multi"),
+        ("grpc_vllm_multi", "gRPC vLLM Multi"),
+    ]
+
+    lines = ["## Nightly Benchmark Summary", ""]
+
+    # Add overview table
+    lines.extend(generate_overview_table(by_model, table_order))
+
+    for model in sorted(by_model.keys()):
+        model_exps = by_model[model]
+
+        # Get GPU info from first experiment
+        first_exp = next(iter(model_exps.values()))
+        gpu_info = f"{first_exp.gpu_count}x {first_exp.gpu_type}" if first_exp.gpu_type != "unknown" else ""
+
+        lines.append(f"### {model}")
+        if gpu_info:
+            lines.append(f"*{gpu_info}*")
+        lines.append("")
+
+        for table_key, table_title in table_order:
+            if table_key not in model_exps:
+                continue
+
+            exp = model_exps[table_key]
+
+            lines.append(f"<details>")
+            lines.append(f"<summary><b>{table_title}</b></summary>")
+            lines.append("")
+            lines.extend(generate_table(exp.runs))
+            lines.append("</details>")
+            lines.append("")
+
     lines.append("---")
     lines.append(f"*Generated from {len(experiments)} experiment(s)*")
 
@@ -371,7 +315,6 @@ def main() -> None:
     base_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.cwd()
     summary = generate_summary(base_dir)
 
-    # Write to GITHUB_STEP_SUMMARY if available
     summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_file:
         with open(summary_file, "a") as f:

@@ -27,6 +27,9 @@ def _build_command(
     max_requests: int,
     task: str = "text-to-text",
     max_time_per_run: int = 3,
+    server_engine: str | None = None,
+    gpu_type: str | None = None,
+    gpu_count: int | None = None,
 ) -> list[str]:
     """Build genai-bench command."""
     cmd = [
@@ -57,6 +60,12 @@ def _build_command(
         cmd.extend(["--num-concurrency", str(num_concurrency)])
     if traffic_scenario is not None:
         cmd.extend(["--traffic-scenario", traffic_scenario])
+    if server_engine:
+        cmd.extend(["--server-engine", server_engine])
+    if gpu_type:
+        cmd.extend(["--server-gpu-type", gpu_type])
+    if gpu_count:
+        cmd.extend(["--server-gpu-count", str(gpu_count)])
     return cmd
 
 
@@ -132,6 +141,9 @@ def genai_bench_runner():
         max_requests_per_run: int | None = None,
         task: str = "text-to-text",
         max_time_per_run: int = 3,
+        server_engine: str | None = None,
+        gpu_type: str | None = None,
+        gpu_count: int | None = None,
         kill_procs: list | None = None,
         drain_delay_sec: int = 6,
     ) -> None:
@@ -156,6 +168,9 @@ def genai_bench_runner():
             max_requests,
             task=task,
             max_time_per_run=max_time_per_run,
+            server_engine=server_engine,
+            gpu_type=gpu_type,
+            gpu_count=gpu_count,
         )
         timeout = timeout_sec or int(os.environ.get("GENAI_BENCH_TEST_TIMEOUT", "120"))
 
