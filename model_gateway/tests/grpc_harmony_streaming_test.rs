@@ -165,7 +165,7 @@ fn test_sglang_chunk_skips_accumulation() {
     }
 
     // Should be empty since we skipped SGLang
-    assert!(completion_tokens.get(&0).is_none());
+    assert!(!completion_tokens.contains_key(&0));
 }
 
 #[test]
