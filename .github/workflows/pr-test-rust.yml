@@ -44,10 +44,21 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Cache wheel and Go FFI artifacts
+        id: cache-wheel
+        uses: actions/cache@v4
+        with:
+          path: |
+            bindings/python/dist/*.whl
+            bindings/golang/target/release/libsmg_go.*
+          key: wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'auth/src/**', 'bindings/python/src/**', 'data_connector/src/**', 'grpc_client/src/**', 'kv_index/src/**', 'mcp/src/**', 'mesh/src/**', 'model_gateway/src/**', 'multimodal/src/**', 'protocols/src/**', 'reasoning_parser/src/**', 'tokenizer/src/**', 'tool_parser/src/**', 'wasm/src/**', 'workflow/src/**', 'bindings/golang/src/**') }}
+
       - name: Setup Rust
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
         uses: ./.github/actions/setup-rust
 
       - name: Build Python wheel and Go FFI library
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: |
           bash scripts/ci_setup_python_venv.sh
           bash scripts/ci_build_wheel.sh
@@ -67,7 +78,7 @@ jobs:
           retention-days: 1
 
       - name: Show sccache stats
-        if: always()
+        if: always() && steps.cache-wheel.outputs.cache-hit != 'true'
         run: sccache --show-stats
 
       - name: Test wheel install
