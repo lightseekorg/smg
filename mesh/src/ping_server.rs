@@ -571,8 +571,8 @@ impl Gossip for GossipService {
                                     }
 
                                     let store_type = LocalStoreType::from_proto(update.store);
-                                    log::debug!("Received incremental update from {}: store={:?}, {} updates. Backtrace: {:?}",
-                                        peer_id, store_type, update.updates.len(), std::backtrace::Backtrace::capture());
+                                    log::debug!("Received incremental update from {}: store={:?}, {} updates",
+                                        peer_id, store_type, update.updates.len());
 
                                     // Apply incremental updates to state stores
                                     // This will be handled by the sync manager if available
