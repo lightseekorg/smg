@@ -26,9 +26,9 @@ sudo dpkg --configure -a --force-confnew 2>/dev/null || true
 # Add NVIDIA CUDA/TensorRT apt repository (needed for libnvinfer-dev, tensorrt-dev)
 if ! dpkg -l cuda-keyring 2>/dev/null | grep -q '^ii'; then
     echo "Setting up NVIDIA apt repository..."
-    wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-    sudo dpkg -i cuda-keyring_1.1-1_all.deb
-    rm -f cuda-keyring_1.1-1_all.deb
+    curl -fsSL -o /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+    sudo dpkg -i /tmp/cuda-keyring.deb
+    rm -f /tmp/cuda-keyring.deb
 fi
 
 sudo apt-get update
