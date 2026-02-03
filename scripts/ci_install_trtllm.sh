@@ -32,7 +32,7 @@ if ! dpkg -l cuda-keyring 2>/dev/null | grep -q '^ii'; then
 fi
 
 sudo apt-get update
-sudo apt-get install -y libopenmpi-dev git-lfs libnvinfer-dev tensorrt-dev cuda-toolkit-13-0 cmake
+sudo apt-get install -y libopenmpi-dev git-lfs libnvinfer-dev tensorrt-dev cuda-toolkit-13-0 cmake libnccl-dev
 
 # ── CUDA setup ───────────────────────────────────────────────────────────────
 # Prefer /usr/local/cuda-13.0 if it exists, otherwise fall back to /usr/local/cuda
@@ -67,23 +67,24 @@ sudo ln -sf /usr/include/x86_64-linux-gnu /usr/local/tensorrt/include
 sudo ln -sf /usr/lib/x86_64-linux-gnu /usr/local/tensorrt/lib
 
 # ── NCCL 2.27 header fix ────────────────────────────────────────────────────
-# System NCCL (v2.25) lacks ncclWindow_t required by TRT-LLM. Install NCCL 2.27
-# via pip and symlink the header.
+# System NCCL from libnccl-dev may lack ncclWindow_t. Install NCCL 2.27+ header
+# via pip and symlink it over the system header. Use system libs for linking.
 pip install --no-cache-dir "nvidia-nccl-cu13>=2.27.7"
 
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
 NCCL_INCLUDE=$(find "$SITE_PACKAGES/nvidia/nccl" -name "nccl.h" 2>/dev/null | head -1)
-NCCL_ROOT=$(dirname "$(dirname "$NCCL_INCLUDE")")
+
+# Use system NCCL root for libraries (from libnccl-dev)
+NCCL_ROOT="/usr"
 
 if [ -n "$NCCL_INCLUDE" ]; then
     echo "Found pip NCCL header at: $NCCL_INCLUDE"
-    echo "NCCL_ROOT: $NCCL_ROOT"
-    echo "NCCL lib dir contents:"
-    ls -la "$NCCL_ROOT/lib/" 2>/dev/null || echo "No lib dir at $NCCL_ROOT/lib"
+    echo "Using system NCCL_ROOT: $NCCL_ROOT"
+    echo "System NCCL lib:"
+    ls -la /usr/lib/x86_64-linux-gnu/libnccl* 2>/dev/null || echo "No system NCCL libs found"
     sudo mv /usr/include/nccl.h /usr/include/nccl.h.bak 2>/dev/null || true
     sudo ln -sf "$NCCL_INCLUDE" /usr/include/nccl.h
-    # Also add NCCL lib to LD_LIBRARY_PATH for runtime
-    export LD_LIBRARY_PATH="$NCCL_ROOT/lib:$LD_LIBRARY_PATH"
+    echo "Symlinked pip NCCL header to /usr/include/nccl.h"
 else
     echo "WARNING: Could not find pip-installed NCCL header"
 fi
