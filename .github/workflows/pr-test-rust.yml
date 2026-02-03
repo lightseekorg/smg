@@ -267,7 +267,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /tmp/trtllm-wheel
-          key: trtllm-wheel-${{ runner.os }}-cuda13
+          key: trtllm-wheel-${{ runner.os }}-cuda13-v2
 
       - name: Install inference backend
         run: |
@@ -288,7 +288,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/trtllm-wheel
-          key: trtllm-wheel-${{ runner.os }}-cuda13
+          key: trtllm-wheel-${{ runner.os }}-cuda13-v2
 
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
