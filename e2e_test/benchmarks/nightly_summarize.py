@@ -28,6 +28,8 @@ class RunResult:
     output_throughput: float
     ttft_mean: float
     ttft_p99: float
+    tpot_mean: float
+    tpot_p99: float
     e2e_mean: float
     e2e_p99: float
 
@@ -160,6 +162,7 @@ def parse_experiment(folder: Path) -> ExperimentInfo | None:
             agg = data.get("aggregated_metrics", {})
             stats = agg.get("stats", {})
             ttft = stats.get("ttft", {})
+            tpot = stats.get("tpot", {})
             e2e = stats.get("e2e_latency", {})
 
             run = RunResult(
@@ -169,6 +172,8 @@ def parse_experiment(folder: Path) -> ExperimentInfo | None:
                 output_throughput=_get_float(agg, "mean_output_throughput_tokens_per_s"),
                 ttft_mean=_get_float(ttft, "mean"),
                 ttft_p99=_get_float(ttft, "p99"),
+                tpot_mean=_get_float(tpot, "mean"),
+                tpot_p99=_get_float(tpot, "p99"),
                 e2e_mean=_get_float(e2e, "mean"),
                 e2e_p99=_get_float(e2e, "p99"),
             )
@@ -214,8 +219,8 @@ def generate_table(runs: list[RunResult]) -> list[str]:
     sorted_runs = sorted(runs, key=lambda r: (r.scenario, r.concurrency))
 
     lines = [
-        "| Scenario | Concurrency | RPS | Output (tok/s) | TTFT (mean) | TTFT (p99) | E2E (mean) | E2E (p99) |",
-        "|----------|-------------|-----|----------------|-------------|------------|------------|-----------|",
+        "| Scenario | Concurrency | RPS | Output (tok/s) | TTFT (mean) | TTFT (p99) | TPOT (mean) | TPOT (p99) | E2E (mean) | E2E (p99) |",
+        "|----------|-------------|-----|----------------|-------------|------------|-------------|------------|------------|-----------|",
     ]
 
     for run in sorted_runs:
@@ -223,6 +228,7 @@ def generate_table(runs: list[RunResult]) -> list[str]:
             f"| {run.scenario} | {run.concurrency} | "
             f"{run.rps:.1f} | {format_throughput(run.output_throughput)} | "
             f"{format_latency(run.ttft_mean)} | {format_latency(run.ttft_p99)} | "
+            f"{format_latency(run.tpot_mean)} | {format_latency(run.tpot_p99)} | "
             f"{format_latency(run.e2e_mean)} | {format_latency(run.e2e_p99)} |"
         )
 

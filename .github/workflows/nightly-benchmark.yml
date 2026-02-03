@@ -186,7 +186,7 @@ jobs:
           # - { id: gpt-oss,     test_class: TestNightlyGptOssMulti }
           # - { id: llama-4-maverick-17b, test_class: TestNightlyLlama4MaverickMulti }
         variant:
-          - { id: sglang, runtime: sglang, grpc_only: "true" }
+          - { id: sglang, runtime: sglang, grpc_only: "false" }
           - { id: vllm,   runtime: vllm,   grpc_only: "true" }
 
     steps:
