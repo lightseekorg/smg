@@ -52,6 +52,8 @@ jobs:
             bindings/python/dist/*.whl
             bindings/golang/target/release/libsmg_go.*
           key: wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'auth/src/**', 'bindings/python/src/**', 'data_connector/src/**', 'grpc_client/src/**', 'kv_index/src/**', 'mcp/src/**', 'mesh/src/**', 'model_gateway/src/**', 'multimodal/src/**', 'protocols/src/**', 'reasoning_parser/src/**', 'tokenizer/src/**', 'tool_parser/src/**', 'wasm/src/**', 'workflow/src/**', 'bindings/golang/src/**') }}
+          restore-keys: |
+            wheel-${{ runner.os }}-
 
       - name: Setup Rust
         if: steps.cache-wheel.outputs.cache-hit != 'true'
