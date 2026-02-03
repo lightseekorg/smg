@@ -111,9 +111,13 @@ git lfs pull
 CMAKE_FILE="cpp/cmake/modules/FindTensorRT.cmake"
 if [ -f "$CMAKE_FILE" ]; then
     echo "Patching FindTensorRT.cmake for system paths..."
-    python3 -c "
+    python3 <<'PYTHON_EOF'
 import pathlib
-p = pathlib.Path('$CMAKE_FILE')
+import re
+import sys
+
+cmake_file = sys.argv[1] if len(sys.argv) > 1 else "cpp/cmake/modules/FindTensorRT.cmake"
+p = pathlib.Path(cmake_file)
 text = p.read_text()
 
 # Add system paths to CMAKE_FIND_ROOT_PATH
@@ -123,22 +127,16 @@ if '/usr/local/tensorrt' not in text or 'list(APPEND CMAKE_FIND_ROOT_PATH' not i
         'set(TensorRT_WELL_KNOWN_ROOT /usr/local/tensorrt)\nlist(APPEND CMAKE_FIND_ROOT_PATH /usr/local/tensorrt /usr)',
     )
 
-# Add NO_CMAKE_FIND_ROOT_PATH and system include paths to find_path
-# Add system library paths to find_library
-# These are needed because Conan toolchain restricts search paths
-import re
-
 # Patch find_path for NvInfer.h to include system paths
 text = re.sub(
-    r'(find_path\(\s*TensorRT_INCLUDE_DIR\s+NAMES\s+NvInfer\.h\s+PATHS\s+\\\$\{TensorRT_WELL_KNOWN_ROOT\}/include)',
+    r'(find_path\(\s*TensorRT_INCLUDE_DIR\s+NAMES\s+NvInfer\.h\s+PATHS\s+\$\{TensorRT_WELL_KNOWN_ROOT\}/include)',
     r'\1 /usr/include/x86_64-linux-gnu',
     text,
 )
 
 # Add system library paths to find_library calls (matches installation guide)
-# Pattern: find_library(...PATHS ${...}/lib) -> find_library(...PATHS ${...}/lib /usr/lib/x86_64-linux-gnu)
 text = re.sub(
-    r'(find_library\([^)]*PATHS\s+\\\$\{TensorRT_WELL_KNOWN_ROOT\}/lib)(\s*\))',
+    r'(find_library\([^)]*PATHS\s+\$\{TensorRT_WELL_KNOWN_ROOT\}/lib)(\s*\))',
     r'\1 /usr/lib/x86_64-linux-gnu\2',
     text,
     flags=re.DOTALL,
@@ -154,7 +152,7 @@ for pattern in [r'(find_path\([^)]*)\)', r'(find_library\([^)]*)\)']:
 
 p.write_text(text)
 print('FindTensorRT.cmake patched')
-"
+PYTHON_EOF
 fi
 
 # ── Patch FindNCCL.cmake ─────────────────────────────────────────────────────
@@ -162,11 +160,11 @@ fi
 NCCL_CMAKE_FILE="cpp/cmake/modules/FindNCCL.cmake"
 if [ -f "$NCCL_CMAKE_FILE" ]; then
     echo "Patching FindNCCL.cmake for Conan compatibility..."
-    python3 -c "
+    python3 <<'PYTHON_EOF'
 import pathlib
 import re
 
-p = pathlib.Path('$NCCL_CMAKE_FILE')
+p = pathlib.Path("cpp/cmake/modules/FindNCCL.cmake")
 text = p.read_text()
 
 # Add NO_CMAKE_FIND_ROOT_PATH to all find_path and find_library calls
@@ -180,7 +178,7 @@ for pattern in [r'(find_path\([^)]*)\)', r'(find_library\([^)]*)\)']:
 
 p.write_text(text)
 print('FindNCCL.cmake patched')
-"
+PYTHON_EOF
 fi
 
 # ── Build TensorRT-LLM from source ──────────────────────────────────────────
