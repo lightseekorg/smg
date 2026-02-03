@@ -89,16 +89,16 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         },
     )
 
-    # PD disaggregation backend
-    if backend_name == "pd":
-        yield from _setup_pd_backend(
+    # PD disaggregation backends - explicit connection modes
+    if backend_name == "pd_http":
+        yield from _setup_pd_http_backend(
             request, model_pool, model_id, workers_config, gateway_config
         )
         return
 
-    # vLLM PD disaggregation backend (NIXL-based KV transfer)
-    if backend_name == "vllm_pd":
-        yield from _setup_vllm_pd_backend(
+    if backend_name == "pd_grpc":
+        # gRPC mode PD
+        yield from _setup_pd_grpc_backend(
             request, model_pool, model_id, workers_config, gateway_config
         )
         return
@@ -149,7 +149,7 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
     yield from _setup_cloud_backend(backend_name, storage_backend, gateway_config)
 
 
-def _setup_pd_backend(
+def _setup_pd_http_backend(
     request: pytest.FixtureRequest,
     model_pool: "ModelPool",
     model_id: str,
@@ -165,18 +165,18 @@ def _setup_pd_backend(
         workers_config=workers_config,
         gateway_config=gateway_config,
         connection_mode=ConnectionMode.HTTP,
-        backend_name="pd",
+        backend_name="pd_http",
     )
 
 
-def _setup_vllm_pd_backend(
+def _setup_pd_grpc_backend(
     request: pytest.FixtureRequest,
     model_pool: "ModelPool",
     model_id: str,
     workers_config: dict,
     gateway_config: dict,
 ):
-    """Setup vLLM PD disaggregation backend (gRPC mode with NIXL KV transfer)."""
+    """Setup PD disaggregation backend with gRPC mode."""
     from infra import ConnectionMode
 
     yield from _setup_pd_backend_common(
@@ -185,7 +185,7 @@ def _setup_vllm_pd_backend(
         workers_config=workers_config,
         gateway_config=gateway_config,
         connection_mode=ConnectionMode.GRPC,
-        backend_name="vllm_pd",
+        backend_name="pd_grpc",
     )
 
 
