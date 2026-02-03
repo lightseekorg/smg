@@ -520,6 +520,8 @@ class ModelPool:
                     model_spec=spec,
                     gpu_slot=gpu_slot,
                     startup_timeout=600,
+                    worker_type=worker_type,
+                    instance_key=instance_key,
                 )
 
         spec = get_model_spec(model_id)
@@ -1223,7 +1225,11 @@ class ModelPool:
             runtime, model_path, DEFAULT_HOST, port, tp_size, model_spec
         )
 
-        key = f"{model_id}:{runtime}-grpc"
+        # Use provided instance_key for PD workers, otherwise generate default key
+        if instance_key:
+            key = instance_key
+        else:
+            key = f"{model_id}:{runtime}-grpc"
         logger.info(
             "Launching %s gRPC worker %s on GPUs %s port %d",
             runtime_label,
