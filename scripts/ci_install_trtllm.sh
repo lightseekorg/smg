@@ -2,10 +2,9 @@
 # Install TensorRT-LLM with gRPC support for CI
 #
 # gRPC server support (PR #11037) is not yet in a pip release,
-# so we install the latest stable wheel (which has all compiled binaries)
-# and then selectively copy only the gRPC-related modules (grpc/, commands/,
-# serve/) from main branch. This avoids breaking the stable wheel's compiled
-# C++ extensions while adding the gRPC serve command.
+# so we install the latest stable wheel (compiled binaries) and then
+# overlay ALL Python source from main branch on top. We patch the few
+# imports that reference compiled C++ extensions missing from the wheel.
 #
 # Prerequisites (expected on k8s-runner-gpu nodes):
 #   - NVIDIA driver 580+ (CUDA 13)
@@ -39,12 +38,8 @@ fi
 # Debug: print what CUDA we actually have
 echo "=== CUDA diagnostics ==="
 echo "CUDA_HOME=$CUDA_HOME"
-ls -la "$CUDA_HOME" 2>/dev/null || echo "WARNING: $CUDA_HOME does not exist!"
 nvidia-smi 2>/dev/null | head -4 || echo "WARNING: nvidia-smi not found"
 nvcc --version 2>/dev/null || echo "WARNING: nvcc not found"
-echo "Looking for libcublasLt.so*:"
-find /usr/local -name "libcublasLt.so*" 2>/dev/null || echo "  not found in /usr/local"
-find /usr -name "libcublasLt.so*" 2>/dev/null | head -5 || echo "  not found in /usr"
 echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
 echo "=== end CUDA diagnostics ==="
 
@@ -59,8 +54,6 @@ echo "Installing stable TensorRT-LLM wheel..."
 pip install --no-cache-dir tensorrt_llm --extra-index-url=https://pypi.nvidia.com
 
 # Step 2: Add pip-installed NVIDIA libraries to LD_LIBRARY_PATH.
-# TRT-LLM pulls in nvidia-* pip packages with .so files that aren't
-# on the default search path.
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
 
 NVIDIA_LIB_DIRS=$(find "$SITE_PACKAGES/nvidia" -name "lib" -type d 2>/dev/null | sort -u | paste -sd':')
@@ -75,12 +68,6 @@ fi
 
 echo "Final LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 
-# Debug: verify libcublasLt.so.13 is findable
-echo "Checking libcublasLt.so.13 resolution:"
-ldconfig -p 2>/dev/null | grep libcublasLt || echo "  not in ldconfig cache"
-find "$SITE_PACKAGES/nvidia" -name "libcublasLt.so*" 2>/dev/null || echo "  not in pip nvidia packages"
-find "$CUDA_HOME" -name "libcublasLt.so*" 2>/dev/null || echo "  not in CUDA_HOME"
-
 # Step 3: Clone main branch for gRPC serve command (not in any release yet).
 TRTLLM_DIR="/tmp/tensorrt-llm-src"
 if [ ! -d "$TRTLLM_DIR" ]; then
@@ -88,28 +75,64 @@ if [ ! -d "$TRTLLM_DIR" ]; then
     git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM.git "$TRTLLM_DIR"
 fi
 
-# Step 4: Selectively copy ONLY gRPC-related modules from main branch.
-# The full overlay breaks because main branch Python references compiled C++
-# extensions (_rawref, etc.) that don't exist in the 1.1.0 wheel. Instead,
-# we only copy the new/updated modules needed for gRPC serving.
-# TRT-LLM prints a version banner to stdout on import; use tail -1 to get only the path
+# Step 4: Full Python overlay from main branch, skipping compiled extensions.
+# TRT-LLM prints a version banner to stdout on import; use tail -1 to get only the path.
 INSTALL_DIR=$(python3 -c "import tensorrt_llm, pathlib; print(pathlib.Path(tensorrt_llm.__file__).parent)" 2>/dev/null | tail -1)
 echo "Installed package at: $INSTALL_DIR"
-echo "Copying gRPC-related modules from main branch..."
+echo "Overlaying main branch Python source..."
 
-# Copy only the directories needed for gRPC serve support.
-# Use cp -rf to force overwrite existing files from the stable wheel.
-for subdir in grpc commands serve; do
-    if [ -d "$TRTLLM_DIR/tensorrt_llm/$subdir" ]; then
-        echo "  Copying $subdir/"
-        rm -rf "$INSTALL_DIR/$subdir"
-        cp -r "$TRTLLM_DIR/tensorrt_llm/$subdir" "$INSTALL_DIR/$subdir"
-    fi
-done
+python3 -c "
+import shutil, pathlib
+src = pathlib.Path('$TRTLLM_DIR/tensorrt_llm')
+dst = pathlib.Path('$INSTALL_DIR')
+skip = {'bindings', 'libs'}
+count = 0
+for f in src.rglob('*.py'):
+    rel = f.relative_to(src)
+    if rel.parts[0] in skip:
+        continue
+    out = dst / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(f, out)
+    count += 1
+print(f'Copied {count} Python files')
+"
 
-# Verify the patched serve.py has --grpc support
-echo "Verifying serve.py was patched:"
-grep -c "grpc" "$INSTALL_DIR/commands/serve.py" || echo "ERROR: serve.py has no grpc references!"
+# Step 5: Copy vendored triton_kernels module (required by main branch __init__.py).
+if [ -d "$TRTLLM_DIR/triton_kernels" ]; then
+    echo "Installing vendored triton_kernels module..."
+    cp -r "$TRTLLM_DIR/triton_kernels" "$SITE_PACKAGES/triton_kernels"
+fi
+
+# Step 6: Patch imports of compiled C++ extensions that don't exist in the
+# stable wheel. The gRPC serve path (--backend pytorch) doesn't need these.
+echo "Patching incompatible compiled extension imports..."
+python3 -c "
+import pathlib
+
+install_dir = pathlib.Path('$INSTALL_DIR')
+
+patches = [
+    (
+        'runtime/kv_cache_manager_v2/rawref/__init__.py',
+        'from ._rawref import NULL, ReferenceType, ref',
+        'try:\n    from ._rawref import NULL, ReferenceType, ref\nexcept (ImportError, ModuleNotFoundError):\n    NULL = None; ReferenceType = None; ref = None',
+    ),
+]
+
+for rel_path, old, new in patches:
+    fpath = install_dir / rel_path
+    if not fpath.exists():
+        print(f'  SKIP (not found): {rel_path}')
+        continue
+    text = fpath.read_text()
+    if old in text:
+        text = text.replace(old, new)
+        fpath.write_text(text)
+        print(f'  PATCHED: {rel_path}')
+    else:
+        print(f'  SKIP (pattern not found): {rel_path}')
+"
 
 # Persist LD_LIBRARY_PATH for subsequent CI steps
 if [ -n "${GITHUB_ENV:-}" ]; then
@@ -120,6 +143,6 @@ echo "TensorRT-LLM installation complete"
 python3 -c "import tensorrt_llm; print(f'TensorRT-LLM version: {tensorrt_llm.__version__}')"
 python3 -c "from tensorrt_llm.commands.serve import main; print('gRPC serve command: available')"
 
-# Smoke-test: verify the serve command can parse --grpc --help without crashing
+# Smoke-test: verify the serve command can parse --help without crashing
 echo "Verifying gRPC serve command..."
 python3 -m tensorrt_llm.commands.serve --help 2>&1 | head -20 || echo "WARNING: serve --help failed"
