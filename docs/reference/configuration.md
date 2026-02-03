@@ -645,6 +645,46 @@ For secure communication to workers (Python bindings):
 
 ## Logging Configuration
 
+### Log Directory
+
+| Option | `--log-dir` |
+|--------|-------------|
+| Environment | - |
+| Default | None (console only) |
+| Description | Directory to store log files |
+
+### Log File Name
+
+| Option | `--log-file-name` |
+|--------|-------------------|
+| Environment | - |
+| Default | `smg` |
+| Description | Current log file name |
+
+### Log Format
+
+| Option | `--log-format` |
+|--------|----------------|
+| Environment | - |
+| Default | `plain` |
+| Values | `plain`, `json` |
+
+### Log Rotation Frequency
+
+| Option | `--log-rotate-frequency` |
+|--------|---------------------------|
+| Environment | - |
+| Default | `daily` |
+| Values | `daily`, `hourly` |
+
+### Log Rotation Count
+
+| Option | `--log-rotate-count` |
+|--------|----------------------|
+| Environment | - |
+| Default | `3` |
+| Description | Number of archived log files to keep |
+
 ### Log Level
 
 | Option | `--log-level` |
@@ -658,14 +698,6 @@ For secure communication to workers (Python bindings):
 ```bash
 RUST_LOG=smg=debug,hyper=warn smg ...
 ```
-
-### Log Directory
-
-| Option | `--log-dir` |
-|--------|-------------|
-| Environment | - |
-| Default | None (console only) |
-| Description | Directory to store log files |
 
 ---
 

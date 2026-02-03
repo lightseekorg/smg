@@ -360,6 +360,10 @@ struct Router {
     api_key: Option<String>,
     log_dir: Option<String>,
     log_level: Option<String>,
+    log_format: Option<String>,
+    log_file_name: Option<String>,
+    log_rotate_frequency: Option<String>,
+    log_rotate_count: Option<u64>,
     service_discovery: bool,
     selector: HashMap<String, String>,
     service_discovery_port: u16,
@@ -625,6 +629,10 @@ impl Router {
             .maybe_trace(trace_config)
             .maybe_log_dir(self.log_dir.as_ref())
             .maybe_log_level(self.log_level.as_ref())
+            .maybe_log_format(self.log_format.as_ref())
+            .maybe_log_file_name(self.log_file_name.as_ref())
+            .maybe_log_rotate_frequency(self.log_rotate_frequency.as_ref())
+            .maybe_log_rotate_count(self.log_rotate_count)
             .maybe_request_id_headers(self.request_id_headers.clone())
             .maybe_rate_limit_tokens_per_second(self.rate_limit_tokens_per_second)
             .maybe_model_path(self.model_path.as_ref())
@@ -675,6 +683,10 @@ impl Router {
         api_key = None,
         log_dir = None,
         log_level = None,
+        log_format = None,
+        log_file_name = None,
+        log_rotate_frequency = None,
+        log_rotate_count = None,
         service_discovery = false,
         selector = HashMap::new(),
         service_discovery_port = 80,
@@ -761,6 +773,10 @@ impl Router {
         api_key: Option<String>,
         log_dir: Option<String>,
         log_level: Option<String>,
+        log_format: Option<String>,
+        log_file_name: Option<String>,
+        log_rotate_frequency: Option<String>,
+        log_rotate_count: Option<u64>,
         service_discovery: bool,
         selector: HashMap<String, String>,
         service_discovery_port: u16,
@@ -860,6 +876,10 @@ impl Router {
             api_key,
             log_dir,
             log_level,
+            log_format,
+            log_file_name,
+            log_rotate_frequency,
+            log_rotate_count,
             service_discovery,
             selector,
             service_discovery_port,
@@ -981,6 +1001,10 @@ impl Router {
                 max_payload_size: self.max_payload_size,
                 log_dir: self.log_dir.clone(),
                 log_level: self.log_level.clone(),
+                log_format: self.log_format.clone(),
+                log_file_name: self.log_file_name.clone(),
+                log_rotate_frequency: self.log_rotate_frequency.clone(),
+                log_rotate_count: self.log_rotate_count,
                 service_discovery_config,
                 prometheus_config,
                 request_timeout_secs: self.request_timeout_secs,

@@ -13,6 +13,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use file_rotate::TimeFrequency;
 use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -545,6 +546,10 @@ pub struct ServerConfig {
     pub max_payload_size: usize,
     pub log_dir: Option<String>,
     pub log_level: Option<String>,
+    pub log_format: Option<String>,
+    pub log_file_name: Option<String>,
+    pub log_rotate_frequency: Option<String>,
+    pub log_rotate_count: Option<u64>,
     pub service_discovery_config: Option<ServiceDiscoveryConfig>,
     pub prometheus_config: Option<PrometheusConfig>,
     pub request_timeout_secs: u64,
@@ -721,6 +726,44 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         )?;
     }
 
+    let json_format = match config.log_format.as_deref() {
+        Some(format) if format.eq_ignore_ascii_case("json") => true,
+        Some(format) if format.eq_ignore_ascii_case("plain") => false,
+        Some(format) => {
+            warn!("Invalid log format '{format}', defaulting to plain.");
+            false
+        }
+        None => false,
+    };
+
+    let log_file_name = match config.log_file_name.as_deref() {
+        Some(name) if !name.trim().is_empty() => name.to_string(),
+        Some(_) => {
+            warn!("Empty log file name provided, defaulting to 'smg'.");
+            "smg".to_string()
+        }
+        None => "smg".to_string(),
+    };
+
+    let rotation_frequency = match config.log_rotate_frequency.as_deref() {
+        Some(freq) if freq.eq_ignore_ascii_case("daily") => TimeFrequency::Daily,
+        Some(freq) if freq.eq_ignore_ascii_case("hourly") => TimeFrequency::Hourly,
+        Some(freq) => {
+            warn!("Invalid log rotate frequency '{freq}', defaulting to daily.");
+            TimeFrequency::Daily
+        }
+        None => TimeFrequency::Daily,
+    };
+
+    let rotate_count = match config.log_rotate_count {
+        Some(count) if count > 0 => count,
+        Some(_) => {
+            warn!("Invalid log rotate count value, defaulting to 3.");
+            3
+        }
+        None => 3,
+    };
+
     let _log_guard = if !LOGGING_INITIALIZED.swap(true, Ordering::SeqCst) {
         Some(logging::init_logging(
             LoggingConfig {
@@ -735,10 +778,12 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
                         }
                     })
                     .unwrap_or(Level::INFO),
-                json_format: false,
+                json_format,
                 log_dir: config.log_dir.clone(),
                 colorize: true,
-                log_file_name: "smg".to_string(),
+                log_file_name,
+                rotation_frequency,
+                rotate_count,
                 log_targets: None,
             },
             config.router_config.trace_config.clone(),

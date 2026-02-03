@@ -260,6 +260,22 @@ struct CliArgs {
     #[arg(long, default_value = "info", value_parser = ["debug", "info", "warn", "error"], help_heading = "Logging")]
     log_level: String,
 
+    /// Log output format
+    #[arg(long, default_value = "plain", value_parser = ["plain", "json"], help_heading = "Logging")]
+    log_format: String,
+
+    /// Log file base name
+    #[arg(long, help_heading = "Logging")]
+    log_file_name: Option<String>,
+
+    /// Log rotation frequency
+    #[arg(long, default_value = "daily", value_parser = ["daily", "hourly"], help_heading = "Logging")]
+    log_rotate_frequency: String,
+
+    /// Number of archived log files to keep
+    #[arg(long, default_value_t = 3, help_heading = "Logging")]
+    log_rotate_count: u64,
+
     // ==================== Prometheus Metrics ====================
     /// Port to expose Prometheus metrics
     #[arg(long, default_value_t = 29000, help_heading = "Prometheus Metrics")]
@@ -1010,11 +1026,15 @@ impl CliArgs {
             })
             .history_backend(history_backend)
             .log_level(&self.log_level)
+            .log_format(&self.log_format)
             .maybe_api_key(self.api_key.as_ref())
             .maybe_discovery(discovery)
             .maybe_metrics(metrics)
             .maybe_trace(trace_config)
             .maybe_log_dir(self.log_dir.as_ref())
+            .maybe_log_file_name(self.log_file_name.as_ref())
+            .log_rotate_count(self.log_rotate_count)
+            .log_rotate_frequency(&self.log_rotate_frequency)
             .maybe_request_id_headers(
                 (!self.request_id_headers.is_empty()).then(|| self.request_id_headers.clone()),
             )
@@ -1128,6 +1148,10 @@ impl CliArgs {
             max_payload_size: self.max_payload_size,
             log_dir: self.log_dir.clone(),
             log_level: Some(self.log_level.clone()),
+            log_format: Some(self.log_format.clone()),
+            log_file_name: self.log_file_name.clone(),
+            log_rotate_frequency: Some(self.log_rotate_frequency.clone()),
+            log_rotate_count: Some(self.log_rotate_count),
             service_discovery_config,
             prometheus_config,
             request_timeout_secs: self.request_timeout_secs,

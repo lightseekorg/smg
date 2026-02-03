@@ -2,11 +2,13 @@
 
 use std::path::PathBuf;
 
-use tracing::Level;
-use tracing_appender::{
-    non_blocking::WorkerGuard,
-    rolling::{RollingFileAppender, Rotation},
+use file_rotate::{
+    compression::Compression,
+    suffix::{AppendTimestamp, DateFrom, FileLimit},
+    ContentLimit, FileRotate, TimeFrequency,
 };
+use tracing::Level;
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_log::LogTracer;
 use tracing_subscriber::{
     fmt::time::ChronoUtc, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
@@ -25,6 +27,8 @@ pub struct LoggingConfig {
     pub log_dir: Option<String>,
     pub colorize: bool,
     pub log_file_name: String,
+    pub rotation_frequency: TimeFrequency,
+    pub rotate_count: u64,
     pub log_targets: Option<Vec<String>>,
 }
 
@@ -37,6 +41,8 @@ impl Default for LoggingConfig {
             log_dir: None,
             colorize: true,
             log_file_name: "smg".to_string(),
+            rotation_frequency: TimeFrequency::Daily,
+            rotate_count: 3,
             log_targets: Some(vec![DEFAULT_LOG_TARGET.to_string()]),
         }
     }
@@ -128,8 +134,22 @@ pub fn init_logging(config: LoggingConfig, otel_layer_config: Option<TraceConfig
             }
         }
 
-        let file_appender =
-            RollingFileAppender::new(Rotation::DAILY, log_dir, &config.log_file_name);
+        let log_path = log_dir.join(&config.log_file_name);
+        let rotate_count = usize::try_from(config.rotate_count).unwrap_or(3).max(1);
+        let format = match config.rotation_frequency {
+            TimeFrequency::Daily => "%Y-%m-%d",
+            TimeFrequency::Hourly => "%Y-%m-%d-%H",
+            _ => "%Y-%m-%d",
+        };
+        let suffix =
+            AppendTimestamp::with_format(format, FileLimit::MaxFiles(rotate_count), DateFrom::Now);
+        let file_appender = FileRotate::new(
+            log_path,
+            suffix,
+            ContentLimit::Time(config.rotation_frequency),
+            Compression::OnRotate(0),
+            None,
+        );
 
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
         file_guard = Some(guard);

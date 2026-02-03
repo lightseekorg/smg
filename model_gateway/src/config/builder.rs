@@ -331,6 +331,26 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn log_format<S: Into<String>>(mut self, format: S) -> Self {
+        self.config.log_format = Some(format.into());
+        self
+    }
+
+    pub fn log_file_name<S: Into<String>>(mut self, name: S) -> Self {
+        self.config.log_file_name = Some(name.into());
+        self
+    }
+
+    pub fn log_rotate_count(mut self, count: u64) -> Self {
+        self.config.log_rotate_count = Some(count);
+        self
+    }
+
+    pub fn log_rotate_frequency<S: Into<String>>(mut self, frequency: S) -> Self {
+        self.config.log_rotate_frequency = Some(frequency.into());
+        self
+    }
+
     pub fn request_id_headers(mut self, headers: Vec<String>) -> Self {
         self.config.request_id_headers = Some(headers);
         self
@@ -501,6 +521,26 @@ impl RouterConfigBuilder {
 
     pub fn maybe_log_level(mut self, level: Option<impl Into<String>>) -> Self {
         self.config.log_level = level.map(|l| l.into());
+        self
+    }
+
+    pub fn maybe_log_format(mut self, format: Option<impl Into<String>>) -> Self {
+        self.config.log_format = format.map(|f| f.into());
+        self
+    }
+
+    pub fn maybe_log_file_name(mut self, name: Option<impl Into<String>>) -> Self {
+        self.config.log_file_name = name.map(|n| n.into());
+        self
+    }
+
+    pub fn maybe_log_rotate_count(mut self, count: Option<u64>) -> Self {
+        self.config.log_rotate_count = count;
+        self
+    }
+
+    pub fn maybe_log_rotate_frequency(mut self, frequency: Option<impl Into<String>>) -> Self {
+        self.config.log_rotate_frequency = frequency.map(|f| f.into());
         self
     }
 

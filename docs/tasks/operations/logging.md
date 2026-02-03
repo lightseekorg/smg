@@ -25,9 +25,12 @@ SMG supports flexible logging configuration via CLI flags or environment variabl
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--log-level` | `info` | Log level: trace, debug, info, warn, error |
-| `--log-json` | `false` | Output logs as JSON |
 | `--log-dir` | None | Directory for log files (enables file logging) |
+| `--log-file-name` | `smg` | Current log file name (archives add date suffix) |
+| `--log-rotate-frequency` | `daily` | Archive frequency: daily, hourly |
+| `--log-rotate-count` | `3` | Number of archived log files to keep (must be > 0) |
+| `--log-format` | `plain` | Log output format: plain or json |
+| `--log-level` | `info` | Log level: trace, debug, info, warn, error |
 | `--log-colorize` | `true` | Enable ANSI colors in terminal |
 | `--log-targets` | `smg` | Comma-separated list of modules to log |
 
@@ -80,7 +83,7 @@ Human-readable format with optional ANSI colors:
 Machine-readable format for log aggregation:
 
 ```bash
-smg --worker-urls http://worker:8000 --log-json
+smg --worker-urls http://worker:8000 --log-format json
 ```
 
 Output:
@@ -104,7 +107,7 @@ Output:
 
 ## File Logging
 
-Enable persistent log files with automatic daily rotation.
+Enable persistent log files with automatic daily rotation and archive compression.
 
 ### Enable File Logging
 
@@ -117,17 +120,20 @@ smg \
 
 ### Features
 
-- **Daily rotation**: New file created each day
+- **Rotation**: Archive on schedule
 - **Non-blocking I/O**: Logging doesn't block request handling
-- **File naming**: `smg.YYYY-MM-DD.log`
+- **Compression**: Gzip archives
+- **Retention**: Keep 3 archives
+- **File naming**: Current file uses `--log-file-name`; archives add date + `.gz`
 
 ### Example Directory Structure
 
 ```
 /var/log/smg/
-├── smg.2024-01-13.log
-├── smg.2024-01-14.log
-└── smg.2024-01-15.log
+├── smg
+├── smg.2024-01-13.gz
+├── smg.2024-01-14.gz
+└── smg.2024-01-15.gz
 ```
 
 ---
@@ -144,7 +150,7 @@ services:
       - RUST_LOG=info
     command: >
       --worker-urls http://worker:8000
-      --log-json
+      --log-format json
     logging:
       driver: json-file
       options:
@@ -161,7 +167,7 @@ services:
     command: >
       --worker-urls http://worker:8000
       --log-level info
-      --log-json
+      --log-format json
       --log-dir /var/log/smg
     volumes:
       - smg-logs:/var/log/smg
@@ -207,7 +213,7 @@ spec:
           args:
             - --worker-urls=http://worker:8000
             - --log-level=info
-            - --log-json
+            - --log-format=json
           env:
             - name: RUST_LOG
               value: "smg=info"
@@ -372,20 +378,6 @@ kubectl logs -n inference -l app=smg | grep "my-trace-123"
 
 ## Log Rotation
 
-### Linux logrotate
-
-```conf title="/etc/logrotate.d/smg"
-/var/log/smg/*.log {
-    daily
-    rotate 7
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 0640 smg smg
-}
-```
-
 ### Docker
 
 ```yaml
@@ -405,7 +397,7 @@ logging:
 smg --worker-urls http://worker:8000 --log-level debug 2>&1 | head -20
 
 # Verify JSON format
-smg --worker-urls http://worker:8000 --log-json 2>&1 | jq .
+smg --worker-urls http://worker:8000 --log-format json 2>&1 | jq .
 
 # Test log level filtering
 smg --worker-urls http://worker:8000 --log-level warn 2>&1 | grep -c INFO
@@ -440,9 +432,9 @@ ls -la /tmp/smg-logs/
 
 ??? question "Logs not in JSON format"
 
-    1. Ensure `--log-json` flag is set:
+    1. Ensure `--log-format json` flag is set:
     ```bash
-    smg --log-json --worker-urls http://worker:8000
+    smg --log-format json --worker-urls http://worker:8000
     ```
 
     2. Verify you're reading stderr, not stdout

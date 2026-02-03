@@ -161,6 +161,8 @@ async fn test_router_with_tracing() {
             log_dir: None,
             colorize: false,
             log_file_name: "test-otel".to_string(),
+            rotation_frequency: file_rotate::TimeFrequency::Daily,
+            rotate_count: 3,
             log_targets: Some(vec!["smg".to_string()]),
         },
         Some(trace_config),
