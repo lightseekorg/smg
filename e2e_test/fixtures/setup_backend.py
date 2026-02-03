@@ -14,7 +14,7 @@ import pytest
 if TYPE_CHECKING:
     from infra import ModelPool
 
-from infra import get_runtime, is_vllm
+from infra import RUNTIME_LABELS, get_runtime, is_trtllm, is_vllm
 
 from .markers import get_marker_kwargs, get_marker_value
 
@@ -116,15 +116,16 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         # For gRPC mode, check E2E_RUNTIME environment variable
         if connection_mode == ConnectionMode.GRPC:
             runtime = get_runtime()
+            runtime_label = RUNTIME_LABELS.get(runtime, "SGLang")
             logger.info(
                 "gRPC backend detected: E2E_RUNTIME=%s, routing to %s backend",
                 runtime,
-                "vLLM" if is_vllm() else "SGLang",
+                runtime_label,
             )
 
-            # Route to vLLM gRPC if runtime is vllm
-            if is_vllm():
-                yield from _setup_vllm_grpc_backend(
+            # Route to runtime-specific gRPC backend (vLLM, TRT-LLM)
+            if is_vllm() or is_trtllm():
+                yield from _setup_grpc_backend(
                     request, model_pool, model_id, workers_config, gateway_config
                 )
                 return
@@ -334,30 +335,30 @@ def _setup_pd_backend_common(
             worker.release()
 
 
-def _setup_vllm_grpc_backend(
+def _setup_grpc_backend(
     request: pytest.FixtureRequest,
     model_pool: "ModelPool",
     model_id: str,
     workers_config: dict,
     gateway_config: dict,
 ):
-    """Setup vLLM gRPC backend."""
+    """Setup a runtime-specific gRPC backend (vLLM or TensorRT-LLM)."""
     import openai
     from infra import Gateway
 
-    logger.info("Setting up vLLM gRPC backend for model %s", model_id)
+    runtime = get_runtime()
+    runtime_label = RUNTIME_LABELS.get(runtime, runtime)
 
-    # vLLM currently only supports single worker per test
-    # get_vllm_grpc_worker() auto-acquires the returned instance
+    logger.info("Setting up %s gRPC backend for model %s", runtime_label, model_id)
+
     try:
-        instance = model_pool.get_vllm_grpc_worker(model_id)
+        instance = model_pool.get_grpc_worker(model_id)
     except RuntimeError as e:
         pytest.fail(str(e))
 
     model_path = instance.model_path
     worker_urls = [instance.worker_url]
 
-    # Launch gateway
     gateway = Gateway()
     gateway.start(
         worker_urls=worker_urls,
@@ -373,7 +374,8 @@ def _setup_vllm_grpc_backend(
     )
 
     logger.info(
-        "Setup vLLM gRPC backend: model=%s, worker=%s, gateway=%s, policy=%s",
+        "Setup %s gRPC backend: model=%s, worker=%s, gateway=%s, policy=%s",
+        runtime_label,
         model_id,
         instance.worker_url,
         gateway.base_url,
@@ -383,9 +385,8 @@ def _setup_vllm_grpc_backend(
     try:
         yield "grpc", model_path, client, gateway
     finally:
-        logger.info("Tearing down vLLM gRPC gateway")
+        logger.info("Tearing down %s gRPC gateway", runtime_label)
         gateway.shutdown()
-        # Release reference to allow eviction
         instance.release()
 
 
