@@ -23,10 +23,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 sudo dpkg --configure -a --force-confnew 2>/dev/null || true
 sudo apt-get update
-sudo apt-get install -y \
-    libopenmpi-dev \
-    libnvinfer10 libnvinfer-dev tensorrt-dev \
-    git-lfs
+sudo apt-get install -y libopenmpi-dev git-lfs
 
 # ── CUDA setup ───────────────────────────────────────────────────────────────
 # Prefer /usr/local/cuda-13.0 if it exists, otherwise fall back to /usr/local/cuda
@@ -52,17 +49,39 @@ echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
 python3 --version
 echo "=== end CUDA diagnostics ==="
 
-# ── TensorRT symlinks (for CMake to find TensorRT) ──────────────────────────
-sudo mkdir -p /usr/local/tensorrt
-sudo ln -sf /usr/include/x86_64-linux-gnu /usr/local/tensorrt/include
-sudo ln -sf /usr/lib/x86_64-linux-gnu /usr/local/tensorrt/lib
-
-# ── NCCL 2.27 header fix ────────────────────────────────────────────────────
-# System NCCL (v2.25) lacks ncclWindow_t required by TRT-LLM. Install NCCL 2.27
-# via pip and symlink the header.
+# ── Install TensorRT and NCCL via pip ────────────────────────────────────────
+# TensorRT dev packages are not in default apt repos on the CI runner.
+# Install via pip and point the build system at the pip-installed locations.
+pip install --no-cache-dir tensorrt tensorrt-cu13 tensorrt-cu13-bindings tensorrt-cu13-libs
 pip install --no-cache-dir "nvidia-nccl-cu13>=2.27.7"
 
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
+
+# ── TensorRT root for CMake ──────────────────────────────────────────────────
+# Build a /usr/local/tensorrt with include/ and lib/ pointing to pip packages
+TRT_INCLUDE=$(find "$SITE_PACKAGES" -path "*/tensorrt/include" -type d 2>/dev/null | head -1)
+TRT_LIB=$(find "$SITE_PACKAGES" -path "*/tensorrt_libs" -type d 2>/dev/null | head -1)
+if [ -z "$TRT_LIB" ]; then
+    TRT_LIB=$(find "$SITE_PACKAGES" -path "*/tensorrt/lib" -type d 2>/dev/null | head -1)
+fi
+
+echo "TRT_INCLUDE=$TRT_INCLUDE"
+echo "TRT_LIB=$TRT_LIB"
+
+sudo mkdir -p /usr/local/tensorrt
+if [ -n "$TRT_INCLUDE" ]; then
+    sudo ln -sf "$TRT_INCLUDE" /usr/local/tensorrt/include
+else
+    echo "WARNING: Could not find TensorRT include directory"
+fi
+if [ -n "$TRT_LIB" ]; then
+    sudo ln -sf "$TRT_LIB" /usr/local/tensorrt/lib
+else
+    echo "WARNING: Could not find TensorRT lib directory"
+fi
+
+# ── NCCL 2.27 header fix ────────────────────────────────────────────────────
+# System NCCL may lack ncclWindow_t required by TRT-LLM. Use pip NCCL 2.27.
 NCCL_INCLUDE=$(find "$SITE_PACKAGES/nvidia/nccl" -name "nccl.h" 2>/dev/null | head -1)
 NCCL_ROOT=$(dirname "$(dirname "$NCCL_INCLUDE")")
 
