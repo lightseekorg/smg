@@ -119,7 +119,10 @@ git lfs install --force
 git lfs pull
 
 # ── Install TensorRT-LLM Python requirements ─────────────────────────────────
-# cutlass_library and other build dependencies
+# Install nvidia-cutlass first - provides cutlass_library module needed during CMake configure
+# This is cleaner than relying on CMake's FetchContent which installs to user site-packages
+pip install --no-cache-dir nvidia-cutlass
+
 if [ -f "requirements-dev.txt" ]; then
     echo "Installing TensorRT-LLM build requirements..."
     pip install --no-cache-dir -r requirements-dev.txt
@@ -213,12 +216,6 @@ fi
 
 # ── Build TensorRT-LLM from source ──────────────────────────────────────────
 echo "Building TensorRT-LLM from source (this may take a while)..."
-
-# Add user site-packages to PYTHONPATH - CMake installs cutlass_library there via egg-link
-# during configure, but venv Python doesn't see user site-packages by default
-USER_SITE_PACKAGES=$(python3 -c "import site; print(site.getusersitepackages())")
-export PYTHONPATH="${USER_SITE_PACKAGES}:${PYTHONPATH:-}"
-echo "Added user site-packages to PYTHONPATH: $USER_SITE_PACKAGES"
 
 python3 scripts/build_wheel.py \
     --cuda_architectures "90-real" \
