@@ -19,7 +19,83 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
-# ── System dependencies ──────────────────────────────────────────────────────
+# ── Check for cached wheel FIRST ─────────────────────────────────────────────
+# This allows us to skip heavy build dependencies when wheel is already cached
+TRTLLM_WHEEL_CACHE="/tmp/trtllm-wheel"
+mkdir -p "$TRTLLM_WHEEL_CACHE"
+CACHED_WHEEL=$(find "$TRTLLM_WHEEL_CACHE" -name "tensorrt_llm*.whl" 2>/dev/null | head -1 || true)
+
+if [ -n "$CACHED_WHEEL" ] && [ -f "$CACHED_WHEEL" ]; then
+    echo "=== Found cached TRT-LLM wheel: $CACHED_WHEEL ==="
+    echo "=== Installing runtime dependencies only (skipping build deps) ==="
+
+    # ── Runtime dependencies only ────────────────────────────────────────────
+    export DEBIAN_FRONTEND=noninteractive
+    sudo dpkg --configure -a --force-confnew 2>/dev/null || true
+
+    # Add NVIDIA apt repository if needed
+    if ! dpkg -l cuda-keyring 2>/dev/null | grep -q '^ii'; then
+        echo "Setting up NVIDIA apt repository..."
+        curl -fsSL -o /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+        sudo dpkg -i /tmp/cuda-keyring.deb
+        rm -f /tmp/cuda-keyring.deb
+    fi
+
+    sudo apt-get update
+    # Runtime only: TensorRT runtime library (no -dev packages, no cmake, no cuda-toolkit)
+    sudo apt-get install -y libnvinfer10
+
+    # ── CUDA runtime setup ───────────────────────────────────────────────────
+    if [ -d "/usr/local/cuda-13.0" ]; then
+        export CUDA_HOME="/usr/local/cuda-13.0"
+    else
+        export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+    fi
+    export PATH="$CUDA_HOME/bin:$PATH"
+    export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH:-}"
+
+    # ── Install NCCL runtime ─────────────────────────────────────────────────
+    pip install --upgrade pip
+    pip install --no-cache-dir "nvidia-nccl-cu13>=2.27.7"
+
+    # ── Install cached wheel ─────────────────────────────────────────────────
+    echo "Installing cached wheel..."
+    pip install --no-cache-dir "$CACHED_WHEEL"
+
+    # ── Setup LD_LIBRARY_PATH ────────────────────────────────────────────────
+    SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
+    NVIDIA_LIB_DIRS=$(find "$SITE_PACKAGES/nvidia" -name "lib" -type d 2>/dev/null | sort -u | paste -sd':')
+    if [ -n "$NVIDIA_LIB_DIRS" ]; then
+        export LD_LIBRARY_PATH="${NVIDIA_LIB_DIRS}:${LD_LIBRARY_PATH:-}"
+    fi
+
+    TRTLLM_LIB_DIR=$(find "$SITE_PACKAGES" -path "*/tensorrt_llm/libs" -type d 2>/dev/null | head -1)
+    if [ -n "$TRTLLM_LIB_DIR" ]; then
+        export LD_LIBRARY_PATH="${TRTLLM_LIB_DIR}:${LD_LIBRARY_PATH:-}"
+    fi
+
+    # Persist LD_LIBRARY_PATH for subsequent CI steps
+    if [ -n "${GITHUB_ENV:-}" ]; then
+        echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+    fi
+
+    # ── Verification ─────────────────────────────────────────────────────────
+    echo "=== TensorRT-LLM verification ==="
+    python3 -c "import tensorrt_llm; print(f'TensorRT-LLM version: {tensorrt_llm.__version__}')"
+    python3 -c "from tensorrt_llm.commands.serve import main; print('gRPC serve command: available')"
+    echo "Verifying gRPC serve command..."
+    python3 -m tensorrt_llm.commands.serve serve --help 2>&1 | head -20 || echo "WARNING: serve --help failed"
+
+    echo "TensorRT-LLM installation complete (from cache)"
+    exit 0
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# No cached wheel - full build required
+# ══════════════════════════════════════════════════════════════════════════════
+echo "=== No cached wheel found, building from source ==="
+
+# ── System dependencies (full build) ─────────────────────────────────────────
 export DEBIAN_FRONTEND=noninteractive
 sudo dpkg --configure -a --force-confnew 2>/dev/null || true
 
@@ -32,6 +108,7 @@ if ! dpkg -l cuda-keyring 2>/dev/null | grep -q '^ii'; then
 fi
 
 sudo apt-get update
+# Full build deps: runtime + dev headers + build tools
 sudo apt-get install -y libopenmpi-dev git-lfs libnvinfer10 libnvinfer-dev tensorrt-dev cuda-toolkit-13-0 cmake
 
 # ── Fabric Manager for multi-GPU NCCL communication ───────────────────────────
@@ -225,39 +302,28 @@ print('FindNCCL.cmake patched to use NCCL_ROOT hint')
 PYTHON_EOF
 fi
 
-# ── Build or install TensorRT-LLM ─────────────────────────────────────────────
-TRTLLM_WHEEL_CACHE="/tmp/trtllm-wheel"
-# Create cache directory if it doesn't exist (find fails with pipefail if dir missing)
+# ── Build TensorRT-LLM ───────────────────────────────────────────────────────
+echo "=== Building TensorRT-LLM from source (this may take a while)... ==="
+
+python3 scripts/build_wheel.py \
+    --cuda_architectures "90-real" \
+    --trt_root /usr/local/tensorrt \
+    --nccl_root "$NCCL_ROOT" \
+    --install \
+    --no-venv \
+    -j "$(nproc)" \
+    -D "ENABLE_UCX=OFF" \
+    --clean
+
+# Return to repo dir
+cd -
+
+# Cache the built wheel for future runs
 mkdir -p "$TRTLLM_WHEEL_CACHE"
-CACHED_WHEEL=$(find "$TRTLLM_WHEEL_CACHE" -name "tensorrt_llm*.whl" 2>/dev/null | head -1 || true)
-
-if [ -n "$CACHED_WHEEL" ] && [ -f "$CACHED_WHEEL" ]; then
-    echo "=== Using cached TRT-LLM wheel: $CACHED_WHEEL ==="
-    pip install --no-cache-dir "$CACHED_WHEEL"
-    cd -
-else
-    echo "=== Building TensorRT-LLM from source (this may take a while)... ==="
-
-    python3 scripts/build_wheel.py \
-        --cuda_architectures "90-real" \
-        --trt_root /usr/local/tensorrt \
-        --nccl_root "$NCCL_ROOT" \
-        --install \
-        --no-venv \
-        -j "$(nproc)" \
-        -D "ENABLE_UCX=OFF" \
-        --clean
-
-    # Return to repo dir
-    cd -
-
-    # Cache the built wheel for future runs
-    mkdir -p "$TRTLLM_WHEEL_CACHE"
-    BUILT_WHEEL=$(find "$TRTLLM_DIR/build" -name "tensorrt_llm*.whl" 2>/dev/null | head -1)
-    if [ -n "$BUILT_WHEEL" ]; then
-        cp "$BUILT_WHEEL" "$TRTLLM_WHEEL_CACHE/"
-        echo "Cached wheel to: $TRTLLM_WHEEL_CACHE/$(basename "$BUILT_WHEEL")"
-    fi
+BUILT_WHEEL=$(find "$TRTLLM_DIR/build" -name "tensorrt_llm*.whl" 2>/dev/null | head -1)
+if [ -n "$BUILT_WHEEL" ]; then
+    cp "$BUILT_WHEEL" "$TRTLLM_WHEEL_CACHE/"
+    echo "Cached wheel to: $TRTLLM_WHEEL_CACHE/$(basename "$BUILT_WHEEL")"
 fi
 
 # ── Add pip-installed NVIDIA libraries to LD_LIBRARY_PATH ────────────────────
@@ -285,4 +351,4 @@ python3 -c "from tensorrt_llm.commands.serve import main; print('gRPC serve comm
 echo "Verifying gRPC serve command..."
 python3 -m tensorrt_llm.commands.serve serve --help 2>&1 | head -20 || echo "WARNING: serve --help failed"
 
-echo "TensorRT-LLM installation complete"
+echo "TensorRT-LLM installation complete (built from source)"
