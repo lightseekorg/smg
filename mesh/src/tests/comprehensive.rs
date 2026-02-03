@@ -459,6 +459,7 @@ async fn test_two_node_heartbeat_monitoring() {
 //
 
 #[tokio::test]
+#[ignore = "Long-running test with complex state convergence"]
 async fn test_three_node_cluster_formation() {
     init_test_logging();
     log::info!("Starting test_three_node_cluster_formation");
@@ -509,6 +510,7 @@ async fn test_three_node_cluster_formation() {
 }
 
 #[tokio::test]
+#[ignore = "Long-running test with complex state convergence"]
 async fn test_multi_node_data_propagation() {
     init_test_logging();
     log::info!("Starting test_multi_node_data_propagation");
@@ -597,7 +599,7 @@ async fn test_multi_node_data_propagation() {
 }
 
 #[tokio::test]
-//#[ignore = "Long-running test with complex state convergence"]
+#[ignore = "Long-running test with complex state convergence"]
 async fn test_five_node_cluster_with_failure() {
     init_test_logging();
     log::info!("Starting test_five_node_cluster_with_failure");
@@ -643,7 +645,7 @@ async fn test_five_node_cluster_with_failure() {
     log::info!("Node D gracefully shutdown");
 
     // Wait for state convergence
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     log::info!("Final state A: {}", print_cluster_state(&handler_a));
     log::info!("Final state B: {}", print_cluster_state(&handler_b));

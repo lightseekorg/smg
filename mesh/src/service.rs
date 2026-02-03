@@ -202,12 +202,19 @@ impl MeshServerHandler {
         // Write to the app store
         let app_state = AppState {
             key: key.clone(),
-            value,
+            value: value.clone(),
             version,
         };
         self.stores
             .app
-            .insert(SKey(key), app_state, self.self_name.clone());
+            .insert(SKey(key.clone()), app_state, self.self_name.clone());
+
+        // Update the node's own metadata in the cluster state
+        let mut state = self.state.write();
+        if let Some(node) = state.get_mut(&self.self_name) {
+            node.metadata.insert(key, value);
+            node.version += 1;
+        }
     }
 
     pub fn read_data(&self, key: String) -> Option<Vec<u8>> {
