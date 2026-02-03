@@ -156,28 +156,38 @@ PYTHON_EOF
 fi
 
 # ── Patch FindNCCL.cmake ─────────────────────────────────────────────────────
-# CMake needs NO_CMAKE_FIND_ROOT_PATH to bypass Conan toolchain restrictions
+# The upstream FindNCCL.cmake doesn't use NCCL_ROOT hint at all!
+# We need to add PATHS ${NCCL_ROOT}/lib and NO_CMAKE_FIND_ROOT_PATH
 NCCL_CMAKE_FILE="cpp/cmake/modules/FindNCCL.cmake"
 if [ -f "$NCCL_CMAKE_FILE" ]; then
-    echo "Patching FindNCCL.cmake for Conan compatibility..."
+    echo "Patching FindNCCL.cmake to use NCCL_ROOT hint..."
     python3 <<'PYTHON_EOF'
 import pathlib
-import re
 
 p = pathlib.Path("cpp/cmake/modules/FindNCCL.cmake")
 text = p.read_text()
 
-# Add NO_CMAKE_FIND_ROOT_PATH to all find_path and find_library calls
-# This is needed because Conan toolchain restricts search paths
-for pattern in [r'(find_path\([^)]*)\)', r'(find_library\([^)]*)\)']:
-    for match in re.finditer(pattern, text, re.DOTALL):
-        block = match.group(0)
-        if 'NO_CMAKE_FIND_ROOT_PATH' not in block:
-            patched = block[:-1] + '\n  NO_CMAKE_FIND_ROOT_PATH)'
-            text = text.replace(block, patched)
+# Replace simple find_library/find_path calls with ones that use NCCL_ROOT hint
+# Original: find_library(NCCL_LIBRARY NAMES nccl)
+# Patched:  find_library(NCCL_LIBRARY NAMES nccl PATHS ${NCCL_ROOT}/lib NO_CMAKE_FIND_ROOT_PATH)
+
+text = text.replace(
+    'find_library(NCCL_LIBRARY NAMES nccl)',
+    'find_library(NCCL_LIBRARY NAMES nccl PATHS ${NCCL_ROOT}/lib NO_CMAKE_FIND_ROOT_PATH)'
+)
+
+text = text.replace(
+    'find_library(NCCL_STATIC_LIBRARY NAMES nccl_static)',
+    'find_library(NCCL_STATIC_LIBRARY NAMES nccl_static PATHS ${NCCL_ROOT}/lib NO_CMAKE_FIND_ROOT_PATH)'
+)
+
+text = text.replace(
+    'find_path(NCCL_INCLUDE_DIR NAMES nccl.h)',
+    'find_path(NCCL_INCLUDE_DIR NAMES nccl.h PATHS ${NCCL_ROOT}/include NO_CMAKE_FIND_ROOT_PATH)'
+)
 
 p.write_text(text)
-print('FindNCCL.cmake patched')
+print('FindNCCL.cmake patched to use NCCL_ROOT hint')
 PYTHON_EOF
 fi
 

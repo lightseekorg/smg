@@ -66,6 +66,10 @@ jobs:
           path: bindings/golang/target/release/libsmg_go.*
           retention-days: 1
 
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
       - name: Test wheel install
         run: |
           pip install bindings/python/dist/*.whl
