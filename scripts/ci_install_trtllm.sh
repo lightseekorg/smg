@@ -171,14 +171,15 @@ text = p.read_text()
 # Original: find_library(NCCL_LIBRARY NAMES nccl)
 # Patched:  find_library(NCCL_LIBRARY NAMES nccl PATHS ${NCCL_ROOT}/lib NO_CMAKE_FIND_ROOT_PATH)
 
+# The pip nvidia-nccl-cu13 package has libnccl.so.2 directly in NCCL_ROOT, not in lib/
 text = text.replace(
     'find_library(NCCL_LIBRARY NAMES nccl)',
-    'find_library(NCCL_LIBRARY NAMES nccl PATHS ${NCCL_ROOT}/lib NO_CMAKE_FIND_ROOT_PATH)'
+    'find_library(NCCL_LIBRARY NAMES nccl PATHS ${NCCL_ROOT} ${NCCL_ROOT}/lib NO_CMAKE_FIND_ROOT_PATH)'
 )
 
 text = text.replace(
     'find_library(NCCL_STATIC_LIBRARY NAMES nccl_static)',
-    'find_library(NCCL_STATIC_LIBRARY NAMES nccl_static PATHS ${NCCL_ROOT}/lib NO_CMAKE_FIND_ROOT_PATH)'
+    'find_library(NCCL_STATIC_LIBRARY NAMES nccl_static PATHS ${NCCL_ROOT} ${NCCL_ROOT}/lib NO_CMAKE_FIND_ROOT_PATH)'
 )
 
 text = text.replace(
