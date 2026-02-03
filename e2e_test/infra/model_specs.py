@@ -53,7 +53,7 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 2,
         "features": ["chat", "streaming", "function_calling", "pythonic_tools"],
         "worker_args": [
-            "--context-length=2048"
+            "--context-length=16384"
         ],  # Faster startup, prevents memory issues
     },
     # Reasoning model
