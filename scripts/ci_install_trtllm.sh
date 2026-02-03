@@ -34,6 +34,14 @@ fi
 sudo apt-get update
 sudo apt-get install -y libopenmpi-dev git-lfs libnvinfer10 libnvinfer-dev tensorrt-dev cuda-toolkit-13-0 cmake
 
+# ── Fabric Manager for multi-GPU NCCL communication ───────────────────────────
+# Required for H100 with NVSwitch - Fabric Manager version must match driver version
+# Without this, NCCL allreduce fails with "unhandled system error"
+echo "Installing and starting Fabric Manager for multi-GPU support..."
+sudo apt-get install -y nvidia-fabricmanager-580 || echo "WARNING: nvidia-fabricmanager-580 not available"
+sudo systemctl start nvidia-fabricmanager 2>/dev/null || echo "WARNING: Could not start nvidia-fabricmanager"
+sudo systemctl status nvidia-fabricmanager --no-pager 2>/dev/null || echo "WARNING: nvidia-fabricmanager status unknown"
+
 # ── CUDA setup ───────────────────────────────────────────────────────────────
 # Prefer /usr/local/cuda-13.0 if it exists, otherwise fall back to /usr/local/cuda
 if [ -d "/usr/local/cuda-13.0" ]; then
