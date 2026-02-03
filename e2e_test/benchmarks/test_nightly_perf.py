@@ -42,6 +42,8 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, **kwargs):
 
     # Get runtime and GPU info for metadata
     runtime = get_runtime()  # sglang or vllm from E2E_RUNTIME env var
+    # Map to genai-bench expected case (SGLang, vLLM)
+    runtime_display = {"sglang": "SGLang", "vllm": "vLLM"}.get(runtime, runtime)
     gpu_type = os.environ.get("GPU_TYPE", "H200")
     gpu_count = int(os.environ.get("GPU_COUNT", "8"))
 
@@ -57,7 +59,7 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, **kwargs):
             traffic_scenario=_TEST_TRAFFIC_SCENARIO,
             max_requests_per_run=_TEST_MAX_REQUESTS,
             timeout_sec=300,
-            server_engine=runtime,
+            server_engine=runtime_display,
             gpu_type=gpu_type,
             gpu_count=gpu_count,
             **kwargs,
@@ -73,7 +75,7 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, **kwargs):
         max_requests_per_run=_MAX_REQUESTS,
         max_time_per_run=_MAX_TIME_PER_RUN,
         timeout_sec=_TIMEOUT_SEC,
-        server_engine=runtime,
+        server_engine=runtime_display,
         gpu_type=gpu_type,
         gpu_count=gpu_count,
         **kwargs,

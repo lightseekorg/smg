@@ -174,6 +174,8 @@ def genai_bench_runner():
         )
         timeout = timeout_sec or int(os.environ.get("GENAI_BENCH_TEST_TIMEOUT", "120"))
 
+        logger.info("Running genai-bench command: %s", " ".join(cmd))
+
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -203,13 +205,17 @@ def genai_bench_runner():
             stdout, stderr = proc.communicate()
             logger.error("genai-bench timed out after %ds", timeout)
 
-        # Log output if process failed or for debugging
+        # Fail immediately if genai-bench failed
         if proc.returncode != 0:
             logger.error(
                 "genai-bench exited with code %d\nstdout:\n%s\nstderr:\n%s",
                 proc.returncode,
                 stdout or "(empty)",
                 stderr or "(empty)",
+            )
+            pytest.fail(
+                f"genai-bench failed with exit code {proc.returncode}. "
+                f"Check logs above for details."
             )
 
         try:

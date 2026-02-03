@@ -119,6 +119,8 @@ def parse_experiment(folder: Path) -> ExperimentInfo | None:
             runtime = "vllm"
         else:
             runtime = "sglang"
+    # Normalize to lowercase for consistent grouping
+    runtime = runtime.lower() if runtime else "sglang"
 
     # Determine worker type
     worker_type = "multi" if "multi" in folder.name.lower() else "single"
