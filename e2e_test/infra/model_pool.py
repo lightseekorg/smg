@@ -1172,6 +1172,7 @@ class ModelPool:
                 "python3",
                 "-m",
                 "tensorrt_llm.commands.serve",
+                "serve",
                 model_path,
                 "--grpc",
                 "--host",
