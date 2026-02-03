@@ -78,7 +78,7 @@ _NIGHTLY_MODELS = [
     ("mistral-7b",  "Mistral7b",  8, ["http", "grpc"], {}),
     # ("embedding",   "Embedding",  8, ["http", "grpc"], {"task": "text-to-embeddings"}),  # Skipped
     ("gpt-oss",     "GptOss",     4, ["http"], {}),  # Skip gRPC (vLLM not supported)
-    # ("llama-4-maverick-17b", "Llama4Maverick", 1, ["http", "grpc"], {}),  # 1 worker uses all 8 GPUs (tp=8)
+    ("llama-4-maverick-17b", "Llama4Maverick", 1, ["http", "grpc"], {}),  # 1 worker uses all 8 GPUs (tp=8)
 ]
 
 
