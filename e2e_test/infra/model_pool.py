@@ -1192,7 +1192,7 @@ class ModelPool:
 
         if worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
             logger.info(
-                "Launching vLLM gRPC %s worker %s on GPUs %s port %d (NIXL port %d)",
+                "Launching vLLM gRPC %s worker %s on GPUs %s port %d (NIXL port %s)",
                 worker_type.value,
                 key,
                 gpu_slot.gpu_ids,
