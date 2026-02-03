@@ -97,13 +97,19 @@ INSTALL_DIR=$(python3 -c "import tensorrt_llm, pathlib; print(pathlib.Path(tenso
 echo "Installed package at: $INSTALL_DIR"
 echo "Copying gRPC-related modules from main branch..."
 
-# Copy only the directories needed for gRPC serve support
+# Copy only the directories needed for gRPC serve support.
+# Use cp -rf to force overwrite existing files from the stable wheel.
 for subdir in grpc commands serve; do
     if [ -d "$TRTLLM_DIR/tensorrt_llm/$subdir" ]; then
         echo "  Copying $subdir/"
-        cp -r "$TRTLLM_DIR/tensorrt_llm/$subdir/" "$INSTALL_DIR/$subdir/"
+        rm -rf "$INSTALL_DIR/$subdir"
+        cp -r "$TRTLLM_DIR/tensorrt_llm/$subdir" "$INSTALL_DIR/$subdir"
     fi
 done
+
+# Verify the patched serve.py has --grpc support
+echo "Verifying serve.py was patched:"
+grep -c "grpc" "$INSTALL_DIR/commands/serve.py" || echo "ERROR: serve.py has no grpc references!"
 
 # Persist LD_LIBRARY_PATH for subsequent CI steps
 if [ -n "${GITHUB_ENV:-}" ]; then
