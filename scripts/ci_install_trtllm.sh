@@ -116,9 +116,28 @@ patches = [
     (
         'runtime/kv_cache_manager_v2/rawref/__init__.py',
         'from ._rawref import NULL, ReferenceType, ref',
-        'try:\n    from ._rawref import NULL, ReferenceType, ref\nexcept (ImportError, ModuleNotFoundError):\n    NULL = None; ReferenceType = None; ref = None',
+        'try:\\n    from ._rawref import NULL, ReferenceType, ref\\nexcept (ImportError, ModuleNotFoundError):\\n    NULL = None; ReferenceType = None\\n    class _RefStub:\\n        def __class_getitem__(cls, item): return cls\\n    ref = _RefStub',
     ),
 ]
+
+# Also add deferred annotations to files that use rawref type hints at runtime
+deferred = [
+    'runtime/kv_cache_manager_v2/_utils.py',
+    'runtime/kv_cache_manager_v2/_life_cycle_registry.py',
+    'runtime/kv_cache_manager_v2/_block_radix_tree.py',
+]
+for rel_path in deferred:
+    fpath = install_dir / rel_path
+    if not fpath.exists():
+        print(f'  SKIP deferred (not found): {rel_path}')
+        continue
+    text = fpath.read_text()
+    if 'from __future__ import annotations' not in text:
+        text = 'from __future__ import annotations\\n' + text
+        fpath.write_text(text)
+        print(f'  DEFERRED ANNOTATIONS: {rel_path}')
+    else:
+        print(f'  SKIP deferred (already present): {rel_path}')
 
 for rel_path, old, new in patches:
     fpath = install_dir / rel_path
