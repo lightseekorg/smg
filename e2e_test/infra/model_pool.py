@@ -1212,8 +1212,9 @@ class ModelPool:
         if runtime == "trtllm" and tp_size > 1:
             env["NCCL_DEBUG"] = "WARN"  # Help diagnose NCCL issues
             env["NCCL_IB_DISABLE"] = "1"  # Disable InfiniBand (not on CI runners)
-            # Disable TRT-LLM's tunable allreduce to avoid autotuner failures
-            env["TLLM_DISABLE_TUNABLE_ALLREDUCE"] = "1"
+            # Disable TRT-LLM's allreduce autotuner to avoid warmup failures on CI
+            # See: tensorrt_llm/_torch/distributed/ops.py
+            env["TLLM_DISABLE_ALLREDUCE_AUTOTUNE"] = "1"
 
         cmd = self._build_grpc_cmd(
             runtime, model_path, DEFAULT_HOST, port, tp_size, model_spec
