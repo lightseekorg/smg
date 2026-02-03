@@ -52,8 +52,12 @@ fi
 # Debug: print what CUDA we actually have
 echo "=== CUDA diagnostics ==="
 echo "CUDA_HOME=$CUDA_HOME"
+echo "PATH=$PATH"
+ls -la "$CUDA_HOME/bin/nvcc" 2>/dev/null || echo "WARNING: nvcc not at $CUDA_HOME/bin/nvcc"
+find /usr/local -name "nvcc" -type f 2>/dev/null || echo "WARNING: nvcc not found anywhere in /usr/local"
+which nvcc 2>/dev/null || echo "WARNING: nvcc not on PATH"
+nvcc --version 2>/dev/null || echo "WARNING: nvcc --version failed"
 nvidia-smi 2>/dev/null | head -4 || echo "WARNING: nvidia-smi not found"
-nvcc --version 2>/dev/null || echo "WARNING: nvcc not found"
 echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
 python3 --version
 echo "=== end CUDA diagnostics ==="
