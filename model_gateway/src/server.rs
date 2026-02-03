@@ -148,6 +148,37 @@ async fn health(_state: State<Arc<AppState>>) -> Response {
     liveness().await
 }
 
+async fn config(State(state): State<Arc<AppState>>) -> Response {
+    let config = &state.context.router_config;
+    
+    (
+        StatusCode::OK,
+        Json(json!({
+            "policy": format!("{:?}", config.policy),
+            "max_concurrent_requests": config.max_concurrent_requests,
+            "rate_limit_tokens_per_second": config.rate_limit_tokens_per_second,
+            "queue_size": config.queue_size,
+            "queue_timeout_secs": config.queue_timeout_secs,
+            "circuit_breaker": {
+                "threshold": config.circuit_breaker.failure_threshold,
+                "timeout_secs": config.circuit_breaker.timeout_duration_secs,
+            },
+            "health_check": {
+                "interval_secs": config.health_check.check_interval_secs,
+                "timeout_secs": config.health_check.timeout_secs,
+                "path": config.health_check.endpoint,
+            },
+            "service_discovery": config.discovery.as_ref().map(|sd| json!({
+                "enabled": true,
+                "selector": sd.selector,
+                "namespace": sd.namespace,
+                "port": sd.port,
+            })),
+        })),
+    )
+        .into_response()
+}
+
 async fn health_generate(State(state): State<Arc<AppState>>, req: Request) -> Response {
     state.router.health_generate(req).await
 }
@@ -618,6 +649,7 @@ pub fn build_app(
         .route("/liveness", get(liveness))
         .route("/readiness", get(readiness))
         .route("/health", get(health))
+        .route("/config", get(config))
         .route("/health_generate", get(health_generate))
         .route("/engine_metrics", get(engine_metrics))
         .route("/v1/models", get(v1_models))
