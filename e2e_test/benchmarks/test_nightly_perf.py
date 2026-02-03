@@ -27,9 +27,9 @@ _MAX_TIME_PER_RUN = 10  # seconds per scenario×concurrency combo
 _TIMEOUT_SEC = 10800  # 3 hours per model
 
 # TODO: revert before merge — fast settings for PR testing
-_TEST_MODE = False
+_TEST_MODE = True
 _TEST_NUM_CONCURRENCY = 1
-_TEST_TRAFFIC_SCENARIO = "D(100,1000)"
+_TEST_TRAFFIC_SCENARIO = "D(7800,1000)"
 _TEST_MAX_REQUESTS = 10
 
 

@@ -1223,6 +1223,25 @@ class ModelPool:
             # Disable TRT-LLM's allreduce autotuner to avoid warmup failures on CI
             # See: tensorrt_llm/_torch/distributed/ops.py
             env["TLLM_DISABLE_ALLREDUCE_AUTOTUNE"] = "1"
+        # Build vLLM gRPC command
+        cmd = [
+            "python3",
+            "-m",
+            "vllm.entrypoints.grpc_server",
+            "--model",
+            model_path,
+            "--host",
+            DEFAULT_HOST,
+            "--port",
+            str(port),
+            "--tensor-parallel-size",
+            str(tp_size),
+            "--max-model-len",
+            "16384",  # Reduced to minimize GPU memory usage
+            "--gpu-memory-utilization",
+            "0.9",
+            "--enforce-eager",  # Disable CUDA graph to save memory
+        ]
 
         cmd = self._build_grpc_cmd(
             runtime, model_path, DEFAULT_HOST, port, tp_size, model_spec
