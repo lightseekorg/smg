@@ -154,7 +154,7 @@ async fn config(State(state): State<Arc<AppState>>) -> Response {
     (
         StatusCode::OK,
         Json(json!({
-            "policy": format!("{:?}", config.policy),
+            "policy": config.policy.name(),
             "max_concurrent_requests": config.max_concurrent_requests,
             "rate_limit_tokens_per_second": config.rate_limit_tokens_per_second,
             "queue_size": config.queue_size,
