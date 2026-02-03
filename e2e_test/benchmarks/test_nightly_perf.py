@@ -15,7 +15,10 @@ genai-bench defaults (omitted flags):
   - Embedding scenarios: E(64), E(128), E(256), E(512), E(1024)
 """
 
+import os
+
 import pytest
+from infra import get_runtime
 
 
 # ---------------------------------------------------------------------------
@@ -37,15 +40,26 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, **kwargs):
     """Run nightly benchmark for a model with genai-bench defaults."""
     backend, model_path, client, gateway = setup_backend
 
+    # Get runtime and GPU info for metadata
+    runtime = get_runtime()  # sglang or vllm from E2E_RUNTIME env var
+    gpu_type = os.environ.get("GPU_TYPE", "H200")
+    gpu_count = int(os.environ.get("GPU_COUNT", "8"))
+
+    # Include runtime in folder name to distinguish sglang vs vllm results
+    experiment_folder = f"nightly_{model_id}_{backend}_{runtime}"
+
     if _TEST_MODE:
         genai_bench_runner(
             router_url=gateway.base_url,
             model_path=model_path,
-            experiment_folder=f"nightly_{model_id}_{backend}",
+            experiment_folder=experiment_folder,
             num_concurrency=_TEST_NUM_CONCURRENCY,
             traffic_scenario=_TEST_TRAFFIC_SCENARIO,
             max_requests_per_run=_TEST_MAX_REQUESTS,
             timeout_sec=300,
+            server_engine=runtime,
+            gpu_type=gpu_type,
+            gpu_count=gpu_count,
             **kwargs,
         )
         return
@@ -53,12 +67,15 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, **kwargs):
     genai_bench_runner(
         router_url=gateway.base_url,
         model_path=model_path,
-        experiment_folder=f"nightly_{model_id}_{backend}",
+        experiment_folder=experiment_folder,
         num_concurrency=None,      # use genai-bench defaults
         traffic_scenario=None,     # use genai-bench defaults
         max_requests_per_run=_MAX_REQUESTS,
         max_time_per_run=_MAX_TIME_PER_RUN,
         timeout_sec=_TIMEOUT_SEC,
+        server_engine=runtime,
+        gpu_type=gpu_type,
+        gpu_count=gpu_count,
         **kwargs,
     )
 
@@ -76,7 +93,7 @@ _NIGHTLY_MODELS = [
     # ("deepseek-7b", "Deepseek7b", 8, ["http", "grpc"], {}),
     # ("qwen-30b",    "Qwen30b",    2, ["http", "grpc"], {}),
     # ("mistral-7b",  "Mistral7b",  8, ["http", "grpc"], {}),
-    ("gpt-oss",     "GptOss",     4, ["http"], {}),  # Skip gRPC (vLLM not supported)
+    ("gpt-oss",     "GptOss",     4, ["http", "grpc"], {}),  # Skip gRPC (vLLM not supported)
     # ("llama-4-maverick-17b", "Llama4Maverick", 1, ["http", "grpc"], {}),  # 1 worker uses all 8 GPUs (tp=8)
 ]
 

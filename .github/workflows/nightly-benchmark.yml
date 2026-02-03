@@ -176,17 +176,17 @@ jobs:
       max-parallel: 1
       matrix:
         model:
-          #- { id: llama-8b,    test_class: TestNightlyLlama8bMulti }
+          - { id: llama-8b,    test_class: TestNightlyLlama8bMulti }
           # - { id: llama-1b,    test_class: TestNightlyLlama1bMulti }
           # - { id: qwen-7b,     test_class: TestNightlyQwen7bMulti }
           # - { id: qwen-14b,    test_class: TestNightlyQwen14bMulti }
           # - { id: deepseek-7b, test_class: TestNightlyDeepseek7bMulti }
-          - { id: qwen-30b,    test_class: TestNightlyQwen30bMulti }
+          # - { id: qwen-30b,    test_class: TestNightlyQwen30bMulti }
           # - { id: mistral-7b,  test_class: TestNightlyMistral7bMulti }
           # - { id: gpt-oss,     test_class: TestNightlyGptOssMulti }
           # - { id: llama-4-maverick-17b, test_class: TestNightlyLlama4MaverickMulti }
         variant:
-          - { id: sglang, runtime: sglang, grpc_only: "false" }
+          - { id: sglang, runtime: sglang, grpc_only: "true" }
           - { id: vllm,   runtime: vllm,   grpc_only: "true" }
 
     steps:

@@ -60,28 +60,30 @@ def parse_folder_name(folder_name: str) -> dict:
     """Parse experiment info from folder name.
 
     Expected patterns:
-    - nightly_llama-8b_http -> model=llama-8b, protocol=http
-    - nightly_llama-8b_grpc -> model=llama-8b, protocol=grpc
+    - nightly_llama-8b_http_sglang -> model=llama-8b, protocol=http, runtime=sglang
+    - nightly_llama-8b_grpc_vllm -> model=llama-8b, protocol=grpc, runtime=vllm
+    - nightly_llama-8b_http (legacy) -> model=llama-8b, protocol=http
     """
-    info = {"model": "unknown", "protocol": "unknown", "worker_type": "single"}
+    info = {"model": "unknown", "protocol": "unknown", "runtime": None, "worker_type": "single"}
 
     # Remove nightly_ prefix
     name = folder_name.replace("nightly_", "")
 
-    # Check for protocol suffix
-    if name.endswith("_http"):
-        info["protocol"] = "http"
-        info["model"] = name[:-5]
-    elif name.endswith("_grpc"):
-        info["protocol"] = "grpc"
-        info["model"] = name[:-5]
+    # Try new format: model_protocol_runtime (e.g., llama-8b_grpc_sglang)
+    # Split from the right to handle model names with underscores
+    parts = name.rsplit("_", 2)
+
+    if len(parts) >= 3 and parts[-1] in ("sglang", "vllm"):
+        # New format: model_protocol_runtime
+        info["runtime"] = parts[-1]
+        info["protocol"] = parts[-2]
+        info["model"] = "_".join(parts[:-2])
+    elif len(parts) >= 2 and parts[-1] in ("http", "grpc"):
+        # Legacy format: model_protocol
+        info["protocol"] = parts[-1]
+        info["model"] = "_".join(parts[:-1])
     else:
-        parts = name.rsplit("_", 1)
-        if len(parts) == 2:
-            info["model"] = parts[0]
-            info["protocol"] = parts[1]
-        else:
-            info["model"] = name
+        info["model"] = name
 
     return info
 
@@ -107,8 +109,12 @@ def parse_experiment(folder: Path) -> ExperimentInfo | None:
     model = model_path.split("/")[-1] if "/" in model_path else model_path
 
     # Determine runtime from metadata or folder name
-    runtime = meta.get("server_engine") or "unknown"
-    if runtime == "unknown" or runtime is None:
+    runtime = meta.get("server_engine")
+    if not runtime or runtime == "unknown":
+        # Use runtime from folder name if available
+        runtime = folder_info.get("runtime")
+    if not runtime:
+        # Fallback: check folder name for vllm/sglang
         if "vllm" in folder.name.lower():
             runtime = "vllm"
         else:
