@@ -32,7 +32,7 @@ if ! dpkg -l cuda-keyring 2>/dev/null | grep -q '^ii'; then
 fi
 
 sudo apt-get update
-sudo apt-get install -y libopenmpi-dev git-lfs libnvinfer-dev tensorrt-dev cuda-toolkit-13-0 cmake
+sudo apt-get install -y libopenmpi-dev git-lfs libnvinfer10 libnvinfer-dev tensorrt-dev cuda-toolkit-13-0 cmake
 
 # ── CUDA setup ───────────────────────────────────────────────────────────────
 # Prefer /usr/local/cuda-13.0 if it exists, otherwise fall back to /usr/local/cuda
@@ -69,6 +69,7 @@ sudo ln -sf /usr/lib/x86_64-linux-gnu /usr/local/tensorrt/lib
 # ── NCCL 2.27 setup ──────────────────────────────────────────────────────────
 # Use pip-installed NCCL 2.27+ which has both headers and libraries.
 # This matches the working installation guide approach.
+pip install --upgrade pip
 pip install --no-cache-dir "nvidia-nccl-cu13>=2.27.7"
 
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
@@ -132,6 +133,15 @@ text = re.sub(
     r'(find_path\(\s*TensorRT_INCLUDE_DIR\s+NAMES\s+NvInfer\.h\s+PATHS\s+\\\$\{TensorRT_WELL_KNOWN_ROOT\}/include)',
     r'\1 /usr/include/x86_64-linux-gnu',
     text,
+)
+
+# Add system library paths to find_library calls (matches installation guide)
+# Pattern: find_library(...PATHS ${...}/lib) -> find_library(...PATHS ${...}/lib /usr/lib/x86_64-linux-gnu)
+text = re.sub(
+    r'(find_library\([^)]*PATHS\s+\\\$\{TensorRT_WELL_KNOWN_ROOT\}/lib)(\s*\))',
+    r'\1 /usr/lib/x86_64-linux-gnu\2',
+    text,
+    flags=re.DOTALL,
 )
 
 # Add NO_CMAKE_FIND_ROOT_PATH to find_path and find_library calls
