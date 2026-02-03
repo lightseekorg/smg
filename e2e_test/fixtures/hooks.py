@@ -367,6 +367,11 @@ def pytest_configure(config: pytest.Config) -> None:
     """Register custom markers."""
     config.addinivalue_line(
         "markers",
+        "skip_for_runtime(*runtimes, reason=None): skip test for specific runtimes "
+        "(e.g., @pytest.mark.skip_for_runtime('trtllm', reason='no guided decoding'))",
+    )
+    config.addinivalue_line(
+        "markers",
         "model(name): mark test to use a specific model from MODEL_SPECS",
     )
     config.addinivalue_line(
@@ -428,9 +433,21 @@ def is_parallel_execution(config: pytest.Config) -> bool:
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
-    """Skip thread_unsafe tests when running in parallel mode."""
+    """Skip tests based on markers and runtime configuration."""
+    from infra import get_runtime
+
+    # Skip thread_unsafe tests when running in parallel mode
     if is_parallel_execution(item.config):
         marker = item.get_closest_marker("thread_unsafe")
         if marker:
             reason = marker.kwargs.get("reason", "Test is not thread-safe")
             pytest.skip(f"Skipping in parallel mode: {reason}")
+
+    # Skip tests for specific runtimes
+    marker = item.get_closest_marker("skip_for_runtime")
+    if marker:
+        current_runtime = get_runtime()
+        skip_runtimes = marker.args
+        if current_runtime in skip_runtimes:
+            reason = marker.kwargs.get("reason", f"Not supported on {current_runtime}")
+            pytest.skip(f"Skipping for {current_runtime}: {reason}")
