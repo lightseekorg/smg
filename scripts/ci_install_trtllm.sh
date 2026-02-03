@@ -78,8 +78,12 @@ NCCL_ROOT=$(dirname "$(dirname "$NCCL_INCLUDE")")
 if [ -n "$NCCL_INCLUDE" ]; then
     echo "Found pip NCCL header at: $NCCL_INCLUDE"
     echo "NCCL_ROOT: $NCCL_ROOT"
+    echo "NCCL lib dir contents:"
+    ls -la "$NCCL_ROOT/lib/" 2>/dev/null || echo "No lib dir at $NCCL_ROOT/lib"
     sudo mv /usr/include/nccl.h /usr/include/nccl.h.bak 2>/dev/null || true
     sudo ln -sf "$NCCL_INCLUDE" /usr/include/nccl.h
+    # Also add NCCL lib to LD_LIBRARY_PATH for runtime
+    export LD_LIBRARY_PATH="$NCCL_ROOT/lib:$LD_LIBRARY_PATH"
 else
     echo "WARNING: Could not find pip-installed NCCL header"
 fi
