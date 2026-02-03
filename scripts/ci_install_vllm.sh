@@ -1,6 +1,7 @@
 #!/bin/bash
 # Install vLLM with flash-attn for CI
 # Handles CUDA toolkit setup and flash-attn compilation
+# Uses uv for faster package installation
 
 set -euo pipefail
 
@@ -9,8 +10,17 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
+# Install uv for faster package management (10-100x faster than pip)
+if ! command -v uv &> /dev/null; then
+    echo "Installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+
+echo "Using uv version: $(uv --version)"
+
 echo "Installing vLLM..."
-python3 -m pip install vllm
+uv pip install vllm
 
 # Ensure CUDA toolkit (nvcc) is available for building flash-attn
 if [ ! -f /usr/local/cuda/bin/nvcc ]; then
@@ -56,17 +66,17 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
-# Install flash-attn
+# Install flash-attn (uv handles --no-build-isolation differently)
 echo "Installing flash-attn..."
-python3 -m pip install flash-attn --no-build-isolation
+uv pip install flash-attn --no-build-isolation
 
 # Install flashinfer (remove conflicting versions first)
 echo "Installing flashinfer..."
-python3 -m pip uninstall -y flashinfer flashinfer-python flashinfer-cubin flashinfer-jit-cache 2>/dev/null || true
-python3 -m pip install flashinfer-python==0.5.3 flashinfer-cubin==0.5.3
+uv pip uninstall flashinfer flashinfer-python flashinfer-cubin flashinfer-jit-cache 2>/dev/null || true
+uv pip install flashinfer-python==0.5.3 flashinfer-cubin==0.5.3
 
 # Install nixl for vLLM PD disaggregation (NIXL KV transfer)
 echo "Installing nixl..."
-python3 -m pip install nixl
+uv pip install nixl
 
 echo "vLLM installation complete"

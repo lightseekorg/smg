@@ -258,12 +258,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Cache flash-attn build
+      - name: Cache vLLM dependencies
         if: matrix.setup_vllm
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pip/wheels
-          key: flash-attn-${{ runner.os }}-py310-${{ hashFiles('scripts/ci_install_vllm.sh') }}
+          path: |
+            ~/.cache/pip/wheels
+            ~/.cache/uv
+          key: vllm-deps-${{ runner.os }}-${{ hashFiles('scripts/ci_install_vllm.sh') }}
 
       - name: Restore TRT-LLM wheel cache
         id: trtllm-cache
