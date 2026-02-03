@@ -42,8 +42,8 @@ if [ -n "$CACHED_WHEEL" ] && [ -f "$CACHED_WHEEL" ]; then
     fi
 
     sudo apt-get update
-    # Runtime only: TensorRT runtime library + full MPI runtime (mpi4py needs executables, not just libmpi.so)
-    sudo apt-get install -y libnvinfer10 openmpi-bin
+    # Runtime deps: same as build path to ensure compatibility
+    sudo apt-get install -y libopenmpi-dev libnvinfer10
 
     # ── CUDA runtime setup ───────────────────────────────────────────────────
     if [ -d "/usr/local/cuda-13.0" ]; then
