@@ -210,7 +210,7 @@ jobs:
             timeout: 45
             test_dirs: "e2e_test/router/test_vllm_pd_mmlu.py"
             extra_deps: ""
-            env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
+            env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: ""
             test_filter: ""
