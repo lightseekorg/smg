@@ -261,9 +261,10 @@ jobs:
           path: ~/.cache/pip/wheels
           key: flash-attn-${{ runner.os }}-py310-${{ hashFiles('scripts/ci_install_vllm.sh') }}
 
-      - name: Cache TRT-LLM wheel
+      - name: Restore TRT-LLM wheel cache
+        id: trtllm-cache
         if: matrix.setup_trtllm
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /tmp/trtllm-wheel
           key: trtllm-wheel-${{ runner.os }}-cuda13-${{ hashFiles('scripts/ci_install_trtllm.sh') }}
@@ -281,6 +282,15 @@ jobs:
           else
             bash scripts/ci_install_sglang.sh
           fi
+
+      # Save TRT-LLM wheel immediately after build, before tests run
+      # This ensures the cache is saved even if tests fail or job is cancelled
+      - name: Save TRT-LLM wheel cache
+        if: matrix.setup_trtllm && steps.trtllm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/trtllm-wheel
+          key: trtllm-wheel-${{ runner.os }}-cuda13-${{ hashFiles('scripts/ci_install_trtllm.sh') }}
 
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
