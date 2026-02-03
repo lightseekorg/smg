@@ -32,7 +32,7 @@ if ! dpkg -l cuda-keyring 2>/dev/null | grep -q '^ii'; then
 fi
 
 sudo apt-get update
-sudo apt-get install -y libopenmpi-dev git-lfs libnvinfer-dev tensorrt-dev cuda-toolkit-13-0
+sudo apt-get install -y libopenmpi-dev git-lfs libnvinfer-dev tensorrt-dev cuda-toolkit-13-0 cmake
 
 # ── CUDA setup ───────────────────────────────────────────────────────────────
 # Prefer /usr/local/cuda-13.0 if it exists, otherwise fall back to /usr/local/cuda
