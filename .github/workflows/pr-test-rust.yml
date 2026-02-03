@@ -267,9 +267,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /tmp/trtllm-wheel
-          key: trtllm-wheel-${{ runner.os }}-cuda13-${{ hashFiles('scripts/ci_install_trtllm.sh') }}
-          restore-keys: |
-            trtllm-wheel-${{ runner.os }}-cuda13-
+          key: trtllm-wheel-${{ runner.os }}-cuda13
 
       - name: Install inference backend
         run: |
@@ -290,7 +288,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/trtllm-wheel
-          key: trtllm-wheel-${{ runner.os }}-cuda13-${{ hashFiles('scripts/ci_install_trtllm.sh') }}
+          key: trtllm-wheel-${{ runner.os }}-cuda13
 
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
