@@ -5,11 +5,14 @@ use axum::response::Response;
 use tracing::error;
 use uuid::Uuid;
 
-use crate::routers::{
-    error,
-    grpc::{
-        common::stages::{helpers, PipelineStage},
-        context::{ClientSelection, RequestContext, WorkerSelection},
+use crate::{
+    core::RuntimeType,
+    routers::{
+        error,
+        grpc::{
+            common::stages::{helpers, PipelineStage},
+            context::{ClientSelection, RequestContext, WorkerSelection},
+        },
     },
 };
 
@@ -75,10 +78,18 @@ impl PipelineStage for GenerateRequestBuildingStage {
                 error::bad_request("build_request_failed", e)
             })?;
 
-        // Inject PD metadata if needed
+        // Inject PD metadata if needed (only SGLang uses bootstrap-based PD;
+        // vLLM PD uses NIXL for transparent KV transfer, no metadata injection needed)
         if self.inject_pd_metadata {
-            if let WorkerSelection::Dual { prefill, .. } = ctx.state.workers.as_ref().unwrap() {
-                helpers::inject_bootstrap_metadata(&mut proto_request, prefill);
+            if let WorkerSelection::Dual {
+                prefill,
+                runtime_type,
+                ..
+            } = ctx.state.workers.as_ref().unwrap()
+            {
+                if *runtime_type == RuntimeType::Sglang {
+                    helpers::inject_bootstrap_metadata(&mut proto_request, prefill);
+                }
             }
         }
 

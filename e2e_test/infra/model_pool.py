@@ -1197,6 +1197,123 @@ class ModelPool:
             self._evict_instance(key)
             return None
 
+    def launch_vllm_pd_worker(
+        self,
+        model_id: str,
+        role: str,
+        index: int = 0,
+        startup_timeout: int = DEFAULT_STARTUP_TIMEOUT,
+    ) -> ModelInstance | None:
+        """Launch a vLLM gRPC worker with KV transfer for PD mode.
+
+        Args:
+            model_id: Model identifier.
+            role: KV transfer role ("kv_producer" for prefill, "kv_consumer" for decode).
+            index: Worker index for unique keying.
+            startup_timeout: Timeout for worker to become healthy.
+
+        Returns:
+            The launched ModelInstance, or None if launch fails.
+        """
+        import json
+
+        model_spec = get_model_spec(model_id)
+        model_path = model_spec["model"]
+        tp_size = model_spec.get("tp", 1)
+
+        # Allocate GPU
+        with self._lock:
+            available = self.allocator.available_gpus()
+            if len(available) < tp_size:
+                self._evict_for_gpus(tp_size)
+            gpu_slot = self.allocator.allocate(tp_size)
+            if gpu_slot is None:
+                logger.error(
+                    "Not enough GPUs for vLLM PD worker (need %d)", tp_size
+                )
+                return None
+
+        worker_type_label = "prefill" if role == "kv_producer" else "decode"
+        worker_type = (
+            WorkerType.PREFILL if role == "kv_producer" else WorkerType.DECODE
+        )
+
+        port = gpu_slot.port
+
+        kv_transfer_config = json.dumps(
+            {"kv_connector": "NixlConnector", "kv_role": role}
+        )
+
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = gpu_slot.cuda_visible_devices()
+
+        cmd = [
+            "python3",
+            "-m",
+            "vllm.entrypoints.grpc_server",
+            "--model",
+            model_path,
+            "--host",
+            DEFAULT_HOST,
+            "--port",
+            str(port),
+            "--tensor-parallel-size",
+            str(tp_size),
+            "--max-model-len",
+            "2048",
+            "--gpu-memory-utilization",
+            "0.9",
+            "--enforce-eager",
+            "--kv-transfer-config",
+            kv_transfer_config,
+        ]
+
+        vllm_args = model_spec.get("vllm_args", [])
+        if vllm_args:
+            cmd.extend(vllm_args)
+
+        key = f"{model_id}:vllm-pd:{worker_type_label}_{index}"
+        logger.info(
+            "Launching vLLM PD %s worker %s on GPUs %s port %d",
+            worker_type_label,
+            key,
+            gpu_slot.gpu_ids,
+            port,
+        )
+
+        show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
+        proc = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=None if show_output else subprocess.PIPE,
+            stderr=None if show_output else subprocess.PIPE,
+            start_new_session=True,
+        )
+
+        base_url = f"grpc://{DEFAULT_HOST}:{port}"
+        instance = ModelInstance(
+            model_id=model_id,
+            mode=ConnectionMode.GRPC,
+            model_path=model_path,
+            base_url=base_url,
+            port=port,
+            process=proc,
+            gpu_slot=gpu_slot,
+            key=key,
+            worker_type=worker_type,
+            bootstrap_port=None,  # No bootstrap for vLLM PD (NIXL handles KV transfer)
+            last_used=time.time(),
+        )
+        self.instances[key] = instance
+
+        try:
+            self._wait_worker_healthy(instance, startup_timeout)
+            return instance
+        except Exception as e:
+            logger.error("Failed to start vLLM PD worker %s: %s", key, e)
+            self._evict_instance(key)
+            return None
+
     def get_vllm_grpc_worker(
         self,
         model_id: str,

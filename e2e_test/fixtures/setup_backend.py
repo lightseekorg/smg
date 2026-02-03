@@ -96,6 +96,13 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         )
         return
 
+    # vLLM PD disaggregation backend (NIXL-based KV transfer)
+    if backend_name == "vllm_pd":
+        yield from _setup_vllm_pd_backend(
+            request, model_pool, model_id, workers_config, gateway_config
+        )
+        return
+
     # Check if this is a local backend (grpc, http)
     try:
         connection_mode = ConnectionMode(backend_name)
@@ -277,6 +284,87 @@ def _setup_pd_backend(
         logger.info("Tearing down PD gateway")
         gateway.shutdown()
         # Release references to allow eviction
+        for worker in prefills + decodes:
+            worker.release()
+
+
+def _setup_vllm_pd_backend(
+    request: pytest.FixtureRequest,
+    model_pool: "ModelPool",
+    model_id: str,
+    workers_config: dict,
+    gateway_config: dict,
+):
+    """Setup vLLM PD disaggregation backend.
+
+    Launches vLLM gRPC workers with NIXL KV transfer configured
+    as kv_producer (prefill) and kv_consumer (decode).
+    """
+    import openai
+    from infra import Gateway
+
+    logger.info("Setting up vLLM PD backend for model %s", model_id)
+
+    num_prefill = workers_config.get("prefill") or 1
+    num_decode = workers_config.get("decode") or 1
+    logger.info("vLLM PD config: %d prefill, %d decode workers", num_prefill, num_decode)
+
+    prefills = []
+    decodes = []
+
+    for i in range(num_prefill):
+        instance = model_pool.launch_vllm_pd_worker(
+            model_id, role="kv_producer", index=i
+        )
+        if instance is None:
+            # Clean up already-launched workers
+            for w in prefills:
+                w.release()
+            pytest.fail(f"Failed to launch vLLM prefill worker {i}")
+        prefills.append(instance)
+
+    for i in range(num_decode):
+        instance = model_pool.launch_vllm_pd_worker(
+            model_id, role="kv_consumer", index=i
+        )
+        if instance is None:
+            for w in prefills + decodes:
+                w.release()
+            pytest.fail(f"Failed to launch vLLM decode worker {i}")
+        decodes.append(instance)
+
+    model_path = prefills[0].model_path
+
+    # Launch PD gateway (no bootstrap port for vLLM PD workers)
+    gateway = Gateway()
+    gateway.start(
+        prefill_workers=prefills,
+        decode_workers=decodes,
+        policy=gateway_config["policy"],
+        timeout=gateway_config["timeout"],
+        extra_args=gateway_config["extra_args"],
+    )
+
+    client = openai.OpenAI(
+        base_url=f"{gateway.base_url}/v1",
+        api_key="not-used",
+    )
+
+    logger.info(
+        "Setup vLLM PD backend: model=%s, %d prefill + %d decode workers, "
+        "gateway=%s, policy=%s",
+        model_id,
+        len(prefills),
+        len(decodes),
+        gateway.base_url,
+        gateway_config["policy"],
+    )
+
+    try:
+        yield "vllm_pd", model_path, client, gateway
+    finally:
+        logger.info("Tearing down vLLM PD gateway and workers")
+        gateway.shutdown()
         for worker in prefills + decodes:
             worker.release()
 

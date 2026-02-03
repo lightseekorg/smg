@@ -10,10 +10,12 @@ use crate::{
     routers::grpc::proto_wrapper::ProtoGenerateRequest,
 };
 
-/// Inject PD bootstrap metadata into a gRPC request
+/// Inject PD bootstrap metadata into a SGLang gRPC request.
 ///
-/// Used by both chat and generate request building stages when in PD mode.
-/// Only SGLang supports PD (prefill/decode) disaggregated mode.
+/// # Panics
+/// Panics if called with a non-SGLang request. Callers must check runtime type
+/// before calling this function. vLLM PD uses NIXL for transparent KV transfer
+/// and does not need metadata injection.
 pub(crate) fn inject_bootstrap_metadata(
     request: &mut ProtoGenerateRequest,
     prefill_worker: &Arc<dyn Worker>,
@@ -31,8 +33,6 @@ pub(crate) fn inject_bootstrap_metadata(
         bootstrap_room: room_id,
     };
 
-    // Inject metadata directly into SGLang request
-    // (vLLM doesn't support PD mode, so this will panic if called with vLLM)
     let sglang_request = request.as_sglang_mut();
     sglang_request.disaggregated_params = Some(disagg_params);
 

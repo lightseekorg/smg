@@ -207,7 +207,11 @@ class Gateway:
 
             mode_args = ["--pd-disaggregation"]
             for pf in prefills:
-                mode_args += ["--prefill", pf.base_url, str(pf.bootstrap_port)]
+                if pf.bootstrap_port is not None:
+                    mode_args += ["--prefill", pf.base_url, str(pf.bootstrap_port)]
+                else:
+                    # vLLM PD: no bootstrap port (NIXL handles KV transfer)
+                    mode_args += ["--prefill", pf.base_url]
             for dc in decodes:
                 mode_args += ["--decode", dc.base_url]
 
