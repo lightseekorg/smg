@@ -32,7 +32,7 @@ if ! dpkg -l cuda-keyring 2>/dev/null | grep -q '^ii'; then
 fi
 
 sudo apt-get update
-sudo apt-get install -y libopenmpi-dev git-lfs libnvinfer-dev tensorrt-dev cuda-toolkit-13-0 cmake libnccl-dev
+sudo apt-get install -y libopenmpi-dev git-lfs libnvinfer-dev tensorrt-dev cuda-toolkit-13-0 cmake
 
 # ── CUDA setup ───────────────────────────────────────────────────────────────
 # Prefer /usr/local/cuda-13.0 if it exists, otherwise fall back to /usr/local/cuda
@@ -66,22 +66,27 @@ sudo mkdir -p /usr/local/tensorrt
 sudo ln -sf /usr/include/x86_64-linux-gnu /usr/local/tensorrt/include
 sudo ln -sf /usr/lib/x86_64-linux-gnu /usr/local/tensorrt/lib
 
-# ── NCCL 2.27 header fix ────────────────────────────────────────────────────
-# System NCCL from libnccl-dev may lack ncclWindow_t. Install NCCL 2.27+ header
-# via pip and symlink it over the system header. Use system libs for linking.
+# ── NCCL 2.27 setup ──────────────────────────────────────────────────────────
+# Use pip-installed NCCL 2.27+ which has both headers and libraries.
+# This matches the working installation guide approach.
 pip install --no-cache-dir "nvidia-nccl-cu13>=2.27.7"
 
 SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
-NCCL_INCLUDE=$(find "$SITE_PACKAGES/nvidia/nccl" -name "nccl.h" 2>/dev/null | head -1)
 
-# Use system NCCL root for libraries (from libnccl-dev)
-NCCL_ROOT="/usr"
+# Use pip NCCL package as NCCL_ROOT (has both include/ and lib/ directories)
+NCCL_ROOT="$SITE_PACKAGES/nvidia/nccl"
 
+echo "=== NCCL diagnostics ==="
+echo "NCCL_ROOT=$NCCL_ROOT"
+ls -la "$NCCL_ROOT/" 2>/dev/null || echo "WARNING: NCCL_ROOT not found"
+ls -la "$NCCL_ROOT/include/" 2>/dev/null || echo "WARNING: NCCL include not found"
+ls -la "$NCCL_ROOT/lib/" 2>/dev/null || echo "WARNING: NCCL lib not found"
+echo "=== end NCCL diagnostics ==="
+
+# Symlink pip NCCL header to system path for other tools that look there
+NCCL_INCLUDE=$(find "$NCCL_ROOT" -name "nccl.h" 2>/dev/null | head -1)
 if [ -n "$NCCL_INCLUDE" ]; then
     echo "Found pip NCCL header at: $NCCL_INCLUDE"
-    echo "Using system NCCL_ROOT: $NCCL_ROOT"
-    echo "System NCCL lib:"
-    ls -la /usr/lib/x86_64-linux-gnu/libnccl* 2>/dev/null || echo "No system NCCL libs found"
     sudo mv /usr/include/nccl.h /usr/include/nccl.h.bak 2>/dev/null || true
     sudo ln -sf "$NCCL_INCLUDE" /usr/include/nccl.h
     echo "Symlinked pip NCCL header to /usr/include/nccl.h"
