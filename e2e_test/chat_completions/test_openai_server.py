@@ -46,6 +46,7 @@ class TestChatCompletion:
         _, model, client, gateway = setup_backend
         self._run_chat_completion_stream(client, model, logprobs, parallel_sample_num)
 
+    @pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM gRPC bug: uses 'guided_decoding_params' instead of 'guided_decoding'")
     def test_regex(self, setup_backend):
         """Test structured output with regex constraint."""
         _, model, client, gateway = setup_backend
