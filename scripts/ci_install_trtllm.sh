@@ -118,6 +118,13 @@ cd "$TRTLLM_DIR"
 git lfs install --force
 git lfs pull
 
+# ── Install TensorRT-LLM Python requirements ─────────────────────────────────
+# cutlass_library and other build dependencies
+if [ -f "requirements-dev.txt" ]; then
+    echo "Installing TensorRT-LLM build requirements..."
+    pip install --no-cache-dir -r requirements-dev.txt
+fi
+
 # ── Patch FindTensorRT.cmake ─────────────────────────────────────────────────
 # CMake needs to find TensorRT in system paths
 CMAKE_FILE="cpp/cmake/modules/FindTensorRT.cmake"
