@@ -5,14 +5,11 @@ use axum::response::Response;
 use tracing::error;
 use uuid::Uuid;
 
-use crate::{
-    core::RuntimeType,
-    routers::{
-        error,
-        grpc::{
-            common::stages::{helpers, PipelineStage},
-            context::{ClientSelection, RequestContext, WorkerSelection},
-        },
+use crate::routers::{
+    error,
+    grpc::{
+        common::stages::{helpers, PipelineStage},
+        context::{ClientSelection, RequestContext},
     },
 };
 
@@ -79,18 +76,9 @@ impl PipelineStage for ChatRequestBuildingStage {
                 error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {}", e))
             })?;
 
-        // Inject PD metadata if needed (only SGLang uses bootstrap-based PD;
-        // vLLM PD uses NIXL for transparent KV transfer, no metadata injection needed)
         if self.inject_pd_metadata {
-            if let WorkerSelection::Dual {
-                prefill,
-                runtime_type,
-                ..
-            } = ctx.state.workers.as_ref().unwrap()
-            {
-                if *runtime_type == RuntimeType::Sglang {
-                    helpers::inject_bootstrap_metadata(&mut proto_request, prefill);
-                }
+            if let Some(workers) = ctx.state.workers.as_ref() {
+                helpers::maybe_inject_pd_metadata(&mut proto_request, workers);
             }
         }
 

@@ -107,13 +107,37 @@ impl PipelineStage for RequestExecutionStage {
                 ProtoRequest::Generate(req) => match self.mode {
                     ExecutionMode::Single => self.execute_single(req, clients, workers).await,
                     ExecutionMode::DualDispatch => {
-                        // Dispatch based on runtime type: SGLang uses parallel dual dispatch,
-                        // vLLM uses sequential prefill-then-decode (NIXL handles KV transfer)
+                        // Dispatch based on runtime type:
+                        // - SGLang: parallel dual dispatch with bootstrap metadata
+                        // - vLLM: sequential prefill-then-decode (NIXL handles KV transfer)
                         match workers.pd_runtime_type() {
                             Some(RuntimeType::Vllm) => {
                                 self.execute_sequential_pd(req, clients, workers).await
                             }
-                            _ => self.execute_dual_dispatch(req, clients, workers).await,
+                            Some(RuntimeType::Sglang) => {
+                                self.execute_dual_dispatch(req, clients, workers).await
+                            }
+                            Some(RuntimeType::Trtllm) | Some(RuntimeType::External) => {
+                                error!(
+                                    function = "RequestExecutionStage::execute",
+                                    runtime_type = ?workers.pd_runtime_type(),
+                                    "Runtime does not support PD disaggregated mode"
+                                );
+                                Err(error::bad_request(
+                                    "runtime_pd_not_supported",
+                                    "This runtime does not support PD disaggregated mode",
+                                ))
+                            }
+                            None => {
+                                error!(
+                                    function = "RequestExecutionStage::execute",
+                                    "PD mode requires dual worker selection"
+                                );
+                                Err(error::internal_error(
+                                    "pd_mode_requires_dual_workers",
+                                    "PD mode requires dual worker selection",
+                                ))
+                            }
                         }
                     }
                 },

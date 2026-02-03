@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
+use tracing::debug;
 
 use super::{
     client::GrpcClient,
@@ -391,15 +392,21 @@ impl WorkerSelection {
 
     /// Record circuit breaker outcome for prefill worker only (sequential PD)
     pub fn record_outcome_prefill(&self, success: bool) {
-        if let Self::Dual { prefill, .. } = self {
-            prefill.record_outcome(success);
+        match self {
+            Self::Dual { prefill, .. } => prefill.record_outcome(success),
+            Self::Single { .. } => {
+                debug!("record_outcome_prefill called on Single worker selection, ignoring");
+            }
         }
     }
 
     /// Record circuit breaker outcome for decode worker only (sequential PD)
     pub fn record_outcome_decode(&self, success: bool) {
-        if let Self::Dual { decode, .. } = self {
-            decode.record_outcome(success);
+        match self {
+            Self::Dual { decode, .. } => decode.record_outcome(success),
+            Self::Single { .. } => {
+                debug!("record_outcome_decode called on Single worker selection, ignoring");
+            }
         }
     }
 

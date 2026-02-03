@@ -6,27 +6,44 @@ use rand::Rng;
 use tracing::debug;
 
 use crate::{
-    core::Worker, grpc_client::sglang_proto::DisaggregatedParams,
-    routers::grpc::proto_wrapper::ProtoGenerateRequest,
+    core::{RuntimeType, Worker},
+    grpc_client::sglang_proto::DisaggregatedParams,
+    routers::grpc::{context::WorkerSelection, proto_wrapper::ProtoGenerateRequest},
 };
 
-/// Inject PD bootstrap metadata into a SGLang gRPC request.
+/// Inject PD bootstrap metadata if needed.
 ///
-/// # Panics
-/// Panics if called with a non-SGLang request. Callers must check runtime type
-/// before calling this function. vLLM PD uses NIXL for transparent KV transfer
-/// and does not need metadata injection.
-pub(crate) fn inject_bootstrap_metadata(
+/// Only SGLang uses bootstrap-based PD. vLLM PD uses NIXL for transparent
+/// KV transfer and does not need metadata injection.
+///
+/// Returns `true` if metadata was injected, `false` otherwise.
+pub(crate) fn maybe_inject_pd_metadata(
+    request: &mut ProtoGenerateRequest,
+    workers: &WorkerSelection,
+) -> bool {
+    if let WorkerSelection::Dual {
+        prefill,
+        runtime_type,
+        ..
+    } = workers
+    {
+        if *runtime_type == RuntimeType::Sglang {
+            inject_sglang_bootstrap_metadata(request, prefill);
+            return true;
+        }
+    }
+    false
+}
+
+/// Inject bootstrap metadata into a SGLang gRPC request.
+fn inject_sglang_bootstrap_metadata(
     request: &mut ProtoGenerateRequest,
     prefill_worker: &Arc<dyn Worker>,
 ) {
     let hostname = prefill_worker.bootstrap_host();
     let bootstrap_port = prefill_worker.bootstrap_port().unwrap_or(8998);
-
-    // Generate room ID for bootstrap
     let room_id = rand::rng().random_range(0..i32::MAX);
 
-    // Create DisaggregatedParams
     let disagg_params = DisaggregatedParams {
         bootstrap_host: hostname.to_string(),
         bootstrap_port: bootstrap_port as i32,

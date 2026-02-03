@@ -1247,6 +1247,15 @@ class ModelPool:
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu_slot.cuda_visible_devices()
 
+        # Each worker needs a unique NIXL side-channel port (default 5600)
+        # Use gRPC port as offset to ensure uniqueness
+        nixl_side_channel_port = 5600 + (port - 50051)
+        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(nixl_side_channel_port)
+
+        # Get configurable parameters from model spec or use defaults
+        max_model_len = model_spec.get("max_model_len", 4096)
+        gpu_memory_util = model_spec.get("gpu_memory_utilization", 0.9)
+
         cmd = [
             "python3",
             "-m",
@@ -1260,13 +1269,16 @@ class ModelPool:
             "--tensor-parallel-size",
             str(tp_size),
             "--max-model-len",
-            "2048",
+            str(max_model_len),
             "--gpu-memory-utilization",
-            "0.9",
-            "--enforce-eager",
+            str(gpu_memory_util),
             "--kv-transfer-config",
             kv_transfer_config,
         ]
+
+        # Add enforce-eager only if explicitly requested (impacts performance)
+        if model_spec.get("enforce_eager", False):
+            cmd.append("--enforce-eager")
 
         vllm_args = model_spec.get("vllm_args", [])
         if vllm_args:
@@ -1274,11 +1286,12 @@ class ModelPool:
 
         key = f"{model_id}:vllm-pd:{worker_type_label}_{index}"
         logger.info(
-            "Launching vLLM PD %s worker %s on GPUs %s port %d",
+            "Launching vLLM PD %s worker %s on GPUs %s port %d (NIXL port %d)",
             worker_type_label,
             key,
             gpu_slot.gpu_ids,
             port,
+            nixl_side_channel_port,
         )
 
         show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"

@@ -1,6 +1,6 @@
 //! Worker selection stage: Select appropriate worker(s) based on routing mode
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::response::Response;
@@ -16,6 +16,9 @@ use crate::{
         grpc::context::{RequestContext, WorkerSelection},
     },
 };
+
+/// Result type for PD worker pair selection: (prefill, decode, runtime_type)
+type PdWorkerPair = (Arc<dyn Worker>, Arc<dyn Worker>, RuntimeType);
 
 /// Worker selection stage: Select appropriate worker(s) based on routing mode
 pub(crate) struct WorkerSelectionStage {
@@ -198,7 +201,7 @@ impl WorkerSelectionStage {
         text: Option<&str>,
         tokens: Option<&[u32]>,
         headers: Option<&http::HeaderMap>,
-    ) -> Option<(Arc<dyn Worker>, Arc<dyn Worker>, RuntimeType)> {
+    ) -> Option<PdWorkerPair> {
         let all_workers = self.worker_registry.get_workers_filtered(
             model_id,
             None,
@@ -239,21 +242,20 @@ impl WorkerSelectionStage {
             .runtime_type
             .clone();
 
-        // Check for mixed runtimes (log warning but proceed with first runtime)
-        let has_mixed_runtimes = all_prefill
+        // Check for mixed runtimes in both prefill and decode pools
+        let prefill_mixed = all_prefill
             .iter()
             .skip(1)
             .any(|w| w.metadata().runtime_type != first_runtime);
+        let decode_mixed = all_decode
+            .iter()
+            .any(|w| w.metadata().runtime_type != first_runtime);
 
-        if has_mixed_runtimes {
-            // Count for logging only
-            let mut counts: HashMap<&RuntimeType, usize> = HashMap::new();
-            for w in &all_prefill {
-                *counts.entry(&w.metadata().runtime_type).or_insert(0) += 1;
-            }
+        if prefill_mixed || decode_mixed {
             warn!(
-                "Mixed runtime types in prefill workers: {:?}. Using {:?}.",
-                counts.keys().collect::<Vec<_>>(),
+                "Mixed runtime types in PD workers (prefill_mixed={}, decode_mixed={}). Using {:?}.",
+                prefill_mixed,
+                decode_mixed,
                 first_runtime
             );
         }

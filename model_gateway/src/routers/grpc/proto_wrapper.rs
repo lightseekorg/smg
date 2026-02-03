@@ -178,7 +178,6 @@ impl ProtoGenerateRequest {
                 if let Some(ref mut params) = req.sampling_params {
                     params.max_tokens = Some(max_tokens);
                 } else {
-                    // Create minimal sampling params with just max_tokens set
                     req.sampling_params = Some(vllm::SamplingParams {
                         max_tokens: Some(max_tokens),
                         ..Default::default()
