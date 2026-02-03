@@ -514,29 +514,12 @@ class ModelPool:
             )
             if is_vllm() or is_trtllm():
                 spec = get_model_spec(model_id)
-<<<<<<< HEAD
-                # vLLM startup can be slow, use longer timeout
-                return self._launch_vllm_grpc_worker(
-                    model_id, spec, gpu_slot, 600,
-                    worker_type=worker_type,
-                    instance_key=instance_key,
-                )
-            if is_trtllm():
-                # Launch TensorRT-LLM gRPC worker
-                spec = get_model_spec(model_id)
-                # TRT-LLM startup can be slow (model compilation), use longer timeout
-                return self._launch_trtllm_grpc_worker(
-                    model_id, spec, gpu_slot, 600,
-                    worker_type=worker_type,
-                    instance_key=instance_key,
-=======
                 return self._launch_grpc_worker(
                     runtime=get_runtime(),
                     model_id=model_id,
                     model_spec=spec,
                     gpu_slot=gpu_slot,
                     startup_timeout=600,
->>>>>>> 0ef0703 (refactor(e2e): deduplicate gRPC worker launch and setup code)
                 )
 
         spec = get_model_spec(model_id)
@@ -1216,12 +1199,7 @@ class ModelPool:
         Returns:
             The launched ModelInstance, or None if launch fails.
         """
-<<<<<<< HEAD
-        import json
-
-=======
         runtime_label = RUNTIME_LABELS.get(runtime, runtime)
->>>>>>> 0ef0703 (refactor(e2e): deduplicate gRPC worker launch and setup code)
         model_path = model_spec["model"]
         tp_size = model_spec.get("tp", 1)
         port = gpu_slot.port
@@ -1229,80 +1207,14 @@ class ModelPool:
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu_slot.cuda_visible_devices()
 
-<<<<<<< HEAD
-        # For PD mode, each worker needs a unique NIXL side-channel port.
-        # Use port as offset to ensure uniqueness, with min bound to stay in valid range.
-        if worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
-            nixl_side_channel_port = max(5600, 5600 + (port - 50051))
-            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(nixl_side_channel_port)
+        # For TRT-LLM multi-GPU, add NCCL environment variables for compatibility
+        # across different GPU types (H100 with NVSwitch, A10 with PCIe)
+        if runtime == "trtllm" and tp_size > 1:
+            env["NCCL_DEBUG"] = "WARN"  # Help diagnose NCCL issues
+            env["NCCL_IB_DISABLE"] = "1"  # Disable InfiniBand (not on CI runners)
+            # Disable TRT-LLM's tunable allreduce to avoid autotuner failures
+            env["TLLM_DISABLE_TUNABLE_ALLREDUCE"] = "1"
 
-        # Build vLLM gRPC command
-        cmd = [
-            "python3",
-            "-m",
-            "vllm.entrypoints.grpc_server",
-            "--model",
-            model_path,
-            "--host",
-            DEFAULT_HOST,
-            "--port",
-            str(port),
-            "--tensor-parallel-size",
-            str(tp_size),
-        ]
-
-        # PD mode uses different defaults than regular mode
-        if worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
-            max_model_len = model_spec.get("max_model_len", 4096)
-            gpu_memory_util = model_spec.get("gpu_memory_utilization", 0.9)
-            cmd.extend(["--max-model-len", str(max_model_len)])
-            cmd.extend(["--gpu-memory-utilization", str(gpu_memory_util)])
-
-            # Add NIXL KV transfer config
-            kv_role = "kv_producer" if worker_type == WorkerType.PREFILL else "kv_consumer"
-            kv_transfer_config = json.dumps(
-                {"kv_connector": "NixlConnector", "kv_role": kv_role}
-            )
-            cmd.extend(["--kv-transfer-config", kv_transfer_config])
-
-            if model_spec.get("enforce_eager", False):
-                cmd.append("--enforce-eager")
-        else:
-            # Regular mode uses more conservative defaults
-            cmd.extend(["--max-model-len", "2048"])
-            cmd.extend(["--gpu-memory-utilization", "0.9"])
-            cmd.append("--enforce-eager")
-
-        # Add vllm_args from model spec if present
-        vllm_args = model_spec.get("vllm_args", [])
-        if vllm_args:
-            cmd.extend(vllm_args)
-
-        # Build key based on worker type
-        if instance_key:
-            key = instance_key
-        elif worker_type == WorkerType.REGULAR:
-            key = f"{model_id}:grpc"
-        else:
-            key = f"{model_id}:grpc:{worker_type.value}"
-
-        if worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
-            logger.info(
-                "Launching vLLM gRPC %s worker %s on GPUs %s port %d (NIXL port %s)",
-                worker_type.value,
-                key,
-                gpu_slot.gpu_ids,
-                port,
-                env.get("VLLM_NIXL_SIDE_CHANNEL_PORT", "N/A"),
-            )
-        else:
-            logger.info(
-                "Launching vLLM gRPC worker %s on GPUs %s port %d",
-                key,
-                gpu_slot.gpu_ids,
-                port,
-            )
-=======
         cmd = self._build_grpc_cmd(
             runtime, model_path, DEFAULT_HOST, port, tp_size, model_spec
         )
@@ -1315,7 +1227,6 @@ class ModelPool:
             gpu_slot.gpu_ids,
             port,
         )
->>>>>>> 0ef0703 (refactor(e2e): deduplicate gRPC worker launch and setup code)
 
         show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
 
@@ -1410,173 +1321,8 @@ class ModelPool:
             }
             slots = self.allocator.allocate_slots(allocation_specs, preserve_order=True)
             if not slots:
-<<<<<<< HEAD
-                raise RuntimeError(f"Failed to allocate GPU slots for vLLM worker: {model_id}")
-
-            gpu_slot = slots[0]
-
-            # Launch worker
-            instance = self._launch_vllm_grpc_worker(
-                model_id=model_id,
-                model_spec=spec,
-                gpu_slot=gpu_slot,
-                startup_timeout=self._startup_timeout,
-            )
-
-            if instance is None:
-                self.allocator.release_slot(gpu_slot)
-                raise RuntimeError(f"Failed to launch vLLM gRPC worker: {model_id}")
-
-            instance.acquire()
-            return instance
-
-    def _launch_trtllm_grpc_worker(
-        self,
-        model_id: str,
-        model_spec: dict,
-        gpu_slot: GPUSlot,
-        startup_timeout: int,
-        worker_type: WorkerType = WorkerType.REGULAR,
-        instance_key: str | None = None,
-    ) -> ModelInstance | None:
-        """Launch a TensorRT-LLM worker with native gRPC.
-
-        Args:
-            model_id: Model identifier.
-            model_spec: Model specification dict from MODEL_SPECS.
-            gpu_slot: GPU slot assignment.
-            startup_timeout: Timeout for worker to become healthy.
-            worker_type: Type of worker (REGULAR, PREFILL, DECODE).
-            instance_key: Custom instance key, or None to auto-generate.
-
-        Returns:
-            The launched ModelInstance, or None if launch fails.
-        """
-        model_path = model_spec["model"]
-        tp_size = model_spec.get("tp", 1)
-        port = gpu_slot.port
-
-        # Build environment
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = gpu_slot.cuda_visible_devices()
-
-        # Build TensorRT-LLM gRPC command
-        # Model path is positional, uses --backend pytorch (no TRT engine build needed)
-        cmd = [
-            "python3",
-            "-m",
-            "tensorrt_llm.commands.serve",
-            model_path,
-            "--grpc",
-            "--host",
-            DEFAULT_HOST,
-            "--port",
-            str(port),
-            "--backend",
-            "pytorch",
-            "--tp_size",
-            str(tp_size),
-        ]
-
-        # Add trtllm_args from model spec if present
-        trtllm_args = model_spec.get("trtllm_args", [])
-        if trtllm_args:
-            cmd.extend(trtllm_args)
-
-        # Build key based on worker type
-        if instance_key:
-            key = instance_key
-        elif worker_type == WorkerType.REGULAR:
-            key = f"{model_id}:trtllm-grpc"
-        else:
-            key = f"{model_id}:trtllm-grpc:{worker_type.value}"
-
-        logger.info(
-            "Launching TensorRT-LLM gRPC worker %s on GPUs %s port %d",
-            key,
-            gpu_slot.gpu_ids,
-            port,
-        )
-
-        show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
-
-        # Start the process
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=None if show_output else subprocess.PIPE,
-            stderr=None if show_output else subprocess.PIPE,
-            start_new_session=True,
-        )
-
-        # TRT-LLM gRPC uses grpc:// protocol
-        base_url = f"grpc://{DEFAULT_HOST}:{port}"
-        instance = ModelInstance(
-            model_id=model_id,
-            mode=ConnectionMode.GRPC,
-            model_path=model_path,
-            base_url=base_url,
-            port=port,
-            process=proc,
-            gpu_slot=gpu_slot,
-            key=key,
-            worker_type=worker_type,
-            bootstrap_port=None,
-            last_used=time.time(),
-        )
-        self.instances[key] = instance
-
-        # Wait for this worker to become healthy
-        try:
-            self._wait_worker_healthy(instance, startup_timeout)
-            return instance
-        except Exception as e:
-            logger.error("Failed to start TensorRT-LLM gRPC worker %s: %s", key, e)
-            self._evict_instance(key)
-            return None
-
-    def get_trtllm_grpc_worker(
-        self,
-        model_id: str,
-    ) -> ModelInstance:
-        """Get or launch a TensorRT-LLM gRPC worker.
-
-        Thread-safe: Protected by internal lock.
-
-        Args:
-            model_id: The model ID to launch.
-
-        Returns:
-            The acquired ModelInstance.
-
-        Raises:
-            RuntimeError: If worker cannot be launched.
-        """
-        key = f"{model_id}:trtllm-grpc"
-
-        with self._lock:
-            # Check if already exists
-            if key in self.instances:
-                inst = self.instances[key]
-                inst.acquire()
-                inst.last_used = time.time()
-                return inst
-
-            # Need to launch
-            spec = get_model_spec(model_id)
-            tp_size = spec.get("tp", 1)
-
-            # Check if we have enough GPUs
-            available = self.allocator.available_gpus()
-            if len(available) < tp_size:
-                logger.info(
-                    "Need %d GPUs for TRT-LLM worker, only %d available. Evicting...",
-                    tp_size,
-                    len(available),
-=======
                 raise RuntimeError(
                     f"Failed to allocate GPU slots for {runtime_label} worker: {model_id}"
->>>>>>> 0ef0703 (refactor(e2e): deduplicate gRPC worker launch and setup code)
                 )
 
             gpu_slot = slots[0]
