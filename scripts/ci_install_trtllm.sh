@@ -42,8 +42,8 @@ if [ -n "$CACHED_WHEEL" ] && [ -f "$CACHED_WHEEL" ]; then
     fi
 
     sudo apt-get update
-    # Runtime deps: same as build path to ensure compatibility
-    sudo apt-get install -y libopenmpi-dev libnvinfer10
+    # Runtime deps: wheel links against CUDA 13 + TensorRT libs
+    sudo apt-get install -y libopenmpi-dev libnvinfer10 cuda-toolkit-13-0
 
     # ── CUDA runtime setup ───────────────────────────────────────────────────
     if [ -d "/usr/local/cuda-13.0" ]; then
