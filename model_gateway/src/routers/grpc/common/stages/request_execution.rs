@@ -373,8 +373,7 @@ impl RequestExecutionStage {
             )
         })?;
 
-        // Note: decode success is recorded when stream completes in response processing
-        // We only record failure here if the stream fails to start
+        workers.record_outcome_decode(true);
 
         Ok(ExecutionResult::Single {
             stream: decode_stream,
