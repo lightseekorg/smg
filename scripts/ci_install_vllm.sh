@@ -65,4 +65,8 @@ echo "Installing flashinfer..."
 python3 -m pip uninstall -y flashinfer flashinfer-python flashinfer-cubin flashinfer-jit-cache 2>/dev/null || true
 python3 -m pip install flashinfer-python==0.5.3 flashinfer-cubin==0.5.3
 
+# Install nixl for vLLM PD disaggregation (NIXL KV transfer)
+echo "Installing nixl..."
+python3 -m pip install nixl
+
 echo "vLLM installation complete"
