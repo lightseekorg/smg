@@ -267,6 +267,8 @@ jobs:
         with:
           path: /tmp/trtllm-wheel
           key: trtllm-wheel-${{ runner.os }}-cuda13-${{ hashFiles('scripts/ci_install_trtllm.sh') }}
+          restore-keys: |
+            trtllm-wheel-${{ runner.os }}-cuda13-
 
       - name: Install inference backend
         run: |
