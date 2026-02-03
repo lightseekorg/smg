@@ -83,6 +83,11 @@ jobs:
         if: always() && steps.cache-wheel.outputs.cache-hit != 'true'
         run: sccache --show-stats
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - name: Test wheel install
         run: |
           pip install bindings/python/dist/*.whl
