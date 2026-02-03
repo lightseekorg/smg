@@ -236,11 +236,7 @@ impl WorkerSelectionStage {
 
         // Determine the runtime type from prefill workers.
         // All workers in a PD pair must use the same runtime.
-        let first_runtime = all_prefill
-            .first()?
-            .metadata()
-            .runtime_type
-            .clone();
+        let first_runtime = all_prefill.first()?.metadata().runtime_type.clone();
 
         // Check for mixed runtimes in both prefill and decode pools
         let prefill_mixed = all_prefill

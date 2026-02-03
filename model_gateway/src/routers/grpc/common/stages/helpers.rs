@@ -15,12 +15,10 @@ use crate::{
 ///
 /// Only SGLang uses bootstrap-based PD. vLLM PD uses NIXL for transparent
 /// KV transfer and does not need metadata injection.
-///
-/// Returns `true` if metadata was injected, `false` otherwise.
 pub(crate) fn maybe_inject_pd_metadata(
     request: &mut ProtoGenerateRequest,
     workers: &WorkerSelection,
-) -> bool {
+) {
     if let WorkerSelection::Dual {
         prefill,
         runtime_type,
@@ -29,10 +27,8 @@ pub(crate) fn maybe_inject_pd_metadata(
     {
         if *runtime_type == RuntimeType::Sglang {
             inject_sglang_bootstrap_metadata(request, prefill);
-            return true;
         }
     }
-    false
 }
 
 /// Inject bootstrap metadata into a SGLang gRPC request.
