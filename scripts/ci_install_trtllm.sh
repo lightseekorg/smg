@@ -147,6 +147,32 @@ print('FindTensorRT.cmake patched')
 "
 fi
 
+# ── Patch FindNCCL.cmake ─────────────────────────────────────────────────────
+# CMake needs NO_CMAKE_FIND_ROOT_PATH to bypass Conan toolchain restrictions
+NCCL_CMAKE_FILE="cpp/cmake/modules/FindNCCL.cmake"
+if [ -f "$NCCL_CMAKE_FILE" ]; then
+    echo "Patching FindNCCL.cmake for Conan compatibility..."
+    python3 -c "
+import pathlib
+import re
+
+p = pathlib.Path('$NCCL_CMAKE_FILE')
+text = p.read_text()
+
+# Add NO_CMAKE_FIND_ROOT_PATH to all find_path and find_library calls
+# This is needed because Conan toolchain restricts search paths
+for pattern in [r'(find_path\([^)]*)\)', r'(find_library\([^)]*)\)']:
+    for match in re.finditer(pattern, text, re.DOTALL):
+        block = match.group(0)
+        if 'NO_CMAKE_FIND_ROOT_PATH' not in block:
+            patched = block[:-1] + '\n  NO_CMAKE_FIND_ROOT_PATH)'
+            text = text.replace(block, patched)
+
+p.write_text(text)
+print('FindNCCL.cmake patched')
+"
+fi
+
 # ── Build TensorRT-LLM from source ──────────────────────────────────────────
 echo "Building TensorRT-LLM from source (this may take a while)..."
 
