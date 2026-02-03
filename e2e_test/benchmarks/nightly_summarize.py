@@ -98,6 +98,12 @@ class ExperimentSummary:
         return any(r.error_rate > 0 for r in self.runs)
 
 
+def _get_float(d: dict, key: str, default: float = 0.0) -> float:
+    """Get a float value from dict, returning default if missing or None."""
+    val = d.get(key)
+    return float(val) if val is not None else default
+
+
 def parse_run_json(path: Path) -> RunResult | None:
     """Parse a single benchmark run JSON file."""
     try:
@@ -106,22 +112,25 @@ def parse_run_json(path: Path) -> RunResult | None:
 
         agg = data.get("aggregated_metrics", {})
         stats = agg.get("stats", {})
+        ttft = stats.get("ttft", {})
+        e2e = stats.get("e2e_latency", {})
+        tpot = stats.get("tpot", {})
 
         return RunResult(
             scenario=agg.get("scenario", "unknown"),
-            concurrency=agg.get("num_concurrency", 0),
-            requests_per_second=agg.get("requests_per_second", 0),
-            output_throughput=agg.get("mean_output_throughput_tokens_per_s", 0),
-            input_throughput=agg.get("mean_input_throughput_tokens_per_s", 0),
-            total_throughput=agg.get("mean_total_tokens_throughput_tokens_per_s", 0),
-            ttft_mean=stats.get("ttft", {}).get("mean", 0),
-            ttft_p99=stats.get("ttft", {}).get("p99", 0),
-            e2e_latency_mean=stats.get("e2e_latency", {}).get("mean", 0),
-            e2e_latency_p99=stats.get("e2e_latency", {}).get("p99", 0),
-            tpot_mean=stats.get("tpot", {}).get("mean", 0),
-            error_rate=agg.get("error_rate", 0),
-            num_requests=agg.get("num_requests", 0),
-            run_duration=agg.get("run_duration", 0),
+            concurrency=agg.get("num_concurrency", 0) or 0,
+            requests_per_second=_get_float(agg, "requests_per_second"),
+            output_throughput=_get_float(agg, "mean_output_throughput_tokens_per_s"),
+            input_throughput=_get_float(agg, "mean_input_throughput_tokens_per_s"),
+            total_throughput=_get_float(agg, "mean_total_tokens_throughput_tokens_per_s"),
+            ttft_mean=_get_float(ttft, "mean"),
+            ttft_p99=_get_float(ttft, "p99"),
+            e2e_latency_mean=_get_float(e2e, "mean"),
+            e2e_latency_p99=_get_float(e2e, "p99"),
+            tpot_mean=_get_float(tpot, "mean"),
+            error_rate=_get_float(agg, "error_rate"),
+            num_requests=agg.get("num_requests", 0) or 0,
+            run_duration=_get_float(agg, "run_duration"),
         )
     except Exception as e:
         print(f"Warning: Failed to parse {path}: {e}", file=sys.stderr)

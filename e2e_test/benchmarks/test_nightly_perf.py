@@ -69,12 +69,12 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, **kwargs):
 # ---------------------------------------------------------------------------
 
 _NIGHTLY_MODELS = [
-    ("llama-8b",    "Llama8b",    8, ["http", "grpc"], {}),
+    # ("llama-8b",    "Llama8b",    8, ["http", "grpc"], {}),
     # ("llama-1b",    "Llama1b",    8, ["http", "grpc"], {}),
-    ("qwen-7b",     "Qwen7b",     8, ["http", "grpc"], {}),
+    # ("qwen-7b",     "Qwen7b",     8, ["http", "grpc"], {}),
     # ("qwen-14b",    "Qwen14b",    4, ["http", "grpc"], {}),
     # ("deepseek-7b", "Deepseek7b", 8, ["http", "grpc"], {}),
-    # ("qwen-30b",    "Qwen30b",    2, ["http", "grpc"], {}),
+    ("qwen-30b",    "Qwen30b",    2, ["http", "grpc"], {}),
     # ("mistral-7b",  "Mistral7b",  8, ["http", "grpc"], {}),
     # ("gpt-oss",     "GptOss",     4, ["http"], {}),  # Skip gRPC (vLLM not supported)
     # ("llama-4-maverick-17b", "Llama4Maverick", 1, ["http", "grpc"], {}),  # 1 worker uses all 8 GPUs (tp=8)

@@ -19,7 +19,7 @@ on:
 
 concurrency:
   group: nightly-benchmark
-  cancel-in-progress: false
+  cancel-in-progress: true # TODO: revert before merge — enable concurrency
 
 permissions:
   contents: read
@@ -176,9 +176,9 @@ jobs:
       max-parallel: 1
       matrix:
         model:
-          - { id: llama-8b,    test_class: TestNightlyLlama8bMulti }
+          #- { id: llama-8b,    test_class: TestNightlyLlama8bMulti }
           # - { id: llama-1b,    test_class: TestNightlyLlama1bMulti }
-          - { id: qwen-7b,     test_class: TestNightlyQwen7bMulti }
+          # - { id: qwen-7b,     test_class: TestNightlyQwen7bMulti }
           # - { id: qwen-14b,    test_class: TestNightlyQwen14bMulti }
           # - { id: deepseek-7b, test_class: TestNightlyDeepseek7bMulti }
           # - { id: qwen-30b,    test_class: TestNightlyQwen30bMulti }
