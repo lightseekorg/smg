@@ -227,7 +227,9 @@ fi
 
 # ── Build or install TensorRT-LLM ─────────────────────────────────────────────
 TRTLLM_WHEEL_CACHE="/tmp/trtllm-wheel"
-CACHED_WHEEL=$(find "$TRTLLM_WHEEL_CACHE" -name "tensorrt_llm*.whl" 2>/dev/null | head -1)
+# Create cache directory if it doesn't exist (find fails with pipefail if dir missing)
+mkdir -p "$TRTLLM_WHEEL_CACHE"
+CACHED_WHEEL=$(find "$TRTLLM_WHEEL_CACHE" -name "tensorrt_llm*.whl" 2>/dev/null | head -1 || true)
 
 if [ -n "$CACHED_WHEEL" ] && [ -f "$CACHED_WHEEL" ]; then
     echo "=== Using cached TRT-LLM wheel: $CACHED_WHEEL ==="
