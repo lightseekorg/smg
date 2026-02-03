@@ -1134,9 +1134,10 @@ class ModelPool:
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu_slot.cuda_visible_devices()
 
-        # For PD mode, each worker needs a unique NIXL side-channel port
+        # For PD mode, each worker needs a unique NIXL side-channel port.
+        # Use port as offset to ensure uniqueness, with min bound to stay in valid range.
         if worker_type in (WorkerType.PREFILL, WorkerType.DECODE):
-            nixl_side_channel_port = 5600 + (port - 50051)
+            nixl_side_channel_port = max(5600, 5600 + (port - 50051))
             env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(nixl_side_channel_port)
 
         # Build vLLM gRPC command
