@@ -19,6 +19,7 @@ import os
 
 import pytest
 from infra import get_runtime
+from infra.model_specs import get_model_spec
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +37,7 @@ _TEST_TRAFFIC_SCENARIO = "D(100,100)"
 _TEST_MAX_REQUESTS = 10
 
 
-def _run_nightly(setup_backend, genai_bench_runner, model_id, **kwargs):
+def _run_nightly(setup_backend, genai_bench_runner, model_id, worker_count=1, **kwargs):
     """Run nightly benchmark for a model with genai-bench defaults."""
     backend, model_path, client, gateway = setup_backend
 
@@ -45,10 +46,18 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, **kwargs):
     # Map to genai-bench expected case (SGLang, vLLM)
     runtime_display = {"sglang": "SGLang", "vllm": "vLLM"}.get(runtime, runtime)
     gpu_type = os.environ.get("GPU_TYPE", "H200")
-    gpu_count = int(os.environ.get("GPU_COUNT", "8"))
 
-    # Include runtime in folder name to distinguish sglang vs vllm results
-    experiment_folder = f"nightly_{model_id}_{backend}_{runtime}"
+    # Get tp (tensor parallelism) from model spec - this is GPUs per worker
+    model_spec = get_model_spec(model_id)
+    tp_per_worker = model_spec.get("tp", 1)
+
+    # Determine worker type and GPU count
+    worker_type = "single" if worker_count == 1 else "multi"
+    # Total GPU count = tp * workers
+    gpu_count = tp_per_worker * worker_count
+
+    # Include runtime and worker type in folder name
+    experiment_folder = f"nightly_{model_id}_{backend}_{runtime}_{worker_type}"
 
     if _TEST_MODE:
         genai_bench_runner(
@@ -107,6 +116,8 @@ _NIGHTLY_MODELS = [
 
 def _make_test_class(model_id, worker_count, backends, extra_kwargs):
     """Create a nightly benchmark test class for a model/worker configuration."""
+    # Capture worker_count in closure for the test method
+    _worker_count = worker_count
 
     @pytest.mark.nightly
     @pytest.mark.e2e
@@ -116,7 +127,7 @@ def _make_test_class(model_id, worker_count, backends, extra_kwargs):
     @pytest.mark.parametrize("setup_backend", backends, indirect=True)
     class _NightlyTest:
         def test_nightly_perf(self, setup_backend, genai_bench_runner):
-            _run_nightly(setup_backend, genai_bench_runner, model_id, **extra_kwargs)
+            _run_nightly(setup_backend, genai_bench_runner, model_id, worker_count=_worker_count, **extra_kwargs)
 
     return _NightlyTest
 

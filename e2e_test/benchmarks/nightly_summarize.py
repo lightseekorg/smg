@@ -59,9 +59,10 @@ def _get_float(d: dict, key: str, default: float = 0.0) -> float:
 def parse_folder_name(folder_name: str) -> dict:
     """Parse experiment info from folder name.
 
-    Expected patterns:
-    - nightly_llama-8b_http_sglang -> model=llama-8b, protocol=http, runtime=sglang
-    - nightly_llama-8b_grpc_vllm -> model=llama-8b, protocol=grpc, runtime=vllm
+    Expected patterns (newest to oldest):
+    - nightly_llama-8b_http_sglang_single -> model=llama-8b, protocol=http, runtime=sglang, worker_type=single
+    - nightly_llama-8b_grpc_vllm_multi -> model=llama-8b, protocol=grpc, runtime=vllm, worker_type=multi
+    - nightly_llama-8b_http_sglang -> model=llama-8b, protocol=http, runtime=sglang (worker_type=single)
     - nightly_llama-8b_http (legacy) -> model=llama-8b, protocol=http
     """
     info = {"model": "unknown", "protocol": "unknown", "runtime": None, "worker_type": "single"}
@@ -69,12 +70,17 @@ def parse_folder_name(folder_name: str) -> dict:
     # Remove nightly_ prefix
     name = folder_name.replace("nightly_", "")
 
-    # Try new format: model_protocol_runtime (e.g., llama-8b_grpc_sglang)
-    # Split from the right to handle model names with underscores
-    parts = name.rsplit("_", 2)
+    # Try newest format: model_protocol_runtime_worker_type (e.g., llama-8b_grpc_sglang_single)
+    parts = name.rsplit("_", 3)
 
-    if len(parts) >= 3 and parts[-1] in ("sglang", "vllm"):
-        # New format: model_protocol_runtime
+    if len(parts) >= 4 and parts[-1] in ("single", "multi") and parts[-2] in ("sglang", "vllm"):
+        # Newest format: model_protocol_runtime_worker_type
+        info["worker_type"] = parts[-1]
+        info["runtime"] = parts[-2]
+        info["protocol"] = parts[-3]
+        info["model"] = "_".join(parts[:-3])
+    elif len(parts) >= 3 and parts[-1] in ("sglang", "vllm"):
+        # Old format without worker_type: model_protocol_runtime
         info["runtime"] = parts[-1]
         info["protocol"] = parts[-2]
         info["model"] = "_".join(parts[:-2])
@@ -122,8 +128,8 @@ def parse_experiment(folder: Path) -> ExperimentInfo | None:
     # Normalize to lowercase for consistent grouping
     runtime = runtime.lower() if runtime else "sglang"
 
-    # Determine worker type
-    worker_type = "multi" if "multi" in folder.name.lower() else "single"
+    # Determine worker type from folder name parsing
+    worker_type = folder_info.get("worker_type", "single")
 
     # Get GPU info
     gpu_type = meta.get("server_gpu_type") or "unknown"
@@ -290,13 +296,7 @@ def generate_summary(base_dir: Path) -> str:
     for model in sorted(by_model.keys()):
         model_exps = by_model[model]
 
-        # Get GPU info from first experiment
-        first_exp = next(iter(model_exps.values()))
-        gpu_info = f"{first_exp.gpu_count}x {first_exp.gpu_type}" if first_exp.gpu_type != "unknown" else ""
-
         lines.append(f"### {model}")
-        if gpu_info:
-            lines.append(f"*{gpu_info}*")
         lines.append("")
 
         for table_key, table_title in table_order:
@@ -305,8 +305,11 @@ def generate_summary(base_dir: Path) -> str:
 
             exp = model_exps[table_key]
 
+            # Show GPU info per runtime/worker combination
+            gpu_info = f" ({exp.gpu_count}x {exp.gpu_type})" if exp.gpu_type != "unknown" else ""
+
             lines.append(f"<details>")
-            lines.append(f"<summary><b>{table_title}</b></summary>")
+            lines.append(f"<summary><b>{table_title}</b>{gpu_info}</summary>")
             lines.append("")
             lines.extend(generate_table(exp.runs))
             lines.append("</details>")
