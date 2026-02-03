@@ -37,7 +37,6 @@ pub struct MeshController {
 }
 
 impl MeshController {
-
     /// Create a new MeshController with stores and sync manager
     pub fn new(
         state: ClusterState,

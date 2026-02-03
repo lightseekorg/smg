@@ -21,6 +21,7 @@ use super::{
         record_snapshot_duration, record_snapshot_trigger, update_peer_connections,
         ConvergenceTracker,
     },
+    mtls::MTLSManager,
     node_state_machine::NodeStateMachine,
     partition::PartitionDetector,
     service::{
@@ -46,6 +47,7 @@ pub struct GossipService {
     sync_manager: Option<Arc<MeshSyncManager>>, // Optional sync manager for applying remote updates
     state_machine: Option<Arc<NodeStateMachine>>,
     partition_detector: Option<Arc<PartitionDetector>>,
+    mtls_manager: Option<Arc<MTLSManager>>,
 }
 
 impl GossipService {
@@ -235,6 +237,7 @@ impl GossipService {
             sync_manager: None,
             state_machine: None,
             partition_detector: None,
+            mtls_manager: None,
         }
     }
 
@@ -261,12 +264,21 @@ impl GossipService {
         self
     }
 
+    pub fn with_mtls_manager(mut self, mtls_manager: Arc<crate::mtls::MTLSManager>) -> Self {
+        self.mtls_manager = Some(mtls_manager);
+        self
+    }
+
     pub async fn serve_ping_with_shutdown<F: std::future::Future<Output = ()>>(
         self,
         signal: F,
     ) -> Result<()> {
         let listen_addr = self.self_addr;
         let service = GossipServer::new(self);
+
+        // For now, start without TLS support
+        // TODO: Implement TLS support using tonic's transport layer
+        // The mTLS manager is available but needs proper integration with tonic's transport
         Server::builder()
             .add_service(service)
             .serve_with_shutdown(listen_addr, signal)
@@ -723,6 +735,7 @@ impl Gossip for GossipService {
                                         sync_manager: sync_manager.clone(),
                                         state_machine: None,
                                         partition_detector: None,
+                                        mtls_manager: None,
                                     };
                                     let chunks =
                                         service.create_snapshot_chunks(store_type, 100).await; // chunk_size = 100 entries

@@ -30,6 +30,7 @@ mod tests;
 // Re-export commonly used types
 pub use crdt::SKey;
 pub use metrics::init_mesh_metrics;
+pub use mtls::{MTLSConfig, MTLSManager, OptionalMTLSManager};
 pub use partition::PartitionDetector;
 pub use rate_limit_window::RateLimitWindow;
 pub use service::{gossip, ClusterState, MeshServerBuilder, MeshServerConfig, MeshServerHandler};

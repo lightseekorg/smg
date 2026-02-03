@@ -23,6 +23,7 @@ use gossip::{
 use crate::{
     controller::MeshController,
     crdt::SKey,
+    mtls::{MTLSConfig, MTLSManager},
     node_state_machine::{ConvergenceConfig, NodeStateMachine},
     partition::PartitionDetector,
     ping_server::GossipService,
@@ -36,6 +37,7 @@ pub struct MeshServerConfig {
     pub self_name: String,
     pub self_addr: SocketAddr,
     pub init_peer: Option<SocketAddr>,
+    pub mtls_config: Option<MTLSConfig>,
 }
 
 /// MeshServerHandler
@@ -264,6 +266,7 @@ pub struct MeshServerBuilder {
     self_name: String,
     self_addr: SocketAddr,
     init_peer: Option<SocketAddr>,
+    mtls_manager: Option<Arc<MTLSManager>>,
 }
 
 impl MeshServerBuilder {
@@ -285,7 +288,13 @@ impl MeshServerBuilder {
             self_name,
             self_addr,
             init_peer,
+            mtls_manager: None,
         }
+    }
+
+    pub fn with_mtls(mut self, mtls_config: MTLSConfig) -> Self {
+        self.mtls_manager = Some(Arc::new(MTLSManager::new(mtls_config)));
+        self
     }
 
     pub fn build(&self) -> (MeshServer, MeshServerHandler) {
@@ -303,6 +312,7 @@ impl MeshServerBuilder {
                 self.self_addr,
                 self.init_peer,
                 signal_rx,
+                self.mtls_manager.clone(),
             ),
             MeshServerHandler::new(
                 self.state.clone(),
@@ -318,7 +328,12 @@ impl MeshServerBuilder {
 
 impl From<&MeshServerConfig> for MeshServerBuilder {
     fn from(value: &MeshServerConfig) -> Self {
-        MeshServerBuilder::new(value.self_name.clone(), value.self_addr, value.init_peer)
+        let mut builder =
+            MeshServerBuilder::new(value.self_name.clone(), value.self_addr, value.init_peer);
+        if let Some(mtls_config) = &value.mtls_config {
+            builder = builder.with_mtls(mtls_config.clone());
+        }
+        builder
     }
 }
 
@@ -330,6 +345,7 @@ pub struct MeshServer {
     self_addr: SocketAddr,
     init_peer: Option<SocketAddr>,
     signal_rx: tokio::sync::watch::Receiver<()>,
+    mtls_manager: Option<Arc<MTLSManager>>,
 }
 
 impl MeshServer {
@@ -341,6 +357,7 @@ impl MeshServer {
         self_addr: SocketAddr,
         init_peer: Option<SocketAddr>,
         signal_rx: tokio::sync::watch::Receiver<()>,
+        mtls_manager: Option<Arc<MTLSManager>>,
     ) -> Self {
         MeshServer {
             state,
@@ -350,6 +367,7 @@ impl MeshServer {
             self_addr,
             init_peer,
             signal_rx,
+            mtls_manager,
         }
     }
 
@@ -382,6 +400,12 @@ impl MeshServer {
         service = service.with_sync_manager(self.sync_manager.clone());
 
         service = service.with_partition_detector(partition_detector);
+
+        // Add mTLS support if configured
+        if let Some(mtls_manager) = self.mtls_manager.clone() {
+            service = service.with_mtls_manager(mtls_manager);
+        }
+
         let controller = self.build_controller();
 
         let mut service_shutdown = self.signal_rx.clone();
