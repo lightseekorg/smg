@@ -899,7 +899,7 @@ class ModelPool:
                 "Model %s not running, launching on-demand with MRU eviction if needed",
                 key,
             )
-            if not self._ensure_gpu_available(model_id):
+            if not self._ensure_gpu_available(model_id, mode):
                 # GPUs not available after eviction - signal retry
                 return None
 
@@ -1004,11 +1004,12 @@ class ModelPool:
             if inst.gpu_slot:
                 freed_gpus += len(inst.gpu_slot.gpu_ids)
 
-    def _ensure_gpu_available(self, model_id: str) -> bool:
+    def _ensure_gpu_available(self, model_id: str, mode: ConnectionMode) -> bool:
         """Ensure GPU is available for a model, evicting if needed.
 
         Args:
             model_id: Model ID that needs GPU resources.
+            mode: Connection mode (HTTP or gRPC) being launched.
 
         Returns:
             True if GPUs are available, False if not (all in use by other tests).
@@ -1016,11 +1017,13 @@ class ModelPool:
         spec = get_model_spec(model_id)
         required_gpus = spec.get("tp", 1)
 
-        # Exclude REGULAR workers of same model from eviction (keep them)
-        # but allow evicting PD workers (PREFILL/DECODE) to free GPUs
+        # Exclude REGULAR workers of same model AND same mode from eviction.
+        # Different modes (HTTP vs gRPC) are separate instances that can be evicted.
+        # Also allow evicting PD workers (PREFILL/DECODE) to free GPUs.
         self._evict_for_gpus(
             required_gpus,
             exclude_model_id=model_id,
+            exclude_mode=mode,
             exclude_worker_types={WorkerType.REGULAR},
         )
 

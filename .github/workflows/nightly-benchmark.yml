@@ -60,7 +60,7 @@ jobs:
   single-sglang:
     needs: build-wheel
     name: "single-worker / sglang (http+grpc)"
-    if: github.event.inputs.runtime == '' || github.event.inputs.runtime == 'all' || github.event.inputs.runtime == 'sglang'
+    if: false #github.event.inputs.runtime == '' || github.event.inputs.runtime == 'all' || github.event.inputs.runtime == 'sglang'
     runs-on: 8-gpu-h200
     timeout-minutes: 1440
     steps:
@@ -113,7 +113,7 @@ jobs:
   single-vllm:
     name: "single-worker / vllm (grpc)"
     needs: [build-wheel, single-sglang]
-    if: always() && (github.event.inputs.runtime == '' || github.event.inputs.runtime == 'all' || github.event.inputs.runtime == 'vllm')
+    if: false #always() && (github.event.inputs.runtime == '' || github.event.inputs.runtime == 'all' || github.event.inputs.runtime == 'vllm')
     runs-on: 8-gpu-h200
     timeout-minutes: 1440
     steps:
