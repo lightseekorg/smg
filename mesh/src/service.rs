@@ -57,34 +57,6 @@ pub struct MeshServerHandler {
 }
 
 impl MeshServerHandler {
-    pub fn new(
-        state: ClusterState,
-        stores: Arc<StateStores>,
-        sync_manager: Arc<MeshSyncManager>,
-        self_name: &str,
-        self_addr: SocketAddr,
-        signal_tx: tokio::sync::watch::Sender<()>,
-    ) -> Self {
-        let partition_detector = Some(Arc::new(PartitionDetector::default()));
-        let state_machine = Arc::new(NodeStateMachine::new(
-            stores.clone(),
-            ConvergenceConfig::default(),
-        ));
-        // Initialize rate-limit hash ring with current membership
-        sync_manager.update_rate_limit_membership();
-        Self {
-            state,
-            stores,
-            sync_manager,
-            self_name: self_name.to_string(),
-            _self_addr: self_addr,
-            signal_tx,
-            partition_detector,
-            state_machine: Some(state_machine),
-            rate_limit_task_handle: std::sync::Mutex::new(None),
-        }
-    }
-
     /// Get partition detector
     pub fn partition_detector(&self) -> Option<&Arc<PartitionDetector>> {
         self.partition_detector.as_ref()
@@ -303,25 +275,34 @@ impl MeshServerBuilder {
             self.stores.clone(),
             self.self_name.clone(),
         ));
+        let state_machine = Arc::new(NodeStateMachine::new(
+            self.stores.clone(),
+            ConvergenceConfig::default(),
+        ));
+        // Initialize rate-limit hash ring with current membership
+        sync_manager.update_rate_limit_membership();
         (
-            MeshServer::new(
-                self.state.clone(),
-                self.stores.clone(),
-                sync_manager.clone(),
-                &self.self_name,
-                self.self_addr,
-                self.init_peer,
+            MeshServer {
+                state: self.state.clone(),
+                stores: self.stores.clone(),
+                sync_manager: sync_manager.clone(),
+                self_name: self.self_name.clone(),
+                self_addr: self.self_addr,
+                init_peer: self.init_peer,
                 signal_rx,
-                self.mtls_manager.clone(),
-            ),
-            MeshServerHandler::new(
-                self.state.clone(),
-                self.stores.clone(),
+                mtls_manager: self.mtls_manager.clone(),
+            },
+            MeshServerHandler {
+                state: self.state.clone(),
+                stores: self.stores.clone(),
                 sync_manager,
-                &self.self_name,
-                self.self_addr,
+                self_name: self.self_name.clone(),
+                _self_addr: self.self_addr,
                 signal_tx,
-            ),
+                partition_detector: Some(Arc::new(PartitionDetector::default())),
+                state_machine: Some(state_machine),
+                rate_limit_task_handle: std::sync::Mutex::new(None),
+            },
         )
     }
 }
@@ -349,28 +330,6 @@ pub struct MeshServer {
 }
 
 impl MeshServer {
-    pub fn new(
-        state: ClusterState,
-        stores: Arc<StateStores>,
-        sync_manager: Arc<MeshSyncManager>,
-        self_name: &str,
-        self_addr: SocketAddr,
-        init_peer: Option<SocketAddr>,
-        signal_rx: tokio::sync::watch::Receiver<()>,
-        mtls_manager: Option<Arc<MTLSManager>>,
-    ) -> Self {
-        MeshServer {
-            state,
-            stores,
-            sync_manager,
-            self_name: self_name.to_string(),
-            self_addr,
-            init_peer,
-            signal_rx,
-            mtls_manager,
-        }
-    }
-
     fn build_ping_server(&self) -> GossipService {
         GossipService::new(self.state.clone(), self.self_addr, &self.self_name)
     }
