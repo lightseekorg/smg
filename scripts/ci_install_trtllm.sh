@@ -41,13 +41,12 @@ if [ -d "/usr/local/cuda-13.0" ]; then
 else
     export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 fi
-export PATH="$CUDA_HOME/bin:$PATH"
-export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH:-}"
-
-# Re-activate venv to keep venv Python first in PATH
+# Re-activate venv first, then add CUDA to PATH so it takes precedence
 if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH:-}"
 
 # Debug: print what CUDA we actually have
 echo "=== CUDA diagnostics ==="
