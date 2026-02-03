@@ -297,68 +297,139 @@ def _setup_vllm_pd_backend(
 ):
     """Setup vLLM PD disaggregation backend.
 
-    Launches vLLM gRPC workers with NIXL KV transfer configured
-    as kv_producer (prefill) and kv_consumer (decode).
+    Uses the same pattern as SGLang PD: WorkerIdentity with ConnectionMode.GRPC
+    and WorkerType.PREFILL/DECODE, routed through launch_workers.
+
+    vLLM PD uses NIXL for KV transfer (configured in _launch_vllm_grpc_worker).
     """
     import openai
-    from infra import Gateway
+    from infra import ConnectionMode, Gateway, WorkerIdentity, WorkerType
 
     logger.info("Setting up vLLM PD backend for model %s", model_id)
 
+    # Get PD configuration from workers marker
     num_prefill = workers_config.get("prefill") or 1
     num_decode = workers_config.get("decode") or 1
     logger.info("vLLM PD config: %d prefill, %d decode workers", num_prefill, num_decode)
 
-    prefills = []
-    decodes = []
-    gateway = Gateway()
+    # Try to use pre-launched PD workers, or launch additional ones if needed
+    # get_workers_by_type auto-acquires all returned workers
+    existing_prefills = model_pool.get_workers_by_type(model_id, WorkerType.PREFILL)
+    existing_decodes = model_pool.get_workers_by_type(model_id, WorkerType.DECODE)
 
-    try:
-        for i in range(num_prefill):
-            instance = model_pool.launch_vllm_pd_worker(
-                model_id, role="kv_producer", index=i
-            )
-            if instance is None:
-                pytest.fail(f"Failed to launch vLLM prefill worker {i}")
-            prefills.append(instance)
+    # Calculate how many more we need
+    missing_prefill = max(0, num_prefill - len(existing_prefills))
+    missing_decode = max(0, num_decode - len(existing_decodes))
 
-        for i in range(num_decode):
-            instance = model_pool.launch_vllm_pd_worker(
-                model_id, role="kv_consumer", index=i
-            )
-            if instance is None:
-                pytest.fail(f"Failed to launch vLLM decode worker {i}")
-            decodes.append(instance)
-
-        model_path = prefills[0].model_path
-
-        gateway.start(
-            prefill_workers=prefills,
-            decode_workers=decodes,
-            policy=gateway_config["policy"],
-            timeout=gateway_config["timeout"],
-            extra_args=gateway_config["extra_args"],
-        )
-
-        client = openai.OpenAI(
-            base_url=f"{gateway.base_url}/v1",
-            api_key="not-used",
-        )
-
+    if missing_prefill == 0 and missing_decode == 0:
+        prefills = existing_prefills[:num_prefill]
+        decodes = existing_decodes[:num_decode]
+        # Release excess workers we won't use
+        for w in existing_prefills[num_prefill:]:
+            w.release()
+        for w in existing_decodes[num_decode:]:
+            w.release()
         logger.info(
-            "Setup vLLM PD backend: model=%s, %d prefill + %d decode workers, "
-            "gateway=%s, policy=%s",
-            model_id,
+            "Using pre-launched vLLM PD workers: %d prefill, %d decode",
             len(prefills),
             len(decodes),
-            gateway.base_url,
-            gateway_config["policy"],
+        )
+    else:
+        # Build WorkerIdentity list for missing workers (use GRPC mode for vLLM)
+        workers_to_launch: list[WorkerIdentity] = []
+        for i in range(missing_prefill):
+            workers_to_launch.append(
+                WorkerIdentity(
+                    model_id,
+                    ConnectionMode.GRPC,
+                    WorkerType.PREFILL,
+                    len(existing_prefills) + i,
+                )
+            )
+        for i in range(missing_decode):
+            workers_to_launch.append(
+                WorkerIdentity(
+                    model_id,
+                    ConnectionMode.GRPC,
+                    WorkerType.DECODE,
+                    len(existing_decodes) + i,
+                )
+            )
+
+        logger.info(
+            "Have %d/%d prefill, %d/%d decode. Launching %d more workers",
+            len(existing_prefills),
+            num_prefill,
+            len(existing_decodes),
+            num_decode,
+            len(workers_to_launch),
+        )
+        new_instances = model_pool.launch_workers(
+            workers_to_launch, startup_timeout=300
         )
 
+        if not new_instances:
+            # Release any existing workers we acquired
+            for w in existing_prefills + existing_decodes:
+                w.release()
+            pytest.fail(
+                f"Failed to launch vLLM PD workers: needed {len(workers_to_launch)} workers "
+                f"but could not allocate GPUs (all in use or timeout)"
+            )
+
+        # Acquire newly launched instances (launch_workers doesn't auto-acquire)
+        for inst in new_instances:
+            inst.acquire()
+
+        new_prefills = [w for w in new_instances if w.worker_type == WorkerType.PREFILL]
+        new_decodes = [w for w in new_instances if w.worker_type == WorkerType.DECODE]
+        prefills = existing_prefills + new_prefills
+        decodes = existing_decodes + new_decodes
+
+    # All workers in prefills and decodes are now acquired
+
+    if not prefills or not decodes:
+        # This shouldn't happen but guard against it
+        for w in prefills + decodes:
+            w.release()
+        pytest.fail(
+            f"vLLM PD setup incomplete: have {len(prefills)} prefill, {len(decodes)} decode "
+            f"(need {num_prefill} prefill, {num_decode} decode)"
+        )
+
+    model_path = prefills[0].model_path
+
+    # Launch PD gateway
+    gateway = Gateway()
+    gateway.start(
+        prefill_workers=prefills,
+        decode_workers=decodes,
+        policy=gateway_config["policy"],
+        timeout=gateway_config["timeout"],
+        extra_args=gateway_config["extra_args"],
+    )
+
+    client = openai.OpenAI(
+        base_url=f"{gateway.base_url}/v1",
+        api_key="not-used",
+    )
+
+    logger.info(
+        "Setup vLLM PD backend: model=%s, %d prefill + %d decode workers, "
+        "gateway=%s, policy=%s",
+        model_id,
+        len(prefills),
+        len(decodes),
+        gateway.base_url,
+        gateway_config["policy"],
+    )
+
+    try:
         yield "vllm_pd", model_path, client, gateway
     finally:
-        logger.info("Tearing down vLLM PD gateway and workers")
+        logger.info("Tearing down vLLM PD gateway")
         gateway.shutdown()
+        # Release references to allow eviction
         for worker in prefills + decodes:
             worker.release()
 
