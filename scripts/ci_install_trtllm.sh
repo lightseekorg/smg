@@ -222,21 +222,38 @@ print('FindNCCL.cmake patched to use NCCL_ROOT hint')
 PYTHON_EOF
 fi
 
-# ── Build TensorRT-LLM from source ──────────────────────────────────────────
-echo "Building TensorRT-LLM from source (this may take a while)..."
+# ── Build or install TensorRT-LLM ─────────────────────────────────────────────
+TRTLLM_WHEEL_CACHE="/tmp/trtllm-wheel"
+CACHED_WHEEL=$(find "$TRTLLM_WHEEL_CACHE" -name "tensorrt_llm*.whl" 2>/dev/null | head -1)
 
-python3 scripts/build_wheel.py \
-    --cuda_architectures "90-real" \
-    --trt_root /usr/local/tensorrt \
-    --nccl_root "$NCCL_ROOT" \
-    --install \
-    --no-venv \
-    -j "$(nproc)" \
-    -D "ENABLE_UCX=OFF" \
-    --clean
+if [ -n "$CACHED_WHEEL" ] && [ -f "$CACHED_WHEEL" ]; then
+    echo "=== Using cached TRT-LLM wheel: $CACHED_WHEEL ==="
+    pip install --no-cache-dir "$CACHED_WHEEL"
+    cd -
+else
+    echo "=== Building TensorRT-LLM from source (this may take a while)... ==="
 
-# Return to repo dir
-cd -
+    python3 scripts/build_wheel.py \
+        --cuda_architectures "90-real" \
+        --trt_root /usr/local/tensorrt \
+        --nccl_root "$NCCL_ROOT" \
+        --install \
+        --no-venv \
+        -j "$(nproc)" \
+        -D "ENABLE_UCX=OFF" \
+        --clean
+
+    # Return to repo dir
+    cd -
+
+    # Cache the built wheel for future runs
+    mkdir -p "$TRTLLM_WHEEL_CACHE"
+    BUILT_WHEEL=$(find "$TRTLLM_DIR/build" -name "tensorrt_llm*.whl" 2>/dev/null | head -1)
+    if [ -n "$BUILT_WHEEL" ]; then
+        cp "$BUILT_WHEEL" "$TRTLLM_WHEEL_CACHE/"
+        echo "Cached wheel to: $TRTLLM_WHEEL_CACHE/$(basename "$BUILT_WHEEL")"
+    fi
+fi
 
 # ── Add pip-installed NVIDIA libraries to LD_LIBRARY_PATH ────────────────────
 NVIDIA_LIB_DIRS=$(find "$SITE_PACKAGES/nvidia" -name "lib" -type d 2>/dev/null | sort -u | paste -sd':')
