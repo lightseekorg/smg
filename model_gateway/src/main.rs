@@ -79,16 +79,16 @@ impl std::fmt::Display for Backend {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "sglang-router", alias = "smg", alias = "amg")]
-#[command(about = "SGLang Model Gateway - High-performance inference gateway")]
+#[command(name = "shepherd-model-gateway", alias = "smg", alias = "amg")]
+#[command(about = "Shepherd Model Gateway - High-performance inference gateway")]
 #[command(args_conflicts_with_subcommands = true)]
 #[command(long_about = r#"
-SGLang Model Gateway - Rust-based inference gateway
+Shepherd Model Gateway - Rust-based inference gateway
 
 Usage:
-  smg launch [OPTIONS]     Launch router (short command)
-  amg launch [OPTIONS]     Launch router (alternative)
-  sglang-router [OPTIONS]  Launch router (full name)
+  smg launch [OPTIONS]             Launch gateway (short command)
+  amg launch [OPTIONS]             Launch gateway (alternative)
+  shepherd-model-gateway launch [OPTIONS] Launch gateway (full name)
 
 Examples:
   # Regular mode
