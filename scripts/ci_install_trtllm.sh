@@ -95,6 +95,18 @@ else
     echo "WARNING: Could not find pip-installed NCCL header"
 fi
 
+# Create libnccl.so symlink - pip package only has libnccl.so.2, but CMake looks for libnccl.so
+NCCL_LIB=$(find "$NCCL_ROOT" -name "libnccl.so.2" 2>/dev/null | head -1)
+if [ -n "$NCCL_LIB" ]; then
+    NCCL_LIB_DIR=$(dirname "$NCCL_LIB")
+    echo "Found NCCL library at: $NCCL_LIB"
+    ln -sf "$NCCL_LIB" "$NCCL_LIB_DIR/libnccl.so"
+    echo "Created symlink: $NCCL_LIB_DIR/libnccl.so -> libnccl.so.2"
+    ls -la "$NCCL_LIB_DIR"/libnccl*
+else
+    echo "WARNING: Could not find pip-installed NCCL library"
+fi
+
 # ── Clone TensorRT-LLM ──────────────────────────────────────────────────────
 TRTLLM_DIR="/tmp/tensorrt-llm-src"
 if [ ! -d "$TRTLLM_DIR" ]; then
