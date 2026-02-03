@@ -429,11 +429,11 @@ async fn test_two_node_heartbeat_monitoring() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Both nodes should be alive
-    let state_a = handler_a.state.read();
-    let node_b_status = state_a.get("heartbeat_b").map(|n| n.status);
-    assert_eq!(node_b_status, Some(NodeStatus::Alive as i32));
-
-    drop(state_a);
+    {
+        let state_a = handler_a.state.read();
+        let node_b_status = state_a.get("heartbeat_b").map(|n| n.status);
+        assert_eq!(node_b_status, Some(NodeStatus::Alive as i32));
+    }
 
     // Shutdown node B abruptly
     handler_b.shutdown();
