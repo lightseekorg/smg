@@ -311,56 +311,50 @@ def _setup_vllm_pd_backend(
 
     prefills = []
     decodes = []
-
-    for i in range(num_prefill):
-        instance = model_pool.launch_vllm_pd_worker(
-            model_id, role="kv_producer", index=i
-        )
-        if instance is None:
-            # Clean up already-launched workers
-            for w in prefills:
-                w.release()
-            pytest.fail(f"Failed to launch vLLM prefill worker {i}")
-        prefills.append(instance)
-
-    for i in range(num_decode):
-        instance = model_pool.launch_vllm_pd_worker(
-            model_id, role="kv_consumer", index=i
-        )
-        if instance is None:
-            for w in prefills + decodes:
-                w.release()
-            pytest.fail(f"Failed to launch vLLM decode worker {i}")
-        decodes.append(instance)
-
-    model_path = prefills[0].model_path
-
-    # Launch PD gateway (no bootstrap port for vLLM PD workers)
     gateway = Gateway()
-    gateway.start(
-        prefill_workers=prefills,
-        decode_workers=decodes,
-        policy=gateway_config["policy"],
-        timeout=gateway_config["timeout"],
-        extra_args=gateway_config["extra_args"],
-    )
-
-    client = openai.OpenAI(
-        base_url=f"{gateway.base_url}/v1",
-        api_key="not-used",
-    )
-
-    logger.info(
-        "Setup vLLM PD backend: model=%s, %d prefill + %d decode workers, "
-        "gateway=%s, policy=%s",
-        model_id,
-        len(prefills),
-        len(decodes),
-        gateway.base_url,
-        gateway_config["policy"],
-    )
 
     try:
+        for i in range(num_prefill):
+            instance = model_pool.launch_vllm_pd_worker(
+                model_id, role="kv_producer", index=i
+            )
+            if instance is None:
+                pytest.fail(f"Failed to launch vLLM prefill worker {i}")
+            prefills.append(instance)
+
+        for i in range(num_decode):
+            instance = model_pool.launch_vllm_pd_worker(
+                model_id, role="kv_consumer", index=i
+            )
+            if instance is None:
+                pytest.fail(f"Failed to launch vLLM decode worker {i}")
+            decodes.append(instance)
+
+        model_path = prefills[0].model_path
+
+        gateway.start(
+            prefill_workers=prefills,
+            decode_workers=decodes,
+            policy=gateway_config["policy"],
+            timeout=gateway_config["timeout"],
+            extra_args=gateway_config["extra_args"],
+        )
+
+        client = openai.OpenAI(
+            base_url=f"{gateway.base_url}/v1",
+            api_key="not-used",
+        )
+
+        logger.info(
+            "Setup vLLM PD backend: model=%s, %d prefill + %d decode workers, "
+            "gateway=%s, policy=%s",
+            model_id,
+            len(prefills),
+            len(decodes),
+            gateway.base_url,
+            gateway_config["policy"],
+        )
+
         yield "vllm_pd", model_path, client, gateway
     finally:
         logger.info("Tearing down vLLM PD gateway and workers")

@@ -228,6 +228,11 @@ main() {
         error "PREFILL_PORT and DECODE_PORT must be different"
     fi
 
+    # Validate NIXL ports for vLLM
+    if [[ "$runtime" == "vllm" && "$NIXL_PREFILL_PORT" == "$NIXL_DECODE_PORT" ]]; then
+        error "NIXL_PREFILL_PORT and NIXL_DECODE_PORT must be different"
+    fi
+
     case "$runtime" in
         sglang)
             launch_sglang_pd "$model_path"
