@@ -13,7 +13,7 @@ runs:
       uses: actions/cache/restore@v4
       with:
         path: /tmp/trtllm-wheel
-        key: trtllm-wheel-${{ runner.os }}-cuda13-v2
+        key: trtllm-wheel-${{ runner.os }}-${{ hashFiles('scripts/ci_install_trtllm.sh') }}
 
     - name: Install TRT-LLM
       shell: bash
@@ -24,4 +24,4 @@ runs:
       uses: actions/cache/save@v4
       with:
         path: /tmp/trtllm-wheel
-        key: trtllm-wheel-${{ runner.os }}-cuda13-v2
+        key: trtllm-wheel-${{ runner.os }}-${{ hashFiles('scripts/ci_install_trtllm.sh') }}
