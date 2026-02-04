@@ -1,0 +1,19 @@
+name: 'Setup SGLang Backend'
+description: 'Create Python venv, restore pip cache, and install SGLang.'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python venv
+      shell: bash
+      run: bash scripts/ci_setup_python_venv.sh
+
+    - name: Restore pip cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: sglang-pip-${{ runner.os }}-${{ hashFiles('scripts/ci_install_sglang.sh') }}
+
+    - name: Install SGLang
+      shell: bash
+      run: bash scripts/ci_install_sglang.sh
