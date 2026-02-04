@@ -60,7 +60,7 @@ jobs:
   single-sglang:
     needs: build-wheel
     name: "single-worker / sglang (http+grpc)"
-    if: github.event.inputs.runtime == '' || github.event.inputs.runtime == 'all' || github.event.inputs.runtime == 'sglang'
+    if: ${{ !cancelled() && (github.event.inputs.runtime == '' || github.event.inputs.runtime == 'all' || github.event.inputs.runtime == 'sglang') }}
     runs-on: 8-gpu-h200
     timeout-minutes: 1440
     steps:
@@ -113,7 +113,7 @@ jobs:
   single-vllm:
     name: "single-worker / vllm (grpc)"
     needs: [build-wheel, single-sglang]
-    if: always() && (github.event.inputs.runtime == '' || github.event.inputs.runtime == 'all' || github.event.inputs.runtime == 'vllm')
+    if: ${{ !cancelled() && (github.event.inputs.runtime == '' || github.event.inputs.runtime == 'all' || github.event.inputs.runtime == 'vllm') }}
     runs-on: 8-gpu-h200
     timeout-minutes: 1440
     steps:
@@ -168,7 +168,7 @@ jobs:
   multi-worker:
     name: "${{ matrix.model.id }} / multi-${{ matrix.variant.id }}"
     needs: [build-wheel, single-sglang, single-vllm]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: 8-gpu-h200
     timeout-minutes: 1440
     strategy:
@@ -177,14 +177,14 @@ jobs:
       matrix:
         model:
           - { id: llama-8b,    test_class: TestNightlyLlama8bMulti }
-          # - { id: llama-1b,    test_class: TestNightlyLlama1bMulti }
-          # - { id: qwen-7b,     test_class: TestNightlyQwen7bMulti }
-          # - { id: qwen-14b,    test_class: TestNightlyQwen14bMulti }
-          # - { id: deepseek-7b, test_class: TestNightlyDeepseek7bMulti }
-          # - { id: qwen-30b,    test_class: TestNightlyQwen30bMulti }
-          # - { id: mistral-7b,  test_class: TestNightlyMistral7bMulti }
-          # - { id: gpt-oss,     test_class: TestNightlyGptOssMulti }
-          # - { id: llama-4-maverick-17b, test_class: TestNightlyLlama4MaverickMulti }
+          - { id: llama-1b,    test_class: TestNightlyLlama1bMulti }
+          - { id: qwen-7b,     test_class: TestNightlyQwen7bMulti }
+          - { id: qwen-14b,    test_class: TestNightlyQwen14bMulti }
+          - { id: deepseek-7b, test_class: TestNightlyDeepseek7bMulti }
+          - { id: qwen-30b,    test_class: TestNightlyQwen30bMulti }
+          - { id: mistral-7b,  test_class: TestNightlyMistral7bMulti }
+          - { id: gpt-oss,     test_class: TestNightlyGptOssMulti }
+          # - { id: llama-4-maverick-17b, test_class: TestNightlyLlama4MaverickMulti } # 1 worker uses all 8 GPUs (tp=8)
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false" }
           - { id: vllm,   runtime: vllm,   grpc_only: "true" }
