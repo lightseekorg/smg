@@ -19,6 +19,7 @@ from .hooks import (
     pytest_collection_modifyitems,
     pytest_configure,
     pytest_runtest_setup,
+    pytest_sessionfinish,
     validate_gpu_requirements,
 )
 
@@ -27,7 +28,7 @@ from .markers import get_marker_kwargs, get_marker_value
 
 # Fixtures (imported by conftest.py)
 from .pool import model_base_url, model_client, model_pool
-from .setup_backend import _cleanup_backend_cache, backend_router, setup_backend
+from .setup_backend import backend_router, setup_backend
 
 __all__ = [
     # Hooks
@@ -35,6 +36,7 @@ __all__ = [
     "pytest_collection_finish",
     "pytest_configure",
     "pytest_runtest_setup",
+    "pytest_sessionfinish",
     "get_pool_requirements",
     "validate_gpu_requirements",
     "is_parallel_execution",
@@ -45,7 +47,6 @@ __all__ = [
     # Backend fixtures
     "setup_backend",
     "backend_router",
-    "_cleanup_backend_cache",
     # Marker helpers
     "get_marker_value",
     "get_marker_kwargs",

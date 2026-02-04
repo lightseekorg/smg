@@ -228,10 +228,13 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
     yield value
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _cleanup_backend_cache():
-    """Cleanup all thread-cached backends at session end."""
-    yield
+def cleanup_all_cached_backends() -> None:
+    """Cleanup all thread-cached backends.
+
+    Called from pytest_sessionfinish hook to ensure it runs exactly once,
+    not per-test (which is what happens with session-scoped autouse fixtures
+    under pytest-parallel's thread model).
+    """
     with _cache_lock:
         entries = list(_thread_cache.values())
         _thread_cache.clear()

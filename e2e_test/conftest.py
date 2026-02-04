@@ -197,7 +197,6 @@ def pytest_runtest_logstart(nodeid: str, location: tuple) -> None:
 # Import fixtures - pytest discovers these by name
 # Import hooks - pytest discovers these by name
 from fixtures import (
-    _cleanup_backend_cache,
     backend_router,
     model_base_url,
     model_client,
@@ -206,6 +205,7 @@ from fixtures import (
     pytest_collection_modifyitems,
     pytest_configure,
     pytest_runtest_setup,
+    pytest_sessionfinish,
     setup_backend,
 )
 
@@ -217,11 +217,11 @@ __all__ = [
     "pytest_collection_finish",
     "pytest_configure",
     "pytest_runtest_setup",
+    "pytest_sessionfinish",
     # Fixtures
     "model_pool",
     "model_client",
     "model_base_url",
     "setup_backend",
     "backend_router",
-    "_cleanup_backend_cache",
 ]

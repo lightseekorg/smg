@@ -448,6 +448,17 @@ def is_parallel_execution(config: pytest.Config) -> bool:
         return False
 
 
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Cleanup all thread-cached backends at session end.
+
+    This hook runs exactly once when the session ends, unlike session-scoped
+    autouse fixtures which fire per-test under pytest-parallel's thread model.
+    """
+    from .setup_backend import cleanup_all_cached_backends
+
+    cleanup_all_cached_backends()
+
+
 def pytest_runtest_setup(item: pytest.Item) -> None:
     """Skip tests based on markers and runtime configuration."""
     from infra import get_runtime
