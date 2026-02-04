@@ -8,7 +8,7 @@ on:
       - "*.md"
   pull_request:
     branches: [ main ]
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
     paths-ignore:
       - "docs/**"
       - "*.md"
