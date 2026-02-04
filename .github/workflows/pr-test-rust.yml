@@ -212,13 +212,7 @@ jobs:
   gateway-e2e:
     name: ${{ matrix.name }}
     needs: [check-ci, build-wheel, determine-stages]
-    if: |
-      needs.check-ci.outputs.should_run == 'true' &&
-      (
-        (matrix.stage == 'smoke' && needs.determine-stages.outputs.run_smoke == 'true') ||
-        (matrix.stage == 'e2e' && needs.determine-stages.outputs.run_e2e == 'true') ||
-        (matrix.stage == 'benchmark' && needs.determine-stages.outputs.run_benchmark == 'true')
-      )
+    if: needs.check-ci.outputs.should_run == 'true'
     permissions:
       contents: read
     strategy:
@@ -323,11 +317,28 @@ jobs:
     runs-on: k8s-runner-gpu
     timeout-minutes: ${{ matrix.timeout }}
     steps:
+      - name: Check if stage should run
+        id: check-stage
+        run: |
+          should_run="true"
+          if [[ "${{ matrix.stage }}" == "smoke" && "${{ needs.determine-stages.outputs.run_smoke }}" != "true" ]]; then
+            should_run="false"
+            echo "Skipping smoke test (ci:skip-smoke label)"
+          elif [[ "${{ matrix.stage }}" == "e2e" && "${{ needs.determine-stages.outputs.run_e2e }}" != "true" ]]; then
+            should_run="false"
+            echo "Skipping e2e test (ci:skip-e2e label)"
+          elif [[ "${{ matrix.stage }}" == "benchmark" && "${{ needs.determine-stages.outputs.run_benchmark }}" != "true" ]]; then
+            should_run="false"
+            echo "Skipping benchmark (ci:skip-benchmark label)"
+          fi
+          echo "should_run=$should_run" >> $GITHUB_OUTPUT
+
       - name: Checkout code
+        if: steps.check-stage.outputs.should_run == 'true'
         uses: actions/checkout@v6
 
       - name: Cache flash-attn wheel
-        if: matrix.setup_vllm
+        if: steps.check-stage.outputs.should_run == 'true' && matrix.setup_vllm
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip/wheels
@@ -335,13 +346,14 @@ jobs:
 
       - name: Restore TRT-LLM wheel cache
         id: trtllm-cache
-        if: matrix.setup_trtllm
+        if: steps.check-stage.outputs.should_run == 'true' && matrix.setup_trtllm
         uses: actions/cache/restore@v4
         with:
           path: /tmp/trtllm-wheel
           key: trtllm-wheel-${{ runner.os }}-cuda13-v2
 
       - name: Install inference backend
+        if: steps.check-stage.outputs.should_run == 'true'
         run: |
           bash scripts/ci_setup_python_venv.sh
           source .venv/bin/activate
@@ -356,14 +368,14 @@ jobs:
       # Save TRT-LLM wheel immediately after build, before tests run
       # This ensures the cache is saved even if tests fail or job is cancelled
       - name: Save TRT-LLM wheel cache
-        if: matrix.setup_trtllm && steps.trtllm-cache.outputs.cache-hit != 'true'
+        if: steps.check-stage.outputs.should_run == 'true' && matrix.setup_trtllm && steps.trtllm-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: /tmp/trtllm-wheel
           key: trtllm-wheel-${{ runner.os }}-cuda13-v2
 
       - name: Setup Oracle Instant Client
-        if: matrix.setup_oracle
+        if: steps.check-stage.outputs.should_run == 'true' && matrix.setup_oracle
         run: |
           sudo apt-get install -y unzip
           INSTANT_CLIENT_DIR="$HOME/instant-client"
@@ -383,7 +395,7 @@ jobs:
           echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_9:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
       - name: Start Oracle Database
-        if: matrix.setup_oracle
+        if: steps.check-stage.outputs.should_run == 'true' && matrix.setup_oracle
         run: |
           docker run -d -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim
           echo "Starting Oracle DB..."
@@ -394,7 +406,7 @@ jobs:
           echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
 
       - name: Start Brave MCP Server
-        if: matrix.setup_brave
+        if: steps.check-stage.outputs.should_run == 'true' && matrix.setup_brave
         env:
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
         run: |
@@ -408,18 +420,21 @@ jobs:
           curl -f --max-time 1 http://localhost:8001/sse > /dev/null 2>&1 && echo "Brave MCP Server is healthy!" || echo "Brave MCP Server responded"
 
       - name: Download wheel artifact
+        if: steps.check-stage.outputs.should_run == 'true'
         uses: actions/download-artifact@v7
         with:
           name: smg-wheel
           path: wheel/
 
       - name: Install wheel and test dependencies
+        if: steps.check-stage.outputs.should_run == 'true'
         run: |
           pip uninstall -y smg || true
           pip install wheel/*.whl
           bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
 
       - name: Run E2E tests
+        if: steps.check-stage.outputs.should_run == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -427,7 +442,7 @@ jobs:
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
 
       - name: Upload benchmark results
-        if: matrix.upload_benchmarks && success()
+        if: steps.check-stage.outputs.should_run == 'true' && matrix.upload_benchmarks && success()
         uses: actions/upload-artifact@v6
         with:
           name: genai-bench-results-all-policies
