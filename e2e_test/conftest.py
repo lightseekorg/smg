@@ -79,7 +79,7 @@ This module defines several pytest markers for configuring E2E tests:
 Fixtures
 --------
 model_pool: Session-scoped fixture managing SGLang worker processes.
-setup_backend: Class-scoped fixture that launches gateway + provides client.
+setup_backend: Function-scoped fixture (with per-thread caching) that launches gateway + provides client.
 
 Usage Examples
 --------------
@@ -197,6 +197,7 @@ def pytest_runtest_logstart(nodeid: str, location: tuple) -> None:
 # Import fixtures - pytest discovers these by name
 # Import hooks - pytest discovers these by name
 from fixtures import (
+    _cleanup_backend_cache,
     backend_router,
     model_base_url,
     model_client,
@@ -222,4 +223,5 @@ __all__ = [
     "model_base_url",
     "setup_backend",
     "backend_router",
+    "_cleanup_backend_cache",
 ]
