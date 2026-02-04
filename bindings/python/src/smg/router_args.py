@@ -43,6 +43,7 @@ class RouterArgs:
     api_key: Optional[str] = None
     log_dir: Optional[str] = None
     log_level: Optional[str] = None
+    log_json: bool = False
     # Service discovery configuration
     service_discovery: bool = False
     selector: Dict[str, str] = dataclasses.field(default_factory=dict)
@@ -382,6 +383,12 @@ class RouterArgs:
             default="info",
             choices=["debug", "info", "warn", "error"],
             help="Set the logging level. If not specified, defaults to INFO.",
+        )
+        logging_group.add_argument(
+            f"--{prefix}log-json",
+            action="store_true",
+            default=RouterArgs.log_json,
+            help="Output logs in JSON format",
         )
 
         # Service discovery configuration
