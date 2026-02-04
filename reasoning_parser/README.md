@@ -51,6 +51,7 @@ async fn main() {
 | Kimi | `◁think▷`/`◁/think▷` | Unicode delimiters |
 | Step3 | `<think>`/`</think>` | Starts in reasoning mode |
 | MiniMax M2 | `<think>`/`</think>` | Auto-prepends start token |
+| Cohere Command | `<\|START_THINKING\|>`/`<\|END_THINKING\|>` | CMD3/CMD4 format |
 | Nemotron-Nano | `<think>`/`</think>` | Qwen3-compatible |
 
 Unknown models fall back to a passthrough parser that returns all text as normal output.
@@ -255,8 +256,9 @@ Pattern priority (first match wins):
 5. `kimi` → KimiParser
 6. `step3` → Step3Parser
 7. `minimax` / `mm-m2` → MiniMaxParser
-8. `nemotron-nano` / `nano-v3` → Qwen3Parser
-9. (fallback) → BaseReasoningParser (passthrough)
+8. `command-r` / `command-a` / `c4ai-command` / `cohere` → CohereCmdParser
+9. `nemotron-nano` / `nano-v3` → Qwen3Parser
+10. (fallback) → BaseReasoningParser (passthrough)
 
 ## Thread Safety
 
