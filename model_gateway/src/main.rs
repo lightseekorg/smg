@@ -260,6 +260,10 @@ struct CliArgs {
     #[arg(long, default_value = "info", value_parser = ["debug", "info", "warn", "error"], help_heading = "Logging")]
     log_level: String,
 
+    /// Output logs as JSON
+    #[arg(long, default_value_t = false, help_heading = "Logging")]
+    log_json: bool,
+
     // ==================== Prometheus Metrics ====================
     /// Port to expose Prometheus metrics
     #[arg(long, default_value_t = 29000, help_heading = "Prometheus Metrics")]
@@ -1128,6 +1132,7 @@ impl CliArgs {
             max_payload_size: self.max_payload_size,
             log_dir: self.log_dir.clone(),
             log_level: Some(self.log_level.clone()),
+            log_json: self.log_json,
             service_discovery_config,
             prometheus_config,
             request_timeout_secs: self.request_timeout_secs,
