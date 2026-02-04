@@ -17,13 +17,16 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
-    mcp::{ApprovalMode, McpOrchestrator, ResponseFormat, ResponseTransformer, TenantContext},
+    mcp::{
+        ApprovalResponseInput, McpOrchestrator, ResponseFormat, ResponseTransformer,
+        TenantContext, ToolCallContext, ToolCallResult, ToolExecutionOutcome,
+    },
     protocols::{
         event_types::{
             is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType,
             McpEvent, OutputItemEvent, WebSearchCallEvent,
         },
-        responses::{generate_id, ResponseInput, ResponsesRequest},
+        responses::{generate_id, ResponseInput, ResponseInputOutputItem, ResponsesRequest},
     },
     routers::{
         header_utils::apply_request_headers,
@@ -131,8 +134,17 @@ impl FunctionCallInProgress {
 // Tool Execution
 // ============================================================================
 
+/// Result of executing streaming tool calls
+pub(super) enum StreamingToolCallResult {
+    /// All calls executed successfully, continue the tool loop
+    Continue,
+    /// Client disconnected during execution
+    ClientDisconnected,
+    /// One or more calls require approval, stop the loop
+    ApprovalRequired,
+}
+
 /// Execute detected tool calls and send completion events to client
-/// Returns false if client disconnected during execution
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_streaming_tool_calls(
     pending_calls: Vec<FunctionCallInProgress>,
@@ -143,13 +155,19 @@ pub(super) async fn execute_streaming_tool_calls(
     request_id: &str,
     mcp_servers: &[(String, String)],
     server_keys: &[String],
-) -> bool {
-    // Create a request context for tool execution
-    let request_ctx = orchestrator.create_request_context(
+    approval_modes: &std::collections::HashMap<String, crate::mcp::ApprovalMode>,
+) -> StreamingToolCallResult {
+    let server_label = mcp_servers
+        .first()
+        .map(|(label, _)| label.as_str())
+        .unwrap_or("mcp");
+    let tool_ctx = ToolCallContext {
+        allowed_servers: server_keys,
+        server_label,
         request_id,
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
-    );
+        tenant_ctx: TenantContext::default(),
+        approval_modes,
+    };
 
     // Execute all pending tool calls (sequential, as PR3 is skipped)
     for call in pending_calls {
@@ -205,7 +223,7 @@ pub(super) async fn execute_streaming_tool_calls(
                     mcp_call_item.clone(),
                     sequence_number,
                 ) {
-                    return false;
+                    return StreamingToolCallResult::ClientDisconnected;
                 }
                 state.record_call(
                     call.call_id,
@@ -220,44 +238,51 @@ pub(super) async fn execute_streaming_tool_calls(
 
         // Emit the intermediate event before tool execution (searching/interpreting)
         if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
-            return false;
+            return StreamingToolCallResult::ClientDisconnected;
         }
 
         // Call tool by name within allowed servers
         debug!("Calling MCP tool '{}' with args: {}", call.name, args_str);
         let call_result = orchestrator
-            .call_tool_by_name(
-                &call.name,
-                arguments,
-                server_keys,
-                &server_label,
-                &request_ctx,
-            )
+            .call_tool_by_name(&call.name, arguments, &tool_ctx)
             .await;
 
         // Get transformed item directly (avoids serialize/parse roundtrip and double transformation)
         let (mcp_call_item, output_str) = match call_result {
-            Ok(result) => {
-                // call_tool_by_name returns already-transformed ResponseOutputItem
-                match result.into_item() {
-                    Some(item) => {
-                        // Serialize for conversation history and convert to Value for events
-                        let output_str = serde_json::to_string(&item).unwrap_or_else(|e| {
-                            warn!(tool = %call.name, error = %e, "Failed to serialize tool output");
-                            json!({ "error": "serialization failed" }).to_string()
-                        });
-                        let item_value = to_value(&item).unwrap_or_else(|e| {
-                            warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
-                            json!({})
-                        });
-                        (item_value, output_str)
-                    }
-                    None => {
-                        // PendingApproval case - not supported in streaming
-                        let err = json!({ "error": "Tool requires approval (not supported)" });
-                        (err.clone(), err.to_string())
-                    }
+            Ok(ToolCallResult::Success(item)) => {
+                let output_str = serde_json::to_string(&item).unwrap_or_else(|e| {
+                    warn!(tool = %call.name, error = %e, "Failed to serialize tool output");
+                    json!({ "error": "serialization failed" }).to_string()
+                });
+                let item_value = to_value(&item).unwrap_or_else(|e| {
+                    warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
+                    json!({})
+                });
+                (item_value, output_str)
+            }
+            Ok(ToolCallResult::PendingApproval(approval_req)) => {
+                // Build an mcp_approval_request output item and stop the loop.
+                // The user must resolve the approval before tool execution continues.
+                let item = json!({
+                    "type": "mcp_approval_request",
+                    "server_label": server_label,
+                    "name": call.name,
+                    "id": generate_id("mcpr"),
+                    "approval_request_id": approval_req.elicitation_id,
+                    "arguments": call.arguments_buffer,
+                });
+
+                // Send the approval request event to the client
+                if !send_tool_call_completion_events(tx, &call, item.clone(), sequence_number) {
+                    return StreamingToolCallResult::ClientDisconnected;
                 }
+                state.mcp_call_items.push(item);
+
+                info!(
+                    "Streaming tool loop stopping: approval required for '{}'",
+                    call.name
+                );
+                return StreamingToolCallResult::ApprovalRequired;
             }
             Err(err) => {
                 let err_str = format!("tool call failed: {}", err);
@@ -279,7 +304,7 @@ pub(super) async fn execute_streaming_tool_calls(
         // Send mcp_call completion event to client
         if !send_tool_call_completion_events(tx, &call, mcp_call_item.clone(), sequence_number) {
             // Client disconnected, no point continuing tool execution
-            return false;
+            return StreamingToolCallResult::ClientDisconnected;
         }
 
         // Record the call with transformed item (avoids re-transformation later)
@@ -291,7 +316,7 @@ pub(super) async fn execute_streaming_tool_calls(
             mcp_call_item,
         );
     }
-    true
+    StreamingToolCallResult::Continue
 }
 
 // ============================================================================
@@ -343,6 +368,100 @@ pub(super) fn prepare_mcp_tools_as_functions(
         obj.insert("tools".to_string(), Value::Array(tools_json));
         obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
     }
+}
+
+/// Process any `mcp_approval_response` items from the payload's input before
+/// sending to the upstream LLM. The upstream doesn't understand our approval
+/// protocol, so we must:
+/// 1. Extract approval response items from the input
+/// 2. Execute approved tools via the orchestrator
+/// 3. Replace approval items with function_call + function_call_output items
+///
+/// Returns true if approvals were found and processed.
+pub(super) async fn process_approval_responses_in_payload(
+    payload: &mut Value,
+    orchestrator: &Arc<McpOrchestrator>,
+    server_label: &str,
+) -> Result<bool, String> {
+    let input_array = match payload.get_mut("input").and_then(|v| v.as_array_mut()) {
+        Some(arr) => arr,
+        None => return Ok(false),
+    };
+
+    // Collect approval responses and track indices to remove
+    let mut approvals = Vec::new();
+    let mut indices_to_remove = Vec::new();
+
+    for (i, item) in input_array.iter().enumerate() {
+        let item_type = item.get("type").and_then(|t| t.as_str());
+        match item_type {
+            Some("mcp_approval_response") => {
+                if let (Some(req_id), Some(approve)) = (
+                    item.get("approval_request_id").and_then(|v| v.as_str()),
+                    item.get("approve").and_then(|v| v.as_bool()),
+                ) {
+                    approvals.push(ApprovalResponseInput {
+                        approval_request_id: req_id.to_string(),
+                        approve,
+                        reason: item
+                            .get("reason")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                    });
+                }
+                indices_to_remove.push(i);
+            }
+            Some("mcp_approval_request") => {
+                // Also strip approval request items — upstream doesn't need them
+                indices_to_remove.push(i);
+            }
+            _ => {}
+        }
+    }
+
+    if approvals.is_empty() {
+        return Ok(false);
+    }
+
+    // Remove approval items in reverse order to preserve indices
+    for &i in indices_to_remove.iter().rev() {
+        input_array.remove(i);
+    }
+
+    info!(
+        "Processing {} approval responses before upstream call",
+        approvals.len()
+    );
+
+    // Execute approved tools through the orchestrator
+    let outcomes = orchestrator
+        .process_approval_responses(approvals, server_label)
+        .await;
+
+    // Inject function_call + function_call_output for executed tools
+    for outcome in outcomes {
+        if let ToolExecutionOutcome::Executed(output) = outcome {
+            input_array.push(json!({
+                "type": "function_call",
+                "id": generate_id("fc"),
+                "call_id": &output.call_id,
+                "name": &output.tool_name,
+                "arguments": &output.arguments_str,
+            }));
+
+            let output_str = match &output.output {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            input_array.push(json!({
+                "type": "function_call_output",
+                "call_id": &output.call_id,
+                "output": output_str,
+            }));
+        }
+    }
+
+    Ok(true)
 }
 
 /// Build a resume payload with conversation history
@@ -660,16 +779,18 @@ pub(super) async fn execute_tool_loop(
 ) -> Result<Value, String> {
     let mut state = ToolLoopState::new(original_body.input.clone());
 
+    // Strip approval-related items from original_input so they don't leak into resume payloads
+    if let ResponseInput::Items(ref mut items) = state.original_input {
+        items.retain(|item| {
+            !matches!(item, ResponseInputOutputItem::McpApprovalResponse { .. })
+        });
+    }
+
     // Create a request context for tool execution (use request's ID if available)
     let request_id = original_body
         .request_id
         .clone()
         .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
-    let request_ctx = orchestrator.create_request_context(
-        request_id,
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
-    );
 
     // Get max_tool_calls from request (None means no user-specified limit)
     let max_tool_calls = original_body.max_tool_calls.map(|n| n as usize);
@@ -683,6 +804,19 @@ pub(super) async fn execute_tool_loop(
         .iter()
         .map(|(_, key)| key.clone())
         .collect();
+    let server_label = config
+        .mcp_servers
+        .first()
+        .map(|(label, _)| label.as_str())
+        .unwrap_or("mcp");
+
+    let tool_ctx = ToolCallContext {
+        allowed_servers: &server_keys,
+        server_label,
+        request_id: &request_id,
+        tenant_ctx: TenantContext::default(),
+        approval_modes: &config.approval_modes,
+    };
 
     info!(
         "Starting tool loop: max_tool_calls={:?}, max_iterations={}",
@@ -781,38 +915,45 @@ pub(super) async fn execute_tool_loop(
                 &server_keys,
             );
             let call_result = orchestrator
-                .call_tool_by_name(
-                    &tool_name,
-                    arguments,
-                    &server_keys,
-                    &resolved_label,
-                    &request_ctx,
-                )
+                .call_tool_by_name(&tool_name, arguments, &tool_ctx)
                 .await;
 
             // Get transformed item directly (avoids serialize/parse roundtrip and double transformation)
             let (transformed_item, output_str) = match call_result {
-                Ok(result) => {
-                    // call_tool_by_name returns already-transformed ResponseOutputItem
-                    match result.into_item() {
-                        Some(item) => {
-                            let output_str = serde_json::to_string(&item)
-                                .unwrap_or_else(|e| {
-                                    warn!(tool = %tool_name, error = %e, "Failed to serialize tool output");
-                                    json!({ "error": "serialization failed" }).to_string()
-                                });
-                            let item_value = to_value(&item).unwrap_or_else(|e| {
-                                warn!(tool = %tool_name, error = %e, "Failed to convert item to Value");
-                                json!({})
-                            });
-                            (item_value, output_str)
-                        }
-                        None => {
-                            // PendingApproval case - not supported in non-streaming
-                            let err = json!({ "error": "Tool requires approval (not supported)" });
-                            (err.clone(), err.to_string())
-                        }
-                    }
+                Ok(ToolCallResult::Success(item)) => {
+                    let output_str = serde_json::to_string(&item).unwrap_or_else(|e| {
+                        warn!(tool = %tool_name, error = %e, "Failed to serialize tool output");
+                        json!({ "error": "serialization failed" }).to_string()
+                    });
+                    let item_value = to_value(&item).unwrap_or_else(|e| {
+                        warn!(tool = %tool_name, error = %e, "Failed to convert item to Value");
+                        json!({})
+                    });
+                    (item_value, output_str)
+                }
+                Ok(ToolCallResult::PendingApproval(approval_req)) => {
+                    // Build an mcp_approval_request output item and stop the loop.
+                    // The user must resolve the approval before tool execution continues.
+                    let item = json!({
+                        "type": "mcp_approval_request",
+                        "server_label": resolved_label,
+                        "name": tool_name,
+                        "id": generate_id("mcpr"),
+                        "approval_request_id": approval_req.elicitation_id,
+                        "arguments": args_json_str,
+                    });
+                    state.mcp_call_items.push(item);
+
+                    info!(
+                        "Tool loop stopping: approval required for '{}', returning to caller",
+                        tool_name
+                    );
+                    return build_approval_response(
+                        response_json,
+                        state,
+                        orchestrator,
+                        &config.mcp_servers,
+                    );
                 }
                 Err(err) => {
                     warn!("Tool execution failed: {}", err);
@@ -978,6 +1119,47 @@ pub(super) fn build_incomplete_response(
             }
         }
     }
+
+    Ok(response)
+}
+
+/// Build a response when tool execution is paused for approval.
+///
+/// Unlike `build_incomplete_response`, this strips the LLM's function_call items
+/// entirely — the output only contains mcp_list_tools + mcp_approval_request items.
+fn build_approval_response(
+    mut response: Value,
+    state: ToolLoopState,
+    orchestrator: &Arc<McpOrchestrator>,
+    mcp_servers: &[(String, String)],
+) -> Result<Value, String> {
+    let obj = response
+        .as_object_mut()
+        .ok_or_else(|| "response not an object".to_string())?;
+
+    obj.insert(
+        "status".to_string(),
+        Value::String("incomplete".to_string()),
+    );
+    obj.insert(
+        "incomplete_details".to_string(),
+        json!({ "reason": "approval_required" }),
+    );
+
+    // Build clean output: mcp_list_tools + mcp_approval_request items only
+    let mut output = Vec::new();
+
+    for (label, key) in mcp_servers {
+        let list_tools_item =
+            build_mcp_list_tools_item(orchestrator, label, slice::from_ref(key));
+        output.push(list_tools_item);
+    }
+
+    for item in &state.mcp_call_items {
+        output.push(item.clone());
+    }
+
+    obj.insert("output".to_string(), Value::Array(output));
 
     Ok(response)
 }

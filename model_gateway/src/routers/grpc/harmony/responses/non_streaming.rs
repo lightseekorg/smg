@@ -29,7 +29,8 @@ use crate::{
         error,
         grpc::{
             common::responses::{
-                ensure_mcp_connection, persist_response_if_needed, ResponsesContext,
+                ensure_mcp_connection, persist_response_if_needed, process_pending_approvals,
+                ResponsesContext,
             },
             harmony::processor::ResponsesIterationResult,
         },
@@ -40,13 +41,14 @@ use crate::{
 /// Execute Harmony Responses API request with multi-turn MCP tool support
 ///
 /// This function orchestrates the multi-turn conversation flow:
-/// 1. Execute request through full pipeline
-/// 2. Check for tool calls in commentary channel
-/// 3. If tool calls found:
+/// 1. Process any mcp_approval_response items from input (execute approved tools)
+/// 2. Execute request through full pipeline
+/// 3. Check for tool calls in commentary channel
+/// 4. If tool calls found:
 ///    - Execute MCP tools
 ///    - Build next request with tool results
-///    - Repeat from step 1 (full pipeline re-execution)
-/// 4. If no tool calls, return final response
+///    - Repeat from step 2 (full pipeline re-execution)
+/// 5. If no tool calls, return final response
 pub(crate) async fn serve_harmony_responses(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
@@ -57,15 +59,41 @@ pub(crate) async fn serve_harmony_responses(
     // Load previous conversation history if previous_response_id is set
     let current_request = load_previous_messages(ctx, request).await?;
 
+    // Extract server_label for logging
+    let server_label = extract_server_label(current_request.tools.as_deref(), "sglang-mcp");
+
+    // Generate request_id
+    let request_id = format!("resp_{}", uuid::Uuid::new_v4());
+
+    // Process any mcp_approval_response items from input
+    if let Some(output_items) =
+        process_pending_approvals(&ctx.mcp_orchestrator, &current_request.input, &server_label)
+            .await
+    {
+        let response = ResponsesResponse::builder(&request_id, &current_request.model)
+            .copy_from_request(&current_request)
+            .status(ResponseStatus::Completed)
+            .output(output_items)
+            .build();
+
+        persist_response_if_needed(
+            ctx.conversation_storage.clone(),
+            ctx.conversation_item_storage.clone(),
+            ctx.response_storage.clone(),
+            &response,
+            &original_request,
+        )
+        .await;
+
+        return Ok(response);
+    }
+
     // Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) =
+    let mcp_info =
         ensure_mcp_connection(&ctx.mcp_orchestrator, current_request.tools.as_deref()).await?;
 
-    // Set the server keys in the context
-    {
-        let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = server_keys;
-    }
+    let has_mcp_tools = mcp_info.has_mcp_tools();
+    ctx.set_mcp_connection(mcp_info);
 
     let response = if has_mcp_tools {
         execute_with_mcp_loop(ctx, current_request).await?
@@ -104,14 +132,14 @@ async fn execute_with_mcp_loop(
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
 
     // Preserve original tools for response (before merging MCP tools)
-    // The response should show the user's original request tools, not internal MCP tools
     let original_tools = current_request.tools.clone();
 
+    // Read approval modes once before the loop (they don't change across iterations)
+    let approval_modes = ctx.mcp_connection().approval_modes;
+
     // Add filtered MCP tools (static + requested dynamic) to the request
-    let mcp_tools = {
-        let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_orchestrator.list_tools_for_servers(&servers)
-    };
+    let server_keys = ctx.server_keys();
+    let mcp_tools = ctx.mcp_orchestrator.list_tools_for_servers(&server_keys);
     if !mcp_tools.is_empty() {
         let mcp_response_tools = convert_mcp_tools_to_response_tools(&mcp_tools);
 
@@ -216,16 +244,16 @@ async fn execute_with_mcp_loop(
                     // Use original_tools for response (hide internal MCP tools)
                     let mut response_request = current_request.clone();
                     response_request.tools = original_tools.clone();
-                    let mut response = build_tool_response(
-                        vec![],         // No MCP tools executed
-                        vec![],         // No MCP results
-                        all_tool_calls, // All tools returned as function calls (not executed)
+                    let mut response = build_tool_response(ToolResponseParams {
+                        mcp_tool_calls: vec![],
+                        mcp_results: vec![],
+                        function_tool_calls: all_tool_calls,
                         analysis,
                         partial_text,
                         usage,
                         request_id,
-                        Arc::new(response_request),
-                    );
+                        responses_request: Arc::new(response_request),
+                    });
 
                     // Mark as completed with incomplete_details
                     response.status = ResponseStatus::Completed;
@@ -239,21 +267,58 @@ async fn execute_with_mcp_loop(
                     return Ok(response);
                 }
 
-                // Execute MCP tools (if any)
-                let mcp_results = if !mcp_tool_calls.is_empty() {
-                    execute_mcp_tools(
+                let (mcp_results, pending_approvals) = if !mcp_tool_calls.is_empty() {
+                    let tool_ctx = crate::mcp::ToolCallContext {
+                        allowed_servers: &server_keys,
+                        server_label: &server_label,
+                        request_id: &request_id,
+                        tenant_ctx: crate::mcp::TenantContext::default(),
+                        approval_modes: &approval_modes,
+                    };
+                    let result = execute_mcp_tools(
                         &ctx.mcp_orchestrator,
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,
-                        &request_id,
-                        &server_label,
-                        &mcp_tools,
+                        &tool_ctx,
                     )
-                    .await?
+                    .await?;
+                    (result.executed, result.pending_approvals)
                 } else {
-                    Vec::new()
+                    (Vec::new(), Vec::new())
                 };
+
+                // If there are pending approvals, return response with approval requests
+                // Client must approve these via mcp_approval_response in next request
+                if !pending_approvals.is_empty() {
+                    debug!(
+                        approval_count = pending_approvals.len(),
+                        "MCP tools require approval - returning approval requests"
+                    );
+
+                    // Convert Usage to UsageInfo for ResponsesUsage
+                    let usage_info = crate::protocols::common::UsageInfo {
+                        prompt_tokens: usage.prompt_tokens,
+                        completion_tokens: usage.completion_tokens,
+                        total_tokens: usage.total_tokens,
+                        reasoning_tokens: usage
+                            .completion_tokens_details
+                            .as_ref()
+                            .and_then(|d| d.reasoning_tokens),
+                        prompt_tokens_details: None,
+                    };
+
+                    // Build response with approval requests as output items
+                    // Status is InProgress since we're waiting for approval
+                    let response = ResponsesResponse::builder(&request_id, &current_request.model)
+                        .copy_from_request(&current_request)
+                        .status(ResponseStatus::InProgress)
+                        .output(pending_approvals)
+                        .maybe_usage(Some(ResponsesUsage::Classic(usage_info)))
+                        .build();
+
+                    return Ok(response);
+                }
 
                 // If there are function tools, exit MCP loop and return response
                 if !function_tool_calls.is_empty() {
@@ -268,7 +333,7 @@ async fn execute_with_mcp_loop(
                     // Use original_tools for response (hide internal MCP tools)
                     let mut response_request = current_request.clone();
                     response_request.tools = original_tools.clone();
-                    let mut response = build_tool_response(
+                    let mut response = build_tool_response(ToolResponseParams {
                         mcp_tool_calls,
                         mcp_results,
                         function_tool_calls,
@@ -276,8 +341,8 @@ async fn execute_with_mcp_loop(
                         partial_text,
                         usage,
                         request_id,
-                        Arc::new(response_request),
-                    );
+                        responses_request: Arc::new(response_request),
+                    });
 
                     // Inject MCP metadata for all executed calls
                     if mcp_tracking.total_calls() > 0 {
@@ -361,16 +426,16 @@ async fn execute_without_mcp_loop(
                 "Function tool calls found - returning to caller"
             );
 
-            Ok(build_tool_response(
-                vec![],
-                vec![],
-                tool_calls,
+            Ok(build_tool_response(ToolResponseParams {
+                mcp_tool_calls: vec![],
+                mcp_results: vec![],
+                function_tool_calls: tool_calls,
                 analysis,
                 partial_text,
                 usage,
                 request_id,
-                Arc::new(current_request),
-            ))
+                responses_request: Arc::new(current_request),
+            }))
         }
         ResponsesIterationResult::Completed { response, usage: _ } => {
             // No tool calls - return completed response
@@ -380,18 +445,28 @@ async fn execute_without_mcp_loop(
     }
 }
 
-/// Build ResponsesResponse with tool calls (MCP and/or function tools)
-#[allow(clippy::too_many_arguments)]
-fn build_tool_response(
+struct ToolResponseParams {
     mcp_tool_calls: Vec<ToolCall>,
     mcp_results: Vec<ToolResult>,
     function_tool_calls: Vec<ToolCall>,
-    analysis: Option<String>, // Analysis channel content (reasoning)
-    partial_text: String,     // Final channel content (message)
+    analysis: Option<String>,
+    partial_text: String,
     usage: Usage,
     request_id: String,
     responses_request: Arc<ResponsesRequest>,
-) -> ResponsesResponse {
+}
+
+fn build_tool_response(params: ToolResponseParams) -> ResponsesResponse {
+    let ToolResponseParams {
+        mcp_tool_calls,
+        mcp_results,
+        function_tool_calls,
+        analysis,
+        partial_text,
+        usage,
+        request_id,
+        responses_request,
+    } = params;
     let mut output: Vec<ResponseOutputItem> = Vec::new();
 
     // Add reasoning output item if analysis exists

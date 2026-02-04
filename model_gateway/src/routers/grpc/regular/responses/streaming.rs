@@ -33,7 +33,7 @@ use super::{
 };
 use crate::{
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::{ApprovalMode, ResponseFormat, ResponseTransformer, TenantContext},
+    mcp::{ResponseFormat, ResponseTransformer, TenantContext, ToolCallContext, ToolCallResult},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         chat::{
@@ -498,15 +498,8 @@ async fn execute_tool_loop_streaming_internal(
     let mut state = ToolLoopState::new(original_request.input.clone(), server_label.clone());
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
-    // Generate response ID first so we can use it for both emitter and request context
+    // Generate response ID first so we can use it for emitter
     let response_id = format!("resp_{}", Uuid::new_v4());
-
-    // Create a request context for tool execution (using the same response_id)
-    let request_ctx = ctx.mcp_orchestrator.create_request_context(
-        response_id.clone(),
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
-    );
 
     // Create response event emitter
     let model = current_request.model.clone();
@@ -514,7 +507,8 @@ async fn execute_tool_loop_streaming_internal(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let mut emitter = ResponseStreamEventEmitter::new(response_id, model.clone(), created_at);
+    let mut emitter =
+        ResponseStreamEventEmitter::new(response_id.clone(), model.clone(), created_at);
     emitter.set_original_request(original_request.clone());
 
     // Emit initial response.created and response.in_progress events
@@ -523,11 +517,10 @@ async fn execute_tool_loop_streaming_internal(
     let event = emitter.emit_in_progress();
     emitter.send_event(&event, &tx)?;
 
-    // Get MCP tools and convert to chat format (do this once before loop)
-    let mcp_tools = {
-        let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_orchestrator.list_tools_for_servers(&servers)
-    };
+    // Get MCP connection info and tools once before the loop
+    let server_keys = ctx.server_keys();
+    let conn = ctx.mcp_connection();
+    let mcp_tools = ctx.mcp_orchestrator.list_tools_for_servers(&server_keys);
     let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&mcp_tools);
     trace!(
         "Streaming: Converted {} MCP tools to chat format",
@@ -673,10 +666,7 @@ async fn execute_tool_loop_streaming_internal(
             }
 
             // Get server_keys once before processing tool calls
-            let server_keys: Vec<String> = {
-                let servers = ctx.requested_servers.read().unwrap();
-                servers.clone()
-            };
+            let server_keys = ctx.server_keys();
 
             // Process each MCP tool call
             for tool_call in mcp_tool_calls {
@@ -766,21 +756,79 @@ async fn execute_tool_loop_streaming_internal(
                 let arguments: Value =
                     serde_json::from_str(&tool_call.arguments).unwrap_or_else(|_| json!({}));
 
-                // Execute tool and convert result using unified serialization
+                let tool_ctx = ToolCallContext {
+                    allowed_servers: &server_keys,
+                    server_label: &state.server_label,
+                    request_id: &response_id,
+                    tenant_ctx: TenantContext::default(),
+                    approval_modes: &conn.approval_modes,
+                };
                 let call_result = ctx
                     .mcp_orchestrator
-                    .call_tool_by_name(
-                        &tool_call.name,
-                        arguments,
-                        &server_keys,
-                        &state.server_label,
-                        &request_ctx,
-                    )
+                    .call_tool_by_name(&tool_call.name, arguments, &tool_ctx)
                     .await;
 
                 let (output_str, success, _error) = match call_result {
-                    Ok(result) => {
-                        let (output, is_error, err_msg) = result.into_serialized();
+                    Ok(ToolCallResult::PendingApproval(approval_request)) => {
+                        // Tool requires approval - emit approval request and complete
+                        debug!(
+                            "Tool '{}' requires approval - emitting approval request",
+                            tool_call.name
+                        );
+
+                        // Allocate output index for approval request
+                        let (approval_output_index, _) =
+                            emitter.allocate_output_index(OutputItemType::McpApprovalRequest);
+
+                        // Build approval request item
+                        let approval_item = json!({
+                            "type": "mcp_approval_request",
+                            "id": approval_request.elicitation_id,
+                            "server_label": state.server_label,
+                            "name": tool_call.name,
+                            "arguments": tool_call.arguments,
+                        });
+
+                        // Emit output_item.added
+                        let event =
+                            emitter.emit_output_item_added(approval_output_index, &approval_item);
+                        emitter.send_event(&event, &tx)?;
+
+                        // Emit output_item.done
+                        let event =
+                            emitter.emit_output_item_done(approval_output_index, &approval_item);
+                        emitter.send_event(&event, &tx)?;
+                        emitter.complete_output_item(approval_output_index);
+
+                        // Record pending metric
+                        Metrics::record_mcp_tool_call(
+                            &model,
+                            &tool_call.name,
+                            metrics_labels::RESULT_PENDING,
+                        );
+
+                        // Emit response.completed and return - we're done
+                        let usage_json = json!({
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0
+                        });
+                        let event = emitter.emit_completed(Some(&usage_json));
+                        emitter.send_event(&event, &tx)?;
+                        return Ok(());
+                    }
+                    Ok(ToolCallResult::Success(item)) => {
+                        let (output, is_error, err_msg) = match serde_json::to_string(&item) {
+                            Ok(s) => (s, false, None),
+                            Err(e) => {
+                                let err = format!("Failed to serialize tool result: {}", e);
+                                (
+                                    serde_json::json!({"error": &err}).to_string(),
+                                    true,
+                                    Some(err),
+                                )
+                            }
+                        };
 
                         if !is_error {
                             // Emit tool_call.completed

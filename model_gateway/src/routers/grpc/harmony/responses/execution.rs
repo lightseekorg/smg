@@ -8,63 +8,33 @@ use tracing::{debug, error};
 
 use super::common::McpCallTracking;
 use crate::{
-    mcp::{ApprovalMode, McpOrchestrator, TenantContext, ToolEntry, ToolExecutionInput},
+    mcp::{McpOrchestrator, ToolCallContext, ToolEntry, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         common::{Function, ToolCall},
-        responses::{ResponseTool, ResponseToolType},
+        responses::{ResponseOutputItem, ResponseTool, ResponseToolType},
     },
+    routers::grpc::common::responses::utils::partition_outcomes,
 };
 
-/// Tool execution result
-///
-/// Contains the result of executing a single MCP tool.
-/// Used for building conversation history (raw output) and status tracking.
 pub(crate) struct ToolResult {
-    /// Tool call ID (for matching with request)
     pub call_id: String,
-
-    /// Tool output (JSON value) - used for conversation history
     pub output: Value,
-
-    /// Whether this is an error result
     pub is_error: bool,
 }
 
-/// Execute MCP tools and collect results
-///
-/// Executes tool calls via the unified MCP orchestrator batch API.
-/// Tool execution errors are returned as error results to the model
-/// (allows model to handle gracefully).
-///
-/// Vector of tool results (one per tool call)
+pub(crate) struct McpExecutionResult {
+    pub executed: Vec<ToolResult>,
+    pub pending_approvals: Vec<ResponseOutputItem>,
+}
+
 pub(super) async fn execute_mcp_tools(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tool_calls: &[ToolCall],
     tracking: &mut McpCallTracking,
     model_id: &str,
-    request_id: &str,
-    server_label: &str,
-    mcp_tools: &[ToolEntry],
-) -> Result<Vec<ToolResult>, Response> {
-    // Create request context for tool execution
-    let request_ctx = mcp_orchestrator.create_request_context(
-        request_id,
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
-    );
-
-    // Extract unique server_keys from mcp_tools
-    // For small lists (typical: 1-10 tools), linear scan is faster than HashSet
-    let mut server_keys = Vec::new();
-    for entry in mcp_tools {
-        let key = entry.server_key().to_string();
-        if !server_keys.iter().any(|k| k == &key) {
-            server_keys.push(key);
-        }
-    }
-
-    // Convert tool calls to execution inputs
+    tool_ctx: &ToolCallContext<'_>,
+) -> Result<McpExecutionResult, Response> {
     let inputs: Vec<ToolExecutionInput> = tool_calls
         .iter()
         .map(|tc| {
@@ -92,48 +62,39 @@ pub(super) async fn execute_mcp_tools(
         "Executing MCP tools via unified API"
     );
 
-    // Execute all tools via unified batch API
-    let outputs = mcp_orchestrator
-        .execute_tools(inputs, &server_keys, server_label, &request_ctx)
-        .await;
+    let outcomes = mcp_orchestrator.execute_tools(inputs, tool_ctx).await;
 
-    // Convert outputs to ToolResults and record metrics/tracking
-    let results: Vec<ToolResult> = outputs
-        .into_iter()
-        .map(|output| {
-            // Transform to correctly-typed ResponseOutputItem
-            let output_item = output.to_response_item();
+    let (executed_outputs, pending_approvals) = partition_outcomes(outcomes, model_id);
 
-            // Record this call in tracking
-            tracking.record_call(output_item.clone());
+    let mut executed = Vec::with_capacity(executed_outputs.len());
+    for output in executed_outputs {
+        let output_item = output.to_response_item();
+        tracking.record_call(output_item);
 
-            // Record MCP tool metrics
-            Metrics::record_mcp_tool_duration(model_id, &output.tool_name, output.duration);
-            Metrics::record_mcp_tool_call(
-                model_id,
-                &output.tool_name,
-                if output.is_error {
-                    metrics_labels::RESULT_ERROR
-                } else {
-                    metrics_labels::RESULT_SUCCESS
-                },
-            );
+        Metrics::record_mcp_tool_duration(model_id, &output.tool_name, output.duration);
+        Metrics::record_mcp_tool_call(
+            model_id,
+            &output.tool_name,
+            if output.is_error {
+                metrics_labels::RESULT_ERROR
+            } else {
+                metrics_labels::RESULT_SUCCESS
+            },
+        );
 
-            ToolResult {
-                call_id: output.call_id,
-                output: output.output,
-                is_error: output.is_error,
-            }
-        })
-        .collect();
+        executed.push(ToolResult {
+            call_id: output.call_id,
+            output: output.output,
+            is_error: output.is_error,
+        });
+    }
 
-    Ok(results)
+    Ok(McpExecutionResult {
+        executed,
+        pending_approvals,
+    })
 }
 
-/// Convert MCP tools to Responses API tool format
-///
-/// Converts MCP ToolEntry (from inventory) to ResponseTool format so the model
-/// knows about available MCP tools when making tool calls.
 pub(crate) fn convert_mcp_tools_to_response_tools(mcp_tools: &[ToolEntry]) -> Vec<ResponseTool> {
     mcp_tools
         .iter()
@@ -145,7 +106,7 @@ pub(crate) fn convert_mcp_tools_to_response_tools(mcp_tools: &[ToolEntry]) -> Ve
                 parameters: Value::Object((*entry.tool.input_schema).clone()),
                 strict: None,
             }),
-            server_url: None, // MCP tools from inventory don't have individual server URLs
+            server_url: None,
             authorization: None,
             headers: None,
             server_label: Some(entry.server_key().to_string()),

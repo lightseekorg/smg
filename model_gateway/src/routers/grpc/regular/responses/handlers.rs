@@ -39,7 +39,11 @@ use crate::{
     protocols::responses::ResponsesRequest,
     routers::{
         error,
-        grpc::common::responses::{ensure_mcp_connection, ResponsesContext},
+        grpc::common::responses::{
+            ensure_mcp_connection, process_pending_approvals, stream_approval_results,
+            ResponsesContext,
+        },
+        mcp_utils::extract_server_label,
     },
 };
 
@@ -109,18 +113,39 @@ async fn route_responses_streaming(
         Err(response) => return response, // Already a Response with proper status code
     };
 
-    // 2. Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) =
+    // Extract server_label for logging
+    let server_label = extract_server_label(request.tools.as_deref(), "request-mcp");
+
+    // Generate response_id
+    let response_id = format!("resp_{}", Uuid::new_v4());
+
+    // 2. Process any mcp_approval_response items from input
+    if let Some(output_items) = process_pending_approvals(
+        &ctx.mcp_orchestrator,
+        &modified_request.input,
+        &server_label,
+    )
+    .await
+    {
+        return stream_approval_results(
+            ctx,
+            &response_id,
+            &modified_request,
+            &request,
+            output_items,
+        )
+        .await;
+    }
+
+    // 3. Check MCP connection and get whether MCP tools are present
+    let mcp_info =
         match ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await {
             Ok(result) => result,
             Err(response) => return response,
         };
 
-    // Set the server keys in the context
-    {
-        let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = server_keys;
-    }
+    let has_mcp_tools = mcp_info.has_mcp_tools();
+    ctx.set_mcp_connection(mcp_info);
 
     if has_mcp_tools {
         debug!("MCP tools detected in streaming mode, using streaming tool loop");

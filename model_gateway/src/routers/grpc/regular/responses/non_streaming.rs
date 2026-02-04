@@ -20,13 +20,14 @@ use super::{
     conversions,
 };
 use crate::{
-    mcp::{ApprovalMode, TenantContext, ToolExecutionInput},
+    mcp::{TenantContext, ToolCallContext, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse},
     routers::{
         error,
         grpc::common::responses::{
-            ensure_mcp_connection, persist_response_if_needed, ResponsesContext,
+            ensure_mcp_connection, persist_response_if_needed, process_pending_approvals,
+            ResponsesContext,
         },
         mcp_utils::{extract_server_label, DEFAULT_MAX_ITERATIONS},
     },
@@ -36,9 +37,10 @@ use crate::{
 ///
 /// This is the core execution path that:
 /// 1. Loads conversation history / response chain
-/// 2. Checks for MCP tools
-/// 3. Executes with or without MCP tool loop
-/// 4. Persists to storage
+/// 2. Processes any mcp_approval_response items (execute approved tools)
+/// 3. Checks for MCP tools
+/// 4. Executes with or without MCP tool loop
+/// 5. Persists to storage
 pub(super) async fn route_responses_internal(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
@@ -49,15 +51,45 @@ pub(super) async fn route_responses_internal(
     // 1. Load conversation history and build modified request
     let modified_request = load_conversation_history(ctx, &request).await?;
 
-    // 2. Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) =
-        ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await?;
+    // Extract server_label for logging
+    let server_label = extract_server_label(request.tools.as_deref(), "request-mcp");
 
-    // Set the server keys in the context
+    // Get request_id for tool execution (use response_id if available)
+    let request_id = response_id
+        .clone()
+        .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4()));
+
+    // 2. Process any mcp_approval_response items from input
+    if let Some(output_items) = process_pending_approvals(
+        &ctx.mcp_orchestrator,
+        &modified_request.input,
+        &server_label,
+    )
+    .await
     {
-        let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = server_keys;
+        let response = ResponsesResponse::builder(&request_id, &modified_request.model)
+            .copy_from_request(&modified_request)
+            .status(ResponseStatus::Completed)
+            .output(output_items)
+            .build();
+
+        persist_response_if_needed(
+            ctx.conversation_storage.clone(),
+            ctx.conversation_item_storage.clone(),
+            ctx.response_storage.clone(),
+            &response,
+            &request,
+        )
+        .await;
+
+        return Ok(response);
     }
+
+    // 3. Check MCP connection and get whether MCP tools are present
+    let mcp_info = ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await?;
+
+    let has_mcp_tools = mcp_info.has_mcp_tools();
+    ctx.set_mcp_connection(mcp_info);
 
     let responses_response = if has_mcp_tools {
         debug!("MCP tools detected, using tool loop");
@@ -175,21 +207,15 @@ pub(super) async fn execute_tool_loop(
         DEFAULT_MAX_ITERATIONS
     );
 
-    // Create a request context for tool execution (use response_id if available)
+    // Get request_id for tool execution (use response_id if available)
     let request_id = response_id
         .clone()
         .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4()));
-    let request_ctx = ctx.mcp_orchestrator.create_request_context(
-        request_id,
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
-    );
 
-    // Get MCP tools and convert to chat format (do this once before loop)
-    let mcp_tools = {
-        let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_orchestrator.list_tools_for_servers(&servers)
-    };
+    // Get MCP connection info and tools once before the loop
+    let server_keys = ctx.server_keys();
+    let conn = ctx.mcp_connection();
+    let mcp_tools = ctx.mcp_orchestrator.list_tools_for_servers(&server_keys);
     let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&mcp_tools);
     trace!(
         "Converted {} MCP tools to chat format",
@@ -323,12 +349,6 @@ pub(super) async fn execute_tool_loop(
                 return Ok(responses_response);
             }
 
-            // Get server_keys for tool execution
-            let server_keys: Vec<String> = {
-                let servers = ctx.requested_servers.read().unwrap();
-                servers.clone()
-            };
-
             // Convert tool calls to execution inputs
             let inputs: Vec<ToolExecutionInput> = mcp_tool_calls
                 .into_iter()
@@ -339,14 +359,37 @@ pub(super) async fn execute_tool_loop(
                 })
                 .collect();
 
-            // Execute all MCP tools via unified API
-            let results = ctx
-                .mcp_orchestrator
-                .execute_tools(inputs, &server_keys, &server_label, &request_ctx)
-                .await;
+            let tool_ctx = ToolCallContext {
+                allowed_servers: &server_keys,
+                server_label: &server_label,
+                request_id: &request_id,
+                tenant_ctx: TenantContext::default(),
+                approval_modes: &conn.approval_modes,
+            };
+            let outcomes = ctx.mcp_orchestrator.execute_tools(inputs, &tool_ctx).await;
 
-            // Process results: record metrics and state
-            for result in results {
+            // Separate pending approvals from executed results
+            let (executed_results, pending_approvals) =
+                crate::routers::grpc::common::responses::utils::partition_outcomes(
+                    outcomes,
+                    &current_request.model,
+                );
+
+            if !pending_approvals.is_empty() {
+                debug!(
+                    approval_count = pending_approvals.len(),
+                    "MCP tools require approval - returning approval requests"
+                );
+                let response = ResponsesResponse::builder(&request_id, &current_request.model)
+                    .copy_from_request(&current_request)
+                    .status(ResponseStatus::InProgress)
+                    .output(pending_approvals)
+                    .build();
+                return Ok(response);
+            }
+
+            // Process executed results: record metrics and state
+            for result in executed_results {
                 trace!(
                     "Tool '{}' (call_id: {}) completed in {:?}, success={}",
                     result.tool_name,
@@ -421,10 +464,8 @@ pub(super) async fn execute_tool_loop(
 
             // Inject MCP metadata into output
             if state.total_calls > 0 {
-                // Prepend mcp_list_tools item
-                let servers = ctx.requested_servers.read().unwrap();
                 let mcp_list_tools =
-                    build_mcp_list_tools_item(&ctx.mcp_orchestrator, &server_label, &servers);
+                    build_mcp_list_tools_item(&ctx.mcp_orchestrator, &server_label, &server_keys);
                 responses_response.output.insert(0, mcp_list_tools);
 
                 // Append all mcp_call items at the end

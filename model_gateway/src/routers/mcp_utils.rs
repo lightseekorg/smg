@@ -1,11 +1,14 @@
 //! Shared MCP utilities for routers.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use tracing::{debug, warn};
 
 use crate::{
-    mcp::{BuiltinToolType, McpOrchestrator, McpServerConfig, McpTransport, ResponseFormat},
+    mcp::{
+        ApprovalMode, BuiltinToolType, McpOrchestrator, McpServerConfig, McpTransport,
+        ResponseFormat,
+    },
     protocols::responses::{ResponseTool, ResponseToolType},
 };
 
@@ -19,6 +22,37 @@ pub struct McpLoopConfig {
     pub max_iterations: usize,
     /// MCP servers for this request (label, server_key).
     pub mcp_servers: Vec<(String, String)>,
+    /// Per-server approval modes (server_key -> ApprovalMode).
+    pub approval_modes: HashMap<String, ApprovalMode>,
+}
+
+/// Result of ensuring MCP client connections.
+#[derive(Clone)]
+pub struct McpConnectionResult {
+    /// Connected MCP servers (label, server_key).
+    pub mcp_servers: Vec<(String, String)>,
+    /// Per-server approval modes (server_key -> ApprovalMode).
+    pub approval_modes: HashMap<String, ApprovalMode>,
+}
+
+impl McpConnectionResult {
+    pub fn empty() -> Self {
+        Self {
+            mcp_servers: Vec::new(),
+            approval_modes: HashMap::new(),
+        }
+    }
+
+    pub fn has_mcp_tools(&self) -> bool {
+        !self.mcp_servers.is_empty()
+    }
+
+    pub fn server_keys(&self) -> Vec<String> {
+        self.mcp_servers
+            .iter()
+            .map(|(_, key)| key.clone())
+            .collect()
+    }
 }
 
 /// Routing information for a built-in tool type.
@@ -42,7 +76,21 @@ impl Default for McpLoopConfig {
         Self {
             max_iterations: DEFAULT_MAX_ITERATIONS,
             mcp_servers: Vec::new(),
+            approval_modes: HashMap::new(),
         }
+    }
+}
+
+/// Parse require_approval field value to ApprovalMode.
+///
+/// Maps OpenAI API values to internal approval modes:
+/// - "always" (default) -> ApprovalMode::Interactive
+/// - "never" -> ApprovalMode::PolicyOnly
+fn parse_require_approval(require_approval: Option<&str>) -> ApprovalMode {
+    match require_approval {
+        Some("never") => ApprovalMode::PolicyOnly,
+        // "always" is the default per OpenAI spec
+        _ => ApprovalMode::Interactive,
     }
 }
 
@@ -158,13 +206,15 @@ pub fn collect_builtin_routing(
 ///
 /// Headers for MCP servers come from the tool payload (`tool.headers`), not HTTP request headers.
 ///
-/// Returns `Some((orchestrator, mcp_servers))` if MCP tools or built-in routing is available,
-/// `None` otherwise.
+/// Returns `Some(McpConnectionResult)` if MCP tools or built-in routing is available,
+/// `None` otherwise. The result includes per-server approval modes based on the
+/// `require_approval` field in each MCP tool definition.
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
-) -> Option<(Arc<McpOrchestrator>, Vec<(String, String)>)> {
+) -> Option<McpConnectionResult> {
     let mut mcp_servers = Vec::new();
+    let mut approval_modes: HashMap<String, ApprovalMode> = HashMap::new();
 
     // 1. Process explicit MCP tools (dynamic via `server_url`, or static via `server_label`)
     for tool in tools {
@@ -223,10 +273,14 @@ pub async fn ensure_request_mcp_client(
 
             let server_key = McpOrchestrator::server_key(&server_config);
 
+            // Parse approval mode from require_approval field
+            let approval_mode = parse_require_approval(tool.require_approval.as_deref());
+
             match mcp_orchestrator.connect_dynamic_server(server_config).await {
                 Ok(_) => {
                     if !mcp_servers.iter().any(|(_, key)| key == &server_key) {
-                        mcp_servers.push((label.clone(), server_key));
+                        mcp_servers.push((label.clone(), server_key.clone()));
+                        approval_modes.insert(server_key, approval_mode);
                     }
                 }
                 Err(err) => {
@@ -253,14 +307,20 @@ pub async fn ensure_request_mcp_client(
 
         let server_name = routing.server_name;
         if !mcp_servers.iter().any(|(_, key)| key == &server_name) {
-            mcp_servers.push((server_name.clone(), server_name));
+            mcp_servers.push((server_name.clone(), server_name.clone()));
+            // Built-in tools use PolicyOnly mode — they are server-configured,
+            // not user-requested, so they should auto-execute without approval.
+            approval_modes.insert(server_name, ApprovalMode::PolicyOnly);
         }
     }
 
     if mcp_servers.is_empty() {
         None
     } else {
-        Some((mcp_orchestrator.clone(), mcp_servers))
+        Some(McpConnectionResult {
+            mcp_servers,
+            approval_modes,
+        })
     }
 }
 
@@ -625,13 +685,19 @@ mod tests {
         // Should return Some because built-in routing is configured
         assert!(result.is_some());
 
-        let (_, mcp_servers) = result.unwrap();
-        assert_eq!(mcp_servers.len(), 1);
+        let conn_result = result.unwrap();
+        assert_eq!(conn_result.mcp_servers.len(), 1);
 
         // The server key should be the static server name
-        let (label, key) = &mcp_servers[0];
+        let (label, key) = &conn_result.mcp_servers[0];
         assert_eq!(label, "search-server");
         assert_eq!(key, "search-server");
+
+        // Built-in tools should default to PolicyOnly mode (server-configured, auto-execute)
+        assert_eq!(
+            conn_result.approval_modes.get("search-server"),
+            Some(&ApprovalMode::PolicyOnly)
+        );
     }
 
     #[tokio::test]
@@ -689,8 +755,32 @@ mod tests {
         // Should return Some because web_search_preview has built-in routing
         assert!(result.is_some());
 
-        let (_, mcp_servers) = result.unwrap();
-        assert_eq!(mcp_servers.len(), 1);
-        assert_eq!(mcp_servers[0].0, "search-server");
+        let conn_result = result.unwrap();
+        assert_eq!(conn_result.mcp_servers.len(), 1);
+        assert_eq!(conn_result.mcp_servers[0].0, "search-server");
+    }
+
+    #[test]
+    fn test_parse_require_approval() {
+        // "never" -> PolicyOnly
+        assert_eq!(
+            parse_require_approval(Some("never")),
+            ApprovalMode::PolicyOnly
+        );
+
+        // "always" -> Interactive
+        assert_eq!(
+            parse_require_approval(Some("always")),
+            ApprovalMode::Interactive
+        );
+
+        // None -> Interactive (default)
+        assert_eq!(parse_require_approval(None), ApprovalMode::Interactive);
+
+        // Unknown value -> Interactive (default)
+        assert_eq!(
+            parse_require_approval(Some("unknown")),
+            ApprovalMode::Interactive
+        );
     }
 }

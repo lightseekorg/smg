@@ -16,6 +16,7 @@ pub use config::{
 pub use handler::{HandlerRequestContext, RefreshRequest, SmgClientHandler};
 pub use metrics::{LatencySnapshot, McpMetrics, MetricsSnapshot};
 pub use orchestrator::{
-    McpOrchestrator, McpRequestContext, ToolCallResult, ToolExecutionInput, ToolExecutionOutput,
+    ApprovalResponseInput, McpOrchestrator, McpRequestContext, PendingApprovalOutput,
+    ToolCallContext, ToolCallResult, ToolExecutionInput, ToolExecutionOutcome, ToolExecutionOutput,
 };
 pub use pool::{McpConnectionPool, PoolKey};

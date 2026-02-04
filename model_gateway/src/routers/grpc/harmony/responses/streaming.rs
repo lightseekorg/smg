@@ -23,6 +23,7 @@ use crate::{
         grpc::{
             common::responses::{
                 build_sse_response, ensure_mcp_connection, persist_response_if_needed,
+                process_pending_approvals, stream_approval_results,
                 streaming::{OutputItemType, ResponseStreamEventEmitter},
                 ResponsesContext,
             },
@@ -46,8 +47,29 @@ pub(crate) async fn serve_harmony_responses_stream(
         Err(err_response) => return err_response,
     };
 
+    // Extract server_label for logging
+    let server_label = extract_server_label(current_request.tools.as_deref(), "sglang-mcp");
+
+    // Generate response_id
+    let response_id = format!("resp_{}", Uuid::new_v4());
+
+    // Process any mcp_approval_response items from input BEFORE streaming
+    if let Some(output_items) =
+        process_pending_approvals(&ctx.mcp_orchestrator, &current_request.input, &server_label)
+            .await
+    {
+        return stream_approval_results(
+            ctx,
+            &response_id,
+            &current_request,
+            &request,
+            output_items,
+        )
+        .await;
+    }
+
     // Check MCP connection BEFORE starting stream and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) = match ensure_mcp_connection(
+    let mcp_info = match ensure_mcp_connection(
         &ctx.mcp_orchestrator,
         current_request.tools.as_deref(),
     )
@@ -57,17 +79,13 @@ pub(crate) async fn serve_harmony_responses_stream(
         Err(response) => return response,
     };
 
-    // Set the server keys in the context
-    {
-        let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = server_keys;
-    }
+    let has_mcp_tools = mcp_info.has_mcp_tools();
+    ctx.set_mcp_connection(mcp_info);
 
     // Create SSE channel
     let (tx, rx) = mpsc::unbounded_channel();
 
     // Create response event emitter
-    let response_id = format!("resp_{}", Uuid::new_v4());
     let model = current_request.model.clone();
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -129,7 +147,7 @@ async fn execute_mcp_tool_loop_streaming(
     // the original tools. MCP tools are only merged into current_request for model calls.
 
     // Add filtered MCP tools (static + requested dynamic) to the request
-    let server_keys: Vec<String> = ctx.requested_servers.read().unwrap().clone();
+    let server_keys = ctx.server_keys();
     let mcp_tools = ctx.mcp_orchestrator.list_tools_for_servers(&server_keys);
     if !mcp_tools.is_empty() {
         let mcp_response_tools = convert_mcp_tools_to_response_tools(&mcp_tools);
@@ -161,6 +179,9 @@ async fn execute_mcp_tool_loop_streaming(
     emitter.set_mcp_server_label(server_label.clone());
 
     let mut mcp_tracking = McpCallTracking::new(server_label.clone());
+
+    // Read approval modes once before the loop (they don't change across iterations)
+    let approval_modes = ctx.mcp_connection().approval_modes;
 
     // Emit mcp_list_tools on first iteration
     let (output_index, item_id) = emitter.allocate_output_index(OutputItemType::McpListTools);
@@ -349,20 +370,24 @@ async fn execute_mcp_tool_loop_streaming(
                     return;
                 }
 
-                // Execute MCP tools (if any)
-                let mcp_results = if !mcp_tool_calls.is_empty() {
+                let (mcp_results, pending_approvals) = if !mcp_tool_calls.is_empty() {
+                    let tool_ctx = crate::mcp::ToolCallContext {
+                        allowed_servers: &server_keys,
+                        server_label: &server_label,
+                        request_id: &request_id,
+                        tenant_ctx: crate::mcp::TenantContext::default(),
+                        approval_modes: &approval_modes,
+                    };
                     match execute_mcp_tools(
                         &ctx.mcp_orchestrator,
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,
-                        &request_id,
-                        &server_label,
-                        &mcp_tools,
+                        &tool_ctx,
                     )
                     .await
                     {
-                        Ok(results) => results,
+                        Ok(result) => (result.executed, result.pending_approvals),
                         Err(err_response) => {
                             emitter.emit_error(
                                 &format!("MCP tool execution failed: {:?}", err_response),
@@ -373,12 +398,51 @@ async fn execute_mcp_tool_loop_streaming(
                         }
                     }
                 } else {
-                    Vec::new()
+                    (Vec::new(), Vec::new())
                 };
 
                 // Update mcp_call output items with execution results (if any MCP tools were executed)
                 if !mcp_results.is_empty() {
                     emitter.update_mcp_call_outputs(&mcp_results);
+                }
+
+                // If there are pending approvals, emit them and complete the response
+                // Client must approve these via mcp_approval_response in next request
+                if !pending_approvals.is_empty() {
+                    debug!(
+                        approval_count = pending_approvals.len(),
+                        "MCP tools require approval - emitting approval requests and completing"
+                    );
+
+                    // Emit each approval request as an output item
+                    for approval in pending_approvals {
+                        let (output_index, _item_id) =
+                            emitter.allocate_output_index(OutputItemType::McpApprovalRequest);
+
+                        // Convert to JSON for emission
+                        let item_json = serde_json::to_value(&approval).unwrap_or_else(|_| {
+                            json!({"type": "mcp_approval_request", "error": "serialization_failed"})
+                        });
+
+                        // Emit added event
+                        let event = emitter.emit_output_item_added(output_index, &item_json);
+                        emitter.send_event_best_effort(&event, tx);
+
+                        // Emit done event (approval requests are immediately "done" - they just need client response)
+                        let event = emitter.emit_output_item_done(output_index, &item_json);
+                        emitter.send_event_best_effort(&event, tx);
+                        emitter.complete_output_item(output_index);
+                    }
+
+                    // Emit response.completed with usage
+                    let usage_json = json!({
+                        "input_tokens": usage.prompt_tokens,
+                        "output_tokens": usage.completion_tokens,
+                        "total_tokens": usage.total_tokens,
+                    });
+                    let event = emitter.emit_completed(Some(&usage_json));
+                    emitter.send_event_best_effort(&event, tx);
+                    return;
                 }
 
                 // If there are function tools, exit MCP loop and emit completion

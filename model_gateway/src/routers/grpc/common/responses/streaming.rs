@@ -27,6 +27,7 @@ pub(crate) enum OutputItemType {
     Message,
     McpListTools,
     McpCall,
+    McpApprovalRequest,
     FunctionCall,
     Reasoning,
     WebSearchCall,
@@ -620,6 +621,7 @@ impl ResponseStreamEventEmitter {
         let id_prefix = match &item_type {
             OutputItemType::McpListTools => "mcpl",
             OutputItemType::McpCall => "mcp",
+            OutputItemType::McpApprovalRequest => "mcpa",
             OutputItemType::FunctionCall => "fc",
             OutputItemType::Message => "msg",
             OutputItemType::Reasoning => "rs",

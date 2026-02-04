@@ -9,28 +9,28 @@ use tracing::{debug, error, warn};
 use crate::{
     core::WorkerRegistry,
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::McpOrchestrator,
+    mcp::{ApprovalResponseInput, McpOrchestrator, ToolExecutionOutcome},
     protocols::{
         common::Tool,
-        responses::{ResponseTool, ResponseToolType, ResponsesRequest, ResponsesResponse},
+        responses::{
+            ResponseInput, ResponseInputOutputItem, ResponseTool, ResponseToolType,
+            ResponsesRequest, ResponsesResponse,
+        },
     },
     routers::{
-        error, mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
+        error,
+        mcp_utils::{ensure_request_mcp_client, McpConnectionResult},
+        persistence_utils::persist_conversation_items,
     },
 };
 
-/// Ensure MCP connection succeeds if MCP tools or builtin tools are declared
+/// Validate MCP connections for tools declared in request.
 ///
-/// Checks if request declares MCP tools or builtin tool types (web_search_preview,
-/// code_interpreter), and if so, validates that the MCP clients can be created
-/// and connected.
-///
-/// Returns Ok((has_mcp_tools, server_keys)) on success.
+/// Returns server keys and per-server approval modes.
 pub(crate) async fn ensure_mcp_connection(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: Option<&[ResponseTool]>,
-) -> Result<(bool, Vec<String>), Response> {
-    // Check for explicit MCP tools (must error if connection fails)
+) -> Result<McpConnectionResult, Response> {
     let has_explicit_mcp_tools = tools
         .map(|t| {
             t.iter()
@@ -38,7 +38,6 @@ pub(crate) async fn ensure_mcp_connection(
         })
         .unwrap_or(false);
 
-    // Check for builtin tools that MAY have MCP routing configured
     let has_builtin_tools = tools
         .map(|t| {
             t.iter().any(|tool| {
@@ -50,22 +49,15 @@ pub(crate) async fn ensure_mcp_connection(
         })
         .unwrap_or(false);
 
-    // Only process if we have MCP or builtin tools
     if !has_explicit_mcp_tools && !has_builtin_tools {
-        return Ok((false, Vec::new()));
+        return Ok(McpConnectionResult::empty());
     }
 
     if let Some(tools) = tools {
         match ensure_request_mcp_client(mcp_orchestrator, tools).await {
-            Some((_orchestrator, mcp_servers)) => {
-                let server_keys: Vec<String> =
-                    mcp_servers.into_iter().map(|(_, key)| key).collect();
-                return Ok((true, server_keys));
-            }
+            Some(conn_result) => return Ok(conn_result),
             None => {
-                // No MCP servers available
                 if has_explicit_mcp_tools {
-                    // Explicit MCP tools MUST have working connections
                     error!(
                         function = "ensure_mcp_connection",
                         "Failed to connect to MCP servers"
@@ -75,17 +67,16 @@ pub(crate) async fn ensure_mcp_connection(
                         "Failed to connect to MCP servers. Check server_url and authorization.",
                     ));
                 }
-                // Builtin tools without MCP routing - pass through to model
                 debug!(
                     function = "ensure_mcp_connection",
                     "No MCP routing configured for builtin tools, passing through to model"
                 );
-                return Ok((false, Vec::new()));
+                return Ok(McpConnectionResult::empty());
             }
         }
     }
 
-    Ok((false, Vec::new()))
+    Ok(McpConnectionResult::empty())
 }
 
 /// Validate that workers are available for the requested model
@@ -109,20 +100,7 @@ pub(crate) fn validate_worker_availability(
     None
 }
 
-/// Extract function tools (and optionally MCP tools) from ResponseTools
-///
-/// This utility consolidates the logic for extracting tools with schemas from ResponseTools.
-/// It's used by both Harmony and Regular routers for different purposes:
-///
-/// - **Harmony router**: Extracts both Function and MCP tools (with `include_mcp: true`)
-///   because MCP schemas are populated by convert_mcp_tools_to_response_tools() before the
-///   pipeline runs. These tools are used to generate structural constraints in the
-///   Harmony preparation stage.
-///
-/// - **Regular router**: Extracts only Function tools (with `include_mcp: false`) during
-///   the initial conversion from ResponsesRequest to ChatCompletionRequest. MCP tools
-///   are merged later by the tool loop before being sent to the chat pipeline, where
-///   tool_choice constraints are generated for ALL tools (function + MCP combined).
+/// Extract tools with schemas from ResponseTools.
 pub(crate) fn extract_tools_from_response_tools(
     response_tools: Option<&[ResponseTool]>,
     include_mcp: bool,
@@ -153,10 +131,51 @@ pub(crate) fn extract_tools_from_response_tools(
         .collect()
 }
 
-/// Persist response to storage if store=true
+/// Persist response to storage if store=true.
+/// Partition tool execution outcomes into executed results and pending approval output items.
 ///
-/// Common helper function to avoid duplication across sync and streaming paths
-/// in both harmony and regular responses implementations.
+/// Records metrics for pending approvals. Returns (executed, pending_approval_items).
+pub(crate) fn partition_outcomes(
+    outcomes: Vec<ToolExecutionOutcome>,
+    model_id: &str,
+) -> (
+    Vec<crate::mcp::ToolExecutionOutput>,
+    Vec<crate::protocols::responses::ResponseOutputItem>,
+) {
+    use crate::{
+        mcp::PendingApprovalOutput,
+        observability::metrics::{metrics_labels, Metrics},
+    };
+
+    let mut executed = Vec::new();
+    let mut pending = Vec::new();
+
+    for outcome in outcomes {
+        match outcome {
+            ToolExecutionOutcome::Executed(output) => executed.push(output),
+            ToolExecutionOutcome::PendingApproval(PendingApprovalOutput {
+                tool_name,
+                server_label,
+                arguments_str,
+                elicitation_id,
+                ..
+            }) => {
+                Metrics::record_mcp_tool_call(model_id, &tool_name, metrics_labels::RESULT_PENDING);
+                pending.push(
+                    crate::protocols::responses::ResponseOutputItem::McpApprovalRequest {
+                        id: elicitation_id,
+                        server_label,
+                        name: tool_name,
+                        arguments: arguments_str,
+                    },
+                );
+            }
+        }
+    }
+
+    (executed, pending)
+}
+
 pub(crate) async fn persist_response_if_needed(
     conversation_storage: Arc<dyn ConversationStorage>,
     conversation_item_storage: Arc<dyn ConversationItemStorage>,
@@ -183,4 +202,139 @@ pub(crate) async fn persist_response_if_needed(
             debug!("Persisted response: {}", response.id);
         }
     }
+}
+
+/// Stream approval results as SSE events.
+///
+/// Used when client sends mcp_approval_response items in a streaming request.
+/// Shared between regular and harmony streaming paths.
+pub(crate) async fn stream_approval_results(
+    ctx: &super::ResponsesContext,
+    response_id: &str,
+    modified_request: &ResponsesRequest,
+    original_request: &ResponsesRequest,
+    output_items: Vec<crate::protocols::responses::ResponseOutputItem>,
+) -> Response {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use tokio::sync::mpsc;
+
+    use super::streaming::{OutputItemType, ResponseStreamEventEmitter};
+    use crate::protocols::responses::ResponseStatus;
+
+    let model = modified_request.model.clone();
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut emitter =
+        ResponseStreamEventEmitter::new(response_id.to_string(), model.clone(), created_at);
+    emitter.set_original_request(modified_request.clone());
+
+    let response = ResponsesResponse::builder(response_id, &model)
+        .copy_from_request(modified_request)
+        .status(ResponseStatus::Completed)
+        .output(output_items.clone())
+        .build();
+
+    let ctx_clone = ctx.clone();
+    let original_request_clone = original_request.clone();
+
+    tokio::spawn(async move {
+        let event = emitter.emit_created();
+        if emitter.send_event(&event, &tx).is_err() {
+            return;
+        }
+        let event = emitter.emit_in_progress();
+        if emitter.send_event(&event, &tx).is_err() {
+            return;
+        }
+
+        for result in output_items {
+            let (output_index, _item_id) = emitter.allocate_output_index(OutputItemType::McpCall);
+            let item_json = to_value(&result).unwrap_or_default();
+
+            let event = emitter.emit_output_item_added(output_index, &item_json);
+            if emitter.send_event(&event, &tx).is_err() {
+                return;
+            }
+
+            let event = emitter.emit_output_item_done(output_index, &item_json);
+            if emitter.send_event(&event, &tx).is_err() {
+                return;
+            }
+        }
+
+        let event = emitter.emit_completed(None);
+        let _ = emitter.send_event(&event, &tx);
+
+        persist_response_if_needed(
+            ctx_clone.conversation_storage.clone(),
+            ctx_clone.conversation_item_storage.clone(),
+            ctx_clone.response_storage.clone(),
+            &response,
+            &original_request_clone,
+        )
+        .await;
+    });
+
+    super::build_sse_response(rx)
+}
+
+/// Process any mcp_approval_response items from input. Returns output items if approvals
+/// were found and executed, None otherwise.
+pub(crate) async fn process_pending_approvals(
+    orchestrator: &McpOrchestrator,
+    input: &ResponseInput,
+    server_label: &str,
+) -> Option<Vec<crate::protocols::responses::ResponseOutputItem>> {
+    let items = match input {
+        ResponseInput::Items(items) => items,
+        ResponseInput::Text(_) => return None,
+    };
+
+    let approvals: Vec<ApprovalResponseInput> = items
+        .iter()
+        .filter_map(|item| {
+            if let ResponseInputOutputItem::McpApprovalResponse {
+                approval_request_id,
+                approve,
+                reason,
+                ..
+            } = item
+            {
+                Some(ApprovalResponseInput {
+                    approval_request_id: approval_request_id.clone(),
+                    approve: *approve,
+                    reason: reason.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if approvals.is_empty() {
+        return None;
+    }
+
+    let outcomes = orchestrator
+        .process_approval_responses(approvals, server_label)
+        .await;
+
+    let output_items: Vec<_> = outcomes
+        .into_iter()
+        .filter_map(|outcome| match outcome {
+            ToolExecutionOutcome::Executed(output) => Some(output.to_response_item()),
+            ToolExecutionOutcome::PendingApproval(_) => None, // shouldn't happen for approved tools
+        })
+        .collect();
+
+    if output_items.is_empty() {
+        return None;
+    }
+
+    Some(output_items)
 }

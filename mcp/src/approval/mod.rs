@@ -7,7 +7,7 @@ pub mod policy;
 pub use audit::{AuditEntry, AuditLog, DecisionResult, DecisionSource};
 pub use manager::{
     ApprovalDecision, ApprovalKey, ApprovalManager, ApprovalMode, ApprovalOutcome, ApprovalParams,
-    McpApprovalRequest, McpApprovalResponse,
+    McpApprovalRequest, McpApprovalResponse, PendingApprovalInfo,
 };
 pub use policy::{
     PolicyDecision, PolicyEngine, PolicyRule, RuleCondition, RulePattern, ServerPolicy, TrustLevel,

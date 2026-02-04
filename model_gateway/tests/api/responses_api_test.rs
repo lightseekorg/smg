@@ -89,7 +89,7 @@ async fn test_non_streaming_mcp_minimal_e2e_with_persistence() {
             headers: None,
             server_label: Some("mock".to_string()),
             server_description: None,
-            require_approval: None,
+            require_approval: Some("never".to_string()),
             allowed_tools: None,
         }]),
         top_logprobs: Some(0),
@@ -727,6 +727,7 @@ async fn test_max_tool_calls_limit() {
             r#type: ResponseToolType::Mcp,
             server_url: Some(mcp.url()),
             server_label: Some("mock".to_string()),
+            require_approval: Some("never".to_string()),
             ..Default::default()
         }]),
         top_logprobs: Some(0),
