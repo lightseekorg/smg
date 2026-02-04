@@ -243,86 +243,106 @@ def _setup_pd_backend_common(
     missing_prefill = max(0, num_prefill - len(existing_prefills))
     missing_decode = max(0, num_decode - len(existing_decodes))
 
-    if missing_prefill == 0 and missing_decode == 0:
-        prefills = existing_prefills[:num_prefill]
-        decodes = existing_decodes[:num_decode]
-        for w in existing_prefills[num_prefill:]:
-            w.release()
-        for w in existing_decodes[num_decode:]:
-            w.release()
-        logger.info(
-            "Using pre-launched %s PD workers: %d prefill, %d decode",
-            runtime_label,
-            len(prefills),
-            len(decodes),
-        )
-    else:
-        workers_to_launch: list[WorkerIdentity] = []
-        for i in range(missing_prefill):
-            workers_to_launch.append(
-                WorkerIdentity(
-                    model_id,
-                    connection_mode,
-                    WorkerType.PREFILL,
-                    len(existing_prefills) + i,
-                )
-            )
-        for i in range(missing_decode):
-            workers_to_launch.append(
-                WorkerIdentity(
-                    model_id,
-                    connection_mode,
-                    WorkerType.DECODE,
-                    len(existing_decodes) + i,
-                )
-            )
+    # Track all acquired workers for cleanup on failure
+    acquired_workers: list = []
 
-        logger.info(
-            "Have %d/%d prefill, %d/%d decode. Launching %d more workers",
-            len(existing_prefills),
-            num_prefill,
-            len(existing_decodes),
-            num_decode,
-            len(workers_to_launch),
-        )
-        new_instances = model_pool.launch_workers(
-            workers_to_launch, startup_timeout=300
-        )
-
-        if not new_instances:
-            for w in existing_prefills + existing_decodes:
+    try:
+        if missing_prefill == 0 and missing_decode == 0:
+            prefills = existing_prefills[:num_prefill]
+            decodes = existing_decodes[:num_decode]
+            acquired_workers = prefills + decodes
+            for w in existing_prefills[num_prefill:]:
                 w.release()
-            pytest.fail(
-                f"Failed to launch {runtime_label} PD workers: needed "
-                f"{len(workers_to_launch)} workers but could not allocate GPUs"
+            for w in existing_decodes[num_decode:]:
+                w.release()
+            logger.info(
+                "Using pre-launched %s PD workers: %d prefill, %d decode",
+                runtime_label,
+                len(prefills),
+                len(decodes),
+            )
+        else:
+            acquired_workers = existing_prefills + existing_decodes
+            workers_to_launch: list[WorkerIdentity] = []
+            for i in range(missing_prefill):
+                workers_to_launch.append(
+                    WorkerIdentity(
+                        model_id,
+                        connection_mode,
+                        WorkerType.PREFILL,
+                        len(existing_prefills) + i,
+                    )
+                )
+            for i in range(missing_decode):
+                workers_to_launch.append(
+                    WorkerIdentity(
+                        model_id,
+                        connection_mode,
+                        WorkerType.DECODE,
+                        len(existing_decodes) + i,
+                    )
+                )
+
+            logger.info(
+                "Have %d/%d prefill, %d/%d decode. Launching %d more workers",
+                len(existing_prefills),
+                num_prefill,
+                len(existing_decodes),
+                num_decode,
+                len(workers_to_launch),
+            )
+            new_instances = model_pool.launch_workers(
+                workers_to_launch, startup_timeout=300
             )
 
-        for inst in new_instances:
-            inst.acquire()
+            if not new_instances:
+                pytest.fail(
+                    f"Failed to launch {runtime_label} PD workers: needed "
+                    f"{len(workers_to_launch)} workers but could not allocate GPUs"
+                )
 
-        new_prefills = [w for w in new_instances if w.worker_type == WorkerType.PREFILL]
-        new_decodes = [w for w in new_instances if w.worker_type == WorkerType.DECODE]
-        prefills = existing_prefills + new_prefills
-        decodes = existing_decodes + new_decodes
+            for inst in new_instances:
+                inst.acquire()
+                acquired_workers.append(inst)
 
-    if not prefills or not decodes:
-        for w in prefills + decodes:
-            w.release()
-        pytest.fail(
-            f"{runtime_label} PD setup incomplete: have {len(prefills)} prefill, "
-            f"{len(decodes)} decode (need {num_prefill} prefill, {num_decode} decode)"
-        )
+            new_prefills = [w for w in new_instances if w.worker_type == WorkerType.PREFILL]
+            new_decodes = [w for w in new_instances if w.worker_type == WorkerType.DECODE]
+            prefills = existing_prefills + new_prefills
+            decodes = existing_decodes + new_decodes
+
+        if not prefills or not decodes:
+            pytest.fail(
+                f"{runtime_label} PD setup incomplete: have {len(prefills)} prefill, "
+                f"{len(decodes)} decode (need {num_prefill} prefill, {num_decode} decode)"
+            )
+    except Exception:
+        # Release all acquired workers on any failure
+        for w in acquired_workers:
+            try:
+                w.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        raise
 
     model_path = prefills[0].model_path
 
     gateway = Gateway()
-    gateway.start(
-        prefill_workers=prefills,
-        decode_workers=decodes,
-        policy=gateway_config["policy"],
-        timeout=gateway_config["timeout"],
-        extra_args=gateway_config["extra_args"],
-    )
+    try:
+        gateway.start(
+            prefill_workers=prefills,
+            decode_workers=decodes,
+            policy=gateway_config["policy"],
+            timeout=gateway_config["timeout"],
+            extra_args=gateway_config["extra_args"],
+        )
+    except Exception:
+        # Release workers if gateway fails to start
+        for w in acquired_workers:
+            try:
+                w.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        raise
 
     client = openai.OpenAI(
         base_url=f"{gateway.base_url}/v1",
@@ -345,8 +365,11 @@ def _setup_pd_backend_common(
     finally:
         logger.info("Tearing down %s PD gateway", runtime_label)
         gateway.shutdown()
-        for worker in prefills + decodes:
-            worker.release()
+        for worker in acquired_workers:
+            try:
+                worker.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
 
 
 def _setup_grpc_backend(
@@ -365,6 +388,7 @@ def _setup_grpc_backend(
 
     logger.info("Setting up %s gRPC backend for model %s", runtime_label, model_id)
 
+    instance = None
     try:
         instance = model_pool.get_grpc_worker(model_id)
     except RuntimeError as e:
@@ -374,13 +398,22 @@ def _setup_grpc_backend(
     worker_urls = [instance.worker_url]
 
     gateway = Gateway()
-    gateway.start(
-        worker_urls=worker_urls,
-        model_path=model_path,
-        policy=gateway_config["policy"],
-        timeout=gateway_config["timeout"],
-        extra_args=gateway_config["extra_args"],
-    )
+    try:
+        gateway.start(
+            worker_urls=worker_urls,
+            model_path=model_path,
+            policy=gateway_config["policy"],
+            timeout=gateway_config["timeout"],
+            extra_args=gateway_config["extra_args"],
+        )
+    except Exception:
+        # Release worker if gateway fails to start
+        if instance is not None:
+            try:
+                instance.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        raise
 
     client = openai.OpenAI(
         base_url=f"{gateway.base_url}/v1",
@@ -401,7 +434,11 @@ def _setup_grpc_backend(
     finally:
         logger.info("Tearing down %s gRPC gateway", runtime_label)
         gateway.shutdown()
-        instance.release()
+        if instance is not None:
+            try:
+                instance.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
 
 
 def _setup_local_backend(
@@ -465,18 +502,35 @@ def _setup_local_backend(
             instances = [instance]
             worker_urls = [instance.worker_url]
             model_path = instance.model_path
-    except RuntimeError as e:
-        pytest.fail(str(e))
+    except Exception as e:
+        # Release any acquired instances on failure
+        for inst in instances:
+            try:
+                inst.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        if isinstance(e, RuntimeError):
+            pytest.fail(str(e))
+        raise
 
     # Launch gateway
     gateway = Gateway()
-    gateway.start(
-        worker_urls=worker_urls,
-        model_path=model_path,
-        policy=gateway_config["policy"],
-        timeout=gateway_config["timeout"],
-        extra_args=gateway_config["extra_args"],
-    )
+    try:
+        gateway.start(
+            worker_urls=worker_urls,
+            model_path=model_path,
+            policy=gateway_config["policy"],
+            timeout=gateway_config["timeout"],
+            extra_args=gateway_config["extra_args"],
+        )
+    except Exception:
+        # Release workers if gateway fails to start
+        for inst in instances:
+            try:
+                inst.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        raise
 
     client = openai.OpenAI(
         base_url=f"{gateway.base_url}/v1",
@@ -499,7 +553,10 @@ def _setup_local_backend(
         gateway.shutdown()
         # Release references to allow eviction
         for inst in instances:
-            inst.release()
+            try:
+                inst.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
 
 
 def _setup_cloud_backend(
@@ -569,6 +626,7 @@ def backend_router(request: pytest.FixtureRequest, model_pool: "ModelPool"):
 
     connection_mode = ConnectionMode(backend_name)
 
+    instance = None
     try:
         # get() auto-acquires the returned instance
         instance = model_pool.get(model_id, connection_mode)
@@ -578,14 +636,27 @@ def backend_router(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         pytest.fail(str(e))
 
     gateway = Gateway()
-    gateway.start(
-        worker_urls=[instance.worker_url],
-        model_path=instance.model_path,
-    )
+    try:
+        gateway.start(
+            worker_urls=[instance.worker_url],
+            model_path=instance.model_path,
+        )
+    except Exception:
+        # Release worker if gateway fails to start
+        if instance is not None:
+            try:
+                instance.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        raise
 
     try:
         yield gateway
     finally:
         gateway.shutdown()
         # Release reference to allow eviction
-        instance.release()
+        if instance is not None:
+            try:
+                instance.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)

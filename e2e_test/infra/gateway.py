@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from .constants import DEFAULT_HOST, DEFAULT_ROUTER_TIMEOUT, ENV_SHOW_ROUTER_LOGS
-from .gpu_allocator import get_open_port
+from .gpu_allocator import get_open_port, release_port
 from .process_utils import kill_process_tree, wait_for_health, wait_for_workers_ready
 
 if TYPE_CHECKING:
@@ -93,6 +93,9 @@ class Gateway:
             prometheus_port: Port for prometheus metrics. If None, auto-assigns.
         """
         self.host = host
+        # Track whether we auto-allocated ports (for cleanup)
+        self._port_auto_allocated = port is None
+        self._prometheus_port_auto_allocated = prometheus_port is None
         self.port = port or get_open_port()
         self.prometheus_port = prometheus_port or get_open_port()
         self.base_url = f"http://{self.host}:{self.port}"
@@ -332,11 +335,18 @@ class Gateway:
         logger.info("Gateway ready at %s", self.base_url)
 
     def shutdown(self) -> None:
-        """Shutdown the gateway process."""
+        """Shutdown the gateway process and release allocated ports."""
         if self.process is not None:
             logger.info("Shutting down gateway (PID %d)", self.process.pid)
             kill_process_tree(self.process.pid)
             self.process = None
+
+        # Release auto-allocated ports back to the pool
+        if self._port_auto_allocated:
+            release_port(self.port)
+        if self._prometheus_port_auto_allocated:
+            release_port(self.prometheus_port)
+
         self._started = False
 
     def _build_base_cmd(self) -> list[str]:

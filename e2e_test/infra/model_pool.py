@@ -839,7 +839,10 @@ class ModelPool:
                 timeout waiting for GPUs.
         """
         deadline = time.time() + gpu_wait_timeout
-        poll_interval = 2.0  # seconds
+        # Exponential backoff: 1s, 2s, 4s, 8s, 16s, then cap at 16s
+        base_interval = 1.0
+        max_interval = 16.0
+        attempt = 0
 
         while True:
             with self._lock:
@@ -860,11 +863,16 @@ class ModelPool:
                         f"Timeout waiting for GPUs for {model_id} after {gpu_wait_timeout}s"
                     )
 
+            # Exponential backoff with cap
+            poll_interval = min(base_interval * (2**attempt), max_interval)
+            attempt += 1
+
             # Release lock while waiting so other tests can release workers
             logger.info(
-                "All GPUs in use by other tests, waiting %.1fs for %s...",
+                "All GPUs in use by other tests, waiting %.1fs for %s (attempt %d)...",
                 poll_interval,
                 model_id,
+                attempt,
             )
             time.sleep(poll_interval)
 
@@ -1381,7 +1389,10 @@ class ModelPool:
             List of launched ModelInstance objects.
         """
         deadline = time.time() + gpu_wait_timeout
-        poll_interval = 2.0  # seconds
+        # Exponential backoff: 1s, 2s, 4s, 8s, 16s, then cap at 16s
+        base_interval = 1.0
+        max_interval = 16.0
+        attempt = 0
 
         while True:
             with self._lock:
@@ -1403,10 +1414,15 @@ class ModelPool:
                     )
                     return []
 
+            # Exponential backoff with cap
+            poll_interval = min(base_interval * (2**attempt), max_interval)
+            attempt += 1
+
             # Release lock while waiting so other tests can release workers
             logger.info(
-                "All GPUs in use by other tests, waiting %.1fs for availability...",
+                "All GPUs in use by other tests, waiting %.1fs for availability (attempt %d)...",
                 poll_interval,
+                attempt,
             )
             time.sleep(poll_interval)
 
@@ -1548,7 +1564,7 @@ class ModelPool:
         return self.get(model_id, mode).base_url
 
     def shutdown(self) -> None:
-        """Tear down all models.
+        """Tear down all models and release resources.
 
         Thread-safe: Protected by internal lock.
         """
@@ -1556,6 +1572,9 @@ class ModelPool:
             logger.info("Shutting down model pool (%d instances)", len(self.instances))
             for instance in self.instances.values():
                 instance.terminate()
+                # Release GPU slot and port back to allocator
+                if instance.gpu_slot:
+                    self.allocator.release_slot(instance.gpu_slot)
             self.instances.clear()
 
     def __enter__(self) -> "ModelPool":
