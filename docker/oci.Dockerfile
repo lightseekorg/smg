@@ -3,7 +3,7 @@ FROM ocr-docker-remote.artifactory.oci.oraclecorp.com/os/oraclelinux:9-slim-fips
 COPY --from=odo-docker-signed-local.artifactory.oci.oraclecorp.com/base-image-support/ol9:1.51 / /
 ENTRYPOINT ["/sbin/simple_init.py"]
 
-RUN microdnf install io-ol9-container-hardening \
+RUN microdnf install io-ol9-container-hardening libaio \
     && rm -rf /var/cache/yum
 RUN microdnf update -y && microdnf clean all
 
@@ -50,11 +50,30 @@ RUN uv pip install maturin \
 ######################### ROUTER IMAGE #########################
 FROM base AS router-image
 
+# Install unzip, download client, and keep it flat (no /lib subfolder)
+RUN microdnf install -y unzip \
+    && curl -L -o instantclient-basic.zip https://download.oracle.com/otn_software/linux/instantclient/2113000/instantclient-basic-linux.x64-21.13.0.0.0dbru.zip \
+    && mkdir -p /opt/oracle \
+    && unzip instantclient-basic.zip -d /opt/oracle/ \
+    && rm instantclient-basic.zip \
+    && mv /opt/oracle/instantclient_21_13 /opt/oracle/instantclient \
+    && echo "/opt/oracle/instantclient" > /etc/ld.so.conf.d/oracle-instantclient.conf \
+    && ldconfig \
+    && microdnf remove -y unzip \
+    && microdnf clean all
+
+ENV LD_LIBRARY_PATH="/opt/oracle/instantclient:${LD_LIBRARY_PATH}"
+ENV ORACLE_HOME="/opt/oracle/instantclient"
+
+# Create directory for Oracle wallet (mount at runtime)
+RUN mkdir -p /opt/oracle/wallet
+
 COPY --from=build-image /opt/smg/bindings/python/dist/*.whl dist/
 
 RUN uv pip install --force-reinstall dist/*.whl
 
-RUN rm -rf /root/.cache dist/ \
+RUN rm -rf /root/.cache dist/
+RUN microdnf install -y procps-ng \
     && microdnf clean all
 
 ENTRYPOINT ["python3", "-m", "smg.launch_router"]
