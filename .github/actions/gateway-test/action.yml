@@ -1,0 +1,186 @@
+name: Gateway Test
+description: Run gateway E2E tests with configurable runtime and test directories
+
+inputs:
+  test_dirs:
+    description: Test directories to run
+    required: true
+  extra_deps:
+    description: Extra pip dependencies
+    required: false
+    default: ""
+  env_vars:
+    description: Environment variables prefix for pytest
+    required: false
+    default: ""
+  reruns:
+    description: Pytest rerun options
+    required: false
+    default: ""
+  parallel_opts:
+    description: Pytest parallel options
+    required: false
+    default: ""
+  ignore_opts:
+    description: Pytest ignore options
+    required: false
+    default: ""
+  test_filter:
+    description: Pytest -k filter
+    required: false
+    default: ""
+  setup_vllm:
+    description: Whether to setup vLLM backend
+    required: false
+    default: "false"
+  setup_trtllm:
+    description: Whether to setup TRT-LLM backend
+    required: false
+    default: "false"
+  setup_oracle:
+    description: Whether to setup Oracle database
+    required: false
+    default: "false"
+  setup_brave:
+    description: Whether to setup Brave MCP server
+    required: false
+    default: "false"
+  upload_benchmarks:
+    description: Whether to upload benchmark results
+    required: false
+    default: "false"
+  hf_token:
+    description: HuggingFace token
+    required: false
+    default: ""
+  brave_api_key:
+    description: Brave API key
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Cache flash-attn wheel
+      if: inputs.setup_vllm == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip/wheels
+        key: flash-attn-${{ runner.os }}-${{ hashFiles('scripts/ci_install_vllm.sh') }}
+
+    - name: Restore TRT-LLM wheel cache
+      id: trtllm-cache
+      if: inputs.setup_trtllm == 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: /tmp/trtllm-wheel
+        key: trtllm-wheel-${{ runner.os }}-cuda13-v2
+
+    - name: Install inference backend
+      shell: bash
+      run: |
+        bash scripts/ci_setup_python_venv.sh
+        source .venv/bin/activate
+        if [ "${{ inputs.setup_vllm }}" == "true" ]; then
+          bash scripts/ci_install_vllm.sh
+        elif [ "${{ inputs.setup_trtllm }}" == "true" ]; then
+          bash scripts/ci_install_trtllm.sh
+        else
+          bash scripts/ci_install_sglang.sh
+        fi
+
+    - name: Save TRT-LLM wheel cache
+      if: inputs.setup_trtllm == 'true' && steps.trtllm-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: /tmp/trtllm-wheel
+        key: trtllm-wheel-${{ runner.os }}-cuda13-v2
+
+    - name: Setup Oracle Instant Client
+      if: inputs.setup_oracle == 'true'
+      shell: bash
+      run: |
+        sudo apt-get install -y unzip
+        INSTANT_CLIENT_DIR="$HOME/instant-client"
+        INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.9.0.25.07.zip"
+
+        if [ ! -d "$INSTANT_CLIENT_DIR/instantclient_23_9" ]; then
+          echo "Downloading Oracle Instant Client..."
+          mkdir -p "$INSTANT_CLIENT_DIR"
+          cd "$INSTANT_CLIENT_DIR"
+          wget https://download.oracle.com/otn_software/linux/instantclient/2390000/$INSTANT_CLIENT_ZIP
+          unzip $INSTANT_CLIENT_ZIP
+          rm $INSTANT_CLIENT_ZIP
+        else
+          echo "Oracle Instant Client already exists, skipping download"
+        fi
+
+        echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_9:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+    - name: Start Oracle Database
+      if: inputs.setup_oracle == 'true'
+      shell: bash
+      run: |
+        docker run -d -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim
+        echo "Starting Oracle DB..."
+
+        echo "ATP_USER=system" >> $GITHUB_ENV
+        echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
+        echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
+
+    - name: Start Brave MCP Server
+      if: inputs.setup_brave == 'true'
+      shell: bash
+      env:
+        BRAVE_API_KEY: ${{ inputs.brave_api_key }}
+      run: |
+        docker run -d --rm \
+          -p 8001:8080 \
+          -e BRAVE_API_KEY \
+          --name brave-search-server \
+          shoofio/brave-search-mcp-sse:1.0.10
+        echo "Starting Brave MCP Server..."
+        sleep 2
+        curl -f --max-time 1 http://localhost:8001/sse > /dev/null 2>&1 && echo "Brave MCP Server is healthy!" || echo "Brave MCP Server responded"
+
+    - name: Download wheel artifact
+      uses: actions/download-artifact@v7
+      with:
+        name: smg-wheel
+        path: wheel/
+
+    - name: Install wheel and test dependencies
+      shell: bash
+      run: |
+        pip uninstall -y smg || true
+        pip install wheel/*.whl
+        bash scripts/ci_install_e2e_deps.sh ${{ inputs.extra_deps }}
+
+    - name: Run E2E tests
+      shell: bash
+      env:
+        HF_TOKEN: ${{ inputs.hf_token }}
+      run: |
+        bash scripts/ci_killall_sglang.sh "nuk_gpus"
+        ${{ inputs.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ inputs.reruns }} ${{ inputs.parallel_opts }} ${{ inputs.ignore_opts }} ${{ inputs.test_dirs }} ${{ inputs.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
+
+    - name: Upload benchmark results
+      if: inputs.upload_benchmarks == 'true' && success()
+      uses: actions/upload-artifact@v6
+      with:
+        name: genai-bench-results-all-policies
+        path: benchmark_**/
+
+    - name: Cleanup Brave MCP Server
+      if: always() && inputs.setup_brave == 'true'
+      shell: bash
+      run: |
+        docker stop brave-search-server || true
+        docker rm brave-search-server || true
+
+    - name: Cleanup Oracle Database
+      if: always() && inputs.setup_oracle == 'true'
+      shell: bash
+      run: |
+        docker stop oracle-db || true
+        docker rm oracle-db || true

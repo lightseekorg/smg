@@ -209,66 +209,87 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  gateway-e2e:
+  # =============================================================================
+  # Stage 1: Smoke Tests (quick sanity checks)
+  # =============================================================================
+  gateway-smoke:
     name: ${{ matrix.name }}
     needs: [check-ci, build-wheel, determine-stages]
-    if: needs.check-ci.outputs.should_run == 'true'
+    if: needs.check-ci.outputs.should_run == 'true' && needs.determine-stages.outputs.run_smoke == 'true'
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Stage 1: Smoke Tests (quick sanity checks)
           - name: gw-sgl-smoke-test
-            stage: smoke
             timeout: 45
             test_dirs: "e2e_test/router e2e_test/embeddings"
-            extra_deps: "pytest-parallel py"  # py is required for pytest-parallel with newer pytest
+            extra_deps: "pytest-parallel py"
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"  # Thread-based parallelism
-            ignore_opts: ""
+            parallel_opts: "--workers 1 --tests-per-worker 4"
           - name: gw-vllm-smoke-test
-            stage: smoke
             timeout: 45
             test_dirs: "e2e_test/router e2e_test/embeddings"
             extra_deps: "pytest-parallel py"
             env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"
-            test_filter: ""
             setup_vllm: true
-            ignore_opts: ""
             # vLLM: gRPC only, PD mode supported
             # HTTP tests auto-skipped via @pytest.mark.skip_for_runtime("vllm")
           - name: gw-trtllm-smoke-test
-            stage: smoke
             timeout: 90
             test_dirs: "e2e_test/router e2e_test/embeddings"
             extra_deps: "pytest-parallel py"
             env_vars: "E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"
-            test_filter: ""
             setup_trtllm: true
-            ignore_opts: ""
             # TRT-LLM: gRPC only, no PD mode
             # HTTP and PD tests auto-skipped via markers
+    runs-on: k8s-runner-gpu
+    timeout-minutes: ${{ matrix.timeout }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run gateway tests
+        uses: ./.github/actions/gateway-test
+        with:
+          test_dirs: ${{ matrix.test_dirs }}
+          extra_deps: ${{ matrix.extra_deps }}
+          env_vars: ${{ matrix.env_vars }}
+          reruns: ${{ matrix.reruns }}
+          parallel_opts: ${{ matrix.parallel_opts }}
+          setup_vllm: ${{ matrix.setup_vllm || 'false' }}
+          setup_trtllm: ${{ matrix.setup_trtllm || 'false' }}
+          hf_token: ${{ secrets.HF_TOKEN }}
 
-          # Stage 2: E2E Tests (comprehensive testing)
+  # =============================================================================
+  # Stage 2: E2E Tests (comprehensive testing) - runs after smoke tests pass
+  # =============================================================================
+  gateway-e2e:
+    name: ${{ matrix.name }}
+    needs: [check-ci, build-wheel, determine-stages, gateway-smoke]
+    if: |
+      always() &&
+      needs.check-ci.outputs.should_run == 'true' &&
+      needs.determine-stages.outputs.run_e2e == 'true' &&
+      (needs.gateway-smoke.result == 'success' || needs.gateway-smoke.result == 'skipped')
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
           - name: chat-completions-sglang
-            stage: e2e
             timeout: 45
             test_dirs: "e2e_test/chat_completions"
             extra_deps: "pytest-parallel py"
             env_vars: "E2E_RUNTIME=sglang SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"
-            test_filter: ""
-            ignore_opts: ""
           - name: chat-completions-vllm
-            stage: e2e
             timeout: 45
             test_dirs: "e2e_test/chat_completions"
             extra_deps: "pytest-parallel py"
@@ -276,189 +297,68 @@ jobs:
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"
             # TODO: Remove filter when vLLM supports logprobs and n>1 with greedy sampling
-            # Excludes: 5-grpc (logprobs=5), 2-None-grpc (n=2 with no logprobs), multiple_choices (n=2 tests)
             test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
             setup_vllm: true
-            ignore_opts: ""
           - name: chat-completions-trtllm
-            stage: e2e
             timeout: 90
             test_dirs: "e2e_test/chat_completions"
             extra_deps: "pytest-parallel py"
             env_vars: "E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"
-            test_filter: ""
             setup_trtllm: true
-            ignore_opts: ""
           - name: responses
-            stage: e2e
             timeout: 45
             test_dirs: "e2e_test/responses"
-            extra_deps: ""
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             setup_oracle: true
             setup_brave: true
-            parallel_opts: ""  # Cloud backend tests not compatible with parallel execution
-            ignore_opts: ""
-
-          # Stage 3: Benchmarks (performance)
-          - name: benchmarks
-            stage: benchmark
-            timeout: 32
-            test_dirs: "e2e_test/benchmarks"
-            extra_deps: "genai-bench==0.0.3"
-            env_vars: ""
-            reruns: ""
-            upload_benchmarks: true
-            parallel_opts: ""  # No parallel for benchmarks (performance measurement)
-            ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py"  # Go benchmark runs in dedicated job
     runs-on: k8s-runner-gpu
     timeout-minutes: ${{ matrix.timeout }}
     steps:
-      - name: Check if stage should run
-        id: check-stage
-        run: |
-          should_run="true"
-          if [[ "${{ matrix.stage }}" == "smoke" && "${{ needs.determine-stages.outputs.run_smoke }}" != "true" ]]; then
-            should_run="false"
-            echo "Skipping smoke test (ci:skip-smoke label)"
-          elif [[ "${{ matrix.stage }}" == "e2e" && "${{ needs.determine-stages.outputs.run_e2e }}" != "true" ]]; then
-            should_run="false"
-            echo "Skipping e2e test (ci:skip-e2e label)"
-          elif [[ "${{ matrix.stage }}" == "benchmark" && "${{ needs.determine-stages.outputs.run_benchmark }}" != "true" ]]; then
-            should_run="false"
-            echo "Skipping benchmark (ci:skip-benchmark label)"
-          fi
-          echo "should_run=$should_run" >> $GITHUB_OUTPUT
-
-      - name: Checkout code
-        if: steps.check-stage.outputs.should_run == 'true'
-        uses: actions/checkout@v6
-
-      - name: Cache flash-attn wheel
-        if: steps.check-stage.outputs.should_run == 'true' && matrix.setup_vllm
-        uses: actions/cache@v4
+      - uses: actions/checkout@v6
+      - name: Run gateway tests
+        uses: ./.github/actions/gateway-test
         with:
-          path: ~/.cache/pip/wheels
-          key: flash-attn-${{ runner.os }}-${{ hashFiles('scripts/ci_install_vllm.sh') }}
+          test_dirs: ${{ matrix.test_dirs }}
+          extra_deps: ${{ matrix.extra_deps || '' }}
+          env_vars: ${{ matrix.env_vars }}
+          reruns: ${{ matrix.reruns }}
+          parallel_opts: ${{ matrix.parallel_opts || '' }}
+          test_filter: ${{ matrix.test_filter || '' }}
+          setup_vllm: ${{ matrix.setup_vllm || 'false' }}
+          setup_trtllm: ${{ matrix.setup_trtllm || 'false' }}
+          setup_oracle: ${{ matrix.setup_oracle || 'false' }}
+          setup_brave: ${{ matrix.setup_brave || 'false' }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          brave_api_key: ${{ secrets.BRAVE_API_KEY }}
 
-      - name: Restore TRT-LLM wheel cache
-        id: trtllm-cache
-        if: steps.check-stage.outputs.should_run == 'true' && matrix.setup_trtllm
-        uses: actions/cache/restore@v4
+  # =============================================================================
+  # Stage 3: Benchmarks (performance) - runs after e2e tests pass
+  # =============================================================================
+  gateway-benchmark:
+    name: benchmarks
+    needs: [check-ci, build-wheel, determine-stages, gateway-e2e]
+    if: |
+      always() &&
+      needs.check-ci.outputs.should_run == 'true' &&
+      needs.determine-stages.outputs.run_benchmark == 'true' &&
+      (needs.gateway-e2e.result == 'success' || needs.gateway-e2e.result == 'skipped')
+    permissions:
+      contents: read
+    runs-on: k8s-runner-gpu
+    timeout-minutes: 32
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run gateway tests
+        uses: ./.github/actions/gateway-test
         with:
-          path: /tmp/trtllm-wheel
-          key: trtllm-wheel-${{ runner.os }}-cuda13-v2
-
-      - name: Install inference backend
-        if: steps.check-stage.outputs.should_run == 'true'
-        run: |
-          bash scripts/ci_setup_python_venv.sh
-          source .venv/bin/activate
-          if [ "${{ matrix.setup_vllm }}" == "true" ]; then
-            bash scripts/ci_install_vllm.sh
-          elif [ "${{ matrix.setup_trtllm }}" == "true" ]; then
-            bash scripts/ci_install_trtllm.sh
-          else
-            bash scripts/ci_install_sglang.sh
-          fi
-
-      # Save TRT-LLM wheel immediately after build, before tests run
-      # This ensures the cache is saved even if tests fail or job is cancelled
-      - name: Save TRT-LLM wheel cache
-        if: steps.check-stage.outputs.should_run == 'true' && matrix.setup_trtllm && steps.trtllm-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: /tmp/trtllm-wheel
-          key: trtllm-wheel-${{ runner.os }}-cuda13-v2
-
-      - name: Setup Oracle Instant Client
-        if: steps.check-stage.outputs.should_run == 'true' && matrix.setup_oracle
-        run: |
-          sudo apt-get install -y unzip
-          INSTANT_CLIENT_DIR="$HOME/instant-client"
-          INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.9.0.25.07.zip"
-
-          if [ ! -d "$INSTANT_CLIENT_DIR/instantclient_23_9" ]; then
-            echo "Downloading Oracle Instant Client..."
-            mkdir -p "$INSTANT_CLIENT_DIR"
-            cd "$INSTANT_CLIENT_DIR"
-            wget https://download.oracle.com/otn_software/linux/instantclient/2390000/$INSTANT_CLIENT_ZIP
-            unzip $INSTANT_CLIENT_ZIP
-            rm $INSTANT_CLIENT_ZIP
-          else
-            echo "Oracle Instant Client already exists, skipping download"
-          fi
-
-          echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_9:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-
-      - name: Start Oracle Database
-        if: steps.check-stage.outputs.should_run == 'true' && matrix.setup_oracle
-        run: |
-          docker run -d -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim
-          echo "Starting Oracle DB..."
-
-          # Export Oracle connection environment variables
-          echo "ATP_USER=system" >> $GITHUB_ENV
-          echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
-          echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
-
-      - name: Start Brave MCP Server
-        if: steps.check-stage.outputs.should_run == 'true' && matrix.setup_brave
-        env:
-          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
-        run: |
-          docker run -d --rm \
-            -p 8001:8080 \
-            -e BRAVE_API_KEY \
-            --name brave-search-server \
-            shoofio/brave-search-mcp-sse:1.0.10
-          echo "Starting Brave MCP Server..."
-          sleep 2
-          curl -f --max-time 1 http://localhost:8001/sse > /dev/null 2>&1 && echo "Brave MCP Server is healthy!" || echo "Brave MCP Server responded"
-
-      - name: Download wheel artifact
-        if: steps.check-stage.outputs.should_run == 'true'
-        uses: actions/download-artifact@v7
-        with:
-          name: smg-wheel
-          path: wheel/
-
-      - name: Install wheel and test dependencies
-        if: steps.check-stage.outputs.should_run == 'true'
-        run: |
-          pip uninstall -y smg || true
-          pip install wheel/*.whl
-          bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
-
-      - name: Run E2E tests
-        if: steps.check-stage.outputs.should_run == 'true'
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
-
-      - name: Upload benchmark results
-        if: steps.check-stage.outputs.should_run == 'true' && matrix.upload_benchmarks && success()
-        uses: actions/upload-artifact@v6
-        with:
-          name: genai-bench-results-all-policies
-          path: benchmark_**/
-
-      - name: Cleanup Brave MCP Server
-        if: always() && matrix.setup_brave
-        run: |
-          docker stop brave-search-server || true
-          docker rm brave-search-server || true
-
-      - name: Cleanup Oracle Database
-        if: always() && matrix.setup_oracle
-        run: |
-          docker stop oracle-db || true
-          docker rm oracle-db || true
+          test_dirs: "e2e_test/benchmarks"
+          extra_deps: "genai-bench==0.0.3"
+          ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py"
+          upload_benchmarks: "true"
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   go-unit-tests:
     name: go-unit-tests
@@ -623,7 +523,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [check-ci, determine-stages, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
+    needs: [check-ci, determine-stages, build-wheel, python-unit-tests, unit-tests, gateway-smoke, gateway-e2e, gateway-benchmark, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -633,7 +533,7 @@ jobs:
           if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
             echo "CI was skipped (external contributor without run-ci label)"
             exit 0
-          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
+          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-smoke.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.gateway-benchmark.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else
@@ -641,7 +541,7 @@ jobs:
           fi
 
   summarize-benchmarks:
-    needs: [gateway-e2e]
+    needs: [gateway-benchmark]
     runs-on: k8s-runner-cpu
     if: success()
     permissions:
