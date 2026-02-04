@@ -208,12 +208,14 @@ class Gateway:
             mode_args = ["--pd-disaggregation"]
             for pf in prefills:
                 if pf.bootstrap_port is not None:
+                    # SGLang HTTP PD: use base_url (HTTP) with bootstrap port
                     mode_args += ["--prefill", pf.base_url, str(pf.bootstrap_port)]
                 else:
-                    # vLLM PD: no bootstrap port (NIXL handles KV transfer)
-                    mode_args += ["--prefill", pf.base_url]
+                    # gRPC PD (vLLM/SGLang): use worker_url (gRPC or HTTP based on mode)
+                    mode_args += ["--prefill", pf.worker_url]
             for dc in decodes:
-                mode_args += ["--decode", dc.base_url]
+                # Use worker_url to get correct protocol (HTTP or gRPC)
+                mode_args += ["--decode", dc.worker_url]
 
             self._launch(
                 mode_args=mode_args,
