@@ -8,7 +8,7 @@ use tracing::{error, warn};
 
 use super::PipelineStage;
 use crate::{
-    core::{ConnectionMode, Worker, WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID},
+    core::{ConnectionMode, RuntimeType, Worker, WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID},
     observability::metrics::{metrics_labels, Metrics},
     policies::{PolicyRegistry, SelectWorkerInfo},
     routers::{
@@ -16,6 +16,9 @@ use crate::{
         grpc::context::{RequestContext, WorkerSelection},
     },
 };
+
+/// Result type for PD worker pair selection: (prefill, decode, runtime_type)
+type PdWorkerPair = (Arc<dyn Worker>, Arc<dyn Worker>, RuntimeType);
 
 /// Worker selection stage: Select appropriate worker(s) based on routing mode
 pub(crate) struct WorkerSelectionStage {
@@ -102,7 +105,11 @@ impl PipelineStage for WorkerSelectionStage {
             }
             WorkerSelectionMode::PrefillDecode => {
                 match self.select_pd_pair(ctx.input.model_id.as_deref(), text, tokens, headers) {
-                    Some((prefill, decode)) => WorkerSelection::Dual { prefill, decode },
+                    Some((prefill, decode, runtime_type)) => WorkerSelection::Dual {
+                        prefill,
+                        decode,
+                        runtime_type,
+                    },
                     None => {
                         let model = ctx.input.model_id.as_deref().unwrap_or(UNKNOWN_MODEL_ID);
                         error!(
@@ -194,7 +201,7 @@ impl WorkerSelectionStage {
         text: Option<&str>,
         tokens: Option<&[u32]>,
         headers: Option<&http::HeaderMap>,
-    ) -> Option<(Arc<dyn Worker>, Arc<dyn Worker>)> {
+    ) -> Option<PdWorkerPair> {
         let all_workers = self.worker_registry.get_workers_filtered(
             model_id,
             None,
@@ -203,7 +210,7 @@ impl WorkerSelectionStage {
             false,
         );
 
-        let (available_prefill, available_decode): (Vec<_>, Vec<_>) =
+        let (all_prefill, all_decode): (Vec<_>, Vec<_>) =
             all_workers
                 .into_iter()
                 .fold((Vec::new(), Vec::new()), |mut acc, w| {
@@ -217,13 +224,52 @@ impl WorkerSelectionStage {
                     acc
                 });
 
-        if available_prefill.is_empty() {
+        if all_prefill.is_empty() {
             warn!("No available prefill workers");
             return None;
         }
 
-        if available_decode.is_empty() {
+        if all_decode.is_empty() {
             warn!("No available decode workers");
+            return None;
+        }
+
+        // Determine the runtime type from prefill workers.
+        // All workers in a PD pair must use the same runtime.
+        let first_runtime = all_prefill.first()?.metadata().runtime_type.clone();
+
+        // Check for mixed runtimes in both prefill and decode pools
+        let prefill_mixed = all_prefill
+            .iter()
+            .skip(1)
+            .any(|w| w.metadata().runtime_type != first_runtime);
+        let decode_mixed = all_decode
+            .iter()
+            .any(|w| w.metadata().runtime_type != first_runtime);
+
+        if prefill_mixed || decode_mixed {
+            warn!(
+                "Mixed runtime types in PD workers (prefill_mixed={}, decode_mixed={}). Using {:?}.",
+                prefill_mixed,
+                decode_mixed,
+                first_runtime
+            );
+        }
+
+        let target_runtime = first_runtime;
+
+        // Filter both pools to the target runtime
+        let available_prefill: Vec<_> = all_prefill
+            .into_iter()
+            .filter(|w| w.metadata().runtime_type == target_runtime)
+            .collect();
+        let available_decode: Vec<_> = all_decode
+            .into_iter()
+            .filter(|w| w.metadata().runtime_type == target_runtime)
+            .collect();
+
+        if available_prefill.is_empty() || available_decode.is_empty() {
+            warn!("No available PD pair for runtime {:?}", target_runtime);
             return None;
         }
 
@@ -267,6 +313,7 @@ impl WorkerSelectionStage {
         Some((
             available_prefill[prefill_idx].clone(),
             available_decode[decode_idx].clone(),
+            target_runtime,
         ))
     }
 }

@@ -561,8 +561,16 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                     t.clear_waiting(idx);
                 }
 
-                // Collect steps ready to launch
-                let mut ready = newly_ready_from_wait;
+                // Collect steps ready to launch, deduplicating indices.
+                // A step with depends_on_any([A, B]) appears in pending_check once
+                // per completed dependency, but must only launch once.
+                let mut seen = std::collections::HashSet::new();
+                let mut ready: Vec<usize> = Vec::new();
+                for idx in newly_ready_from_wait {
+                    if seen.insert(idx) {
+                        ready.push(idx);
+                    }
+                }
 
                 for idx in deps_ready_indices {
                     let step = &definition.steps[idx];
@@ -582,7 +590,9 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                             continue;
                         }
                     }
-                    ready.push(idx);
+                    if seen.insert(idx) {
+                        ready.push(idx);
+                    }
                 }
 
                 (ready, added_to_waiting)
@@ -721,38 +731,34 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                         .execute_step_with_retry(instance_id, step, &def)
                         .await;
 
-                    let signal = match &result {
-                        Ok(r) => *r,
-                        Err(_) => StepResult::Failure,
-                    };
-
                     // Track whether we need to update state to Skipped after releasing lock
                     let needs_skip_update = {
                         let mut t = tracker.write();
                         t.running.remove(&step_id);
 
-                        let needs_update = match result {
+                        let (sig, needs_update) = match result {
                             Ok(StepResult::Success) => {
                                 t.completed.insert(step_id.clone());
-                                false
+                                (StepResult::Success, false)
                             }
                             Ok(StepResult::Skip) => {
                                 t.skipped.insert(step_id.clone());
-                                false
+                                (StepResult::Skip, false)
                             }
                             Ok(StepResult::Failure) | Err(_) => match step.on_failure {
                                 FailureAction::FailWorkflow | FailureAction::RetryIndefinitely => {
                                     t.failed.insert(step_id.clone());
-                                    false
+                                    (StepResult::Failure, false)
                                 }
                                 FailureAction::ContinueNextStep => {
                                     t.skipped.insert(step_id.clone());
-                                    true // Need to update state store after releasing lock
+                                    // Signal as Skip so dependents get scheduled
+                                    (StepResult::Skip, true)
                                 }
                             },
                         };
 
-                        if let Err(e) = tx.try_send((step_id.clone(), signal)) {
+                        if let Err(e) = tx.try_send((step_id.clone(), sig)) {
                             use mpsc::error::TrySendError;
                             match e {
                                 TrySendError::Full(_) => {

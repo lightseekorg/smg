@@ -117,7 +117,19 @@ def pytest_collection_modifyitems(
         tp = MODEL_SPECS[model_id].get("tp", 1)
         return tp * (prefill + decode + regular)
 
-    for item in items:
+    # Filter items based on -k expression to only scan tests that will actually run
+    keyword = config.option.keyword
+    if keyword:
+        from _pytest.mark.expression import Expression
+
+        expr = Expression.compile(keyword)
+        items_to_scan = [
+            item for item in items if expr.evaluate(lambda x: x in item.keywords)
+        ]
+    else:
+        items_to_scan = items
+
+    for item in items_to_scan:
         # Extract model from marker or use default
         # Walk class MRO to prioritize child class markers over parent class
         model_id = None
@@ -181,8 +193,8 @@ def pytest_collection_modifyitems(
         test_gpus = 0
         if model_id and backends:
             for backend in backends:
-                if backend == "pd":
-                    mode = ConnectionMode.HTTP
+                if backend in ("pd_http", "pd_grpc"):
+                    mode = ConnectionMode.HTTP if backend == "pd_http" else ConnectionMode.GRPC
                     p_count = prefill_count if prefill_count > 0 else 1
                     d_count = decode_count if decode_count > 0 else 1
                     track_worker(model_id, mode, WorkerType.PREFILL, p_count)
@@ -367,6 +379,11 @@ def pytest_configure(config: pytest.Config) -> None:
     """Register custom markers."""
     config.addinivalue_line(
         "markers",
+        "skip_for_runtime(*runtimes, reason=None): skip test for specific runtimes "
+        "(e.g., @pytest.mark.skip_for_runtime('trtllm', reason='no guided decoding'))",
+    )
+    config.addinivalue_line(
+        "markers",
         "model(name): mark test to use a specific model from MODEL_SPECS",
     )
     config.addinivalue_line(
@@ -401,6 +418,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "storage(backend): mark test to use a specific history storage backend "
         "(memory, oracle). Default is memory.",
     )
+    config.addinivalue_line(
+        "markers",
+        "nightly: mark test as a nightly comprehensive benchmark",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -428,9 +449,21 @@ def is_parallel_execution(config: pytest.Config) -> bool:
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
-    """Skip thread_unsafe tests when running in parallel mode."""
+    """Skip tests based on markers and runtime configuration."""
+    from infra import get_runtime
+
+    # Skip thread_unsafe tests when running in parallel mode
     if is_parallel_execution(item.config):
         marker = item.get_closest_marker("thread_unsafe")
         if marker:
             reason = marker.kwargs.get("reason", "Test is not thread-safe")
             pytest.skip(f"Skipping in parallel mode: {reason}")
+
+    # Skip tests for specific runtimes
+    marker = item.get_closest_marker("skip_for_runtime")
+    if marker:
+        current_runtime = get_runtime()
+        skip_runtimes = marker.args
+        if current_runtime in skip_runtimes:
+            reason = marker.kwargs.get("reason", f"Not supported on {current_runtime}")
+            pytest.skip(f"Skipping for {current_runtime}: {reason}")

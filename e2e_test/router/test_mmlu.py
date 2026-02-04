@@ -4,11 +4,12 @@ Tests the router's ability to handle MMLU benchmark evaluations across
 different backend configurations (gRPC and HTTP workers).
 
 Usage:
-    # Run with gRPC backend only
+    # Run all MMLU tests
     pytest e2e_test/router/test_mmlu.py -v
 
     # Run with specific backend
     pytest e2e_test/router/test_mmlu.py -v -k "grpc"
+    pytest e2e_test/router/test_mmlu.py -v -k "http"
 """
 
 from __future__ import annotations
@@ -23,17 +24,15 @@ logger = logging.getLogger(__name__)
 
 
 @pytest.mark.e2e
-@pytest.mark.parametrize("setup_backend", ["grpc", "http"], indirect=True)
-class TestMMLU:
-    """MMLU evaluation tests using local workers (gRPC and HTTP)."""
+@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
+class TestMMLUGrpc:
+    """MMLU evaluation tests using gRPC workers."""
 
     def test_mmlu_basic(self, setup_backend):
         """Basic MMLU evaluation with score threshold.
 
         Runs MMLU evaluation with 64 examples and validates that
         accuracy meets minimum threshold (>= 0.65).
-
-        Note: setup_backend fixture already waits for workers to be ready.
         """
         backend, model, client, *_ = setup_backend
 
@@ -50,7 +49,7 @@ class TestMMLU:
         assert (
             metrics["score"] >= 0.65
         ), f"MMLU score {metrics['score']:.2f} below threshold 0.65"
-        logger.info("MMLU score: %.2f (threshold: 0.65)", metrics["score"])
+        logger.info("MMLU gRPC score: %.2f (threshold: 0.65)", metrics["score"])
 
     def test_mmlu_extended(self, setup_backend):
         """Extended MMLU evaluation with more examples.
@@ -73,4 +72,57 @@ class TestMMLU:
         assert (
             metrics["score"] >= 0.65
         ), f"MMLU score {metrics['score']:.2f} below threshold 0.65"
-        logger.info("MMLU extended score: %.2f (threshold: 0.65)", metrics["score"])
+        logger.info("MMLU gRPC extended score: %.2f (threshold: 0.65)", metrics["score"])
+
+
+@pytest.mark.e2e
+@pytest.mark.skip_for_runtime("vllm", reason="vLLM does not support HTTP mode")
+@pytest.mark.parametrize("setup_backend", ["http"], indirect=True)
+class TestMMLUHttp:
+    """MMLU evaluation tests using HTTP workers (SGLang only)."""
+
+    def test_mmlu_basic(self, setup_backend):
+        """Basic MMLU evaluation with score threshold.
+
+        Runs MMLU evaluation with 64 examples and validates that
+        accuracy meets minimum threshold (>= 0.65).
+        """
+        backend, model, client, *_ = setup_backend
+
+        args = SimpleNamespace(
+            base_url=str(client.base_url),
+            model=model,
+            eval_name="mmlu",
+            num_examples=64,
+            num_threads=32,
+            temperature=0.1,
+        )
+        metrics = run_eval(args)
+
+        assert (
+            metrics["score"] >= 0.65
+        ), f"MMLU score {metrics['score']:.2f} below threshold 0.65"
+        logger.info("MMLU HTTP score: %.2f (threshold: 0.65)", metrics["score"])
+
+    def test_mmlu_extended(self, setup_backend):
+        """Extended MMLU evaluation with more examples.
+
+        Runs MMLU with 128 examples for more statistically
+        significant results.
+        """
+        backend, model, client, *_ = setup_backend
+
+        args = SimpleNamespace(
+            base_url=str(client.base_url),
+            model=model,
+            eval_name="mmlu",
+            num_examples=128,
+            num_threads=64,
+            temperature=0.1,
+        )
+        metrics = run_eval(args)
+
+        assert (
+            metrics["score"] >= 0.65
+        ), f"MMLU score {metrics['score']:.2f} below threshold 0.65"
+        logger.info("MMLU HTTP extended score: %.2f (threshold: 0.65)", metrics["score"])

@@ -92,7 +92,7 @@ services:
     restart: unless-stopped
 
   worker:
-    image: lightseekorg/sglang:latest
+    image: lightseekorg/smg:latest
     deploy:
       resources:
         reservations:
@@ -194,11 +194,11 @@ services:
       - cache_aware
 
   worker-1:
-    image: lightseekorg/sglang:latest
+    image: lightseekorg/smg:latest
     # ...
 
   worker-2:
-    image: lightseekorg/sglang:latest
+    image: lightseekorg/smg:latest
     # ...
 ```
 

@@ -39,6 +39,7 @@ def get_tokenizer(model_path: str):
 # =============================================================================
 
 
+@pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support ignore_eos parameter")
 @pytest.mark.model("llama-8b")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)

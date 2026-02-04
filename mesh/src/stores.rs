@@ -46,7 +46,13 @@ impl StoreType {
             2 => StoreType::Worker,
             3 => StoreType::Policy,
             4 => StoreType::RateLimit,
-            _ => StoreType::Membership, // Default fallback
+            unknown => {
+                tracing::warn!(
+                    proto_value = unknown,
+                    "Unknown StoreType proto value, defaulting to Membership"
+                );
+                StoreType::Membership
+            }
         }
     }
 }

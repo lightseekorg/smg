@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SGLang Model Gateway CLI
+Shepherd Model Gateway CLI
 
 Provides convenient command-line interface for launching the router and server.
 
@@ -26,7 +26,7 @@ def create_parser() -> argparse.ArgumentParser:
     prog_name = os.path.basename(sys.argv[0]) if sys.argv else "smg"
     parser = argparse.ArgumentParser(
         prog=prog_name,
-        description="SGLang Model Gateway - High-performance inference router",
+        description="Shepherd Model Gateway - High-performance inference router",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -36,7 +36,7 @@ def create_parser() -> argparse.ArgumentParser:
     launch_parser = subparsers.add_parser(
         "launch",
         help="Launch router only (requires existing worker URLs)",
-        description="Launch the SGLang router with existing worker instances",
+        description="Launch the Shepherd router with existing worker instances",
         add_help=False,  # Let router handle --help
     )
 
@@ -44,8 +44,16 @@ def create_parser() -> argparse.ArgumentParser:
     server_parser = subparsers.add_parser(
         "server",
         help="Launch router and server processes together",
-        description="Launch both SGLang router and server processes",
+        description="Launch both Shepherd router and server processes",
         add_help=False,  # Let server handle --help
+    )
+
+    # Serve subcommand (two-pass parsing with lazy backend import)
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Launch backend worker(s) + gateway router",
+        description="Launch inference backend workers and gateway router",
+        add_help=False,  # Let serve handle --help with backend-specific args
     )
 
     return parser
@@ -65,7 +73,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         sys.exit(0)
 
     # Handle empty command - show help
-    if not argv or argv[0] not in ["launch", "server", "-h", "--help"]:
+    if not argv or argv[0] not in ["launch", "server", "serve", "-h", "--help"]:
         parser = create_parser()
         parser.print_help()
         sys.exit(1)
@@ -97,6 +105,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         finally:
             # Restore original sys.argv
             sys.argv = original_argv
+
+    elif args.command == "serve":
+        from smg.serve import serve_main
+
+        serve_main(unknown)
 
     else:
         parser.print_help()

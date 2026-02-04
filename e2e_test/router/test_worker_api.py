@@ -8,6 +8,8 @@ Tests the gateway's worker management endpoints:
 
 Usage:
     pytest e2e_test/router/test_worker_api.py -v
+
+Note: These tests use HTTP mode which is not supported by vLLM.
 """
 
 from __future__ import annotations
@@ -18,6 +20,9 @@ import pytest
 from infra import ConnectionMode, Gateway, ModelPool
 
 logger = logging.getLogger(__name__)
+
+# Skip all tests in this module for vLLM (HTTP mode not supported)
+pytestmark = pytest.mark.skip_for_runtime("vllm", reason="vLLM does not support HTTP mode")
 
 
 @pytest.mark.e2e

@@ -158,6 +158,36 @@ pub fn normalize_arguments_field(mut obj: Value) -> Value {
     obj
 }
 
+/// Normalize the name/tool_name field in a tool call object.
+/// If the object has "tool_name" but not "name", copy tool_name to name.
+///
+/// # Background
+/// Cohere models use "tool_name" instead of "name":
+/// - Standard format uses "name"
+/// - Cohere uses "tool_name"
+///
+/// This function normalizes to "name" for consistent downstream processing.
+pub fn normalize_name_field(mut obj: Value) -> Value {
+    if obj.get("name").is_none() {
+        if let Some(tool_name) = obj.get("tool_name").cloned() {
+            if let Value::Object(ref mut map) = obj {
+                map.insert("name".to_string(), tool_name);
+            }
+        }
+    }
+    obj
+}
+
+/// Normalize all tool call fields (both name and arguments).
+/// Combines normalize_name_field and normalize_arguments_field.
+///
+/// This handles formats like Cohere that use both "tool_name" and "parameters"
+/// instead of the standard "name" and "arguments".
+pub fn normalize_tool_call_fields(obj: Value) -> Value {
+    let obj = normalize_name_field(obj);
+    normalize_arguments_field(obj)
+}
+
 /// Handle the entire JSON tool call streaming process for JSON-based parsers.
 ///
 /// This unified function handles all aspects of streaming tool calls:
@@ -228,8 +258,12 @@ pub(crate) fn handle_json_tool_streaming(
     };
     let is_complete = serde_json::from_str::<Value>(&json_str[..safe_end_idx]).is_ok();
 
+    // Normalize all tool call fields first (handles tool_name -> name, parameters -> arguments)
+    // This must happen before validation since different LLMs use different field names
+    let current_tool_call = normalize_tool_call_fields(obj);
+
     // Validate tool name if present
-    if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
+    if let Some(name) = current_tool_call.get("name").and_then(|v| v.as_str()) {
         if !tool_indices.contains_key(name) {
             // Invalid tool name - skip this tool, preserve indexing for next tool
             tracing::debug!("Invalid tool name '{}' - skipping", name);
@@ -242,9 +276,6 @@ pub(crate) fn handle_json_tool_streaming(
             return Ok(StreamingParseResult::default());
         }
     }
-
-    // Normalize parameters/arguments field
-    let current_tool_call = normalize_arguments_field(obj);
 
     let mut result = StreamingParseResult::default();
 
@@ -482,5 +513,73 @@ mod tests {
         let obj = serde_json::json!({"name": "test"});
         let normalized = normalize_arguments_field(obj.clone());
         assert_eq!(normalized, obj);
+    }
+
+    #[test]
+    fn test_normalize_name_field() {
+        // Case 1: Has tool_name, no name (Cohere format)
+        let obj = serde_json::json!({
+            "tool_name": "search",
+            "parameters": {"query": "test"}
+        });
+        let normalized = normalize_name_field(obj);
+        assert_eq!(normalized.get("name").unwrap(), "search");
+
+        // Case 2: Already has name (standard format)
+        let obj = serde_json::json!({
+            "name": "test",
+            "arguments": {"key": "value"}
+        });
+        let normalized = normalize_name_field(obj.clone());
+        assert_eq!(normalized, obj);
+
+        // Case 3: Has both tool_name and name - name takes precedence
+        let obj = serde_json::json!({
+            "tool_name": "cohere_name",
+            "name": "standard_name",
+            "parameters": {}
+        });
+        let normalized = normalize_name_field(obj);
+        assert_eq!(normalized.get("name").unwrap(), "standard_name");
+
+        // Case 4: No name or tool_name
+        let obj = serde_json::json!({"parameters": {}});
+        let normalized = normalize_name_field(obj.clone());
+        assert!(normalized.get("name").is_none());
+    }
+
+    #[test]
+    fn test_normalize_tool_call_fields() {
+        // Case 1: Full Cohere format with tool_name and parameters
+        let obj = serde_json::json!({
+            "tool_name": "search",
+            "parameters": {"query": "rust programming"}
+        });
+        let normalized = normalize_tool_call_fields(obj);
+        assert_eq!(normalized.get("name").unwrap(), "search");
+        assert_eq!(
+            normalized.get("arguments").unwrap(),
+            &serde_json::json!({"query": "rust programming"})
+        );
+
+        // Case 2: Standard format - should remain unchanged
+        let obj = serde_json::json!({
+            "name": "test",
+            "arguments": {"key": "value"}
+        });
+        let normalized = normalize_tool_call_fields(obj.clone());
+        assert_eq!(normalized, obj);
+
+        // Case 3: Mixed format (name + parameters)
+        let obj = serde_json::json!({
+            "name": "test",
+            "parameters": {"key": "value"}
+        });
+        let normalized = normalize_tool_call_fields(obj);
+        assert_eq!(normalized.get("name").unwrap(), "test");
+        assert_eq!(
+            normalized.get("arguments").unwrap(),
+            &serde_json::json!({"key": "value"})
+        );
     }
 }

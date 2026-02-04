@@ -360,6 +360,7 @@ struct Router {
     api_key: Option<String>,
     log_dir: Option<String>,
     log_level: Option<String>,
+    log_json: bool,
     service_discovery: bool,
     selector: HashMap<String, String>,
     service_discovery_port: u16,
@@ -443,8 +444,8 @@ impl Router {
             DiscoveryConfig, MetricsConfig, PolicyConfig as ConfigPolicyConfig, RoutingMode,
         };
 
-        let convert_policy = |policy: &PolicyType| -> ConfigPolicyConfig {
-            match policy {
+        let convert_policy = |policy: &PolicyType| -> config::ConfigResult<ConfigPolicyConfig> {
+            Ok(match policy {
                 PolicyType::Random => ConfigPolicyConfig::Random,
                 PolicyType::RoundRobin => ConfigPolicyConfig::RoundRobin,
                 PolicyType::CacheAware => ConfigPolicyConfig::CacheAware {
@@ -469,7 +470,13 @@ impl Router {
                         "random" => config::ManualAssignmentMode::Random,
                         "min_load" => config::ManualAssignmentMode::MinLoad,
                         "min_group" => config::ManualAssignmentMode::MinGroup,
-                        other => panic!("Unknown assignment mode: {}", other),
+                        other => {
+                            return Err(config::ConfigError::InvalidValue {
+                                field: "assignment_mode".to_string(),
+                                value: other.to_string(),
+                                reason: "expected 'random', 'min_load', or 'min_group'".to_string(),
+                            });
+                        }
                     },
                 },
                 PolicyType::ConsistentHashing => ConfigPolicyConfig::ConsistentHashing,
@@ -477,7 +484,7 @@ impl Router {
                     prefix_token_count: 256,
                     load_factor: 1.25,
                 },
-            }
+            })
         };
 
         let mode = if self.enable_igw {
@@ -492,8 +499,16 @@ impl Router {
             RoutingMode::PrefillDecode {
                 prefill_urls: self.prefill_urls.clone().unwrap_or_default(),
                 decode_urls: self.decode_urls.clone().unwrap_or_default(),
-                prefill_policy: self.prefill_policy.as_ref().map(convert_policy),
-                decode_policy: self.decode_policy.as_ref().map(convert_policy),
+                prefill_policy: self
+                    .prefill_policy
+                    .as_ref()
+                    .map(convert_policy)
+                    .transpose()?,
+                decode_policy: self
+                    .decode_policy
+                    .as_ref()
+                    .map(convert_policy)
+                    .transpose()?,
             }
         } else {
             RoutingMode::Regular {
@@ -501,7 +516,7 @@ impl Router {
             }
         };
 
-        let policy = convert_policy(&self.policy);
+        let policy = convert_policy(&self.policy)?;
 
         let discovery = if self.service_discovery {
             Some(DiscoveryConfig {
@@ -661,6 +676,7 @@ impl Router {
         api_key = None,
         log_dir = None,
         log_level = None,
+        log_json = false,
         service_discovery = false,
         selector = HashMap::new(),
         service_discovery_port = 80,
@@ -747,6 +763,7 @@ impl Router {
         api_key: Option<String>,
         log_dir: Option<String>,
         log_level: Option<String>,
+        log_json: bool,
         service_discovery: bool,
         selector: HashMap<String, String>,
         service_discovery_port: u16,
@@ -846,6 +863,7 @@ impl Router {
             api_key,
             log_dir,
             log_level,
+            log_json,
             service_discovery,
             selector,
             service_discovery_port,
@@ -967,6 +985,7 @@ impl Router {
                 max_payload_size: self.max_payload_size,
                 log_dir: self.log_dir.clone(),
                 log_level: self.log_level.clone(),
+                log_json: self.log_json,
                 service_discovery_config,
                 prometheus_config,
                 request_timeout_secs: self.request_timeout_secs,

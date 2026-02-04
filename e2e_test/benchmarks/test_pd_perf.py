@@ -5,7 +5,7 @@ import pytest
 
 @pytest.mark.e2e
 @pytest.mark.workers(prefill=2, decode=2)
-@pytest.mark.parametrize("setup_backend", ["pd"], indirect=True)
+@pytest.mark.parametrize("setup_backend", ["pd_http"], indirect=True)
 class TestPDPerf:
     """Performance benchmark for PD disaggregation router."""
 

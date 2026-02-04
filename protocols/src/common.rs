@@ -401,12 +401,56 @@ pub struct ToolCall {
     pub function: FunctionCallResponse,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(untagged)]
+/// Deprecated `function_call` field from the OpenAI API.
+/// Can be `"none"`, `"auto"`, or `{"name": "function_name"}`.
+#[derive(Debug, Clone)]
 pub enum FunctionCall {
     None,
     Auto,
     Function { name: String },
+}
+
+impl Serialize for FunctionCall {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            FunctionCall::None => serializer.serialize_str("none"),
+            FunctionCall::Auto => serializer.serialize_str("auto"),
+            FunctionCall::Function { name } => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("name", name)?;
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for FunctionCall {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match &value {
+            serde_json::Value::String(s) => match s.as_str() {
+                "none" => Ok(FunctionCall::None),
+                "auto" => Ok(FunctionCall::Auto),
+                other => Err(serde::de::Error::custom(format!(
+                    "unknown function_call value: \"{}\"",
+                    other
+                ))),
+            },
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(name)) = map.get("name") {
+                    Ok(FunctionCall::Function { name: name.clone() })
+                } else {
+                    Err(serde::de::Error::custom(
+                        "function_call object must have a \"name\" string field",
+                    ))
+                }
+            }
+            _ => Err(serde::de::Error::custom(
+                "function_call must be a string or object",
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -385,7 +385,7 @@ pub async fn broadcast_node_states(
 
     match broadcast_result {
         Ok(results) => {
-            let success_count = results.iter().filter(|r| r.is_ok()).count();
+            let success_count = results.iter().filter(|r| matches!(r, Ok(Ok(_)))).count();
             let total_count = target_nodes.len();
             log::info!(
                 "Broadcast completed: {}/{} successful",

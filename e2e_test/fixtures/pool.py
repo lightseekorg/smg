@@ -56,7 +56,7 @@ def model_pool(request: pytest.FixtureRequest) -> "ModelPool":
     - Waits for all workers to become healthy before returning
 
     Test requirements are auto-detected from:
-    - @pytest.mark.parametrize("setup_backend", ["grpc", "http", "pd"])
+    - @pytest.mark.parametrize("setup_backend", ["grpc", "http", "pd_http"])
     - @pytest.mark.model("model-name")
     - @pytest.mark.workers(count=N) for regular workers
     - @pytest.mark.workers(prefill=N, decode=N) for PD workers

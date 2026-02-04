@@ -36,7 +36,7 @@ If you don't have a worker running, start one using SGLang:
 ```bash
 # Using Docker
 docker run -p 8000:8000 --gpus all \
-  lightseekorg/sglang:latest \
+  lightseekorg/smg:latest \
   python -m sglang.launch_server \
   --model-path meta-llama/Llama-3.1-8B-Instruct \
   --port 8000

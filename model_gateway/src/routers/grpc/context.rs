@@ -7,13 +7,14 @@
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
+use tracing::debug;
 
 use super::{
     client::GrpcClient,
     proto_wrapper::{ProtoEmbedComplete, ProtoRequest, ProtoStream},
 };
 use crate::{
-    core::{Worker, WorkerLoadGuard},
+    core::{RuntimeType, Worker, WorkerLoadGuard},
     protocols::{
         chat::{ChatCompletionRequest, ChatCompletionResponse},
         classify::{ClassifyRequest, ClassifyResponse},
@@ -132,6 +133,7 @@ pub(crate) enum WorkerSelection {
     Dual {
         prefill: Arc<dyn Worker>,
         decode: Arc<dyn Worker>,
+        runtime_type: RuntimeType,
     },
 }
 
@@ -173,7 +175,9 @@ impl LoadGuards {
             WorkerSelection::Single { worker } => LoadGuards::Single {
                 _guard: WorkerLoadGuard::new(worker.clone(), headers),
             },
-            WorkerSelection::Dual { prefill, decode } => LoadGuards::Dual {
+            WorkerSelection::Dual {
+                prefill, decode, ..
+            } => LoadGuards::Dual {
                 _prefill: WorkerLoadGuard::new(prefill.clone(), headers),
                 _decode: WorkerLoadGuard::new(decode.clone(), headers),
             },
@@ -366,7 +370,9 @@ impl WorkerSelection {
     pub fn record_outcome(&self, success: bool) {
         match self {
             Self::Single { worker } => worker.record_outcome(success),
-            Self::Dual { prefill, decode } => {
+            Self::Dual {
+                prefill, decode, ..
+            } => {
                 prefill.record_outcome(success);
                 decode.record_outcome(success);
             }
@@ -375,16 +381,41 @@ impl WorkerSelection {
 
     /// Record circuit breaker outcomes for dual dispatch (individual tracking)
     pub fn record_dual_outcomes(&self, prefill_success: bool, decode_success: bool) {
-        if let Self::Dual { prefill, decode } = self {
+        if let Self::Dual {
+            prefill, decode, ..
+        } = self
+        {
             prefill.record_outcome(prefill_success);
             decode.record_outcome(decode_success);
+        }
+    }
+
+    /// Record circuit breaker outcome for prefill worker only (sequential PD)
+    pub fn record_outcome_prefill(&self, success: bool) {
+        match self {
+            Self::Dual { prefill, .. } => prefill.record_outcome(success),
+            Self::Single { .. } => {
+                debug!("record_outcome_prefill called on Single worker selection, ignoring");
+            }
+        }
+    }
+
+    /// Record circuit breaker outcome for decode worker only (sequential PD)
+    pub fn record_outcome_decode(&self, success: bool) {
+        match self {
+            Self::Dual { decode, .. } => decode.record_outcome(success),
+            Self::Single { .. } => {
+                debug!("record_outcome_decode called on Single worker selection, ignoring");
+            }
         }
     }
 
     #[allow(clippy::type_complexity)]
     pub fn dual(&self) -> Option<(&Arc<dyn Worker>, &Arc<dyn Worker>)> {
         match self {
-            Self::Dual { prefill, decode } => Some((prefill, decode)),
+            Self::Dual {
+                prefill, decode, ..
+            } => Some((prefill, decode)),
             _ => None,
         }
     }
@@ -399,6 +430,14 @@ impl WorkerSelection {
     pub fn decode_worker(&self) -> Option<&Arc<dyn Worker>> {
         match self {
             Self::Dual { decode, .. } => Some(decode),
+            _ => None,
+        }
+    }
+
+    /// Get the runtime type for PD mode (from dual workers)
+    pub fn pd_runtime_type(&self) -> Option<&RuntimeType> {
+        match self {
+            Self::Dual { runtime_type, .. } => Some(runtime_type),
             _ => None,
         }
     }

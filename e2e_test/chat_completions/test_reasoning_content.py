@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
+@pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support reasoning content extraction")
 @pytest.mark.model("deepseek-7b")
 @pytest.mark.gateway(
     extra_args=["--reasoning-parser", "deepseek_r1", "--history-backend", "memory"]

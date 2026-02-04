@@ -179,7 +179,12 @@ impl HarmonyStreamingProcessor {
                     }
 
                     // Track token counts
-                    *completion_tokens.entry(index).or_insert(0) += 1;
+                    // For vLLM, accumulate completion tokens (vLLM sends deltas)
+                    // For SGLang, skip (SGLang sends cumulative values in Complete)
+                    if chunk_wrapper.is_vllm() {
+                        *completion_tokens.entry(index).or_insert(0) +=
+                            chunk_wrapper.token_ids().len() as u32;
+                    }
 
                     // Convert logprobs if present and requested
                     let chunk_logprobs = if original_request.logprobs {
@@ -237,8 +242,13 @@ impl HarmonyStreamingProcessor {
                         }),
                     );
                     prompt_tokens.insert(index, complete_wrapper.prompt_tokens());
-                    *completion_tokens.entry(index).or_insert(0) =
-                        complete_wrapper.completion_tokens();
+                    // For vLLM, use accumulated count (we tracked deltas above)
+                    // For SGLang, use complete value (already cumulative)
+                    if complete_wrapper.is_vllm() {
+                        completion_tokens.entry(index).or_insert(0);
+                    } else {
+                        completion_tokens.insert(index, complete_wrapper.completion_tokens());
+                    }
 
                     // Finalize parser and emit final chunk
                     if let Some(parser) = parsers.get_mut(&index) {
@@ -353,7 +363,13 @@ impl HarmonyStreamingProcessor {
                         is_firsts.insert(index, true);
                     }
 
-                    *completion_tokens.entry(index).or_insert(0) += 1;
+                    // Track token counts
+                    // For vLLM, accumulate completion tokens (vLLM sends deltas)
+                    // For SGLang, skip (SGLang sends cumulative values in Complete)
+                    if chunk_wrapper.is_vllm() {
+                        *completion_tokens.entry(index).or_insert(0) +=
+                            chunk_wrapper.token_ids().len() as u32;
+                    }
 
                     // Convert logprobs if present and requested
                     let chunk_logprobs = if original_request.logprobs {
@@ -407,8 +423,13 @@ impl HarmonyStreamingProcessor {
                             }
                         }),
                     );
-                    *completion_tokens.entry(index).or_insert(0) =
-                        complete_wrapper.completion_tokens();
+                    // For vLLM, use accumulated count (we tracked deltas above)
+                    // For SGLang, use complete value (already cumulative)
+                    if complete_wrapper.is_vllm() {
+                        completion_tokens.entry(index).or_insert(0);
+                    } else {
+                        completion_tokens.insert(index, complete_wrapper.completion_tokens());
+                    }
 
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
@@ -716,6 +737,12 @@ impl HarmonyStreamingProcessor {
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
+                    // Track token counts for vLLM (vLLM sends deltas)
+                    // For SGLang, skip (SGLang sends cumulative values in Complete)
+                    if chunk_wrapper.is_vllm() {
+                        completion_tokens += chunk_wrapper.token_ids().len() as u32;
+                    }
+
                     // Parse chunk via Harmony parser
                     let delta_result = parser
                         .parse_chunk(chunk_wrapper.token_ids())
@@ -947,7 +974,11 @@ impl HarmonyStreamingProcessor {
                         }
                     });
                     prompt_tokens = complete_wrapper.prompt_tokens();
-                    completion_tokens = complete_wrapper.completion_tokens();
+                    // For vLLM, use accumulated count (we tracked deltas above)
+                    // For SGLang, use complete value (already cumulative)
+                    if !complete_wrapper.is_vllm() {
+                        completion_tokens = complete_wrapper.completion_tokens();
+                    }
 
                     // Finalize parser and get complete output
                     let final_output = parser

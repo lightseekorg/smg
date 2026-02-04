@@ -10,7 +10,7 @@ use crate::routers::{
     grpc::{
         client::GrpcClient,
         common::stages::{helpers, PipelineStage},
-        context::{ClientSelection, RequestContext, RequestType, WorkerSelection},
+        context::{ClientSelection, RequestContext, RequestType},
         proto_wrapper::{ProtoGenerateRequest, ProtoRequest},
     },
 };
@@ -261,12 +261,9 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             }
         }
 
-        // Inject PD metadata if needed (only SGLang supports PD mode)
         if self.inject_pd_metadata {
-            if let Some(WorkerSelection::Dual { prefill, .. }) = ctx.state.workers.as_ref() {
-                if proto_request.is_sglang() {
-                    helpers::inject_bootstrap_metadata(&mut proto_request, prefill);
-                }
+            if let Some(workers) = ctx.state.workers.as_ref() {
+                helpers::maybe_inject_pd_metadata(&mut proto_request, workers);
             }
         }
 

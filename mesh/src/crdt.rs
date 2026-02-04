@@ -209,20 +209,17 @@ impl CRDTPNCounter {
     }
 
     pub fn inc(&mut self, actor: String, delta: i64) {
-        // PNCounter API: inc(actor) and dec(actor) return operations that need to be applied
-        // In crdts 7.3, we need to call apply() to actually modify the counter
+        // Apply delta increments/decrements using the actor identity.
+        // Each call to inc/dec on the PNCounter increments by 1, so we loop.
+        // We reuse the same actor to avoid unbounded actor growth in the CRDT.
         if delta > 0 {
-            for i in 0..delta as u64 {
-                // Use a unique actor for each increment to ensure they're all counted
-                let unique_actor = format!("{}:{}", actor, i);
-                let op = self.inner.inc(unique_actor);
+            for _ in 0..delta as u64 {
+                let op = self.inner.inc(actor.clone());
                 self.inner.apply(op);
             }
         } else if delta < 0 {
-            for i in 0..(-delta) as u64 {
-                // Use a unique actor for each decrement
-                let unique_actor = format!("{}:{}", actor, i);
-                let op = self.inner.dec(unique_actor);
+            for _ in 0..(-delta) as u64 {
+                let op = self.inner.dec(actor.clone());
                 self.inner.apply(op);
             }
         }

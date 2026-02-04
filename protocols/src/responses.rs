@@ -1145,9 +1145,9 @@ fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), validator::Vali
                 }
             }
             ResponseToolType::Mcp => {
-                if tool.server_url.is_none() {
-                    let mut e = validator::ValidationError::new("mcp_tool_missing_server_url");
-                    e.message = Some("MCP tool must have a server_url".into());
+                if tool.server_url.is_none() && tool.server_label.is_none() {
+                    let mut e = validator::ValidationError::new("mcp_tool_missing_connection_info");
+                    e.message = Some("MCP tool must have either server_url or server_label".into());
                     return Err(e);
                 }
             }

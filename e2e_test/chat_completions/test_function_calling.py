@@ -98,6 +98,7 @@ PYTHONIC_MESSAGES = [
 # =============================================================================
 
 
+@pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support guided decoding (json_schema)")
 @pytest.mark.model("llama-1b")
 @pytest.mark.gateway(
     extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"]
@@ -1472,6 +1473,7 @@ class _TestToolChoiceBase:
 # =============================================================================
 
 
+@pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support guided decoding (json_schema)")
 @pytest.mark.model("llama-1b")
 @pytest.mark.gateway(
     extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"]
@@ -1492,6 +1494,7 @@ class TestToolChoiceLlama(_TestToolChoiceBase):
 # =============================================================================
 
 
+@pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support guided decoding (json_schema)")
 @pytest.mark.model("qwen-7b")
 @pytest.mark.gateway(
     extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"]
@@ -1509,6 +1512,7 @@ class TestToolChoiceQwen(_TestToolChoiceBase):
 # =============================================================================
 
 
+@pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support guided decoding (json_schema)")
 @pytest.mark.model("mistral-7b")
 @pytest.mark.gateway(
     extra_args=["--tool-call-parser", "mistral", "--history-backend", "memory"]

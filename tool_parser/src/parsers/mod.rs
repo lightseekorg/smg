@@ -3,6 +3,7 @@
 /// This module contains concrete parser implementations for various model-specific
 /// tool/function call formats.
 // Individual parser modules
+pub mod cohere;
 pub mod deepseek;
 pub mod glm4_moe;
 pub mod json;
@@ -20,6 +21,7 @@ pub mod step3;
 pub mod helpers;
 
 // Re-export parser types for convenience
+pub use cohere::CohereParser;
 pub use deepseek::DeepSeekParser;
 pub use glm4_moe::Glm4MoeParser;
 pub use json::JsonParser;

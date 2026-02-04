@@ -105,7 +105,7 @@ PD disaggregation mode:
 
     @pytest.mark.e2e
     @pytest.mark.workers(prefill=1, decode=1)
-    @pytest.mark.parametrize("setup_backend", ["pd"], indirect=True)
+    @pytest.mark.parametrize("setup_backend", ["pd_http"], indirect=True)
     class TestPD:
         def test_pd_inference(self, setup_backend):
             ...
