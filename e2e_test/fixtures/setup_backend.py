@@ -224,8 +224,21 @@ def _setup_pd_backend_common(
     )
 
     # get_workers_by_type auto-acquires all returned workers
-    existing_prefills = model_pool.get_workers_by_type(model_id, WorkerType.PREFILL)
-    existing_decodes = model_pool.get_workers_by_type(model_id, WorkerType.DECODE)
+    # Filter by connection_mode to ensure we use the right worker type (HTTP vs gRPC)
+    all_prefills = model_pool.get_workers_by_type(model_id, WorkerType.PREFILL)
+    all_decodes = model_pool.get_workers_by_type(model_id, WorkerType.DECODE)
+
+    # Filter by connection mode and release workers we won't use
+    existing_prefills = [w for w in all_prefills if w.mode == connection_mode]
+    existing_decodes = [w for w in all_decodes if w.mode == connection_mode]
+
+    # Release workers that don't match the requested connection mode
+    for w in all_prefills:
+        if w not in existing_prefills:
+            w.release()
+    for w in all_decodes:
+        if w not in existing_decodes:
+            w.release()
 
     missing_prefill = max(0, num_prefill - len(existing_prefills))
     missing_decode = max(0, num_decode - len(existing_decodes))
