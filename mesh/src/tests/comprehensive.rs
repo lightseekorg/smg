@@ -34,7 +34,6 @@ use crate::{
     },
     stores::{AppState, StateStores},
     sync::MeshSyncManager,
-    SKey,
 };
 
 //
@@ -214,16 +213,16 @@ fn test_state_stores_basic_operations() {
         version: 1,
     };
     stores.app.insert(
-        SKey("key1".to_string()),
+        "key1".to_string(),
         app_state.clone(),
         "test_node".to_string(),
     );
-    let value = stores.app.get(&SKey("key1".to_string()));
+    let value = stores.app.get("key1");
     assert!(value.is_some());
     assert_eq!(value.unwrap().value, vec![1, 2, 3]);
 
     // Test that keys don't exist initially
-    assert_eq!(stores.app.get(&SKey("nonexistent".to_string())), None);
+    assert_eq!(stores.app.get("nonexistent"), None);
 }
 
 #[test]
@@ -293,7 +292,7 @@ async fn test_single_node_data_operations() {
         .unwrap();
 
     // Verify data was written
-    let value = handler.stores.app.get(&SKey("test_key".to_string()));
+    let value = handler.stores.app.get("test_key");
     assert!(value.is_some());
 
     handler.shutdown();
@@ -383,8 +382,8 @@ async fn test_two_node_data_synchronization() {
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Verify data exists on both nodes
-    let value_a = handler_a.stores.app.get(&SKey("shared_key".to_string()));
-    let value_b = handler_b.stores.app.get(&SKey("shared_key".to_string()));
+    let value_a = handler_a.stores.app.get("shared_key");
+    let value_b = handler_b.stores.app.get("shared_key");
 
     log::info!("Value on A: {:?}", value_a);
     log::info!("Value on B: {:?}", value_b);
@@ -398,8 +397,8 @@ async fn test_two_node_data_synchronization() {
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Verify data exists on both nodes
-    let value_a = handler_a.stores.app.get(&SKey("shared_key".to_string()));
-    let value_b = handler_b.stores.app.get(&SKey("shared_key".to_string()));
+    let value_a = handler_a.stores.app.get("shared_key");
+    let value_b = handler_b.stores.app.get("shared_key");
 
     log::info!("Value on A: {:?}", value_a);
     log::info!("Value on B: {:?}", value_b);
@@ -536,18 +535,9 @@ async fn test_multi_node_data_propagation() {
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Verify data reached all nodes
-    let value_a = handler_a
-        .stores
-        .app
-        .get(&SKey("propagated_key".to_string()));
-    let value_b = handler_b
-        .stores
-        .app
-        .get(&SKey("propagated_key".to_string()));
-    let value_c = handler_c
-        .stores
-        .app
-        .get(&SKey("propagated_key".to_string()));
+    let value_a = handler_a.stores.app.get("propagated_key");
+    let value_b = handler_b.stores.app.get("propagated_key");
+    let value_c = handler_c.stores.app.get("propagated_key");
 
     log::info!("Value on A: {:?}", value_a);
     log::info!("Value on B: {:?}", value_b);
@@ -571,18 +561,9 @@ async fn test_multi_node_data_propagation() {
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Verify data reached all nodes
-    let value_a = handler_a
-        .stores
-        .app
-        .get(&SKey("propagated_key".to_string()));
-    let value_b = handler_b
-        .stores
-        .app
-        .get(&SKey("propagated_key".to_string()));
-    let value_c = handler_c
-        .stores
-        .app
-        .get(&SKey("propagated_key".to_string()));
+    let value_a = handler_a.stores.app.get("propagated_key");
+    let value_b = handler_b.stores.app.get("propagated_key");
+    let value_c = handler_c.stores.app.get("propagated_key");
 
     log::info!("Value on A: {:?}", value_a);
     log::info!("Value on B: {:?}", value_b);

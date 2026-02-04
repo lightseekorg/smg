@@ -496,9 +496,7 @@ impl MeshController {
                                                         &state_update.value
                                                     ) {
                                                         stores.app.insert(
-                                                            super::crdt::SKey(
-                                                                app_state.key.clone(),
-                                                            ),
+                                                            app_state.key.clone(),
                                                             app_state,
                                                             state_update.actor.clone(),
                                                         );
@@ -512,9 +510,7 @@ impl MeshController {
                                                         &state_update.value
                                                     ) {
                                                         stores.membership.insert(
-                                                            super::crdt::SKey(
-                                                                membership_state.name.clone(),
-                                                            ),
+                                                            membership_state.name.clone(),
                                                             membership_state,
                                                             state_update.actor.clone(),
                                                         );
@@ -549,19 +545,14 @@ impl MeshController {
                                                     }
                                                 }
                                                 LocalStoreType::RateLimit => {
-                                                    // Deserialize and apply rate limit counter
-                                                    if let Ok(counter) = serde_json::from_slice::<
-                                                        super::crdt::CRDTPNCounter,
+                                                    // Deserialize and apply rate limit operation log
+                                                    if let Ok(log) = serde_json::from_slice::<
+                                                        super::crdt_kv::OperationLog,
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        let sync_counter =
-                                                            super::crdt::SyncPNCounter::new();
-                                                        sync_counter.merge(&counter);
-                                                        sync_manager.apply_remote_rate_limit_counter(
-                                                            state_update.key.clone(),
-                                                            &sync_counter,
-                                                        );
+                                                        sync_manager
+                                                            .apply_remote_rate_limit_counter(&log);
                                                     }
                                                 }
                                             }
