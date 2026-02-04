@@ -444,24 +444,22 @@ impl RouterTrait for RouterManager {
     }
 
     async fn get_models(&self, req: Request<Body>) -> Response {
-        // Try delegating to router first (for routers with custom implementations)
-        let router_id = {
-            let default_router = self
-                .default_router
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            default_router.clone()
-        };
+        // In multi-router (IGW) setups, select router based on request headers
+        // This ensures requests to /v1/models get routed to the correct router
+        // (e.g., Anthropic router for anthropic-version header)
+        let (parts, body) = req.into_parts();
+        let router = self.select_router_for_request(Some(&parts.headers), None);
 
-        if let Some(router_id) = router_id {
-            if let Some(router) = self.routers.get(&router_id) {
-                let response = router.get_models(req).await;
-                // If router implements get_models, use its response
-                // Otherwise fall back to worker registry
-                if response.status() != StatusCode::NOT_IMPLEMENTED {
-                    return response;
-                }
+        if let Some(router) = router {
+            // Reconstruct request to pass to the selected router
+            let new_req = Request::from_parts(parts, body);
+            let response = router.get_models(new_req).await;
+
+            // If router has a custom implementation, use its response
+            if response.status() != StatusCode::NOT_IMPLEMENTED {
+                return response;
             }
+            // Otherwise fall through to worker registry fallback
         }
 
         // Fallback: return OpenAI-compatible format from worker registry
@@ -625,14 +623,12 @@ impl RouterTrait for RouterManager {
         &self,
         headers: Option<&HeaderMap>,
         body: &CreateMessageRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
         // In IGW mode, resolve model_id and fail fast if not resolvable
         // In non-IGW mode, pass through to router (router handles validation)
-        let effective_model_id = if self.enable_igw {
-            // Use provided model_id or fall back to body.model
-            let model = model_id.or(Some(&body.model));
-            match self.resolve_model_id(model) {
+        let effective_model_id: Option<String> = if self.enable_igw {
+            match self.resolve_model_id(Some(model_id)) {
                 Ok(id) => Some(id),
                 Err(err_response) => return *err_response,
             }
@@ -640,13 +636,11 @@ impl RouterTrait for RouterManager {
             None
         };
 
-        let router =
-            self.select_router_for_request(headers, effective_model_id.as_deref().or(model_id));
+        let effective_model = effective_model_id.as_deref().unwrap_or(model_id);
+        let router = self.select_router_for_request(headers, Some(effective_model));
 
         if let Some(router) = router {
-            router
-                .route_messages(headers, body, effective_model_id.as_deref().or(model_id))
-                .await
+            router.route_messages(headers, body, effective_model).await
         } else {
             (
                 StatusCode::NOT_FOUND,

@@ -12,10 +12,10 @@
 /// Only propagates authentication and Anthropic-specific headers.
 /// This prevents leaking sensitive headers like cookies or internal routing info.
 pub fn should_propagate_header(key: &str) -> bool {
-    matches!(
-        key.to_lowercase().as_str(),
-        "authorization" | "x-api-key" | "anthropic-version" | "anthropic-beta"
-    )
+    key.eq_ignore_ascii_case("authorization")
+        || key.eq_ignore_ascii_case("x-api-key")
+        || key.eq_ignore_ascii_case("anthropic-version")
+        || key.eq_ignore_ascii_case("anthropic-beta")
 }
 
 #[cfg(test)]
