@@ -50,7 +50,7 @@ jobs:
 
       - name: Cache wheel and Go FFI artifacts
         id: cache-wheel
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             bindings/python/dist/*.whl
