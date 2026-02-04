@@ -23,6 +23,8 @@ pub struct BasicWorkerBuilder {
     health_config: HealthConfig,
     circuit_breaker_config: CircuitBreakerConfig,
     grpc_client: Option<GrpcClient>,
+    kv_connector: Option<String>,
+    kv_role: Option<String>,
 }
 
 impl BasicWorkerBuilder {
@@ -39,6 +41,8 @@ impl BasicWorkerBuilder {
             health_config: HealthConfig::default(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
+            kv_connector: None,
+            kv_role: None,
         }
     }
 
@@ -55,6 +59,8 @@ impl BasicWorkerBuilder {
             health_config: HealthConfig::default(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
+            kv_connector: None,
+            kv_role: None,
         }
     }
 
@@ -109,6 +115,18 @@ impl BasicWorkerBuilder {
     /// Set gRPC client for gRPC workers
     pub fn grpc_client(mut self, client: GrpcClient) -> Self {
         self.grpc_client = Some(client);
+        self
+    }
+
+    /// Set KV connector type (e.g., "MooncakeConnector", "NixlConnector")
+    pub fn kv_connector(mut self, connector: impl Into<String>) -> Self {
+        self.kv_connector = Some(connector.into());
+        self
+    }
+
+    /// Set KV role (e.g., "kv_producer", "kv_consumer", "kv_both")
+    pub fn kv_role(mut self, role: impl Into<String>) -> Self {
+        self.kv_role = Some(role.into());
         self
     }
 
@@ -171,6 +189,8 @@ impl BasicWorkerBuilder {
             health_config: self.health_config,
             bootstrap_host,
             bootstrap_port,
+            kv_connector: self.kv_connector,
+            kv_role: self.kv_role,
             models: self.models,                // Empty = accepts any model
             default_provider: None,             // Native/passthrough
             default_model_type: ModelType::LLM, // Standard LLM capabilities
@@ -222,6 +242,8 @@ pub struct DPAwareWorkerBuilder {
     health_config: HealthConfig,
     circuit_breaker_config: CircuitBreakerConfig,
     grpc_client: Option<GrpcClient>,
+    kv_connector: Option<String>,
+    kv_role: Option<String>,
 }
 
 impl DPAwareWorkerBuilder {
@@ -240,6 +262,8 @@ impl DPAwareWorkerBuilder {
             health_config: HealthConfig::default(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
+            kv_connector: None,
+            kv_role: None,
         }
     }
 
@@ -263,6 +287,8 @@ impl DPAwareWorkerBuilder {
             health_config: HealthConfig::default(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
+            kv_connector: None,
+            kv_role: None,
         }
     }
 
@@ -332,6 +358,18 @@ impl DPAwareWorkerBuilder {
         self
     }
 
+    /// Set the KV connector type (for PD disaggregation)
+    pub fn kv_connector(mut self, connector: impl Into<String>) -> Self {
+        self.kv_connector = Some(connector.into());
+        self
+    }
+
+    /// Set the KV role (for PD disaggregation)
+    pub fn kv_role(mut self, role: impl Into<String>) -> Self {
+        self.kv_role = Some(role.into());
+        self
+    }
+
     /// Build the DPAwareWorker instance
     pub fn build(self) -> DPAwareWorker {
         let worker_url = format!("{}@{}", self.base_url, self.dp_rank);
@@ -349,6 +387,12 @@ impl DPAwareWorkerBuilder {
         }
         if let Some(api_key) = self.api_key {
             builder = builder.api_key(api_key);
+        }
+        if let Some(kv_connector) = self.kv_connector {
+            builder = builder.kv_connector(kv_connector);
+        }
+        if let Some(kv_role) = self.kv_role {
+            builder = builder.kv_role(kv_role);
         }
 
         let base_worker = builder.build();
