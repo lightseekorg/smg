@@ -209,10 +209,14 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
     gen = _create_backend(request, model_pool)
     value = next(gen)
 
-    with _cache_lock:
-        _thread_cache[thread_id] = _CachedBackend(
-            gen=gen, value=value, cls=cls, param=param
-        )
+    try:
+        with _cache_lock:
+            _thread_cache[thread_id] = _CachedBackend(
+                gen=gen, value=value, cls=cls, param=param
+            )
+    except Exception:
+        gen.close()
+        raise
 
     logger.info(
         "Thread %s: created new backend (class=%s, param=%s)",
