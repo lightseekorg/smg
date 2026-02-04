@@ -1,22 +1,25 @@
 //! Client events for the Realtime API.
 //!
 //! This module contains all event types that can be sent from the client
-//! to the Realtime API server. There are 9 client event types organized
-//! into four categories:
+//! to the Realtime API server. There are 12 client event types organized
+//! into six categories:
 //!
 //! - Session events: `session.update`
 //! - Input audio buffer events: `append`, `commit`, `clear`
-//! - Conversation events: `item.create`, `item.truncate`, `item.delete`
+//! - Output audio buffer events: `clear`
+//! - Conversation events: `item.create`, `item.truncate`, `item.delete`, `item.retrieve`
 //! - Response events: `response.create`, `response.cancel`
+//! - Transcription session events: `transcription_session.update`
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use super::conversation::ConversationItem;
-use super::response::ResponseConfig;
-use super::session::SessionConfig;
+use super::{
+    conversation::ConversationItem, response::ResponseConfig, session::SessionConfig,
+    transcription::TranscriptionSessionConfig,
+};
 
 // ============================================================================
-// Client Event Enum
+// Client Event Enum (Main Type)
 // ============================================================================
 
 /// All client events that can be sent to the Realtime API.
@@ -27,13 +30,16 @@ use super::session::SessionConfig;
 pub enum RealtimeClientEvent {
     // === Session Events ===
     /// Update the session configuration
+    ///
+    /// The session can be either a realtime session (type: "realtime") or
+    /// a transcription session (type: "transcription").
     #[serde(rename = "session.update")]
     SessionUpdate {
         /// Optional client-generated event ID
         #[serde(skip_serializing_if = "Option::is_none")]
         event_id: Option<String>,
-        /// New session configuration
-        session: SessionConfig,
+        /// New session configuration (realtime or transcription)
+        session: Box<SessionUpdateConfig>,
     },
 
     // === Input Audio Buffer Events ===
@@ -112,6 +118,29 @@ pub enum RealtimeClientEvent {
         item_id: String,
     },
 
+    /// Retrieve a conversation item
+    ///
+    /// Requests the server to return a specific conversation item.
+    #[serde(rename = "conversation.item.retrieve")]
+    ConversationItemRetrieve {
+        /// Optional client-generated event ID
+        #[serde(skip_serializing_if = "Option::is_none")]
+        event_id: Option<String>,
+        /// ID of the item to retrieve
+        item_id: String,
+    },
+
+    // === Output Audio Buffer Events ===
+    /// Clear the output audio buffer
+    ///
+    /// Discards any audio that has been generated but not yet played.
+    #[serde(rename = "output_audio_buffer.clear")]
+    OutputAudioBufferClear {
+        /// Optional client-generated event ID
+        #[serde(skip_serializing_if = "Option::is_none")]
+        event_id: Option<String>,
+    },
+
     // === Response Events ===
     /// Create a new response
     ///
@@ -124,17 +153,34 @@ pub enum RealtimeClientEvent {
         event_id: Option<String>,
         /// Optional response configuration
         #[serde(skip_serializing_if = "Option::is_none")]
-        response: Option<ResponseConfig>,
+        response: Option<Box<ResponseConfig>>,
     },
 
     /// Cancel an in-progress response
     ///
-    /// Stops the current response generation.
+    /// Stops the current response generation. If no `response_id` is provided,
+    /// cancels the in-progress response in the default conversation.
     #[serde(rename = "response.cancel")]
     ResponseCancel {
         /// Optional client-generated event ID
         #[serde(skip_serializing_if = "Option::is_none")]
         event_id: Option<String>,
+        /// Specific response ID to cancel (if not provided, cancels in-progress response)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        response_id: Option<String>,
+    },
+
+    // === Transcription Session Events ===
+    /// Update the transcription session configuration
+    ///
+    /// Used for transcription-only sessions (speech-to-text without conversation).
+    #[serde(rename = "transcription_session.update")]
+    TranscriptionSessionUpdate {
+        /// Optional client-generated event ID
+        #[serde(skip_serializing_if = "Option::is_none")]
+        event_id: Option<String>,
+        /// New transcription session configuration
+        session: TranscriptionSessionConfig,
     },
 }
 
@@ -149,8 +195,11 @@ impl RealtimeClientEvent {
             Self::ConversationItemCreate { .. } => "conversation.item.create",
             Self::ConversationItemTruncate { .. } => "conversation.item.truncate",
             Self::ConversationItemDelete { .. } => "conversation.item.delete",
+            Self::ConversationItemRetrieve { .. } => "conversation.item.retrieve",
+            Self::OutputAudioBufferClear { .. } => "output_audio_buffer.clear",
             Self::ResponseCreate { .. } => "response.create",
             Self::ResponseCancel { .. } => "response.cancel",
+            Self::TranscriptionSessionUpdate { .. } => "transcription_session.update",
         }
     }
 
@@ -164,22 +213,86 @@ impl RealtimeClientEvent {
             | Self::ConversationItemCreate { event_id, .. }
             | Self::ConversationItemTruncate { event_id, .. }
             | Self::ConversationItemDelete { event_id, .. }
+            | Self::ConversationItemRetrieve { event_id, .. }
+            | Self::OutputAudioBufferClear { event_id, .. }
             | Self::ResponseCreate { event_id, .. }
-            | Self::ResponseCancel { event_id, .. } => event_id.as_deref(),
+            | Self::ResponseCancel { event_id, .. }
+            | Self::TranscriptionSessionUpdate { event_id, .. } => event_id.as_deref(),
         }
     }
 }
 
 // ============================================================================
-// Builder methods for common operations
+// Supporting Types
+// ============================================================================
+
+/// Configuration for `session.update` events.
+///
+/// Can be either a realtime session config or a transcription session config,
+/// distinguished by the `type` field ("realtime" or "transcription").
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum SessionUpdateConfig {
+    /// Realtime session configuration (type: "realtime")
+    Realtime(Box<SessionConfig>),
+    /// Transcription session configuration (type: "transcription")
+    Transcription(TranscriptionSessionConfig),
+}
+
+impl<'de> Deserialize<'de> for SessionUpdateConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Deserialize to a raw value first to inspect the type field
+        let value = serde_json::Value::deserialize(deserializer)?;
+
+        // Check the type field to determine which variant to use
+        let session_type = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("realtime");
+
+        match session_type {
+            "transcription" => {
+                let config: TranscriptionSessionConfig =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(SessionUpdateConfig::Transcription(config))
+            }
+            _ => {
+                // Default to realtime for "realtime" or any other value
+                let config: SessionConfig =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(SessionUpdateConfig::Realtime(Box::new(config)))
+            }
+        }
+    }
+}
+
+impl From<SessionConfig> for SessionUpdateConfig {
+    fn from(config: SessionConfig) -> Self {
+        Self::Realtime(Box::new(config))
+    }
+}
+
+impl From<TranscriptionSessionConfig> for SessionUpdateConfig {
+    fn from(config: TranscriptionSessionConfig) -> Self {
+        Self::Transcription(config)
+    }
+}
+
+// ============================================================================
+// Builder Methods
 // ============================================================================
 
 impl RealtimeClientEvent {
     /// Create a session update event
-    pub fn session_update(session: SessionConfig) -> Self {
+    ///
+    /// Accepts either `SessionConfig` (realtime) or `TranscriptionSessionConfig`.
+    pub fn session_update(session: impl Into<SessionUpdateConfig>) -> Self {
         Self::SessionUpdate {
             event_id: None,
-            session,
+            session: Box::new(session.into()),
         }
     }
 
@@ -227,6 +340,19 @@ impl RealtimeClientEvent {
         }
     }
 
+    /// Create a conversation item retrieve event
+    pub fn item_retrieve(item_id: impl Into<String>) -> Self {
+        Self::ConversationItemRetrieve {
+            event_id: None,
+            item_id: item_id.into(),
+        }
+    }
+
+    /// Create an output audio buffer clear event
+    pub fn output_audio_clear() -> Self {
+        Self::OutputAudioBufferClear { event_id: None }
+    }
+
     /// Create a response create event with default config
     pub fn response_create() -> Self {
         Self::ResponseCreate {
@@ -239,32 +365,58 @@ impl RealtimeClientEvent {
     pub fn response_create_with(config: ResponseConfig) -> Self {
         Self::ResponseCreate {
             event_id: None,
-            response: Some(config),
+            response: Some(Box::new(config)),
         }
     }
 
-    /// Create a response cancel event
+    /// Create a response cancel event (cancels in-progress response in default conversation)
     pub fn response_cancel() -> Self {
-        Self::ResponseCancel { event_id: None }
+        Self::ResponseCancel {
+            event_id: None,
+            response_id: None,
+        }
+    }
+
+    /// Create a response cancel event for a specific response ID
+    pub fn response_cancel_with_id(response_id: impl Into<String>) -> Self {
+        Self::ResponseCancel {
+            event_id: None,
+            response_id: Some(response_id.into()),
+        }
+    }
+
+    /// Create a transcription session update event
+    pub fn transcription_session_update(session: TranscriptionSessionConfig) -> Self {
+        Self::TranscriptionSessionUpdate {
+            event_id: None,
+            session,
+        }
     }
 
     /// Add an event ID to this event
     pub fn with_event_id(mut self, id: impl Into<String>) -> Self {
-        let id = Some(id.into());
-        match &mut self {
-            Self::SessionUpdate { event_id, .. }
-            | Self::InputAudioBufferAppend { event_id, .. }
-            | Self::InputAudioBufferCommit { event_id, .. }
-            | Self::InputAudioBufferClear { event_id, .. }
-            | Self::ConversationItemCreate { event_id, .. }
-            | Self::ConversationItemTruncate { event_id, .. }
-            | Self::ConversationItemDelete { event_id, .. }
-            | Self::ResponseCreate { event_id, .. }
-            | Self::ResponseCancel { event_id, .. } => *event_id = id,
-        }
+        let event_id_ref = match &mut self {
+            Self::SessionUpdate { event_id, .. } => event_id,
+            Self::InputAudioBufferAppend { event_id, .. } => event_id,
+            Self::InputAudioBufferCommit { event_id, .. } => event_id,
+            Self::InputAudioBufferClear { event_id, .. } => event_id,
+            Self::ConversationItemCreate { event_id, .. } => event_id,
+            Self::ConversationItemTruncate { event_id, .. } => event_id,
+            Self::ConversationItemDelete { event_id, .. } => event_id,
+            Self::ConversationItemRetrieve { event_id, .. } => event_id,
+            Self::OutputAudioBufferClear { event_id, .. } => event_id,
+            Self::ResponseCreate { event_id, .. } => event_id,
+            Self::ResponseCancel { event_id, .. } => event_id,
+            Self::TranscriptionSessionUpdate { event_id, .. } => event_id,
+        };
+        *event_id_ref = Some(id.into());
         self
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -349,5 +501,68 @@ mod tests {
         let event: RealtimeClientEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.event_type(), "response.create");
         assert_eq!(event.event_id(), Some("evt_456"));
+    }
+
+    #[test]
+    fn test_item_retrieve_serialization() {
+        let event = RealtimeClientEvent::item_retrieve("item_abc");
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"conversation.item.retrieve\""));
+        assert!(json.contains("\"item_id\":\"item_abc\""));
+        assert_eq!(event.event_type(), "conversation.item.retrieve");
+    }
+
+    #[test]
+    fn test_output_audio_buffer_clear_serialization() {
+        let event = RealtimeClientEvent::output_audio_clear();
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"output_audio_buffer.clear\""));
+        assert_eq!(event.event_type(), "output_audio_buffer.clear");
+    }
+
+    #[test]
+    fn test_transcription_session_update_serialization() {
+        use crate::realtime::transcription::TranscriptionSessionConfig;
+
+        let event = RealtimeClientEvent::transcription_session_update(
+            TranscriptionSessionConfig::default(),
+        );
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"transcription_session.update\""));
+        assert!(json.contains("\"session\""));
+        assert_eq!(event.event_type(), "transcription_session.update");
+    }
+
+    #[test]
+    fn test_session_update_with_realtime_config() {
+        let event = RealtimeClientEvent::session_update(SessionConfig::default());
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"session.update\""));
+        // The session contains type: "realtime"
+        assert!(json.contains("\"realtime\""));
+    }
+
+    #[test]
+    fn test_session_update_with_transcription_config() {
+        use crate::realtime::transcription::TranscriptionSessionConfig;
+
+        let event = RealtimeClientEvent::session_update(TranscriptionSessionConfig::default());
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"session.update\""));
+        // The session contains type: "transcription"
+        assert!(json.contains("\"transcription\""));
+    }
+
+    #[test]
+    fn test_session_update_config_deserialization() {
+        // Realtime config
+        let json = r#"{"type": "realtime"}"#;
+        let config: SessionUpdateConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(config, SessionUpdateConfig::Realtime(_)));
+
+        // Transcription config
+        let json = r#"{"type": "transcription"}"#;
+        let config: SessionUpdateConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(config, SessionUpdateConfig::Transcription(_)));
     }
 }

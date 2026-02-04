@@ -11,20 +11,27 @@
 //! - **Session types**: Configuration and state for realtime sessions
 //! - **Conversation types**: Messages, function calls, and content parts
 //! - **Response types**: Response configuration and streaming state
-//! - **Client events**: Events sent from client to server (9 types)
-//! - **Server events**: Events received from server (28 types)
+//! - **Client events**: Events sent from client to server (12 types)
+//! - **Server events**: Events received from server (46 types)
 //!
 //! # Example
 //!
 //! ```rust,ignore
 //! use protocols::realtime::{
 //!     RealtimeClientEvent, RealtimeServerEvent,
-//!     SessionConfig, ConversationItem, Voice,
+//!     SessionConfig, ConversationItem, Voice, VoiceOption,
+//!     AudioConfig, AudioOutputConfig,
 //! };
 //!
-//! // Create a session update event
+//! // Create a session update event with nested audio config
 //! let event = RealtimeClientEvent::session_update(SessionConfig {
-//!     voice: Some(Voice::Alloy),
+//!     audio: Some(AudioConfig {
+//!         output: Some(AudioOutputConfig {
+//!             voice: Some(VoiceOption::BuiltIn(Voice::Alloy)),
+//!             ..Default::default()
+//!         }),
+//!         ..Default::default()
+//!     }),
 //!     instructions: Some("Be helpful and concise.".to_string()),
 //!     ..Default::default()
 //! });
@@ -66,17 +73,30 @@ pub mod conversation;
 pub mod response;
 pub mod server_events;
 pub mod session;
+pub mod transcription;
 
 // Re-export all public types for convenience
-pub use client_events::RealtimeClientEvent;
-pub use conversation::{ContentPart, ConversationItem, ItemStatus, Role};
-pub use response::{
-    InputTokenDetails, OutputTokenDetails, Response, ResponseConfig, ResponseError,
-    ResponseStatus, ResponseStatusDetails, ResponseUsage,
+pub use client_events::{RealtimeClientEvent, SessionUpdateConfig};
+pub use conversation::{
+    ContentPart, ConversationItem, ImageDetail, ItemStatus, McpError, McpListToolsTool, Role,
 };
-pub use server_events::{ApiError, Conversation, RateLimit, RealtimeServerEvent};
+pub use response::{
+    CachedTokensDetails, InputTokenDetails, OutputTokenDetails, Response, ResponseAudioConfig,
+    ResponseConfig, ResponseContentPart, ResponseError, ResponseStatus, ResponseStatusDetails,
+    ResponseUsage, StatusReason,
+};
+pub use server_events::{
+    ApiError, Conversation, LogProbProperties, RateLimit, RateLimitName, RealtimeServerEvent,
+    SessionOrTranscription, TranscriptInputTokenDetails, TranscriptTextUsage,
+};
 pub use session::{
-    AudioFormat, InputAudioTranscription, MaxResponseOutputTokens, Modality, RealtimeTool,
-    Session, SessionConfig, ToolChoice, ToolChoiceFunction, ToolChoiceFunctionName,
-    ToolChoiceMode, TurnDetection, Voice,
+    AudioConfig, AudioFormat, AudioInputConfig, AudioOutputConfig, ClientSecret, ConnectorId,
+    InputAudioNoiseReduction, InputAudioTranscription, MaxResponseOutputTokens, Modality,
+    NoiseReductionType, Prompt, SemanticVadEagerness, Session, SessionConfig, ToolChoice,
+    ToolChoiceFunction, ToolChoiceFunctionName, ToolChoiceMcp, ToolChoiceMode, ToolDefinition,
+    TracingConfig, TracingMode, Truncation, TruncationMode, TurnDetection, Voice, VoiceOption,
+};
+pub use transcription::{
+    TranscriptionAudioConfig, TranscriptionAudioInputConfig, TranscriptionSegment,
+    TranscriptionSession, TranscriptionSessionConfig, TranscriptionTurnDetection,
 };
