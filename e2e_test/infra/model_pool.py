@@ -25,9 +25,11 @@ from .constants import (
     INITIAL_GRACE_PERIOD,
     LAUNCH_STAGGER_DELAY,
     LOCAL_MODES,
+    RUNTIME_LABELS,
     ConnectionMode,
     WorkerType,
     get_runtime,
+    is_trtllm,
     is_vllm,
 )
 from .gpu_allocator import GPUAllocator, GPUSlot, get_open_port
@@ -502,17 +504,25 @@ class ModelPool:
             The launched ModelInstance.
         """
         if mode == ConnectionMode.GRPC:
+            runtime = get_runtime()
+            runtime_label = RUNTIME_LABELS.get(runtime, "SGLang")
             logger.info(
                 "gRPC worker requested for %s: E2E_RUNTIME=%s, routing to %s backend",
                 model_id,
-                get_runtime(),
-                "vLLM" if is_vllm() else "SGLang",
+                runtime,
+                runtime_label,
             )
-            if is_vllm():
-                # Launch vLLM gRPC worker instead of SGLang
+            if is_vllm() or is_trtllm():
                 spec = get_model_spec(model_id)
-                # vLLM startup can be slow, use longer timeout
-                return self._launch_vllm_grpc_worker(model_id, spec, gpu_slot, 600)
+                return self._launch_grpc_worker(
+                    runtime=get_runtime(),
+                    model_id=model_id,
+                    model_spec=spec,
+                    gpu_slot=gpu_slot,
+                    startup_timeout=600,
+                    worker_type=worker_type,
+                    instance_key=instance_key,
+                )
 
         spec = get_model_spec(model_id)
         model_path = spec["model"]
@@ -889,7 +899,7 @@ class ModelPool:
                 "Model %s not running, launching on-demand with MRU eviction if needed",
                 key,
             )
-            if not self._ensure_gpu_available(model_id):
+            if not self._ensure_gpu_available(model_id, mode):
                 # GPUs not available after eviction - signal retry
                 return None
 
@@ -994,11 +1004,12 @@ class ModelPool:
             if inst.gpu_slot:
                 freed_gpus += len(inst.gpu_slot.gpu_ids)
 
-    def _ensure_gpu_available(self, model_id: str) -> bool:
+    def _ensure_gpu_available(self, model_id: str, mode: ConnectionMode) -> bool:
         """Ensure GPU is available for a model, evicting if needed.
 
         Args:
             model_id: Model ID that needs GPU resources.
+            mode: Connection mode (HTTP or gRPC) being launched.
 
         Returns:
             True if GPUs are available, False if not (all in use by other tests).
@@ -1006,11 +1017,13 @@ class ModelPool:
         spec = get_model_spec(model_id)
         required_gpus = spec.get("tp", 1)
 
-        # Exclude REGULAR workers of same model from eviction (keep them)
-        # but allow evicting PD workers (PREFILL/DECODE) to free GPUs
+        # Exclude REGULAR workers of same model AND same mode from eviction.
+        # Different modes (HTTP vs gRPC) are separate instances that can be evicted.
+        # Also allow evicting PD workers (PREFILL/DECODE) to free GPUs.
         self._evict_for_gpus(
             required_gpus,
             exclude_model_id=model_id,
+            exclude_mode=mode,
             exclude_worker_types={WorkerType.REGULAR},
         )
 
@@ -1100,61 +1113,129 @@ class ModelPool:
                 worker.acquire()
             return workers
 
-    def _launch_vllm_grpc_worker(
+    @staticmethod
+    def _build_grpc_cmd(
+        runtime: str,
+        model_path: str,
+        host: str,
+        port: int,
+        tp_size: int,
+        model_spec: dict,
+    ) -> list[str]:
+        """Build the gRPC server launch command for a given runtime.
+
+        Args:
+            runtime: Runtime name ("vllm" or "trtllm").
+            model_path: HuggingFace model path.
+            host: Host to bind to.
+            port: Port to bind to.
+            tp_size: Tensor parallel size.
+            model_spec: Model specification dict (for runtime-specific args).
+
+        Returns:
+            Command list for subprocess.Popen.
+        """
+        if runtime == "vllm":
+            cmd = [
+                "python3",
+                "-m",
+                "vllm.entrypoints.grpc_server",
+                "--model",
+                model_path,
+                "--host",
+                host,
+                "--port",
+                str(port),
+                "--tensor-parallel-size",
+                str(tp_size),
+                "--max-model-len",
+                "16384",
+                "--gpu-memory-utilization",
+                "0.9",
+                "--enforce-eager",
+            ]
+            extra = model_spec.get("vllm_args", [])
+        elif runtime == "trtllm":
+            cmd = [
+                "python3",
+                "-m",
+                "tensorrt_llm.commands.serve",
+                "serve",
+                model_path,
+                "--grpc",
+                "--host",
+                host,
+                "--port",
+                str(port),
+                "--backend",
+                "pytorch",
+                "--tp_size",
+                str(tp_size),
+            ]
+            extra = model_spec.get("trtllm_args", [])
+        else:
+            raise ValueError(f"Unsupported gRPC runtime: {runtime}")
+
+        if extra:
+            cmd.extend(extra)
+        return cmd
+
+    def _launch_grpc_worker(
         self,
+        runtime: str,
         model_id: str,
         model_spec: dict,
         gpu_slot: GPUSlot,
         startup_timeout: int,
+        worker_type: WorkerType = WorkerType.REGULAR,
+        instance_key: str | None = None,
     ) -> ModelInstance | None:
-        """Launch a vLLM worker with native gRPC.
+        """Launch a gRPC worker for the given runtime.
 
         Args:
+            runtime: Runtime name ("vllm" or "trtllm").
             model_id: Model identifier.
             model_spec: Model specification dict from MODEL_SPECS.
             gpu_slot: GPU slot assignment.
             startup_timeout: Timeout for worker to become healthy.
+            worker_type: Worker type (REGULAR, PREFILL, or DECODE).
+            instance_key: Custom instance key, or None to auto-generate.
 
         Returns:
             The launched ModelInstance, or None if launch fails.
         """
+        runtime_label = RUNTIME_LABELS.get(runtime, runtime)
         model_path = model_spec["model"]
         tp_size = model_spec.get("tp", 1)
-        memory_gb = model_spec.get("memory_gb", 16)
         port = gpu_slot.port
 
-        # Build environment
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu_slot.cuda_visible_devices()
 
-        # Build vLLM gRPC command
-        cmd = [
-            "python3",
-            "-m",
-            "vllm.entrypoints.grpc_server",
-            "--model",
-            model_path,
-            "--host",
-            DEFAULT_HOST,
-            "--port",
-            str(port),
-            "--tensor-parallel-size",
-            str(tp_size),
-            "--max-model-len",
-            "2048",  # Reduced to minimize GPU memory usage
-            "--gpu-memory-utilization",
-            "0.9",
-            "--enforce-eager",  # Disable CUDA graph to save memory
-        ]
+        # For TRT-LLM multi-GPU, add NCCL environment variables for compatibility
+        # across different GPU types (H100 with NVSwitch, A10 with PCIe)
+        if runtime == "trtllm" and tp_size > 1:
+            env["NCCL_DEBUG"] = "WARN"  # Help diagnose NCCL issues
+            env["NCCL_IB_DISABLE"] = "1"  # Disable InfiniBand (not on CI runners)
+            # Disable shared memory - CI runners have limited /dev/shm (64MB default)
+            # NCCL needs ~33MB per GPU, so 4 GPUs would exceed the limit
+            env["NCCL_SHM_DISABLE"] = "1"
+            # Disable TRT-LLM's allreduce autotuner to avoid warmup failures on CI
+            # See: tensorrt_llm/_torch/distributed/ops.py
+            env["TLLM_DISABLE_ALLREDUCE_AUTOTUNE"] = "1"
 
-        # Add vllm_args from model spec if present
-        vllm_args = model_spec.get("vllm_args", [])
-        if vllm_args:
-            cmd.extend(vllm_args)
+        cmd = self._build_grpc_cmd(
+            runtime, model_path, DEFAULT_HOST, port, tp_size, model_spec
+        )
 
-        key = f"{model_id}:vllm-grpc"
+        # Use provided instance_key for PD workers, otherwise generate default key
+        if instance_key:
+            key = instance_key
+        else:
+            key = f"{model_id}:{runtime}-grpc"
         logger.info(
-            "Launching vLLM gRPC worker %s on GPUs %s port %d",
+            "Launching %s gRPC worker %s on GPUs %s port %d",
+            runtime_label,
             key,
             gpu_slot.gpu_ids,
             port,
@@ -1162,7 +1243,6 @@ class ModelPool:
 
         show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
 
-        # Start the process
         proc = subprocess.Popen(
             cmd,
             env=env,
@@ -1171,7 +1251,6 @@ class ModelPool:
             start_new_session=True,
         )
 
-        # vLLM gRPC uses grpc:// protocol
         base_url = f"grpc://{DEFAULT_HOST}:{port}"
         instance = ModelInstance(
             model_id=model_id,
@@ -1182,31 +1261,32 @@ class ModelPool:
             process=proc,
             gpu_slot=gpu_slot,
             key=key,
-            worker_type=WorkerType.REGULAR,
-            bootstrap_port=None,
+            worker_type=worker_type,
+            bootstrap_port=None,  # vLLM PD uses NIXL, not bootstrap
             last_used=time.time(),
         )
         self.instances[key] = instance
 
-        # Wait for this worker to become healthy
         try:
             self._wait_worker_healthy(instance, startup_timeout)
             return instance
         except Exception as e:
-            logger.error("Failed to start vLLM gRPC worker %s: %s", key, e)
+            logger.error("Failed to start %s gRPC worker %s: %s", runtime_label, key, e)
             self._evict_instance(key)
             return None
 
-    def get_vllm_grpc_worker(
+    def get_grpc_worker(
         self,
         model_id: str,
+        runtime: str | None = None,
     ) -> ModelInstance:
-        """Get or launch a vLLM gRPC worker.
+        """Get or launch a gRPC worker for the current runtime.
 
         Thread-safe: Protected by internal lock.
 
         Args:
             model_id: The model ID to launch.
+            runtime: Runtime name override. Defaults to get_runtime().
 
         Returns:
             The acquired ModelInstance.
@@ -1214,36 +1294,37 @@ class ModelPool:
         Raises:
             RuntimeError: If worker cannot be launched.
         """
-        key = f"{model_id}:vllm-grpc"
+        if runtime is None:
+            runtime = get_runtime()
+        runtime_label = RUNTIME_LABELS.get(runtime, runtime)
+        key = f"{model_id}:{runtime}-grpc"
 
         with self._lock:
-            # Check if already exists
             if key in self.instances:
                 inst = self.instances[key]
                 inst.acquire()
                 inst.last_used = time.time()
                 return inst
 
-            # Need to launch
             spec = get_model_spec(model_id)
             tp_size = spec.get("tp", 1)
 
-            # Check if we have enough GPUs
             available = self.allocator.available_gpus()
             if len(available) < tp_size:
                 logger.info(
-                    "Need %d GPUs for vLLM worker, only %d available. Evicting...",
+                    "Need %d GPUs for %s worker, only %d available. Evicting...",
                     tp_size,
+                    runtime_label,
                     len(available),
                 )
                 self._evict_for_gpus(tp_size)
                 available = self.allocator.available_gpus()
                 if len(available) < tp_size:
                     raise RuntimeError(
-                        f"Insufficient GPUs for vLLM worker: need {tp_size}, only {len(available)} available"
+                        f"Insufficient GPUs for {runtime_label} worker: "
+                        f"need {tp_size}, only {len(available)} available"
                     )
 
-            # Allocate GPU slot
             allocation_specs = {
                 key: {
                     "model": spec["model"],
@@ -1253,12 +1334,14 @@ class ModelPool:
             }
             slots = self.allocator.allocate_slots(allocation_specs, preserve_order=True)
             if not slots:
-                raise RuntimeError(f"Failed to allocate GPU slots for vLLM worker: {model_id}")
+                raise RuntimeError(
+                    f"Failed to allocate GPU slots for {runtime_label} worker: {model_id}"
+                )
 
             gpu_slot = slots[0]
 
-            # Launch worker
-            instance = self._launch_vllm_grpc_worker(
+            instance = self._launch_grpc_worker(
+                runtime=runtime,
                 model_id=model_id,
                 model_spec=spec,
                 gpu_slot=gpu_slot,
@@ -1267,7 +1350,9 @@ class ModelPool:
 
             if instance is None:
                 self.allocator.release_slot(gpu_slot)
-                raise RuntimeError(f"Failed to launch vLLM gRPC worker: {model_id}")
+                raise RuntimeError(
+                    f"Failed to launch {runtime_label} gRPC worker: {model_id}"
+                )
 
             instance.acquire()
             return instance

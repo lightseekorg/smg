@@ -79,16 +79,16 @@ impl std::fmt::Display for Backend {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "sglang-router", alias = "smg", alias = "amg")]
-#[command(about = "SGLang Model Gateway - High-performance inference gateway")]
+#[command(name = "shepherd-model-gateway", alias = "smg", alias = "amg")]
+#[command(about = "Shepherd Model Gateway - High-performance inference gateway")]
 #[command(args_conflicts_with_subcommands = true)]
 #[command(long_about = r#"
-SGLang Model Gateway - Rust-based inference gateway
+Shepherd Model Gateway - Rust-based inference gateway
 
 Usage:
-  smg launch [OPTIONS]     Launch router (short command)
-  amg launch [OPTIONS]     Launch router (alternative)
-  sglang-router [OPTIONS]  Launch router (full name)
+  smg launch [OPTIONS]             Launch gateway (short command)
+  amg launch [OPTIONS]             Launch gateway (alternative)
+  shepherd-model-gateway launch [OPTIONS] Launch gateway (full name)
 
 Examples:
   # Regular mode
@@ -259,6 +259,10 @@ struct CliArgs {
     /// Set the logging level
     #[arg(long, default_value = "info", value_parser = ["debug", "info", "warn", "error"], help_heading = "Logging")]
     log_level: String,
+
+    /// Output logs as JSON
+    #[arg(long, default_value_t = false, help_heading = "Logging")]
+    log_json: bool,
 
     // ==================== Prometheus Metrics ====================
     /// Port to expose Prometheus metrics
@@ -1129,6 +1133,7 @@ impl CliArgs {
             max_payload_size: self.max_payload_size,
             log_dir: self.log_dir.clone(),
             log_level: Some(self.log_level.clone()),
+            log_json: self.log_json,
             service_discovery_config,
             prometheus_config,
             request_timeout_secs: self.request_timeout_secs,

@@ -9,7 +9,7 @@ use crate::routers::{
     error,
     grpc::{
         common::stages::{helpers, PipelineStage},
-        context::{ClientSelection, RequestContext, WorkerSelection},
+        context::{ClientSelection, RequestContext},
     },
 };
 
@@ -76,10 +76,9 @@ impl PipelineStage for ChatRequestBuildingStage {
                 error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {}", e))
             })?;
 
-        // Inject PD metadata if needed
         if self.inject_pd_metadata {
-            if let WorkerSelection::Dual { prefill, .. } = ctx.state.workers.as_ref().unwrap() {
-                helpers::inject_bootstrap_metadata(&mut proto_request, prefill);
+            if let Some(workers) = ctx.state.workers.as_ref() {
+                helpers::maybe_inject_pd_metadata(&mut proto_request, workers);
             }
         }
 

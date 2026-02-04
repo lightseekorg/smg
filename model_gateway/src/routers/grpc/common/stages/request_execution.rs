@@ -2,16 +2,21 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
-use tracing::{error, info_span, Instrument};
+use tracing::{debug, error, info_span, Instrument};
 
 use super::PipelineStage;
-use crate::routers::{
-    error,
-    grpc::{
-        context::{ClientSelection, ExecutionResult, LoadGuards, RequestContext, WorkerSelection},
-        proto_wrapper::{
-            ProtoEmbedRequest, ProtoEmbedResponseVariant, ProtoGenerateRequest, ProtoRequest,
-            ProtoStream,
+use crate::{
+    core::RuntimeType,
+    routers::{
+        error,
+        grpc::{
+            context::{
+                ClientSelection, ExecutionResult, LoadGuards, RequestContext, WorkerSelection,
+            },
+            proto_wrapper::{
+                ProtoEmbedRequest, ProtoEmbedResponseVariant, ProtoGenerateRequest, ProtoRequest,
+                ProtoStream,
+            },
         },
     },
 };
@@ -102,7 +107,38 @@ impl PipelineStage for RequestExecutionStage {
                 ProtoRequest::Generate(req) => match self.mode {
                     ExecutionMode::Single => self.execute_single(req, clients, workers).await,
                     ExecutionMode::DualDispatch => {
-                        self.execute_dual_dispatch(req, clients, workers).await
+                        // Dispatch based on runtime type:
+                        // - SGLang: parallel dual dispatch with bootstrap metadata
+                        // - vLLM: sequential prefill-then-decode (NIXL handles KV transfer)
+                        match workers.pd_runtime_type() {
+                            Some(RuntimeType::Vllm) => {
+                                self.execute_sequential_pd(req, clients, workers).await
+                            }
+                            Some(RuntimeType::Sglang) => {
+                                self.execute_dual_dispatch(req, clients, workers).await
+                            }
+                            Some(RuntimeType::Trtllm) | Some(RuntimeType::External) => {
+                                error!(
+                                    function = "RequestExecutionStage::execute",
+                                    runtime_type = ?workers.pd_runtime_type(),
+                                    "Runtime does not support PD disaggregated mode"
+                                );
+                                Err(error::bad_request(
+                                    "runtime_pd_not_supported",
+                                    "This runtime does not support PD disaggregated mode",
+                                ))
+                            }
+                            None => {
+                                error!(
+                                    function = "RequestExecutionStage::execute",
+                                    "PD mode requires dual worker selection"
+                                );
+                                Err(error::internal_error(
+                                    "pd_mode_requires_dual_workers",
+                                    "PD mode requires dual worker selection",
+                                ))
+                            }
+                        }
                     }
                 },
                 ProtoRequest::Embed(req) => self.execute_single_embed(req, clients).await,
@@ -278,6 +314,93 @@ impl RequestExecutionStage {
         Ok(ExecutionResult::Dual {
             prefill: prefill_stream,
             decode: Box::new(decode_stream),
+        })
+    }
+
+    /// Execute vLLM PD: send to prefill with max_tokens=1 first, wait for completion,
+    /// then send original request to decode. NIXL handles KV cache transfer transparently.
+    async fn execute_sequential_pd(
+        &self,
+        proto_request: ProtoGenerateRequest,
+        clients: &mut ClientSelection,
+        workers: &WorkerSelection,
+    ) -> Result<ExecutionResult, Response> {
+        let (prefill_client, decode_client) = clients.dual_mut().ok_or_else(|| {
+            error!(
+                function = "execute_sequential_pd",
+                "Expected dual clients but got single"
+            );
+            error::internal_error(
+                "expected_dual_clients_got_single",
+                "Expected dual clients but got single",
+            )
+        })?;
+
+        // Clone request and set max_tokens=1, stream=false for prefill
+        let mut prefill_request = proto_request.clone_inner();
+        prefill_request.set_max_tokens_for_prefill(1);
+        prefill_request.set_stream(false);
+
+        debug!(
+            request_id = %prefill_request.request_id(),
+            "vLLM PD: sending prefill request (max_tokens=1)"
+        );
+
+        // Send to prefill, wait for completion
+        let mut prefill_stream = prefill_client
+            .generate(prefill_request)
+            .await
+            .map_err(|e| {
+                workers.record_outcome_prefill(false);
+                error!(
+                    function = "execute_sequential_pd",
+                    error = %e,
+                    "Prefill worker failed to start"
+                );
+                error::internal_error(
+                    "prefill_worker_failed_to_start",
+                    format!("Prefill worker failed to start: {}", e),
+                )
+            })?;
+
+        // Drain prefill response (only KV cache computation matters)
+        while let Some(result) = prefill_stream.next().await {
+            if let Err(e) = result {
+                workers.record_outcome_prefill(false);
+                error!(
+                    function = "execute_sequential_pd",
+                    error = %e,
+                    "Prefill stream error"
+                );
+                return Err(error::internal_error(
+                    "prefill_stream_error",
+                    format!("Prefill stream error: {}", e),
+                ));
+            }
+        }
+        prefill_stream.mark_completed();
+        workers.record_outcome_prefill(true);
+
+        debug!("vLLM PD: prefill completed, sending decode request");
+
+        // Send original request to decode
+        let decode_stream = decode_client.generate(proto_request).await.map_err(|e| {
+            workers.record_outcome_decode(false);
+            error!(
+                function = "execute_sequential_pd",
+                error = %e,
+                "Decode worker failed to start"
+            );
+            error::internal_error(
+                "decode_worker_failed_to_start",
+                format!("Decode worker failed to start: {}", e),
+            )
+        })?;
+
+        workers.record_outcome_decode(true);
+
+        Ok(ExecutionResult::Single {
+            stream: decode_stream,
         })
     }
 }

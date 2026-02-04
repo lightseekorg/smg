@@ -169,6 +169,36 @@ impl ProtoGenerateRequest {
         matches!(self, Self::Trtllm(_))
     }
 
+    /// Set max_tokens for prefill-only execution (vLLM PD mode).
+    /// The prefill request uses max_tokens=1 to trigger KV cache computation
+    /// without generating unnecessary tokens.
+    pub fn set_max_tokens_for_prefill(&mut self, max_tokens: u32) {
+        match self {
+            Self::Vllm(req) => {
+                if let Some(ref mut params) = req.sampling_params {
+                    params.max_tokens = Some(max_tokens);
+                } else {
+                    req.sampling_params = Some(vllm::SamplingParams {
+                        max_tokens: Some(max_tokens),
+                        ..Default::default()
+                    });
+                }
+            }
+            _ => {
+                tracing::warn!("set_max_tokens_for_prefill called on non-vLLM request, ignoring");
+            }
+        }
+    }
+
+    /// Set stream mode on the request.
+    pub fn set_stream(&mut self, stream: bool) {
+        match self {
+            Self::Vllm(req) => req.stream = stream,
+            Self::Sglang(req) => req.stream = stream,
+            Self::Trtllm(req) => req.streaming = stream,
+        }
+    }
+
     /// Clone the inner request (for passing to generate())
     pub fn clone_inner(&self) -> Self {
         self.clone()

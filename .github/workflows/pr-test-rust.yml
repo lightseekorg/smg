@@ -3,11 +3,15 @@ name: PR Test (SMG)
 on:
   push:
     branches: [ main ]
-    paths:
-      - "**"
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
   pull_request:
     branches: [ main ]
     types: [opened, synchronize, reopened, labeled]
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
   workflow_dispatch:
 
 permissions:
@@ -44,10 +48,23 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Cache wheel and Go FFI artifacts
+        id: cache-wheel
+        uses: actions/cache@v4
+        with:
+          path: |
+            bindings/python/dist/*.whl
+            bindings/golang/target/release/libsmg_go.*
+          key: wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'auth/src/**', 'bindings/python/src/**', 'data_connector/src/**', 'grpc_client/src/**', 'kv_index/src/**', 'mcp/src/**', 'mesh/src/**', 'model_gateway/src/**', 'multimodal/src/**', 'protocols/src/**', 'reasoning_parser/src/**', 'tokenizer/src/**', 'tool_parser/src/**', 'wasm/src/**', 'workflow/src/**', 'bindings/golang/src/**') }}
+          restore-keys: |
+            wheel-${{ runner.os }}-
+
       - name: Setup Rust
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
         uses: ./.github/actions/setup-rust
 
       - name: Build Python wheel and Go FFI library
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: |
           bash scripts/ci_setup_python_venv.sh
           bash scripts/ci_build_wheel.sh
@@ -65,6 +82,15 @@ jobs:
           name: go-ffi-library
           path: bindings/golang/target/release/libsmg_go.*
           retention-days: 1
+
+      - name: Show sccache stats
+        if: always() && steps.cache-wheel.outputs.cache-hit != 'true'
+        run: sccache --show-stats
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
       - name: Test wheel install
         run: |
@@ -166,7 +192,7 @@ jobs:
             reruns: ""
             upload_benchmarks: true
             parallel_opts: ""  # No parallel for benchmarks (performance measurement)
-            ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py"  # Go benchmark runs in dedicated job
+            ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py --ignore=e2e_test/benchmarks/test_nightly_perf.py"  # Go and nightly benchmarks run in dedicated jobs
           - name: responses
             timeout: 45
             test_dirs: "e2e_test/responses"
@@ -206,18 +232,46 @@ jobs:
             test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
             setup_vllm: true
             ignore_opts: ""
+          - name: vllm-pd
+            timeout: 45
+            test_dirs: "e2e_test/router/test_pd_mmlu.py"
+            extra_deps: ""
+            env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
+            reruns: "--reruns 2 --reruns-delay 5"
+            parallel_opts: ""
+            test_filter: ""
+            setup_vllm: true
+            ignore_opts: ""
+          - name: chat-completions-trtllm
+            timeout: 90
+            test_dirs: "e2e_test/chat_completions"
+            extra_deps: "pytest-parallel py"
+            env_vars: "E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1"
+            reruns: "--reruns 2 --reruns-delay 5"
+            parallel_opts: "--workers 1 --tests-per-worker 4"
+            test_filter: ""
+            setup_trtllm: true
+            ignore_opts: ""
     runs-on: k8s-runner-gpu
     timeout-minutes: ${{ matrix.timeout }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Cache flash-attn build
+      - name: Cache flash-attn wheel
         if: matrix.setup_vllm
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip/wheels
-          key: flash-attn-${{ runner.os }}-py310-${{ hashFiles('scripts/ci_install_vllm.sh') }}
+          key: flash-attn-${{ runner.os }}-${{ hashFiles('scripts/ci_install_vllm.sh') }}
+
+      - name: Restore TRT-LLM wheel cache
+        id: trtllm-cache
+        if: matrix.setup_trtllm
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/trtllm-wheel
+          key: trtllm-wheel-${{ runner.os }}-cuda13-v2
 
       - name: Install inference backend
         run: |
@@ -225,9 +279,20 @@ jobs:
           source .venv/bin/activate
           if [ "${{ matrix.setup_vllm }}" == "true" ]; then
             bash scripts/ci_install_vllm.sh
+          elif [ "${{ matrix.setup_trtllm }}" == "true" ]; then
+            bash scripts/ci_install_trtllm.sh
           else
             bash scripts/ci_install_sglang.sh
           fi
+
+      # Save TRT-LLM wheel immediately after build, before tests run
+      # This ensures the cache is saved even if tests fail or job is cancelled
+      - name: Save TRT-LLM wheel cache
+        if: matrix.setup_trtllm && steps.trtllm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/trtllm-wheel
+          key: trtllm-wheel-${{ runner.os }}-cuda13-v2
 
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
