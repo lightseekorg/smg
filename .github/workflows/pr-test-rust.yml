@@ -39,41 +39,6 @@ jobs:
       - id: check
         uses: ./.github/actions/check-ci
 
-  determine-stages:
-    runs-on: k8s-runner-cpu
-    outputs:
-      run_smoke: ${{ steps.check.outputs.run_smoke }}
-      run_e2e: ${{ steps.check.outputs.run_e2e }}
-      run_benchmark: ${{ steps.check.outputs.run_benchmark }}
-    steps:
-      - name: Check stage labels
-        id: check
-        run: |
-          # Default: run all stages
-          run_smoke="true"
-          run_e2e="true"
-          run_benchmark="true"
-
-          # Check labels (only on pull_request events)
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            if [[ "${{ contains(github.event.pull_request.labels.*.name, 'ci:skip-smoke') }}" == "true" ]]; then
-              run_smoke="false"
-              echo "Skipping smoke tests (ci:skip-smoke label)"
-            fi
-            if [[ "${{ contains(github.event.pull_request.labels.*.name, 'ci:skip-e2e') }}" == "true" ]]; then
-              run_e2e="false"
-              echo "Skipping e2e tests (ci:skip-e2e label)"
-            fi
-            if [[ "${{ contains(github.event.pull_request.labels.*.name, 'ci:skip-benchmark') }}" == "true" ]]; then
-              run_benchmark="false"
-              echo "Skipping benchmarks (ci:skip-benchmark label)"
-            fi
-          fi
-
-          echo "run_smoke=$run_smoke" >> $GITHUB_OUTPUT
-          echo "run_e2e=$run_e2e" >> $GITHUB_OUTPUT
-          echo "run_benchmark=$run_benchmark" >> $GITHUB_OUTPUT
-
   build-wheel:
     needs: check-ci
     if: needs.check-ci.outputs.should_run == 'true'
@@ -210,155 +175,265 @@ jobs:
         run: sccache --show-stats
 
   # =============================================================================
-  # Stage 1: Smoke Tests (quick sanity checks)
+  # E2E Tests - Each runtime installs backend once, runs all tests sequentially
   # =============================================================================
-  gateway-smoke:
-    name: ${{ matrix.name }}
-    needs: [check-ci, build-wheel, determine-stages]
-    if: needs.check-ci.outputs.should_run == 'true' && needs.determine-stages.outputs.run_smoke == 'true'
+  e2e-sglang:
+    name: e2e-sglang
+    needs: [check-ci, build-wheel]
+    if: needs.check-ci.outputs.should_run == 'true'
+    runs-on: k8s-runner-gpu
+    timeout-minutes: 90
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: gw-sgl-smoke-test
-            timeout: 45
-            test_dirs: "e2e_test/router e2e_test/embeddings"
-            extra_deps: "pytest-parallel py"
-            env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"
-          - name: gw-vllm-smoke-test
-            timeout: 45
-            test_dirs: "e2e_test/router e2e_test/embeddings"
-            extra_deps: "pytest-parallel py"
-            env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"
-            setup_vllm: true
-            # vLLM: gRPC only, PD mode supported
-            # HTTP tests auto-skipped via @pytest.mark.skip_for_runtime("vllm")
-          - name: gw-trtllm-smoke-test
-            timeout: 90
-            test_dirs: "e2e_test/router e2e_test/embeddings"
-            extra_deps: "pytest-parallel py"
-            env_vars: "E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"
-            setup_trtllm: true
-            # TRT-LLM: gRPC only, no PD mode
-            # HTTP and PD tests auto-skipped via markers
-    runs-on: k8s-runner-gpu
-    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - uses: actions/checkout@v6
-      - name: Run gateway tests
-        uses: ./.github/actions/gateway-test
-        with:
-          test_dirs: ${{ matrix.test_dirs }}
-          extra_deps: ${{ matrix.extra_deps }}
-          env_vars: ${{ matrix.env_vars }}
-          reruns: ${{ matrix.reruns }}
-          parallel_opts: ${{ matrix.parallel_opts }}
-          setup_vllm: ${{ matrix.setup_vllm || 'false' }}
-          setup_trtllm: ${{ matrix.setup_trtllm || 'false' }}
-          hf_token: ${{ secrets.HF_TOKEN }}
 
-  # =============================================================================
-  # Stage 2: E2E Tests (comprehensive testing) - runs after smoke tests pass
-  # =============================================================================
-  gateway-e2e:
-    name: ${{ matrix.name }}
-    needs: [check-ci, build-wheel, determine-stages, gateway-smoke]
-    if: |
-      always() &&
-      needs.check-ci.outputs.should_run == 'true' &&
-      needs.determine-stages.outputs.run_e2e == 'true' &&
-      (needs.gateway-smoke.result == 'success' || needs.gateway-smoke.result == 'skipped')
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: smg-wheel
+          path: wheel/
+
+      - name: Install SGLang backend
+        run: |
+          bash scripts/ci_setup_python_venv.sh
+          source .venv/bin/activate
+          bash scripts/ci_install_sglang.sh
+
+      - name: Install wheel and test dependencies
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+          bash scripts/ci_install_e2e_deps.sh pytest-parallel py
+
+      - name: Setup Oracle Instant Client
+        run: |
+          sudo apt-get install -y unzip
+          INSTANT_CLIENT_DIR="$HOME/instant-client"
+          INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.9.0.25.07.zip"
+          if [ ! -d "$INSTANT_CLIENT_DIR/instantclient_23_9" ]; then
+            mkdir -p "$INSTANT_CLIENT_DIR"
+            cd "$INSTANT_CLIENT_DIR"
+            wget https://download.oracle.com/otn_software/linux/instantclient/2390000/$INSTANT_CLIENT_ZIP
+            unzip $INSTANT_CLIENT_ZIP
+            rm $INSTANT_CLIENT_ZIP
+          fi
+          echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_9:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: Start Oracle Database
+        run: |
+          docker run -d -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim
+          echo "ATP_USER=system" >> $GITHUB_ENV
+          echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
+          echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
+
+      - name: Start Brave MCP Server
+        env:
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+        run: |
+          docker run -d --rm -p 8001:8080 -e BRAVE_API_KEY --name brave-search-server shoofio/brave-search-mcp-sse:1.0.10
+          sleep 2
+
+      - name: "Test: Smoke (router + embeddings)"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+            pytest --reruns 2 --reruns-delay 5 --workers 1 --tests-per-worker 4 \
+            e2e_test/router e2e_test/embeddings -s -vv -o log_cli=true --log-cli-level=INFO
+
+      - name: "Test: Chat completions"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          E2E_RUNTIME=sglang SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+            pytest --reruns 2 --reruns-delay 5 --workers 1 --tests-per-worker 4 \
+            e2e_test/chat_completions -s -vv -o log_cli=true --log-cli-level=INFO
+
+      - name: "Test: Responses (MCP)"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+            pytest --reruns 2 --reruns-delay 5 \
+            e2e_test/responses -s -vv -o log_cli=true --log-cli-level=INFO
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop brave-search-server oracle-db || true
+          docker rm brave-search-server oracle-db || true
+
+  e2e-vllm:
+    name: e2e-vllm
+    needs: [check-ci, build-wheel]
+    if: needs.check-ci.outputs.should_run == 'true'
+    runs-on: k8s-runner-gpu
+    timeout-minutes: 90
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: chat-completions-sglang
-            timeout: 45
-            test_dirs: "e2e_test/chat_completions"
-            extra_deps: "pytest-parallel py"
-            env_vars: "E2E_RUNTIME=sglang SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"
-          - name: chat-completions-vllm
-            timeout: 45
-            test_dirs: "e2e_test/chat_completions"
-            extra_deps: "pytest-parallel py"
-            env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"
-            # TODO: Remove filter when vLLM supports logprobs and n>1 with greedy sampling
-            test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
-            setup_vllm: true
-          - name: chat-completions-trtllm
-            timeout: 90
-            test_dirs: "e2e_test/chat_completions"
-            extra_deps: "pytest-parallel py"
-            env_vars: "E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"
-            setup_trtllm: true
-          - name: responses
-            timeout: 45
-            test_dirs: "e2e_test/responses"
-            env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            setup_oracle: true
-            setup_brave: true
-    runs-on: k8s-runner-gpu
-    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - uses: actions/checkout@v6
-      - name: Run gateway tests
-        uses: ./.github/actions/gateway-test
+
+      - name: Cache flash-attn wheel
+        uses: actions/cache@v4
         with:
-          test_dirs: ${{ matrix.test_dirs }}
-          extra_deps: ${{ matrix.extra_deps || '' }}
-          env_vars: ${{ matrix.env_vars }}
-          reruns: ${{ matrix.reruns }}
-          parallel_opts: ${{ matrix.parallel_opts || '' }}
-          test_filter: ${{ matrix.test_filter || '' }}
-          setup_vllm: ${{ matrix.setup_vllm || 'false' }}
-          setup_trtllm: ${{ matrix.setup_trtllm || 'false' }}
-          setup_oracle: ${{ matrix.setup_oracle || 'false' }}
-          setup_brave: ${{ matrix.setup_brave || 'false' }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          brave_api_key: ${{ secrets.BRAVE_API_KEY }}
+          path: ~/.cache/pip/wheels
+          key: flash-attn-${{ runner.os }}-${{ hashFiles('scripts/ci_install_vllm.sh') }}
+
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: smg-wheel
+          path: wheel/
+
+      - name: Install vLLM backend
+        run: |
+          bash scripts/ci_setup_python_venv.sh
+          source .venv/bin/activate
+          bash scripts/ci_install_vllm.sh
+
+      - name: Install wheel and test dependencies
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+          bash scripts/ci_install_e2e_deps.sh pytest-parallel py
+
+      - name: "Test: Smoke (router + embeddings)"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+            pytest --reruns 2 --reruns-delay 5 --workers 1 --tests-per-worker 4 \
+            e2e_test/router e2e_test/embeddings -s -vv -o log_cli=true --log-cli-level=INFO
+
+      - name: "Test: Chat completions"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+            pytest --reruns 2 --reruns-delay 5 --workers 1 --tests-per-worker 4 \
+            -k 'not (5-grpc or 2-None-grpc or multiple_choices)' \
+            e2e_test/chat_completions -s -vv -o log_cli=true --log-cli-level=INFO
+
+  e2e-trtllm:
+    name: e2e-trtllm
+    needs: [check-ci, build-wheel]
+    if: needs.check-ci.outputs.should_run == 'true'
+    runs-on: k8s-runner-gpu
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Restore TRT-LLM wheel cache
+        id: trtllm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/trtllm-wheel
+          key: trtllm-wheel-${{ runner.os }}-cuda13-v2
+
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: smg-wheel
+          path: wheel/
+
+      - name: Install TRT-LLM backend
+        run: |
+          bash scripts/ci_setup_python_venv.sh
+          source .venv/bin/activate
+          bash scripts/ci_install_trtllm.sh
+
+      - name: Save TRT-LLM wheel cache
+        if: steps.trtllm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/trtllm-wheel
+          key: trtllm-wheel-${{ runner.os }}-cuda13-v2
+
+      - name: Install wheel and test dependencies
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+          bash scripts/ci_install_e2e_deps.sh pytest-parallel py
+
+      - name: "Test: Smoke (router + embeddings)"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+            pytest --reruns 2 --reruns-delay 5 --workers 1 --tests-per-worker 4 \
+            e2e_test/router e2e_test/embeddings -s -vv -o log_cli=true --log-cli-level=INFO
+
+      - name: "Test: Chat completions"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1 ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+            pytest --reruns 2 --reruns-delay 5 --workers 1 --tests-per-worker 4 \
+            e2e_test/chat_completions -s -vv -o log_cli=true --log-cli-level=INFO
 
   # =============================================================================
-  # Stage 3: Benchmarks (performance) - runs after e2e tests pass
+  # Benchmarks - runs after all E2E tests pass
   # =============================================================================
-  gateway-benchmark:
+  benchmarks:
     name: benchmarks
-    needs: [check-ci, build-wheel, determine-stages, gateway-e2e]
+    needs: [check-ci, build-wheel, e2e-sglang, e2e-vllm, e2e-trtllm]
     if: |
       always() &&
       needs.check-ci.outputs.should_run == 'true' &&
-      needs.determine-stages.outputs.run_benchmark == 'true' &&
-      (needs.gateway-e2e.result == 'success' || needs.gateway-e2e.result == 'skipped')
-    permissions:
-      contents: read
+      needs.e2e-sglang.result == 'success' &&
+      needs.e2e-vllm.result == 'success' &&
+      needs.e2e-trtllm.result == 'success'
     runs-on: k8s-runner-gpu
     timeout-minutes: 32
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v6
-      - name: Run gateway tests
-        uses: ./.github/actions/gateway-test
+
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v7
         with:
-          test_dirs: "e2e_test/benchmarks"
-          extra_deps: "genai-bench==0.0.3"
-          ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py"
-          upload_benchmarks: "true"
-          hf_token: ${{ secrets.HF_TOKEN }}
+          name: smg-wheel
+          path: wheel/
+
+      - name: Install SGLang backend
+        run: |
+          bash scripts/ci_setup_python_venv.sh
+          source .venv/bin/activate
+          bash scripts/ci_install_sglang.sh
+
+      - name: Install wheel and test dependencies
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+          bash scripts/ci_install_e2e_deps.sh genai-bench==0.0.3
+
+      - name: Run benchmarks
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" \
+            pytest --ignore=e2e_test/benchmarks/test_go_bindings_perf.py \
+            e2e_test/benchmarks -s -vv -o log_cli=true --log-cli-level=INFO
+
+      - name: Upload benchmark results
+        if: success()
+        uses: actions/upload-artifact@v6
+        with:
+          name: genai-bench-results-all-policies
+          path: benchmark_**/
 
   go-unit-tests:
     name: go-unit-tests
@@ -523,7 +598,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [check-ci, determine-stages, build-wheel, python-unit-tests, unit-tests, gateway-smoke, gateway-e2e, gateway-benchmark, go-unit-tests, go-bindings-e2e]
+    needs: [check-ci, build-wheel, python-unit-tests, unit-tests, e2e-sglang, e2e-vllm, e2e-trtllm, benchmarks, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -533,7 +608,7 @@ jobs:
           if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
             echo "CI was skipped (external contributor without run-ci label)"
             exit 0
-          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-smoke.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.gateway-benchmark.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
+          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.e2e-sglang.result }}" == "failure" || "${{ needs.e2e-vllm.result }}" == "failure" || "${{ needs.e2e-trtllm.result }}" == "failure" || "${{ needs.benchmarks.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else
@@ -541,7 +616,7 @@ jobs:
           fi
 
   summarize-benchmarks:
-    needs: [gateway-benchmark]
+    needs: [benchmarks]
     runs-on: k8s-runner-cpu
     if: success()
     permissions:
