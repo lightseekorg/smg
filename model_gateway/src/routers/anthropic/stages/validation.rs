@@ -13,7 +13,15 @@ use tracing::debug;
 use super::{PipelineStage, StageResult};
 use crate::routers::anthropic::context::{RequestContext, ValidationOutput};
 
-/// Maximum allowed message count to prevent DoS
+/// Maximum allowed message count for gateway-level DoS protection.
+///
+/// This is intentionally lower than Anthropic's documented limit of 100,000 messages.
+/// Rationale:
+/// - Gateway handles many concurrent requests; large message arrays consume significant
+///   memory during routing, serialization, and forwarding
+/// - Each message may contain large content (images, long text) that amplifies memory usage
+/// - 1,000 messages is sufficient for most legitimate use cases (long conversations)
+/// - Backend workers may have their own limits that could cause confusing errors
 const MAX_MESSAGE_COUNT: usize = 1000;
 
 /// Validation stage

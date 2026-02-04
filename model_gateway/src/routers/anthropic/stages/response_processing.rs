@@ -421,8 +421,10 @@ impl ResponseProcessingStage {
 /// Used for pass-through streams that need to:
 /// - Decrement worker load when stream completes or is dropped
 /// - Record circuit breaker outcome based on whether stream completed successfully
+///
+/// Note: Uses `Pin<Box<S>>` to support `!Unpin` streams like `reqwest::Response::bytes_stream()`.
 struct LoadTrackingStream<S> {
-    inner: S,
+    inner: Pin<Box<S>>,
     worker: Option<Arc<dyn Worker>>,
     /// Tracks whether the stream completed successfully (received None from inner stream)
     /// vs being interrupted (dropped before completion)
@@ -434,7 +436,7 @@ struct LoadTrackingStream<S> {
 impl<S> LoadTrackingStream<S> {
     fn new(inner: S, worker: Option<Arc<dyn Worker>>) -> Self {
         Self {
-            inner,
+            inner: Box::pin(inner),
             worker,
             completed_successfully: false,
             encountered_error: false,
@@ -444,12 +446,12 @@ impl<S> LoadTrackingStream<S> {
 
 impl<S> Stream for LoadTrackingStream<S>
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+    S: Stream<Item = Result<Bytes, reqwest::Error>>,
 {
     type Item = Result<Bytes, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.inner).poll_next(cx) {
+        match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(bytes))),
             Poll::Ready(Some(Err(e))) => {
                 self.encountered_error = true;
