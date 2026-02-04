@@ -74,7 +74,16 @@ SMG supports PD disaggregation with two inference backends:
 | Runtime | Protocol | Dispatch | KV Transfer | Best For |
 |---------|----------|----------|-------------|----------|
 | **SGLang** | HTTP | Parallel | Bootstrap-based coordination | Production deployments with SGLang |
-| **vLLM** | gRPC | Sequential | NIXL (RDMA-based) | High-performance with RDMA networking |
+| **vLLM** | gRPC | Sequential | NIXL or Mooncake | High-performance with RDMA/TCP networking |
+
+### vLLM KV Transfer Backends
+
+vLLM supports two backends for KV cache transfer:
+
+| Backend | Transport | Configuration | Best For |
+|---------|-----------|---------------|----------|
+| **NIXL** | RDMA | `VLLM_NIXL_SIDE_CHANNEL_PORT` env var | High-bandwidth RDMA networks |
+| **Mooncake** | TCP/RDMA | `MOONCAKE_MASTER` env var or config file | Flexible deployment, TCP fallback |
 
 ---
 
@@ -132,7 +141,7 @@ sequenceDiagram
     P-->>S: Prefill complete (discarded)
 
     S->>D: Forward original request
-    Note over P,D: NIXL auto-discovers KV cache
+    Note over P,D: NIXL/Mooncake auto-discovers KV cache
 
     loop Token generation
         D->>D: Generate token
@@ -144,12 +153,12 @@ sequenceDiagram
     S-->>C: Final response
 ```
 
-vLLM uses **sequential dispatch** with NIXL KV transfer:
+vLLM uses **sequential dispatch** with NIXL or Mooncake KV transfer:
 
 1. SMG sends request to prefill worker with `max_tokens=1`
 2. Prefill computes KV cache and returns (response discarded)
 3. SMG sends original request to decode worker
-4. NIXL transparently transfers KV cache via RDMA
+4. KV backend (NIXL/Mooncake) transparently transfers KV cache
 5. Decode streams tokens back to client
 
 ### Request Flow
@@ -180,7 +189,7 @@ smg \
 
 ### vLLM PD Setup
 
-vLLM workers use gRPC and NIXL for KV transfer (no bootstrap port needed):
+vLLM workers use gRPC and NIXL/Mooncake for KV transfer (no bootstrap port needed):
 
 ```bash
 smg \
@@ -188,8 +197,12 @@ smg \
   --prefill grpc://prefill1:50051 \
   --prefill grpc://prefill2:50052 \
   --decode grpc://decode1:50053 \
-  --decode grpc://decode2:50054
+  --decode grpc://decode2:50054 \
+  --model-path /path/to/model
 ```
+
+!!! note "Model Path Required"
+    The `--model-path` parameter is required for vLLM PD mode to load the tokenizer for request processing.
 
 ### Parameters
 
@@ -328,11 +341,15 @@ The KV cache is transferred between workers using the backend's native mechanism
 | Backend | Transfer Method | Coordination |
 |---------|-----------------|--------------|
 | SGLang | NCCL/Gloo over network | Bootstrap metadata (host/port/room) |
-| vLLM | NIXL (RDMA-based) | Automatic prefix matching |
+| vLLM + NIXL | RDMA | Automatic prefix matching |
+| vLLM + Mooncake | TCP/RDMA | P2P handshake via master server |
 
 **SGLang**: SMG injects bootstrap metadata (`DisaggregatedParams`) into requests, enabling workers to coordinate KV transfer through a shared "room".
 
-**vLLM**: SMG uses the simple proxy pattern—sends `max_tokens=1` to prefill to trigger KV cache computation, then NIXL automatically discovers and transfers the cache to decode via RDMA prefix matching. No protocol changes required.
+**vLLM**: SMG uses the simple proxy pattern—sends `max_tokens=1` to prefill to trigger KV cache computation, then the KV backend (NIXL or Mooncake) automatically discovers and transfers the cache to decode. No protocol changes required.
+
+- **NIXL**: Uses RDMA for high-bandwidth KV transfer with automatic prefix matching
+- **Mooncake**: Supports both TCP and RDMA, uses P2P handshake for coordination (no external metadata server required)
 
 ---
 
@@ -506,13 +523,37 @@ smg \
   --prefill grpc://prefill-1:50052 \
   --decode grpc://decode-0:50053 \
   --decode grpc://decode-1:50054 \
+  --model-path /path/to/model \
   --prefill-policy cache_aware \
   --decode-policy round_robin
 ```
 
+### vLLM PD (Static Workers with Mooncake)
+
+```bash
+smg \
+  --pd-disaggregation \
+  --prefill grpc://prefill-0:50051 8998 \
+  --prefill grpc://prefill-1:50052 8999 \
+  --decode grpc://decode-0:50053 \
+  --decode grpc://decode-1:50054 \
+  --model-path /path/to/model \
+  --prefill-policy cache_aware \
+  --decode-policy round_robin
+```
+
+Note: For Mooncake, each prefill worker needs a unique bootstrap port (8998, 8999, etc.) passed to SMG.
+
+Workers should be started with Mooncake configuration:
+
+```bash
+# Launch workers using helper script (auto-assigns unique bootstrap ports)
+KV_BACKEND=mooncake ./scripts/launch-pd-workers.sh vllm /path/to/model
+```
+
 ### Launching vLLM PD Workers
 
-vLLM workers require NIXL configuration for KV transfer:
+#### Option 1: NIXL Backend (RDMA)
 
 ```bash
 # Prefill worker (kv_producer)
@@ -530,10 +571,54 @@ python -m vllm.entrypoints.grpc_server \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
 ```
 
-Or use the provided helper script:
+#### Option 2: Mooncake Backend (TCP/RDMA)
+
+Mooncake requires each prefill worker to have a unique bootstrap port for P2P coordination:
 
 ```bash
+# Prefill worker 1 (kv_producer) - bootstrap port 8998
+VLLM_MOONCAKE_BOOTSTRAP_PORT=8998 \
+python -m vllm.entrypoints.grpc_server \
+  --model /path/to/model \
+  --port 50051 \
+  --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer"}'
+
+# Prefill worker 2 (kv_producer) - bootstrap port 8999 (must be unique!)
+VLLM_MOONCAKE_BOOTSTRAP_PORT=8999 \
+python -m vllm.entrypoints.grpc_server \
+  --model /path/to/model \
+  --port 50052 \
+  --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_producer"}'
+
+# Decode worker (kv_consumer) - no bootstrap port needed
+python -m vllm.entrypoints.grpc_server \
+  --model /path/to/model \
+  --port 50053 \
+  --kv-transfer-config '{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer"}'
+```
+
+Mooncake environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `VLLM_MOONCAKE_BOOTSTRAP_PORT` | Bootstrap port for prefill workers (must be unique per worker) | Required for prefill |
+| `MOONCAKE_PROTOCOL` | Transport protocol: `tcp` or `rdma` | `tcp` |
+| `MOONCAKE_DEVICE` | RDMA device name (for RDMA protocol) | `""` |
+
+#### Helper Script
+
+Use the provided helper script to launch workers with either backend:
+
+```bash
+# NIXL backend (default)
 ./scripts/launch-pd-workers.sh vllm /path/to/model
+
+# Mooncake backend
+KV_BACKEND=mooncake ./scripts/launch-pd-workers.sh vllm /path/to/model
+
+# Mooncake with custom bootstrap port
+KV_BACKEND=mooncake MOONCAKE_BOOTSTRAP_PORT=9000 \
+  ./scripts/launch-pd-workers.sh vllm /path/to/model
 ```
 
 ---

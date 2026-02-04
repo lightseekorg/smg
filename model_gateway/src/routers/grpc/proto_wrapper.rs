@@ -212,12 +212,28 @@ impl ProtoGenerateRequest {
             Self::Trtllm(req) => &req.request_id,
         }
     }
+
+    /// Set KV transfer parameters for Mooncake PD disaggregation (vLLM only).
+    /// These parameters tell the decode worker where to fetch KV cache from the prefill worker.
+    pub fn set_kv_transfer_params(&mut self, remote_host: String, remote_port: u32) {
+        match self {
+            Self::Vllm(req) => {
+                req.kv_transfer_params = Some(vllm::KvTransferParams {
+                    remote_host,
+                    remote_port,
+                });
+            }
+            _ => {
+                tracing::warn!("set_kv_transfer_params called on non-vLLM request, ignoring");
+            }
+        }
+    }
 }
 
 /// Unified GenerateResponse from stream
 pub enum ProtoGenerateResponse {
     Sglang(Box<sglang::GenerateResponse>),
-    Vllm(vllm::GenerateResponse),
+    Vllm(Box<vllm::GenerateResponse>),
     Trtllm(Box<trtllm::GenerateResponse>),
 }
 
@@ -662,6 +678,18 @@ impl ProtoGenerateComplete {
             }
         }
     }
+
+    /// Get KV transfer parameters from prefill response (vLLM Mooncake PD only).
+    /// Returns (remote_host, remote_port) if present.
+    pub fn kv_transfer_params(&self) -> Option<(String, u32)> {
+        match self {
+            Self::Vllm(c) => c
+                .kv_transfer_params
+                .as_ref()
+                .map(|params| (params.remote_host.clone(), params.remote_port)),
+            Self::Sglang(_) | Self::Trtllm(_) => None,
+        }
+    }
 }
 
 /// Unified GenerateError
@@ -700,7 +728,7 @@ impl ProtoStream {
             Self::Vllm(stream) => stream
                 .next()
                 .await
-                .map(|result| result.map(ProtoGenerateResponse::Vllm)),
+                .map(|result| result.map(|r| ProtoGenerateResponse::Vllm(Box::new(r)))),
             Self::Trtllm(stream) => stream
                 .next()
                 .await
