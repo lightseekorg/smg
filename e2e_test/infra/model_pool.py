@@ -520,6 +520,8 @@ class ModelPool:
                     model_spec=spec,
                     gpu_slot=gpu_slot,
                     startup_timeout=600,
+                    worker_type=worker_type,
+                    instance_key=instance_key,
                 )
 
         spec = get_model_spec(model_id)
@@ -897,7 +899,7 @@ class ModelPool:
                 "Model %s not running, launching on-demand with MRU eviction if needed",
                 key,
             )
-            if not self._ensure_gpu_available(model_id):
+            if not self._ensure_gpu_available(model_id, mode):
                 # GPUs not available after eviction - signal retry
                 return None
 
@@ -1002,11 +1004,12 @@ class ModelPool:
             if inst.gpu_slot:
                 freed_gpus += len(inst.gpu_slot.gpu_ids)
 
-    def _ensure_gpu_available(self, model_id: str) -> bool:
+    def _ensure_gpu_available(self, model_id: str, mode: ConnectionMode) -> bool:
         """Ensure GPU is available for a model, evicting if needed.
 
         Args:
             model_id: Model ID that needs GPU resources.
+            mode: Connection mode (HTTP or gRPC) being launched.
 
         Returns:
             True if GPUs are available, False if not (all in use by other tests).
@@ -1014,11 +1017,13 @@ class ModelPool:
         spec = get_model_spec(model_id)
         required_gpus = spec.get("tp", 1)
 
-        # Exclude REGULAR workers of same model from eviction (keep them)
-        # but allow evicting PD workers (PREFILL/DECODE) to free GPUs
+        # Exclude REGULAR workers of same model AND same mode from eviction.
+        # Different modes (HTTP vs gRPC) are separate instances that can be evicted.
+        # Also allow evicting PD workers (PREFILL/DECODE) to free GPUs.
         self._evict_for_gpus(
             required_gpus,
             exclude_model_id=model_id,
+            exclude_mode=mode,
             exclude_worker_types={WorkerType.REGULAR},
         )
 
@@ -1144,7 +1149,7 @@ class ModelPool:
                 "--tensor-parallel-size",
                 str(tp_size),
                 "--max-model-len",
-                "2048",
+                "16384",
                 "--gpu-memory-utilization",
                 "0.9",
                 "--enforce-eager",
@@ -1223,7 +1228,11 @@ class ModelPool:
             runtime, model_path, DEFAULT_HOST, port, tp_size, model_spec
         )
 
-        key = f"{model_id}:{runtime}-grpc"
+        # Use provided instance_key for PD workers, otherwise generate default key
+        if instance_key:
+            key = instance_key
+        else:
+            key = f"{model_id}:{runtime}-grpc"
         logger.info(
             "Launching %s gRPC worker %s on GPUs %s port %d",
             runtime_label,

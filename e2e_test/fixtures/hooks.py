@@ -117,7 +117,19 @@ def pytest_collection_modifyitems(
         tp = MODEL_SPECS[model_id].get("tp", 1)
         return tp * (prefill + decode + regular)
 
-    for item in items:
+    # Filter items based on -k expression to only scan tests that will actually run
+    keyword = config.option.keyword
+    if keyword:
+        from _pytest.mark.expression import Expression
+
+        expr = Expression.compile(keyword)
+        items_to_scan = [
+            item for item in items if expr.evaluate(lambda x: x in item.keywords)
+        ]
+    else:
+        items_to_scan = items
+
+    for item in items_to_scan:
         # Extract model from marker or use default
         # Walk class MRO to prioritize child class markers over parent class
         model_id = None
@@ -181,8 +193,8 @@ def pytest_collection_modifyitems(
         test_gpus = 0
         if model_id and backends:
             for backend in backends:
-                if backend == "pd":
-                    mode = ConnectionMode.HTTP
+                if backend in ("pd_http", "pd_grpc"):
+                    mode = ConnectionMode.HTTP if backend == "pd_http" else ConnectionMode.GRPC
                     p_count = prefill_count if prefill_count > 0 else 1
                     d_count = decode_count if decode_count > 0 else 1
                     track_worker(model_id, mode, WorkerType.PREFILL, p_count)
@@ -405,6 +417,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "storage(backend): mark test to use a specific history storage backend "
         "(memory, oracle). Default is memory.",
+    )
+    config.addinivalue_line(
+        "markers",
+        "nightly: mark test as a nightly comprehensive benchmark",
     )
 
 

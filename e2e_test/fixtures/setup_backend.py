@@ -31,7 +31,7 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
 
     Backend types:
     - "http", "grpc": Gets existing worker from model_pool, launches router
-    - "pd": Launches prefill/decode workers via model_pool, launches PD router
+    - "pd_http", "pd_grpc": Launches prefill/decode workers via model_pool, launches PD router
     - "openai", "xai", etc.: Launches cloud router (no local workers)
 
     Configuration via markers:
@@ -89,16 +89,16 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         },
     )
 
-    # PD disaggregation backend
-    if backend_name == "pd":
-        yield from _setup_pd_backend(
+    # PD disaggregation backends - explicit connection modes
+    if backend_name == "pd_http":
+        yield from _setup_pd_http_backend(
             request, model_pool, model_id, workers_config, gateway_config
         )
         return
 
-    # vLLM PD disaggregation backend (NIXL-based KV transfer)
-    if backend_name == "vllm_pd":
-        yield from _setup_vllm_pd_backend(
+    if backend_name == "pd_grpc":
+        # gRPC mode PD
+        yield from _setup_pd_grpc_backend(
             request, model_pool, model_id, workers_config, gateway_config
         )
         return
@@ -149,7 +149,7 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
     yield from _setup_cloud_backend(backend_name, storage_backend, gateway_config)
 
 
-def _setup_pd_backend(
+def _setup_pd_http_backend(
     request: pytest.FixtureRequest,
     model_pool: "ModelPool",
     model_id: str,
@@ -165,18 +165,18 @@ def _setup_pd_backend(
         workers_config=workers_config,
         gateway_config=gateway_config,
         connection_mode=ConnectionMode.HTTP,
-        backend_name="pd",
+        backend_name="pd_http",
     )
 
 
-def _setup_vllm_pd_backend(
+def _setup_pd_grpc_backend(
     request: pytest.FixtureRequest,
     model_pool: "ModelPool",
     model_id: str,
     workers_config: dict,
     gateway_config: dict,
 ):
-    """Setup vLLM PD disaggregation backend (gRPC mode with NIXL KV transfer)."""
+    """Setup PD disaggregation backend with gRPC mode."""
     from infra import ConnectionMode
 
     yield from _setup_pd_backend_common(
@@ -185,7 +185,7 @@ def _setup_vllm_pd_backend(
         workers_config=workers_config,
         gateway_config=gateway_config,
         connection_mode=ConnectionMode.GRPC,
-        backend_name="vllm_pd",
+        backend_name="pd_grpc",
     )
 
 
@@ -205,12 +205,13 @@ def _setup_pd_backend_common(
         workers_config: Worker configuration from markers.
         gateway_config: Gateway configuration from markers.
         connection_mode: ConnectionMode.HTTP for SGLang, ConnectionMode.GRPC for vLLM.
-        backend_name: Backend name to yield ("pd" or "vllm_pd").
+        backend_name: Backend name to yield ("pd_http" or "pd_grpc").
     """
     import openai
     from infra import Gateway, WorkerIdentity, WorkerType
 
-    runtime_label = "vLLM" if backend_name == "vllm_pd" else "SGLang"
+    runtime = get_runtime()
+    runtime_label = RUNTIME_LABELS.get(runtime, "SGLang")
     logger.info("Setting up %s PD backend for model %s", runtime_label, model_id)
 
     num_prefill = workers_config.get("prefill") or 1
@@ -223,8 +224,21 @@ def _setup_pd_backend_common(
     )
 
     # get_workers_by_type auto-acquires all returned workers
-    existing_prefills = model_pool.get_workers_by_type(model_id, WorkerType.PREFILL)
-    existing_decodes = model_pool.get_workers_by_type(model_id, WorkerType.DECODE)
+    # Filter by connection_mode to ensure we use the right worker type (HTTP vs gRPC)
+    all_prefills = model_pool.get_workers_by_type(model_id, WorkerType.PREFILL)
+    all_decodes = model_pool.get_workers_by_type(model_id, WorkerType.DECODE)
+
+    # Filter by connection mode and release workers we won't use
+    existing_prefills = [w for w in all_prefills if w.mode == connection_mode]
+    existing_decodes = [w for w in all_decodes if w.mode == connection_mode]
+
+    # Release workers that don't match the requested connection mode
+    for w in all_prefills:
+        if w not in existing_prefills:
+            w.release()
+    for w in all_decodes:
+        if w not in existing_decodes:
+            w.release()
 
     missing_prefill = max(0, num_prefill - len(existing_prefills))
     missing_decode = max(0, num_decode - len(existing_decodes))

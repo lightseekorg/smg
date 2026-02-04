@@ -192,7 +192,7 @@ jobs:
             reruns: ""
             upload_benchmarks: true
             parallel_opts: ""  # No parallel for benchmarks (performance measurement)
-            ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py"  # Go benchmark runs in dedicated job
+            ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py --ignore=e2e_test/benchmarks/test_nightly_perf.py"  # Go and nightly benchmarks run in dedicated jobs
           - name: responses
             timeout: 45
             test_dirs: "e2e_test/responses"
@@ -234,7 +234,7 @@ jobs:
             ignore_opts: ""
           - name: vllm-pd
             timeout: 45
-            test_dirs: "e2e_test/router/test_vllm_pd_mmlu.py"
+            test_dirs: "e2e_test/router/test_pd_mmlu.py"
             extra_deps: ""
             env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
@@ -258,12 +258,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Cache flash-attn build
+      - name: Cache flash-attn wheel
         if: matrix.setup_vllm
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip/wheels
-          key: flash-attn-${{ runner.os }}-py310-${{ hashFiles('scripts/ci_install_vllm.sh') }}
+          key: flash-attn-${{ runner.os }}-${{ hashFiles('scripts/ci_install_vllm.sh') }}
 
       - name: Restore TRT-LLM wheel cache
         id: trtllm-cache

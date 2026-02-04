@@ -20,7 +20,7 @@ package trtllm;
 //
 // This service provides high-performance inference for LLMs using TensorRT-LLM.
 // It accepts pre-tokenized requests and returns raw token IDs, enabling efficient
-// binary communication with external routers (e.g., sgl-router).
+// binary communication with external routers (e.g., Shepherd Model Gateway).
 //
 // Key Design Principles:
 // - Token IDs only: No text in requests or responses (router handles tokenization)

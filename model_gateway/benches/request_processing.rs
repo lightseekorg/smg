@@ -577,7 +577,7 @@ fn bench_full_round_trip(c: &mut Criterion) {
 fn benchmark_summary(c: &mut Criterion) {
     let group = c.benchmark_group("benchmark_summary");
 
-    println!("\nSGLang Model Gateway Performance Benchmark Suite");
+    println!("\nShepherd Model Gateway Performance Benchmark Suite");
     println!("=================================================");
 
     // Quick performance overview
