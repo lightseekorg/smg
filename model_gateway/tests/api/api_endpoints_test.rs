@@ -167,18 +167,18 @@ mod health_tests {
             .await
             .unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        
+
         assert!(body_json.get("policy").is_some());
         assert!(body_json.get("max_concurrent_requests").is_some());
         assert!(body_json.get("queue_size").is_some());
         assert!(body_json.get("queue_timeout_secs").is_some());
         assert!(body_json.get("circuit_breaker").is_some());
         assert!(body_json.get("health_check").is_some());
-        
+
         let cb = &body_json["circuit_breaker"];
         assert!(cb.get("threshold").is_some());
         assert!(cb.get("timeout_secs").is_some());
-        
+
         let hc = &body_json["health_check"];
         assert!(hc.get("enabled").is_some());
         assert!(hc.get("interval_secs").is_some());
