@@ -31,7 +31,7 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
 
     Backend types:
     - "http", "grpc": Gets existing worker from model_pool, launches router
-    - "pd": Launches prefill/decode workers via model_pool, launches PD router
+    - "pd_http", "pd_grpc": Launches prefill/decode workers via model_pool, launches PD router
     - "openai", "xai", etc.: Launches cloud router (no local workers)
 
     Configuration via markers:
@@ -205,12 +205,13 @@ def _setup_pd_backend_common(
         workers_config: Worker configuration from markers.
         gateway_config: Gateway configuration from markers.
         connection_mode: ConnectionMode.HTTP for SGLang, ConnectionMode.GRPC for vLLM.
-        backend_name: Backend name to yield ("pd" or "vllm_pd").
+        backend_name: Backend name to yield ("pd_http" or "pd_grpc").
     """
     import openai
     from infra import Gateway, WorkerIdentity, WorkerType
 
-    runtime_label = "vLLM" if backend_name == "vllm_pd" else "SGLang"
+    runtime = get_runtime()
+    runtime_label = RUNTIME_LABELS.get(runtime, "SGLang")
     logger.info("Setting up %s PD backend for model %s", runtime_label, model_id)
 
     num_prefill = workers_config.get("prefill") or 1

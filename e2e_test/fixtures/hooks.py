@@ -181,8 +181,8 @@ def pytest_collection_modifyitems(
         test_gpus = 0
         if model_id and backends:
             for backend in backends:
-                if backend == "pd":
-                    mode = ConnectionMode.HTTP
+                if backend in ("pd_http", "pd_grpc"):
+                    mode = ConnectionMode.HTTP if backend == "pd_http" else ConnectionMode.GRPC
                     p_count = prefill_count if prefill_count > 0 else 1
                     d_count = decode_count if decode_count > 0 else 1
                     track_worker(model_id, mode, WorkerType.PREFILL, p_count)
