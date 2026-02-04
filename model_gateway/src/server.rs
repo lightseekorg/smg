@@ -150,7 +150,8 @@ async fn health(_state: State<Arc<AppState>>) -> Response {
 
 async fn config(State(state): State<Arc<AppState>>) -> Response {
     let config = &state.context.router_config;
-    
+    let cb_config = config.effective_circuit_breaker_config();
+
     (
         StatusCode::OK,
         Json(json!({
@@ -160,10 +161,11 @@ async fn config(State(state): State<Arc<AppState>>) -> Response {
             "queue_size": config.queue_size,
             "queue_timeout_secs": config.queue_timeout_secs,
             "circuit_breaker": {
-                "threshold": config.circuit_breaker.failure_threshold,
-                "timeout_secs": config.circuit_breaker.timeout_duration_secs,
+                "threshold": cb_config.failure_threshold,
+                "timeout_secs": cb_config.timeout_duration_secs,
             },
             "health_check": {
+                "enabled": !config.health_check.disable_health_check,
                 "interval_secs": config.health_check.check_interval_secs,
                 "timeout_secs": config.health_check.timeout_secs,
                 "path": config.health_check.endpoint,
