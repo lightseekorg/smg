@@ -13,7 +13,6 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, warn};
 
 use crate::{
-    grpc_client::sglang_proto::generate_complete::MatchedStop::{MatchedStopStr, MatchedTokenId},
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     protocols::{
         chat::{ChatCompletionRequest, ChatCompletionStreamResponse},
@@ -484,15 +483,7 @@ impl StreamingProcessor {
                     cached_tokens.insert(index, complete.cached_tokens());
                     finish_reasons.insert(index, complete.finish_reason().to_string());
 
-                    // Extract matched_stop
-                    let matched_stop_value = match complete.matched_stop() {
-                        Some(MatchedTokenId(token_id)) => {
-                            Some(Value::Number(serde_json::Number::from(*token_id)))
-                        }
-                        Some(MatchedStopStr(stop_str)) => Some(Value::String(stop_str.clone())),
-                        None => None,
-                    };
-                    matched_stops.insert(index, matched_stop_value);
+                    matched_stops.insert(index, complete.matched_stop_json());
 
                     // Don't break - continue reading all Complete messages for n>1
                 }

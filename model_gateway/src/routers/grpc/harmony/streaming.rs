@@ -20,7 +20,6 @@ use super::{
     types::HarmonyChannelDelta, HarmonyParserAdapter,
 };
 use crate::{
-    grpc_client::sglang_proto::generate_complete::MatchedStop::{MatchedStopStr, MatchedTokenId},
     mcp::{McpOrchestrator, ResponseFormat},
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     protocols::{
@@ -232,17 +231,7 @@ impl HarmonyStreamingProcessor {
                     // Store final metadata
                     finish_reasons
                         .insert(index, Some(complete_wrapper.finish_reason().to_string()));
-                    matched_stops.insert(
-                        index,
-                        complete_wrapper.matched_stop().map(|m| match m {
-                            MatchedTokenId(id) => {
-                                json!(id)
-                            }
-                            MatchedStopStr(s) => {
-                                json!(s)
-                            }
-                        }),
-                    );
+                    matched_stops.insert(index, complete_wrapper.matched_stop_json());
                     prompt_tokens.insert(index, complete_wrapper.prompt_tokens());
                     // For vLLM, use accumulated count (we tracked deltas above)
                     // For SGLang, use complete value (already cumulative)
@@ -414,17 +403,7 @@ impl HarmonyStreamingProcessor {
 
                     finish_reasons
                         .insert(index, Some(complete_wrapper.finish_reason().to_string()));
-                    matched_stops.insert(
-                        index,
-                        complete_wrapper.matched_stop().map(|m| match m {
-                            MatchedTokenId(id) => {
-                                json!(id)
-                            }
-                            MatchedStopStr(s) => {
-                                json!(s)
-                            }
-                        }),
-                    );
+                    matched_stops.insert(index, complete_wrapper.matched_stop_json());
                     // For vLLM, use accumulated count (we tracked deltas above)
                     // For SGLang, use complete value (already cumulative)
                     if complete_wrapper.is_vllm() {
@@ -966,14 +945,7 @@ impl HarmonyStreamingProcessor {
                 ProtoResponseVariant::Complete(complete_wrapper) => {
                     // Store final metadata
                     finish_reason = complete_wrapper.finish_reason().to_string();
-                    matched_stop = complete_wrapper.matched_stop().map(|m| match m {
-                        MatchedTokenId(id) => {
-                            json!(id)
-                        }
-                        MatchedStopStr(s) => {
-                            json!(s)
-                        }
-                    });
+                    matched_stop = complete_wrapper.matched_stop_json();
                     prompt_tokens = complete_wrapper.prompt_tokens();
                     // For vLLM, use accumulated count (we tracked deltas above)
                     // For SGLang, use complete value (already cumulative)

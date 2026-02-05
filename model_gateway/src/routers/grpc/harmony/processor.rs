@@ -7,7 +7,6 @@ use tracing::error;
 
 use super::{builder::convert_harmony_logprobs, HarmonyParserAdapter};
 use crate::{
-    grpc_client::sglang_proto::generate_complete::MatchedStop::{MatchedStopStr, MatchedTokenId},
     protocols::{
         chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
         common::{ChatLogProbs, CompletionTokensDetails, ToolCall, Usage},
@@ -61,15 +60,7 @@ impl HarmonyResponseProcessor {
         let mut total_reasoning_tokens = 0u32;
 
         for (index, complete) in all_responses.iter().enumerate() {
-            // Convert matched_stop from proto to JSON
-            let matched_stop = complete.matched_stop().map(|m| match m {
-                MatchedTokenId(id) => {
-                    serde_json::json!(id)
-                }
-                MatchedStopStr(s) => {
-                    serde_json::json!(s)
-                }
-            });
+            let matched_stop = complete.matched_stop_json();
 
             // Parse Harmony channels with HarmonyParserAdapter
             let mut parser = HarmonyParserAdapter::new().map_err(|e| {
@@ -237,15 +228,7 @@ impl HarmonyResponseProcessor {
             )
         })?;
 
-        // Convert matched_stop from proto to JSON
-        let matched_stop = complete.matched_stop().map(|m| match m {
-            MatchedTokenId(id) => {
-                serde_json::json!(id)
-            }
-            MatchedStopStr(s) => {
-                serde_json::json!(s)
-            }
-        });
+        let matched_stop = complete.matched_stop_json();
 
         let parsed = parser
             .parse_complete(
