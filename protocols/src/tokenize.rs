@@ -3,6 +3,7 @@
 //! These types mirror the SGLang Python implementation for compatibility.
 //! See: python/sglang/srt/entrypoints/openai/protocol.py
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::UNKNOWN_MODEL_ID;
