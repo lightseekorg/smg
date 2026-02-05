@@ -1,13 +1,8 @@
 name: Nightly Benchmark
 
 on:
-  # TODO: Uncomment after testing
-  # schedule:
-  #   - cron: '0 0 * * 0'
-  pull_request:
-    paths:
-      - '.github/workflows/nightly-benchmark.yml'
-      - 'e2e_test/benchmarks/test_nightly_perf.py'
+  schedule:
+    - cron: '0 0 * * 0'
   workflow_dispatch:
     inputs:
       models:

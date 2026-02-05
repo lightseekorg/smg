@@ -30,8 +30,7 @@ _MAX_REQUESTS = 300
 _MAX_TIME_PER_RUN = 10  # seconds per scenario×concurrency combo
 _TIMEOUT_SEC = 10800  # 3 hours per model
 
-# TODO: Set to False after testing workflow changes
-_TEST_MODE = True
+_TEST_MODE = False
 _TEST_NUM_CONCURRENCY = 1
 _TEST_TRAFFIC_SCENARIO = "D(100,100)"
 _TEST_MAX_REQUESTS = 10
