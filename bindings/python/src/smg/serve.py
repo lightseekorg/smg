@@ -38,15 +38,19 @@ class WorkerLauncher(ABC):
         """Build the CLI command list to launch a worker."""
         ...
 
-    @abstractmethod
-    def health_check(self, host: str, port: int, timeout: float) -> bool:
+    def health_check(
+        self, args: argparse.Namespace, host: str, port: int, timeout: float
+    ) -> bool:
         """Return True when the worker at host:port is healthy."""
-        ...
+        if getattr(args, "connection_mode", "grpc") == "grpc":
+            return _grpc_health_check(host, port, timeout)
+        return _http_health_check(f"http://{host}:{port}/health", timeout)
 
-    @abstractmethod
-    def worker_url(self, host: str, port: int) -> str:
+    def worker_url(self, args: argparse.Namespace, host: str, port: int) -> str:
         """Return the URL used by the router to reach this worker."""
-        ...
+        if getattr(args, "connection_mode", "grpc") == "grpc":
+            return f"grpc://{host}:{port}"
+        return f"http://{host}:{port}"
 
     def _get_tp_size(self, args: argparse.Namespace) -> int:
         """Return tensor-parallel size for GPU assignment. Default 1."""
@@ -97,19 +101,14 @@ class SglangWorkerLauncher(WorkerLauncher):
             "--port",
             str(port),
         ]
-        if getattr(args, "grpc_mode", False):
+        if getattr(args, "connection_mode", "grpc") == "grpc":
             cmd.append("--grpc-mode")
         return cmd
 
-    def health_check(self, host: str, port: int, timeout: float) -> bool:
-        return _http_health_check(f"http://{host}:{port}/health", timeout)
-
-    def worker_url(self, host: str, port: int) -> str:
-        return f"http://{host}:{port}"
 
 
 class VllmWorkerLauncher(WorkerLauncher):
-    """Launcher for vLLM inference workers (gRPC mode)."""
+    """Launcher for vLLM inference workers (gRPC mode only)."""
 
     def _get_tp_size(self, args: argparse.Namespace) -> int:
         return getattr(args, "tensor_parallel_size", 1)
@@ -117,6 +116,8 @@ class VllmWorkerLauncher(WorkerLauncher):
     def build_command(
         self, args: argparse.Namespace, host: str, port: int
     ) -> List[str]:
+        if getattr(args, "connection_mode", "grpc") != "grpc":
+            raise ValueError("vLLM backend only supports grpc connection mode")
         return [
             sys.executable,
             "-m",
@@ -129,15 +130,10 @@ class VllmWorkerLauncher(WorkerLauncher):
             str(port),
         ]
 
-    def health_check(self, host: str, port: int, timeout: float) -> bool:
-        return _grpc_health_check(host, port, timeout)
-
-    def worker_url(self, host: str, port: int) -> str:
-        return f"grpc://{host}:{port}"
 
 
 class TrtllmWorkerLauncher(WorkerLauncher):
-    """Launcher for TensorRT-LLM inference workers (gRPC mode).
+    """Launcher for TensorRT-LLM inference workers (gRPC mode only).
 
     Uses ``python3 -m tensorrt_llm.commands.serve <model> --grpc ...``.
     See https://github.com/NVIDIA/TensorRT-LLM/pull/11037
@@ -149,6 +145,8 @@ class TrtllmWorkerLauncher(WorkerLauncher):
     def build_command(
         self, args: argparse.Namespace, host: str, port: int
     ) -> List[str]:
+        if getattr(args, "connection_mode", "grpc") != "grpc":
+            raise ValueError("TensorRT-LLM backend only supports grpc connection mode")
         return [
             sys.executable,
             "-m",
@@ -161,11 +159,6 @@ class TrtllmWorkerLauncher(WorkerLauncher):
             str(port),
         ]
 
-    def health_check(self, host: str, port: int, timeout: float) -> bool:
-        return _grpc_health_check(host, port, timeout)
-
-    def worker_url(self, host: str, port: int) -> str:
-        return f"grpc://{host}:{port}"
 
 
 BACKEND_LAUNCHERS = {
@@ -323,9 +316,30 @@ def add_serve_args(parser: argparse.ArgumentParser) -> None:
         help=f"Inference backend to use (default: {DEFAULT_BACKEND})",
     )
     group.add_argument(
+        "--connection-mode",
+        default="grpc",
+        choices=["grpc", "http"],
+        help="Connection mode for workers (default: grpc). Note: vllm and trtllm only support grpc",
+    )
+    # Router host/port - may be overridden by backend (e.g. sglang)
+    group.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host for the router (default: 127.0.0.1)",
+    )
+    group.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port for the router (default: 8080)",
+    )
+    # Data parallel size - may be overridden by backend
+    group.add_argument(
+        "--data-parallel-size",
         "--dp-size",
         type=int,
         default=1,
+        dest="data_parallel_size",
         help="Data parallel size (number of worker replicas)",
     )
     group.add_argument(
@@ -375,8 +389,10 @@ def parse_serve_args(
     backend = pre_args.backend
 
     # Pass 2: build full parser with backend-specific args
+    # Use conflict_handler='resolve' to let backend args override serve defaults
     parser = argparse.ArgumentParser(
-        description=f"Launch {backend} worker(s) + gateway router"
+        description=f"Launch {backend} worker(s) + gateway router",
+        conflict_handler="resolve",
     )
     add_serve_args(parser)
     _import_backend_args(backend, parser)
@@ -421,7 +437,7 @@ class ServeOrchestrator:
     # -- internal -----------------------------------------------------------
 
     def _launch_workers(self) -> None:
-        ports = _find_available_ports(self.args.worker_base_port, self.args.dp_size)
+        ports = _find_available_ports(self.args.worker_base_port, self.args.data_parallel_size)
         host = self.args.worker_host
         for dp_rank, port in enumerate(ports):
             env = self.launcher.gpu_env(self.args, dp_rank)
@@ -441,7 +457,7 @@ class ServeOrchestrator:
                     raise RuntimeError(
                         f"Worker on port {port} exited with code {proc.returncode}"
                     )
-                if self.launcher.health_check(host, port, timeout=5.0):
+                if self.launcher.health_check(self.args, host, port, timeout=5.0):
                     logger.info("Worker on %s:%d is healthy", host, port)
                     break
                 time.sleep(2)
@@ -453,7 +469,7 @@ class ServeOrchestrator:
 
     def _build_router_args(self) -> RouterArgs:
         worker_urls = [
-            self.launcher.worker_url(self.args.worker_host, port)
+            self.launcher.worker_url(self.args, self.args.worker_host, port)
             for _, port in self.workers
         ]
         router_args = RouterArgs.from_cli_args(self.args, use_router_prefix=True)

@@ -11,14 +11,13 @@ authors = [
     {name = "Chang Su", email = "mckvtl@gmail.com"},
     {name = "Keyang Ru", email = "rukeyang@gmail.com"}
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 readme = "../../README.md"
 license = { text = "Apache-2.0" }
 classifiers = [
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -29,10 +28,8 @@ classifiers = [
 
 dependencies = [
     "setproctitle",
-    "aiohttp",
-    "orjson",
-    "uvicorn",
-    "fastapi",
+    "grpcio",
+    "grpcio-health-checking",
 ]
 
 [project.optional-dependencies]
