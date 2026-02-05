@@ -452,6 +452,7 @@ impl RouterTrait for RouterManager {
             self.routers
                 .get(&router_ids::HTTP_ANTHROPIC)
                 .map(|r| r.clone())
+                .or_else(|| self.select_router_for_request(Some(&parts.headers), None))
         } else {
             self.select_router_for_request(Some(&parts.headers), None)
         };
