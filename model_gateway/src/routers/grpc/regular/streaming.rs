@@ -548,12 +548,7 @@ impl StreamingProcessor {
 
                 let usage_chunk = ChatCompletionStreamResponse::builder(request_id, model)
                     .created(created)
-                    .usage(Usage {
-                        prompt_tokens: total_prompt,
-                        completion_tokens: total_completion,
-                        total_tokens: total_prompt + total_completion,
-                        completion_tokens_details: None,
-                    })
+                    .usage(Usage::from_counts(total_prompt, total_completion))
                     .maybe_system_fingerprint(system_fingerprint)
                     .build();
 

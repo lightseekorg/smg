@@ -26,10 +26,7 @@ use crate::{
         chat::{
             ChatCompletionRequest, ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice,
         },
-        common::{
-            ChatLogProbs, CompletionTokensDetails, FunctionCallDelta, ToolCall, ToolCallDelta,
-            Usage,
-        },
+        common::{ChatLogProbs, FunctionCallDelta, ToolCall, ToolCallDelta, Usage},
         responses::{
             OutputTokensDetails, ResponseStatus, ResponseUsage, ResponsesResponse, ResponsesUsage,
         },
@@ -561,12 +558,7 @@ impl HarmonyStreamingProcessor {
         let usage_chunk =
             ChatCompletionStreamResponse::builder(&dispatch.request_id, &original_request.model)
                 .created(dispatch.created)
-                .usage(Usage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens: prompt_tokens + completion_tokens,
-                    completion_tokens_details: None,
-                })
+                .usage(Usage::from_counts(prompt_tokens, completion_tokens))
                 .maybe_system_fingerprint(dispatch.weight_version.as_deref())
                 .build();
 
@@ -1156,18 +1148,8 @@ impl HarmonyStreamingProcessor {
                     tool_calls,
                     analysis: analysis_content,
                     partial_text: accumulated_final_text,
-                    usage: Usage {
-                        prompt_tokens,
-                        completion_tokens,
-                        total_tokens: prompt_tokens + completion_tokens,
-                        completion_tokens_details: if reasoning_token_count > 0 {
-                            Some(CompletionTokensDetails {
-                                reasoning_tokens: Some(reasoning_token_count),
-                            })
-                        } else {
-                            None
-                        },
-                    },
+                    usage: Usage::from_counts(prompt_tokens, completion_tokens)
+                        .with_reasoning_tokens(reasoning_token_count),
                     request_id: emitter.response_id.clone(),
                 });
             }
@@ -1195,18 +1177,8 @@ impl HarmonyStreamingProcessor {
                     }))
                     .build(),
             ),
-            usage: Usage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
-                completion_tokens_details: if reasoning_token_count > 0 {
-                    Some(CompletionTokensDetails {
-                        reasoning_tokens: Some(reasoning_token_count),
-                    })
-                } else {
-                    None
-                },
-            },
+            usage: Usage::from_counts(prompt_tokens, completion_tokens)
+                .with_reasoning_tokens(reasoning_token_count),
         })
     }
 

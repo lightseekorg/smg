@@ -9,7 +9,7 @@ use super::{builder::convert_harmony_logprobs, HarmonyParserAdapter};
 use crate::{
     protocols::{
         chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
-        common::{ChatLogProbs, CompletionTokensDetails, ToolCall, Usage},
+        common::{ChatLogProbs, ToolCall, Usage},
         responses::{
             OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
             ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
@@ -129,14 +129,8 @@ impl HarmonyResponseProcessor {
         }
 
         // Build usage from proto fields
-        let mut usage = response_formatting::build_usage(&all_responses);
-
-        // Add reasoning token count from parsed analysis/commentary channels
-        if total_reasoning_tokens > 0 {
-            usage.completion_tokens_details = Some(CompletionTokensDetails {
-                reasoning_tokens: Some(total_reasoning_tokens),
-            });
-        }
+        let usage = response_formatting::build_usage(&all_responses)
+            .with_reasoning_tokens(total_reasoning_tokens);
 
         // Final ChatCompletionResponse
         Ok(
@@ -265,14 +259,8 @@ impl HarmonyResponseProcessor {
         }
 
         // Build usage (needed for both ToolCallsFound and Completed)
-        let mut usage = response_formatting::build_usage(std::slice::from_ref(complete));
-
-        // Add reasoning token count from parsed analysis/commentary channels
-        if parsed.reasoning_token_count > 0 {
-            usage.completion_tokens_details = Some(CompletionTokensDetails {
-                reasoning_tokens: Some(parsed.reasoning_token_count),
-            });
-        }
+        let usage = response_formatting::build_usage(std::slice::from_ref(complete))
+            .with_reasoning_tokens(parsed.reasoning_token_count);
 
         // Check for tool calls in commentary channel
         if let Some(tool_calls) = parsed.commentary {

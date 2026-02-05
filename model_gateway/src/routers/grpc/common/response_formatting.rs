@@ -15,22 +15,11 @@ use crate::{
 ///
 /// Sums prompt_tokens and completion_tokens across all responses.
 /// Typically used with n>1 parameter where multiple completions are generated.
-///
-/// # Arguments
-/// * `responses` - Vector of GenerateComplete responses from the backend
-///
-/// # Returns
-/// Usage object with aggregated token counts
 pub(crate) fn build_usage(responses: &[ProtoGenerateComplete]) -> Usage {
     let total_prompt_tokens: u32 = responses.iter().map(|r| r.prompt_tokens()).sum();
     let total_completion_tokens: u32 = responses.iter().map(|r| r.completion_tokens()).sum();
 
-    Usage {
-        prompt_tokens: total_prompt_tokens,
-        completion_tokens: total_completion_tokens,
-        total_tokens: total_prompt_tokens + total_completion_tokens,
-        completion_tokens_details: None,
-    }
+    Usage::from_counts(total_prompt_tokens, total_completion_tokens)
 }
 
 /// Tracks per-index completion token counts across streaming chunks.

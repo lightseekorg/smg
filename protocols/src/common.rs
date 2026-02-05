@@ -473,6 +473,28 @@ pub struct Usage {
     pub completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
+impl Usage {
+    /// Create a Usage from prompt and completion token counts
+    pub fn from_counts(prompt_tokens: u32, completion_tokens: u32) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+            completion_tokens_details: None,
+        }
+    }
+
+    /// Add reasoning token details to this Usage
+    pub fn with_reasoning_tokens(mut self, reasoning_tokens: u32) -> Self {
+        if reasoning_tokens > 0 {
+            self.completion_tokens_details = Some(CompletionTokensDetails {
+                reasoning_tokens: Some(reasoning_tokens),
+            });
+        }
+        self
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CompletionTokensDetails {
     pub reasoning_tokens: Option<u32>,
