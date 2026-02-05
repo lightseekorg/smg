@@ -132,6 +132,17 @@ impl ResponseProcessingStage {
             "Starting streaming response"
         );
 
+        // Record duration metric when streaming starts
+        // Note: This records time-to-first-byte, not total stream duration
+        Metrics::record_router_duration(
+            metrics_labels::ROUTER_HTTP,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            "messages",
+            start_time.elapsed(),
+        );
+
         let headers = response.headers().clone();
 
         // Wrap the stream with worker load tracking
@@ -167,6 +178,26 @@ impl ResponseProcessingStage {
                 model = %model_id,
                 status = %status,
                 "Streaming error response (SSE)"
+            );
+
+            // Record duration metric for SSE error stream
+            Metrics::record_router_duration(
+                metrics_labels::ROUTER_HTTP,
+                metrics_labels::BACKEND_EXTERNAL,
+                metrics_labels::CONNECTION_HTTP,
+                model_id,
+                "messages",
+                start_time.elapsed(),
+            );
+
+            // Record error metric for SSE error stream
+            Metrics::record_router_error(
+                metrics_labels::ROUTER_HTTP,
+                metrics_labels::BACKEND_EXTERNAL,
+                metrics_labels::CONNECTION_HTTP,
+                model_id,
+                "messages",
+                "streaming_error",
             );
 
             let headers = response.headers().clone();

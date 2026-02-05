@@ -7,13 +7,11 @@
 //!
 //! ## Pipeline Architecture
 //!
-//! The Messages API is processed through a 6-stage pipeline:
-//! 1. Validation - Validate request fields and extract model ID
-//! 2. Worker Selection - Select appropriate worker for the request
-//! 3. Request Building - Build HTTP request for worker
-//! 4. Dispatch Metadata - Generate request ID and timestamps
-//! 5. Request Execution - Send request to worker
-//! 6. Response Processing - Parse response and record metrics
+//! The Messages API is processed through a 4-stage pipeline:
+//! 1. Worker Selection - Select appropriate worker for the request
+//! 2. Request Building - Build HTTP request for worker
+//! 3. Request Execution - Send request to worker
+//! 4. Response Processing - Parse response and record metrics
 
 use std::{any::Any, fmt, sync::Arc, time::Duration};
 
