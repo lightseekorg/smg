@@ -300,7 +300,8 @@ impl ResponseProcessingStage {
         // This avoids buffering unbounded data when content-length is unknown
         let mut body = String::new();
         let mut size = 0usize;
-        let mut stream = response.bytes_stream();
+        let stream = response.bytes_stream();
+        futures::pin_mut!(stream);
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
