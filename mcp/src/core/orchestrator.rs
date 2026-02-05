@@ -1730,8 +1730,8 @@ impl McpOrchestrator {
         self.shutdown_token.cancel();
 
         // Wait for active executions (30s timeout)
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(30);
+        let start = Instant::now();
+        let timeout = Duration::from_secs(30);
         while self.active_executions.load(Ordering::SeqCst) > 0 {
             if start.elapsed() >= timeout {
                 tracing::warn!(
@@ -1740,7 +1740,7 @@ impl McpOrchestrator {
                 );
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         // Cancel pending approvals

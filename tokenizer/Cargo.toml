@@ -47,3 +47,6 @@ tempfile = "3.8"
 [[bench]]
 name = "stop_sequence_search"
 harness = false
+
+[lints]
+workspace = true

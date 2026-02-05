@@ -118,7 +118,7 @@ impl<'de> Deserialize<'de> for PolicyDecisionConfig {
         impl<'de> Visitor<'de> for PolicyDecisionVisitor {
             type Value = PolicyDecisionConfig;
 
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.write_str("\"allow\", \"deny\", or {\"deny_with_reason\": \"...\"}")
             }
 
@@ -249,8 +249,8 @@ pub enum ConfigValidationError {
     },
 }
 
-impl std::fmt::Display for ConfigValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ConfigValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConfigValidationError::MissingBuiltinToolName { server } => {
                 write!(

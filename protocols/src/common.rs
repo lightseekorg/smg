@@ -427,9 +427,9 @@ impl Serialize for FunctionCall {
 
 impl<'de> Deserialize<'de> for FunctionCall {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
+        let value = Value::deserialize(deserializer)?;
         match &value {
-            serde_json::Value::String(s) => match s.as_str() {
+            Value::String(s) => match s.as_str() {
                 "none" => Ok(FunctionCall::None),
                 "auto" => Ok(FunctionCall::Auto),
                 other => Err(serde::de::Error::custom(format!(
@@ -437,8 +437,8 @@ impl<'de> Deserialize<'de> for FunctionCall {
                     other
                 ))),
             },
-            serde_json::Value::Object(map) => {
-                if let Some(serde_json::Value::String(name)) = map.get("name") {
+            Value::Object(map) => {
+                if let Some(Value::String(name)) = map.get("name") {
                     Ok(FunctionCall::Function { name: name.clone() })
                 } else {
                     Err(serde::de::Error::custom(
