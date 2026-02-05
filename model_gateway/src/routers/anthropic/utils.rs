@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use futures::StreamExt;
+
 use crate::core::{model_card::ProviderType, Worker};
 
 // ============================================================================
@@ -63,6 +65,54 @@ pub fn find_best_worker_for_model(
         .filter(|w| w.supports_model(model_id))
         .min_by_key(|w| w.load())
 }
+
+// ============================================================================
+// Response Body Reading
+// ============================================================================
+
+/// Result of reading a response body with size limit
+pub enum ReadBodyResult {
+    /// Successfully read the full body
+    Ok(String),
+    /// Body exceeded max size
+    TooLarge,
+    /// Error reading body
+    Error(String),
+}
+
+/// Read a response body incrementally with a size limit.
+///
+/// SECURITY: This prevents DoS by avoiding unbounded buffering when
+/// content-length is unknown (e.g., chunked transfer encoding).
+pub async fn read_response_body_limited(
+    response: reqwest::Response,
+    max_size: usize,
+) -> ReadBodyResult {
+    let mut stream = response.bytes_stream();
+    let mut body = String::new();
+    let mut total_size: usize = 0;
+
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(chunk) => {
+                total_size += chunk.len();
+                if total_size > max_size {
+                    return ReadBodyResult::TooLarge;
+                }
+                body.push_str(&String::from_utf8_lossy(&chunk));
+            }
+            Err(e) => {
+                return ReadBodyResult::Error(e.to_string());
+            }
+        }
+    }
+
+    ReadBodyResult::Ok(body)
+}
+
+// ============================================================================
+// Worker Filtering (Internal)
+// ============================================================================
 
 /// Filter workers to only include Anthropic workers in multi-provider setups.
 fn filter_by_anthropic_provider(workers: Vec<Arc<dyn Worker>>) -> Vec<Arc<dyn Worker>> {

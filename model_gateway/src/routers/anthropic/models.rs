@@ -6,11 +6,13 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use futures::StreamExt;
 use tracing::{debug, warn};
 
 use super::{
-    utils::{get_healthy_anthropic_workers, should_propagate_header},
+    utils::{
+        get_healthy_anthropic_workers, read_response_body_limited, should_propagate_header,
+        ReadBodyResult,
+    },
     AnthropicRouter,
 };
 
@@ -52,7 +54,6 @@ pub async fn handle_list_models(router: &AnthropicRouter, req: Request<Body>) ->
             let status = response.status();
 
             // SECURITY: Check content-length header first to reject obviously oversized responses
-            // without buffering any data
             if let Some(content_length) = response.content_length() {
                 if content_length > MAX_RESPONSE_SIZE as u64 {
                     warn!(
@@ -67,42 +68,26 @@ pub async fn handle_list_models(router: &AnthropicRouter, req: Request<Body>) ->
                 }
             }
 
-            // SECURITY: Read body incrementally to avoid buffering unbounded data
-            // when content-length is unknown (e.g., chunked transfer encoding)
-            let mut stream = response.bytes_stream();
-            let mut body_bytes = Vec::new();
-            let mut total_size: usize = 0;
-
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                        total_size += chunk.len();
-                        if total_size > MAX_RESPONSE_SIZE {
-                            warn!(
-                                "Response body too large: {} bytes (max {})",
-                                total_size, MAX_RESPONSE_SIZE
-                            );
-                            return (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "Response body exceeds maximum size",
-                            )
-                                .into_response();
-                        }
-                        body_bytes.extend_from_slice(&chunk);
-                    }
-                    Err(e) => {
-                        warn!("Failed to read response body chunk: {}", e);
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Failed to read response: {}", e),
-                        )
-                            .into_response();
-                    }
+            // SECURITY: Read body incrementally with size limit
+            match read_response_body_limited(response, MAX_RESPONSE_SIZE).await {
+                ReadBodyResult::Ok(body) => (status, body).into_response(),
+                ReadBodyResult::TooLarge => {
+                    warn!("Response body too large (max {} bytes)", MAX_RESPONSE_SIZE);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Response body exceeds maximum size",
+                    )
+                        .into_response()
+                }
+                ReadBodyResult::Error(e) => {
+                    warn!("Failed to read response body: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to read response: {}", e),
+                    )
+                        .into_response()
                 }
             }
-
-            let body = String::from_utf8_lossy(&body_bytes).to_string();
-            (status, body).into_response()
         }
         Err(e) => {
             warn!("Failed to forward list models request: {}", e);

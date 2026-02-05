@@ -20,14 +20,17 @@ use axum::{
     Json,
 };
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use tracing::{debug, error, info, warn};
 
 use super::{PipelineStage, StageResult};
 use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     protocols::messages::Message,
-    routers::anthropic::context::RequestContext,
+    routers::anthropic::{
+        context::RequestContext,
+        utils::{read_response_body_limited, ReadBodyResult},
+    },
 };
 
 /// Maximum error response body size to prevent DoS (1 MB)
@@ -298,37 +301,22 @@ impl ResponseProcessingStage {
         let status = response.status();
 
         // SECURITY: Read error response incrementally with size limit to prevent DoS
-        // This avoids buffering unbounded data when content-length is unknown
-        let mut body = String::new();
-        let mut size = 0usize;
-        let stream = response.bytes_stream();
-        futures::pin_mut!(stream);
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bytes) => {
-                    size += bytes.len();
-                    if size > MAX_ERROR_RESPONSE_SIZE {
-                        warn!(
-                            model = %model_id,
-                            body_size = %size,
-                            max_size = %MAX_ERROR_RESPONSE_SIZE,
-                            "Error response body too large"
-                        );
-                        body = format!("Backend returned error: {} (response too large)", status);
-                        break;
-                    }
-                    body.push_str(&String::from_utf8_lossy(&bytes));
-                }
-                Err(e) => {
-                    warn!(model = %model_id, error = %e, "Failed to read error response body");
-                    body = format!("Backend returned error: {}", status);
-                    break;
-                }
+        let body = match read_response_body_limited(response, MAX_ERROR_RESPONSE_SIZE).await {
+            ReadBodyResult::Ok(b) if b.is_empty() => format!("Backend returned error: {}", status),
+            ReadBodyResult::Ok(b) => b,
+            ReadBodyResult::TooLarge => {
+                warn!(
+                    model = %model_id,
+                    max_size = %MAX_ERROR_RESPONSE_SIZE,
+                    "Error response body too large"
+                );
+                format!("Backend returned error: {} (response too large)", status)
             }
-        }
-        if body.is_empty() {
-            body = format!("Backend returned error: {}", status);
-        }
+            ReadBodyResult::Error(e) => {
+                warn!(model = %model_id, error = %e, "Failed to read error response body");
+                format!("Backend returned error: {}", status)
+            }
+        };
 
         warn!(
             model = %model_id,
