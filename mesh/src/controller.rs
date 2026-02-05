@@ -58,7 +58,7 @@ impl MeshController {
     }
 
     #[instrument(fields(name = %self.self_name), skip(self, signal))]
-    pub async fn event_loop(self, mut signal: tokio::sync::watch::Receiver<()>) -> Result<()> {
+    pub async fn event_loop(self, mut signal: tokio::sync::watch::Receiver<bool>) -> Result<()> {
         let init_state = self.state.clone();
         let read_state = self.state.clone();
         let mut cnt: u64 = 0;

@@ -50,7 +50,7 @@ pub struct MeshServerHandler {
     pub sync_manager: Arc<MeshSyncManager>,
     pub self_name: String,
     _self_addr: SocketAddr,
-    signal_tx: tokio::sync::watch::Sender<()>,
+    signal_tx: tokio::sync::watch::Sender<bool>,
     partition_detector: Option<Arc<PartitionDetector>>,
     state_machine: Option<Arc<NodeStateMachine>>,
     rate_limit_task_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -112,7 +112,7 @@ impl MeshServerHandler {
     /// Shutdown immediately without graceful shutdown
     pub fn shutdown(&self) {
         self.stop_rate_limit_task();
-        self.signal_tx.send(()).ok();
+        self.signal_tx.send(true).ok();
     }
 
     /// Graceful shutdown: broadcast LEAVING status to all alive nodes,
@@ -126,7 +126,7 @@ impl MeshServerHandler {
             let mut self_node = if let Some(self_node) = state.get(&self.self_name) {
                 self_node.clone()
             } else {
-                self.signal_tx.send(()).ok();
+                self.signal_tx.send(true).ok();
                 return Ok(());
             };
 
@@ -144,7 +144,7 @@ impl MeshServerHandler {
                     .collect::<Vec<NodeState>>();
                 (self_node.clone(), alive_nodes)
             } else {
-                self.signal_tx.send(()).ok();
+                self.signal_tx.send(true).ok();
                 return Ok(());
             }
         };
@@ -180,7 +180,7 @@ impl MeshServerHandler {
         self.stop_rate_limit_task();
 
         log::info!("Sending shutdown signal");
-        self.signal_tx.send(()).ok();
+        self.signal_tx.send(true).ok();
         Ok(())
     }
 
@@ -277,7 +277,7 @@ impl MeshServerBuilder {
     }
 
     pub fn build(&self) -> (MeshServer, MeshServerHandler) {
-        let (signal_tx, signal_rx) = tokio::sync::watch::channel(());
+        let (signal_tx, signal_rx) = tokio::sync::watch::channel(false);
         let sync_manager = Arc::new(MeshSyncManager::new(
             self.stores.clone(),
             self.self_name.clone(),
@@ -332,7 +332,7 @@ pub struct MeshServer {
     self_name: String,
     self_addr: SocketAddr,
     init_peer: Option<SocketAddr>,
-    signal_rx: tokio::sync::watch::Receiver<()>,
+    signal_rx: tokio::sync::watch::Receiver<bool>,
     mtls_manager: Option<Arc<MTLSManager>>,
 }
 

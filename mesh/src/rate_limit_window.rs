@@ -29,7 +29,7 @@ impl RateLimitWindow {
     ///
     /// # Arguments
     /// * `shutdown_rx` - A watch receiver that signals when to stop the task
-    pub async fn start_reset_task(self, mut shutdown_rx: tokio::sync::watch::Receiver<()>) {
+    pub async fn start_reset_task(self, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
         let mut interval_timer = interval(Duration::from_secs(self.window_seconds));
         info!(
             "Starting rate limit window reset task with {}s interval",
@@ -95,7 +95,7 @@ mod tests {
         let window = RateLimitWindow::new(sync_manager, 1);
 
         // Create shutdown channel
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         // Spawn the reset task
         let task_handle = tokio::spawn(async move {
@@ -106,10 +106,15 @@ mod tests {
         sleep(Duration::from_millis(1500)).await;
 
         // Send shutdown signal
-        shutdown_tx.send(()).ok();
+        shutdown_tx
+            .send(true)
+            .expect("failed to send shutdown signal");
 
         // Wait for task to complete gracefully
-        let _ = tokio::time::timeout(Duration::from_secs(1), task_handle).await;
+        let res = tokio::time::timeout(Duration::from_secs(1), task_handle).await;
+        assert!(res.is_ok(), "reset task did not shut down in time");
+        let join_res = res.unwrap();
+        assert!(join_res.is_ok(), "reset task panicked");
 
         // The task should have started and stopped gracefully
     }
@@ -148,7 +153,7 @@ mod tests {
             let window = RateLimitWindow::new(sync_manager.clone(), 1); // 1 second
 
             // Create shutdown channel
-            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
             // Start reset task in background
             let reset_handle = tokio::spawn(async move {
@@ -164,10 +169,15 @@ mod tests {
             // Note: The exact value depends on timing, but it should be less than initial
 
             // Send shutdown signal
-            shutdown_tx.send(()).ok();
+            shutdown_tx
+                .send(true)
+                .expect("failed to send shutdown signal");
 
             // Wait for task to complete gracefully
-            let _ = tokio::time::timeout(Duration::from_secs(1), reset_handle).await;
+            let res = tokio::time::timeout(Duration::from_secs(1), reset_handle).await;
+            assert!(res.is_ok(), "reset task did not shut down in time");
+            let join_res = res.unwrap();
+            assert!(join_res.is_ok(), "reset task panicked");
         }
     }
 
