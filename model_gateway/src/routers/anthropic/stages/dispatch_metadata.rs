@@ -2,8 +2,7 @@
 //!
 //! This stage generates metadata for request tracing and metrics:
 //! - Records timestamps
-//! - Creates OTEL tracing span
-
+//! - Captures streaming flag for downstream metrics
 use async_trait::async_trait;
 use tracing::debug;
 
