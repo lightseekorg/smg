@@ -3,80 +3,88 @@
 use axum::{
     body::Body,
     extract::Request,
-    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use tracing::{debug, warn};
 
-use super::{utils::should_propagate_header, AnthropicRouter};
+use super::{
+    utils::{
+        get_healthy_anthropic_workers, read_response_body_limited, should_propagate_header,
+        ReadBodyResult,
+    },
+    AnthropicRouter,
+};
+use crate::routers::error;
 
-/// Handle /v1/models request
+const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
+
 pub async fn handle_list_models(router: &AnthropicRouter, req: Request<Body>) -> Response {
     debug!("Handling list models request");
 
-    // Extract headers from the request
     let headers = req.headers();
 
-    // Get a healthy worker to avoid credential leakage and ensure reliability
-    let healthy_workers = router.context().worker_registry.get_workers_filtered(
-        None, // model_id
-        None, // provider
-        None, // connection_mode
-        None, // runtime_type
-        true, // healthy_only
-    );
+    // SECURITY: Filter by Anthropic provider in multi-provider setups
+    let healthy_workers = get_healthy_anthropic_workers(&router.context().worker_registry);
 
     if healthy_workers.is_empty() {
-        warn!("No healthy workers available for /v1/models request");
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "No healthy workers available",
-        )
-            .into_response();
+        warn!("No healthy Anthropic workers available for /v1/models request");
+        return error::service_unavailable("no_workers", "No healthy Anthropic workers available");
     }
 
     let worker = &healthy_workers[0];
 
-    // Forward request to backend
     let url = format!("{}/v1/models", worker.url());
 
     debug!("Forwarding list models request to: {}", url);
 
     let mut req_builder = router.http_client().get(&url);
 
-    // Propagate relevant headers
     for (key, value) in headers {
         if should_propagate_header(key.as_str()) {
             req_builder = req_builder.header(key, value);
         }
     }
 
-    // Send request
     match req_builder.send().await {
         Ok(response) => {
             let status = response.status();
-            let body = match response.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    warn!("Failed to read response body: {}", e);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to read response: {}", e),
-                    )
-                        .into_response();
-                }
-            };
 
-            // Return response with same status and body
-            (status, body).into_response()
+            // SECURITY: Check content-length header first to reject obviously oversized responses
+            if let Some(content_length) = response.content_length() {
+                if content_length > MAX_RESPONSE_SIZE as u64 {
+                    warn!(
+                        "Response content-length too large: {} bytes (max {})",
+                        content_length, MAX_RESPONSE_SIZE
+                    );
+                    return error::internal_error(
+                        "response_too_large",
+                        "Response body exceeds maximum size",
+                    );
+                }
+            }
+
+            // SECURITY: Read body incrementally with size limit
+            match read_response_body_limited(response, MAX_RESPONSE_SIZE).await {
+                ReadBodyResult::Ok(body) => (status, body).into_response(),
+                ReadBodyResult::TooLarge => {
+                    warn!("Response body too large (max {} bytes)", MAX_RESPONSE_SIZE);
+                    error::internal_error(
+                        "response_too_large",
+                        "Response body exceeds maximum size",
+                    )
+                }
+                ReadBodyResult::Error(e) => {
+                    warn!("Failed to read response body: {}", e);
+                    error::internal_error("read_error", format!("Failed to read response: {}", e))
+                }
+            }
         }
         Err(e) => {
             warn!("Failed to forward list models request: {}", e);
-            (
-                StatusCode::BAD_GATEWAY,
+            error::bad_gateway(
+                "forward_failed",
                 format!("Failed to forward request: {}", e),
             )
-                .into_response()
         }
     }
 }
