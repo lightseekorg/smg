@@ -102,9 +102,14 @@ impl MeshServerHandler {
 
     /// Stop rate limit window reset task
     pub fn stop_rate_limit_task(&self) {
+        self.signal_tx.send(true).ok();
         if let Ok(mut task_handle) = self.rate_limit_task_handle.lock() {
             if let Some(handle) = task_handle.take() {
-                handle.abort();
+                tokio::spawn(async move {
+                    if let Err(err) = handle.await {
+                        log::warn!("Rate limit task shutdown failed: {}", err);
+                    }
+                });
             }
         }
     }
