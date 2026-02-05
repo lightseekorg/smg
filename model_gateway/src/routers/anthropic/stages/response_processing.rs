@@ -287,7 +287,7 @@ impl ResponseProcessingStage {
 
         result
     }
-    /// Handle error response from worker
+
     async fn handle_error_response(
         &self,
         response: reqwest::Response,
