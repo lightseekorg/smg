@@ -13,35 +13,28 @@ use super::common::{default_model, default_true, Function, GenerationRequest};
 // Interaction Tools
 // ============================================================================
 
+/// Interaction tool types
+/// See: https://ai.google.dev/api/interactions-api#Resource:Tool
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct InteractionTool {
-    #[serde(rename = "type")]
-    pub r#type: InteractionToolType,
-
-    // Function tool fields (used when type == "function")
-    #[serde(flatten)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub function: Option<Function>,
-
-    // McpServer fields (used when type == "mcp_server")
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub headers: Option<HashMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allowed_tools: Option<AllowedTools>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum InteractionToolType {
-    Function,
-    GoogleSearch,
-    CodeExecution,
-    UrlContext,
-    McpServer,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InteractionTool {
+    /// Function tool with function declaration
+    Function(Function),
+    /// Google Search built-in tool
+    GoogleSearch {},
+    /// URL Context built-in tool
+    UrlContext {},
+    /// MCP Server tool
+    McpServer {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        headers: Option<HashMap<String, String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        allowed_tools: Option<AllowedTools>,
+    },
 }
 
 /// Allowed tools configuration for MCP server
@@ -128,7 +121,7 @@ pub enum ToolChoice {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ToolChoiceConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub allowed_tools: Option<AllowedTools>
+    pub allowed_tools: Option<AllowedTools>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -209,7 +202,6 @@ pub struct Turn {
     /// Role: "user" or "model"
     pub role: String,
     /// Content can be array of Content or string
-    #[serde(flatten)]
     pub content: TurnContent,
 }
 
@@ -572,7 +564,7 @@ pub enum InteractionStatus {
     InProgress,
     RequiresAction,
     Failed,
-    Cancelled
+    Cancelled,
 }
 
 // ============================================================================
@@ -617,6 +609,7 @@ pub struct InteractionUsage {
 // ============================================================================
 
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[validate(schema(function = "validate_interactions_request"))]
 pub struct InteractionsRequest {
     /// Model identifier (e.g., "gemini-2.0-flash")
     #[serde(default = "default_model")]
@@ -664,6 +657,13 @@ pub struct InteractionsRequest {
     /// Whether to store the interaction (default: true)
     #[serde(default = "default_true")]
     pub store: bool,
+}
+
+fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), validator::ValidationError> {
+    if req.response_format.is_some() && req.response_mime_type.is_none() {
+        return Err(validator::ValidationError::new("response_mime_type_required"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -841,15 +841,3 @@ pub struct InteractionsCancelParams {
     pub api_version: Option<String>,
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-pub fn generate_interaction_id() -> String {
-    use rand::RngCore;
-    let mut rng = rand::rng();
-    let mut bytes = [0u8; 16];
-    rng.fill_bytes(&mut bytes);
-    let hex_string: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("int_{}", hex_string)
-}
