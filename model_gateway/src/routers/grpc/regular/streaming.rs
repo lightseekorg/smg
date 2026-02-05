@@ -24,6 +24,7 @@ use crate::{
     },
     reasoning_parser::{ParserFactory as ReasoningParserFactory, ParserResult, ReasoningParser},
     routers::grpc::{
+        common::response_formatting::CompletionTokenTracker,
         context,
         proto_wrapper::{ProtoResponseVariant, ProtoStream},
         utils,
@@ -211,7 +212,7 @@ impl StreamingProcessor {
         let mut finish_reasons: HashMap<u32, String> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<Value>> = HashMap::new();
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
-        let mut completion_tokens: HashMap<u32, u32> = HashMap::new();
+        let mut completion_tokens = CompletionTokenTracker::new();
         let mut cached_tokens: HashMap<u32, u32> = HashMap::new();
 
         // Parser state (lazy initialization per index)
@@ -287,12 +288,7 @@ impl StreamingProcessor {
 
                     let index = chunk.index();
 
-                    // For vLLM, accumulate completion tokens (vLLM sends deltas)
-                    // For SGLang, skip (SGLang sends cumulative values)
-                    if chunk.is_vllm() {
-                        let tokens_count = completion_tokens.entry(index).or_insert(0);
-                        *tokens_count += chunk.token_ids().len() as u32;
-                    }
+                    completion_tokens.record_chunk(&chunk);
 
                     // Get or create stop decoder for this index
                     let stop_decoder = stop_decoders.entry(index).or_insert_with(|| {
@@ -472,13 +468,7 @@ impl StreamingProcessor {
                     // Store metadata
                     prompt_tokens.insert(index, complete.prompt_tokens());
 
-                    // For vLLM, use accumulated count (we tracked deltas)
-                    // For SGLang, use complete value (already cumulative)
-                    if complete.is_vllm() {
-                        completion_tokens.entry(index).or_insert(0);
-                    } else {
-                        completion_tokens.insert(index, complete.completion_tokens());
-                    }
+                    completion_tokens.record_complete(&complete);
 
                     cached_tokens.insert(index, complete.cached_tokens());
                     finish_reasons.insert(index, complete.finish_reason().to_string());
@@ -554,7 +544,7 @@ impl StreamingProcessor {
         if let Some(stream_opts) = stream_options {
             if stream_opts.include_usage.unwrap_or(false) {
                 let total_prompt: u32 = prompt_tokens.values().sum();
-                let total_completion: u32 = completion_tokens.values().sum();
+                let total_completion: u32 = completion_tokens.total();
 
                 let usage_chunk = ChatCompletionStreamResponse::builder(request_id, model)
                     .created(created)
@@ -579,7 +569,7 @@ impl StreamingProcessor {
 
         // Record streaming metrics
         let total_prompt: u32 = prompt_tokens.values().sum();
-        let total_completion: u32 = completion_tokens.values().sum();
+        let total_completion: u32 = completion_tokens.total();
         Metrics::record_streaming_metrics(StreamingMetricsParams {
             router_type: metrics_labels::ROUTER_GRPC,
             backend_type: self.backend_type,

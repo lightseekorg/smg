@@ -35,8 +35,11 @@ use crate::{
         },
     },
     routers::grpc::{
-        common::responses::streaming::{
-            attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter,
+        common::{
+            response_formatting::CompletionTokenTracker,
+            responses::streaming::{
+                attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter,
+            },
         },
         context,
         proto_wrapper::{ProtoResponseVariant, ProtoStream},
@@ -153,7 +156,7 @@ impl HarmonyStreamingProcessor {
         let mut finish_reasons: HashMap<u32, Option<String>> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
-        let mut completion_tokens: HashMap<u32, u32> = HashMap::new();
+        let mut completion_tokens = CompletionTokenTracker::new();
 
         let stream_options = &original_request.stream_options;
 
@@ -179,13 +182,7 @@ impl HarmonyStreamingProcessor {
                         is_firsts.insert(index, true);
                     }
 
-                    // Track token counts
-                    // For vLLM, accumulate completion tokens (vLLM sends deltas)
-                    // For SGLang, skip (SGLang sends cumulative values in Complete)
-                    if chunk_wrapper.is_vllm() {
-                        *completion_tokens.entry(index).or_insert(0) +=
-                            chunk_wrapper.token_ids().len() as u32;
-                    }
+                    completion_tokens.record_chunk(&chunk_wrapper);
 
                     // Convert logprobs if present and requested
                     let chunk_logprobs = if original_request.logprobs {
@@ -233,13 +230,7 @@ impl HarmonyStreamingProcessor {
                         .insert(index, Some(complete_wrapper.finish_reason().to_string()));
                     matched_stops.insert(index, complete_wrapper.matched_stop_json());
                     prompt_tokens.insert(index, complete_wrapper.prompt_tokens());
-                    // For vLLM, use accumulated count (we tracked deltas above)
-                    // For SGLang, use complete value (already cumulative)
-                    if complete_wrapper.is_vllm() {
-                        completion_tokens.entry(index).or_insert(0);
-                    } else {
-                        completion_tokens.insert(index, complete_wrapper.completion_tokens());
-                    }
+                    completion_tokens.record_complete(&complete_wrapper);
 
                     // Finalize parser and emit final chunk
                     if let Some(parser) = parsers.get_mut(&index) {
@@ -270,7 +261,7 @@ impl HarmonyStreamingProcessor {
 
         // Compute totals once for both usage chunk and metrics
         let total_prompt: u32 = prompt_tokens.values().sum();
-        let total_completion: u32 = completion_tokens.values().sum();
+        let total_completion: u32 = completion_tokens.total();
 
         // Emit final usage if requested
         if let Some(true) = stream_options.as_ref().and_then(|so| so.include_usage) {
@@ -329,7 +320,7 @@ impl HarmonyStreamingProcessor {
         let mut is_firsts: HashMap<u32, bool> = HashMap::new();
         let mut finish_reasons: HashMap<u32, Option<String>> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
-        let mut completion_tokens: HashMap<u32, u32> = HashMap::new();
+        let mut completion_tokens = CompletionTokenTracker::new();
 
         let stream_options = &original_request.stream_options;
 
@@ -354,13 +345,7 @@ impl HarmonyStreamingProcessor {
                         is_firsts.insert(index, true);
                     }
 
-                    // Track token counts
-                    // For vLLM, accumulate completion tokens (vLLM sends deltas)
-                    // For SGLang, skip (SGLang sends cumulative values in Complete)
-                    if chunk_wrapper.is_vllm() {
-                        *completion_tokens.entry(index).or_insert(0) +=
-                            chunk_wrapper.token_ids().len() as u32;
-                    }
+                    completion_tokens.record_chunk(&chunk_wrapper);
 
                     // Convert logprobs if present and requested
                     let chunk_logprobs = if original_request.logprobs {
@@ -404,13 +389,7 @@ impl HarmonyStreamingProcessor {
                     finish_reasons
                         .insert(index, Some(complete_wrapper.finish_reason().to_string()));
                     matched_stops.insert(index, complete_wrapper.matched_stop_json());
-                    // For vLLM, use accumulated count (we tracked deltas above)
-                    // For SGLang, use complete value (already cumulative)
-                    if complete_wrapper.is_vllm() {
-                        completion_tokens.entry(index).or_insert(0);
-                    } else {
-                        completion_tokens.insert(index, complete_wrapper.completion_tokens());
-                    }
+                    completion_tokens.record_complete(&complete_wrapper);
 
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
@@ -446,7 +425,7 @@ impl HarmonyStreamingProcessor {
 
         // Compute totals once for both usage chunk and metrics
         let total_prompt: u32 = prompt_tokens.values().sum();
-        let total_completion: u32 = completion_tokens.values().sum();
+        let total_completion: u32 = completion_tokens.total();
 
         // Emit final usage if requested
         if let Some(true) = stream_options.as_ref().and_then(|so| so.include_usage) {
