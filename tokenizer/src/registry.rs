@@ -715,4 +715,35 @@ mod tests {
         ));
         assert!(entry.created_at.timestamp() > 0);
     }
+
+    #[tokio::test]
+    async fn test_load_ignores_updates() {
+        let registry = TokenizerRegistry::new();
+        let id = TokenizerRegistry::generate_id();
+
+        // Load initially with chat template A
+        registry
+            .load(&id, "fixed-model", "source", Some("A"), || async {
+                Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
+            })
+            .await
+            .unwrap();
+
+        // Try to load again (same name) with chat template B
+        let id2 = TokenizerRegistry::generate_id();
+        let outcome = registry
+            .load(&id2, "fixed-model", "source", Some("B"), || async {
+                panic!("Should not load")
+            })
+            .await
+            .unwrap();
+
+        // Should return existing ID
+        assert_eq!(outcome.id(), id);
+
+        // Verify the original chat template is preserved
+        let entry = registry.get_by_name("fixed-model").unwrap();
+        assert_eq!(entry.chat_template_path.as_deref(), Some("A"));
+        assert_ne!(entry.chat_template_path.as_deref(), Some("B"));
+    }
 }
