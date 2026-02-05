@@ -690,4 +690,29 @@ mod tests {
         assert!(!outcome.is_newly_loaded());
         assert_eq!(outcome.id(), id1); // Returns original ID
     }
+
+    #[tokio::test]
+    async fn test_metadata_population() {
+        let registry = TokenizerRegistry::new();
+        let id = TokenizerRegistry::generate_id();
+        let chat_template = Some("templates/chat.json");
+
+        registry
+            .load(&id, "meta-model", "source", chat_template, || async {
+                Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
+            })
+            .await
+            .unwrap();
+
+        let entry = registry.get_by_name("meta-model").unwrap();
+
+        // Verify metadata
+        assert_eq!(entry.vocab_size, 0); // MockTokenizer default
+        assert_eq!(entry.chat_template_path.as_deref(), chat_template);
+        assert!(matches!(
+            entry.backend,
+            crate::traits::TokenizerBackend::Mock
+        ));
+        assert!(entry.created_at.timestamp() > 0);
+    }
 }
