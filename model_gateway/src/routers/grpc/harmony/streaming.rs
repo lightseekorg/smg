@@ -7,12 +7,10 @@ use std::{
     time::Instant,
 };
 
-use axum::{body::Body, http::StatusCode, response::Response};
+use axum::response::Response;
 use bytes::Bytes;
-use http::header::{HeaderValue, CONTENT_TYPE};
 use serde_json::json;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error};
 
 use super::{
@@ -34,8 +32,9 @@ use crate::{
     routers::grpc::{
         common::{
             response_formatting::CompletionTokenTracker,
-            responses::streaming::{
-                attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter,
+            responses::{
+                build_sse_response,
+                streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
             },
         },
         context,
@@ -133,7 +132,7 @@ impl HarmonyStreamingProcessor {
         }
 
         // Return SSE response
-        Self::build_sse_response(rx)
+        build_sse_response(rx)
     }
 
     /// Process streaming chunks from a single stream
@@ -1180,23 +1179,6 @@ impl HarmonyStreamingProcessor {
             usage: Usage::from_counts(prompt_tokens, completion_tokens)
                 .with_reasoning_tokens(reasoning_token_count),
         })
-    }
-
-    /// Build SSE response from receiver
-    fn build_sse_response(rx: mpsc::UnboundedReceiver<Result<Bytes, io::Error>>) -> Response {
-        let stream = UnboundedReceiverStream::new(rx);
-        let body = Body::from_stream(stream);
-
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/event-stream; charset=utf-8"),
-            )
-            .header("Cache-Control", HeaderValue::from_static("no-cache"))
-            .header("Connection", HeaderValue::from_static("keep-alive"))
-            .body(body)
-            .unwrap()
     }
 }
 

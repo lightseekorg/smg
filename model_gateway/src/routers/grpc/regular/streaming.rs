@@ -4,12 +4,10 @@
 
 use std::{collections::HashMap, io, sync::Arc, time::Instant};
 
-use axum::{body::Body, http::StatusCode, response::Response};
+use axum::response::Response;
 use bytes::Bytes;
-use http::header::{HeaderValue, CONTENT_TYPE};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, mpsc::UnboundedSender};
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, warn};
 
 use crate::{
@@ -24,7 +22,7 @@ use crate::{
     },
     reasoning_parser::{ParserFactory as ReasoningParserFactory, ParserResult, ReasoningParser},
     routers::grpc::{
-        common::response_formatting::CompletionTokenTracker,
+        common::{response_formatting::CompletionTokenTracker, responses::build_sse_response},
         context,
         proto_wrapper::{ProtoResponseVariant, ProtoStream},
         utils,
@@ -1313,23 +1311,4 @@ impl StreamingProcessor {
         }
         buffer.extend_from_slice(b"\n\n");
     }
-}
-
-/// Build SSE response with proper headers
-pub(crate) fn build_sse_response(
-    rx: mpsc::UnboundedReceiver<Result<Bytes, io::Error>>,
-) -> Response {
-    let stream = UnboundedReceiverStream::new(rx);
-    let mut response = Response::new(Body::from_stream(stream));
-    *response.status_mut() = StatusCode::OK;
-    response
-        .headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-    response
-        .headers_mut()
-        .insert("Cache-Control", HeaderValue::from_static("no-cache"));
-    response
-        .headers_mut()
-        .insert("Connection", HeaderValue::from_static("keep-alive"));
-    response
 }

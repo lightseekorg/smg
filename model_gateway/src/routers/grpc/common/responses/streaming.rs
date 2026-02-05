@@ -2,6 +2,7 @@
 
 use axum::{body::Body, http::StatusCode, response::Response};
 use bytes::Bytes;
+use http::header::{HeaderValue, CONTENT_TYPE};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -972,9 +973,12 @@ pub(crate) fn build_sse_response(
     let stream = UnboundedReceiverStream::new(rx);
     Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .header("Connection", "keep-alive")
+        .header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream; charset=utf-8"),
+        )
+        .header("Cache-Control", HeaderValue::from_static("no-cache"))
+        .header("Connection", HeaderValue::from_static("keep-alive"))
         .body(Body::from_stream(stream))
         .unwrap()
 }
