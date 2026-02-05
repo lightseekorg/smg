@@ -36,7 +36,9 @@ use crate::{
         },
     },
     routers::grpc::{
-        common::responses::streaming::{OutputItemType, ResponseStreamEventEmitter},
+        common::responses::streaming::{
+            attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter,
+        },
         context,
         proto_wrapper::{ProtoResponseVariant, ProtoStream},
     },
@@ -876,12 +878,11 @@ impl HarmonyStreamingProcessor {
                                     "status": "in_progress"
                                 });
 
-                                // Add server_label for mcp_call only (Passthrough format)
-                                if matches!(response_format, Some(ResponseFormat::Passthrough)) {
-                                    if let Some(ref label) = emitter.mcp_server_label {
-                                        item["server_label"] = json!(label);
-                                    }
-                                }
+                                attach_mcp_server_label(
+                                    &mut item,
+                                    emitter.mcp_server_label.as_deref(),
+                                    response_format.as_ref(),
+                                );
 
                                 let event = emitter.emit_output_item_added(output_index, &item);
                                 emitter.send_event_best_effort(&event, tx);
@@ -1043,12 +1044,11 @@ impl HarmonyStreamingProcessor {
                                     "status": "completed"
                                 });
 
-                                // Add server_label for mcp_call only (Passthrough format)
-                                if matches!(response_format, Some(ResponseFormat::Passthrough)) {
-                                    if let Some(ref label) = emitter.mcp_server_label {
-                                        item["server_label"] = json!(label);
-                                    }
-                                }
+                                attach_mcp_server_label(
+                                    &mut item,
+                                    emitter.mcp_server_label.as_deref(),
+                                    response_format.as_ref(),
+                                );
 
                                 let event = emitter.emit_output_item_done(*output_index, &item);
                                 emitter.complete_output_item(*output_index);
@@ -1172,12 +1172,11 @@ impl HarmonyStreamingProcessor {
                             "status": "completed"
                         });
 
-                        // Add server_label for mcp_call only (Passthrough format)
-                        if matches!(response_format, Some(ResponseFormat::Passthrough)) {
-                            if let Some(ref label) = emitter.mcp_server_label {
-                                item["server_label"] = json!(label);
-                            }
-                        }
+                        attach_mcp_server_label(
+                            &mut item,
+                            emitter.mcp_server_label.as_deref(),
+                            response_format.as_ref(),
+                        );
 
                         let event = emitter.emit_output_item_done(*output_index, &item);
                         emitter.complete_output_item(*output_index);
