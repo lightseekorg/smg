@@ -40,6 +40,12 @@ pub enum TokenizerBackend {
     Mock,
 }
 
+impl std::fmt::Display for TokenizerBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 /// Contains the results of tokenizing text: token IDs, string tokens, and their spans
 #[derive(Debug, Clone)]
 pub enum Encoding {

@@ -83,6 +83,27 @@ pub struct TokenizerEntry {
     pub created_at: DateTime<Utc>,
 }
 
+impl TokenizerEntry {
+    pub fn new(
+        id: &str,
+        name: &str,
+        source: &str,
+        chat_template_path: Option<&str>,
+        tokenizer: Arc<dyn Tokenizer>,
+    ) -> Self {
+        Self {
+            id: id.to_string(),
+            name: name.to_string(),
+            source: source.to_string(),
+            vocab_size: tokenizer.vocab_size(),
+            chat_template_path: chat_template_path.map(|s| s.to_string()),
+            backend: tokenizer.backend(),
+            created_at: Utc::now(),
+            tokenizer,
+        }
+    }
+}
+
 /// Registry for managing tokenizers keyed by UUID
 ///
 /// Features:
@@ -198,17 +219,8 @@ impl TokenizerRegistry {
 
         let tokenizer = result.map_err(LoadError::LoadFailed)?;
 
-        // Create entry with provided ID
-        let entry = TokenizerEntry {
-            id: id.to_string(),
-            name: name.to_string(),
-            source: source.to_string(),
-            vocab_size: tokenizer.vocab_size(),
-            chat_template_path: chat_template_path.map(|s| s.to_string()),
-            backend: tokenizer.backend(),
-            created_at: Utc::now(),
-            tokenizer,
-        };
+        // Create entry using constructor
+        let entry = TokenizerEntry::new(id, name, source, chat_template_path, tokenizer);
 
         // Store in registry
         self.tokenizers.insert(id.to_string(), entry);
@@ -253,16 +265,8 @@ impl TokenizerRegistry {
                 None
             }
             Entry::Vacant(name_entry) => {
-                let entry = TokenizerEntry {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    source: source.to_string(),
-                    vocab_size: tokenizer.vocab_size(),
-                    chat_template_path: chat_template_path.map(|s| s.to_string()),
-                    backend: tokenizer.backend(),
-                    created_at: Utc::now(),
-                    tokenizer,
-                };
+                // Create entry using constructor
+                let entry = TokenizerEntry::new(id, name, source, chat_template_path, tokenizer);
 
                 info!("Registering tokenizer '{}' with id: {}", name, id);
                 self.tokenizers.insert(id.to_string(), entry);

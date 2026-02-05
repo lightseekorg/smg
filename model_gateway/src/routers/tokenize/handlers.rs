@@ -286,7 +286,7 @@ pub async fn list_tokenizers(registry: &Arc<TokenizerRegistry>) -> Response {
             source: e.source,
             vocab_size: e.vocab_size, // Use pre-calculated size from entry
             chat_template_path: e.chat_template_path,
-            backend: format!("{:?}", e.backend),
+            backend: e.backend.to_string(),
             created_at: e.created_at,
         })
         .collect();
@@ -343,7 +343,7 @@ pub async fn get_tokenizer_info(context: &Arc<AppContext>, tokenizer_id: &str) -
                 source: e.source,
                 vocab_size: e.vocab_size,
                 chat_template_path: e.chat_template_path,
-                backend: format!("{:?}", e.backend),
+                backend: e.backend.to_string(),
                 created_at: e.created_at,
             };
             Json(info).into_response()
