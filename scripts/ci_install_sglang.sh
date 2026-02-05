@@ -18,20 +18,28 @@ if [ ! -d "$SGLANG_DIR" ]; then
 fi
 
 # By default, check out the latest stable release tag.
-# Set SGLANG_USE_MAIN=1 to stay on the main branch instead.
+# Set SGLANG_USE_MAIN=1 to stay on the default branch instead.
 SGLANG_USE_MAIN="${SGLANG_USE_MAIN:-0}"
-if [ "$SGLANG_USE_MAIN" != "1" ]; then
-    cd "$SGLANG_DIR"
-    git fetch --tags
-    LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+cd "$SGLANG_DIR"
+git fetch --tags
+DEFAULT_BRANCH="$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || true)"
+if [ "$SGLANG_USE_MAIN" = "1" ]; then
+    if [ -n "$DEFAULT_BRANCH" ]; then
+        git checkout "$DEFAULT_BRANCH"
+        git pull --ff-only
+    else
+        echo "WARNING: Could not determine default branch; staying on current HEAD"
+    fi
+else
+    LATEST_TAG="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+(\.[0-9]+){2}$' | head -1 || true)"
     if [ -n "$LATEST_TAG" ]; then
         echo "Checking out latest SGLang stable tag: $LATEST_TAG"
         git checkout "$LATEST_TAG"
     else
         echo "WARNING: No stable tags found, staying on default branch"
     fi
-    cd -
 fi
+cd -
 
 # Install SGLang dependencies
 echo "Installing SGLang dependencies..."
