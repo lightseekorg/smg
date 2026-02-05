@@ -170,8 +170,9 @@ impl ResponseProcessingStage {
             let headers = response.headers().clone();
             let stream = response.bytes_stream();
 
-            // Use LoadTrackingStream to decrement load when error stream completes
-            let load_stream = LoadTrackingStream::new(stream, worker);
+            // Use LoadTrackingStream::new_force_failure to ensure circuit breaker records failure
+            // even if the SSE error stream completes normally
+            let load_stream = LoadTrackingStream::new_force_failure(stream, worker);
             let body = Body::from_stream(load_stream);
 
             return self.build_sse_response(status, headers, body);
@@ -431,15 +432,27 @@ struct LoadTrackingStream<S> {
     completed_successfully: bool,
     /// Tracks whether we encountered an error during streaming
     encountered_error: bool,
+    /// If true, always record failure regardless of stream completion
+    force_failure: bool,
 }
 
 impl<S> LoadTrackingStream<S> {
     fn new(inner: S, worker: Option<Arc<dyn Worker>>) -> Self {
+        Self::with_force_failure(inner, worker, false)
+    }
+
+    /// Create a stream that always records circuit breaker failure on drop
+    fn new_force_failure(inner: S, worker: Option<Arc<dyn Worker>>) -> Self {
+        Self::with_force_failure(inner, worker, true)
+    }
+
+    fn with_force_failure(inner: S, worker: Option<Arc<dyn Worker>>, force_failure: bool) -> Self {
         Self {
             inner: Box::pin(inner),
             worker,
             completed_successfully: false,
             encountered_error: false,
+            force_failure,
         }
     }
 }
@@ -474,7 +487,14 @@ impl<S> Drop for LoadTrackingStream<S> {
             worker.decrement_load();
 
             // Record circuit breaker outcome based on completion state
-            if self.completed_successfully && !self.encountered_error {
+            // force_failure streams always record failure, even if stream completed normally
+            if self.force_failure {
+                worker.record_outcome(false);
+                debug!(
+                    completed = %self.completed_successfully,
+                    "LoadTrackingStream (force_failure) completed, recorded failure"
+                );
+            } else if self.completed_successfully && !self.encountered_error {
                 worker.record_outcome(true);
                 debug!("LoadTrackingStream completed successfully, recorded success");
             } else {
