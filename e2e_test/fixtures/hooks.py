@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Track max worker counts: (model_id, mode, worker_type) -> max_count
-_worker_counts: dict[tuple[ConnectionMode, WorkerType], int] = {}
+_worker_counts: dict[tuple[str, ConnectionMode, WorkerType], int] = {}
 
 # Track first-seen order to preserve test collection order
 _first_seen_order: list[tuple[str, ConnectionMode, WorkerType]] = []

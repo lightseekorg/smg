@@ -1,16 +1,16 @@
 """Constants and enums for E2E test infrastructure."""
 
-from enum import Enum
+from enum import StrEnum
 
 
-class ConnectionMode(str, Enum):
+class ConnectionMode(StrEnum):
     """Worker connection protocol."""
 
     HTTP = "http"
     GRPC = "grpc"
 
 
-class WorkerType(str, Enum):
+class WorkerType(StrEnum):
     """Worker specialization type."""
 
     REGULAR = "regular"
@@ -18,7 +18,7 @@ class WorkerType(str, Enum):
     DECODE = "decode"
 
 
-class Runtime(str, Enum):
+class Runtime(StrEnum):
     """Inference runtime/backend."""
 
     SGLANG = "sglang"

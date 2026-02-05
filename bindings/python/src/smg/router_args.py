@@ -619,7 +619,7 @@ class RouterArgs:
             f"--{prefix}disable-circuit-breaker",
             action="store_true",
             help=(
-                "Disable circuit breaker (equivalent to setting cb_failure_threshold to u32::MAX)"
+                "Disable circuit breaker (equivalent to setting cb_failure_threshold to a very large value)"
             ),
         )
 
