@@ -173,7 +173,11 @@ impl ResponseProcessingStage {
             .unwrap_or("");
 
         // If it's an SSE error stream, pass it through (with worker load tracking)
-        if content_type.contains("text/event-stream") {
+        // Case-insensitive check: backends may return mixed-case Content-Type values
+        if content_type
+            .to_ascii_lowercase()
+            .contains("text/event-stream")
+        {
             warn!(
                 model = %model_id,
                 status = %status,

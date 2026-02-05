@@ -87,7 +87,7 @@ pub async fn read_response_body_limited(
     max_size: usize,
 ) -> ReadBodyResult {
     let mut stream = response.bytes_stream();
-    let mut body = String::new();
+    let mut buf: Vec<u8> = Vec::new();
     let mut total_size: usize = 0;
 
     while let Some(chunk_result) = stream.next().await {
@@ -97,7 +97,7 @@ pub async fn read_response_body_limited(
                 if total_size > max_size {
                     return ReadBodyResult::TooLarge;
                 }
-                body.push_str(&String::from_utf8_lossy(&chunk));
+                buf.extend_from_slice(&chunk);
             }
             Err(e) => {
                 return ReadBodyResult::Error(e.to_string());
@@ -105,7 +105,12 @@ pub async fn read_response_body_limited(
         }
     }
 
-    ReadBodyResult::Ok(body)
+    // Decode the entire buffer at once to avoid corrupting multibyte UTF-8
+    // sequences that may be split across chunk boundaries.
+    match String::from_utf8(buf) {
+        Ok(body) => ReadBodyResult::Ok(body),
+        Err(e) => ReadBodyResult::Error(format!("invalid UTF-8 in response body: {}", e)),
+    }
 }
 
 // ============================================================================
@@ -113,20 +118,22 @@ pub async fn read_response_body_limited(
 // ============================================================================
 
 /// Filter workers to only include Anthropic workers in multi-provider setups.
+///
+/// Treats `None` (no provider configured) as a distinct provider value so that
+/// a mix of `Some(...)` and `None` workers is recognized as multi-provider,
+/// preventing Anthropic credentials from leaking to untagged workers.
 fn filter_by_anthropic_provider(workers: Vec<Arc<dyn Worker>>) -> Vec<Arc<dyn Worker>> {
-    // Early-exit pattern to detect multiple providers without HashSet allocation
-    let mut first_provider = None;
+    // Early-exit pattern to detect multiple providers without HashSet allocation.
+    // Track Option<ProviderType> so None vs Some(...) counts as different.
+    let mut first_provider: Option<Option<ProviderType>> = None;
     let has_multiple_providers = workers.iter().any(|w| {
-        if let Some(p) = w.default_provider() {
-            match first_provider {
-                None => {
-                    first_provider = Some(p);
-                    false
-                }
-                Some(first) => first != p,
+        let provider = w.default_provider().cloned();
+        match first_provider {
+            None => {
+                first_provider = Some(provider);
+                false
             }
-        } else {
-            false
+            Some(ref first) => *first != provider,
         }
     });
 
