@@ -735,8 +735,8 @@ mod tests {
         assert!(access_after_miss > access_after_hit);
     }
 
-    #[test]
-    fn test_manual_ttl_eviction_logic() {
+    #[tokio::test]
+    async fn test_manual_ttl_eviction_logic() {
         use std::time::Duration;
 
         let config = ManualConfig {
@@ -756,7 +756,7 @@ mod tests {
 
         assert_eq!(policy.routing_map.len(), 1);
 
-        std::thread::sleep(Duration::from_secs(4));
+        tokio::time::sleep(Duration::from_secs(4)).await;
 
         assert_eq!(policy.routing_map.len(), 0);
     }
