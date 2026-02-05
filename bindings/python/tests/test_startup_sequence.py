@@ -423,18 +423,14 @@ class TestRouterInitialization:
 
     def test_router_initialization_with_cors_config(self):
         """Test router initialization with CORS configuration."""
-        args = RouterArgs(
-            cors_allowed_origins=["http://localhost:3000", "https://example.com"]
-        )
+        args = RouterArgs(cors_allowed_origins=["http://localhost:3000", "https://example.com"])
 
         with patch("smg.launch_router.Router") as router_mod:
             captured_args = {}
             mock_router_instance = MagicMock()
 
             def fake_from_args(router_args):
-                captured_args.update(
-                    dict(cors_allowed_origins=router_args.cors_allowed_origins)
-                )
+                captured_args.update(dict(cors_allowed_origins=router_args.cors_allowed_origins))
                 return mock_router_instance
 
             router_mod.from_args = MagicMock(side_effect=fake_from_args)
@@ -523,10 +519,7 @@ class TestStartupValidation:
                 # Should log warning about policy usage
                 mock_logger.warning.assert_called_once()
                 warning_call = mock_logger.warning.call_args[0][0]
-                assert (
-                    "Both --prefill-policy and --decode-policy are specified"
-                    in warning_call
-                )
+                assert "Both --prefill-policy and --decode-policy are specified" in warning_call
 
                 # Should create router instance
                 router_mod.from_args.assert_called_once()
@@ -594,15 +587,11 @@ class TestStartupErrorHandling:
 
     def test_router_creation_error_handling(self):
         """Test error handling when router creation fails."""
-        args = RouterArgs(
-            host="127.0.0.1", port=30000, worker_urls=["http://worker1:8000"]
-        )
+        args = RouterArgs(host="127.0.0.1", port=30000, worker_urls=["http://worker1:8000"])
 
         with patch("smg.launch_router.Router") as router_mod:
             # Simulate router creation failure in from_args
-            router_mod.from_args = MagicMock(
-                side_effect=Exception("Router creation failed")
-            )
+            router_mod.from_args = MagicMock(side_effect=Exception("Router creation failed"))
 
             with patch("smg.launch_router.logger") as mock_logger:
                 with pytest.raises(Exception, match="Router creation failed"):
@@ -615,9 +604,7 @@ class TestStartupErrorHandling:
 
     def test_router_start_error_handling(self):
         """Test error handling when router start fails."""
-        args = RouterArgs(
-            host="127.0.0.1", port=30000, worker_urls=["http://worker1:8000"]
-        )
+        args = RouterArgs(host="127.0.0.1", port=30000, worker_urls=["http://worker1:8000"])
 
         with patch("smg.launch_router.Router") as router_mod:
             mock_router_instance = MagicMock()
@@ -701,9 +688,7 @@ def _install_sglang_stubs(monkeypatch):
     monkeypatch.setitem(sys.modules, "sglang", sglang_mod)
     monkeypatch.setitem(sys.modules, "sglang.srt", srt_mod)
     monkeypatch.setitem(sys.modules, "sglang.srt.entrypoints", entry_mod)
-    monkeypatch.setitem(
-        sys.modules, "sglang.srt.entrypoints.http_server", http_server_mod
-    )
+    monkeypatch.setitem(sys.modules, "sglang.srt.entrypoints.http_server", http_server_mod)
     monkeypatch.setitem(sys.modules, "sglang.srt.server_args", server_args_mod)
     monkeypatch.setitem(sys.modules, "sglang.srt.utils", utils_mod)
 
@@ -861,10 +846,7 @@ def test_launch_server_process_and_cleanup(monkeypatch):
         )
 
         with patch("smg.launch_router.logger") as mock_logger:
-
-            with pytest.raises(
-                ValueError, match="PD disaggregation mode requires --prefill"
-            ):
+            with pytest.raises(ValueError, match="PD disaggregation mode requires --prefill"):
                 launch_router(args)
 
             # Should log error for validation failures

@@ -116,9 +116,7 @@ class TestStructuredOutputCloud:
 
 @pytest.mark.e2e
 @pytest.mark.model("gpt-oss")
-@pytest.mark.gateway(
-    extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"]
-)
+@pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestStructuredOutputHarmony:
     """Structured output tests against local gRPC backend with Harmony model."""
@@ -215,9 +213,7 @@ class TestStructuredOutputHarmony:
 
 @pytest.mark.e2e
 @pytest.mark.model("qwen-14b")
-@pytest.mark.gateway(
-    extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"]
-)
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestSimpleSchemaStructuredOutput:
     """Structured output tests with simpler schema for models that don't
@@ -233,7 +229,10 @@ class TestSimpleSchemaStructuredOutput:
             "input": [
                 {
                     "role": "system",
-                    "content": "You are a math solver. Return ONLY a JSON object that matches the schema-no extra text.",
+                    "content": (
+                        "You are a math solver. Return ONLY a JSON object that matches the "
+                        "schema-no extra text."
+                    ),
                 },
                 {
                     "role": "user",

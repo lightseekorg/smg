@@ -52,9 +52,7 @@ MODEL_SPECS: dict[str, dict] = {
         "memory_gb": 28,
         "tp": 2,
         "features": ["chat", "streaming", "function_calling", "pythonic_tools"],
-        "worker_args": [
-            "--context-length=16384"
-        ],  # Faster startup, prevents memory issues
+        "worker_args": ["--context-length=16384"],  # Faster startup, prevents memory issues
     },
     # Reasoning model
     "deepseek-7b": {
@@ -117,18 +115,14 @@ MODEL_SPECS: dict[str, dict] = {
 def get_models_with_feature(feature: str) -> list[str]:
     """Get list of model IDs that support a specific feature."""
     return [
-        model_id
-        for model_id, spec in MODEL_SPECS.items()
-        if feature in spec.get("features", [])
+        model_id for model_id, spec in MODEL_SPECS.items() if feature in spec.get("features", [])
     ]
 
 
 def get_model_spec(model_id: str) -> dict:
     """Get spec for a specific model, raising KeyError if not found."""
     if model_id not in MODEL_SPECS:
-        raise KeyError(
-            f"Unknown model: {model_id}. Available: {list(MODEL_SPECS.keys())}"
-        )
+        raise KeyError(f"Unknown model: {model_id}. Available: {list(MODEL_SPECS.keys())}")
     return MODEL_SPECS[model_id]
 
 

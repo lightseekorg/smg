@@ -123,8 +123,8 @@ class Gateway:
         worker_urls: list[str] | None = None,
         model_path: str | None = None,
         # PD mode arguments
-        prefill_workers: list["ModelInstance"] | None = None,
-        decode_workers: list["ModelInstance"] | None = None,
+        prefill_workers: list[ModelInstance] | None = None,
+        decode_workers: list[ModelInstance] | None = None,
         # IGW mode arguments
         igw_mode: bool = False,
         # Cloud mode arguments
@@ -437,9 +437,7 @@ class Gateway:
             resp = httpx.get(f"{self.base_url}/workers", timeout=timeout)
             if resp.status_code == 200:
                 data = resp.json()
-                return [
-                    self._worker_from_api_response(w) for w in data.get("workers", [])
-                ]
+                return [self._worker_from_api_response(w) for w in data.get("workers", [])]
             return []
         except (httpx.RequestError, httpx.TimeoutException):
             return []
@@ -565,7 +563,7 @@ class Gateway:
     # Context manager support
     # -------------------------------------------------------------------------
 
-    def __enter__(self) -> "Gateway":
+    def __enter__(self) -> Gateway:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -596,8 +594,7 @@ def launch_cloud_gateway(
 
     if runtime not in THIRD_PARTY_MODELS:
         raise ValueError(
-            f"Unknown cloud runtime: {runtime}. "
-            f"Available: {list(THIRD_PARTY_MODELS.keys())}"
+            f"Unknown cloud runtime: {runtime}. Available: {list(THIRD_PARTY_MODELS.keys())}"
         )
 
     gateway = Gateway()

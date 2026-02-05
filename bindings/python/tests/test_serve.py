@@ -210,13 +210,20 @@ class TestParseServeArgs:
         assert args.connection_mode == "grpc"
 
     def test_trtllm_with_serve_args(self):
-        backend, args = parse_serve_args([
-            "--backend", "trtllm",
-            "--dp-size", "8",
-            "--worker-host", "0.0.0.0",
-            "--worker-base-port", "35000",
-            "--worker-startup-timeout", "600",
-        ])
+        backend, args = parse_serve_args(
+            [
+                "--backend",
+                "trtllm",
+                "--dp-size",
+                "8",
+                "--worker-host",
+                "0.0.0.0",
+                "--worker-base-port",
+                "35000",
+                "--worker-startup-timeout",
+                "600",
+            ]
+        )
         assert backend == "trtllm"
         assert args.data_parallel_size == 8
         assert args.worker_host == "0.0.0.0"
@@ -225,10 +232,14 @@ class TestParseServeArgs:
 
     def test_trtllm_includes_router_args(self):
         """Router args should be included with --router- prefix."""
-        backend, args = parse_serve_args([
-            "--backend", "trtllm",
-            "--router-policy", "round_robin",
-        ])
+        backend, args = parse_serve_args(
+            [
+                "--backend",
+                "trtllm",
+                "--router-policy",
+                "round_robin",
+            ]
+        )
         assert args.router_policy == "round_robin"
 
     def test_trtllm_router_args_defaults(self):
@@ -273,10 +284,14 @@ class TestParseServeArgs:
     def test_two_pass_extracts_backend_first(self):
         """Backend-specific args should not cause errors during pass 1."""
         # --model is only valid for trtllm; pass 1 should ignore it
-        backend, args = parse_serve_args([
-            "--backend", "trtllm",
-            "--model", "/some/path",
-        ])
+        backend, args = parse_serve_args(
+            [
+                "--backend",
+                "trtllm",
+                "--model",
+                "/some/path",
+            ]
+        )
         assert backend == "trtllm"
         assert args.model == "/some/path"
 
@@ -635,7 +650,9 @@ class TestServeOrchestrator:
         ]
 
     def test_build_router_args_vllm_grpc_urls(self):
-        args = _make_args(backend="vllm", data_parallel_size=2, model="/tmp/m", connection_mode="grpc")
+        args = _make_args(
+            backend="vllm", data_parallel_size=2, model="/tmp/m", connection_mode="grpc"
+        )
         orch = ServeOrchestrator("vllm", args)
         mock_proc = MagicMock()
         orch.workers = [(mock_proc, 32000), (mock_proc, 32003)]
@@ -707,7 +724,9 @@ class TestServeOrchestrator:
         orch._signal_handler(signal.SIGINT, None)
 
     def test_trtllm_orchestrator_launches_grpc_workers(self):
-        args = _make_args(backend="trtllm", data_parallel_size=1, model="/tmp/m", connection_mode="grpc")
+        args = _make_args(
+            backend="trtllm", data_parallel_size=1, model="/tmp/m", connection_mode="grpc"
+        )
         orch = ServeOrchestrator("trtllm", args)
 
         with patch("smg.serve._find_available_ports", return_value=[50051]):

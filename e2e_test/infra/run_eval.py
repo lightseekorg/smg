@@ -50,7 +50,7 @@ class EvalConfig:
     port: int = 30000
 
 
-def _get_eval(eval_name: str, num_examples: int, num_threads: int) -> "Eval":
+def _get_eval(eval_name: str, num_examples: int, num_threads: int) -> Eval:
     """Get the evaluation object by name."""
     if eval_name == "mmlu":
         from .simple_eval_mmlu import MMLUEval
