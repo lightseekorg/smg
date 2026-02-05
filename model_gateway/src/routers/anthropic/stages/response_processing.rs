@@ -269,6 +269,16 @@ impl ResponseProcessingStage {
                     w.record_outcome(false);
                 }
 
+                // Record duration metric for failed parse
+                Metrics::record_router_duration(
+                    metrics_labels::ROUTER_HTTP,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_HTTP,
+                    model_id,
+                    "messages",
+                    start_time.elapsed(),
+                );
+
                 // Record error metric
                 Metrics::record_router_error(
                     metrics_labels::ROUTER_HTTP,

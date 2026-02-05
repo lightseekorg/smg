@@ -448,7 +448,13 @@ impl RouterTrait for RouterManager {
         // This ensures requests to /v1/models get routed to the correct router
         // (e.g., Anthropic router for anthropic-version header)
         let (parts, body) = req.into_parts();
-        let router = self.select_router_for_request(Some(&parts.headers), None);
+        let router = if parts.headers.contains_key("anthropic-version") {
+            self.routers
+                .get(&router_ids::HTTP_ANTHROPIC)
+                .map(|r| r.clone())
+        } else {
+            self.select_router_for_request(Some(&parts.headers), None)
+        };
 
         if let Some(router) = router {
             // Reconstruct request to pass to the selected router
