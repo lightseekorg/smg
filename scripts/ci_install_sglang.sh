@@ -9,11 +9,6 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
-# Ensure pip cache goes to the runner user's home (not /root) when running
-# under sudo, so that actions/cache can save it afterward.
-export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$HOME/.cache/pip}"
-mkdir -p "$PIP_CACHE_DIR"
-
 SGLANG_DIR="${1:-sglang}"
 
 # Clone SGLang if not already present
@@ -59,9 +54,6 @@ if [ ! -f "$INSTALL_SCRIPT" ]; then
     exit 1
 fi
 
-sudo CUDA_HOME=/usr/local/cuda IS_BLACKWELL=1 --preserve-env=PATH,PIP_CACHE_DIR bash "$INSTALL_SCRIPT"
-
-# Fix ownership so actions/cache (running as the runner user) can read the files
-sudo chown -R "$(id -u):$(id -g)" "$PIP_CACHE_DIR" || true
+sudo CUDA_HOME=/usr/local/cuda IS_BLACKWELL=1 --preserve-env=PATH bash "$INSTALL_SCRIPT"
 
 echo "SGLang installation complete"
