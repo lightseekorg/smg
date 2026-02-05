@@ -14,17 +14,22 @@ SGLANG_DIR="${1:-sglang}"
 # Clone SGLang if not already present
 if [ ! -d "$SGLANG_DIR" ]; then
     echo "Cloning SGLang repository..."
-    git clone --depth 1 https://github.com/sgl-project/sglang.git "$SGLANG_DIR"
+    git clone https://github.com/sgl-project/sglang.git "$SGLANG_DIR"
 fi
 
-# Optionally check out the latest release tag
-SGLANG_USE_LATEST_TAG="${SGLANG_USE_LATEST_TAG:-0}"
-if [ "$SGLANG_USE_LATEST_TAG" = "1" ]; then
+# By default, check out the latest stable release tag.
+# Set SGLANG_USE_MAIN=1 to stay on the main branch instead.
+SGLANG_USE_MAIN="${SGLANG_USE_MAIN:-0}"
+if [ "$SGLANG_USE_MAIN" != "1" ]; then
     cd "$SGLANG_DIR"
     git fetch --tags
-    LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
-    echo "Checking out latest SGLang tag: $LATEST_TAG"
-    git checkout "$LATEST_TAG"
+    LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+    if [ -n "$LATEST_TAG" ]; then
+        echo "Checking out latest SGLang stable tag: $LATEST_TAG"
+        git checkout "$LATEST_TAG"
+    else
+        echo "WARNING: No stable tags found, staying on default branch"
+    fi
     cd -
 fi
 
