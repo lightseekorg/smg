@@ -114,7 +114,7 @@ def wait_for_server_health(host: str, port: int, timeout: int = 300) -> bool:
 
 def find_available_ports(base_port: int, count: int) -> list[int]:
     """Find consecutive available ports starting from base_port."""
-    available_ports = []
+    available_ports: list[int] = []
     current_port = base_port
 
     while len(available_ports) < count:
@@ -127,6 +127,8 @@ def find_available_ports(base_port: int, count: int) -> list[int]:
 
 def cleanup_processes(processes: list[mp.Process]):
     for process in processes:
+        if process.pid is None:
+            continue
         logger.info(f"Terminating process group {process.pid}")
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -137,7 +139,7 @@ def cleanup_processes(processes: list[mp.Process]):
     # Wait for processes to terminate
     for process in processes:
         process.join(timeout=5)
-        if process.is_alive():
+        if process.is_alive() and process.pid is not None:
             logger.warning(f"Process {process.pid} did not terminate gracefully, forcing kill")
             try:
                 os.killpg(process.pid, signal.SIGKILL)

@@ -970,7 +970,7 @@ class _TestToolChoiceBase:
     """Base class for tool_choice tests. Not collected by pytest (underscore prefix)."""
 
     # Subclasses should override this
-    FLAKY_TESTS = set()
+    FLAKY_TESTS: set[str] = set()
 
     def _is_flaky_test(self, test_name):
         """Check if the current test is marked as flaky for this class."""
@@ -1542,7 +1542,7 @@ class TestToolChoiceQwen(_TestToolChoiceBase):
     """Tests for tool_choice functionality with Qwen model."""
 
     # No flaky tests for Qwen
-    FLAKY_TESTS = set()
+    FLAKY_TESTS: set[str] = set()
 
 
 # =============================================================================

@@ -143,7 +143,7 @@ class TrtllmWorkerLauncher(WorkerLauncher):
         ]
 
 
-BACKEND_LAUNCHERS = {
+BACKEND_LAUNCHERS: dict[str, type[WorkerLauncher]] = {
     "sglang": SglangWorkerLauncher,
     "vllm": VllmWorkerLauncher,
     "trtllm": TrtllmWorkerLauncher,
@@ -196,8 +196,13 @@ def _grpc_health_check(host: str, port: int, timeout: float) -> bool:
                     return True
                 finally:
                     channel.close()
-            except Exception as e:
-                logger.debug("gRPC channel_ready fallback for %s:%d failed: %s", host, port, e)
+            except Exception as fallback_err:
+                logger.debug(
+                    "gRPC channel_ready fallback for %s:%d failed: %s",
+                    host,
+                    port,
+                    fallback_err,
+                )
                 return False
         logger.debug("gRPC health check for %s:%d failed: %s", host, port, e)
         return False

@@ -11,11 +11,11 @@ logger = logging.getLogger("router")
 try:
     from smg.router import Router
 except ImportError:
-    Router = None
+    Router = None  # type: ignore[assignment,misc]
     logger.warning("Rust Router is not installed")
 
 
-def launch_router(args: argparse.Namespace) -> Router | None:
+def launch_router(args: argparse.Namespace | RouterArgs) -> None:
     """
     Launch the SMG router with the configuration from parsed arguments.
 

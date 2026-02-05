@@ -8,6 +8,7 @@ import os
 import resource
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from multiprocessing.pool import ThreadPool
 from typing import Any
@@ -16,7 +17,7 @@ import httpx
 import jinja2
 import numpy as np
 import openai
-import requests
+import requests  # type: ignore[import-untyped]
 from openai import OpenAI
 from tqdm import tqdm
 
@@ -144,10 +145,10 @@ class ChatCompletionSampler(SamplerBase):
             try:
                 response = self.client.chat.completions.create(
                     model=self.model,
-                    messages=message_list,
+                    messages=message_list,  # type: ignore[arg-type]
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
-                    reasoning_effort=self.reasoning_effort,
+                    reasoning_effort=self.reasoning_effort,  # type: ignore[arg-type]
                     extra_body=self.extra_body,
                 )
                 return response.choices[0].message.content or ""
@@ -320,12 +321,12 @@ def aggregate_results(
     return EvalResult(
         score=final_metrics.pop("score", None),
         metrics=final_metrics,
-        htmls=htmls,
-        convos=convos,
+        htmls=htmls,  # type: ignore[arg-type]
+        convos=convos,  # type: ignore[arg-type]
     )
 
 
-def map_with_progress(f: callable, xs: list[Any], num_threads: int) -> list[Any]:
+def map_with_progress(f: Callable, xs: list[Any], num_threads: int) -> list[Any]:
     """Apply f to each element of xs, using a ThreadPool, and show progress."""
     # Use quiet progress bar that doesn't pollute logs
     if os.getenv("debug"):

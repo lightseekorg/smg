@@ -3,8 +3,8 @@ import warnings
 
 from setuptools import setup
 
-with_rust = os.environ.get("SMG_BUILD_WITH_RUST", None)
-with_rust = with_rust is None or (with_rust.lower() not in ["0", "false", "no"])
+_rust_env = os.environ.get("SMG_BUILD_WITH_RUST", None)
+with_rust = _rust_env is None or (_rust_env.lower() not in ["0", "false", "no"])
 
 rust_extensions = []
 if with_rust:

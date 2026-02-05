@@ -243,7 +243,7 @@ def genai_bench_runner():
             raise
 
         finally:
-            _cleanup_procs(kill_procs, drain_delay_sec)
+            _cleanup_procs(kill_procs or [], drain_delay_sec)
             if gpu_monitor:
                 gpu_monitor.stop(timeout=2)
 

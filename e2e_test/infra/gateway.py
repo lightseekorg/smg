@@ -272,6 +272,8 @@ class Gateway:
             # Regular mode: worker URLs
             if model_path is None:
                 raise ValueError("model_path is required for regular mode")
+            if worker_urls is None:
+                raise ValueError("worker_urls is required for regular mode")
             self.model_path = model_path
             self.pd_mode = False
             self.igw_mode = False

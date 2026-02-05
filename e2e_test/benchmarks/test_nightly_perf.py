@@ -94,7 +94,7 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, worker_count=1, **
 # backends: list of backends to test (default: ["http", "grpc"])
 # ---------------------------------------------------------------------------
 
-_NIGHTLY_MODELS = [
+_NIGHTLY_MODELS: list[tuple[str, str, int, list[str], dict]] = [
     ("llama-8b", "Llama8b", 8, ["http", "grpc"], {}),
     ("llama-1b", "Llama1b", 8, ["http", "grpc"], {}),
     ("qwen-7b", "Qwen7b", 8, ["http", "grpc"], {}),

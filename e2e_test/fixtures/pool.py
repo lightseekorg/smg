@@ -10,6 +10,7 @@ import atexit
 import logging
 import os
 import threading
+from collections.abc import Generator
 from typing import TYPE_CHECKING
 
 import pytest
@@ -167,7 +168,9 @@ def model_pool(request: pytest.FixtureRequest) -> ModelPool:
 
 
 @pytest.fixture
-def model_client(request: pytest.FixtureRequest, model_pool: ModelPool):
+def model_client(
+    request: pytest.FixtureRequest, model_pool: ModelPool
+) -> Generator[object, None, None]:
     """Get OpenAI client for the model specified by @pytest.mark.model().
 
     Usage:
@@ -205,7 +208,9 @@ def model_client(request: pytest.FixtureRequest, model_pool: ModelPool):
 
 
 @pytest.fixture
-def model_base_url(request: pytest.FixtureRequest, model_pool: ModelPool) -> str:
+def model_base_url(
+    request: pytest.FixtureRequest, model_pool: ModelPool
+) -> Generator[str, None, None]:
     """Get the base URL for the model specified by @pytest.mark.model().
 
     Usage:

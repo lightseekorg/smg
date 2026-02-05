@@ -500,7 +500,8 @@ class ModelPool:
             )
             if is_vllm() or is_trtllm():
                 spec = get_model_spec(model_id)
-                return self._launch_grpc_worker(
+                assert gpu_slot is not None
+                instance = self._launch_grpc_worker(
                     runtime=get_runtime(),
                     model_id=model_id,
                     model_spec=spec,
@@ -509,6 +510,8 @@ class ModelPool:
                     worker_type=worker_type,
                     instance_key=instance_key,
                 )
+                assert instance is not None
+                return instance
 
         spec = get_model_spec(model_id)
         model_path = spec["model"]
@@ -516,7 +519,7 @@ class ModelPool:
         features = spec.get("features", [])
 
         # Get port - use slot's port if available, otherwise find open port
-        port = gpu_slot.port if gpu_slot else get_open_port()
+        port = gpu_slot.port if gpu_slot and gpu_slot.port is not None else get_open_port()
 
         # Build environment
         env = os.environ.copy()
@@ -709,19 +712,19 @@ class ModelPool:
             )
             # Log stderr from failed workers for debugging
             for key in pending:
-                instance = self.instances.get(key)
-                if instance and instance.process.stderr:
+                inst = self.instances.get(key)
+                if inst and inst.process.stderr:
                     try:
                         import os
                         import select
 
                         # Use select for non-blocking read with short timeout
                         # to avoid hanging if worker is unresponsive
-                        ready, _, _ = select.select([instance.process.stderr], [], [], 0.1)
+                        ready, _, _ = select.select([inst.process.stderr], [], [], 0.1)
                         if ready:
                             # Use os.read with limited size instead of .read()
                             # which reads until EOF and can block if pipe stays open
-                            fd = instance.process.stderr.fileno()
+                            fd = inst.process.stderr.fileno()
                             stderr = os.read(fd, 65536)  # Read up to 64KB
                             if stderr:
                                 logger.error(
@@ -1190,6 +1193,7 @@ class ModelPool:
         model_path = model_spec["model"]
         tp_size = model_spec.get("tp", 1)
         port = gpu_slot.port
+        assert port is not None
 
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu_slot.cuda_visible_devices()

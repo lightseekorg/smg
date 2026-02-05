@@ -124,13 +124,13 @@ def run_eval(args: Any) -> dict:
 
     # Build metrics
     metrics = result.metrics.copy() if result.metrics else {}
-    metrics["score"] = result.score
+    metrics["score"] = result.score if result.score is not None else 0.0
     metrics["latency"] = latency
 
     logger.info(
         "%s eval complete: score=%.3f, latency=%.1fs, model=%s",
         eval_name,
-        result.score,
+        result.score if result.score is not None else 0.0,
         latency,
         sampler.model,
     )

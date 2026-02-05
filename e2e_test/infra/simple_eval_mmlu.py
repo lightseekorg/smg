@@ -103,7 +103,7 @@ class MMLUEval(Eval):
     def __call__(self, sampler: SamplerBase) -> EvalResult:
         def fn(row: dict) -> SingleEvalResult:
             prompt_messages = [
-                sampler._pack_message(content=format_multichoice_question(row), role="user")
+                sampler._pack_message(content=format_multichoice_question(row), role="user")  # type: ignore[attr-defined]
             ]
             response_text = sampler(prompt_messages)
             response_text = response_text or ""
