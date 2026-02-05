@@ -15,7 +15,7 @@ use super::{
     context::{RequestContext, SharedComponents},
     stages::{
         PipelineStage, RequestBuildingStage, RequestExecutionStage, ResponseProcessingStage,
-        ValidationStage, WorkerSelectionStage,
+        WorkerSelectionStage,
     },
 };
 use crate::protocols::messages::CreateMessageRequest;
@@ -23,11 +23,10 @@ use crate::protocols::messages::CreateMessageRequest;
 /// Messages API pipeline that processes requests through stages
 ///
 /// The pipeline executes stages in order:
-/// 1. Validation - Validate request fields
-/// 2. Worker Selection - Select appropriate worker
-/// 3. Request Building - Build HTTP request
-/// 4. Request Execution - Send request to worker
-/// 5. Response Processing - Parse response and record metrics
+/// 1. Worker Selection - Select appropriate worker
+/// 2. Request Building - Build HTTP request
+/// 3. Request Execution - Send request to worker
+/// 4. Response Processing - Parse response and record metrics
 pub(crate) struct MessagesPipeline {
     stages: Vec<Box<dyn PipelineStage>>,
 }
@@ -35,7 +34,6 @@ pub(crate) struct MessagesPipeline {
 impl MessagesPipeline {
     pub fn new(components: Arc<SharedComponents>) -> Self {
         let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(ValidationStage::new()),
             Box::new(WorkerSelectionStage::new(
                 components.worker_registry.clone(),
             )),

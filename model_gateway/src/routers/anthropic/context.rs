@@ -80,12 +80,6 @@ impl std::fmt::Debug for SharedComponents {
 // Processing State
 // ============================================================================
 
-#[derive(Debug, Clone)]
-pub(crate) struct ValidationOutput {
-    pub is_streaming: bool,
-    pub max_tokens: u32,
-}
-
 #[derive(Debug)]
 pub(crate) struct HttpRequestState {
     pub url: String,
@@ -100,7 +94,6 @@ pub(crate) struct ResponseState {
 
 #[derive(Debug, Default)]
 pub(crate) struct ProcessingState {
-    pub validation: Option<ValidationOutput>,
     pub worker: Option<Arc<dyn Worker>>,
     pub http_request: Option<HttpRequestState>,
     pub response: ResponseState,
