@@ -587,9 +587,8 @@ impl MeshController {
                                     }
                                 }
                                 StreamMessageType::SnapshotChunk => {
-                                    log::info!("[CLIENT-CONTROLLER] Entering SnapshotChunk handler");
                                     log::info!(
-                                        "[CLIENT-CONTROLLER-LINE582] Received snapshot chunk from {} (seq: {})",
+                                        "Received snapshot chunk from {} (seq: {})",
                                         peer_name,
                                         msg.sequence
                                     );
