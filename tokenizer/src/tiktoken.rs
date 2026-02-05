@@ -179,6 +179,10 @@ impl TokenizerTrait for TiktokenTokenizer {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn backend(&self) -> crate::traits::TokenizerBackend {
+        crate::traits::TokenizerBackend::Tiktoken
+    }
 }
 
 #[cfg(test)]

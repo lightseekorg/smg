@@ -350,6 +350,10 @@ impl TokenizerTrait for HuggingFaceTokenizer {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn backend(&self) -> crate::traits::TokenizerBackend {
+        crate::traits::TokenizerBackend::HuggingFace
+    }
 }
 
 #[cfg(test)]

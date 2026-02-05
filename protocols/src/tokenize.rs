@@ -161,6 +161,9 @@ pub struct TokenizerInfo {
     /// Source path or HuggingFace model ID
     pub source: String,
     pub vocab_size: usize,
+    pub chat_template_path: Option<String>,
+    pub backend: String,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Request schema for removing a tokenizer
