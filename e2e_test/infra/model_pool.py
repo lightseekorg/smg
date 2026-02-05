@@ -139,7 +139,7 @@ class ModelInstance:
         with self._ref_lock:
             self._ref_count += 1
             self.last_used = time.time()
-            logger.debug(
+            logger.warning(
                 "Acquired reference to %s (ref_count=%d)", self.key, self._ref_count
             )
 
@@ -151,7 +151,7 @@ class ModelInstance:
         with self._ref_lock:
             if self._ref_count > 0:
                 self._ref_count -= 1
-                logger.debug(
+                logger.warning(
                     "Released reference to %s (ref_count=%d)",
                     self.key,
                     self._ref_count,
@@ -868,11 +868,15 @@ class ModelPool:
             attempt += 1
 
             # Release lock while waiting so other tests can release workers
-            logger.info(
-                "All GPUs in use by other tests, waiting %.1fs for %s (attempt %d)...",
-                poll_interval,
+            # Log at warning level with instance snapshot for debugging GPU starvation
+            remaining = deadline - time.time()
+            logger.warning(
+                "GPU wait: need %s, all GPUs in use. attempt=%d "
+                "poll=%.1fs remaining=%.0fs",
                 model_id,
                 attempt,
+                poll_interval,
+                remaining,
             )
             time.sleep(poll_interval)
 
@@ -972,6 +976,31 @@ class ModelPool:
         if len(available) >= required_gpus:
             return  # Already have enough
 
+        # Log all instances and their ref counts for debugging GPU starvation
+        logger.warning(
+            "GPU eviction needed: require %d GPUs, %d available. "
+            "Instance snapshot (%d total):",
+            required_gpus,
+            len(available),
+            len(self.instances),
+        )
+        for dict_key, inst in list(self.instances.items()):
+            with inst._ref_lock:
+                ref_count = inst._ref_count
+            gpus = len(inst.gpu_slot.gpu_ids) if inst.gpu_slot else 0
+            logger.warning(
+                "  [%s] model=%s mode=%s worker_type=%s ref_count=%d "
+                "is_in_use=%s gpus=%d last_used=%.1f",
+                dict_key,
+                inst.model_id,
+                inst.mode.value,
+                inst.worker_type.value,
+                ref_count,
+                inst.is_in_use,
+                gpus,
+                inst.last_used,
+            )
+
         # Sort by last_used descending (MRU eviction) - evict most recently used first
         # Store (dict_key, instance) tuples to preserve the actual key for eviction
         # Note: Make a copy of items to avoid RuntimeError if dict is modified during iteration
@@ -979,8 +1008,12 @@ class ModelPool:
         for dict_key, inst in list(self.instances.items()):
             # Skip instances with active references (tests using them)
             if inst.is_in_use:
-                logger.debug(
-                    "Skipping eviction of %s - has active references", dict_key
+                with inst._ref_lock:
+                    rc = inst._ref_count
+                logger.warning(
+                    "Eviction skip: %s has active references (ref_count=%d)",
+                    dict_key,
+                    rc,
                 )
                 continue
             if exclude_worker_types is not None:
@@ -1002,15 +1035,35 @@ class ModelPool:
 
         evictable.sort(key=lambda x: x[1].last_used, reverse=True)
 
+        if not evictable:
+            logger.warning(
+                "No evictable instances found — all %d instances are in use or excluded",
+                len(self.instances),
+            )
+
         freed_gpus = len(available)
         for dict_key, inst in evictable:
             if freed_gpus >= required_gpus:
                 break
 
-            logger.info("Evicting model %s (MRU) to free GPUs", dict_key)
+            gpus_on_inst = len(inst.gpu_slot.gpu_ids) if inst.gpu_slot else 0
+            logger.warning(
+                "Evicting %s (MRU) to free %d GPU(s) (freed so far: %d/%d)",
+                dict_key,
+                gpus_on_inst,
+                freed_gpus,
+                required_gpus,
+            )
             self._evict_instance(dict_key)
             if inst.gpu_slot:
                 freed_gpus += len(inst.gpu_slot.gpu_ids)
+
+        logger.warning(
+            "Eviction complete: freed_gpus=%d, required=%d, sufficient=%s",
+            freed_gpus,
+            required_gpus,
+            freed_gpus >= required_gpus,
+        )
 
     def _ensure_gpu_available(self, model_id: str, mode: ConnectionMode) -> bool:
         """Ensure GPU is available for a model, evicting if needed.
@@ -1037,7 +1090,7 @@ class ModelPool:
 
         available = self.allocator.available_gpus()
         if len(available) < required_gpus:
-            logger.info(
+            logger.warning(
                 "Cannot launch %s: need %d GPUs, only %d available after eviction "
                 "(all workers in use by other tests)",
                 model_id,
@@ -1422,10 +1475,14 @@ class ModelPool:
             attempt += 1
 
             # Release lock while waiting so other tests can release workers
-            logger.info(
-                "All GPUs in use by other tests, waiting %.1fs for availability (attempt %d)...",
-                poll_interval,
+            remaining = deadline - time.time()
+            logger.warning(
+                "GPU wait (launch_workers): need workers=%s, all GPUs in use. "
+                "attempt=%d poll=%.1fs remaining=%.0fs",
+                [str(w) for w in workers],
                 attempt,
+                poll_interval,
+                remaining,
             )
             time.sleep(poll_interval)
 
