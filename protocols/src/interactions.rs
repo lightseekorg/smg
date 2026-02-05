@@ -659,9 +659,13 @@ pub struct InteractionsRequest {
     pub store: bool,
 }
 
-fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), validator::ValidationError> {
+fn validate_interactions_request(
+    req: &InteractionsRequest,
+) -> Result<(), validator::ValidationError> {
     if req.response_format.is_some() && req.response_mime_type.is_none() {
-        return Err(validator::ValidationError::new("response_mime_type_required"));
+        return Err(validator::ValidationError::new(
+            "response_mime_type_required",
+        ));
     }
     Ok(())
 }
@@ -840,4 +844,3 @@ pub struct InteractionsCancelParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_version: Option<String>,
 }
-
