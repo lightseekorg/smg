@@ -707,7 +707,7 @@ mod tests {
         let entry = registry.get_by_name("meta-model").unwrap();
 
         // Verify metadata
-        assert_eq!(entry.vocab_size, 0); // MockTokenizer default
+        assert_eq!(entry.vocab_size, 14); // MockTokenizer default populated with 14 tokens
         assert_eq!(entry.chat_template_path.as_deref(), chat_template);
         assert!(matches!(
             entry.backend,
