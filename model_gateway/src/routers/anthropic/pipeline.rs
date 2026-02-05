@@ -5,10 +5,7 @@
 
 use std::sync::Arc;
 
-use axum::{
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-};
+use axum::{http::HeaderMap, response::Response};
 use tracing::{debug, error, info};
 
 use super::{
@@ -18,7 +15,7 @@ use super::{
         WorkerSelectionStage,
     },
 };
-use crate::protocols::messages::CreateMessageRequest;
+use crate::{protocols::messages::CreateMessageRequest, routers::error};
 
 /// Messages API pipeline that processes requests through stages
 ///
@@ -95,11 +92,10 @@ impl MessagesPipeline {
         }
 
         error!("Pipeline completed without producing a response");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
+        error::internal_error(
+            "no_response",
             "Internal error: pipeline completed without response",
         )
-            .into_response()
     }
 }
 

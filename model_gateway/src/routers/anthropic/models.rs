@@ -3,7 +3,6 @@
 use axum::{
     body::Body,
     extract::Request,
-    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use tracing::{debug, warn};
@@ -15,6 +14,7 @@ use super::{
     },
     AnthropicRouter,
 };
+use crate::routers::error;
 
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
 
@@ -28,11 +28,7 @@ pub async fn handle_list_models(router: &AnthropicRouter, req: Request<Body>) ->
 
     if healthy_workers.is_empty() {
         warn!("No healthy Anthropic workers available for /v1/models request");
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "No healthy Anthropic workers available",
-        )
-            .into_response();
+        return error::service_unavailable("no_workers", "No healthy Anthropic workers available");
     }
 
     let worker = &healthy_workers[0];
@@ -60,11 +56,10 @@ pub async fn handle_list_models(router: &AnthropicRouter, req: Request<Body>) ->
                         "Response content-length too large: {} bytes (max {})",
                         content_length, MAX_RESPONSE_SIZE
                     );
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
+                    return error::internal_error(
+                        "response_too_large",
                         "Response body exceeds maximum size",
-                    )
-                        .into_response();
+                    );
                 }
             }
 
@@ -73,29 +68,23 @@ pub async fn handle_list_models(router: &AnthropicRouter, req: Request<Body>) ->
                 ReadBodyResult::Ok(body) => (status, body).into_response(),
                 ReadBodyResult::TooLarge => {
                     warn!("Response body too large (max {} bytes)", MAX_RESPONSE_SIZE);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
+                    error::internal_error(
+                        "response_too_large",
                         "Response body exceeds maximum size",
                     )
-                        .into_response()
                 }
                 ReadBodyResult::Error(e) => {
                     warn!("Failed to read response body: {}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to read response: {}", e),
-                    )
-                        .into_response()
+                    error::internal_error("read_error", format!("Failed to read response: {}", e))
                 }
             }
         }
         Err(e) => {
             warn!("Failed to forward list models request: {}", e);
-            (
-                StatusCode::BAD_GATEWAY,
+            error::bad_gateway(
+                "forward_failed",
                 format!("Failed to forward request: {}", e),
             )
-                .into_response()
         }
     }
 }

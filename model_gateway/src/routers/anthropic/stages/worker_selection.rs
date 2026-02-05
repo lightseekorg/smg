@@ -11,13 +11,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::{http::StatusCode, response::IntoResponse};
 use tracing::{debug, warn};
 
 use super::{PipelineStage, StageResult};
 use crate::{
     core::WorkerRegistry,
-    routers::anthropic::{context::RequestContext, utils::find_best_worker_for_model},
+    routers::{
+        anthropic::{context::RequestContext, utils::find_best_worker_for_model},
+        error,
+    },
 };
 
 /// Worker selection stage
@@ -55,11 +57,10 @@ impl PipelineStage for WorkerSelectionStage {
             }
             None => {
                 warn!(model = %model_id, "No healthy workers available for model");
-                Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
+                Err(error::service_unavailable(
+                    "no_workers",
                     format!("No healthy workers available for model '{}'", model_id),
-                )
-                    .into_response())
+                ))
             }
         }
     }

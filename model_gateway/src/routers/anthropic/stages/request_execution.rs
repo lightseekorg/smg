@@ -11,11 +11,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::{http::StatusCode, response::IntoResponse};
 use tracing::{debug, error, warn};
 
 use super::{PipelineStage, StageResult};
-use crate::routers::anthropic::context::RequestContext;
+use crate::routers::{anthropic::context::RequestContext, error};
 
 /// Request execution stage
 pub(crate) struct RequestExecutionStage {
@@ -39,21 +38,13 @@ impl PipelineStage for RequestExecutionStage {
         // Ensure we have HTTP request state
         let http_request = ctx.state.http_request.as_ref().ok_or_else(|| {
             error!("Request execution stage called without HTTP request state");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal error: no HTTP request built",
-            )
-                .into_response()
+            error::internal_error("no_http_request", "Internal error: no HTTP request built")
         })?;
 
         // Get worker for circuit breaker recording
         let worker = ctx.state.worker.as_ref().ok_or_else(|| {
             error!("Request execution stage called without worker");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal error: no worker selected",
-            )
-                .into_response()
+            error::internal_error("no_worker", "Internal error: no worker selected")
         })?;
 
         let url = &http_request.url;
@@ -108,19 +99,23 @@ impl PipelineStage for RequestExecutionStage {
                 // Record circuit breaker failure
                 worker.record_outcome(false);
 
-                // Determine error type
-                let (status, message) = if e.is_timeout() {
-                    (
-                        StatusCode::GATEWAY_TIMEOUT,
+                // Determine error type and return appropriate response
+                if e.is_timeout() {
+                    Err(error::gateway_timeout(
+                        "timeout",
                         format!("Request timeout: {}", e),
-                    )
+                    ))
                 } else if e.is_connect() {
-                    (StatusCode::BAD_GATEWAY, format!("Connection failed: {}", e))
+                    Err(error::bad_gateway(
+                        "connection_failed",
+                        format!("Connection failed: {}", e),
+                    ))
                 } else {
-                    (StatusCode::BAD_GATEWAY, format!("Request failed: {}", e))
-                };
-
-                Err((status, message).into_response())
+                    Err(error::bad_gateway(
+                        "request_failed",
+                        format!("Request failed: {}", e),
+                    ))
+                }
             }
         }
     }

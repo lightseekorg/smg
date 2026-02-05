@@ -27,9 +27,12 @@ use super::{PipelineStage, StageResult};
 use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     protocols::messages::Message,
-    routers::anthropic::{
-        context::RequestContext,
-        utils::{read_response_body_limited, ReadBodyResult},
+    routers::{
+        anthropic::{
+            context::RequestContext,
+            utils::{read_response_body_limited, ReadBodyResult},
+        },
+        error,
     },
 };
 
@@ -289,7 +292,10 @@ impl ResponseProcessingStage {
                     "parse_error",
                 );
 
-                Err((StatusCode::BAD_GATEWAY, "Invalid response from backend").into_response())
+                Err(error::bad_gateway(
+                    "parse_error",
+                    "Invalid response from backend",
+                ))
             }
         };
 

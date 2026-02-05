@@ -5,16 +5,16 @@
 //! - Propagates relevant headers
 
 use async_trait::async_trait;
-use axum::{
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-};
+use axum::http::HeaderMap;
 use tracing::{debug, error};
 
 use super::{PipelineStage, StageResult};
-use crate::routers::anthropic::{
-    context::{HttpRequestState, RequestContext},
-    utils::should_propagate_header,
+use crate::routers::{
+    anthropic::{
+        context::{HttpRequestState, RequestContext},
+        utils::should_propagate_header,
+    },
+    error,
 };
 
 /// Request building stage
@@ -39,11 +39,7 @@ impl PipelineStage for RequestBuildingStage {
         // Ensure we have a worker selected
         let worker = ctx.state.worker.as_ref().ok_or_else(|| {
             error!("Request building stage called without worker selection");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal error: no worker selected",
-            )
-                .into_response()
+            error::internal_error("no_worker", "Internal error: no worker selected")
         })?;
 
         // Build target URL
