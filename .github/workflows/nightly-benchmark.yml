@@ -51,111 +51,107 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # Single-worker: all models in one pytest session (model_pool manages GPUs)
+  # Single-worker: one model per job for better isolation and debugging
   # ---------------------------------------------------------------------------
 
-  single-sglang:
+  single-worker:
+    name: "${{ matrix.model.id }} / single-${{ matrix.variant.id }}"
     needs: build-wheel
-    name: "single-worker / sglang (http+grpc)"
-    if: ${{ !cancelled() && (github.event.inputs.runtime == '' || github.event.inputs.runtime == 'all' || github.event.inputs.runtime == 'sglang') }}
+    if: ${{ !cancelled() }}
     runs-on: 8-gpu-h200
     timeout-minutes: 1440
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        model:
+          - { id: llama-8b,    test_class: TestNightlyLlama8bSingle }
+          - { id: llama-1b,    test_class: TestNightlyLlama1bSingle }
+          - { id: qwen-7b,     test_class: TestNightlyQwen7bSingle }
+          - { id: qwen-14b,    test_class: TestNightlyQwen14bSingle }
+          - { id: deepseek-7b, test_class: TestNightlyDeepseek7bSingle }
+          - { id: qwen-30b,    test_class: TestNightlyQwen30bSingle }
+          - { id: mistral-7b,  test_class: TestNightlyMistral7bSingle }
+          - { id: gpt-oss,     test_class: TestNightlyGptOssSingle }
+          - { id: llama-4-maverick-17b, test_class: TestNightlyLlama4MaverickSingle }
+        variant:
+          - { id: sglang, runtime: sglang, grpc_only: "false" }
+          - { id: vllm,   runtime: vllm,   grpc_only: "true" }
+
     steps:
+      - name: Check filters
+        id: filter
+        run: |
+          MODELS="${{ github.event.inputs.models || 'all' }}"
+          RUNTIME="${{ github.event.inputs.runtime || 'all' }}"
+          SKIP="false"
+          if [ "$MODELS" != "all" ] && ! echo ",$MODELS," | grep -q ",${{ matrix.model.id }},"; then
+            SKIP="true"
+          fi
+          if [ "$RUNTIME" != "all" ] && [ "$RUNTIME" != "${{ matrix.variant.id }}" ]; then
+            SKIP="true"
+          fi
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+
       - name: Checkout code
+        if: steps.filter.outputs.skip != 'true'
         uses: actions/checkout@v6
 
       - name: Install inference backend
+        if: steps.filter.outputs.skip != 'true'
         env:
           SGLANG_USE_LATEST_TAG: "1"
         run: |
           bash scripts/ci_setup_python_venv.sh
           source .venv/bin/activate
-          bash scripts/ci_install_sglang.sh
+          if [ "${{ matrix.variant.runtime }}" == "vllm" ]; then
+            bash scripts/ci_install_vllm.sh
+          else
+            bash scripts/ci_install_sglang.sh
+          fi
 
       - name: Download wheel artifact
+        if: steps.filter.outputs.skip != 'true'
         uses: actions/download-artifact@v7
         with:
           name: smg-wheel
           path: wheel/
 
       - name: Install wheel and test dependencies
+        if: steps.filter.outputs.skip != 'true'
         run: |
           pip uninstall -y smg || true
           pip install wheel/*.whl
           bash scripts/ci_install_e2e_deps.sh genai-bench
 
-      - name: Run benchmarks
+      - name: Run benchmark
+        if: steps.filter.outputs.skip != 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          E2E_RUNTIME=sglang \
+
+          K_FILTER="${{ matrix.model.test_class }}"
+          if [ "${{ matrix.variant.grpc_only }}" == "true" ]; then
+            K_FILTER="${{ matrix.model.test_class }} and grpc"
+          fi
+
+          E2E_RUNTIME=${{ matrix.variant.runtime }} \
           ROUTER_LOCAL_MODEL_PATH="/raid/models" \
             pytest e2e_test/benchmarks/test_nightly_perf.py \
-              -k "Single" \
+              -k "$K_FILTER" \
               -s -vv -o log_cli=true --log-cli-level=INFO
 
       - name: Upload benchmark results
-        if: always()
+        if: always() && steps.filter.outputs.skip != 'true'
         uses: actions/upload-artifact@v6
         with:
-          name: nightly-single-sglang-${{ github.run_id }}
+          name: nightly-${{ matrix.model.id }}-single-${{ matrix.variant.id }}-${{ github.run_id }}
           path: nightly_*/
           retention-days: 90
 
       - name: Cleanup
-        if: always()
-        run: bash scripts/ci_killall_sglang.sh || true
-
-  single-vllm:
-    name: "single-worker / vllm (grpc)"
-    needs: [build-wheel, single-sglang]
-    if: ${{ !cancelled() && (github.event.inputs.runtime == '' || github.event.inputs.runtime == 'all' || github.event.inputs.runtime == 'vllm') }}
-    runs-on: 8-gpu-h200
-    timeout-minutes: 1440
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Install inference backend
-        run: |
-          bash scripts/ci_setup_python_venv.sh
-          source .venv/bin/activate
-          bash scripts/ci_install_vllm.sh
-
-      - name: Download wheel artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: smg-wheel
-          path: wheel/
-
-      - name: Install wheel and test dependencies
-        run: |
-          pip uninstall -y smg || true
-          pip install wheel/*.whl
-          bash scripts/ci_install_e2e_deps.sh genai-bench
-
-      - name: Run benchmarks
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          E2E_RUNTIME=vllm \
-          ROUTER_LOCAL_MODEL_PATH="/raid/models" \
-            pytest e2e_test/benchmarks/test_nightly_perf.py \
-              -k "Single and grpc" \
-              -s -vv -o log_cli=true --log-cli-level=INFO
-
-      - name: Upload benchmark results
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: nightly-single-vllm-${{ github.run_id }}
-          path: nightly_*/
-          retention-days: 90
-
-      - name: Cleanup
-        if: always()
+        if: always() && steps.filter.outputs.skip != 'true'
         run: bash scripts/ci_killall_sglang.sh || true
 
   # ---------------------------------------------------------------------------
@@ -164,7 +160,7 @@ jobs:
 
   multi-worker:
     name: "${{ matrix.model.id }} / multi-${{ matrix.variant.id }}"
-    needs: [build-wheel, single-sglang, single-vllm]
+    needs: [build-wheel, single-worker]
     if: ${{ !cancelled() }}
     runs-on: 8-gpu-h200
     timeout-minutes: 1440
@@ -267,7 +263,7 @@ jobs:
   # ---------------------------------------------------------------------------
 
   summarize-benchmarks:
-    needs: [single-sglang, single-vllm, multi-worker]
+    needs: [single-worker, multi-worker]
     runs-on: ubuntu-latest
     if: always()
     permissions:
