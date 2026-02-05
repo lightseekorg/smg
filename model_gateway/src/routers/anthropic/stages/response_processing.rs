@@ -80,7 +80,7 @@ impl PipelineStage for ResponseProcessingStage {
         );
 
         // Get start time for duration calculation
-        let start_time = ctx.start_time();
+        let start_time = ctx.start_time;
 
         if is_streaming {
             // For streaming, pass worker to stream so load is decremented when done
@@ -112,7 +112,7 @@ impl ResponseProcessingStage {
         &self,
         response: reqwest::Response,
         model_id: &str,
-        start_time: Option<std::time::Instant>,
+        start_time: std::time::Instant,
         worker: Option<Arc<dyn Worker>>,
     ) -> StageResult {
         let status = response.status();
@@ -149,7 +149,7 @@ impl ResponseProcessingStage {
         &self,
         response: reqwest::Response,
         model_id: &str,
-        start_time: Option<std::time::Instant>,
+        start_time: std::time::Instant,
         worker: Option<Arc<dyn Worker>>,
     ) -> StageResult {
         let status = response.status();
@@ -228,7 +228,7 @@ impl ResponseProcessingStage {
         &self,
         response: reqwest::Response,
         model_id: &str,
-        start_time: Option<std::time::Instant>,
+        start_time: std::time::Instant,
         worker: Option<Arc<dyn Worker>>,
     ) -> StageResult {
         // Parse JSON response
@@ -292,7 +292,7 @@ impl ResponseProcessingStage {
         &self,
         response: reqwest::Response,
         model_id: &str,
-        start_time: Option<std::time::Instant>,
+        start_time: std::time::Instant,
         worker: Option<Arc<dyn Worker>>,
     ) -> StageResult {
         let status = response.status();
@@ -343,16 +343,14 @@ impl ResponseProcessingStage {
         }
 
         // Record duration metric
-        if let Some(start) = start_time {
-            Metrics::record_router_duration(
-                metrics_labels::ROUTER_HTTP,
-                metrics_labels::BACKEND_EXTERNAL,
-                metrics_labels::CONNECTION_HTTP,
-                model_id,
-                "messages",
-                start.elapsed(),
-            );
-        }
+        Metrics::record_router_duration(
+            metrics_labels::ROUTER_HTTP,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            "messages",
+            start_time.elapsed(),
+        );
 
         // Record error metric
         Metrics::record_router_error(
@@ -378,19 +376,17 @@ impl ResponseProcessingStage {
         &self,
         model_id: &str,
         message: &Message,
-        start_time: Option<std::time::Instant>,
+        start_time: std::time::Instant,
     ) {
         // Record duration
-        if let Some(start) = start_time {
-            Metrics::record_router_duration(
-                metrics_labels::ROUTER_HTTP,
-                metrics_labels::BACKEND_EXTERNAL,
-                metrics_labels::CONNECTION_HTTP,
-                model_id,
-                "messages",
-                start.elapsed(),
-            );
-        }
+        Metrics::record_router_duration(
+            metrics_labels::ROUTER_HTTP,
+            metrics_labels::BACKEND_EXTERNAL,
+            metrics_labels::CONNECTION_HTTP,
+            model_id,
+            "messages",
+            start_time.elapsed(),
+        );
 
         // Record token usage
         Metrics::record_router_tokens(

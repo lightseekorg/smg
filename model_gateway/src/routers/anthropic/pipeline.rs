@@ -14,8 +14,8 @@ use tracing::{debug, error, info};
 use super::{
     context::{RequestContext, SharedComponents},
     stages::{
-        DispatchMetadataStage, PipelineStage, RequestBuildingStage, RequestExecutionStage,
-        ResponseProcessingStage, ValidationStage, WorkerSelectionStage,
+        PipelineStage, RequestBuildingStage, RequestExecutionStage, ResponseProcessingStage,
+        ValidationStage, WorkerSelectionStage,
     },
 };
 use crate::protocols::messages::CreateMessageRequest;
@@ -26,9 +26,8 @@ use crate::protocols::messages::CreateMessageRequest;
 /// 1. Validation - Validate request fields
 /// 2. Worker Selection - Select appropriate worker
 /// 3. Request Building - Build HTTP request
-/// 4. Dispatch Metadata - Generate request ID and timestamps
-/// 5. Request Execution - Send request to worker
-/// 6. Response Processing - Parse response and record metrics
+/// 4. Request Execution - Send request to worker
+/// 5. Response Processing - Parse response and record metrics
 pub(crate) struct MessagesPipeline {
     stages: Vec<Box<dyn PipelineStage>>,
 }
@@ -41,7 +40,6 @@ impl MessagesPipeline {
                 components.worker_registry.clone(),
             )),
             Box::new(RequestBuildingStage::new()),
-            Box::new(DispatchMetadataStage::new()),
             Box::new(RequestExecutionStage::new(
                 components.http_client.clone(),
                 components.request_timeout,

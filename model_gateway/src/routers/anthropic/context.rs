@@ -92,22 +92,6 @@ pub(crate) struct HttpRequestState {
     pub headers: HeaderMap,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct DispatchMetadata {
-    pub created: Instant,
-    pub streaming: bool,
-}
-
-impl DispatchMetadata {
-    /// Create new dispatch metadata
-    pub fn new(streaming: bool) -> Self {
-        Self {
-            created: Instant::now(),
-            streaming,
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct ResponseState {
     pub worker_response: Option<reqwest::Response>,
@@ -119,7 +103,6 @@ pub(crate) struct ProcessingState {
     pub validation: Option<ValidationOutput>,
     pub worker: Option<Arc<dyn Worker>>,
     pub http_request: Option<HttpRequestState>,
-    pub dispatch: Option<DispatchMetadata>,
     pub response: ResponseState,
 }
 
@@ -131,6 +114,8 @@ pub(crate) struct ProcessingState {
 pub(crate) struct RequestContext {
     pub input: RequestInput,
     pub state: ProcessingState,
+    /// Timestamp when request processing started (for metrics)
+    pub start_time: Instant,
 }
 
 impl RequestContext {
@@ -143,15 +128,12 @@ impl RequestContext {
         Self {
             input: RequestInput::new(request, headers, model_id),
             state: ProcessingState::default(),
+            start_time: Instant::now(),
         }
     }
 
     pub fn is_streaming(&self) -> bool {
         self.input.request.stream.unwrap_or(false)
-    }
-
-    pub fn start_time(&self) -> Option<Instant> {
-        self.state.dispatch.as_ref().map(|d| d.created)
     }
 }
 
@@ -161,7 +143,6 @@ impl std::fmt::Debug for RequestContext {
             .field("model_id", &self.input.model_id)
             .field("is_streaming", &self.is_streaming())
             .field("has_worker", &self.state.worker.is_some())
-            .field("has_dispatch", &self.state.dispatch.is_some())
             .finish()
     }
 }

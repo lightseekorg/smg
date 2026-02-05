@@ -9,11 +9,9 @@
 //! 1. **Validation** - Validate request fields and extract model ID
 //! 2. **Worker Selection** - Select appropriate worker for the request
 //! 3. **Request Building** - Build HTTP request for worker
-//! 4. **Dispatch Metadata** - Generate request ID and timestamps
-//! 5. **Request Execution** - Send request to worker
-//! 6. **Response Processing** - Parse response and record metrics
+//! 4. **Request Execution** - Send request to worker
+//! 5. **Response Processing** - Parse response and record metrics
 
-mod dispatch_metadata;
 mod request_building;
 mod request_execution;
 mod response_processing;
@@ -22,7 +20,6 @@ mod worker_selection;
 
 use async_trait::async_trait;
 use axum::response::Response;
-pub(crate) use dispatch_metadata::DispatchMetadataStage;
 pub(crate) use request_building::RequestBuildingStage;
 pub(crate) use request_execution::RequestExecutionStage;
 pub(crate) use response_processing::ResponseProcessingStage;
@@ -70,7 +67,7 @@ mod tests {
         let validation = ValidationStage::new();
         assert_eq!(validation.name(), "validation");
 
-        let dispatch = DispatchMetadataStage::new();
-        assert_eq!(dispatch.name(), "dispatch_metadata");
+        let request_building = RequestBuildingStage::new();
+        assert_eq!(request_building.name(), "request_building");
     }
 }
