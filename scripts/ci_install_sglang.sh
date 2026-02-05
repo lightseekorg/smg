@@ -62,6 +62,6 @@ fi
 sudo CUDA_HOME=/usr/local/cuda IS_BLACKWELL=1 --preserve-env=PATH,PIP_CACHE_DIR bash "$INSTALL_SCRIPT"
 
 # Fix ownership so actions/cache (running as the runner user) can read the files
-sudo chown -R "$(id -u):$(id -g)" "$PIP_CACHE_DIR" 2>/dev/null || true
+sudo chown -R "$(id -u):$(id -g)" "$PIP_CACHE_DIR" || true
 
 echo "SGLang installation complete"
