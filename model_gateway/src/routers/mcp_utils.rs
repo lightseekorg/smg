@@ -298,7 +298,22 @@ mod tests {
         }
     }
 
-    /// Create a test orchestrator with a built-in server configuration
+    /// Creates a test McpOrchestrator configured with a built-in WebSearchPreview server.
+    ///
+    /// The returned orchestrator is built from a configuration containing a single server
+    /// named "search-server" configured as a built-in WebSearchPreview tool. Initialization
+    /// may attempt to connect to the configured transport and can fail to establish a network
+    /// connection, but the orchestrator object with its configuration is still returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// let orch = create_test_orchestrator_with_builtin().await;
+    /// // Use `orch` in tests; it is an Arc<McpOrchestrator> configured for the builtin server.
+    /// assert!(std::sync::Arc::strong_count(&orch) >= 1);
+    /// # });
+    /// ```
     async fn create_test_orchestrator_with_builtin() -> Arc<McpOrchestrator> {
         let mut tools_config = HashMap::new();
         tools_config.insert(
@@ -335,7 +350,18 @@ mod tests {
         Arc::new(McpOrchestrator::new(config).await.unwrap())
     }
 
-    /// Create a test orchestrator without built-in server configuration
+    /// Creates an McpOrchestrator configured for tests with no servers or built-in tool configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #[tokio::test]
+    /// async fn uses_orchestrator_no_builtin() {
+    ///     let orch = create_test_orchestrator_no_builtin().await;
+    ///     // orchestrator created and wrapped in Arc
+    ///     assert!(std::sync::Arc::strong_count(&orch) >= 1);
+    /// }
+    /// ```
     async fn create_test_orchestrator_no_builtin() -> Arc<McpOrchestrator> {
         let config = McpConfig {
             servers: vec![],

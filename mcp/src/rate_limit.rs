@@ -20,6 +20,18 @@ pub struct RateLimits {
 }
 
 impl Default for RateLimits {
+    /// Creates default `RateLimits` with common sensible caps.
+    ///
+    /// Defaults: 60 calls per minute, 1000 calls per hour, and 10 concurrent permits.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let d = RateLimits::default();
+    /// assert_eq!(d.max_calls_per_minute, Some(60));
+    /// assert_eq!(d.max_calls_per_hour, Some(1000));
+    /// assert_eq!(d.max_concurrent, Some(10));
+    /// ```
     fn default() -> Self {
         Self {
             max_calls_per_minute: Some(60),
@@ -37,7 +49,19 @@ struct CallWindow {
 }
 
 impl CallWindow {
-    /// Records a new call at the current timestamp.
+    /// Records a call at the current instant and prunes expired entries from the sliding windows.
+    ///
+    /// This appends the current `Instant` to both the minute and hour call lists, then removes
+    /// timestamps older than 60 seconds for the minute window and 3600 seconds for the hour window.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut w = CallWindow::default();
+    /// w.record();
+    /// assert!(w.calls_per_minute() >= 1);
+    /// assert!(w.calls_per_hour() >= 1);
+    /// ```
     fn record(&mut self) {
         let now = Instant::now();
         self.minute_calls.push(now);
@@ -45,7 +69,21 @@ impl CallWindow {
         self.cleanup();
     }
 
-    /// Removes expired timestamps from the windows.
+    /// Removes timestamps that fall outside the sliding windows.
+    ///
+    /// Cleans `minute_calls` by removing entries older than 60 seconds and
+    /// `hour_calls` by removing entries older than 3600 seconds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut w = CallWindow::default();
+    /// w.record(); // adds a timestamp to both minute and hour windows
+    /// // cleanup is safe to call and will keep recent entries
+    /// w.cleanup();
+    /// assert!(w.calls_per_minute() >= 1);
+    /// assert!(w.calls_per_hour() >= 1);
+    /// ```
     fn cleanup(&mut self) {
         let now = Instant::now();
         let minute_ago = now - Duration::from_secs(60);
@@ -55,10 +93,28 @@ impl CallWindow {
         self.hour_calls.retain(|&t| t > hour_ago);
     }
 
+    /// Number of calls recorded within the last 60 seconds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut w = CallWindow::default();
+    /// w.record();
+    /// assert_eq!(w.calls_per_minute(), 1);
+    /// ```
     fn calls_per_minute(&self) -> usize {
         self.minute_calls.len()
     }
 
+    /// Number of recorded calls within the last hour.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut w = CallWindow::default();
+    /// w.record();
+    /// assert_eq!(w.calls_per_hour(), 1);
+    /// ```
     fn calls_per_hour(&self) -> usize {
         self.hour_calls.len()
     }
@@ -75,6 +131,19 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
+    /// Creates a new RateLimiter configured with the provided default limits.
+    ///
+    /// The returned RateLimiter starts with empty per-tenant and per-tool windows
+    /// and no configured semaphores; `defaults` are used when a tenant's own limits
+    /// are not provided.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let defaults = crate::rate_limit::RateLimits::default();
+    /// let limiter = crate::rate_limit::RateLimiter::new(defaults);
+    /// // new limiter should be usable for checks/records (no panics)
+    /// ```
     pub fn new(defaults: RateLimits) -> Self {
         Self {
             tenant_calls: DashMap::new(),
@@ -84,8 +153,26 @@ impl RateLimiter {
         }
     }
 
-    /// Checks if a call is allowed under current rate limits.
-    /// Priority: Tenant-specific limits > Default limits.
+    /// Determines whether a call is permitted under the effective rate limits for the given tenant and tool.
+    ///
+    /// The function uses the tenant-specific limits from `ctx` when present, otherwise falls back to the limiter's defaults.
+    /// It enforces tenant-wide minute/hour limits first, then per-tenant-per-tool minute/hour limits. If any applicable
+    /// limit is exceeded, the call is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(McpError::RateLimitExceeded(_))` when a tenant-wide or tool-specific minute or hour limit has been reached;
+    /// the error message identifies which limit (tenant/tool and minute/hour) was exceeded.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let limiter = RateLimiter::new(RateLimits::default());
+    /// let ctx = TenantContext::default();
+    /// let tool = QualifiedToolName::from("example-tool");
+    /// // Allowed call
+    /// assert!(limiter.check(&ctx, &tool).is_ok());
+    /// ```
     pub fn check(&self, ctx: &TenantContext, tool: &QualifiedToolName) -> McpResult<()> {
         let limits = ctx.limits.unwrap_or(self.defaults);
 
@@ -150,7 +237,33 @@ impl RateLimiter {
             .record();
     }
 
-    /// Acquires a permit for concurrent execution.
+    /// Acquire a per-tenant concurrency permit according to the tenant's configured limits.
+    ///
+    /// Uses the tenant and limits from `ctx` (falling back to the limiter's defaults) to determine
+    /// the maximum concurrent permits for that tenant, creating or updating a per-tenant semaphore as needed.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(OwnedSemaphorePermit)` when a permit was successfully acquired, `Err(McpError::RateLimitExceeded)` if the semaphore is closed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use tokio::sync::Semaphore;
+    /// # use tokio::runtime::Runtime;
+    /// # async fn _example() {
+    /// // Setup (pseudo-types; replace with actual TenantContext, RateLimits, and RateLimiter)
+    /// // let defaults = RateLimits::default();
+    /// // let limiter = RateLimiter::new(defaults);
+    /// // let ctx = TenantContext::for_tenant(...);
+    ///
+    /// // Acquire a permit
+    /// // let permit = limiter.acquire_concurrent_permit(&ctx).await.unwrap();
+    /// // // permit is held until dropped
+    /// # }
+    /// # let _ = Runtime::new().unwrap().block_on(_example());
+    /// ```
     pub async fn acquire_concurrent_permit(
         &self,
         ctx: &TenantContext,

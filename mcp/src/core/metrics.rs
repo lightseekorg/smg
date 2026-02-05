@@ -31,7 +31,16 @@ pub struct McpMetrics {
 }
 
 impl McpMetrics {
-    /// Create a new metrics instance.
+    /// Creates a new McpMetrics with all counters set to zero and an empty per-tool latency map.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let metrics = McpMetrics::new();
+    /// let snapshot = metrics.snapshot();
+    /// assert_eq!(snapshot.total_calls, 0);
+    /// assert_eq!(snapshot.rate_limited_calls, 0);
+    /// ```
     pub fn new() -> Self {
         Self {
             total_calls: AtomicU64::new(0),
@@ -96,17 +105,48 @@ impl McpMetrics {
         self.active_connections.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record a connection closed.
+    /// Decrements the active connection count.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let metrics = McpMetrics::new();
+    /// metrics.record_connection_opened();
+    /// metrics.record_connection_closed();
+    /// let snapshot = metrics.snapshot();
+    /// assert_eq!(snapshot.active_connections, 0);
+    /// ```
     pub fn record_connection_closed(&self) {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Record a rate limit hit.
+    /// Increments the counter for calls that were rate limited.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let metrics = McpMetrics::new();
+    /// assert_eq!(metrics.snapshot().rate_limited_calls, 0);
+    /// metrics.record_rate_limited();
+    /// assert_eq!(metrics.snapshot().rate_limited_calls, 1);
+    /// ```
     pub fn record_rate_limited(&self) {
         self.rate_limited_calls.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Get a snapshot of current metrics.
+    /// Produces a snapshot of all current top-level MCP metrics.
+    ///
+    /// The snapshot captures current values for call, approval, connection,
+    /// execution, and rate-limiting counters as observed at the time of the call.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let metrics = McpMetrics::new();
+    /// let snapshot = metrics.snapshot();
+    /// assert_eq!(snapshot.total_calls, 0);
+    /// assert_eq!(snapshot.rate_limited_calls, 0);
+    /// ```
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
             total_calls: self.total_calls.load(Ordering::Relaxed),
@@ -135,7 +175,29 @@ impl McpMetrics {
             .collect()
     }
 
-    /// Reset all metrics to zero.
+    /// Reset accumulated top-level metrics and clear per-tool latency data.
+    ///
+    /// This sets the following counters to zero: `total_calls`, `successful_calls`,
+    /// `failed_calls`, `approvals_requested`, `approvals_granted`, `approvals_denied`,
+    /// `connection_errors`, and `rate_limited_calls`. It also clears `tool_latencies`.
+    /// It does not modify `active_connections` or `active_executions`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let metrics = McpMetrics::new();
+    /// metrics.record_call_start(&"tool".into());
+    /// metrics.record_approval_requested();
+    /// metrics.record_rate_limited();
+    ///
+    /// metrics.reset();
+    ///
+    /// let snap = metrics.snapshot();
+    /// assert_eq!(snap.total_calls, 0);
+    /// assert_eq!(snap.approvals_requested, 0);
+    /// assert_eq!(snap.rate_limited_calls, 0);
+    /// // active connections/executions are intentionally unchanged by reset
+    /// ```
     pub fn reset(&self) {
         self.total_calls.store(0, Ordering::Relaxed);
         self.successful_calls.store(0, Ordering::Relaxed);

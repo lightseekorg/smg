@@ -288,9 +288,23 @@ pub struct McpOrchestrator {
 }
 
 impl McpOrchestrator {
-    /// Create a new orchestrator with the given configuration.
+    /// Create and initialize an McpOrchestrator from the provided configuration.
     ///
-    /// Policy is built from `config.policy`. Default policy allows all tools.
+    /// On success, returns a fully initialized orchestrator with static servers connected (unless a required
+    /// server failed to connect), tool inventory, approval manager, metrics, rate limiter, and background refresh
+    /// handler started. On failure, returns an `McpError` describing the configuration or connection error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use tokio_test::block_on;
+    /// # async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = McpConfig::default();
+    /// let orchestrator = crate::core::orchestrator::McpOrchestrator::new(config).await?;
+    /// assert!(orchestrator.active_executions.load(std::sync::atomic::Ordering::SeqCst) == 0);
+    /// # Ok(()) }
+    /// # block_on(run_example()).unwrap();
+    /// ```
     pub async fn new(config: McpConfig) -> McpResult<Self> {
         // Validate configuration (server pairs, no duplicate builtin_types)
         config
@@ -364,7 +378,30 @@ impl McpOrchestrator {
         Ok(orchestrator)
     }
 
-    /// Internal helper to enforce rate limits and acquire a concurrency permit.
+    /// Enforces per-tenant rate limits and acquires a concurrency permit for a tool call.
+    ///
+    /// Checks whether the tenant is allowed to call the specified tool, records a rate-limited
+    /// metric if the check fails, acquires an owned concurrency permit, records the call in the
+    /// rate limiter, and returns the acquired permit.
+    ///
+    /// On failure of either the rate check or permit acquisition, an `McpError` is returned and
+    /// a rate-limited metric is recorded.
+    ///
+    /// # Returns
+    ///
+    /// An `OwnedSemaphorePermit` that must be held for the duration of the tool execution. The
+    /// permit is dropped to release concurrency capacity.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example_usage(orchestrator: &crate::McpOrchestrator, tenant_ctx: &crate::TenantContext, qualified: &crate::QualifiedToolName) -> Result<(), crate::McpError> {
+    /// let permit = orchestrator.check_and_acquire_permit(tenant_ctx, qualified).await?;
+    /// // Hold `permit` while executing the tool; dropping it releases the concurrency slot.
+    /// drop(permit);
+    /// # Ok(())
+    /// # }
+    /// ```
     async fn check_and_acquire_permit(
         &self,
         tenant_ctx: &TenantContext,
@@ -776,16 +813,27 @@ impl McpOrchestrator {
     // Tool Execution
     // ========================================================================
 
-    /// Call a tool with approval checking and response transformation.
+    /// Executes a named tool on the specified server, performing approval checks, applying rate limits, and transforming the tool response for API consumption.
     ///
-    /// This is the main entry point for tool execution.
+    /// This call enforces tenant and tool rate limits, routes the request to the configured tool, invokes the approval flow when required, and records execution metrics.
     ///
-    /// # Arguments
-    /// * `server_key` - Internal server identifier (may be URL for dynamic servers)
-    /// * `tool_name` - The tool name to execute
-    /// * `arguments` - Tool arguments as JSON
-    /// * `server_label` - User-facing label for API responses
-    /// * `request_ctx` - Request context for approval
+    /// # Returns
+    ///
+    /// `Ok(ToolCallResult)` containing either a successful transformed response or a pending-approval marker; `Err(McpError)` if execution or routing fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use serde_json::json;
+    /// # async fn example(orchestrator: &crate::McpOrchestrator, ctx: &crate::McpRequestContext<'_>) -> Result<(), crate::McpError> {
+    /// let args = json!({ "text": "hello" });
+    /// let result = orchestrator.call_tool("https://example-server", "echo_tool", args, "Example Server", ctx).await?;
+    /// match result {
+    ///     crate::ToolCallResult::Success(item) => println!("Got response: {:?}", item),
+    ///     crate::ToolCallResult::PendingApproval(req) => println!("Approval required: {:?}", req),
+    /// }
+    /// # Ok(()) }
+    /// ```
     pub async fn call_tool(
         &self,
         server_key: &str,
@@ -1007,28 +1055,35 @@ impl McpOrchestrator {
         None
     }
 
-    /// Execute multiple tools with unified error handling.
+    /// Execute a batch of tool calls and return per-call results encoded for router consumption.
     ///
-    /// This is the recommended entry point for batch tool execution. It:
-    /// - Executes each tool via `call_tool_by_name`
-    /// - Handles result serialization uniformly
-    /// - Returns fully-processed results ready for router use
+    /// Each input is executed (preferring request-local dynamic tools), rate-limited, and processed so that errors are represented in the corresponding output item rather than failing the entire batch. Approvals that would block execution produce an error entry indicating approval is required for contexts that do not support interactive approval.
     ///
-    /// Routers should convert their tool calls to `ToolExecutionInput`,
-    /// call this method, and use `ToolExecutionOutput::to_response_item()`
-    /// to get correctly-typed output items.
-    /// Metrics recording is left to callers (routers) since they have access
-    /// to the model_gateway metrics infrastructure.
+    /// # Parameters
     ///
-    /// # Arguments
-    /// * `inputs` - Tool calls to execute
-    /// * `allowed_servers` - Server keys to search within
-    /// * `server_label` - User-facing label for API responses (from request config)
-    /// * `request_ctx` - Request context for approval and tenant isolation
+    /// - `inputs` — list of tool calls to execute; results are produced in the same order.
+    /// - `allowed_servers` — server keys to restrict the search for matching tools (empty means all servers).
+    /// - `server_label` — user-facing label included in each output for router responses.
+    /// - `request_ctx` — per-request context used for tenant isolation, approvals, and dynamic tools.
     ///
     /// # Returns
-    /// Vector of outputs in the same order as inputs. Errors are returned
-    /// as outputs with `is_error: true` rather than failing the entire batch.
+    ///
+    /// A Vec of `ToolExecutionOutput` with one entry per input; entries representing failures set `is_error: true` and include an `error_message`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example(orchestrator: &crate::McpOrchestrator, ctx: &crate::McpRequestContext<'_>) {
+    /// let inputs = vec![
+    ///     crate::ToolExecutionInput { call_id: "1".to_string(), tool_name: "echo".to_string(), arguments: serde_json::json!({"text":"hello"}) },
+    /// ];
+    /// let outputs = orchestrator.execute_tools(inputs, &[], "default", ctx).await;
+    /// for out in outputs {
+    ///     // Convert to router-friendly response item
+    ///     let _item = out.to_response_item();
+    /// }
+    /// # }
+    /// ```
     pub async fn execute_tools(
         &self,
         inputs: Vec<ToolExecutionInput>,
@@ -1904,13 +1959,27 @@ impl<'a> McpRequestContext<'a> {
         Ok(())
     }
 
-    /// Call a tool in this request context.
+    /// Execute a tool within this request's context, preferring any per-request (dynamic) tool override.
     ///
-    /// # Arguments
-    /// * `server_key` - Internal server identifier
-    /// * `tool_name` - Tool name to execute
-    /// * `arguments` - Tool arguments as JSON
-    /// * `server_label` - User-facing label for API responses
+    /// If a dynamic tool with the given server key and tool name exists for the request, that dynamic tool is executed;
+    /// otherwise the call is delegated to the orchestrator's global/static execution path. The call enforces per-tenant
+    /// rate limits and records call metrics. Successful execution yields `ToolCallResult::Success`, a tool-that-requires-approval
+    /// yields `ToolCallResult::PendingApproval`, and failures are returned as an `Err`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // `ctx` is a prepared McpRequestContext for the request.
+    /// // This example demonstrates the call shape; setup of `ctx` is omitted for brevity.
+    /// let result = tokio::runtime::Handle::current().block_on(async {
+    ///     ctx.call_tool("server_key", "tool_name", serde_json::json!({"arg": "value"}), "User-facing Server").await
+    /// });
+    /// match result {
+    ///     Ok(ToolCallResult::Success(item)) => println!("Got response item"),
+    ///     Ok(ToolCallResult::PendingApproval(req)) => println!("Approval required"),
+    ///     Err(e) => eprintln!("Execution failed: {:?}", e),
+    /// }
+    /// ```
     pub async fn call_tool(
         &self,
         server_key: &str,

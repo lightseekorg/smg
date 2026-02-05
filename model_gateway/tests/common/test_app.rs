@@ -162,7 +162,22 @@ pub fn create_test_app_with_context(
     )
 }
 
-/// Create a minimal test AppContext for unit tests
+/// Builds a minimal `Arc<AppContext>` configured for unit tests.
+///
+/// The returned context uses a default `RouterConfig`, an HTTP client, empty
+/// registries, in-memory storage backends, and an MCP orchestrator initialized
+/// with a mostly-empty `McpConfig`.
+///
+/// # Examples
+///
+/// ```
+/// let rt = tokio::runtime::Runtime::new().unwrap();
+/// let ctx = rt.block_on(create_test_app_context());
+/// // The result is an Arc-wrapped AppContext and can be cloned/shared.
+/// let cloned = std::sync::Arc::clone(&ctx);
+/// assert!(std::sync::Arc::strong_count(&ctx) >= 1);
+/// drop(cloned);
+/// ```
 #[allow(dead_code)]
 pub async fn create_test_app_context() -> Arc<AppContext> {
     let router_config = RouterConfig::default();

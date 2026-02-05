@@ -286,7 +286,25 @@ impl AppTestContext {
     }
 }
 
-/// Helper function to create AppContext for tests
+/// Create an AppContext preconfigured for tests.
+///
+/// The returned context uses in-memory storage backends, sets up an optional token-bucket
+/// rate limiter according to `config`, initializes registries and a load monitor,
+/// registers external test workers when `config.mode` is `RoutingMode::OpenAI`, and
+/// initializes an MCP orchestrator with an empty configuration.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use std::sync::Arc;
+/// # use smg::{app::AppContext, router::RouterConfig};
+/// # use smg_test_utils::create_test_context;
+/// # tokio_test::block_on(async {
+/// let config = RouterConfig::default();
+/// let ctx: Arc<AppContext> = create_test_context(config).await;
+/// assert!(Arc::strong_count(&ctx) >= 1);
+/// # });
+/// ```
 pub async fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
     let client = reqwest::Client::new();
 
@@ -407,7 +425,22 @@ pub async fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
     app_context
 }
 
-/// Helper function to create AppContext for tests with parser factories initialized
+/// Creates an AppContext configured for tests with tokenizer and parser factories initialized.
+///
+/// The provided `RouterConfig` is used to configure limits, routing mode, and other settings
+/// for the returned test `AppContext`. The context uses in-memory storages, a real `reqwest`
+/// client, a load monitor, and initializes job queue, workflow engines, and an MCP orchestrator.
+/// If the routing mode is OpenAI, common test-model workers are registered in the worker registry.
+///
+/// # Examples
+///
+/// ```
+/// # tokio_test::block_on(async {
+/// let config = smg::config::RouterConfig::default();
+/// let ctx = smg_test_utils::create_test_context_with_parsers(config).await;
+/// assert!(std::sync::Arc::strong_count(&ctx) >= 1);
+/// # });
+/// ```
 pub async fn create_test_context_with_parsers(config: RouterConfig) -> Arc<AppContext> {
     let client = reqwest::Client::new();
 

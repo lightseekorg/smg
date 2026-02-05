@@ -482,10 +482,20 @@ impl AppContextBuilder {
         self
     }
 
-    /// Create and initialize MCP orchestrator with empty config
+    /// Initialize the MCP orchestrator with an empty configuration and default settings, and attach it to the builder.
     ///
-    /// This initializes the MCP orchestrator with an empty config and default settings.
-    /// MCP servers will be registered later via the InitializeMcpServers job.
+    /// The orchestrator is created from an empty `crate::mcp::McpConfig` (no servers, default pools and policies, `rate_limits` set to `None`)
+    /// and stored inside a `OnceLock` on the builder so servers may be registered later by the `InitializeMcpServers` job.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), String> {
+    /// let builder = AppContextBuilder::new();
+    /// let router_config = RouterConfig::default(); // provide a real RouterConfig in real code
+    /// let builder = builder.with_mcp_orchestrator(&router_config).await?;
+    /// # Ok(()) }
+    /// ```
     async fn with_mcp_orchestrator(
         mut self,
         _router_config: &RouterConfig,
