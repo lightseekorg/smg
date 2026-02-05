@@ -324,8 +324,8 @@ def add_serve_args(parser: argparse.ArgumentParser) -> None:
     # Router host/port - may be overridden by backend (e.g. sglang)
     group.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="Host for the router (default: 0.0.0.0)",
+        default="127.0.0.1",
+        help="Host for the router (default: 127.0.0.1)",
     )
     group.add_argument(
         "--port",
