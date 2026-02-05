@@ -312,11 +312,6 @@ async fn test_single_node_subsystems_initialized() {
     assert!(handler.partition_detector().is_some());
     assert!(handler.state_machine().is_some());
 
-    // Verify stores exist
-    assert!(
-        !handler.stores.membership.all().is_empty() || handler.stores.membership.all().is_empty()
-    );
-
     handler.shutdown();
     log::info!("Subsystems initialization test completed");
 }
