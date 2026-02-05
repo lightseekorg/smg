@@ -7,6 +7,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use validator::Validate;
+
+use crate::validated::Normalizable;
 
 // ============================================================================
 // Request Types
@@ -15,15 +18,18 @@ use serde_json::Value;
 /// Request to create a message using the Anthropic Messages API.
 ///
 /// This is the main request type for `/v1/messages` endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct CreateMessageRequest {
     /// The model that will complete your prompt.
+    #[validate(length(min = 1, message = "model field is required and cannot be empty"))]
     pub model: String,
 
     /// Input messages for the conversation.
+    #[validate(length(min = 1, message = "messages array is required and cannot be empty"))]
     pub messages: Vec<InputMessage>,
 
     /// The maximum number of tokens to generate before stopping.
+    #[validate(range(min = 1, message = "max_tokens must be greater than 0"))]
     pub max_tokens: u32,
 
     /// An object describing metadata about the request.
@@ -78,6 +84,10 @@ pub struct CreateMessageRequest {
     /// MCP servers to be utilized in this request (beta).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<Vec<McpServerConfig>>,
+}
+
+impl Normalizable for CreateMessageRequest {
+    // Use default no-op implementation
 }
 
 impl CreateMessageRequest {
