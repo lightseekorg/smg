@@ -18,18 +18,13 @@
 use std::{any::Any, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use axum::{
-    body::Body,
-    extract::Request,
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-};
+use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
 
 use super::{context::SharedComponents, models, pipeline::MessagesPipeline};
 use crate::{
     app_context::AppContext,
     protocols::{chat::ChatCompletionRequest, messages::CreateMessageRequest},
-    routers::RouterTrait,
+    routers::{error, RouterTrait},
 };
 
 /// Router for Anthropic-specific APIs
@@ -89,11 +84,10 @@ impl RouterTrait for AnthropicRouter {
         _body: &ChatCompletionRequest,
         _model_id: Option<&str>,
     ) -> Response {
-        (
-            StatusCode::NOT_FOUND,
+        error::not_found(
+            "unsupported_endpoint",
             "Chat completions not supported on Anthropic router. Use /v1/messages instead.",
         )
-            .into_response()
     }
 
     async fn route_messages(

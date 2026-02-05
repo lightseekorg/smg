@@ -61,11 +61,7 @@ impl PipelineStage for ResponseProcessingStage {
         // Take the response from context
         let response = ctx.state.response.worker_response.take().ok_or_else(|| {
             error!("Response processing stage called without worker response");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal error: no worker response",
-            )
-                .into_response()
+            error::internal_error("no_response", "Internal error: no worker response")
         })?;
 
         // Get worker for load tracking (cloned Arc, not taken)
@@ -219,11 +215,7 @@ impl ResponseProcessingStage {
 
         let response = builder.body(body).map_err(|e| {
             error!("Failed to build streaming response: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to build response",
-            )
-                .into_response()
+            error::internal_error("response_build_failed", "Failed to build response")
         })?;
 
         Ok(Some(response))
