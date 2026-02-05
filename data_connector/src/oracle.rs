@@ -299,8 +299,8 @@ impl ConversationStorage for OracleConversationStorage {
         self.store
             .execute(move |conn| {
                 conn.execute(
-                    "INSERT INTO \"CONVERSATIONS\" (\"CONVERSATION_ID\", \"CONVERSATION_STORE_ID\", \"CREATED_AT\", \"METADATA\", \"ITEMS\", \"EXPIRES_AT\") VALUES (:1, :2, :3, :4, :5, :6)",
-                    &[&id_str, &conversation_store_id, &created_at, &metadata_json, &"[]", &expires_at],
+                    "INSERT INTO \"CONVERSATIONS\" (\"CONVERSATION_ID\", \"CONVERSATION_STORE_ID\", \"GENERATIVE_AI_PROJECT_ID\", \"CREATED_AT\", \"METADATA\", \"ITEMS\", \"UPDATED_AT\", \"EXPIRES_AT\", \"VERSION\", \"SHORT_TERM_MEMORY\") VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)",
+                    &[&id_str, &conversation_store_id, &None::<String>, &created_at, &metadata_json, &"[]", &created_at, &expires_at, &0, &None::<String>],
                 )
                 .map(|_| ())
                 .map_err(map_oracle_error)
@@ -319,7 +319,7 @@ impl ConversationStorage for OracleConversationStorage {
         self.store
             .execute(move |conn| {
                 let mut stmt = conn
-                    .statement("SELECT \"CONVERSATION_ID\", \"CREATED_AT\", \"METADATA\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1")
+                    .statement("SELECT \"CONVERSATION_ID\", \"CREATED_AT\", \"METADATA\", \"GENERATIVE_AI_PROJECT_ID\", \"UPDATED_AT\", \"VERSION\", \"SHORT_TERM_MEMORY\", \"EXPIRES_AT\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1")
                     .build()
                     .map_err(map_oracle_error)?;
                 let mut rows = stmt.query(&[&lookup]).map_err(map_oracle_error)?;
@@ -329,6 +329,12 @@ impl ConversationStorage for OracleConversationStorage {
                     let id: String = row.get(0).map_err(map_oracle_error)?;
                     let created_at: DateTime<Utc> = row.get(1).map_err(map_oracle_error)?;
                     let metadata_raw: Option<String> = row.get(2).map_err(map_oracle_error)?;
+                    // Parse new fields but ignore in logic
+                    let _generative_ai_project_id: Option<String> = row.get(3).map_err(map_oracle_error)?;
+                    let _updated_at: Option<DateTime<Utc>> = row.get(4).map_err(map_oracle_error)?;
+                    let _version: Option<i32> = row.get(5).map_err(map_oracle_error)?;
+                    let _short_term_memory: Option<String> = row.get(6).map_err(map_oracle_error)?;
+                    let _expires_at: Option<DateTime<Utc>> = row.get(7).map_err(map_oracle_error)?;
                     let metadata = Self::parse_metadata(metadata_raw).map_err(|e| e.to_string())?;
                     Ok(Some(Conversation::with_parts(
                         ConversationId(id),
@@ -356,8 +362,8 @@ impl ConversationStorage for OracleConversationStorage {
         self.store
             .execute(move |conn| {
                 let affected = conn.execute(
-                    "UPDATE \"CONVERSATIONS\" SET \"METADATA\" = :1, \"UPDATED_AT\" = :2 WHERE \"CONVERSATION_ID\" = :3",
-                    &[&metadata_json, &updated_at, &id_str],
+                    "UPDATE \"CONVERSATIONS\" SET \"METADATA\" = :1, \"UPDATED_AT\" = :2, \"GENERATIVE_AI_PROJECT_ID\" = :3, \"SHORT_TERM_MEMORY\" = :4 WHERE \"CONVERSATION_ID\" = :5",
+                    &[&metadata_json, &updated_at, &None::<String>, &None::<String>, &id_str],
                 )
                 .map_err(map_oracle_error)?;
 
@@ -367,7 +373,7 @@ impl ConversationStorage for OracleConversationStorage {
 
                 // Get the updated conversation
                 let mut stmt = conn
-                    .statement("SELECT \"CREATED_AT\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1")
+                    .statement("SELECT \"CREATED_AT\", \"GENERATIVE_AI_PROJECT_ID\", \"UPDATED_AT\", \"VERSION\", \"SHORT_TERM_MEMORY\", \"EXPIRES_AT\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1")
                     .build()
                     .map_err(map_oracle_error)?;
                 let mut rows = stmt.query(&[&id_str]).map_err(map_oracle_error)?;
@@ -375,6 +381,12 @@ impl ConversationStorage for OracleConversationStorage {
                 if let Some(row_res) = rows.next() {
                     let row = row_res.map_err(map_oracle_error)?;
                     let created_at: DateTime<Utc> = row.get(0).map_err(map_oracle_error)?;
+                    // Parse new fields but ignore in logic
+                    let _generative_ai_project_id: Option<String> = row.get(1).map_err(map_oracle_error)?;
+                    let _updated_at: Option<DateTime<Utc>> = row.get(2).map_err(map_oracle_error)?;
+                    let _version: Option<i32> = row.get(3).map_err(map_oracle_error)?;
+                    let _short_term_memory: Option<String> = row.get(4).map_err(map_oracle_error)?;
+                    let _expires_at: Option<DateTime<Utc>> = row.get(5).map_err(map_oracle_error)?;
                     Ok(Some(Conversation::with_parts(
                         conversation_id,
                         created_at,
@@ -493,8 +505,8 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                     .map_err(|e| e.to_string())?;
 
                 conn.execute(
-                    "UPDATE \"CONVERSATIONS\" SET \"ITEMS\" = :1, \"UPDATED_AT\" = :2 WHERE \"CONVERSATION_ID\" = :3",
-                    &[&updated_items_json, &Utc::now(), &cid],
+                    "UPDATE \"CONVERSATIONS\" SET \"ITEMS\" = :1, \"UPDATED_AT\" = :2, \"GENERATIVE_AI_PROJECT_ID\" = :3, \"SHORT_TERM_MEMORY\" = :4, \"VERSION\" = :5 WHERE \"CONVERSATION_ID\" = :6",
+                    &[&updated_items_json, &Utc::now(), &None::<String>, &None::<String>, &0, &cid],
                 )
                 .map_err(map_oracle_error)?;
 
@@ -707,8 +719,8 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                     .map_err(|e| e.to_string())?;
 
                 conn.execute(
-                    "UPDATE \"CONVERSATIONS\" SET \"ITEMS\" = :1, \"UPDATED_AT\" = :2 WHERE \"CONVERSATION_ID\" = :3",
-                    &[&updated_items_json, &Utc::now(), &cid],
+                    "UPDATE \"CONVERSATIONS\" SET \"ITEMS\" = :1, \"UPDATED_AT\" = :2, \"GENERATIVE_AI_PROJECT_ID\" = :3, \"SHORT_TERM_MEMORY\" = :4, \"VERSION\" = :5 WHERE \"CONVERSATION_ID\" = :6",
+                    &[&updated_items_json, &Utc::now(), &None::<String>, &None::<String>, &0, &cid],
                 )
                 .map_err(map_oracle_error)?;
 
@@ -761,7 +773,7 @@ pub trait OracleResponseStorageExt: ResponseStorage {
 }
 
 const SELECT_BASE: &str = "SELECT \"RESPONSE_ID\", \"CONVERSATION_STORE_ID\", \"CONVERSATION_ID\", \"PREVIOUS_RESPONSE_ID\", \
-    \"INPUT_ITEMS\", \"RESPONSE_OBJECT\", \"MODEL\", \"CREATED_AT\" FROM \"RESPONSES\"";
+    \"INPUT_ITEMS\", \"RESPONSE_OBJECT\", \"MODEL\", \"CREATED_AT\", \"EXPIRES_AT\", \"SUBJECT_ID\", \"INPUT_EMBEDDING\", \"OUTPUT_EMBEDDING\", \"GENERATIVE_AI_PROJECT_ID\" FROM \"RESPONSES\"";
 
 #[derive(Clone)]
 pub(super) struct OracleResponseStorage {
@@ -800,6 +812,10 @@ impl OracleResponseStorage {
         let output_json: Option<String> = row.get(5).map_err(map_oracle_error)?;
         let model: Option<String> = row.get(6).map_err(map_oracle_error)?;
         let created_at: DateTime<Utc> = row.get(7).map_err(map_oracle_error)?;
+        let _expires_at: Option<DateTime<Utc>> = row.get(8).map_err(map_oracle_error)?; // ignore
+        let _subject_id: Option<String> = row.get(9).map_err(map_oracle_error)?; // ignore
+                                                                                 // Skip embeddings as oracle crate doesn't support Vec<f32> for VECTOR
+        let _generative_ai_project_id: Option<String> = row.get(12).map_err(map_oracle_error)?; // ignore
 
         let previous_response_id = previous.map(ResponseId);
         let input = parse_json_value(input_json)?;
@@ -877,8 +893,8 @@ impl ResponseStorage for OracleResponseStorage {
 
                 conn.execute(
                     "INSERT INTO \"RESPONSES\" (\"RESPONSE_ID\", \"CONVERSATION_STORE_ID\", \"CONVERSATION_ID\", \"PREVIOUS_RESPONSE_ID\", \
-                        \"INPUT_ITEMS\", \"RESPONSE_OBJECT\", \"MODEL\", \"CREATED_AT\", \"EXPIRES_AT\") \
-                     VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9)",
+                        \"INPUT_ITEMS\", \"RESPONSE_OBJECT\", \"MODEL\", \"CREATED_AT\", \"EXPIRES_AT\", \"SUBJECT_ID\", \"GENERATIVE_AI_PROJECT_ID\") \
+                     VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11)",
                     &[
                         &response_id_str,
                         &conversation_store_id_ref,  // Use Option<&str> instead of Option<String>
@@ -889,6 +905,8 @@ impl ResponseStorage for OracleResponseStorage {
                         &model,
                         &created_at,
                         &expires_at,
+                        &None::<String>,
+                        &None::<String>,
                     ],
                 )
                 .map(|_| ())
