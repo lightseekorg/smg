@@ -386,7 +386,7 @@ impl ResponseStreamEventEmitter {
                 json!({
                     "name": &entry.tool.name,
                     "description": &entry.tool.description,
-                    "input_schema": entry.tool.input_schema.clone()
+                    "input_schema": serde_json::Value::Object((*entry.tool.input_schema).clone())
                 })
             })
             .collect();
@@ -989,9 +989,7 @@ pub(crate) fn attach_mcp_server_label(
     server_label: Option<&str>,
     response_format: Option<&ResponseFormat>,
 ) {
-    if matches!(response_format, Some(ResponseFormat::Passthrough)) {
-        if let Some(label) = server_label {
-            item["server_label"] = json!(label);
-        }
+    if let (Some(label), Some(ResponseFormat::Passthrough)) = (server_label, response_format) {
+        item["server_label"] = json!(label);
     }
 }
