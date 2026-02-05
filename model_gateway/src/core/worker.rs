@@ -32,6 +32,12 @@ pub const DEFAULT_WORKER_COST: f32 = 1.0;
 /// Default HTTP client timeout for worker requests (in seconds)
 pub const DEFAULT_WORKER_HTTP_TIMEOUT_SECS: u64 = 30;
 
+/// Default bootstrap port for PD disaggregation (used by SGLang and vLLM Mooncake)
+pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8998;
+
+/// vLLM Mooncake KV connector name
+pub const MOONCAKE_CONNECTOR: &str = "MooncakeConnector";
+
 static WORKER_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(DEFAULT_WORKER_HTTP_TIMEOUT_SECS))
@@ -574,6 +580,10 @@ pub struct WorkerMetadata {
     pub bootstrap_host: String,
     /// Cached bootstrap port (from WorkerType::Prefill)
     pub bootstrap_port: Option<u16>,
+    /// KV connector type (e.g., "MooncakeConnector", "NixlConnector", empty if not configured)
+    pub kv_connector: Option<String>,
+    /// KV role (e.g., "kv_producer", "kv_consumer", "kv_both", empty if not configured)
+    pub kv_role: Option<String>,
     /// Models this worker can serve.
     /// If empty, worker accepts any model (backward compatible behavior).
     pub models: Vec<ModelCard>,
@@ -1957,6 +1967,8 @@ mod tests {
             api_key: None,
             bootstrap_host: "test".to_string(),
             bootstrap_port: None,
+            kv_connector: None,
+            kv_role: None,
             models: Vec::new(), // Empty = accepts any model
             default_provider: None,
             default_model_type: ModelType::LLM,
@@ -1987,6 +1999,8 @@ mod tests {
             api_key: None,
             bootstrap_host: "test".to_string(),
             bootstrap_port: None,
+            kv_connector: None,
+            kv_role: None,
             models: vec![model1, model2],
             default_provider: None,
             default_model_type: ModelType::LLM,

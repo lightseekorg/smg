@@ -50,7 +50,7 @@ jobs:
 
       - name: Cache wheel and Go FFI artifacts
         id: cache-wheel
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             bindings/python/dist/*.whl
@@ -258,41 +258,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Cache flash-attn wheel
+      - name: Setup vLLM backend
         if: matrix.setup_vllm
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip/wheels
-          key: flash-attn-${{ runner.os }}-${{ hashFiles('scripts/ci_install_vllm.sh') }}
+        uses: ./.github/actions/setup-vllm
 
-      - name: Restore TRT-LLM wheel cache
-        id: trtllm-cache
+      - name: Setup TRT-LLM backend
         if: matrix.setup_trtllm
-        uses: actions/cache/restore@v4
-        with:
-          path: /tmp/trtllm-wheel
-          key: trtllm-wheel-${{ runner.os }}-cuda13-v2
+        uses: ./.github/actions/setup-trtllm
 
-      - name: Install inference backend
-        run: |
-          bash scripts/ci_setup_python_venv.sh
-          source .venv/bin/activate
-          if [ "${{ matrix.setup_vllm }}" == "true" ]; then
-            bash scripts/ci_install_vllm.sh
-          elif [ "${{ matrix.setup_trtllm }}" == "true" ]; then
-            bash scripts/ci_install_trtllm.sh
-          else
-            bash scripts/ci_install_sglang.sh
-          fi
-
-      # Save TRT-LLM wheel immediately after build, before tests run
-      # This ensures the cache is saved even if tests fail or job is cancelled
-      - name: Save TRT-LLM wheel cache
-        if: matrix.setup_trtllm && steps.trtllm-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: /tmp/trtllm-wheel
-          key: trtllm-wheel-${{ runner.os }}-cuda13-v2
+      - name: Setup SGLang backend
+        if: ${{ !matrix.setup_vllm && !matrix.setup_trtllm }}
+        uses: ./.github/actions/setup-sglang
 
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
@@ -367,15 +343,11 @@ jobs:
 
       - name: Cleanup Brave MCP Server
         if: always() && matrix.setup_brave
-        run: |
-          docker stop brave-search-server || true
-          docker rm brave-search-server || true
+        run: docker rm -f brave-search-server || true
 
       - name: Cleanup Oracle Database
         if: always() && matrix.setup_oracle
-        run: |
-          docker stop oracle-db || true
-          docker rm oracle-db || true
+        run: docker rm -f oracle-db || true
 
   go-unit-tests:
     name: go-unit-tests
@@ -430,11 +402,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Setup Python venv and SGLang
-        run: |
-          bash scripts/ci_setup_python_venv.sh
-          source .venv/bin/activate
-          bash scripts/ci_install_sglang.sh
+      - name: Setup SGLang backend
+        uses: ./.github/actions/setup-sglang
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -486,14 +455,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install inference backend
-        run: |
-          bash scripts/ci_setup_python_venv.sh
-          source .venv/bin/activate
-          bash scripts/ci_install_sglang.sh
+      - name: Setup SGLang backend
+        uses: ./.github/actions/setup-sglang
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.24'
           cache: true

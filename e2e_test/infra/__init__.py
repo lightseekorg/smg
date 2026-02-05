@@ -42,6 +42,7 @@ from .gpu_allocator import (
     get_open_port,
     get_physical_device_indices,
     nvml_context,
+    release_port,
     wait_for_gpu_memory_to_clear,
 )
 from .gpu_monitor import GPUMonitor
@@ -118,6 +119,7 @@ __all__ = [
     # GPU utilities
     "nvml_context",
     "get_open_port",
+    "release_port",
     "get_physical_device_indices",
     "get_gpu_memory_usage",
     "wait_for_gpu_memory_to_clear",

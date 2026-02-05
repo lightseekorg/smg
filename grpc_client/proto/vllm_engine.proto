@@ -101,6 +101,16 @@ message GenerateRequest {
 
   // Streaming
   bool stream = 5;
+
+  // KV transfer parameters for PD disaggregation (Mooncake)
+  // Decode worker uses this to fetch KV cache from prefill worker
+  KvTransferParams kv_transfer_params = 6;
+}
+
+// KV cache transfer parameters for Mooncake PD disaggregation
+message KvTransferParams {
+  string remote_host = 1;  // Prefill worker's side-channel host
+  uint32 remote_port = 2;  // Prefill worker's side-channel port
 }
 
 // =====================
@@ -169,6 +179,10 @@ message GenerateComplete {
 
   // Index for n>1 support (0-indexed, identifies which of n outputs this belongs to)
   uint32 index = 8;
+
+  // KV transfer parameters returned by prefill worker (Mooncake PD)
+  // Contains prefill's side-channel address for decode to fetch KV cache
+  KvTransferParams kv_transfer_params = 9;
 }
 
 // =====================
@@ -226,4 +240,8 @@ message GetServerInfoResponse {
   double last_receive_timestamp = 3;
   double uptime_seconds = 4;
   string server_type = 5;  // "vllm-grpc"
+
+  // KV transfer config (for PD disaggregation)
+  string kv_connector = 6;  // "MooncakeConnector", "NixlConnector", "" if not configured
+  string kv_role = 7;       // "kv_producer", "kv_consumer", "kv_both", "" if not configured
 }

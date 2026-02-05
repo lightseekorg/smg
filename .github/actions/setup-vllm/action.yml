@@ -1,0 +1,27 @@
+name: 'Setup vLLM Backend'
+description: 'Create Python venv, restore/save uv cache, and install vLLM.'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python venv
+      shell: bash
+      run: bash scripts/ci_setup_python_venv.sh
+
+    - name: Restore uv cache
+      id: uv-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/uv
+        key: vllm-uv-${{ runner.os }}-${{ hashFiles('scripts/ci_install_vllm.sh') }}
+
+    - name: Install vLLM
+      shell: bash
+      run: bash scripts/ci_install_vllm.sh
+
+    - name: Save uv cache
+      if: steps.uv-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/uv
+        key: vllm-uv-${{ runner.os }}-${{ hashFiles('scripts/ci_install_vllm.sh') }}

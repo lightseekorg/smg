@@ -1,4 +1,5 @@
 pub mod base;
+pub mod cohere_cmd;
 pub mod deepseek_r1;
 pub mod glm45;
 pub mod kimi;
@@ -7,6 +8,7 @@ pub mod qwen3;
 pub mod step3;
 
 pub use base::BaseReasoningParser;
+pub use cohere_cmd::CohereCmdParser;
 pub use deepseek_r1::DeepSeekR1Parser;
 pub use glm45::Glm45Parser;
 pub use kimi::KimiParser;
