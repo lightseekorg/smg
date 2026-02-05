@@ -29,10 +29,8 @@ classifiers = [
 
 dependencies = [
     "setproctitle",
-    "aiohttp",
-    "orjson",
-    "uvicorn",
-    "fastapi",
+    "grpcio",
+    "grpcio-health-checking",
 ]
 
 [project.optional-dependencies]
