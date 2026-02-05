@@ -9,8 +9,10 @@ use axum::{
 use futures::StreamExt;
 use tracing::{debug, warn};
 
-use super::{utils::should_propagate_header, AnthropicRouter};
-use crate::core::model_card::ProviderType;
+use super::{
+    utils::{get_healthy_anthropic_workers, should_propagate_header},
+    AnthropicRouter,
+};
 
 const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
 
@@ -19,42 +21,8 @@ pub async fn handle_list_models(router: &AnthropicRouter, req: Request<Body>) ->
 
     let headers = req.headers();
 
-    let all_workers = router.context().worker_registry.get_workers_filtered(
-        None, // model_id
-        None, // worker_type
-        None, // connection_mode
-        None, // runtime_type
-        true, // healthy_only
-    );
-
-    // SECURITY: In multi-provider setups, filter by Anthropic provider to prevent credential leakage
-    // This ensures Anthropic credentials (X-API-Key, Authorization) are never sent to
-    // non-Anthropic workers (e.g., OpenAI, xAI workers)
-    let mut first_provider = None;
-    let has_multiple_providers = all_workers.iter().any(|w| {
-        if let Some(p) = w.default_provider() {
-            match first_provider {
-                None => {
-                    first_provider = Some(p);
-                    false
-                }
-                Some(first) => first != p,
-            }
-        } else {
-            false
-        }
-    });
-
-    let healthy_workers: Vec<_> = if has_multiple_providers {
-        // Multi-provider setup: only use explicitly Anthropic workers
-        all_workers
-            .into_iter()
-            .filter(|w| matches!(w.default_provider(), Some(ProviderType::Anthropic)))
-            .collect()
-    } else {
-        // Single-provider or no-provider setup: use all workers
-        all_workers
-    };
+    // SECURITY: Filter by Anthropic provider in multi-provider setups
+    let healthy_workers = get_healthy_anthropic_workers(&router.context().worker_registry);
 
     if healthy_workers.is_empty() {
         warn!("No healthy Anthropic workers available for /v1/models request");
