@@ -53,9 +53,7 @@ pub fn get_healthy_anthropic_workers(
 /// Find the best worker for a given model.
 ///
 /// Returns the least-loaded healthy Anthropic worker that supports the given model.
-///
-/// SECURITY: In multi-provider setups, filters by Anthropic provider to prevent
-/// credential leakage (Anthropic X-API-Key, Authorization) to non-Anthropic workers.
+/// Uses [`get_healthy_anthropic_workers`] for provider-aware filtering.
 pub fn find_best_worker_for_model(
     worker_registry: &crate::core::WorkerRegistry,
     model_id: &str,
