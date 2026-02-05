@@ -278,6 +278,7 @@ impl MeshServerBuilder {
 
     pub fn build(&self) -> (MeshServer, MeshServerHandler) {
         let (signal_tx, signal_rx) = tokio::sync::watch::channel(false);
+        let partition_detector = Arc::new(PartitionDetector::default());
         let sync_manager = Arc::new(MeshSyncManager::new(
             self.stores.clone(),
             self.self_name.clone(),
@@ -297,6 +298,7 @@ impl MeshServerBuilder {
                 self_addr: self.self_addr,
                 init_peer: self.init_peer,
                 signal_rx,
+                partition_detector: Some(partition_detector.clone()),
                 mtls_manager: self.mtls_manager.clone(),
             },
             MeshServerHandler {
@@ -306,7 +308,7 @@ impl MeshServerBuilder {
                 self_name: self.self_name.clone(),
                 _self_addr: self.self_addr,
                 signal_tx,
-                partition_detector: Some(Arc::new(PartitionDetector::default())),
+                partition_detector: Some(partition_detector),
                 state_machine: Some(state_machine),
                 rate_limit_task_handle: std::sync::Mutex::new(None),
             },
@@ -333,6 +335,7 @@ pub struct MeshServer {
     self_addr: SocketAddr,
     init_peer: Option<SocketAddr>,
     signal_rx: tokio::sync::watch::Receiver<bool>,
+    partition_detector: Option<Arc<PartitionDetector>>,
     mtls_manager: Option<Arc<MTLSManager>>,
 }
 
@@ -357,8 +360,10 @@ impl MeshServer {
         let self_name = self.self_name.clone();
         let self_address = self.self_addr;
 
-        // Create partition detector
-        let partition_detector = Arc::new(PartitionDetector::default());
+        let partition_detector = self
+            .partition_detector
+            .clone()
+            .expect("partition detector missing");
 
         let mut service = self.build_ping_server();
         service = service.with_stores(self.stores.clone());
