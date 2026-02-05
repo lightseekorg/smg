@@ -485,6 +485,7 @@ def _setup_grpc_backend(
         instance = model_pool.get_grpc_worker(model_id)
     except RuntimeError as e:
         pytest.fail(str(e))
+    assert instance is not None
 
     model_path = instance.model_path
     worker_urls = [instance.worker_url]
@@ -722,6 +723,7 @@ def backend_router(request: pytest.FixtureRequest, model_pool: ModelPool):
         pytest.skip(f"Model {model_id}:{backend_name} not available in pool")
     except RuntimeError as e:
         pytest.fail(str(e))
+    assert instance is not None
 
     gateway = Gateway()
     try:
