@@ -255,7 +255,7 @@ impl ResponseProcessingStage {
                     "Completed non-streaming request"
                 );
 
-                Err((StatusCode::OK, Json(message)).into_response())
+                Ok(Some((StatusCode::OK, Json(message)).into_response()))
             }
             Err(e) => {
                 error!(model = %model_id, error = %e, "Failed to parse response");
@@ -286,7 +286,6 @@ impl ResponseProcessingStage {
 
         result
     }
-
     /// Handle error response from worker
     async fn handle_error_response(
         &self,
