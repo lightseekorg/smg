@@ -49,7 +49,7 @@ use crate::{
     routers::{
         grpc::common::responses::{
             build_sse_response, persist_response_if_needed,
-            streaming::{OutputItemType, ResponseStreamEventEmitter},
+            streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
             ResponsesContext,
         },
         mcp_utils::{extract_server_label, DEFAULT_MAX_ITERATIONS},
@@ -554,56 +554,7 @@ async fn execute_tool_loop_streaming_internal(
 
         // Emit mcp_list_tools as first output item (only once, on first iteration)
         if !mcp_list_tools_emitted {
-            let (output_index, item_id) =
-                emitter.allocate_output_index(OutputItemType::McpListTools);
-
-            // Build tools list for item structure
-            let tool_items: Vec<_> = mcp_tools
-                .iter()
-                .map(|t| {
-                    json!({
-                        "name": t.tool.name,
-                        "description": t.tool.description,
-                        "input_schema": Value::Object((*t.tool.input_schema).clone())
-                    })
-                })
-                .collect();
-
-            // Build mcp_list_tools item
-            let item = json!({
-                "id": item_id,
-                "type": "mcp_list_tools",
-                "server_label": state.server_label,
-                "status": "in_progress",
-                "tools": []
-            });
-
-            // Emit output_item.added
-            let event = emitter.emit_output_item_added(output_index, &item);
-            emitter.send_event(&event, &tx)?;
-
-            // Emit mcp_list_tools.in_progress
-            let event = emitter.emit_mcp_list_tools_in_progress(output_index);
-            emitter.send_event(&event, &tx)?;
-
-            // Emit mcp_list_tools.completed
-            let event = emitter.emit_mcp_list_tools_completed(output_index, &mcp_tools);
-            emitter.send_event(&event, &tx)?;
-
-            // Build complete item with tools
-            let item_done = json!({
-                "id": item_id,
-                "type": "mcp_list_tools",
-                "server_label": state.server_label,
-                "status": "completed",
-                "tools": tool_items
-            });
-
-            // Emit output_item.done
-            let event = emitter.emit_output_item_done(output_index, &item_done);
-            emitter.send_event(&event, &tx)?;
-
-            emitter.complete_output_item(output_index);
+            emitter.emit_mcp_list_tools_sequence(&state.server_label, &mcp_tools, &tx)?;
             mcp_list_tools_emitted = true;
         }
 
@@ -714,10 +665,11 @@ async fn execute_tool_loop_streaming_internal(
                     "status": "in_progress",
                     "arguments": ""
                 });
-                // Add server_label only for mcp_call
-                if item_type == "mcp_call" {
-                    item["server_label"] = json!(state.server_label);
-                }
+                attach_mcp_server_label(
+                    &mut item,
+                    Some(&state.server_label),
+                    Some(&response_format),
+                );
 
                 // Emit output_item.added
                 let event = emitter.emit_output_item_added(output_index, &item);
@@ -800,9 +752,11 @@ async fn execute_tool_loop_streaming_internal(
                                 "arguments": tool_call.arguments,
                                 "output": output
                             });
-                            if item_type == "mcp_call" {
-                                item_done["server_label"] = json!(state.server_label);
-                            }
+                            attach_mcp_server_label(
+                                &mut item_done,
+                                Some(&state.server_label),
+                                Some(&response_format),
+                            );
 
                             // Emit output_item.done
                             let event = emitter.emit_output_item_done(output_index, &item_done);
@@ -826,9 +780,11 @@ async fn execute_tool_loop_streaming_internal(
                                 "arguments": tool_call.arguments,
                                 "error": &output
                             });
-                            if item_type == "mcp_call" {
-                                item_done["server_label"] = json!(state.server_label);
-                            }
+                            attach_mcp_server_label(
+                                &mut item_done,
+                                Some(&state.server_label),
+                                Some(&response_format),
+                            );
 
                             // Emit output_item.done
                             let event = emitter.emit_output_item_done(output_index, &item_done);
@@ -854,9 +810,11 @@ async fn execute_tool_loop_streaming_internal(
                             "arguments": tool_call.arguments,
                             "error": &err_str
                         });
-                        if item_type == "mcp_call" {
-                            item_done["server_label"] = json!(state.server_label);
-                        }
+                        attach_mcp_server_label(
+                            &mut item_done,
+                            Some(&state.server_label),
+                            Some(&response_format),
+                        );
 
                         // Emit output_item.done
                         let event = emitter.emit_output_item_done(output_index, &item_done);

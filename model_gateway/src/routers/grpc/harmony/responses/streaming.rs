@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::Response;
 use bytes::Bytes;
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -23,8 +23,7 @@ use crate::{
         grpc::{
             common::responses::{
                 build_sse_response, ensure_mcp_connection, persist_response_if_needed,
-                streaming::{OutputItemType, ResponseStreamEventEmitter},
-                ResponsesContext,
+                streaming::ResponseStreamEventEmitter, ResponsesContext,
             },
             harmony::{processor::ResponsesIterationResult, streaming::HarmonyStreamingProcessor},
         },
@@ -163,63 +162,10 @@ async fn execute_mcp_tool_loop_streaming(
     let mut mcp_tracking = McpCallTracking::new(server_label.clone());
 
     // Emit mcp_list_tools on first iteration
-    let (output_index, item_id) = emitter.allocate_output_index(OutputItemType::McpListTools);
-
-    // Build tools list for item structure
-    let tool_items: Vec<_> = mcp_tools
-        .iter()
-        .map(|entry| {
-            json!({
-                "name": entry.tool.name,
-                "description": entry.tool.description,
-                "input_schema": Value::Object((*entry.tool.input_schema).clone())
-            })
-        })
-        .collect();
-
-    // Build final item with completed status and tools
-    let item_done = json!({
-        "id": item_id,
-        "type": "mcp_list_tools",
-        "server_label": server_label,
-        "status": "completed",
-        "tools": tool_items
-    });
-
-    // Store the completed item data and mark as completed FIRST
-    // This ensures it appears in final response even if event sending fails
-    emitter.emit_output_item_done(output_index, &item_done);
-    emitter.complete_output_item(output_index);
-
-    // Now emit all the events (failures won't affect the stored data)
-    // Emit output_item.added
-    let item = json!({
-        "id": item_id,
-        "type": "mcp_list_tools",
-        "server_label": server_label,
-        "status": "in_progress",
-        "tools": []
-    });
-    let event = emitter.emit_output_item_added(output_index, &item);
-    if emitter.send_event(&event, tx).is_err() {
-        return;
-    }
-
-    // Emit mcp_list_tools.in_progress
-    let event = emitter.emit_mcp_list_tools_in_progress(output_index);
-    if emitter.send_event(&event, tx).is_err() {
-        return;
-    }
-
-    // Emit mcp_list_tools.completed
-    let event = emitter.emit_mcp_list_tools_completed(output_index, &mcp_tools);
-    if emitter.send_event(&event, tx).is_err() {
-        return;
-    }
-
-    // Emit output_item.done
-    let event = emitter.emit_output_item_done(output_index, &item_done);
-    if emitter.send_event(&event, tx).is_err() {
+    if emitter
+        .emit_mcp_list_tools_sequence(&server_label, &mcp_tools, tx)
+        .is_err()
+    {
         return;
     }
 
