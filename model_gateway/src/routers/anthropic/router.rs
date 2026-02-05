@@ -13,7 +13,7 @@
 //! 3. Request Execution - Send request to worker
 //! 4. Response Processing - Parse response and record metrics
 
-use std::{any::Any, fmt, sync::Arc, time::Duration};
+use std::{any::Any, fmt, sync::Arc, time::Duration}; // Arc still needed for AppContext, SharedComponents
 
 use async_trait::async_trait;
 use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
@@ -94,8 +94,8 @@ impl RouterTrait for AnthropicRouter {
         body: &CreateMessageRequest,
         model_id: &str,
     ) -> Response {
-        // Clone body into Arc for pipeline (body is borrowed, pipeline needs ownership)
-        let request = Arc::new(body.clone());
+        // Clone body for pipeline (body is borrowed, pipeline needs ownership)
+        let request = body.clone();
         let headers_owned = headers.cloned();
 
         // Execute through pipeline

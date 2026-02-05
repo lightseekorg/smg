@@ -22,17 +22,13 @@ use crate::{
 
 #[derive(Debug)]
 pub(crate) struct RequestInput {
-    pub request: Arc<CreateMessageRequest>,
+    pub request: CreateMessageRequest,
     pub headers: Option<HeaderMap>,
     pub model_id: String,
 }
 
 impl RequestInput {
-    pub fn new(
-        request: Arc<CreateMessageRequest>,
-        headers: Option<HeaderMap>,
-        model_id: &str,
-    ) -> Self {
+    pub fn new(request: CreateMessageRequest, headers: Option<HeaderMap>, model_id: &str) -> Self {
         Self {
             request,
             headers,
@@ -113,11 +109,7 @@ pub(crate) struct RequestContext {
 
 impl RequestContext {
     /// Create a new request context
-    pub fn new(
-        request: Arc<CreateMessageRequest>,
-        headers: Option<HeaderMap>,
-        model_id: &str,
-    ) -> Self {
+    pub fn new(request: CreateMessageRequest, headers: Option<HeaderMap>, model_id: &str) -> Self {
         Self {
             input: RequestInput::new(request, headers, model_id),
             state: ProcessingState::default(),

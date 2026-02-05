@@ -17,6 +17,9 @@ use super::{
 };
 use crate::{protocols::messages::CreateMessageRequest, routers::error};
 
+// Note: Arc is still used for SharedComponents (shared across stages) but not for
+// CreateMessageRequest (flows through sequential stages without shared ownership)
+
 /// Messages API pipeline that processes requests through stages
 ///
 /// The pipeline executes stages in order:
@@ -48,7 +51,7 @@ impl MessagesPipeline {
     /// Execute the pipeline for a Messages API request
     pub async fn execute(
         &self,
-        request: Arc<CreateMessageRequest>,
+        request: CreateMessageRequest,
         headers: Option<HeaderMap>,
         model_id: &str,
     ) -> Response {

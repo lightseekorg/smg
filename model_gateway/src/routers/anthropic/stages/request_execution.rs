@@ -58,7 +58,7 @@ impl PipelineStage for RequestExecutionStage {
         let mut request_builder = self
             .http_client
             .post(url)
-            .json(&*ctx.input.request)
+            .json(&ctx.input.request)
             .timeout(self.timeout);
 
         // Add propagated headers
