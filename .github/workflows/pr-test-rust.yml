@@ -343,15 +343,11 @@ jobs:
 
       - name: Cleanup Brave MCP Server
         if: always() && matrix.setup_brave
-        run: |
-          docker stop brave-search-server || true
-          docker rm brave-search-server || true
+        run: docker rm -f brave-search-server || true
 
       - name: Cleanup Oracle Database
         if: always() && matrix.setup_oracle
-        run: |
-          docker stop oracle-db || true
-          docker rm oracle-db || true
+        run: docker rm -f oracle-db || true
 
   go-unit-tests:
     name: go-unit-tests
