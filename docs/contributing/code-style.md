@@ -18,7 +18,7 @@ All code must be formatted with `rustfmt` (nightly required for unstable options
 cargo +nightly fmt --all
 ```
 
-We use the default rustfmt configuration. Key points:
+We use a project rustfmt configuration (see `rustfmt.toml`). Key points:
 
 - 4 spaces for indentation
 - 100 character line limit
