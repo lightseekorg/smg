@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 200">
+  <defs>
+    <linearGradient id="tls-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="tls-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="tls-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="tls-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <filter id="tls-softGlow">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="tls-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+  </defs>
+
+  <style>
+    .tls-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .tls-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .tls-feature { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #94a3b8; }
+    .tls-code { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 9px; }
+
+    @keyframes tls-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    .tls-pulse { animation: tls-pulse 2s ease-in-out infinite; }
+  </style>
+
+  <!-- Background -->
+  <rect width="700" height="200" rx="16" fill="url(#tls-bgGrad)"/>
+  <rect width="700" height="200" fill="url(#tls-grid)" rx="16"/>
+
+  <!-- Glow effects -->
+  <ellipse cx="85" cy="95" rx="55" ry="50" fill="#0ea5e9" opacity="0.08" filter="url(#tls-softGlow)"/>
+  <ellipse cx="330" cy="95" rx="70" ry="55" fill="#6366f1" opacity="0.08" filter="url(#tls-softGlow)"/>
+  <ellipse cx="570" cy="95" rx="80" ry="60" fill="#10b981" opacity="0.06" filter="url(#tls-softGlow)"/>
+
+  <!-- Title -->
+  <text x="350" y="28" text-anchor="middle" class="tls-label" font-size="13" fill="#e2e8f0">TLS Configuration</text>
+
+  <!-- Client box -->
+  <rect x="25" y="55" width="120" height="80" rx="10" fill="#1e293b" stroke="#0ea5e9" stroke-width="2"/>
+  <rect x="25" y="55" width="120" height="26" rx="10" fill="url(#tls-blueGrad)"/>
+  <rect x="25" y="73" width="120" height="8" fill="url(#tls-blueGrad)"/>
+  <text x="85" y="75" text-anchor="middle" class="tls-label" font-size="10" fill="white">Client</text>
+  <text x="85" y="100" text-anchor="middle" class="tls-feature" fill="#e2e8f0">TLS 1.2+</text>
+  <text x="85" y="118" text-anchor="middle" class="tls-feature">Certificate Verify</text>
+
+  <!-- HTTPS connection indicator -->
+  <line x1="145" y1="88" x2="250" y2="88" stroke="#10b981" stroke-width="2.5"/>
+  <polygon points="247,84 255,88 247,92" fill="#10b981"/>
+  <rect x="168" y="72" width="56" height="18" rx="4" fill="#10b981" opacity="0.2" stroke="#10b981" stroke-width="1"/>
+  <text x="196" y="84" text-anchor="middle" class="tls-code" fill="#34d399" font-weight="600">HTTPS</text>
+  <!-- Lock icon -->
+  <rect x="155" y="78" width="8" height="7" rx="1" fill="none" stroke="#34d399" stroke-width="1.2"/>
+  <path d="M 156.5 78 L 156.5 75 A 2.5 2.5 0 0 1 161.5 75 L 161.5 78" fill="none" stroke="#34d399" stroke-width="1.2"/>
+
+  <!-- SMG Gateway box -->
+  <rect x="255" y="50" width="150" height="90" rx="10" fill="#1e293b" stroke="#6366f1" stroke-width="2"/>
+  <rect x="255" y="50" width="150" height="26" rx="10" fill="url(#tls-primaryGrad)"/>
+  <rect x="255" y="68" width="150" height="8" fill="url(#tls-primaryGrad)"/>
+  <text x="330" y="70" text-anchor="middle" class="tls-label" font-size="10" fill="white">SMG Gateway</text>
+  <text x="330" y="95" text-anchor="middle" class="tls-feature" fill="#e2e8f0">TLS Termination</text>
+  <text x="330" y="110" text-anchor="middle" class="tls-code" fill="#a78bfa">--tls-cert / --tls-key</text>
+  <text x="330" y="128" text-anchor="middle" class="tls-feature">ALPN: h2, http/1.1</text>
+
+  <!-- HTTP/HTTPS connection indicator -->
+  <line x1="405" y1="78" x2="490" y2="65" stroke="#f59e0b" stroke-width="1.5"/>
+  <polygon points="487,61 495,65 487,69" fill="#f59e0b"/>
+  <line x1="405" y1="107" x2="490" y2="120" stroke="#f59e0b" stroke-width="1.5"/>
+  <polygon points="487,116 495,120 487,124" fill="#f59e0b"/>
+
+  <rect x="420" y="80" width="65" height="16" rx="4" fill="#1e293b" stroke="#475569" stroke-width="1"/>
+  <text x="452" y="92" text-anchor="middle" class="tls-feature" font-size="8" fill="#fbbf24">HTTP/HTTPS</text>
+
+  <!-- Worker 1 -->
+  <rect x="495" y="43" width="120" height="45" rx="8" fill="#1e293b" stroke="#10b981" stroke-width="1.5" class="tls-pulse"/>
+  <rect x="495" y="43" width="120" height="20" rx="8" fill="url(#tls-greenGrad)"/>
+  <rect x="495" y="57" width="120" height="6" fill="url(#tls-greenGrad)"/>
+  <text x="555" y="59" text-anchor="middle" class="tls-label" font-size="9" fill="white">Worker 1</text>
+  <text x="555" y="80" text-anchor="middle" class="tls-feature">Inference Server</text>
+
+  <!-- Worker 2 -->
+  <rect x="495" y="100" width="120" height="45" rx="8" fill="#1e293b" stroke="#10b981" stroke-width="1.5" class="tls-pulse"/>
+  <rect x="495" y="100" width="120" height="20" rx="8" fill="url(#tls-greenGrad)"/>
+  <rect x="495" y="114" width="120" height="6" fill="url(#tls-greenGrad)"/>
+  <text x="555" y="116" text-anchor="middle" class="tls-label" font-size="9" fill="white">Worker 2</text>
+  <text x="555" y="137" text-anchor="middle" class="tls-feature">Inference Server</text>
+
+  <!-- Legend -->
+  <rect x="25" y="152" width="280" height="35" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <line x1="42" y1="170" x2="72" y2="170" stroke="#10b981" stroke-width="2.5"/>
+  <text x="80" y="174" class="tls-feature" fill="#e2e8f0">Encrypted (TLS)</text>
+  <line x1="170" y1="170" x2="200" y2="170" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="208" y="174" class="tls-feature" fill="#e2e8f0">Internal (configurable)</text>
+
+  <!-- Bottom tagline -->
+  <text x="350" y="192" text-anchor="middle" class="tls-sublabel" font-size="11" fill="#64748b">TLS Termination  •  Certificate Management  •  ALPN Negotiation</text>
+</svg>

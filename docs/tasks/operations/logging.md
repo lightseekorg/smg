@@ -10,7 +10,7 @@ Configure structured logging with multiple output formats and integrate with log
 
 #### Before you begin
 
-- SMG [installed](../../getting-started/installation.md)
+- SMG [installed](../../getting-started/index.md)
 - Log aggregation system (optional): Elasticsearch, Loki, or similar
 
 </div>
