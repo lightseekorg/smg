@@ -68,33 +68,9 @@ With health checks:
 
 SMG sends periodic HTTP requests to each worker's health endpoint:
 
-```mermaid
-sequenceDiagram
-    participant S as SMG
-    participant W1 as Worker 1
-    participant W2 as Worker 2
-
-    Note over S: Health check interval
-    S->>W1: GET /health
-    W1-->>S: 200 OK
-    Note over W1: Healthy ✓
-
-    S->>W2: GET /health
-    W2--xS: Timeout
-    Note over W2: Failure 1
-
-    Note over S: Next interval
-    S->>W2: GET /health
-    W2--xS: Timeout
-    Note over W2: Failure 2
-
-    Note over S: Next interval
-    S->>W2: GET /health
-    W2--xS: Timeout
-    Note over W2: Failure 3 - Mark UNHEALTHY
-
-    Note over S: Worker 2 removed from pool
-```
+<div class="architecture-diagram">
+  <img src="../../../assets/images/health-checks-flow.svg" alt="Health Check Sequence Diagram">
+</div>
 
 ### Health States
 
