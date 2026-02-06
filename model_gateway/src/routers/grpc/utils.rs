@@ -880,7 +880,7 @@ pub(crate) fn convert_proto_logprobs(
     let mut content_items = Vec::with_capacity(proto_logprobs.token_logprobs.len());
 
     for (i, &logprob) in proto_logprobs.token_logprobs.iter().enumerate() {
-        let token_id = proto_logprobs.token_ids.get(i).copied().unwrap_or(0) as u32;
+        let token_id = proto_logprobs.token_ids.get(i).copied().unwrap_or(0);
         let token_text = decode_token(token_id);
         let bytes = Some(token_text.as_bytes().to_vec());
 
@@ -892,7 +892,7 @@ pub(crate) fn convert_proto_logprobs(
                 .enumerate()
                 .filter_map(|(j, &top_logprob)| {
                     top_logprobs_entry.token_ids.get(j).map(|&tid| {
-                        let text = decode_token(tid as u32);
+                        let text = decode_token(tid);
                         let bytes = Some(text.as_bytes().to_vec());
                         TopLogProb {
                             token: text,
@@ -934,7 +934,7 @@ pub(crate) fn convert_proto_to_openai_logprobs(
 /// Convert OutputLogProbs to Generate format Vec<Vec<Option<f64>>>
 ///
 /// Generate format: [[logprob, token_id, ...], [logprob, token_id, ...], ...]
-/// Each inner vec contains [logprob (f64), token_id (i32), ...]
+/// Each inner vec contains [logprob (f64), token_id (u32), ...]
 pub(crate) fn convert_generate_output_logprobs(
     proto_logprobs: &ProtoOutputLogProbs,
 ) -> Vec<Vec<Option<f64>>> {
