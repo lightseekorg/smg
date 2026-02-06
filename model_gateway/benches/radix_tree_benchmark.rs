@@ -10,6 +10,7 @@
 
 use std::{
     collections::BTreeMap,
+    hint::black_box,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -18,7 +19,7 @@ use std::{
     time::Instant,
 };
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use kv_index::{StringTree, TokenTree};
 use rand::{
     distr::{Alphanumeric, SampleString},
