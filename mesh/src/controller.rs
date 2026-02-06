@@ -649,7 +649,7 @@ impl MeshController {
                                             // Create a temporary GossipService to generate snapshot chunks
                                             let service = GossipService::new(
                                                 Arc::new(parking_lot::RwLock::new(
-                                                    std::collections::BTreeMap::new(),
+                                                    BTreeMap::new(),
                                                 )),
                                                 SocketAddr::from(([0, 0, 0, 0], 0)),
                                                 &self_name,

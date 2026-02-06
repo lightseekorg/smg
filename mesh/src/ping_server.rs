@@ -264,7 +264,7 @@ impl GossipService {
         self
     }
 
-    pub fn with_mtls_manager(mut self, mtls_manager: Arc<crate::mtls::MTLSManager>) -> Self {
+    pub fn with_mtls_manager(mut self, mtls_manager: Arc<MTLSManager>) -> Self {
         self.mtls_manager = Some(mtls_manager);
         self
     }
@@ -646,9 +646,7 @@ impl Gossip for GossipService {
                                                         // Apply app state directly to the store
                                                         if let Some(ref stores) = stores {
                                                             stores.app.insert(
-                                                                super::crdt::SKey(
-                                                                    app_state.key.clone(),
-                                                                ),
+                                                                SKey(app_state.key.clone()),
                                                                 app_state,
                                                                 state_update.actor.clone(),
                                                             );
@@ -667,9 +665,7 @@ impl Gossip for GossipService {
                                                         // Apply membership state directly to the store
                                                         if let Some(ref stores) = stores {
                                                             stores.membership.insert(
-                                                                super::crdt::SKey(
-                                                                    membership_state.name.clone(),
-                                                                ),
+                                                                SKey(membership_state.name.clone()),
                                                                 membership_state,
                                                                 state_update.actor.clone(),
                                                             );

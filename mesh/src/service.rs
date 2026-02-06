@@ -232,13 +232,13 @@ impl MeshServerHandler {
 
     /// Get a snapshot of the app store for synchronization
     /// Returns a CRDT snapshot that can be merged into other nodes
-    pub fn snapshot(&self) -> crate::crdt::CRDTMap<crate::stores::AppState> {
+    pub fn snapshot(&self) -> crate::crdt::CRDTMap<AppState> {
         self.stores.app.snapshot()
     }
 
     /// Sync app store data from a snapshot (for testing and manual sync)
     /// This will be replaced by automatic sync stream in the future
-    pub fn sync_app_from_snapshot(&self, snapshot: &crate::crdt::CRDTMap<crate::stores::AppState>) {
+    pub fn sync_app_from_snapshot(&self, snapshot: &crate::crdt::CRDTMap<AppState>) {
         // Merge snapshot into our app store using CRDT merge
         self.stores.app.merge(snapshot);
     }
