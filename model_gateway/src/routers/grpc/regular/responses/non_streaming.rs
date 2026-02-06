@@ -20,7 +20,7 @@ use super::{
     conversions,
 };
 use crate::{
-    mcp::{ApprovalMode, TenantContext, ToolExecutionInput},
+    mcp::{McpToolSession, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse},
     routers::{
@@ -171,23 +171,16 @@ pub(super) async fn execute_tool_loop(
         DEFAULT_MAX_ITERATIONS
     );
 
-    // Create a request context for tool execution (use response_id if available)
-    let request_id = response_id
+    // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
+    let mcp_servers = ctx.requested_servers.read().unwrap().clone();
+    let session_request_id = response_id
         .clone()
         .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4()));
-    let request_ctx = ctx.mcp_orchestrator.create_request_context(
-        request_id,
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
-    );
+    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
 
     // Get MCP tools and convert to chat format (do this once before loop)
-    let mcp_tools = {
-        let servers = ctx.requested_servers.read().unwrap();
-        let server_keys: Vec<String> = servers.iter().map(|(_, key)| key.clone()).collect();
-        ctx.mcp_orchestrator.list_tools_for_servers(&server_keys)
-    };
-    let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&mcp_tools);
+    let mcp_tools = session.mcp_tools();
+    let mcp_chat_tools = convert_mcp_tools_to_chat_tools(mcp_tools);
     trace!(
         "Converted {} MCP tools to chat format",
         mcp_chat_tools.len()
@@ -320,13 +313,6 @@ pub(super) async fn execute_tool_loop(
                 return Ok(responses_response);
             }
 
-            // Get server_keys for tool execution
-            let (mcp_servers, server_keys): (Vec<(String, String)>, Vec<String>) = {
-                let servers = ctx.requested_servers.read().unwrap();
-                let keys = servers.iter().map(|(_, key)| key.clone()).collect();
-                (servers.clone(), keys)
-            };
-
             // Convert tool calls to execution inputs
             let inputs: Vec<ToolExecutionInput> = mcp_tool_calls
                 .into_iter()
@@ -337,11 +323,8 @@ pub(super) async fn execute_tool_loop(
                 })
                 .collect();
 
-            // Execute all MCP tools via unified API
-            let results = ctx
-                .mcp_orchestrator
-                .execute_tools(inputs, &server_keys, &mcp_servers, &request_ctx)
-                .await;
+            // Execute all MCP tools via session
+            let results = session.execute_tools(inputs).await;
 
             // Process results: record metrics and state
             for result in results {
@@ -420,8 +403,7 @@ pub(super) async fn execute_tool_loop(
             // Inject MCP metadata into output
             if state.total_calls > 0 {
                 // Prepend mcp_list_tools items for each server
-                let mcp_servers = ctx.requested_servers.read().unwrap();
-                for (label, key) in mcp_servers.iter().rev() {
+                for (label, key) in session.mcp_servers().iter().rev() {
                     let mcp_list_tools = build_mcp_list_tools_item(
                         &ctx.mcp_orchestrator,
                         label,
@@ -435,7 +417,7 @@ pub(super) async fn execute_tool_loop(
 
                 trace!(
                     "Injected MCP metadata: {} mcp_list_tools + {} mcp_call items",
-                    mcp_servers.len(),
+                    session.mcp_servers().len(),
                     state.total_calls
                 );
             }
