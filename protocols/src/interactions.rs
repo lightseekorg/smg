@@ -27,12 +27,14 @@ pub struct InteractionsRequest {
     pub agent: Option<String>,
 
     /// Input content - can be string or array of Content objects
+    #[validate(custom(function = "validate_input"))]
     pub input: InteractionsInput,
 
     /// System instruction for the model
     pub system_instruction: Option<String>,
 
     /// Available tools
+    #[validate(custom(function = "validate_tools"))]
     pub tools: Option<Vec<InteractionsTool>>,
 
     /// Response format for structured outputs
@@ -64,19 +66,6 @@ pub struct InteractionsRequest {
 
     /// Link to prior interaction for stateful conversations
     pub previous_interaction_id: Option<String>,
-}
-
-fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), ValidationError> {
-    let is_blank = |v: &Option<String>| v.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true);
-    // Either model or agent must be provided
-    if is_blank(&req.model) && is_blank(&req.agent) {
-        return Err(ValidationError::new("model_or_agent_required"));
-    }
-    // response_mime_type is required when response_format is set
-    if req.response_format.is_some() && is_blank(&req.response_mime_type) {
-        return Err(ValidationError::new("response_mime_type_required"));
-    }
-    Ok(())
 }
 
 impl Default for InteractionsRequest {
@@ -383,6 +372,14 @@ pub enum Delta {
         is_error: Option<bool>,
         call_id: Option<String>,
     },
+    /// File search call delta
+    FileSearchCall {
+        id: Option<String>,
+    },
+    /// File search result delta
+    FileSearchResult {
+        result: Option<Vec<FileSearchResultData>>,
+    },
     /// MCP server tool call delta
     McpServerToolCall {
         name: Option<String>,
@@ -465,6 +462,15 @@ pub enum InteractionsTool {
         url: Option<String>,
         headers: Option<HashMap<String, String>>,
         allowed_tools: Option<AllowedTools>,
+    },
+    /// File Search built-in tool
+    FileSearch {
+        /// Names of file search stores to search
+        file_search_store_names: Option<Vec<String>>,
+        /// Maximum number of results to return
+        top_k: Option<u32>,
+        /// Metadata filter for search
+        metadata_filter: Option<String>,
     },
 }
 
@@ -753,6 +759,16 @@ pub enum Content {
         call_id: Option<String>,
     },
 
+    /// File search call content
+    FileSearchCall {
+        id: Option<String>,
+    },
+
+    /// File search result content
+    FileSearchResult {
+        result: Option<Vec<FileSearchResultData>>,
+    },
+
     /// MCP server tool call content
     McpServerToolCall {
         name: String,
@@ -847,6 +863,18 @@ pub struct GoogleSearchResultData {
     pub title: Option<String>,
     /// Web content snippet
     pub rendered_content: Option<String>,
+}
+
+/// Result data for file search result
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FileSearchResultData {
+    /// Search result title
+    pub title: Option<String>,
+    /// Search result text
+    pub text: Option<String>,
+    /// Name of the file search store
+    pub file_search_store: Option<String>,
 }
 
 /// Arguments for code execution call
@@ -1035,4 +1063,60 @@ pub enum ResponseModality {
     Text,
     Image,
     Audio,
+}
+
+fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), ValidationError> {
+    let is_blank = |v: &Option<String>| v.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true);
+    // Either model or agent must be provided
+    if is_blank(&req.model) && is_blank(&req.agent) {
+        return Err(ValidationError::new("model_or_agent_required"));
+    }
+    // response_mime_type is required when response_format is set
+    if req.response_format.is_some() && is_blank(&req.response_mime_type) {
+        return Err(ValidationError::new("response_mime_type_required"));
+    }
+    Ok(())
+}
+
+fn validate_tools(tools: &[InteractionsTool]) -> Result<(), ValidationError> {
+    // FileSearch tool is not supported yet
+    if tools
+        .iter()
+        .any(|t| matches!(t, InteractionsTool::FileSearch { .. }))
+    {
+        return Err(ValidationError::new("file_search_tool_not_supported"));
+    }
+    Ok(())
+}
+
+fn validate_input(input: &InteractionsInput) -> Result<(), ValidationError> {
+    fn has_file_search_content(content: &Content) -> bool {
+        matches!(
+            content,
+            Content::FileSearchCall { .. } | Content::FileSearchResult { .. }
+        )
+    }
+
+    fn check_turn(turn: &Turn) -> bool {
+        if let Some(content) = &turn.content {
+            match content {
+                TurnContent::Contents(contents) => contents.iter().any(has_file_search_content),
+                TurnContent::Text(_) => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    let has_file_search = match input {
+        InteractionsInput::Text(_) => false,
+        InteractionsInput::Content(content) => has_file_search_content(content),
+        InteractionsInput::Contents(contents) => contents.iter().any(has_file_search_content),
+        InteractionsInput::Turns(turns) => turns.iter().any(check_turn),
+    };
+
+    if has_file_search {
+        return Err(ValidationError::new("file_search_content_not_supported"));
+    }
+    Ok(())
 }
