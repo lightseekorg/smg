@@ -290,6 +290,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Warm up Docker daemon
+        if: matrix.setup_oracle || matrix.setup_brave
+        run: docker info > /dev/null 2>&1
+
       - name: Setup vLLM backend
         if: matrix.setup_vllm
         uses: ./.github/actions/setup-vllm
@@ -301,7 +305,18 @@ jobs:
       - name: Setup SGLang backend
         if: ${{ !matrix.setup_vllm && !matrix.setup_trtllm }}
         uses: ./.github/actions/setup-sglang
+      
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: smg-wheel
+          path: wheel/
 
+      - name: Install wheel and test dependencies
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+          bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
         run: |
@@ -322,57 +337,23 @@ jobs:
 
           echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_9:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
-      - name: Cache Oracle Docker image
+      - name: Start Oracle Database
         if: matrix.setup_oracle
-        id: cache-oracle-image
-        uses: actions/cache@v5
-        with:
-          path: /tmp/oracle-xe-21-slim-faststart.tar
-          key: docker-oracle-xe-21-slim-faststart
+        run: |
+          docker run --rm -d -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim-faststart
+          echo "Starting Oracle DB..."
 
-      # - name: Start Oracle Database
-      #   if: matrix.setup_oracle
-      #   run: |
-      #     if [ -f /tmp/oracle-xe-21-slim-faststart.tar ]; then
-      #       echo "Loading Oracle image from cache..."
-      #       docker load -i /tmp/oracle-xe-21-slim-faststart.tar
-      #     else
-      #       echo "Pulling Oracle image from Docker Hub..."
-      #       docker pull gvenzl/oracle-xe:21-slim-faststart
-      #       echo "Saving Oracle image to cache..."
-      #       docker save gvenzl/oracle-xe:21-slim-faststart -o /tmp/oracle-xe-21-slim-faststart.tar
-      #     fi
-      #     docker run -d -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim-faststart
-      #     echo "Starting Oracle DB..."
-
-      #     # Export Oracle connection environment variables
-      #     echo "ATP_USER=system" >> $GITHUB_ENV
-      #     echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
-      #     echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
-
-      - name: Cache Brave MCP Docker image
-        if: matrix.setup_brave
-        id: cache-brave-image
-        uses: actions/cache@v5
-        with:
-          path: /tmp/brave-search-mcp-sse.tar
-          key: docker-brave-search-mcp-sse-1.0.10
+          # Export Oracle connection environment variables
+          echo "ATP_USER=system" >> $GITHUB_ENV
+          echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
+          echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
 
       - name: Start Brave MCP Server
         if: matrix.setup_brave
         env:
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
         run: |
-          if [ -f /tmp/brave-search-mcp-sse.tar ]; then
-            echo "Loading Brave MCP image from cache..."
-            docker load -i /tmp/brave-search-mcp-sse.tar
-          else
-            echo "Pulling Brave MCP image from Docker Hub..."
-            docker pull shoofio/brave-search-mcp-sse:1.0.10
-            echo "Saving Brave MCP image to cache..."
-            docker save shoofio/brave-search-mcp-sse:1.0.10 -o /tmp/brave-search-mcp-sse.tar
-          fi
-          docker run -d \
+          docker run --rm -d \
             -p 8001:8080 \
             -e BRAVE_API_KEY \
             --name brave-search-server \
@@ -380,18 +361,6 @@ jobs:
           echo "Starting Brave MCP Server..."
           sleep 2
           curl -f --max-time 1 http://localhost:8001/sse > /dev/null 2>&1 && echo "Brave MCP Server is healthy!" || echo "Brave MCP Server responded"
-
-      - name: Download wheel artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: smg-wheel
-          path: wheel/
-
-      - name: Install wheel and test dependencies
-        run: |
-          pip uninstall -y smg || true
-          pip install wheel/*.whl
-          bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
 
       - name: Run E2E tests
         env:
