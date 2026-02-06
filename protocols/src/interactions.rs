@@ -67,12 +67,13 @@ pub struct InteractionsRequest {
 }
 
 fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), ValidationError> {
+    let is_blank = |v: &Option<String>| v.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true);
     // Either model or agent must be provided
-    if req.model.is_none() && req.agent.is_none() {
+    if is_blank(&req.model) && is_blank(&req.agent) {
         return Err(ValidationError::new("model_or_agent_required"));
     }
     // response_mime_type is required when response_format is set
-    if req.response_format.is_some() && req.response_mime_type.is_none() {
+    if req.response_format.is_some() && is_blank(&req.response_mime_type) {
         return Err(ValidationError::new("response_mime_type_required"));
     }
     Ok(())
