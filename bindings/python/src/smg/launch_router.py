@@ -24,7 +24,7 @@ def launch_router(args: argparse.Namespace | RouterArgs) -> None:
             Can be either raw argparse.Namespace or converted RouterArgs
 
     Returns:
-        Router instance if successful, None if failed
+        None. Raises on failure.
     """
     setproctitle.setproctitle("smg::router")
     try:

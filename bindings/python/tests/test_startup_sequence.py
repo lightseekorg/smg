@@ -622,6 +622,22 @@ class TestStartupErrorHandling:
                 error_call = mock_logger.error.call_args[0][0]
                 assert "Error starting router: Router start failed" in error_call
 
+    def test_validation_error_handling(self):
+        """Test error handling when validation fails."""
+        args = RouterArgs(
+            pd_disaggregation=True,
+            prefill_urls=[],
+            decode_urls=[],
+            service_discovery=False,
+        )
+
+        with patch("smg.launch_router.logger") as mock_logger:
+            with pytest.raises(ValueError, match="PD disaggregation mode requires --prefill"):
+                launch_router(args)
+
+            # Should log error for validation failures
+            mock_logger.error.assert_called_once()
+
 
 # --- Added unit tests for Router wrapper and launch_server helpers ---
 
@@ -835,22 +851,6 @@ def test_launch_server_process_and_cleanup(monkeypatch):
 
     assert (p1.pid, _sig.SIGTERM) in calls and (p2.pid, _sig.SIGTERM) in calls
     assert (p2.pid, _sig.SIGKILL) in calls
-
-    def test_validation_error_handling(self):
-        """Test error handling when validation fails."""
-        args = RouterArgs(
-            pd_disaggregation=True,
-            prefill_urls=[],
-            decode_urls=[],
-            service_discovery=False,
-        )
-
-        with patch("smg.launch_router.logger") as mock_logger:
-            with pytest.raises(ValueError, match="PD disaggregation mode requires --prefill"):
-                launch_router(args)
-
-            # Should log error for validation failures
-            mock_logger.error.assert_called_once()
 
 
 class TestStartupFlow:

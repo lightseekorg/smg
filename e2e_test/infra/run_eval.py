@@ -124,6 +124,8 @@ def run_eval(args: Any) -> dict:
 
     # Build metrics
     metrics = result.metrics.copy() if result.metrics else {}
+    if result.score is None:
+        logger.warning("%s eval returned no score, defaulting to 0.0", eval_name)
     metrics["score"] = result.score if result.score is not None else 0.0
     metrics["latency"] = latency
 

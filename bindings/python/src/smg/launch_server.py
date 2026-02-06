@@ -180,9 +180,13 @@ def main():
         proc = launch_server_process(server_args, worker_port, i)
         server_processes.append(proc)
 
-    signal.signal(signal.SIGINT, lambda sig, frame: cleanup_processes(server_processes))
-    signal.signal(signal.SIGTERM, lambda sig, frame: cleanup_processes(server_processes))
-    signal.signal(signal.SIGQUIT, lambda sig, frame: cleanup_processes(server_processes))
+    def _handle_shutdown(sig, frame):
+        cleanup_processes(server_processes)
+        sys.exit(128 + sig)
+
+    signal.signal(signal.SIGINT, _handle_shutdown)
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+    signal.signal(signal.SIGQUIT, _handle_shutdown)
 
     # Update router args with worker URLs
     # Use grpc:// protocol if server is in gRPC mode, otherwise http://
