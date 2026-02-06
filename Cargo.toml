@@ -3,13 +3,20 @@ members = ["model_gateway", "protocols", "reasoning_parser", "tool_parser", "wor
 resolver = "2"
 
 [workspace.dependencies]
-openai-protocol = { version = "1.0.0", path = "protocols" }
-smg-auth = { version = "1.0.0", path = "auth" }
-smg-mcp = { version = "1.0.0", path = "mcp" }
-smg-data-connector = { version = "1.0.0", path = "data_connector", package = "data-connector" }
+# Internal workspace crates
+openai-protocol = { version = "1.1.0", path = "protocols" }
+reasoning-parser = { version = "1.1.0", path = "reasoning_parser" }
+tool-parser = { version = "1.1.0", path = "tool_parser" }
+wfaas = { version = "1.0.1", path = "workflow" }
+llm-tokenizer = { version = "1.1.0", path = "tokenizer" }
+smg-auth = { version = "1.1.0", path = "auth" }
+smg-mcp = { version = "2.0.0", path = "mcp" }
+kv-index = { version = "1.0.0", path = "kv_index" }
+smg-data-connector = { version = "1.1.0", path = "data_connector", package = "data-connector" }
+llm-multimodal = { version = "1.1.0", path = "multimodal" }
 smg-wasm = { version = "1.0.0", path = "wasm", package = "smg-wasm" }
 smg-mesh = { version = "1.0.0", path = "mesh", package = "smg-mesh" }
-smg-grpc-client = { version = "1.0.0", path = "grpc_client" }
+smg-grpc-client = { version = "1.1.0", path = "grpc_client" }
 
 # Shared dependencies
 anyhow = "1.0"
