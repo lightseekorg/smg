@@ -833,8 +833,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                                             {
                                                 seen_in_progress = true;
                                                 if !mcp_list_tools_sent {
-                                                    for (label, key) in
-                                                        session.mcp_servers().iter()
+                                                    for (label, key) in session.mcp_servers().iter()
                                                     {
                                                         let list_tools_index = handler
                                                             .allocate_synthetic_output_index();
@@ -919,11 +918,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                             obj.insert("id".to_string(), Value::String(id.clone()));
                         }
                     }
-                    inject_mcp_metadata_streaming(
-                        &mut response_json,
-                        &state,
-                        &session,
-                    );
+                    inject_mcp_metadata_streaming(&mut response_json, &state, &session);
 
                     restore_original_tools(&mut response_json, &original_request);
                     patch_response_with_request_metadata(

@@ -29,20 +29,16 @@ use crate::{
             OutputTokensDetails, ResponseStatus, ResponseUsage, ResponsesResponse, ResponsesUsage,
         },
     },
-    routers::{
-        grpc::{
-            common::{
-                response_formatting::CompletionTokenTracker,
-                responses::{
-                    build_sse_response,
-                    streaming::{
-                        attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter,
-                    },
-                },
+    routers::grpc::{
+        common::{
+            response_formatting::CompletionTokenTracker,
+            responses::{
+                build_sse_response,
+                streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
             },
-            context,
-            proto_wrapper::{ProtoResponseVariant, ProtoStream},
         },
+        context,
+        proto_wrapper::{ProtoResponseVariant, ProtoStream},
     },
 };
 
@@ -593,14 +589,7 @@ impl HarmonyStreamingProcessor {
         match execution_result {
             context::ExecutionResult::Single { stream } => {
                 debug!("Processing Responses API single stream mode");
-                Self::process_decode_stream(
-                    stream,
-                    emitter,
-                    tx,
-                    session,
-                    mcp_tool_names,
-                )
-                .await
+                Self::process_decode_stream(stream, emitter, tx, session, mcp_tool_names).await
             }
             context::ExecutionResult::Dual { prefill, decode } => {
                 debug!("Processing Responses API dual stream mode");
@@ -634,14 +623,8 @@ impl HarmonyStreamingProcessor {
         }
 
         // Phase 2: Process decode stream
-        let result = Self::process_decode_stream(
-            decode_stream,
-            emitter,
-            tx,
-            session,
-            mcp_tool_names,
-        )
-        .await;
+        let result =
+            Self::process_decode_stream(decode_stream, emitter, tx, session, mcp_tool_names).await;
 
         prefill_stream.mark_completed();
         result

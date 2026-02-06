@@ -8,15 +8,12 @@
 
 use serde_json::Value;
 
-use super::orchestrator::McpOrchestrator;
-use crate::{
-    approval::ApprovalMode,
-    inventory::ToolEntry,
-    tenant::TenantContext,
-    transform::ResponseFormat,
+use super::orchestrator::{
+    McpOrchestrator, McpRequestContext, ToolExecutionInput, ToolExecutionOutput,
 };
-
-use super::orchestrator::{McpRequestContext, ToolExecutionInput, ToolExecutionOutput};
+use crate::{
+    approval::ApprovalMode, inventory::ToolEntry, tenant::TenantContext, transform::ResponseFormat,
+};
 
 /// Bundles all MCP execution state for a single request.
 ///
@@ -89,7 +86,12 @@ impl<'a> McpToolSession<'a> {
     /// `server_keys`, `mcp_servers`, and `request_ctx`.
     pub async fn execute_tools(&self, inputs: Vec<ToolExecutionInput>) -> Vec<ToolExecutionOutput> {
         self.orchestrator
-            .execute_tools(inputs, &self.server_keys, &self.mcp_servers, &self.request_ctx)
+            .execute_tools(
+                inputs,
+                &self.server_keys,
+                &self.mcp_servers,
+                &self.request_ctx,
+            )
             .await
     }
 
@@ -181,7 +183,10 @@ mod tests {
 
         assert_eq!(session.server_keys(), &["key1", "key2"]);
         assert_eq!(session.mcp_servers().len(), 2);
-        assert_eq!(session.mcp_servers()[0], ("label1".to_string(), "key1".to_string()));
+        assert_eq!(
+            session.mcp_servers()[0],
+            ("label1".to_string(), "key1".to_string())
+        );
     }
 
     #[test]
@@ -233,8 +238,7 @@ mod tests {
     }
 
     fn create_test_tool(name: &str) -> crate::core::config::Tool {
-        use std::borrow::Cow;
-        use std::sync::Arc;
+        use std::{borrow::Cow, sync::Arc};
 
         crate::core::config::Tool {
             name: Cow::Owned(name.to_string()),

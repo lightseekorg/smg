@@ -706,11 +706,7 @@ async fn execute_tool_loop_streaming_internal(
 
                 // Execute tool and convert result using unified serialization
                 let call_result = session
-                    .call_tool_by_name(
-                        &tool_call.name,
-                        arguments,
-                        &resolved_label,
-                    )
+                    .call_tool_by_name(&tool_call.name, arguments, &resolved_label)
                     .await;
 
                 let (output_str, success, _error) = match call_result {

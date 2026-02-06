@@ -25,10 +25,7 @@ use crate::{
         },
         responses::{generate_id, ResponseInput, ResponsesRequest},
     },
-    routers::{
-        header_utils::apply_request_headers,
-        mcp_utils::McpLoopConfig,
-    },
+    routers::{header_utils::apply_request_headers, mcp_utils::McpLoopConfig},
 };
 
 // ============================================================================
@@ -211,11 +208,7 @@ pub(super) async fn execute_streaming_tool_calls(
         // Call tool by name within allowed servers
         debug!("Calling MCP tool '{}' with args: {}", call.name, args_str);
         let call_result = session
-            .call_tool_by_name(
-                &call.name,
-                arguments,
-                &server_label,
-            )
+            .call_tool_by_name(&call.name, arguments, &server_label)
             .await;
 
         // Get transformed item directly (avoids serialize/parse roundtrip and double transformation)
@@ -404,7 +397,8 @@ pub(super) fn send_mcp_list_tools_events(
     sequence_number: &mut u64,
     server_keys: &[String],
 ) -> bool {
-    let tools_item_full = build_mcp_list_tools_item_from_session(session, server_label, server_keys);
+    let tools_item_full =
+        build_mcp_list_tools_item_from_session(session, server_label, server_keys);
     let item_id = tools_item_full
         .get("id")
         .and_then(|v| v.as_str())
@@ -740,11 +734,7 @@ pub(super) async fn execute_tool_loop(
             );
             let resolved_label = session.resolve_tool_server_label(&tool_name);
             let call_result = session
-                .call_tool_by_name(
-                    &tool_name,
-                    arguments,
-                    &resolved_label,
-                )
+                .call_tool_by_name(&tool_name, arguments, &resolved_label)
                 .await;
 
             // Get transformed item directly (avoids serialize/parse roundtrip and double transformation)
