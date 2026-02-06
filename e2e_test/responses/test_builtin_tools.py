@@ -539,8 +539,8 @@ class TestWebSearchStreamingEvents:
             item for item in final_response.output if item.type == "web_search_call"
         ]
         for ws_call in web_search_calls:
-            assert ws_call.status == "completed"
-            assert ws_call.id is not None
+            assert ws_call.status == "completed", f"response: {final_response}"
+            assert ws_call.id is not None, f"response: {final_response}"
 
     def test_web_search_streaming_event_order(self, gateway_with_mcp_config):
         """Test that web_search streaming events occur in correct order.
@@ -735,8 +735,8 @@ class TestWebSearchStreamingEventsGrpc:
             item for item in final_response.output if item.type == "web_search_call"
         ]
         for ws_call in web_search_calls:
-            assert ws_call.status == "completed"
-            assert ws_call.id is not None
+            assert ws_call.status == "completed", f"response: {final_response}"
+            assert ws_call.id is not None, f"response: {final_response}"
 
     def test_web_search_streaming_event_order(self, gateway_with_mcp_config_grpc):
         """Test that web_search streaming events occur in correct order (gRPC)."""
