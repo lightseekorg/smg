@@ -407,14 +407,6 @@ jobs:
           name: genai-bench-results-all-policies
           path: benchmark_**/
 
-      - name: Cleanup Brave MCP Server
-        if: always() && matrix.setup_brave
-        run: docker kill brave-search-server || true; docker rm brave-search-server || true
-
-      - name: Cleanup Oracle Database
-        if: always() && matrix.setup_oracle
-        run: docker kill oracle-db || true; docker rm oracle-db || true
-
   go-unit-tests:
     name: go-unit-tests
     needs: [check-ci, build-wheel]
