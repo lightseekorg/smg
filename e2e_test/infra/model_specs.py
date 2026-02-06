@@ -162,4 +162,10 @@ THIRD_PARTY_MODELS: dict[str, dict] = {
         "model": "grok-4-fast",
         "api_key_env": "XAI_API_KEY",
     },
+    "anthropic": {
+        "description": "Anthropic API",
+        "model": "claude-sonnet-4-20250514",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "client_type": "anthropic",
+    },
 }

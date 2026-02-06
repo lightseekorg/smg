@@ -655,14 +655,13 @@ def _setup_cloud_backend(
     storage_backend: str = "memory",
     gateway_config: dict | None = None,
 ):
-    """Setup cloud backend (openai, xai, etc.).
+    """Setup cloud backend (openai, xai, anthropic, etc.).
 
     Args:
-        backend_name: Cloud backend name (openai, xai).
+        backend_name: Cloud backend name (openai, xai, anthropic).
         storage_backend: History storage backend (memory, oracle).
         gateway_config: Gateway configuration from marker.
     """
-    import openai
     from infra import THIRD_PARTY_MODELS, launch_cloud_gateway
 
     if backend_name not in THIRD_PARTY_MODELS:
@@ -684,10 +683,21 @@ def _setup_cloud_backend(
     )
 
     api_key = os.environ.get(api_key_env) if api_key_env else "not-used"
-    client = openai.OpenAI(
-        base_url=f"{gateway.base_url}/v1",
-        api_key=api_key,
-    )
+
+    if cfg.get("client_type") == "anthropic":
+        import anthropic
+
+        client = anthropic.Anthropic(
+            base_url=gateway.base_url,
+            api_key=api_key,
+        )
+    else:
+        import openai
+
+        client = openai.OpenAI(
+            base_url=f"{gateway.base_url}/v1",
+            api_key=api_key,
+        )
 
     try:
         yield backend_name, cfg["model"], client, gateway
