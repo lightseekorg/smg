@@ -126,7 +126,7 @@ cargo test -- --nocapture
 cargo test --test integration
 ```
 
-### Linting and Formatting
+### Linting and Formatting (Rust)
 
 ```bash
 # Format code
@@ -141,6 +141,35 @@ cargo clippy -- -D warnings
 # Fix clippy warnings automatically
 cargo clippy --fix
 ```
+
+### Linting and Formatting (Python)
+
+Python code in `e2e_test/`, `bindings/python/`, and `scripts/` is checked with
+[ruff](https://docs.astral.sh/ruff/) (linting + formatting) and
+[mypy](https://mypy-lang.org/) (type checking).
+
+**Pre-commit hooks** run these checks automatically on every commit. To set up:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+To run checks manually:
+
+```bash
+# Lint (with auto-fix)
+ruff check --fix e2e_test/ bindings/python/ scripts/
+
+# Format
+ruff format e2e_test/ bindings/python/ scripts/
+
+# Type check
+mypy e2e_test/ --config-file mypy.ini
+mypy bindings/python/ --config-file mypy.ini
+```
+
+Configuration lives in `ruff.toml` and `mypy.ini` at the repo root.
 
 ---
 
