@@ -124,7 +124,7 @@ http-body-util = "0.1"
 portpicker = "0.1"
 tempfile = "3.8"
 lazy_static = "1.4"
-wasm-encoder = "0.242"
+wasm-encoder = "0.244"
 npyz = { version = "0.8", features = ["npz"] }
 opentelemetry-proto = { version = "0.27", features = ["gen-tonic"] }
 tonic-v12 = { version = "0.12.3", package = "tonic" }
