@@ -18,10 +18,9 @@ use super::common::{default_model, default_true, Function, GenerationRequest};
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 #[validate(schema(function = "validate_interactions_request"))]
 pub struct InteractionsRequest {
-    /// Model identifier (e.g., "gemini-2.0-flash")
+    /// Model identifier (e.g., "gemini-2.5-flash")
     /// Required if agent is not provided
-    #[serde(default = "default_model")]
-    pub model: String,
+    pub model: Option<String>,
 
     /// Agent name (e.g., "deep-research-pro-preview-12-2025")
     /// Required if model is not provided
@@ -69,7 +68,7 @@ pub struct InteractionsRequest {
 
 fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), ValidationError> {
     // Either model or agent must be provided
-    if (req.model.is_empty() || req.model == default_model()) && req.agent.is_none() {
+    if req.model.is_none() && req.agent.is_none() {
         return Err(ValidationError::new("model_or_agent_required"));
     }
     // response_mime_type is required when response_format is set
@@ -82,7 +81,7 @@ fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), Valida
 impl Default for InteractionsRequest {
     fn default() -> Self {
         Self {
-            model: default_model(),
+            model: Some(default_model()),
             agent: None,
             agent_config: None,
             input: InteractionsInput::Text(String::new()),
@@ -106,7 +105,7 @@ impl GenerationRequest for InteractionsRequest {
     }
 
     fn get_model(&self) -> Option<&str> {
-        Some(self.model.as_str())
+        self.model.as_deref()
     }
 
     fn extract_text_for_routing(&self) -> String {
@@ -119,12 +118,13 @@ impl GenerationRequest for InteractionsRequest {
 
         fn extract_from_turn(turn: &Turn) -> String {
             match &turn.content {
-                TurnContent::Text(text) => text.clone(),
-                TurnContent::Contents(contents) => contents
+                Some(TurnContent::Text(text)) => text.clone(),
+                Some(TurnContent::Contents(contents)) => contents
                     .iter()
                     .filter_map(extract_from_content)
                     .collect::<Vec<String>>()
                     .join(" "),
+                None => String::new(),
             }
         }
 
@@ -153,7 +153,10 @@ impl GenerationRequest for InteractionsRequest {
 
 #[skip_serializing_none]
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct InteractionsResponse {
+pub struct Interaction {
+    /// Object type, always "interaction"
+    pub object: Option<String>,
+
     /// Model used
     pub model: Option<String>,
 
@@ -161,10 +164,10 @@ pub struct InteractionsResponse {
     pub agent: Option<String>,
 
     /// Interaction ID
-    pub id: Option<String>,
+    pub id: String,
 
     /// Interaction status
-    pub status: Option<InteractionsStatus>,
+    pub status: InteractionsStatus,
 
     /// Creation timestamp (ISO 8601)
     pub created: Option<String>,
@@ -185,26 +188,224 @@ pub struct InteractionsResponse {
     pub previous_interaction_id: Option<String>,
 }
 
-impl InteractionsResponse {
+impl Interaction {
     /// Check if the interaction is complete
     pub fn is_complete(&self) -> bool {
-        matches!(self.status, Some(InteractionsStatus::Completed))
+        matches!(self.status, InteractionsStatus::Completed)
     }
 
     /// Check if the interaction is in progress
     pub fn is_in_progress(&self) -> bool {
-        matches!(self.status, Some(InteractionsStatus::InProgress))
+        matches!(self.status, InteractionsStatus::InProgress)
     }
 
     /// Check if the interaction failed
     pub fn is_failed(&self) -> bool {
-        matches!(self.status, Some(InteractionsStatus::Failed))
+        matches!(self.status, InteractionsStatus::Failed)
     }
 
     /// Check if the interaction requires action (tool execution)
     pub fn requires_action(&self) -> bool {
-        matches!(self.status, Some(InteractionsStatus::RequiresAction))
+        matches!(self.status, InteractionsStatus::RequiresAction)
     }
+}
+
+// ============================================================================
+// Streaming Event Types (SSE)
+// ============================================================================
+
+/// Server-Sent Event for Interactions API streaming
+/// See: https://ai.google.dev/api/interactions-api#streaming
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "event_type")]
+pub enum InteractionStreamEvent {
+    /// Emitted when an interaction begins processing
+    #[serde(rename = "interaction.start")]
+    InteractionStart {
+        /// The interaction object
+        interaction: Option<Interaction>,
+        /// Event ID for resuming streams
+        event_id: Option<String>,
+    },
+
+    /// Emitted when an interaction completes
+    #[serde(rename = "interaction.complete")]
+    InteractionComplete {
+        /// The interaction object
+        interaction: Option<Interaction>,
+        /// Event ID for resuming streams
+        event_id: Option<String>,
+    },
+
+    /// Emitted when interaction status changes
+    #[serde(rename = "interaction.status_update")]
+    InteractionStatusUpdate {
+        /// The interaction ID
+        interaction_id: Option<String>,
+        /// The new status
+        status: Option<InteractionsStatus>,
+        /// Event ID for resuming streams
+        event_id: Option<String>,
+    },
+
+    /// Signals the beginning of a new content block
+    #[serde(rename = "content.start")]
+    ContentStart {
+        /// Content block index in outputs array
+        index: Option<u32>,
+        /// The content object
+        content: Option<Content>,
+        /// Event ID for resuming streams
+        event_id: Option<String>,
+    },
+
+    /// Streams incremental content updates
+    #[serde(rename = "content.delta")]
+    ContentDelta {
+        /// Content block index in outputs array
+        index: Option<u32>,
+        /// Event ID for resuming streams
+        event_id: Option<String>,
+        /// The delta content
+        delta: Option<Delta>,
+    },
+
+    /// Marks the end of a content block
+    #[serde(rename = "content.stop")]
+    ContentStop {
+        /// Content block index in outputs array
+        index: Option<u32>,
+        /// Event ID for resuming streams
+        event_id: Option<String>,
+    },
+
+    /// Error event
+    #[serde(rename = "error")]
+    Error {
+        /// Error information
+        error: Option<InteractionsError>,
+        /// Event ID for resuming streams
+        event_id: Option<String>,
+    },
+}
+
+/// Delta content for streaming updates
+/// See: https://ai.google.dev/api/interactions-api#ContentDelta
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Delta {
+    /// Text delta
+    Text {
+        text: Option<String>,
+        annotations: Option<Vec<Annotation>>,
+    },
+    /// Image delta
+    Image {
+        data: Option<String>,
+        uri: Option<String>,
+        mime_type: Option<ImageMimeType>,
+        resolution: Option<MediaResolution>,
+    },
+    /// Audio delta
+    Audio {
+        data: Option<String>,
+        uri: Option<String>,
+        mime_type: Option<AudioMimeType>,
+    },
+    /// Document delta
+    Document {
+        data: Option<String>,
+        uri: Option<String>,
+        mime_type: Option<DocumentMimeType>,
+    },
+    /// Video delta
+    Video {
+        data: Option<String>,
+        uri: Option<String>,
+        mime_type: Option<VideoMimeType>,
+        resolution: Option<MediaResolution>,
+    },
+    /// Thought summary delta
+    ThoughtSummary {
+        content: Option<ThoughtSummaryContent>,
+    },
+    /// Thought signature delta
+    ThoughtSignature { signature: Option<String> },
+    /// Function call delta
+    FunctionCall {
+        name: Option<String>,
+        arguments: Option<String>,
+        id: Option<String>,
+    },
+    /// Function result delta
+    FunctionResult {
+        name: Option<String>,
+        is_error: Option<bool>,
+        result: Option<Value>,
+        call_id: Option<String>,
+    },
+    /// Code execution call delta
+    CodeExecutionCall {
+        arguments: Option<CodeExecutionArguments>,
+        id: Option<String>,
+    },
+    /// Code execution result delta
+    CodeExecutionResult {
+        result: Option<String>,
+        is_error: Option<bool>,
+        signature: Option<String>,
+        call_id: Option<String>,
+    },
+    /// URL context call delta
+    UrlContextCall {
+        arguments: Option<UrlContextArguments>,
+        id: Option<String>,
+    },
+    /// URL context result delta
+    UrlContextResult {
+        signature: Option<String>,
+        result: Option<Vec<UrlContextResultData>>,
+        is_error: Option<bool>,
+        call_id: Option<String>,
+    },
+    /// Google search call delta
+    GoogleSearchCall {
+        arguments: Option<GoogleSearchArguments>,
+        id: Option<String>,
+    },
+    /// Google search result delta
+    GoogleSearchResult {
+        signature: Option<String>,
+        result: Option<Vec<GoogleSearchResultData>>,
+        is_error: Option<bool>,
+        call_id: Option<String>,
+    },
+    /// MCP server tool call delta
+    McpServerToolCall {
+        name: Option<String>,
+        server_name: Option<String>,
+        arguments: Option<Value>,
+        id: Option<String>,
+    },
+    /// MCP server tool result delta
+    McpServerToolResult {
+        name: Option<String>,
+        server_name: Option<String>,
+        result: Option<Value>,
+        call_id: Option<String>,
+    },
+}
+
+/// Error information in streaming events
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct InteractionsError {
+    /// Error code
+    pub code: Option<String>,
+    /// Error message
+    pub message: Option<String>,
 }
 
 // ============================================================================
@@ -308,7 +509,7 @@ pub struct GenerationConfig {
 
     pub max_output_tokens: Option<u32>,
 
-    pub speech_config: Option<SpeechConfig>,
+    pub speech_config: Option<Vec<SpeechConfig>>,
 
     pub image_config: Option<ImageConfig>,
 }
@@ -400,6 +601,7 @@ pub enum AgentConfig {
     /// Dynamic agent configuration
     Dynamic {},
     /// Deep Research agent configuration
+    #[serde(rename = "deep-research")]
     DeepResearch {
         /// Whether to include thought summaries ("auto" or "none")
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -428,12 +630,13 @@ pub enum InteractionsInput {
 
 /// A turn in a conversation with role and content
 /// See: https://ai.google.dev/api/interactions-api#Resource:Turn
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Turn {
     /// Role: "user" or "model"
-    pub role: String,
+    pub role: Option<String>,
     /// Content can be array of Content or string
-    pub content: TurnContent,
+    pub content: Option<TurnContent>,
 }
 
 /// Turn content can be array of Content or a simple string
@@ -530,7 +733,7 @@ pub enum Content {
     /// URL context result content
     UrlContextResult {
         signature: Option<String>,
-        result: Option<UrlContextResultData>,
+        result: Option<Vec<UrlContextResultData>>,
         is_error: Option<bool>,
         call_id: Option<String>,
     },
@@ -544,7 +747,7 @@ pub enum Content {
     /// Google search result content
     GoogleSearchResult {
         signature: Option<String>,
-        result: Option<GoogleSearchResultData>,
+        result: Option<Vec<GoogleSearchResultData>>,
         is_error: Option<bool>,
         call_id: Option<String>,
     },
@@ -787,12 +990,13 @@ impl VideoMimeType {
 // Status Types
 // ============================================================================
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InteractionsStatus {
-    Completed,
+    #[default]
     InProgress,
     RequiresAction,
+    Completed,
     Failed,
     Cancelled,
 }
