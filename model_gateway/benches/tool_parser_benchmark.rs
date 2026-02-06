@@ -17,7 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use criterion::{black_box, criterion_group, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
+
+use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
 use serde_json::json;
 use smg::{
     protocols::common::{Function, Tool},

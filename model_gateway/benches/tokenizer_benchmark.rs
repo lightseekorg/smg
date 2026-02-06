@@ -12,7 +12,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use criterion::{black_box, criterion_group, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
+
+use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
 use smg::tokenizer::{
     cache::{CacheConfig, CachedTokenizer},
     huggingface::HuggingFaceTokenizer,

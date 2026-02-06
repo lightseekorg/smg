@@ -1,6 +1,8 @@
 use std::time::Instant;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde_json::{from_str, to_string, to_value, to_vec};
 use smg::{
     core::{BasicWorker, BasicWorkerBuilder, Worker, WorkerType},
