@@ -305,7 +305,9 @@ jobs:
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
         run: |
+          sudo apt-get update
           sudo apt-get install -y unzip wget
+          sudo apt-get install -y libaio1t64 || sudo apt-get install -y libaio1
           INSTANT_CLIENT_DIR="$HOME/instant-client"
           INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.9.0.25.07.zip"
 
@@ -365,9 +367,6 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
         run: |
-          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
-          ls -la $HOME/instant-client/instantclient_23_9/ 2>/dev/null || echo "Oracle Instant Client directory not found"
-          ldconfig -p | grep libaio || echo "libaio not found in ldconfig"
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
 
