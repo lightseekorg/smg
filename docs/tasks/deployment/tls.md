@@ -10,7 +10,7 @@ This task shows you how to secure SMG communications with TLS and mTLS.
 
 #### Before you begin
 
-- SMG [installed](../../getting-started/installation.md)
+- SMG [installed](../../getting-started/index.md)
 - TLS certificates (or follow the steps below to generate them)
 
 </div>
@@ -26,12 +26,9 @@ SMG supports TLS configurations for securing communications:
 | **Server TLS** | HTTPS for client → gateway communication | Available |
 | **Client mTLS** | Mutual TLS for gateway → worker communication | Planned |
 
-```mermaid
-flowchart LR
-    C[Client] -->|"HTTPS"| G[SMG Gateway]
-    G -->|"HTTP/HTTPS"| W1[Worker 1]
-    G -->|"HTTP/HTTPS"| W2[Worker 2]
-```
+<div class="architecture-diagram">
+  <img src="../../../assets/images/tls-architecture.svg" alt="TLS Configuration Architecture">
+</div>
 
 !!! info "Client mTLS"
     Client mTLS for gateway-to-worker communication is planned but not yet implemented via CLI. See the [Client mTLS section](#client-mtls-planned) below for details.

@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 750 440">
+  <defs>
+    <linearGradient id="pdv-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="pdv-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="pdv-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="pdv-amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="pdv-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <filter id="pdv-softGlow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <pattern id="pdv-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+  </defs>
+
+  <style>
+    .pdv-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .pdv-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .pdv-msg { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 9px; font-weight: 500; }
+    .pdv-note { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 8px; fill: #94a3b8; }
+    @keyframes pdv-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .pdv-pulse { animation: pdv-pulse 1.5s ease-in-out infinite; }
+  </style>
+
+  <!-- Background -->
+  <rect width="750" height="440" rx="16" fill="url(#pdv-bgGrad)"/>
+  <rect width="750" height="440" fill="url(#pdv-grid)" rx="16"/>
+
+  <!-- Title -->
+  <text x="375" y="28" text-anchor="middle" class="pdv-label" font-size="14" fill="#e2e8f0">vLLM PD — Sequential Dispatch</text>
+
+  <!-- Participant boxes -->
+  <rect x="60" y="42" width="80" height="28" rx="8" fill="url(#pdv-blueGrad)"/>
+  <text x="100" y="61" text-anchor="middle" class="pdv-label" font-size="10" fill="white">Client</text>
+
+  <rect x="240" y="42" width="80" height="28" rx="8" fill="url(#pdv-primaryGrad)"/>
+  <text x="280" y="61" text-anchor="middle" class="pdv-label" font-size="10" fill="white">SMG</text>
+
+  <rect x="430" y="42" width="110" height="28" rx="8" fill="url(#pdv-greenGrad)"/>
+  <text x="485" y="61" text-anchor="middle" class="pdv-label" font-size="10" fill="white">Prefill Worker</text>
+
+  <rect x="610" y="42" width="110" height="28" rx="8" fill="url(#pdv-amberGrad)"/>
+  <text x="665" y="61" text-anchor="middle" class="pdv-label" font-size="10" fill="#1e293b">Decode Worker</text>
+
+  <!-- Lifelines -->
+  <line x1="100" y1="70" x2="100" y2="415" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+  <line x1="280" y1="70" x2="280" y2="415" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+  <line x1="485" y1="70" x2="485" y2="415" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+  <line x1="665" y1="70" x2="665" y2="415" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+
+  <!-- Message 1: Client → SMG -->
+  <line x1="100" y1="95" x2="275" y2="95" stroke="#38bdf8" stroke-width="1.5"/>
+  <polygon points="272,91 280,95 272,99" fill="#38bdf8"/>
+  <text x="188" y="89" text-anchor="middle" class="pdv-msg" fill="#38bdf8">Chat completion request</text>
+
+  <!-- Self: SMG find pair -->
+  <rect x="283" y="108" width="90" height="20" rx="4" fill="#1e293b" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="328" y="122" text-anchor="middle" class="pdv-note" fill="#a78bfa">Find P/D pair</text>
+
+  <!-- SMG → Prefill: Forward (max_tokens=1) -->
+  <line x1="280" y1="142" x2="480" y2="142" stroke="#34d399" stroke-width="1.5"/>
+  <polygon points="477,138 485,142 477,146" fill="#34d399"/>
+  <text x="380" y="136" text-anchor="middle" class="pdv-msg" fill="#34d399">Forward request (max_tokens=1)</text>
+
+  <!-- Self: Prefill processes -->
+  <rect x="488" y="155" width="130" height="20" rx="4" fill="#1e293b" stroke="#34d399" stroke-width="1"/>
+  <text x="553" y="169" text-anchor="middle" class="pdv-note" fill="#34d399">Process prompt, compute KV</text>
+
+  <!-- Prefill → SMG: Complete (discarded) -->
+  <line x1="485" y1="188" x2="285" y2="188" stroke="#34d399" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="288,184 280,188 288,192" fill="#34d399"/>
+  <text x="385" y="184" text-anchor="middle" class="pdv-msg" fill="#34d399">Prefill complete (discarded)</text>
+
+  <!-- SMG → Decode: Forward original request -->
+  <line x1="280" y1="212" x2="660" y2="212" stroke="#fbbf24" stroke-width="1.5"/>
+  <polygon points="657,208 665,212 657,216" fill="#fbbf24"/>
+  <text x="470" y="206" text-anchor="middle" class="pdv-msg" fill="#fbbf24">Forward original request</text>
+
+  <!-- Note: NIXL/Mooncake auto-discovers KV cache -->
+  <rect x="420" y="225" width="255" height="22" rx="4" fill="#14b8a6" opacity="0.15" stroke="#14b8a6" stroke-width="1"/>
+  <text x="547" y="240" text-anchor="middle" class="pdv-note" fill="#2dd4bf" font-weight="500">NIXL / Mooncake auto-discovers KV cache</text>
+
+  <!-- Token streaming loop -->
+  <rect x="230" y="258" width="480" height="90" rx="6" fill="none" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <rect x="234" y="258" width="115" height="16" rx="4" fill="#f59e0b" opacity="0.2"/>
+  <text x="291" y="270" text-anchor="middle" class="pdv-note" fill="#fbbf24" font-weight="600">loop Token Generation</text>
+
+  <!-- Decode self: Generate token -->
+  <rect x="668" y="280" width="65" height="16" rx="4" fill="#1e293b" stroke="#fbbf24" stroke-width="1" class="pdv-pulse"/>
+  <text x="700" y="292" text-anchor="middle" class="pdv-note" fill="#fbbf24">Generate</text>
+
+  <!-- Decode → SMG: Stream token -->
+  <line x1="665" y1="305" x2="285" y2="305" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="288,301 280,305 288,309" fill="#fbbf24"/>
+  <text x="475" y="301" text-anchor="middle" class="pdv-msg" fill="#fbbf24">Stream token</text>
+
+  <!-- SMG → Client: Stream token -->
+  <line x1="280" y1="330" x2="105" y2="330" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="108,326 100,330 108,334" fill="#a78bfa"/>
+  <text x="192" y="326" text-anchor="middle" class="pdv-msg" fill="#a78bfa">Stream token</text>
+
+  <!-- Final: Decode → SMG -->
+  <line x1="665" y1="365" x2="285" y2="365" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="288,361 280,365 288,369" fill="#fbbf24"/>
+  <text x="475" y="361" text-anchor="middle" class="pdv-msg" fill="#fbbf24">Generation complete</text>
+
+  <!-- Final: SMG → Client -->
+  <line x1="280" y1="385" x2="105" y2="385" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="108,381 100,385 108,389" fill="#a78bfa"/>
+  <text x="192" y="381" text-anchor="middle" class="pdv-msg" fill="#a78bfa">Final response</text>
+
+  <!-- Bottom tagline -->
+  <text x="375" y="430" text-anchor="middle" class="pdv-sublabel" font-size="11" fill="#64748b">Sequential Dispatch  •  NIXL/Mooncake KV Transfer  •  Transparent Cache Migration</text>
+</svg>

@@ -192,20 +192,9 @@ max_load > balance_rel_threshold × min_load
 
 ### Selection Flow
 
-```mermaid
-flowchart TD
-    A[Request Arrives] --> B{System Balanced?}
-    B -->|No| C[Select Least-Loaded Worker]
-    B -->|Yes| D[Search Radix Tree for Prefix]
-    D --> E{Match Ratio ≥ Threshold?}
-    E -->|Yes| F[Route to Matched Worker]
-    E -->|No| G[Route to Worker with Most Cache Capacity]
-
-    style A fill:#e3f2fd
-    style F fill:#c8e6c9
-    style G fill:#c8e6c9
-    style C fill:#fff3e0
-```
+<div class="architecture-diagram">
+  <img src="../../../assets/images/cache-routing-flow.svg" alt="Cache-Aware Routing Selection Flow">
+</div>
 
 ---
 

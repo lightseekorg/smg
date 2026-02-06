@@ -145,7 +145,7 @@ Route to OpenAI, Claude, Gemini through one endpoint. Mix self-hosted and cloud 
 
 Start here to understand what SMG does and get it running in minutes.
 
-[Quickstart Guide →](getting-started/quickstart.md)
+[Getting Started →](getting-started/index.md)
 
 </div>
 
