@@ -211,6 +211,7 @@ For prefill-decode disaggregation, start separate prefill and decode workers:
       --pd-disaggregation \
       --prefill grpc://localhost:50051 8998 \
       --decode grpc://localhost:50052 \
+      --model-path meta-llama/Llama-3.1-8B-Instruct \
       --host 0.0.0.0 \
       --port 30000
     ```
