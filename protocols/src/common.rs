@@ -582,3 +582,71 @@ pub enum LoRAPath {
     Single(Option<String>),
     Batch(Vec<Option<String>>),
 }
+
+// ============================================================================
+// Redacted Types
+// ============================================================================
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Redacted(pub String);
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+// ============================================================================
+// Response Prompt
+// ============================================================================
+
+/// Reference to a prompt template and its variables.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponsePrompt {
+    pub id: String,
+    pub variables: Option<HashMap<String, PromptVariable>>,
+    pub version: Option<String>,
+}
+
+/// A prompt variable value: plain string or a typed input (text, image, file).
+///
+/// Variant order matters for `#[serde(untagged)]`: a bare JSON string succeeds
+/// as `String`; a JSON object falls through to `Typed`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PromptVariable {
+    String(String),
+    Typed(PromptVariableTyped),
+}
+
+/// Typed prompt variable input.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PromptVariableTyped {
+    #[serde(rename = "input_text")]
+    ResponseInputText { text: String },
+    #[serde(rename = "input_image")]
+    ResponseInputImage {
+        detail: Option<Detail>,
+        file_id: Option<String>,
+        image_url: Option<String>,
+    },
+    #[serde(rename = "input_file")]
+    ResponseInputFile {
+        file_data: Option<String>,
+        file_id: Option<String>,
+        file_url: Option<String>,
+        filename: Option<String>,
+    },
+}
+
+/// Image detail level for [`PromptVariableTyped::InputImage`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Detail {
+    Low,
+    High,
+    #[default]
+    Auto,
+}
