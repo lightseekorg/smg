@@ -22,7 +22,7 @@ use crate::grpc_client::{
 #[derive(Clone, Debug)]
 pub struct ProtoOutputLogProbs {
     pub token_logprobs: Vec<f32>,
-    pub token_ids: Vec<i32>,
+    pub token_ids: Vec<u32>,
     pub top_logprobs: Vec<ProtoTopLogProbs>,
 }
 
@@ -30,14 +30,14 @@ pub struct ProtoOutputLogProbs {
 #[derive(Clone, Debug)]
 pub struct ProtoTopLogProbs {
     pub values: Vec<f32>,
-    pub token_ids: Vec<i32>,
+    pub token_ids: Vec<u32>,
 }
 
 /// Unified input (prompt) logprobs
 #[derive(Clone, Debug)]
 pub struct ProtoInputLogProbs {
     pub token_logprobs: Vec<Option<f32>>, // First token is None
-    pub token_ids: Vec<i32>,
+    pub token_ids: Vec<u32>,
     pub top_logprobs: Vec<ProtoTopLogProbs>,
 }
 
@@ -373,17 +373,13 @@ impl ProtoGenerateStreamChunk {
                 } else {
                     Some(ProtoOutputLogProbs {
                         token_logprobs: c.logprobs.iter().map(|lp| lp.logprob).collect(),
-                        token_ids: c.logprobs.iter().map(|lp| lp.token_id as i32).collect(),
+                        token_ids: c.logprobs.iter().map(|lp| lp.token_id).collect(),
                         top_logprobs: c
                             .logprobs
                             .iter()
                             .map(|lp| ProtoTopLogProbs {
                                 values: lp.top_logprobs.iter().map(|t| t.logprob).collect(),
-                                token_ids: lp
-                                    .top_logprobs
-                                    .iter()
-                                    .map(|t| t.token_id as i32)
-                                    .collect(),
+                                token_ids: lp.top_logprobs.iter().map(|t| t.token_id).collect(),
                             })
                             .collect(),
                     })
@@ -619,21 +615,13 @@ impl ProtoGenerateComplete {
                             .enumerate()
                             .map(|(i, lp)| if i == 0 { None } else { Some(lp.logprob) })
                             .collect(),
-                        token_ids: c
-                            .prompt_logprobs
-                            .iter()
-                            .map(|lp| lp.token_id as i32)
-                            .collect(),
+                        token_ids: c.prompt_logprobs.iter().map(|lp| lp.token_id).collect(),
                         top_logprobs: c
                             .prompt_logprobs
                             .iter()
                             .map(|lp| ProtoTopLogProbs {
                                 values: lp.top_logprobs.iter().map(|t| t.logprob).collect(),
-                                token_ids: lp
-                                    .top_logprobs
-                                    .iter()
-                                    .map(|t| t.token_id as i32)
-                                    .collect(),
+                                token_ids: lp.top_logprobs.iter().map(|t| t.token_id).collect(),
                             })
                             .collect(),
                     })
@@ -675,17 +663,13 @@ impl ProtoGenerateComplete {
                 } else {
                     Some(ProtoOutputLogProbs {
                         token_logprobs: c.logprobs.iter().map(|lp| lp.logprob).collect(),
-                        token_ids: c.logprobs.iter().map(|lp| lp.token_id as i32).collect(),
+                        token_ids: c.logprobs.iter().map(|lp| lp.token_id).collect(),
                         top_logprobs: c
                             .logprobs
                             .iter()
                             .map(|lp| ProtoTopLogProbs {
                                 values: lp.top_logprobs.iter().map(|t| t.logprob).collect(),
-                                token_ids: lp
-                                    .top_logprobs
-                                    .iter()
-                                    .map(|t| t.token_id as i32)
-                                    .collect(),
+                                token_ids: lp.top_logprobs.iter().map(|t| t.token_id).collect(),
                             })
                             .collect(),
                     })
