@@ -344,7 +344,7 @@ impl Gossip for GossipService {
             }
             Some(gossip::gossip_message::Payload::PingReq(PingReq { node: Some(node) })) => {
                 log::info!("PingReq to node {} addr:{}", node.name, node.address);
-                let res = try_ping(&node, None).await?;
+                let res = try_ping(&node, None, self.mtls_manager.clone()).await?;
                 Ok(Response::new(res))
             }
             _ => Err(Status::invalid_argument("Invalid message payload")),

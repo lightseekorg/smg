@@ -8,7 +8,10 @@ use std::{
 
 use anyhow::Result;
 use parking_lot::RwLock;
-use tonic::Request;
+use tonic::{
+    transport::{ClientTlsConfig, Endpoint},
+    Request,
+};
 use tracing as log;
 
 pub mod gossip {
@@ -358,6 +361,7 @@ impl MeshServer {
             self.init_peer,
             self.stores.clone(),
             self.sync_manager.clone(),
+            self.mtls_manager.clone(),
         )
     }
 
@@ -434,7 +438,7 @@ pub async fn broadcast_node_states(
             let ping_payload = gossip_message::Payload::Ping(Ping {
                 state_sync: Some(state_sync),
             });
-            match try_ping(&target_node_clone, Some(ping_payload)).await {
+            match try_ping(&target_node_clone, Some(ping_payload), None).await {
                 Ok(_) => {
                     log::debug!("Successfully broadcasted to {}", target_node_clone.name);
                     Ok(())
@@ -478,6 +482,7 @@ pub async fn broadcast_node_states(
 pub async fn try_ping(
     peer_node: &NodeState,
     payload: Option<gossip_message::Payload>,
+    mtls_manager: Option<Arc<MTLSManager>>,
 ) -> Result<NodeUpdate, tonic::Status> {
     let peer_name = peer_node.name.clone();
 
@@ -487,17 +492,64 @@ pub async fn try_ping(
             peer_name, peer_node.address, e
         ))
     })?;
-    let mut client = gossip_client::GossipClient::connect(format!("http://{}", peer_addr))
-        .await
-        .map_err(|e| {
-            log::warn!(
-                "Failed to connect to peer {} {}: {}.",
-                peer_name,
-                peer_addr,
-                e
-            );
-            tonic::Status::unavailable("Failed to connect to peer")
+
+    let connect_url = if mtls_manager.is_some() {
+        format!("https://{}", peer_addr)
+    } else {
+        format!("http://{}", peer_addr)
+    };
+
+    let mut endpoint = Endpoint::from_shared(connect_url.clone()).map_err(|e| {
+        tonic::Status::invalid_argument(format!(
+            "Invalid endpoint for node {}: {}, {}",
+            peer_name, connect_url, e
+        ))
+    })?;
+
+    if let Some(mtls_manager) = mtls_manager {
+        mtls_manager.load_client_config().await.map_err(|e| {
+            tonic::Status::unavailable(format!(
+                "Failed to load mTLS client config for {}: {}",
+                peer_name, e
+            ))
         })?;
+
+        let tls_domain = endpoint
+            .uri()
+            .host()
+            .map(str::to_owned)
+            .unwrap_or_else(|| peer_name.clone());
+        let ca_certificate = mtls_manager.load_ca_certificate().await.map_err(|e| {
+            tonic::Status::unavailable(format!(
+                "Failed to load mTLS CA certificate for {}: {}",
+                peer_name, e
+            ))
+        })?;
+
+        endpoint = endpoint
+            .tls_config(
+                ClientTlsConfig::new()
+                    .domain_name(tls_domain)
+                    .ca_certificate(ca_certificate),
+            )
+            .map_err(|e| {
+                tonic::Status::unavailable(format!(
+                    "Failed to configure TLS endpoint for {}: {}",
+                    peer_name, e
+                ))
+            })?;
+    }
+
+    let channel = endpoint.connect().await.map_err(|e| {
+        log::warn!(
+            "Failed to connect to peer {} {}: {}.",
+            peer_name,
+            peer_addr,
+            e
+        );
+        tonic::Status::unavailable("Failed to connect to peer")
+    })?;
+    let mut client = gossip_client::GossipClient::new(channel);
 
     let ping_message = GossipMessage { payload };
     let response = client.ping_server(Request::new(ping_message)).await?;

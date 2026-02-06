@@ -16,6 +16,7 @@ use rustls::{
 };
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use tokio::{fs, sync::RwLock};
+use tonic::transport::Certificate;
 use tracing::{info, warn};
 
 /// mTLS configuration
@@ -100,6 +101,12 @@ impl MTLSManager {
         let config = Arc::new(client_config);
         *self.client_config.write().await = Some(config.clone());
         Ok(config)
+    }
+
+    /// Load CA certificate for tonic client TLS configuration
+    pub async fn load_ca_certificate(&self) -> Result<Certificate> {
+        let ca_cert = fs::read(&self.config.ca_cert_path).await?;
+        Ok(Certificate::from_pem(ca_cert))
     }
 
     /// Load certificates from file

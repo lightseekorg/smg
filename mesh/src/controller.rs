@@ -8,11 +8,13 @@ use std::{
 use anyhow::Result;
 use rand::seq::{IndexedRandom, SliceRandom};
 use tokio::sync::Mutex;
+use tonic::transport::{ClientTlsConfig, Endpoint};
 use tracing as log;
 use tracing::{instrument, Instrument};
 
 use super::{
     flow_control::RetryManager,
+    mtls::MTLSManager,
     service::{
         broadcast_node_states,
         gossip::{
@@ -32,6 +34,7 @@ pub struct MeshController {
     init_peer: Option<SocketAddr>,
     stores: Arc<StateStores>,
     sync_manager: Arc<MeshSyncManager>,
+    mtls_manager: Option<Arc<MTLSManager>>,
     // Track active sync_stream connections
     sync_connections: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
@@ -45,6 +48,7 @@ impl MeshController {
         init_peer: Option<SocketAddr>,
         stores: Arc<StateStores>,
         sync_manager: Arc<MeshSyncManager>,
+        mtls_manager: Option<Arc<MTLSManager>>,
     ) -> Self {
         Self {
             state,
@@ -53,6 +57,7 @@ impl MeshController {
             init_peer,
             stores,
             sync_manager,
+            mtls_manager,
             sync_connections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -182,6 +187,7 @@ impl MeshController {
             Some(gossip_message::Payload::Ping(Ping {
                 state_sync: Some(state_sync),
             })),
+            self.mtls_manager.clone(),
         )
         .await
         {
@@ -191,10 +197,14 @@ impl MeshController {
                 if node_update.status == NodeStatus::Alive as i32
                     || node_update.status == NodeStatus::Leaving as i32
                 {
-                    {
+                    let updated_peer = {
                         let mut s = read_state.write();
-                        s.entry(node_update.name.clone())
-                            .and_modify(|e| e.status = node_update.status)
+                        let entry = s
+                            .entry(node_update.name.clone())
+                            .and_modify(|e| {
+                                e.status = node_update.status;
+                                e.address = node_update.address.clone();
+                            })
                             .or_insert(NodeState {
                                 name: node_update.name.clone(),
                                 address: node_update.address.clone(),
@@ -202,12 +212,20 @@ impl MeshController {
                                 version: 1,
                                 metadata: HashMap::new(),
                             });
-                    } // Lock is released here
+                        entry.clone()
+                    }; // Lock is released here
 
-                    // If node is Alive, establish sync_stream connection
+                    // If node is Alive, establish sync_stream connection with freshest address.
                     if node_update.status == NodeStatus::Alive as i32 {
-                        if let Err(e) = self.start_sync_stream_connection(peer.clone()).await {
-                            log::warn!("Failed to start sync_stream to {}: {}", peer.name, e);
+                        if let Err(e) = self
+                            .start_sync_stream_connection(updated_peer.clone())
+                            .await
+                        {
+                            log::warn!(
+                                "Failed to start sync_stream to {}: {}",
+                                updated_peer.name,
+                                e
+                            );
                             // Connection failure doesn't affect ping flow, will retry in next cycle
                         }
                     }
@@ -234,6 +252,7 @@ impl MeshController {
                         Some(gossip_message::Payload::PingReq(PingReq {
                             node: Some(peer.clone()),
                         })),
+                        self.mtls_manager.clone(),
                     )
                     .await
                     .is_ok()
@@ -641,27 +660,32 @@ impl MeshController {
                                             store_type
                                         );
 
-                                        for (idx, chunk) in chunks.into_iter().enumerate() {
+                                        let mut sent_chunks: u64 = 0;
+                                        for chunk in chunks {
                                             let snapshot_chunk = StreamMessage {
                                                 message_type: StreamMessageType::SnapshotChunk
                                                     as i32,
                                                 payload: Some(StreamPayload::SnapshotChunk(chunk)),
-                                                sequence: sequence + idx as u64,
+                                                sequence: sequence + sent_chunks,
                                                 peer_id: self_name.clone(),
                                             };
 
                                             if tx.send(snapshot_chunk).await.is_err() {
                                                 log::warn!(
                                                     "Failed to send snapshot chunk {} to {}",
-                                                    idx,
+                                                    sent_chunks,
                                                     peer_name
                                                 );
                                                 break;
                                             }
+
+                                            sent_chunks += 1;
                                         }
+                                        sequence += sent_chunks;
 
                                         log::info!(
-                                            "Sent all snapshot chunks for store {:?} to {}",
+                                            "Sent {} snapshot chunks for store {:?} to {}",
+                                            sent_chunks,
                                             store_type,
                                             peer_name
                                         );
@@ -734,10 +758,43 @@ impl MeshController {
             peer_addr
         );
 
-        // Connect to peer's gRPC service
-        let connect_url = format!("http://{}", peer_addr);
+        // Connect to peer's gRPC service via Endpoint so TLS can be configured.
+        let connect_url = if self.mtls_manager.is_some() {
+            format!("https://{}", peer_addr)
+        } else {
+            format!("http://{}", peer_addr)
+        };
         log::info!("Connecting to URL: {}", connect_url);
-        let mut client = GossipClient::connect(connect_url).await.map_err(|e| {
+
+        let mut endpoint = Endpoint::from_shared(connect_url.clone())
+            .map_err(|e| anyhow::anyhow!("Invalid peer endpoint {}: {}", connect_url, e))?;
+
+        if let Some(mtls_manager) = self.mtls_manager.clone() {
+            mtls_manager
+                .load_client_config()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to load mTLS client config: {}", e))?;
+
+            let tls_domain = endpoint
+                .uri()
+                .host()
+                .map(str::to_owned)
+                .unwrap_or_else(|| peer_name.clone());
+            let ca_certificate = mtls_manager
+                .load_ca_certificate()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to load mTLS CA certificate: {}", e))?;
+
+            endpoint = endpoint
+                .tls_config(
+                    ClientTlsConfig::new()
+                        .domain_name(tls_domain)
+                        .ca_certificate(ca_certificate),
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to configure TLS endpoint: {}", e))?;
+        }
+
+        let channel = endpoint.connect().await.map_err(|e| {
             log::warn!(
                 "Failed to connect to peer {} for sync_stream: {}",
                 peer_name,
@@ -745,6 +802,7 @@ impl MeshController {
             );
             anyhow::anyhow!("Connection failed: {}", e)
         })?;
+        let mut client = GossipClient::new(channel);
 
         // Create bidirectional stream
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamMessage>(128);
