@@ -27,7 +27,7 @@ pub struct InteractionsRequest {
     pub agent: Option<String>,
 
     /// Input content - can be string or array of Content objects
-    pub input: InteractionInput,
+    pub input: InteractionsInput,
 
     /// System instruction for the model
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,7 +35,7 @@ pub struct InteractionsRequest {
 
     /// Available tools
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<InteractionTool>>,
+    pub tools: Option<Vec<InteractionsTool>>,
 
     /// Response format for structured outputs
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,7 +96,7 @@ impl Default for InteractionsRequest {
             model: default_model(),
             agent: None,
             agent_config: None,
-            input: InteractionInput::Text(String::new()),
+            input: InteractionsInput::Text(String::new()),
             system_instruction: None,
             previous_interaction_id: None,
             tools: None,
@@ -123,7 +123,7 @@ impl GenerationRequest for InteractionsRequest {
     fn extract_text_for_routing(&self) -> String {
         fn extract_from_content(content: &Content) -> Option<String> {
             match content {
-                Content::Text { text, .. } => Some(text.clone()),
+                Content::Text { text, .. } => text.clone(),
                 _ => None,
             }
         }
@@ -140,14 +140,16 @@ impl GenerationRequest for InteractionsRequest {
         }
 
         match &self.input {
-            InteractionInput::Text(text) => text.clone(),
-            InteractionInput::Content(content) => extract_from_content(content).unwrap_or_default(),
-            InteractionInput::Contents(contents) => contents
+            InteractionsInput::Text(text) => text.clone(),
+            InteractionsInput::Content(content) => {
+                extract_from_content(content).unwrap_or_default()
+            }
+            InteractionsInput::Contents(contents) => contents
                 .iter()
                 .filter_map(extract_from_content)
                 .collect::<Vec<String>>()
                 .join(" "),
-            InteractionInput::Turns(turns) => turns
+            InteractionsInput::Turns(turns) => turns
                 .iter()
                 .map(extract_from_turn)
                 .collect::<Vec<String>>()
@@ -176,7 +178,7 @@ pub struct InteractionsResponse {
 
     /// Interaction status
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<InteractionStatus>,
+    pub status: Option<InteractionsStatus>,
 
     /// Creation timestamp (ISO 8601)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,7 +198,7 @@ pub struct InteractionsResponse {
 
     /// Usage information
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<InteractionUsage>,
+    pub usage: Option<InteractionsUsage>,
 
     /// Previous interaction ID for conversation threading
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,22 +208,22 @@ pub struct InteractionsResponse {
 impl InteractionsResponse {
     /// Check if the interaction is complete
     pub fn is_complete(&self) -> bool {
-        matches!(self.status, Some(InteractionStatus::Completed))
+        matches!(self.status, Some(InteractionsStatus::Completed))
     }
 
     /// Check if the interaction is in progress
     pub fn is_in_progress(&self) -> bool {
-        matches!(self.status, Some(InteractionStatus::InProgress))
+        matches!(self.status, Some(InteractionsStatus::InProgress))
     }
 
     /// Check if the interaction failed
     pub fn is_failed(&self) -> bool {
-        matches!(self.status, Some(InteractionStatus::Failed))
+        matches!(self.status, Some(InteractionsStatus::Failed))
     }
 
     /// Check if the interaction requires action (tool execution)
     pub fn requires_action(&self) -> bool {
-        matches!(self.status, Some(InteractionStatus::RequiresAction))
+        matches!(self.status, Some(InteractionsStatus::RequiresAction))
     }
 }
 
@@ -267,7 +269,7 @@ pub struct InteractionsCancelParams {
 /// See: https://ai.google.dev/api/interactions-api#Resource:Tool
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum InteractionTool {
+pub enum InteractionsTool {
     /// Function tool with function declaration
     Function(Function),
     /// Google Search built-in tool
@@ -451,7 +453,7 @@ pub enum AgentConfig {
 /// See: https://ai.google.dev/api/interactions-api#request-body
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum InteractionInput {
+pub enum InteractionsInput {
     /// Simple text input
     Text(String),
     /// Single content block
@@ -852,7 +854,7 @@ impl VideoMimeType {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InteractionStatus {
+pub enum InteractionsStatus {
     Completed,
     InProgress,
     RequiresAction,
@@ -874,7 +876,7 @@ pub struct ModalityTokens {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct InteractionUsage {
+pub struct InteractionsUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_input_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
