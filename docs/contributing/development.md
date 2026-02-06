@@ -129,17 +129,17 @@ cargo test --test integration
 ### Linting and Formatting (Rust)
 
 ```bash
-# Format code
-cargo fmt
+# Format code (requires nightly for unstable rustfmt options)
+cargo +nightly fmt --all
 
 # Check formatting
-cargo fmt --check
+cargo +nightly fmt --all -- --check
 
 # Run clippy
-cargo clippy -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 
 # Fix clippy warnings automatically
-cargo clippy --fix
+cargo clippy --all-targets --all-features --fix --allow-dirty -- -D warnings
 ```
 
 ### Linting and Formatting (Python)
@@ -410,7 +410,7 @@ cargo test -- --test-threads=1
 Run clippy locally before pushing:
 
 ```bash
-cargo clippy -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 ---
