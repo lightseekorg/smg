@@ -60,17 +60,13 @@
 [data-md-color-scheme="default"] .md-typeset .hero h1 {
   background: linear-gradient(
     135deg,
-    #18181b 0%,
-    #18181b 20%,
+    var(--md-code-fg-color) 0%,
+    var(--md-code-fg-color) 20%,
     var(--mesh-purple) 40%,
     var(--mesh-cyan) 60%,
     var(--mesh-blue) 80%,
-    #18181b 100%
+    var(--md-code-fg-color) 100%
   );
-  background-size: 200% 200%;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
 }
 
 /* Hero last paragraph */
@@ -123,11 +119,7 @@
 
 /* Stat values: dark gradient instead of white */
 [data-md-color-scheme="default"] .md-typeset .stat-value {
-  background: linear-gradient(135deg, #18181b 0%, var(--mesh-purple) 50%, var(--mesh-cyan) 100%);
-  background-size: 200% 200%;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  background: linear-gradient(135deg, var(--md-code-fg-color) 0%, var(--mesh-purple) 50%, var(--mesh-cyan) 100%);
 }
 
 [data-md-color-scheme="default"] .md-typeset .stat-label {
