@@ -631,12 +631,16 @@ class TestStartupErrorHandling:
             service_discovery=False,
         )
 
-        with patch("smg.launch_router.logger") as mock_logger:
-            with pytest.raises(ValueError, match="PD disaggregation mode requires --prefill"):
-                launch_router(args)
+        with patch("smg.launch_router.Router") as router_mod:
+            mock_router_instance = MagicMock()
+            router_mod.from_args = MagicMock(return_value=mock_router_instance)
 
-            # Should log error for validation failures
-            mock_logger.error.assert_called_once()
+            with patch("smg.launch_router.logger") as mock_logger:
+                with pytest.raises(ValueError, match="PD disaggregation mode requires --prefill"):
+                    launch_router(args)
+
+                # Should log error for validation failures
+                mock_logger.error.assert_called_once()
 
 
 # --- Added unit tests for Router wrapper and launch_server helpers ---
