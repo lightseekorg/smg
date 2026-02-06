@@ -672,7 +672,7 @@ def _setup_cloud_backend(
     api_key_env = cfg.get("api_key_env")
 
     if api_key_env and not os.environ.get(api_key_env):
-        pytest.skip(f"{api_key_env} not set, skipping {backend_name} tests")
+        pytest.fail(f"{api_key_env} not set for {backend_name} tests")
 
     extra_args = gateway_config.get("extra_args") if gateway_config else None
 

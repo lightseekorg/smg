@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 260">
+  <defs>
+    <linearGradient id="cbr-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="cbr-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="cbr-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="cbr-amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="cbr-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <pattern id="cbr-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+  </defs>
+
+  <style>
+    .cbr-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .cbr-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .cbr-msg { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 9px; font-weight: 500; }
+    .cbr-note { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 8px; }
+  </style>
+
+  <!-- Background -->
+  <rect width="600" height="260" rx="16" fill="url(#cbr-bgGrad)"/>
+  <rect width="600" height="260" fill="url(#cbr-grid)" rx="16"/>
+
+  <!-- Title -->
+  <text x="300" y="25" text-anchor="middle" class="cbr-label" font-size="13" fill="#e2e8f0">Recovery — Circuit Half-Open → Closed</text>
+
+  <!-- Participants -->
+  <rect x="60" y="38" width="80" height="26" rx="8" fill="url(#cbr-blueGrad)"/>
+  <text x="100" y="55" text-anchor="middle" class="cbr-label" font-size="10" fill="white">Client</text>
+
+  <rect x="240" y="38" width="80" height="26" rx="8" fill="url(#cbr-primaryGrad)"/>
+  <text x="280" y="55" text-anchor="middle" class="cbr-label" font-size="10" fill="white">SMG</text>
+
+  <rect x="430" y="38" width="80" height="26" rx="8" fill="url(#cbr-greenGrad)"/>
+  <text x="470" y="55" text-anchor="middle" class="cbr-label" font-size="10" fill="white">Worker</text>
+
+  <!-- Lifelines -->
+  <line x1="100" y1="64" x2="100" y2="235" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+  <line x1="280" y1="64" x2="280" y2="235" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+  <line x1="470" y1="64" x2="470" y2="235" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+
+  <!-- Note: Open (30s elapsed) -->
+  <rect x="415" y="70" width="115" height="16" rx="4" fill="#ef4444" opacity="0.2" stroke="#ef4444" stroke-width="1"/>
+  <text x="472" y="82" text-anchor="middle" class="cbr-note" fill="#f87171">Open (30s elapsed)</text>
+
+  <!-- Note: Half-Open -->
+  <rect x="420" y="90" width="100" height="16" rx="4" fill="#f59e0b" opacity="0.2" stroke="#f59e0b" stroke-width="1"/>
+  <text x="470" y="102" text-anchor="middle" class="cbr-note" fill="#fbbf24" font-weight="600">Circuit: Half-Open</text>
+
+  <!-- Request 1: Test request success -->
+  <line x1="100" y1="120" x2="275" y2="120" stroke="#38bdf8" stroke-width="1.5"/>
+  <polygon points="272,116 280,120 272,124" fill="#38bdf8"/>
+  <text x="188" y="115" text-anchor="middle" class="cbr-msg" fill="#38bdf8">Request 1</text>
+
+  <line x1="280" y1="132" x2="465" y2="132" stroke="#f59e0b" stroke-width="1.5"/>
+  <polygon points="462,128 470,132 462,136" fill="#f59e0b"/>
+  <text x="373" y="128" text-anchor="middle" class="cbr-msg" fill="#fbbf24">Test request</text>
+
+  <line x1="470" y1="146" x2="285" y2="146" stroke="#34d399" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="288,142 280,146 288,150" fill="#34d399"/>
+  <text x="373" y="143" text-anchor="middle" class="cbr-msg" fill="#34d399">Success!</text>
+
+  <line x1="280" y1="158" x2="105" y2="158" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="108,154 100,158 108,162" fill="#a78bfa"/>
+  <text x="188" y="155" text-anchor="middle" class="cbr-msg" fill="#a78bfa">Response</text>
+
+  <!-- Request 2: Threshold met → CLOSED -->
+  <line x1="100" y1="176" x2="275" y2="176" stroke="#38bdf8" stroke-width="1.5"/>
+  <polygon points="272,172 280,176 272,180" fill="#38bdf8"/>
+  <text x="188" y="171" text-anchor="middle" class="cbr-msg" fill="#38bdf8">Request 2</text>
+
+  <line x1="280" y1="188" x2="465" y2="188" stroke="#f59e0b" stroke-width="1.5"/>
+  <polygon points="462,184 470,188 462,192" fill="#f59e0b"/>
+  <text x="373" y="184" text-anchor="middle" class="cbr-msg" fill="#fbbf24">Test request</text>
+
+  <line x1="470" y1="200" x2="285" y2="200" stroke="#34d399" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="288,196 280,200 288,204" fill="#34d399"/>
+  <text x="373" y="197" text-anchor="middle" class="cbr-msg" fill="#34d399">Success! (threshold met)</text>
+
+  <!-- Note: Circuit CLOSED -->
+  <rect x="425" y="206" width="95" height="18" rx="4" fill="#10b981" opacity="0.3" stroke="#10b981" stroke-width="1.5"/>
+  <text x="472" y="219" text-anchor="middle" class="cbr-note" fill="#34d399" font-weight="700">Circuit: CLOSED</text>
+
+  <line x1="280" y1="218" x2="105" y2="218" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="108,214 100,218 108,222" fill="#a78bfa"/>
+  <text x="188" y="215" text-anchor="middle" class="cbr-msg" fill="#a78bfa">Response</text>
+
+  <!-- Tagline -->
+  <text x="300" y="250" text-anchor="middle" class="cbr-sublabel" font-size="10" fill="#64748b">Gradual recovery with test requests before fully closing the circuit</text>
+</svg>

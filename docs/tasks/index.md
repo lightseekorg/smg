@@ -36,7 +36,7 @@ Day-to-day operational tasks.
 
 Most tasks assume you have:
 
-- [ ] SMG [installed](../getting-started/installation.md)
+- [ ] SMG [installed](../getting-started/index.md)
 - [ ] Basic familiarity with [SMG concepts](../concepts/index.md)
 - [ ] Access to one or more inference workers
 

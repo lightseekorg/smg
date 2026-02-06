@@ -10,7 +10,7 @@ Set up Prometheus monitoring, OpenTelemetry tracing, and Grafana dashboards for 
 
 #### Before you begin
 
-- SMG [installed](../../getting-started/installation.md) and running
+- SMG [installed](../../getting-started/index.md) and running
 - Prometheus server (or follow steps below to deploy)
 - Grafana (optional, for dashboards)
 - OTLP collector (optional, for distributed tracing)

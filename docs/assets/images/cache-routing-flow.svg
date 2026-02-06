@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 320">
+  <defs>
+    <linearGradient id="cr-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="cr-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="cr-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="cr-amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="cr-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <filter id="cr-softGlow">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="cr-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+    <marker id="cr-arrowGreen" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#34d399"/>
+    </marker>
+    <marker id="cr-arrowAmber" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#fbbf24"/>
+    </marker>
+    <marker id="cr-arrowPurple" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#a78bfa"/>
+    </marker>
+  </defs>
+
+  <style>
+    .cr-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .cr-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .cr-feature { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #94a3b8; }
+
+    @keyframes cr-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    .cr-pulse { animation: cr-pulse 2s ease-in-out infinite; }
+  </style>
+
+  <!-- Background -->
+  <rect width="700" height="320" rx="16" fill="url(#cr-bgGrad)"/>
+  <rect width="700" height="320" fill="url(#cr-grid)" rx="16"/>
+
+  <!-- Glow effects -->
+  <ellipse cx="350" cy="55" rx="60" ry="35" fill="#0ea5e9" opacity="0.08" filter="url(#cr-softGlow)"/>
+  <ellipse cx="350" cy="140" rx="70" ry="40" fill="#6366f1" opacity="0.06" filter="url(#cr-softGlow)"/>
+
+  <!-- Title -->
+  <text x="350" y="28" text-anchor="middle" class="cr-label" font-size="14" fill="#e2e8f0">Cache-Aware Routing Selection Flow</text>
+
+  <!-- Request Arrives box -->
+  <rect x="290" y="42" width="120" height="34" rx="10" fill="#1e293b" stroke="#0ea5e9" stroke-width="2"/>
+  <rect x="290" y="42" width="120" height="18" rx="10" fill="url(#cr-blueGrad)"/>
+  <rect x="290" y="54" width="120" height="6" fill="url(#cr-blueGrad)"/>
+  <text x="350" y="57" text-anchor="middle" class="cr-label" font-size="9" fill="white">Request Arrives</text>
+  <text x="350" y="72" text-anchor="middle" class="cr-feature" fill="#38bdf8">Token IDs extracted</text>
+
+  <!-- Arrow down -->
+  <line x1="350" y1="76" x2="350" y2="98" stroke="#6366f1" stroke-width="2" marker-end="url(#cr-arrowPurple)"/>
+
+  <!-- Decision: System Balanced? -->
+  <polygon points="350,103 430,140 350,177 270,140" fill="#1e293b" stroke="#6366f1" stroke-width="2"/>
+  <text x="350" y="136" text-anchor="middle" class="cr-label" font-size="10" fill="#a78bfa">System</text>
+  <text x="350" y="150" text-anchor="middle" class="cr-label" font-size="10" fill="#a78bfa">Balanced?</text>
+
+  <!-- NO path (left) → Least-Loaded Worker -->
+  <line x1="270" y1="140" x2="180" y2="140" stroke="#f59e0b" stroke-width="2" marker-end="url(#cr-arrowAmber)"/>
+  <text x="225" y="132" text-anchor="middle" class="cr-label" font-size="9" fill="#fbbf24">No</text>
+
+  <!-- Least-Loaded Worker box -->
+  <rect x="40" y="118" width="135" height="45" rx="8" fill="#1e293b" stroke="#f59e0b" stroke-width="2"/>
+  <rect x="40" y="118" width="135" height="20" rx="8" fill="url(#cr-amberGrad)"/>
+  <rect x="40" y="132" width="135" height="6" fill="url(#cr-amberGrad)"/>
+  <text x="107" y="134" text-anchor="middle" class="cr-label" font-size="9" fill="#1e293b">Least-Loaded</text>
+  <text x="107" y="156" text-anchor="middle" class="cr-feature" fill="#fbbf24">Load balancing fallback</text>
+
+  <!-- YES path (right) → Search Radix Tree -->
+  <line x1="430" y1="140" x2="495" y2="140" stroke="#10b981" stroke-width="2" marker-end="url(#cr-arrowGreen)"/>
+  <text x="460" y="132" text-anchor="middle" class="cr-label" font-size="9" fill="#34d399">Yes</text>
+
+  <!-- Search Radix Tree box -->
+  <rect x="500" y="118" width="150" height="45" rx="8" fill="#1e293b" stroke="#10b981" stroke-width="1.5"/>
+  <rect x="500" y="118" width="150" height="20" rx="8" fill="url(#cr-greenGrad)"/>
+  <rect x="500" y="132" width="150" height="6" fill="url(#cr-greenGrad)"/>
+  <text x="575" y="134" text-anchor="middle" class="cr-label" font-size="9" fill="white">Search Radix Tree</text>
+  <text x="575" y="156" text-anchor="middle" class="cr-feature" fill="#34d399">Prefix match lookup</text>
+
+  <!-- Arrow down from Radix Tree -->
+  <line x1="575" y1="163" x2="575" y2="185" stroke="#6366f1" stroke-width="2" marker-end="url(#cr-arrowPurple)"/>
+
+  <!-- Decision: Match Ratio ≥ Threshold? -->
+  <polygon points="575,190 655,222 575,254 495,222" fill="#1e293b" stroke="#6366f1" stroke-width="2"/>
+  <text x="575" y="216" text-anchor="middle" class="cr-label" font-size="9" fill="#a78bfa">Match ≥</text>
+  <text x="575" y="230" text-anchor="middle" class="cr-label" font-size="9" fill="#a78bfa">Threshold?</text>
+
+  <!-- YES → Route to Matched Worker -->
+  <line x1="655" y1="222" x2="700" y2="222" stroke="#10b981" stroke-width="0"/>
+  <line x1="575" y1="254" x2="575" y2="275" stroke="#10b981" stroke-width="2" marker-end="url(#cr-arrowGreen)"/>
+  <text x="590" y="268" class="cr-label" font-size="9" fill="#34d399">Yes</text>
+
+  <!-- Route to Matched Worker box -->
+  <rect x="495" y="280" width="160" height="30" rx="8" fill="#1e293b" stroke="#10b981" stroke-width="2" class="cr-pulse"/>
+  <text x="575" y="300" text-anchor="middle" class="cr-label" font-size="10" fill="#34d399">Route to Matched Worker</text>
+
+  <!-- NO → Route to Most Cache Capacity -->
+  <line x1="495" y1="222" x2="350" y2="222" stroke="#f59e0b" stroke-width="2"/>
+  <line x1="350" y1="222" x2="350" y2="280" stroke="#f59e0b" stroke-width="2" marker-end="url(#cr-arrowAmber)"/>
+  <text x="420" y="214" text-anchor="middle" class="cr-label" font-size="9" fill="#fbbf24">No</text>
+
+  <!-- Most Cache Capacity box -->
+  <rect x="250" y="280" width="200" height="30" rx="8" fill="#1e293b" stroke="#f59e0b" stroke-width="2" class="cr-pulse"/>
+  <text x="350" y="300" text-anchor="middle" class="cr-label" font-size="10" fill="#fbbf24">Route to Most Cache Capacity</text>
+</svg>
