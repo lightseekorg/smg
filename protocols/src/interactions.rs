@@ -69,7 +69,7 @@ pub struct InteractionsRequest {
 
 fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), ValidationError> {
     // Either model or agent must be provided
-    if req.model.is_empty() && req.agent.is_none() {
+    if (req.model.is_empty() || req.model == default_model()) && req.agent.is_none() {
         return Err(ValidationError::new("model_or_agent_required"));
     }
     // response_mime_type is required when response_format is set
