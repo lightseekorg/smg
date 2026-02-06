@@ -363,7 +363,7 @@ jobs:
         env:
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
         run: |
-         if [ -f /tmp/brave-search-mcp-sse.tar ]; then
+          if [ -f /tmp/brave-search-mcp-sse.tar ]; then
             echo "Loading Brave MCP image from cache..."
             docker load -i /tmp/brave-search-mcp-sse.tar
           else
