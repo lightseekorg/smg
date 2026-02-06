@@ -44,6 +44,120 @@
   --md-primary-fg-color--light: #6366f1;
   --md-primary-fg-color--dark: #4338ca;
   --md-accent-fg-color: #0ea5e9;
+  --md-typeset-a-color: #4f46e5;
+  --md-code-bg-color: #f4f4f5;
+  --md-code-fg-color: #18181b;
+}
+
+/* ---- Light theme component overrides ---- */
+
+/* Hero: fade to white instead of black */
+[data-md-color-scheme="default"] .md-typeset .hero::after {
+  background: linear-gradient(to bottom, transparent 0%, #fff 100%);
+}
+
+/* Hero title: dark gradient text instead of white */
+[data-md-color-scheme="default"] .md-typeset .hero h1 {
+  background: linear-gradient(
+    135deg,
+    var(--md-code-fg-color) 0%,
+    var(--md-code-fg-color) 20%,
+    var(--mesh-purple) 40%,
+    var(--mesh-cyan) 60%,
+    var(--mesh-blue) 80%,
+    var(--md-code-fg-color) 100%
+  );
+}
+
+/* Hero last paragraph */
+[data-md-color-scheme="default"] .md-typeset .hero > p:last-of-type {
+  color: #52525b;
+}
+
+/* Cards: visible backgrounds and borders on light */
+[data-md-color-scheme="default"] .md-typeset .card {
+  background: #fff;
+  border-color: rgba(79, 70, 229, 0.2);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+
+[data-md-color-scheme="default"] .md-typeset .card:hover {
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(139, 92, 246, 0.06) 0%, transparent 60%),
+    #fff;
+}
+
+[data-md-color-scheme="default"] .md-typeset .card:hover h3 {
+  color: #18181b;
+}
+
+[data-md-color-scheme="default"] .md-typeset .card p {
+  color: #52525b;
+}
+
+/* Buttons */
+[data-md-color-scheme="default"] .md-typeset .button--primary {
+  background: linear-gradient(135deg, #4f46e5, #6366f1);
+  color: #fff !important;
+}
+
+[data-md-color-scheme="default"] .md-typeset .button--primary:hover {
+  background: linear-gradient(135deg, #4338ca, #4f46e5);
+  box-shadow: 0 15px 50px rgba(79, 70, 229, 0.3);
+}
+
+[data-md-color-scheme="default"] .md-typeset .button--secondary {
+  background: rgba(79, 70, 229, 0.06);
+  border: 1px solid rgba(79, 70, 229, 0.25);
+  color: #4f46e5 !important;
+}
+
+[data-md-color-scheme="default"] .md-typeset .button--secondary:hover {
+  background: rgba(79, 70, 229, 0.12);
+  border-color: rgba(79, 70, 229, 0.4);
+}
+
+/* Stat values: dark gradient instead of white */
+[data-md-color-scheme="default"] .md-typeset .stat-value {
+  background: linear-gradient(135deg, var(--md-code-fg-color) 0%, var(--mesh-purple) 50%, var(--mesh-cyan) 100%);
+}
+
+[data-md-color-scheme="default"] .md-typeset .stat-label {
+  color: #71717a;
+}
+
+/* Stat divider */
+[data-md-color-scheme="default"] .md-typeset .stat:not(:last-child)::after {
+  opacity: 0.35;
+}
+
+/* Backend pills */
+[data-md-color-scheme="default"] .md-typeset .backend {
+  background: rgba(79, 70, 229, 0.04);
+  border-color: rgba(79, 70, 229, 0.15);
+  color: #52525b;
+}
+
+[data-md-color-scheme="default"] .md-typeset .backend:hover {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.12), rgba(6, 182, 212, 0.12));
+  border-color: var(--mesh-purple);
+  color: #18181b;
+  box-shadow: 0 4px 20px rgba(139, 92, 246, 0.15);
+}
+
+/* Community links */
+[data-md-color-scheme="default"] .md-typeset .community-links {
+  color: #71717a;
+  border-top-color: rgba(0, 0, 0, 0.08);
+}
+
+[data-md-color-scheme="default"] .md-typeset .community-links a {
+  color: #52525b;
+}
+
+/* h2 underline glow: softer in light mode */
+[data-md-color-scheme="default"] .md-typeset h2::after {
+  box-shadow: none;
 }
 
 /* Typography */
@@ -491,8 +605,8 @@
   background: var(--md-default-bg-color--light);
 }
 
-/* Navigation */
-.md-tabs {
+/* Navigation - dark mode only (light mode uses Material defaults) */
+[data-md-color-scheme="slate"] .md-tabs {
   background: var(--md-default-bg-color);
 }
 
@@ -500,13 +614,13 @@
   font-weight: 500;
 }
 
-/* Header */
-.md-header {
+/* Header - dark mode only */
+[data-md-color-scheme="slate"] .md-header {
   background: var(--md-default-bg-color);
 }
 
-/* Sidebar */
-.md-sidebar {
+/* Sidebar - dark mode only */
+[data-md-color-scheme="slate"] .md-sidebar {
   background: var(--md-default-bg-color);
 }
 
