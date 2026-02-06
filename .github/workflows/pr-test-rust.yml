@@ -322,6 +322,27 @@ jobs:
 
           echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_9:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
+      - name: Cache Oracle Docker image
+        if: matrix.setup_oracle
+        id: cache-oracle-image
+        uses: actions/cache@v5
+        with:
+          path: /tmp/oracle-xe-21-slim.tar
+          key: docker-oracle-xe-21-slim
+
+      - name: Load or pull Oracle Docker image
+        if: matrix.setup_oracle
+        run: |
+          if [ -f /tmp/oracle-xe-21-slim.tar ]; then
+            echo "Loading Oracle image from cache..."
+            docker load -i /tmp/oracle-xe-21-slim.tar
+          else
+            echo "Pulling Oracle image from Docker Hub..."
+            docker pull gvenzl/oracle-xe:21-slim
+            echo "Saving Oracle image to cache..."
+            docker save gvenzl/oracle-xe:21-slim -o /tmp/oracle-xe-21-slim.tar
+          fi
+
       - name: Start Oracle Database
         if: matrix.setup_oracle
         run: |
@@ -333,12 +354,33 @@ jobs:
           echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
           echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
 
+      - name: Cache Brave MCP Docker image
+        if: matrix.setup_brave
+        id: cache-brave-image
+        uses: actions/cache@v5
+        with:
+          path: /tmp/brave-search-mcp-sse.tar
+          key: docker-brave-search-mcp-sse-1.0.10
+
+      - name: Load or pull Brave MCP Docker image
+        if: matrix.setup_brave
+        run: |
+          if [ -f /tmp/brave-search-mcp-sse.tar ]; then
+            echo "Loading Brave MCP image from cache..."
+            docker load -i /tmp/brave-search-mcp-sse.tar
+          else
+            echo "Pulling Brave MCP image from Docker Hub..."
+            docker pull shoofio/brave-search-mcp-sse:1.0.10
+            echo "Saving Brave MCP image to cache..."
+            docker save shoofio/brave-search-mcp-sse:1.0.10 -o /tmp/brave-search-mcp-sse.tar
+          fi
+
       - name: Start Brave MCP Server
         if: matrix.setup_brave
         env:
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
         run: |
-          docker run -d --rm \
+          docker run -d \
             -p 8001:8080 \
             -e BRAVE_API_KEY \
             --name brave-search-server \
