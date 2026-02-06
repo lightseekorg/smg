@@ -11,7 +11,7 @@ authors = [
     {name = "Chang Su", email = "mckvtl@gmail.com"},
     {name = "Keyang Ru", email = "rukeyang@gmail.com"}
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 readme = "../../README.md"
 license = { text = "Apache-2.0" }
 classifiers = [
@@ -34,7 +34,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "mypy",
     "requests>=2.25.0",
+    "ruff",
     "pytest>=7.0.0",
 ]
 

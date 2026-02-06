@@ -247,9 +247,7 @@ class TestRouterConfigValidation:
     def test_cors_config_validation(self):
         """Test CORS configuration validation."""
         # Valid CORS config
-        args = RouterArgs(
-            cors_allowed_origins=["http://localhost:3000", "https://example.com"]
-        )
+        args = RouterArgs(cors_allowed_origins=["http://localhost:3000", "https://example.com"])
         assert args.cors_allowed_origins == [
             "http://localhost:3000",
             "https://example.com",
@@ -270,9 +268,7 @@ class TestRouterConfigValidation:
     def test_request_id_headers_validation(self):
         """Test request ID headers configuration validation."""
         # Valid request ID headers config
-        args = RouterArgs(
-            request_id_headers=["x-request-id", "x-trace-id", "x-correlation-id"]
-        )
+        args = RouterArgs(request_id_headers=["x-request-id", "x-trace-id", "x-correlation-id"])
         assert args.request_id_headers == [
             "x-request-id",
             "x-trace-id",
@@ -338,9 +334,7 @@ class TestRouterConfigValidation:
 
     def test_config_immutability(self):
         """Test that configuration objects are properly immutable."""
-        args = RouterArgs(
-            host="127.0.0.1", port=30000, worker_urls=["http://worker1:8000"]
-        )
+        args = RouterArgs(host="127.0.0.1", port=30000, worker_urls=["http://worker1:8000"])
 
         # Test that we can't modify the configuration after creation
         # (This is more of a design test - dataclasses are mutable by default)
@@ -403,9 +397,7 @@ class TestRouterConfigValidation:
 
     def test_config_with_empty_lists(self):
         """Test configuration with empty lists."""
-        args = RouterArgs(
-            worker_urls=[], prefill_urls=[], decode_urls=[], cors_allowed_origins=[]
-        )
+        args = RouterArgs(worker_urls=[], prefill_urls=[], decode_urls=[], cors_allowed_origins=[])
 
         # All empty lists should be preserved
         assert args.worker_urls == []

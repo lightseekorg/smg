@@ -86,8 +86,9 @@ PYTHONIC_MESSAGES = [
     {
         "role": "user",
         "content": (
-            "I'm planning a trip to Tokyo next week. What's the weather like and what are some top tourist attractions? "
-            "Propose parallel tool calls at once, using the python list of function calls format as shown above."
+            "I'm planning a trip to Tokyo next week. What's the weather like and what are some "
+            "top tourist attractions? Propose parallel tool calls at once, using the python list "
+            "of function calls format as shown above."
         ),
     },
 ]
@@ -98,11 +99,11 @@ PYTHONIC_MESSAGES = [
 # =============================================================================
 
 
-@pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support guided decoding (json_schema)")
-@pytest.mark.model("llama-1b")
-@pytest.mark.gateway(
-    extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"]
+@pytest.mark.skip_for_runtime(
+    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
 )
+@pytest.mark.model("llama-1b")
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestOpenAIServerFunctionCalling:
     """Tests for OpenAI-compatible function calling with Llama tool parser."""
@@ -154,9 +155,9 @@ class TestOpenAIServerFunctionCalling:
 
         tool_calls = response.choices[0].message.tool_calls
 
-        assert (
-            isinstance(tool_calls, list) and len(tool_calls) > 0
-        ), "tool_calls should be a non-empty list"
+        assert isinstance(tool_calls, list) and len(tool_calls) > 0, (
+            "tool_calls should be a non-empty list"
+        )
 
         function_name = tool_calls[0].function.name
         assert function_name == "add", "Function name should be 'add'"
@@ -222,23 +223,24 @@ class TestOpenAIServerFunctionCalling:
             if choice.delta.tool_calls:
                 tool_call = choice.delta.tool_calls[0]
                 if tool_call.function.name:
-                    assert (
-                        tool_call.function.name == "get_current_weather"
-                    ), "Function name should be 'get_current_weather'"
+                    assert tool_call.function.name == "get_current_weather", (
+                        "Function name should be 'get_current_weather'"
+                    )
                     found_function_name = True
                     break
 
-        assert (
-            found_function_name
-        ), "Target function name 'get_current_weather' was not found in the streaming chunks"
+        assert found_function_name, (
+            "Target function name 'get_current_weather' was not found in the streaming chunks"
+        )
 
         finish_reason = chunks[-1].choices[0].finish_reason
-        assert (
-            finish_reason == "tool_calls"
-        ), "Final response of function calling should have finish_reason 'tool_calls'"
+        assert finish_reason == "tool_calls", (
+            "Final response of function calling should have finish_reason 'tool_calls'"
+        )
 
     def test_function_calling_streaming_args_parsing(self, setup_backend):
-        """Test: Whether the function call arguments returned in streaming mode can be correctly concatenated into valid JSON.
+        """Test: Whether the function call arguments returned in streaming mode can be correctly
+        concatenated into valid JSON.
 
         - The user request requires multiple parameters.
         - AI may return the arguments in chunks that need to be concatenated.
@@ -265,7 +267,9 @@ class TestOpenAIServerFunctionCalling:
                         },
                         "required": ["a", "b"],
                     },
-                    "strict": True,  # Llama-3.2-1B is flaky in tool call. It won't always respond with parameters unless we set strict.
+                    # Llama-3.2-1B is flaky in tool call. It won't always respond with
+                    # parameters unless we set strict.
+                    "strict": True,
                 },
             }
         ]
@@ -300,22 +304,18 @@ class TestOpenAIServerFunctionCalling:
 
         assert function_name == "add", "Function name should be 'add'"
         joined_args = "".join(argument_fragments)
-        assert (
-            len(joined_args) > 0
-        ), "No parameter fragments were returned in the function call"
+        assert len(joined_args) > 0, "No parameter fragments were returned in the function call"
 
         finish_reason = chunks[-1].choices[0].finish_reason
-        assert (
-            finish_reason == "tool_calls"
-        ), "Final response of function calling should have finish_reason 'tool_calls'"
+        assert finish_reason == "tool_calls", (
+            "Final response of function calling should have finish_reason 'tool_calls'"
+        )
 
         # Check whether the concatenated JSON is valid
         try:
             args_obj = json.loads(joined_args)
         except json.JSONDecodeError:
-            pytest.fail(
-                "The concatenated tool call arguments are not valid JSON, parsing failed"
-            )
+            pytest.fail("The concatenated tool call arguments are not valid JSON, parsing failed")
 
         assert "a" in args_obj, "Missing parameter 'a'"
         assert "b" in args_obj, "Missing parameter 'b'"
@@ -357,9 +357,7 @@ class TestOpenAIServerFunctionCalling:
             }
         ]
 
-        messages = [
-            {"role": "user", "content": "Please compute 5 - 7, using your tool."}
-        ]
+        messages = [{"role": "user", "content": "Please compute 5 - 7, using your tool."}]
         response = client.chat.completions.create(
             model=model,
             max_tokens=2048,
@@ -446,21 +444,19 @@ class TestOpenAIServerFunctionCalling:
         arguments = tool_calls[0].function.arguments
         args_obj = json.loads(arguments)
 
-        assert (
-            function_name == "get_weather"
-        ), f"Function name should be 'get_weather', got: {function_name}"
-        assert (
-            "city" in args_obj
-        ), f"Function arguments should have 'city', got: {args_obj}"
+        assert function_name == "get_weather", (
+            f"Function name should be 'get_weather', got: {function_name}"
+        )
+        assert "city" in args_obj, f"Function arguments should have 'city', got: {args_obj}"
 
         # Make the test more robust by checking type and accepting valid responses
         city_value = args_obj["city"]
-        assert isinstance(
-            city_value, str
-        ), f"Parameter city should be a string, got: {type(city_value)}"
-        assert (
-            "Paris" in city_value or "France" in city_value
-        ), f"Parameter city should contain either 'Paris' or 'France', got: {city_value}"
+        assert isinstance(city_value, str), (
+            f"Parameter city should be a string, got: {type(city_value)}"
+        )
+        assert "Paris" in city_value or "France" in city_value, (
+            f"Parameter city should contain either 'Paris' or 'France', got: {city_value}"
+        )
 
     def test_function_call_specific(self, setup_backend):
         """Test: Whether tool_choice: ToolChoice works as expected.
@@ -563,9 +559,7 @@ class TestOpenAIServerFunctionCalling:
             }
         ]
 
-        messages = [
-            {"role": "user", "content": "What is the weather like in Los Angeles?"}
-        ]
+        messages = [{"role": "user", "content": "What is the weather like in Los Angeles?"}]
 
         # Request with n=2 to get multiple choices
         response_stream = client.chat.completions.create(
@@ -593,9 +587,9 @@ class TestOpenAIServerFunctionCalling:
                         finish_reason_chunks[index].append(choice.finish_reason)
 
         # Verify we got finish_reason chunks for both indices
-        assert (
-            len(finish_reason_chunks) == 2
-        ), f"Expected finish_reason chunks for 2 indices, got {len(finish_reason_chunks)}"
+        assert len(finish_reason_chunks) == 2, (
+            f"Expected finish_reason chunks for 2 indices, got {len(finish_reason_chunks)}"
+        )
 
         # Verify both index 0 and 1 have finish_reason
         assert 0 in finish_reason_chunks, "Missing finish_reason chunk for index 0"
@@ -603,9 +597,9 @@ class TestOpenAIServerFunctionCalling:
 
         # Verify the finish_reason is "tool_calls" since we forced tool calls
         for index, reasons in finish_reason_chunks.items():
-            assert (
-                reasons[-1] == "tool_calls"
-            ), f"Expected finish_reason 'tool_calls' for index {index}, got {reasons[-1]}"
+            assert reasons[-1] == "tool_calls", (
+                f"Expected finish_reason 'tool_calls' for index {index}, got {reasons[-1]}"
+            )
 
     def test_function_calling_streaming_no_tool_call(self, setup_backend):
         """Test: Whether the finish_reason is stop in streaming mode when no tool call is given.
@@ -664,14 +658,12 @@ class TestOpenAIServerFunctionCalling:
                 found_tool_call = True
                 break
 
-        assert (
-            not found_tool_call
-        ), "Shouldn't have any tool_call in the streaming chunks"
+        assert not found_tool_call, "Shouldn't have any tool_call in the streaming chunks"
 
         finish_reason = chunks[-1].choices[0].finish_reason
-        assert (
-            finish_reason == "stop"
-        ), "Final response of no function calling should have finish_reason 'stop'"
+        assert finish_reason == "stop", (
+            "Final response of no function calling should have finish_reason 'stop'"
+        )
 
     def test_streaming_multiple_choices_without_tools(self, setup_backend):
         """Test: Verify that each choice gets its own finish_reason chunk without tool calls.
@@ -706,9 +698,9 @@ class TestOpenAIServerFunctionCalling:
                         finish_reason_chunks[index].append(choice.finish_reason)
 
         # Verify we got finish_reason chunks for both indices
-        assert (
-            len(finish_reason_chunks) == 2
-        ), f"Expected finish_reason chunks for 2 indices, got {len(finish_reason_chunks)}"
+        assert len(finish_reason_chunks) == 2, (
+            f"Expected finish_reason chunks for 2 indices, got {len(finish_reason_chunks)}"
+        )
 
         # Verify both index 0 and 1 have finish_reason
         assert 0 in finish_reason_chunks, "Missing finish_reason chunk for index 0"
@@ -728,9 +720,7 @@ class TestOpenAIServerFunctionCalling:
 
 
 @pytest.mark.model("llama-8b")
-@pytest.mark.gateway(
-    extra_args=["--tool-call-parser", "pythonic", "--history-backend", "memory"]
-)
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "pythonic", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestOpenAIPythonicFunctionCalling:
     """Tests for pythonic function calling format."""
@@ -750,9 +740,9 @@ class TestOpenAIPythonicFunctionCalling:
         assert isinstance(tool_calls, list), "No tool_calls found"
         assert len(tool_calls) >= 1
         names = [tc.function.name for tc in tool_calls]
-        assert (
-            "get_weather" in names or "get_tourist_attractions" in names
-        ), f"Function name '{names}' should contain either 'get_weather' or 'get_tourist_attractions'"
+        assert "get_weather" in names or "get_tourist_attractions" in names, (
+            f"Function name '{names}' should contain either 'get_weather' or 'get_tourist_attractions'"
+        )
 
     def test_pythonic_tool_call_streaming(self, setup_backend):
         """Test: Streaming pythonic tool call format; assert tool_call index is present."""
@@ -781,9 +771,9 @@ class TestOpenAIPythonicFunctionCalling:
 
         assert found_tool_calls, "No tool_calls found in streaming response"
         assert found_index, "No index field found in any streamed tool_call"
-        assert (
-            "get_weather" in found_names or "get_tourist_attractions" in found_names
-        ), f"Function name '{found_names}' should contain either 'get_weather' or 'get_tourist_attractions'"
+        assert "get_weather" in found_names or "get_tourist_attractions" in found_names, (
+            f"Function name '{found_names}' should contain either 'get_weather' or 'get_tourist_attractions'"
+        )
 
 
 # =============================================================================
@@ -836,17 +826,47 @@ def get_test_tools():
             "type": "function",
             "function": {
                 "name": "make_next_step_decision",
-                "description": "You will be given a trace of thinking process in the following format.\n\nQuestion: the input question you must answer\nTOOL: think about what to do, and choose a tool to use ONLY IF there are defined tools. \n  You should never call the same tool with the same input twice in a row.\n  If the previous conversation history already contains the information that can be retrieved from the tool, you should not call the tool again.\nOBSERVATION: the result of the tool call, NEVER include this in your response, this information will be provided\n... (this TOOL/OBSERVATION can repeat N times)\nANSWER: If you know the answer to the original question, require for more information,\n  or you don't know the answer and there are no defined tools or all available tools are not helpful, respond with the answer without mentioning anything else.\n  If the previous conversation history already contains the answer, respond with the answer right away.\n\n  If no tools are configured, naturally mention this limitation while still being helpful. Briefly note that adding tools in the agent configuration would expand capabilities.\n\nYour task is to respond with the next step to take, based on the traces, \nor answer the question if you have enough information.",
+                "description": (
+                    "You will be given a trace of thinking process in the following format.\n\n"
+                    "Question: the input question you must answer\n"
+                    "TOOL: think about what to do, and choose a tool to use ONLY IF there are defined tools. \n"
+                    "  You should never call the same tool with the same input twice in a row.\n"
+                    "  If the previous conversation history already contains the information that can be "
+                    "retrieved from the tool, you should not call the tool again.\n"
+                    "OBSERVATION: the result of the tool call, NEVER include this in your response, this "
+                    "information will be provided\n"
+                    "... (this TOOL/OBSERVATION can repeat N times)\n"
+                    "ANSWER: If you know the answer to the original question, require for more information,\n"
+                    "  or you don't know the answer and there are no defined tools or all available tools are "
+                    "not helpful, respond with the answer without mentioning anything else.\n"
+                    "  If the previous conversation history already contains the answer, respond with the answer "
+                    "right away.\n\n"
+                    "  If no tools are configured, naturally mention this limitation while still being helpful. "
+                    "Briefly note that adding tools in the agent configuration would expand capabilities.\n\n"
+                    "Your task is to respond with the next step to take, based on the traces, \n"
+                    "or answer the question if you have enough information."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "decision": {
                             "type": "string",
-                            "description": 'The next step to take, it must be either "TOOL" or "ANSWER". If the previous conversation history already contains the information that can be retrieved from the tool, you should not call the tool again. If there are no defined tools, you should not return "TOOL" in your response.',
+                            "description": (
+                                'The next step to take, it must be either "TOOL" or "ANSWER". '
+                                "If the previous conversation history already contains the information that can be "
+                                "retrieved from the tool, you should not call the tool again. If there are no "
+                                'defined tools, you should not return "TOOL" in your response.'
+                            ),
                         },
                         "content": {
                             "type": "string",
-                            "description": 'The content of the next step. If the decision is "TOOL", this should be a short and concise reasoning of why you chose the tool, MUST include the tool name. If the decision is "ANSWER", this should be the answer to the question. If no tools are available, integrate this limitation conversationally without sounding scripted.',
+                            "description": (
+                                'The content of the next step. If the decision is "TOOL", this should be '
+                                "a short and concise reasoning of why you chose the tool, MUST include the tool name. "
+                                'If the decision is "ANSWER", this should be the answer to the question. '
+                                "If no tools are available, integrate this limitation conversationally without "
+                                "sounding scripted."
+                            ),
                         },
                     },
                     "required": ["decision", "content"],
@@ -861,7 +881,26 @@ def get_test_messages():
     return [
         {
             "role": "user",
-            "content": "Answer the following questions as best you can:\n\nYou will be given a trace of thinking process in the following format.\n\nQuestion: the input question you must answer\nTOOL: think about what to do, and choose a tool to use ONLY IF there are defined tools\nOBSERVATION: the result of the tool call or the observation of the current task, NEVER include this in your response, this information will be provided\n... (this TOOL/OBSERVATION can repeat N times)\nANSWER: If you know the answer to the original question, require for more information, \nif the previous conversation history already contains the answer, \nor you don't know the answer and there are no defined tools or all available tools are not helpful, respond with the answer without mentioning anything else.\nYou may use light Markdown formatting to improve clarity (e.g. lists, **bold**, *italics*), but keep it minimal and unobtrusive.\n\nYour task is to respond with the next step to take, based on the traces, \nor answer the question if you have enough information.\n\nQuestion: what is the weather in top 5 populated cities in the US in celsius?\n\nTraces:\n\n\nThese are some additional instructions that you should follow:",
+            "content": (
+                "Answer the following questions as best you can:\n\n"
+                "You will be given a trace of thinking process in the following format.\n\n"
+                "Question: the input question you must answer\n"
+                "TOOL: think about what to do, and choose a tool to use ONLY IF there are defined tools\n"
+                "OBSERVATION: the result of the tool call or the observation of the current task, "
+                "NEVER include this in your response, this information will be provided\n"
+                "... (this TOOL/OBSERVATION can repeat N times)\n"
+                "ANSWER: If you know the answer to the original question, require for more information, \n"
+                "if the previous conversation history already contains the answer, \n"
+                "or you don't know the answer and there are no defined tools or all available tools are "
+                "not helpful, respond with the answer without mentioning anything else.\n"
+                "You may use light Markdown formatting to improve clarity (e.g. lists, **bold**, *italics*), "
+                "but keep it minimal and unobtrusive.\n\n"
+                "Your task is to respond with the next step to take, based on the traces, \n"
+                "or answer the question if you have enough information.\n\n"
+                "Question: what is the weather in top 5 populated cities in the US in celsius?\n\n"
+                "Traces:\n\n\n"
+                "These are some additional instructions that you should follow:"
+            ),
         }
     ]
 
@@ -918,7 +957,10 @@ def get_travel_messages():
             "role": "system",
         },
         {
-            "content": "I'm planning a trip to Tokyo next week. What's the weather like? What are the most amazing sights?",
+            "content": (
+                "I'm planning a trip to Tokyo next week. What's the weather like? "
+                "What are the most amazing sights?"
+            ),
             "role": "user",
         },
     ]
@@ -928,7 +970,7 @@ class _TestToolChoiceBase:
     """Base class for tool_choice tests. Not collected by pytest (underscore prefix)."""
 
     # Subclasses should override this
-    FLAKY_TESTS = set()
+    FLAKY_TESTS: set[str] = set()
 
     def _is_flaky_test(self, test_name):
         """Check if the current test is marked as flaky for this class."""
@@ -1095,7 +1137,9 @@ class _TestToolChoiceBase:
         assert found_name == "get_weather"
 
     def test_required_streaming_arguments_chunks_json(self, setup_backend):
-        """In streaming required mode, complete tool call arguments should be valid JSON when all chunks are combined."""
+        """In streaming required mode, complete tool call arguments should be valid JSON when
+        all chunks are combined.
+        """
         _, model, client, _ = setup_backend
 
         tools = get_test_tools()
@@ -1133,13 +1177,9 @@ class _TestToolChoiceBase:
                         tool_call["id"] = tool_call_delta.id
                     if tool_call_delta.function:
                         if tool_call_delta.function.name:
-                            tool_call["function"][
-                                "name"
-                            ] = tool_call_delta.function.name
+                            tool_call["function"]["name"] = tool_call_delta.function.name
                         if tool_call_delta.function.arguments:
-                            tool_call["function"][
-                                "arguments"
-                            ] += tool_call_delta.function.arguments
+                            tool_call["function"]["arguments"] += tool_call_delta.function.arguments
 
         assert len(tool_calls_by_index) > 0
 
@@ -1272,9 +1312,9 @@ class _TestToolChoiceBase:
             assert len(tool_calls) == 2, f"Expected 2 tool calls, got {len(tool_calls)}"
 
             called_functions = {call.function.name for call in tool_calls}
-            assert (
-                called_functions == expected_functions
-            ), f"Expected functions {expected_functions}, got {called_functions}"
+            assert called_functions == expected_functions, (
+                f"Expected functions {expected_functions}, got {called_functions}"
+            )
 
     def test_multi_tool_scenario_required(self, setup_backend):
         """Test multi-tool scenario with tool_choice='required'."""
@@ -1308,9 +1348,7 @@ class _TestToolChoiceBase:
 
         if self._is_flaky_test("test_multi_tool_scenario_required"):
             # For flaky tests, just ensure basic functionality works
-            assert (
-                len(tool_calls) > 0
-            ), f"Expected at least 1 tool call, got {len(tool_calls)}"
+            assert len(tool_calls) > 0, f"Expected at least 1 tool call, got {len(tool_calls)}"
             for call in tool_calls:
                 assert call.function.name in available_names
         else:
@@ -1318,9 +1356,9 @@ class _TestToolChoiceBase:
             assert len(tool_calls) == 2, f"Expected 2 tool calls, got {len(tool_calls)}"
 
             called_functions = {call.function.name for call in tool_calls}
-            assert (
-                called_functions == expected_functions
-            ), f"Expected functions {expected_functions}, got {called_functions}"
+            assert called_functions == expected_functions, (
+                f"Expected functions {expected_functions}, got {called_functions}"
+            )
 
     def test_error_handling_invalid_tool_choice(self, setup_backend):
         """Test error handling for invalid tool_choice."""
@@ -1473,11 +1511,11 @@ class _TestToolChoiceBase:
 # =============================================================================
 
 
-@pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support guided decoding (json_schema)")
-@pytest.mark.model("llama-1b")
-@pytest.mark.gateway(
-    extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"]
+@pytest.mark.skip_for_runtime(
+    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
 )
+@pytest.mark.model("llama-1b")
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestToolChoiceLlama(_TestToolChoiceBase):
     """Tests for tool_choice functionality with Llama model."""
@@ -1494,17 +1532,17 @@ class TestToolChoiceLlama(_TestToolChoiceBase):
 # =============================================================================
 
 
-@pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support guided decoding (json_schema)")
-@pytest.mark.model("qwen-7b")
-@pytest.mark.gateway(
-    extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"]
+@pytest.mark.skip_for_runtime(
+    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
 )
+@pytest.mark.model("qwen-7b")
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestToolChoiceQwen(_TestToolChoiceBase):
     """Tests for tool_choice functionality with Qwen model."""
 
     # No flaky tests for Qwen
-    FLAKY_TESTS = set()
+    FLAKY_TESTS: set[str] = set()
 
 
 # =============================================================================
@@ -1512,11 +1550,11 @@ class TestToolChoiceQwen(_TestToolChoiceBase):
 # =============================================================================
 
 
-@pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support guided decoding (json_schema)")
-@pytest.mark.model("mistral-7b")
-@pytest.mark.gateway(
-    extra_args=["--tool-call-parser", "mistral", "--history-backend", "memory"]
+@pytest.mark.skip_for_runtime(
+    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
 )
+@pytest.mark.model("mistral-7b")
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "mistral", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestToolChoiceMistral(_TestToolChoiceBase):
     """Tests for tool_choice functionality with Mistral model."""

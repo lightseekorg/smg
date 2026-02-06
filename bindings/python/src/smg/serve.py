@@ -15,7 +15,6 @@ import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
 
 from smg.launch_router import launch_router
 from smg.router_args import RouterArgs
@@ -32,15 +31,11 @@ class WorkerLauncher(ABC):
     """Abstract base class for backend worker launchers."""
 
     @abstractmethod
-    def build_command(
-        self, args: argparse.Namespace, host: str, port: int
-    ) -> List[str]:
+    def build_command(self, args: argparse.Namespace, host: str, port: int) -> list[str]:
         """Build the CLI command list to launch a worker."""
         ...
 
-    def health_check(
-        self, args: argparse.Namespace, host: str, port: int, timeout: float
-    ) -> bool:
+    def health_check(self, args: argparse.Namespace, host: str, port: int, timeout: float) -> bool:
         """Return True when the worker at host:port is healthy."""
         if getattr(args, "connection_mode", "grpc") == "grpc":
             return _grpc_health_check(host, port, timeout)
@@ -56,9 +51,7 @@ class WorkerLauncher(ABC):
         """Return tensor-parallel size for GPU assignment. Default 1."""
         return 1
 
-    def gpu_env(
-        self, args: argparse.Namespace, dp_rank: int, env: Optional[dict] = None
-    ) -> dict:
+    def gpu_env(self, args: argparse.Namespace, dp_rank: int, env: dict | None = None) -> dict:
         """Build env dict with CUDA_VISIBLE_DEVICES for this worker's dp_rank."""
         env = dict(env) if env is not None else os.environ.copy()
         tp_size = self._get_tp_size(args)
@@ -72,13 +65,11 @@ class WorkerLauncher(ABC):
         args: argparse.Namespace,
         host: str,
         port: int,
-        env: Optional[dict] = None,
+        env: dict | None = None,
     ) -> subprocess.Popen:
         """Launch the worker subprocess."""
         cmd = self.build_command(args, host, port)
-        return subprocess.Popen(
-            cmd, start_new_session=True, env=env or os.environ.copy()
-        )
+        return subprocess.Popen(cmd, start_new_session=True, env=env or os.environ.copy())
 
 
 class SglangWorkerLauncher(WorkerLauncher):
@@ -87,9 +78,7 @@ class SglangWorkerLauncher(WorkerLauncher):
     def _get_tp_size(self, args: argparse.Namespace) -> int:
         return getattr(args, "tp_size", 1)
 
-    def build_command(
-        self, args: argparse.Namespace, host: str, port: int
-    ) -> List[str]:
+    def build_command(self, args: argparse.Namespace, host: str, port: int) -> list[str]:
         cmd = [
             sys.executable,
             "-m",
@@ -106,16 +95,13 @@ class SglangWorkerLauncher(WorkerLauncher):
         return cmd
 
 
-
 class VllmWorkerLauncher(WorkerLauncher):
     """Launcher for vLLM inference workers (gRPC mode only)."""
 
     def _get_tp_size(self, args: argparse.Namespace) -> int:
         return getattr(args, "tensor_parallel_size", 1)
 
-    def build_command(
-        self, args: argparse.Namespace, host: str, port: int
-    ) -> List[str]:
+    def build_command(self, args: argparse.Namespace, host: str, port: int) -> list[str]:
         if getattr(args, "connection_mode", "grpc") != "grpc":
             raise ValueError("vLLM backend only supports grpc connection mode")
         return [
@@ -131,7 +117,6 @@ class VllmWorkerLauncher(WorkerLauncher):
         ]
 
 
-
 class TrtllmWorkerLauncher(WorkerLauncher):
     """Launcher for TensorRT-LLM inference workers (gRPC mode only).
 
@@ -142,9 +127,7 @@ class TrtllmWorkerLauncher(WorkerLauncher):
     def _get_tp_size(self, args: argparse.Namespace) -> int:
         return getattr(args, "tp_size", 1)
 
-    def build_command(
-        self, args: argparse.Namespace, host: str, port: int
-    ) -> List[str]:
+    def build_command(self, args: argparse.Namespace, host: str, port: int) -> list[str]:
         if getattr(args, "connection_mode", "grpc") != "grpc":
             raise ValueError("TensorRT-LLM backend only supports grpc connection mode")
         return [
@@ -160,8 +143,7 @@ class TrtllmWorkerLauncher(WorkerLauncher):
         ]
 
 
-
-BACKEND_LAUNCHERS = {
+BACKEND_LAUNCHERS: dict[str, type[WorkerLauncher]] = {
     "sglang": SglangWorkerLauncher,
     "vllm": VllmWorkerLauncher,
     "trtllm": TrtllmWorkerLauncher,
@@ -214,8 +196,13 @@ def _grpc_health_check(host: str, port: int, timeout: float) -> bool:
                     return True
                 finally:
                     channel.close()
-            except Exception as e:
-                logger.debug("gRPC channel_ready fallback for %s:%d failed: %s", host, port, e)
+            except Exception as fallback_err:
+                logger.debug(
+                    "gRPC channel_ready fallback for %s:%d failed: %s",
+                    host,
+                    port,
+                    fallback_err,
+                )
                 return False
         logger.debug("gRPC health check for %s:%d failed: %s", host, port, e)
         return False
@@ -229,13 +216,13 @@ def _grpc_health_check(host: str, port: int, timeout: float) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _find_available_ports(base_port: int, count: int) -> List[int]:
+def _find_available_ports(base_port: int, count: int) -> list[int]:
     """Find *count* available ports starting near *base_port*.
 
     Uses socket bind test (no sglang dependency).  Ports are spaced with a
     small random offset to reduce collisions across concurrent launches.
     """
-    ports: List[int] = []
+    ports: list[int] = []
     candidate = base_port
     while len(ports) < count:
         if _is_port_available(candidate):
@@ -244,9 +231,7 @@ def _find_available_ports(base_port: int, count: int) -> List[int]:
         else:
             candidate += 1
         if candidate > 65535:
-            raise RuntimeError(
-                f"Could not find {count} available ports starting from {base_port}"
-            )
+            raise RuntimeError(f"Could not find {count} available ports starting from {base_port}")
     return ports
 
 
@@ -367,8 +352,8 @@ def _import_backend_args(backend: str, parser: argparse.ArgumentParser) -> None:
 
 
 def parse_serve_args(
-    argv: Optional[List[str]] = None,
-) -> Tuple[str, argparse.Namespace]:
+    argv: list[str] | None = None,
+) -> tuple[str, argparse.Namespace]:
     """Two-pass argument parsing for serve command.
 
     Pass 1: Extract --backend with parse_known_args (no backend imports).
@@ -382,9 +367,7 @@ def parse_serve_args(
 
     # Pass 1: extract --backend (lightweight, no backend imports)
     pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument(
-        "--backend", default=DEFAULT_BACKEND, choices=BACKEND_CHOICES
-    )
+    pre_parser.add_argument("--backend", default=DEFAULT_BACKEND, choices=BACKEND_CHOICES)
     pre_args, _ = pre_parser.parse_known_args(argv)
     backend = pre_args.backend
 
@@ -416,7 +399,7 @@ class ServeOrchestrator:
         self.backend = backend
         self.args = args
         self.launcher: WorkerLauncher = BACKEND_LAUNCHERS[backend]()
-        self.workers: List[Tuple[subprocess.Popen, int]] = []
+        self.workers: list[tuple[subprocess.Popen, int]] = []
         self._shutting_down = False
 
     # -- public API ---------------------------------------------------------
@@ -445,7 +428,11 @@ class ServeOrchestrator:
             self.workers.append((proc, port))
             logger.info(
                 "Launched %s worker on %s:%d (pid %d, GPUs: %s)",
-                self.backend, host, port, proc.pid, env["CUDA_VISIBLE_DEVICES"],
+                self.backend,
+                host,
+                port,
+                proc.pid,
+                env["CUDA_VISIBLE_DEVICES"],
             )
 
     def _wait_healthy(self) -> None:
@@ -454,17 +441,14 @@ class ServeOrchestrator:
             deadline = time.monotonic() + self.args.worker_startup_timeout
             while time.monotonic() < deadline:
                 if proc.poll() is not None:
-                    raise RuntimeError(
-                        f"Worker on port {port} exited with code {proc.returncode}"
-                    )
+                    raise RuntimeError(f"Worker on port {port} exited with code {proc.returncode}")
                 if self.launcher.health_check(self.args, host, port, timeout=5.0):
                     logger.info("Worker on %s:%d is healthy", host, port)
                     break
                 time.sleep(2)
             else:
                 raise TimeoutError(
-                    f"Worker on port {port} not healthy within "
-                    f"{self.args.worker_startup_timeout}s"
+                    f"Worker on port {port} not healthy within {self.args.worker_startup_timeout}s"
                 )
 
     def _build_router_args(self) -> RouterArgs:
@@ -514,7 +498,7 @@ class ServeOrchestrator:
 # ---------------------------------------------------------------------------
 
 
-def serve_main(argv: Optional[List[str]] = None) -> None:
+def serve_main(argv: list[str] | None = None) -> None:
     """Parse serve args, create orchestrator, and run."""
     backend, args = parse_serve_args(argv)
     orchestrator = ServeOrchestrator(backend, args)

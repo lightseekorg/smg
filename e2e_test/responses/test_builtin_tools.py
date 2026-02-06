@@ -45,7 +45,7 @@ def is_brave_server_available() -> bool:
     try:
         with socket.create_connection(("localhost", BRAVE_MCP_PORT), timeout=1):
             return True
-    except (OSError, socket.timeout):
+    except (TimeoutError, OSError):
         return False
 
 
@@ -234,9 +234,7 @@ class TestBuiltinToolsCloudBackend:
             "description": "Get weather for a location",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "location": {"type": "string", "description": "City name"}
-                },
+                "properties": {"location": {"type": "string", "description": "City name"}},
                 "required": ["location"],
             },
         }
@@ -254,9 +252,7 @@ class TestBuiltinToolsCloudBackend:
 
 @pytest.mark.e2e
 @pytest.mark.model("gpt-oss")
-@pytest.mark.gateway(
-    extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"]
-)
+@pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestBuiltinToolsLocalBackend:
     """Built-in tool tests against local gRPC backend.
@@ -291,9 +287,7 @@ class TestBuiltinToolsLocalBackend:
             "description": "Get weather for a location",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "location": {"type": "string", "description": "City name"}
-                },
+                "properties": {"location": {"type": "string", "description": "City name"}},
                 "required": ["location"],
             },
         }
@@ -434,18 +428,16 @@ class TestMcpWebSearchStreamingEvents:
         assert "response.completed" in event_types, "Should have response.completed event"
 
         # MCP-specific events
-        assert (
-            "response.mcp_list_tools.in_progress" in event_types
-        ), "Should have mcp_list_tools.in_progress event"
-        assert (
-            "response.mcp_list_tools.completed" in event_types
-        ), "Should have mcp_list_tools.completed event"
-        assert (
-            "response.mcp_call.in_progress" in event_types
-        ), "Should have mcp_call.in_progress event"
-        assert (
-            "response.mcp_call.completed" in event_types
-        ), "Should have mcp_call.completed event"
+        assert "response.mcp_list_tools.in_progress" in event_types, (
+            "Should have mcp_list_tools.in_progress event"
+        )
+        assert "response.mcp_list_tools.completed" in event_types, (
+            "Should have mcp_list_tools.completed event"
+        )
+        assert "response.mcp_call.in_progress" in event_types, (
+            "Should have mcp_call.in_progress event"
+        )
+        assert "response.mcp_call.completed" in event_types, "Should have mcp_call.completed event"
 
         # Verify final response
         completed_events = [e for e in events if e.type == "response.completed"]
@@ -510,23 +502,23 @@ class TestWebSearchStreamingEvents:
         assert "response.completed" in event_types
 
         # web_search_call specific events (per OpenAI API spec)
-        assert (
-            "response.web_search_call.in_progress" in event_types
-        ), "Should have web_search_call.in_progress event"
-        assert (
-            "response.web_search_call.searching" in event_types
-        ), "Should have web_search_call.searching event"
-        assert (
-            "response.web_search_call.completed" in event_types
-        ), "Should have web_search_call.completed event"
+        assert "response.web_search_call.in_progress" in event_types, (
+            "Should have web_search_call.in_progress event"
+        )
+        assert "response.web_search_call.searching" in event_types, (
+            "Should have web_search_call.searching event"
+        )
+        assert "response.web_search_call.completed" in event_types, (
+            "Should have web_search_call.completed event"
+        )
 
         # Verify no MCP events (these should be transformed)
-        assert (
-            "response.mcp_call.in_progress" not in event_types
-        ), "Built-in tool should NOT produce mcp_call events"
-        assert (
-            "response.mcp_call.completed" not in event_types
-        ), "Built-in tool should NOT produce mcp_call events"
+        assert "response.mcp_call.in_progress" not in event_types, (
+            "Built-in tool should NOT produce mcp_call events"
+        )
+        assert "response.mcp_call.completed" not in event_types, (
+            "Built-in tool should NOT produce mcp_call events"
+        )
 
         # Verify final response
         completed_events = [e for e in events if e.type == "response.completed"]
@@ -621,9 +613,7 @@ class TestBuiltinToolRoutingGrpc:
     - gRPC worker available in model_pool
     """
 
-    def test_web_search_preview_produces_web_search_call(
-        self, gateway_with_mcp_config_grpc
-    ):
+    def test_web_search_preview_produces_web_search_call(self, gateway_with_mcp_config_grpc):
         """Test that web_search_preview produces web_search_call output on gRPC."""
         gateway, client, model_path = gateway_with_mcp_config_grpc
 
@@ -701,32 +691,30 @@ class TestWebSearchStreamingEventsGrpc:
 
         events = list(resp)
         event_types = [event.type for event in events]
-        logger.info(
-            "web_search_preview streaming event types (gRPC): %s", sorted(set(event_types))
-        )
+        logger.info("web_search_preview streaming event types (gRPC): %s", sorted(set(event_types)))
 
         # Core streaming events
         assert "response.created" in event_types
         assert "response.completed" in event_types
 
         # web_search_call specific events (per OpenAI API spec)
-        assert (
-            "response.web_search_call.in_progress" in event_types
-        ), "Should have web_search_call.in_progress event"
-        assert (
-            "response.web_search_call.searching" in event_types
-        ), "Should have web_search_call.searching event"
-        assert (
-            "response.web_search_call.completed" in event_types
-        ), "Should have web_search_call.completed event"
+        assert "response.web_search_call.in_progress" in event_types, (
+            "Should have web_search_call.in_progress event"
+        )
+        assert "response.web_search_call.searching" in event_types, (
+            "Should have web_search_call.searching event"
+        )
+        assert "response.web_search_call.completed" in event_types, (
+            "Should have web_search_call.completed event"
+        )
 
         # Verify no MCP events (these should be transformed)
-        assert (
-            "response.mcp_call.in_progress" not in event_types
-        ), "Built-in tool should NOT produce mcp_call events"
-        assert (
-            "response.mcp_call.completed" not in event_types
-        ), "Built-in tool should NOT produce mcp_call events"
+        assert "response.mcp_call.in_progress" not in event_types, (
+            "Built-in tool should NOT produce mcp_call events"
+        )
+        assert "response.mcp_call.completed" not in event_types, (
+            "Built-in tool should NOT produce mcp_call events"
+        )
 
         # Verify final response
         completed_events = [e for e in events if e.type == "response.completed"]

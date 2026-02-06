@@ -29,9 +29,7 @@ class TestGoOAIServerBasic:
 
         response = go_openai_client.chat.completions.create(
             model=model_path,
-            messages=[
-                {"role": "user", "content": "Say hello in one word."}
-            ],
+            messages=[{"role": "user", "content": "Say hello in one word."}],
             max_tokens=10,
             stream=False,
         )
@@ -49,9 +47,7 @@ class TestGoOAIServerBasic:
 
         response_stream = go_openai_client.chat.completions.create(
             model=model_path,
-            messages=[
-                {"role": "user", "content": "Count from 1 to 5."}
-            ],
+            messages=[{"role": "user", "content": "Count from 1 to 5."}],
             max_tokens=50,
             stream=True,
         )
@@ -280,9 +276,7 @@ class TestGoOAIServerParameters:
 
         response = go_openai_client.chat.completions.create(
             model=model_path,
-            messages=[
-                {"role": "user", "content": "Write a very long story about a dragon."}
-            ],
+            messages=[{"role": "user", "content": "Write a very long story about a dragon."}],
             max_tokens=5,
             stream=False,
         )
@@ -399,7 +393,10 @@ class TestGoOAIServerResponseValidation:
         assert response.usage.prompt_tokens > 0, "prompt_tokens should be > 0"
         assert response.usage.completion_tokens > 0, "completion_tokens should be > 0"
         assert response.usage.total_tokens > 0, "total_tokens should be > 0"
-        assert response.usage.total_tokens == response.usage.prompt_tokens + response.usage.completion_tokens
+        assert (
+            response.usage.total_tokens
+            == response.usage.prompt_tokens + response.usage.completion_tokens
+        )
 
         logger.info(
             f"Usage - prompt: {response.usage.prompt_tokens}, "
@@ -512,7 +509,7 @@ class TestGoOAIServerConcurrency:
         def make_streaming_request(i: int):
             response_stream = go_openai_client.chat.completions.create(
                 model=model_path,
-                messages=[{"role": "user", "content": f"Count from {i} to {i+2}."}],
+                messages=[{"role": "user", "content": f"Count from {i} to {i + 2}."}],
                 max_tokens=30,
                 stream=True,
             )
@@ -567,9 +564,7 @@ class TestGoOAIServerEdgeCases:
 
         response = go_openai_client.chat.completions.create(
             model=model_path,
-            messages=[
-                {"role": "user", "content": long_message + " Summarize in one word."}
-            ],
+            messages=[{"role": "user", "content": long_message + " Summarize in one word."}],
             max_tokens=10,
             stream=False,
         )
@@ -604,7 +599,10 @@ class TestGoOAIServerEdgeCases:
         response = go_openai_client.chat.completions.create(
             model=model_path,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that speaks like a pirate."},
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that speaks like a pirate.",
+                },
                 {"role": "user", "content": "Hi"},
             ],
             max_tokens=20,
@@ -684,5 +682,7 @@ class TestGoOAIServerMultipleChoices:
         # Both choices should have content and finish reasons
         for idx in [0, 1]:
             content = "".join(choice_content[idx])
-            assert len(content) > 0 or choice_finish_reasons[idx] is not None, f"Choice {idx} should have content or finish"
+            assert len(content) > 0 or choice_finish_reasons[idx] is not None, (
+                f"Choice {idx} should have content or finish"
+            )
             logger.info(f"Streaming choice {idx}: {content}, finish: {choice_finish_reasons[idx]}")

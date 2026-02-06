@@ -10,6 +10,7 @@ import atexit
 import logging
 import os
 import threading
+from collections.abc import Generator
 from typing import TYPE_CHECKING
 
 import pytest
@@ -22,7 +23,7 @@ from .hooks import get_pool_requirements
 logger = logging.getLogger(__name__)
 
 # Global model pool instance with thread-safe initialization
-_model_pool: "ModelPool | None" = None
+_model_pool: ModelPool | None = None
 _model_pool_lock = threading.Lock()
 _shutdown_registered = False
 
@@ -42,7 +43,7 @@ def _shutdown_model_pool() -> None:
 
 
 @pytest.fixture(scope="session")
-def model_pool(request: pytest.FixtureRequest) -> "ModelPool":
+def model_pool(request: pytest.FixtureRequest) -> ModelPool:
     """Session-scoped fixture that manages SGLang worker processes.
 
     Workers (sglang.launch_server) are expensive to start (~30-60s each due to
@@ -126,19 +127,13 @@ def model_pool(request: pytest.FixtureRequest) -> "ModelPool":
 
             # Create WorkerIdentity objects (regular workers only from env vars)
             requirements = [
-                WorkerIdentity(m, b, WorkerType.REGULAR, 0)
-                for m in models
-                for b in backend_modes
+                WorkerIdentity(m, b, WorkerType.REGULAR, 0) for m in models for b in backend_modes
             ]
-            logger.info(
-                "Using env var requirements: %s", [str(r) for r in requirements]
-            )
+            logger.info("Using env var requirements: %s", [str(r) for r in requirements])
         else:
             # Use scanned requirements from test markers
             requirements = get_pool_requirements()
-            logger.info(
-                "Using scanned requirements: %s", [str(r) for r in requirements]
-            )
+            logger.info("Using scanned requirements: %s", [str(r) for r in requirements])
 
         # Filter to valid models
         requirements = [r for r in requirements if r.model_id in MODEL_SPECS]
@@ -173,7 +168,9 @@ def model_pool(request: pytest.FixtureRequest) -> "ModelPool":
 
 
 @pytest.fixture
-def model_client(request: pytest.FixtureRequest, model_pool: "ModelPool"):
+def model_client(
+    request: pytest.FixtureRequest, model_pool: ModelPool
+) -> Generator[object, None, None]:
     """Get OpenAI client for the model specified by @pytest.mark.model().
 
     Usage:
@@ -211,7 +208,9 @@ def model_client(request: pytest.FixtureRequest, model_pool: "ModelPool"):
 
 
 @pytest.fixture
-def model_base_url(request: pytest.FixtureRequest, model_pool: "ModelPool") -> str:
+def model_base_url(
+    request: pytest.FixtureRequest, model_pool: ModelPool
+) -> Generator[str, None, None]:
     """Get the base URL for the model specified by @pytest.mark.model().
 
     Usage:
