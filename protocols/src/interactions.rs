@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use validator::Validate;
+use validator::{Validate, ValidationError};
 
 use super::common::{default_model, default_true, Function, GenerationRequest};
 
@@ -76,14 +76,14 @@ pub struct InteractionsRequest {
 
 fn validate_interactions_request(
     req: &InteractionsRequest,
-) -> Result<(), validator::ValidationError> {
+) -> Result<(), ValidationError> {
     // Either model or agent must be provided
     if req.model.is_empty() && req.agent.is_none() {
-        return Err(validator::ValidationError::new("model_or_agent_required"));
+        return Err(ValidationError::new("model_or_agent_required"));
     }
     // response_mime_type is required when response_format is set
     if req.response_format.is_some() && req.response_mime_type.is_none() {
-        return Err(validator::ValidationError::new(
+        return Err(ValidationError::new(
             "response_mime_type_required",
         ));
     }
