@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Track max worker counts: (model_id, mode, worker_type) -> max_count
-_worker_counts: dict[tuple["ConnectionMode", "WorkerType"], int] = {}
+_worker_counts: dict[tuple[str, ConnectionMode, WorkerType], int] = {}
 
 # Track first-seen order to preserve test collection order
-_first_seen_order: list[tuple[str, "ConnectionMode", "WorkerType"]] = []
+_first_seen_order: list[tuple[str, ConnectionMode, WorkerType]] = []
 
 # Track max GPU requirement for any single test (for validation)
 _max_test_gpu_requirement: int = 0
@@ -88,14 +88,12 @@ def pytest_collection_modifyitems(
 
     from infra import (
         DEFAULT_MODEL,
-        LOG_SEPARATOR_WIDTH,
         MODEL_SPECS,
         PARAM_MODEL,
         PARAM_SETUP_BACKEND,
         ConnectionMode,
         WorkerType,
     )
-
 
     def track_worker(
         model_id: str, mode: ConnectionMode, worker_type: WorkerType, count: int
@@ -108,9 +106,7 @@ def pytest_collection_modifyitems(
         else:
             _worker_counts[key] = max(_worker_counts[key], count)
 
-    def calculate_test_gpus(
-        model_id: str, prefill: int, decode: int, regular: int
-    ) -> int:
+    def calculate_test_gpus(model_id: str, prefill: int, decode: int, regular: int) -> int:
         """Calculate GPU requirement for a single test."""
         if model_id not in MODEL_SPECS:
             return 0
@@ -123,9 +119,7 @@ def pytest_collection_modifyitems(
         from _pytest.mark.expression import Expression
 
         expr = Expression.compile(keyword)
-        items_to_scan = [
-            item for item in items if expr.evaluate(lambda x: x in item.keywords)
-        ]
+        items_to_scan = [item for item in items if expr.evaluate(lambda x: x in item.keywords)]
     else:
         items_to_scan = items
 
@@ -138,7 +132,9 @@ def pytest_collection_modifyitems(
             # MRO lists classes from most specific (child) to least specific (parent)
             for cls in item.cls.__mro__:
                 if hasattr(cls, "pytestmark"):
-                    markers = cls.pytestmark if isinstance(cls.pytestmark, list) else [cls.pytestmark]
+                    markers = (
+                        cls.pytestmark if isinstance(cls.pytestmark, list) else [cls.pytestmark]
+                    )
                     for marker in markers:
                         if marker.name == PARAM_MODEL and marker.args:
                             model_id = marker.args[0]
@@ -159,7 +155,7 @@ def pytest_collection_modifyitems(
                     param_name = marker.args[0]
                     if param_name == PARAM_MODEL or PARAM_MODEL in param_name:
                         param_values = marker.args[1]
-                        if isinstance(param_values, (list, tuple)) and param_values:
+                        if isinstance(param_values, list | tuple) and param_values:
                             model_id = param_values[0]
                         break
 
@@ -170,7 +166,7 @@ def pytest_collection_modifyitems(
                 param_name = marker.args[0]
                 param_values = marker.args[1]
                 if param_name == PARAM_SETUP_BACKEND:
-                    if isinstance(param_values, (list, tuple)):
+                    if isinstance(param_values, list | tuple):
                         backends.extend(param_values)
 
         # Check for workers marker
@@ -199,9 +195,7 @@ def pytest_collection_modifyitems(
                     d_count = decode_count if decode_count > 0 else 1
                     track_worker(model_id, mode, WorkerType.PREFILL, p_count)
                     track_worker(model_id, mode, WorkerType.DECODE, d_count)
-                    test_gpus = max(
-                        test_gpus, calculate_test_gpus(model_id, p_count, d_count, 0)
-                    )
+                    test_gpus = max(test_gpus, calculate_test_gpus(model_id, p_count, d_count, 0))
                 else:
                     try:
                         mode = ConnectionMode(backend)
@@ -213,9 +207,7 @@ def pytest_collection_modifyitems(
                         track_worker(model_id, mode, WorkerType.DECODE, decode_count)
                         test_gpus = max(
                             test_gpus,
-                            calculate_test_gpus(
-                                model_id, prefill_count, decode_count, 0
-                            ),
+                            calculate_test_gpus(model_id, prefill_count, decode_count, 0),
                         )
                     else:
                         track_worker(model_id, mode, WorkerType.REGULAR, regular_count)
@@ -257,7 +249,7 @@ def pytest_collection_modifyitems(
 # ---------------------------------------------------------------------------
 
 
-def get_pool_requirements() -> list["WorkerIdentity"]:
+def get_pool_requirements() -> list[WorkerIdentity]:
     """Build pool requirements from scanned test markers.
 
     Returns:

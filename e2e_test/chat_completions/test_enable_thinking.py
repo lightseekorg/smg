@@ -25,9 +25,7 @@ API_KEY = "not-used"
 
 
 @pytest.mark.model("qwen-30b")
-@pytest.mark.gateway(
-    extra_args=["--reasoning-parser", "qwen3", "--history-backend", "memory"]
-)
+@pytest.mark.gateway(extra_args=["--reasoning-parser", "qwen3", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestEnableThinking:
     """Tests for enable_thinking feature with Qwen3 reasoning parser."""
@@ -120,9 +118,7 @@ class TestEnableThinking:
                         if "content" in delta and delta["content"]:
                             has_content = True
 
-        assert (
-            has_reasoning
-        ), "The reasoning content is not included in the stream response"
+        assert has_reasoning, "The reasoning content is not included in the stream response"
         assert has_content, "The stream response does not contain normal content"
 
     def test_stream_chat_completion_without_reasoning(self, setup_backend):
@@ -162,7 +158,7 @@ class TestEnableThinking:
                         if "content" in delta and delta["content"]:
                             has_content = True
 
-        assert (
-            not has_reasoning
-        ), "The reasoning content should not be included in the stream response"
+        assert not has_reasoning, (
+            "The reasoning content should not be included in the stream response"
+        )
         assert has_content, "The stream response does not contain normal content"

@@ -1,6 +1,5 @@
 #!/bin/bash
-# Install SGLang and its dependencies for CI
-# Clones SGLang repo and runs the CUDA dependency installation script
+# Install SGLang for CI
 
 set -euo pipefail
 
@@ -9,51 +8,32 @@ if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
 fi
 
-SGLANG_DIR="${1:-sglang}"
+pip install --upgrade pip
 
-# Clone SGLang if not already present
-if [ ! -d "$SGLANG_DIR" ]; then
-    echo "Cloning SGLang repository..."
-    git clone --depth 1 https://github.com/sgl-project/sglang.git "$SGLANG_DIR"
-fi
+# Install SGLang with all dependencies
+echo "Installing SGLang..."
+pip install "sglang[all]"
 
-# Optionally check out the latest release tag
-SGLANG_USE_LATEST_TAG="${SGLANG_USE_LATEST_TAG:-0}"
-if [ "$SGLANG_USE_LATEST_TAG" = "1" ]; then
-    cd "$SGLANG_DIR"
-    git fetch --tags
-    LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
-    echo "Checking out latest SGLang tag: $LATEST_TAG"
-    git checkout "$LATEST_TAG"
-    cd -
-fi
-
-# Install SGLang dependencies
-echo "Installing SGLang dependencies..."
-sudo apt update
-cd "$SGLANG_DIR"
-
-# Handle script path differences between sglang versions
-if [ -f "scripts/ci/cuda/ci_install_dependency.sh" ]; then
-    INSTALL_SCRIPT="scripts/ci/cuda/ci_install_dependency.sh"
-elif [ -f "scripts/ci/ci_install_dependency.sh" ]; then
-    INSTALL_SCRIPT="scripts/ci/ci_install_dependency.sh"
-elif [ -f "scripts/ci_install_dependency.sh" ]; then
-    INSTALL_SCRIPT="scripts/ci_install_dependency.sh"
+# Install flashinfer-jit-cache: sglang bundles flashinfer_python but only for attention ops.
+# Multi-GPU models need trtllm_comm kernels (fused allreduce + layernorm) which FlashInfer
+# JIT-compiles at runtime requiring nvcc. The jit-cache provides these pre-compiled.
+# Version must match flashinfer_python from sglang.
+FLASHINFER_VERSION=$(pip show flashinfer-python 2>/dev/null | grep "^Version:" | awk '{print $2}')
+CU_VERSION=$(python3 -c "import torch; print('cu' + torch.version.cuda.replace('.', ''))" 2>/dev/null || echo "cu129")
+if [ -n "$FLASHINFER_VERSION" ]; then
+    echo "Installing flashinfer-jit-cache==${FLASHINFER_VERSION} (${CU_VERSION})..."
+    pip install "flashinfer-jit-cache==${FLASHINFER_VERSION}" \
+        --index-url "https://flashinfer.ai/whl/${CU_VERSION}"
 else
-    echo "ERROR: Could not find ci_install_dependency.sh in sglang repo"
-    echo "Current directory: $(pwd)"
-    echo "Available scripts:"
-    find scripts -name "ci_install_dependency*" -o -name "*install*" | head -20 || true
-    exit 1
+    echo "WARNING: flashinfer-python not found, skipping flashinfer-jit-cache install"
 fi
 
-echo "Using install script: $INSTALL_SCRIPT"
-if [ ! -f "$INSTALL_SCRIPT" ]; then
-    echo "ERROR: Install script not found at $INSTALL_SCRIPT"
-    exit 1
-fi
-
-sudo CUDA_HOME=/usr/local/cuda IS_BLACKWELL=1 --preserve-env=PATH bash "$INSTALL_SCRIPT"
+# Install mooncake for SGLang PD disaggregation (KV transfer)
+# Mooncake's native transfer engine requires InfiniBand/RDMA libraries at runtime.
+# See: https://github.com/sgl-project/sglang/blob/main/scripts/ci/cuda/ci_install_dependency.sh
+echo "Installing mooncake system dependencies..."
+sudo apt-get install -y --no-install-recommends libnuma-dev libibverbs-dev libibverbs1 ibverbs-providers ibverbs-utils
+echo "Installing mooncake..."
+pip install mooncake-transfer-engine==0.3.8.post1
 
 echo "SGLang installation complete"

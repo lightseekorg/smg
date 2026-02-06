@@ -203,7 +203,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &CreateMessageRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (
             StatusCode::NOT_IMPLEMENTED,

@@ -46,9 +46,7 @@ class TestMMLUGrpc:
         )
         metrics = run_eval(args)
 
-        assert (
-            metrics["score"] >= 0.65
-        ), f"MMLU score {metrics['score']:.2f} below threshold 0.65"
+        assert metrics["score"] >= 0.65, f"MMLU score {metrics['score']:.2f} below threshold 0.65"
         logger.info("MMLU gRPC score: %.2f (threshold: 0.65)", metrics["score"])
 
     def test_mmlu_extended(self, setup_backend):
@@ -69,9 +67,7 @@ class TestMMLUGrpc:
         )
         metrics = run_eval(args)
 
-        assert (
-            metrics["score"] >= 0.65
-        ), f"MMLU score {metrics['score']:.2f} below threshold 0.65"
+        assert metrics["score"] >= 0.65, f"MMLU score {metrics['score']:.2f} below threshold 0.65"
         logger.info("MMLU gRPC extended score: %.2f (threshold: 0.65)", metrics["score"])
 
 
@@ -99,9 +95,7 @@ class TestMMLUHttp:
         )
         metrics = run_eval(args)
 
-        assert (
-            metrics["score"] >= 0.65
-        ), f"MMLU score {metrics['score']:.2f} below threshold 0.65"
+        assert metrics["score"] >= 0.65, f"MMLU score {metrics['score']:.2f} below threshold 0.65"
         logger.info("MMLU HTTP score: %.2f (threshold: 0.65)", metrics["score"])
 
     def test_mmlu_extended(self, setup_backend):
@@ -122,7 +116,5 @@ class TestMMLUHttp:
         )
         metrics = run_eval(args)
 
-        assert (
-            metrics["score"] >= 0.65
-        ), f"MMLU score {metrics['score']:.2f} below threshold 0.65"
+        assert metrics["score"] >= 0.65, f"MMLU score {metrics['score']:.2f} below threshold 0.65"
         logger.info("MMLU HTTP extended score: %.2f (threshold: 0.65)", metrics["score"])

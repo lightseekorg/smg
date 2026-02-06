@@ -168,9 +168,7 @@ class TestToolCallingCloud:
 
         # Check for function_call in output
         function_calls = [item for item in output if item.type == "function_call"]
-        assert (
-            len(function_calls) > 0
-        ), "Response should contain at least one function_call"
+        assert len(function_calls) > 0, "Response should contain at least one function_call"
 
         # Verify function_call structure
         function_call = function_calls[0]
@@ -212,9 +210,7 @@ class TestToolCallingCloud:
 
         message = messages[0]
         assert message.content is not None
-        text_parts = [
-            part.text for part in message.content if part.type == "output_text"
-        ]
+        text_parts = [part.text for part in message.content if part.type == "output_text"]
         full_text = " ".join(text_parts).lower()
         assert "baby otter" in full_text or "aquarius" in full_text
 
@@ -285,30 +281,24 @@ class TestToolCallingCloud:
 
         event_types = [event.type for event in events]
         assert "response.created" in event_types, "Should have response.created event"
-        assert (
-            "response.completed" in event_types
-        ), "Should have response.completed event"
-        assert (
-            "response.output_item.added" in event_types
-        ), "Should have output_item.added events"
-        assert (
-            "response.mcp_list_tools.in_progress" in event_types
-        ), "Should have mcp_list_tools.in_progress event"
-        assert (
-            "response.mcp_list_tools.completed" in event_types
-        ), "Should have mcp_list_tools.completed event"
-        assert (
-            "response.mcp_call.in_progress" in event_types
-        ), "Should have mcp_call.in_progress event"
-        assert (
-            "response.mcp_call_arguments.delta" in event_types
-        ), "Should have mcp_call_arguments.delta event"
-        assert (
-            "response.mcp_call_arguments.done" in event_types
-        ), "Should have mcp_call_arguments.done event"
-        assert (
-            "response.mcp_call.completed" in event_types
-        ), "Should have mcp_call.completed event"
+        assert "response.completed" in event_types, "Should have response.completed event"
+        assert "response.output_item.added" in event_types, "Should have output_item.added events"
+        assert "response.mcp_list_tools.in_progress" in event_types, (
+            "Should have mcp_list_tools.in_progress event"
+        )
+        assert "response.mcp_list_tools.completed" in event_types, (
+            "Should have mcp_list_tools.completed event"
+        )
+        assert "response.mcp_call.in_progress" in event_types, (
+            "Should have mcp_call.in_progress event"
+        )
+        assert "response.mcp_call_arguments.delta" in event_types, (
+            "Should have mcp_call_arguments.delta event"
+        )
+        assert "response.mcp_call_arguments.done" in event_types, (
+            "Should have mcp_call_arguments.done event"
+        )
+        assert "response.mcp_call.completed" in event_types, "Should have mcp_call.completed event"
 
         completed_events = [e for e in events if e.type == "response.completed"]
         assert len(completed_events) == 1
@@ -336,25 +326,15 @@ class TestToolCallingCloud:
             assert mcp_call.output is not None
 
         # Strict validation for cloud backends - check for text output events
-        assert (
-            "response.content_part.added" in event_types
-        ), "Should have content_part.added event"
-        assert (
-            "response.output_text.delta" in event_types
-        ), "Should have output_text.delta events"
-        assert (
-            "response.output_text.done" in event_types
-        ), "Should have output_text.done event"
-        assert (
-            "response.content_part.done" in event_types
-        ), "Should have content_part.done event"
+        assert "response.content_part.added" in event_types, "Should have content_part.added event"
+        assert "response.output_text.delta" in event_types, "Should have output_text.delta events"
+        assert "response.output_text.done" in event_types, "Should have output_text.done event"
+        assert "response.content_part.done" in event_types, "Should have content_part.done event"
 
         assert "message" in final_output_types
 
         # Verify text deltas combine to final message
-        text_deltas = [
-            e.delta for e in events if e.type == "response.output_text.delta"
-        ]
+        text_deltas = [e.delta for e in events if e.type == "response.output_text.delta"]
         assert len(text_deltas) > 0, "Should have text deltas"
 
         # Get final text from output_text.done event
@@ -426,9 +406,7 @@ class TestToolCallingCloud:
         final_response = completed_events[0].response
         assert final_response.output is not None
 
-        final_list_tools = [
-            item for item in final_response.output if item.type == "mcp_list_tools"
-        ]
+        final_list_tools = [item for item in final_response.output if item.type == "mcp_list_tools"]
         assert len(final_list_tools) == 2
         final_labels = {item.server_label for item in final_list_tools}
         assert final_labels == {"brave", "deepwiki"}
@@ -446,9 +424,7 @@ class TestToolCallingCloud:
 
 @pytest.mark.e2e
 @pytest.mark.model("gpt-oss")
-@pytest.mark.gateway(
-    extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"]
-)
+@pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestToolChoiceHarmony:
     """Tool choice tests against local gRPC backend with Harmony model."""
@@ -474,9 +450,9 @@ class TestToolChoiceHarmony:
         assert len(output) > 0
 
         function_calls = [item for item in output if item.type == "function_call"]
-        assert (
-            len(function_calls) > 0
-        ), "Model should choose to call function with tool_choice='auto'"
+        assert len(function_calls) > 0, (
+            "Model should choose to call function with tool_choice='auto'"
+        )
 
     def test_tool_choice_required(self, setup_backend):
         """Test tool_choice="required" forces the model to call at least one tool."""
@@ -497,9 +473,9 @@ class TestToolChoiceHarmony:
 
         output = resp.output
         function_calls = [item for item in output if item.type == "function_call"]
-        assert (
-            len(function_calls) > 0
-        ), "tool_choice='required' must force at least one function call"
+        assert len(function_calls) > 0, (
+            "tool_choice='required' must force at least one function call"
+        )
 
     def test_tool_choice_specific_function(self, setup_backend):
         """Test tool_choice with specific function name forces that function to be called."""
@@ -521,9 +497,9 @@ class TestToolChoiceHarmony:
         output = resp.output
         function_calls = [item for item in output if item.type == "function_call"]
         assert len(function_calls) > 0, "Must call the specified function"
-        assert (
-            function_calls[0].name == "search_web"
-        ), "Must call the function specified in tool_choice"
+        assert function_calls[0].name == "search_web", (
+            "Must call the function specified in tool_choice"
+        )
 
     def test_tool_choice_streaming(self, setup_backend):
         """Test tool_choice parameter works correctly with streaming."""
@@ -560,7 +536,10 @@ class TestToolChoiceHarmony:
 
         resp = client.responses.create(
             model=model,
-            input="What transport protocols does the 2025-03-26 version of the MCP spec (modelcontextprotocol/modelcontextprotocol) support?",
+            input=(
+                "What transport protocols does the 2025-03-26 version of the MCP spec "
+                "(modelcontextprotocol/modelcontextprotocol) support?"
+            ),
             tools=tools,
             tool_choice="auto",
             stream=False,
@@ -734,16 +713,11 @@ class TestToolChoiceHarmony:
         assert "response.function_call_arguments.delta" in event_types
         assert "response.function_call_arguments.done" in event_types
 
-        func_arg_deltas = [
-            e for e in events if e.type == "response.function_call_arguments.delta"
-        ]
+        func_arg_deltas = [e for e in events if e.type == "response.function_call_arguments.delta"]
         assert len(func_arg_deltas) > 0
 
         full_delta_event = "".join(e.delta for e in func_arg_deltas)
-        assert (
-            "system_name" in full_delta_event.lower()
-            and "astra-7" in full_delta_event.lower()
-        )
+        assert "system_name" in full_delta_event.lower() and "astra-7" in full_delta_event.lower()
 
 
 # =============================================================================
@@ -753,9 +727,7 @@ class TestToolChoiceHarmony:
 
 @pytest.mark.e2e
 @pytest.mark.model("qwen-14b")
-@pytest.mark.gateway(
-    extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"]
-)
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestToolChoiceLocal:
     """Tool choice tests against local gRPC backend with Qwen model."""
@@ -877,7 +849,10 @@ class TestToolChoiceLocal:
 
         resp = client.responses.create(
             model=model,
-            input="What transport protocols does the 2025-03-26 version of the MCP spec (modelcontextprotocol/modelcontextprotocol) support?",
+            input=(
+                "What transport protocols does the 2025-03-26 version of the MCP spec "
+                "(modelcontextprotocol/modelcontextprotocol) support?"
+            ),
             tools=tools,
             tool_choice="auto",
             stream=False,
@@ -964,13 +939,8 @@ class TestToolChoiceLocal:
         assert "response.function_call_arguments.delta" in event_types
         assert "response.function_call_arguments.done" in event_types
 
-        func_arg_deltas = [
-            e for e in events if e.type == "response.function_call_arguments.delta"
-        ]
+        func_arg_deltas = [e for e in events if e.type == "response.function_call_arguments.delta"]
         assert len(func_arg_deltas) > 0
 
         full_delta_event = "".join(e.delta for e in func_arg_deltas)
-        assert (
-            "system_name" in full_delta_event.lower()
-            and "astra-7" in full_delta_event.lower()
-        )
+        assert "system_name" in full_delta_event.lower() and "astra-7" in full_delta_event.lower()

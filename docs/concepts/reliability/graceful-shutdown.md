@@ -68,31 +68,9 @@ With graceful shutdown:
 
 ## How It Works
 
-```mermaid
-sequenceDiagram
-    participant K as Kubernetes/Operator
-    participant S as SMG Gateway
-    participant C as Clients
-    participant W as Workers
-
-    K->>S: SIGTERM
-    Note over S: 1. Stop accepting new requests
-
-    C->>S: New Request
-    S-->>C: 503 Service Unavailable
-
-    Note over S: 2. Wait for in-flight requests
-    S->>W: Continue processing...
-    W-->>S: Response
-    S-->>C: Response (existing request)
-
-    Note over S: 3. Grace period timer
-    alt All requests complete
-        Note over S: 4. Clean exit
-    else Grace period expires
-        Note over S: 4. Force shutdown
-    end
-```
+<div class="architecture-diagram">
+  <img src="../../../assets/images/graceful-shutdown.svg" alt="Graceful Shutdown Sequence">
+</div>
 
 ### Shutdown Sequence
 

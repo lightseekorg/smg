@@ -10,7 +10,7 @@ This task shows you how to add, remove, and manage inference workers in SMG.
 
 #### Before you begin
 
-- SMG [installed](../../getting-started/installation.md) and running
+- SMG [installed](../../getting-started/index.md) and running
 - Access to inference workers
 
 </div>
@@ -196,14 +196,9 @@ smg \
 
 ### Circuit States
 
-```mermaid
-stateDiagram-v2
-    [*] --> Closed
-    Closed --> Open: Failures ≥ threshold
-    Open --> HalfOpen: Timeout elapsed
-    HalfOpen --> Closed: Success
-    HalfOpen --> Open: Failure
-```
+<div class="architecture-diagram">
+  <img src="../../../assets/images/circuit-breaker.svg" alt="Circuit Breaker State Machine">
+</div>
 
 ### Monitor Circuit State
 
