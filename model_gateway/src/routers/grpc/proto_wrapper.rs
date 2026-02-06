@@ -169,6 +169,36 @@ impl ProtoGenerateRequest {
         matches!(self, Self::Trtllm(_))
     }
 
+    /// Set max_tokens for prefill-only execution (vLLM PD mode).
+    /// The prefill request uses max_tokens=1 to trigger KV cache computation
+    /// without generating unnecessary tokens.
+    pub fn set_max_tokens_for_prefill(&mut self, max_tokens: u32) {
+        match self {
+            Self::Vllm(req) => {
+                if let Some(ref mut params) = req.sampling_params {
+                    params.max_tokens = Some(max_tokens);
+                } else {
+                    req.sampling_params = Some(vllm::SamplingParams {
+                        max_tokens: Some(max_tokens),
+                        ..Default::default()
+                    });
+                }
+            }
+            _ => {
+                tracing::warn!("set_max_tokens_for_prefill called on non-vLLM request, ignoring");
+            }
+        }
+    }
+
+    /// Set stream mode on the request.
+    pub fn set_stream(&mut self, stream: bool) {
+        match self {
+            Self::Vllm(req) => req.stream = stream,
+            Self::Sglang(req) => req.stream = stream,
+            Self::Trtllm(req) => req.streaming = stream,
+        }
+    }
+
     /// Clone the inner request (for passing to generate())
     pub fn clone_inner(&self) -> Self {
         self.clone()
@@ -182,12 +212,28 @@ impl ProtoGenerateRequest {
             Self::Trtllm(req) => &req.request_id,
         }
     }
+
+    /// Set KV transfer parameters for Mooncake PD disaggregation (vLLM only).
+    /// These parameters tell the decode worker where to fetch KV cache from the prefill worker.
+    pub fn set_kv_transfer_params(&mut self, remote_host: String, remote_port: u32) {
+        match self {
+            Self::Vllm(req) => {
+                req.kv_transfer_params = Some(vllm::KvTransferParams {
+                    remote_host,
+                    remote_port,
+                });
+            }
+            _ => {
+                tracing::warn!("set_kv_transfer_params called on non-vLLM request, ignoring");
+            }
+        }
+    }
 }
 
 /// Unified GenerateResponse from stream
 pub enum ProtoGenerateResponse {
     Sglang(Box<sglang::GenerateResponse>),
-    Vllm(vllm::GenerateResponse),
+    Vllm(Box<vllm::GenerateResponse>),
     Trtllm(Box<trtllm::GenerateResponse>),
 }
 
@@ -501,6 +547,21 @@ impl ProtoGenerateComplete {
         }
     }
 
+    /// Get matched stop as a JSON value
+    ///
+    /// Converts the proto MatchedStop oneof into a serde_json::Value:
+    /// - MatchedTokenId → Number
+    /// - MatchedStopStr → String
+    /// - None → None
+    pub fn matched_stop_json(&self) -> Option<serde_json::Value> {
+        self.matched_stop().map(|m| match m {
+            MatchedStop::MatchedTokenId(id) => {
+                serde_json::Value::Number(serde_json::Number::from(*id))
+            }
+            MatchedStop::MatchedStopStr(s) => serde_json::Value::String(s.clone()),
+        })
+    }
+
     /// Get output IDs (decode tokens only)
     pub fn output_ids(&self) -> &[u32] {
         match self {
@@ -632,6 +693,18 @@ impl ProtoGenerateComplete {
             }
         }
     }
+
+    /// Get KV transfer parameters from prefill response (vLLM Mooncake PD only).
+    /// Returns (remote_host, remote_port) if present.
+    pub fn kv_transfer_params(&self) -> Option<(String, u32)> {
+        match self {
+            Self::Vllm(c) => c
+                .kv_transfer_params
+                .as_ref()
+                .map(|params| (params.remote_host.clone(), params.remote_port)),
+            Self::Sglang(_) | Self::Trtllm(_) => None,
+        }
+    }
 }
 
 /// Unified GenerateError
@@ -670,7 +743,7 @@ impl ProtoStream {
             Self::Vllm(stream) => stream
                 .next()
                 .await
-                .map(|result| result.map(ProtoGenerateResponse::Vllm)),
+                .map(|result| result.map(|r| ProtoGenerateResponse::Vllm(Box::new(r)))),
             Self::Trtllm(stream) => stream
                 .next()
                 .await

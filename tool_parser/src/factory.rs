@@ -9,8 +9,9 @@ use tokio::sync::Mutex;
 
 use crate::{
     parsers::{
-        DeepSeekParser, Glm4MoeParser, JsonParser, KimiK2Parser, LlamaParser, MinimaxM2Parser,
-        MistralParser, PassthroughParser, PythonicParser, QwenCoderParser, QwenParser, Step3Parser,
+        CohereParser, DeepSeekParser, Glm4MoeParser, JsonParser, KimiK2Parser, LlamaParser,
+        MinimaxM2Parser, MistralParser, PassthroughParser, PythonicParser, QwenCoderParser,
+        QwenParser, Step3Parser,
     },
     traits::ToolParser,
 };
@@ -245,6 +246,7 @@ impl ParserFactory {
         registry.register_parser("step3", || Box::new(Step3Parser::new()));
         registry.register_parser("kimik2", || Box::new(KimiK2Parser::new()));
         registry.register_parser("minimax_m2", || Box::new(MinimaxM2Parser::new()));
+        registry.register_parser("cohere", || Box::new(CohereParser::new()));
 
         // Register default model mappings
         Self::register_default_mappings(&registry);
@@ -308,6 +310,14 @@ impl ParserFactory {
         // MiniMax models
         registry.map_model("minimax*", "minimax_m2");
         registry.map_model("MiniMax*", "minimax_m2");
+
+        // Cohere models
+        registry.map_model("command-r*", "cohere");
+        registry.map_model("command-r-plus*", "cohere");
+        registry.map_model("command-a*", "cohere");
+        registry.map_model("c4ai-command*", "cohere");
+        registry.map_model("cohere*", "cohere");
+        registry.map_model("CohereForAI*", "cohere");
 
         // Other models
         registry.map_model("gemini-*", "json");

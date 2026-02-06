@@ -7,12 +7,10 @@ use std::{
     time::Instant,
 };
 
-use axum::{body::Body, http::StatusCode, response::Response};
+use axum::response::Response;
 use bytes::Bytes;
-use http::header::{HeaderValue, CONTENT_TYPE};
 use serde_json::json;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error};
 
 use super::{
@@ -20,23 +18,25 @@ use super::{
     types::HarmonyChannelDelta, HarmonyParserAdapter,
 };
 use crate::{
-    grpc_client::sglang_proto::generate_complete::MatchedStop::{MatchedStopStr, MatchedTokenId},
     mcp::{McpOrchestrator, ResponseFormat},
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     protocols::{
         chat::{
             ChatCompletionRequest, ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice,
         },
-        common::{
-            ChatLogProbs, CompletionTokensDetails, FunctionCallDelta, ToolCall, ToolCallDelta,
-            Usage,
-        },
+        common::{ChatLogProbs, FunctionCallDelta, ToolCall, ToolCallDelta, Usage},
         responses::{
             OutputTokensDetails, ResponseStatus, ResponseUsage, ResponsesResponse, ResponsesUsage,
         },
     },
     routers::grpc::{
-        common::responses::streaming::{OutputItemType, ResponseStreamEventEmitter},
+        common::{
+            response_formatting::CompletionTokenTracker,
+            responses::{
+                build_sse_response,
+                streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
+            },
+        },
         context,
         proto_wrapper::{ProtoResponseVariant, ProtoStream},
     },
@@ -132,7 +132,7 @@ impl HarmonyStreamingProcessor {
         }
 
         // Return SSE response
-        Self::build_sse_response(rx)
+        build_sse_response(rx)
     }
 
     /// Process streaming chunks from a single stream
@@ -152,7 +152,7 @@ impl HarmonyStreamingProcessor {
         let mut finish_reasons: HashMap<u32, Option<String>> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
-        let mut completion_tokens: HashMap<u32, u32> = HashMap::new();
+        let mut completion_tokens = CompletionTokenTracker::new();
 
         let stream_options = &original_request.stream_options;
 
@@ -178,8 +178,7 @@ impl HarmonyStreamingProcessor {
                         is_firsts.insert(index, true);
                     }
 
-                    // Track token counts
-                    *completion_tokens.entry(index).or_insert(0) += 1;
+                    completion_tokens.record_chunk(&chunk_wrapper);
 
                     // Convert logprobs if present and requested
                     let chunk_logprobs = if original_request.logprobs {
@@ -225,20 +224,9 @@ impl HarmonyStreamingProcessor {
                     // Store final metadata
                     finish_reasons
                         .insert(index, Some(complete_wrapper.finish_reason().to_string()));
-                    matched_stops.insert(
-                        index,
-                        complete_wrapper.matched_stop().map(|m| match m {
-                            MatchedTokenId(id) => {
-                                json!(id)
-                            }
-                            MatchedStopStr(s) => {
-                                json!(s)
-                            }
-                        }),
-                    );
+                    matched_stops.insert(index, complete_wrapper.matched_stop_json());
                     prompt_tokens.insert(index, complete_wrapper.prompt_tokens());
-                    *completion_tokens.entry(index).or_insert(0) =
-                        complete_wrapper.completion_tokens();
+                    completion_tokens.record_complete(&complete_wrapper);
 
                     // Finalize parser and emit final chunk
                     if let Some(parser) = parsers.get_mut(&index) {
@@ -269,7 +257,7 @@ impl HarmonyStreamingProcessor {
 
         // Compute totals once for both usage chunk and metrics
         let total_prompt: u32 = prompt_tokens.values().sum();
-        let total_completion: u32 = completion_tokens.values().sum();
+        let total_completion: u32 = completion_tokens.total();
 
         // Emit final usage if requested
         if let Some(true) = stream_options.as_ref().and_then(|so| so.include_usage) {
@@ -328,7 +316,7 @@ impl HarmonyStreamingProcessor {
         let mut is_firsts: HashMap<u32, bool> = HashMap::new();
         let mut finish_reasons: HashMap<u32, Option<String>> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
-        let mut completion_tokens: HashMap<u32, u32> = HashMap::new();
+        let mut completion_tokens = CompletionTokenTracker::new();
 
         let stream_options = &original_request.stream_options;
 
@@ -353,7 +341,7 @@ impl HarmonyStreamingProcessor {
                         is_firsts.insert(index, true);
                     }
 
-                    *completion_tokens.entry(index).or_insert(0) += 1;
+                    completion_tokens.record_chunk(&chunk_wrapper);
 
                     // Convert logprobs if present and requested
                     let chunk_logprobs = if original_request.logprobs {
@@ -396,19 +384,8 @@ impl HarmonyStreamingProcessor {
 
                     finish_reasons
                         .insert(index, Some(complete_wrapper.finish_reason().to_string()));
-                    matched_stops.insert(
-                        index,
-                        complete_wrapper.matched_stop().map(|m| match m {
-                            MatchedTokenId(id) => {
-                                json!(id)
-                            }
-                            MatchedStopStr(s) => {
-                                json!(s)
-                            }
-                        }),
-                    );
-                    *completion_tokens.entry(index).or_insert(0) =
-                        complete_wrapper.completion_tokens();
+                    matched_stops.insert(index, complete_wrapper.matched_stop_json());
+                    completion_tokens.record_complete(&complete_wrapper);
 
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
@@ -444,7 +421,7 @@ impl HarmonyStreamingProcessor {
 
         // Compute totals once for both usage chunk and metrics
         let total_prompt: u32 = prompt_tokens.values().sum();
-        let total_completion: u32 = completion_tokens.values().sum();
+        let total_completion: u32 = completion_tokens.total();
 
         // Emit final usage if requested
         if let Some(true) = stream_options.as_ref().and_then(|so| so.include_usage) {
@@ -580,12 +557,7 @@ impl HarmonyStreamingProcessor {
         let usage_chunk =
             ChatCompletionStreamResponse::builder(&dispatch.request_id, &original_request.model)
                 .created(dispatch.created)
-                .usage(Usage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens: prompt_tokens + completion_tokens,
-                    completion_tokens_details: None,
-                })
+                .usage(Usage::from_counts(prompt_tokens, completion_tokens))
                 .maybe_system_fingerprint(dispatch.weight_version.as_deref())
                 .build();
 
@@ -716,6 +688,12 @@ impl HarmonyStreamingProcessor {
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
+                    // Track token counts for vLLM (vLLM sends deltas)
+                    // For SGLang, skip (SGLang sends cumulative values in Complete)
+                    if chunk_wrapper.is_vllm() {
+                        completion_tokens += chunk_wrapper.token_ids().len() as u32;
+                    }
+
                     // Parse chunk via Harmony parser
                     let delta_result = parser
                         .parse_chunk(chunk_wrapper.token_ids())
@@ -849,12 +827,11 @@ impl HarmonyStreamingProcessor {
                                     "status": "in_progress"
                                 });
 
-                                // Add server_label for mcp_call only (Passthrough format)
-                                if matches!(response_format, Some(ResponseFormat::Passthrough)) {
-                                    if let Some(ref label) = emitter.mcp_server_label {
-                                        item["server_label"] = json!(label);
-                                    }
-                                }
+                                attach_mcp_server_label(
+                                    &mut item,
+                                    emitter.mcp_server_label.as_deref(),
+                                    response_format.as_ref(),
+                                );
 
                                 let event = emitter.emit_output_item_added(output_index, &item);
                                 emitter.send_event_best_effort(&event, tx);
@@ -938,16 +915,13 @@ impl HarmonyStreamingProcessor {
                 ProtoResponseVariant::Complete(complete_wrapper) => {
                     // Store final metadata
                     finish_reason = complete_wrapper.finish_reason().to_string();
-                    matched_stop = complete_wrapper.matched_stop().map(|m| match m {
-                        MatchedTokenId(id) => {
-                            json!(id)
-                        }
-                        MatchedStopStr(s) => {
-                            json!(s)
-                        }
-                    });
+                    matched_stop = complete_wrapper.matched_stop_json();
                     prompt_tokens = complete_wrapper.prompt_tokens();
-                    completion_tokens = complete_wrapper.completion_tokens();
+                    // For vLLM, use accumulated count (we tracked deltas above)
+                    // For SGLang, use complete value (already cumulative)
+                    if !complete_wrapper.is_vllm() {
+                        completion_tokens = complete_wrapper.completion_tokens();
+                    }
 
                     // Finalize parser and get complete output
                     let final_output = parser
@@ -1012,12 +986,11 @@ impl HarmonyStreamingProcessor {
                                     "status": "completed"
                                 });
 
-                                // Add server_label for mcp_call only (Passthrough format)
-                                if matches!(response_format, Some(ResponseFormat::Passthrough)) {
-                                    if let Some(ref label) = emitter.mcp_server_label {
-                                        item["server_label"] = json!(label);
-                                    }
-                                }
+                                attach_mcp_server_label(
+                                    &mut item,
+                                    emitter.mcp_server_label.as_deref(),
+                                    response_format.as_ref(),
+                                );
 
                                 let event = emitter.emit_output_item_done(*output_index, &item);
                                 emitter.complete_output_item(*output_index);
@@ -1141,12 +1114,11 @@ impl HarmonyStreamingProcessor {
                             "status": "completed"
                         });
 
-                        // Add server_label for mcp_call only (Passthrough format)
-                        if matches!(response_format, Some(ResponseFormat::Passthrough)) {
-                            if let Some(ref label) = emitter.mcp_server_label {
-                                item["server_label"] = json!(label);
-                            }
-                        }
+                        attach_mcp_server_label(
+                            &mut item,
+                            emitter.mcp_server_label.as_deref(),
+                            response_format.as_ref(),
+                        );
 
                         let event = emitter.emit_output_item_done(*output_index, &item);
                         emitter.complete_output_item(*output_index);
@@ -1175,18 +1147,8 @@ impl HarmonyStreamingProcessor {
                     tool_calls,
                     analysis: analysis_content,
                     partial_text: accumulated_final_text,
-                    usage: Usage {
-                        prompt_tokens,
-                        completion_tokens,
-                        total_tokens: prompt_tokens + completion_tokens,
-                        completion_tokens_details: if reasoning_token_count > 0 {
-                            Some(CompletionTokensDetails {
-                                reasoning_tokens: Some(reasoning_token_count),
-                            })
-                        } else {
-                            None
-                        },
-                    },
+                    usage: Usage::from_counts(prompt_tokens, completion_tokens)
+                        .with_reasoning_tokens(reasoning_token_count),
                     request_id: emitter.response_id.clone(),
                 });
             }
@@ -1214,36 +1176,9 @@ impl HarmonyStreamingProcessor {
                     }))
                     .build(),
             ),
-            usage: Usage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
-                completion_tokens_details: if reasoning_token_count > 0 {
-                    Some(CompletionTokensDetails {
-                        reasoning_tokens: Some(reasoning_token_count),
-                    })
-                } else {
-                    None
-                },
-            },
+            usage: Usage::from_counts(prompt_tokens, completion_tokens)
+                .with_reasoning_tokens(reasoning_token_count),
         })
-    }
-
-    /// Build SSE response from receiver
-    fn build_sse_response(rx: mpsc::UnboundedReceiver<Result<Bytes, io::Error>>) -> Response {
-        let stream = UnboundedReceiverStream::new(rx);
-        let body = Body::from_stream(stream);
-
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(
-                CONTENT_TYPE,
-                HeaderValue::from_static("text/event-stream; charset=utf-8"),
-            )
-            .header("Cache-Control", HeaderValue::from_static("no-cache"))
-            .header("Connection", HeaderValue::from_static("keep-alive"))
-            .body(body)
-            .unwrap()
     }
 }
 

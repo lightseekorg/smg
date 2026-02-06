@@ -10,8 +10,8 @@ use tokio::sync::Mutex;
 
 use crate::{
     parsers::{
-        BaseReasoningParser, DeepSeekR1Parser, Glm45Parser, KimiParser, MiniMaxParser, Qwen3Parser,
-        QwenThinkingParser, Step3Parser,
+        BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, KimiParser,
+        MiniMaxParser, Qwen3Parser, QwenThinkingParser, Step3Parser,
     },
     traits::{ParseError, ParserConfig, ReasoningParser},
 };
@@ -192,6 +192,9 @@ impl ParserFactory {
         // Register MiniMax parser (appends <think> token at the beginning)
         registry.register_parser("minimax", || Box::new(MiniMaxParser::new()));
 
+        // Register Cohere Command parser (uses <|START_THINKING|> / <|END_THINKING|>)
+        registry.register_parser("cohere_cmd", || Box::new(CohereCmdParser::new()));
+
         // Register model patterns
         registry.register_pattern("deepseek-r1", "deepseek_r1");
         registry.register_pattern("qwen3-thinking", "qwen3_thinking");
@@ -205,6 +208,12 @@ impl ParserFactory {
         registry.register_pattern("minimax", "minimax");
         registry.register_pattern("minimax-m2", "minimax");
         registry.register_pattern("mm-m2", "minimax");
+
+        // Cohere Command models use <|START_THINKING|> / <|END_THINKING|>
+        registry.register_pattern("command-r", "cohere_cmd");
+        registry.register_pattern("command-a", "cohere_cmd");
+        registry.register_pattern("c4ai-command", "cohere_cmd");
+        registry.register_pattern("cohere", "cohere_cmd");
 
         // Nano V3 uses same format as Qwen3 (requires explicit <think> token)
         registry.register_pattern("nemotron-nano", "qwen3");
@@ -350,6 +359,24 @@ mod tests {
         // Also test alternate patterns
         let mm = factory.create("mm-m2-chat").unwrap();
         assert_eq!(mm.model_type(), "minimax");
+    }
+
+    #[test]
+    fn test_cohere_cmd_model() {
+        let factory = ParserFactory::new();
+
+        // Test various Cohere model patterns
+        let command_r = factory.create("command-r-plus").unwrap();
+        assert_eq!(command_r.model_type(), "cohere_cmd");
+
+        let command_a = factory.create("command-a-03-2025").unwrap();
+        assert_eq!(command_a.model_type(), "cohere_cmd");
+
+        let c4ai = factory.create("c4ai-command-r-v01").unwrap();
+        assert_eq!(c4ai.model_type(), "cohere_cmd");
+
+        let cohere = factory.create("cohere-embed").unwrap();
+        assert_eq!(cohere.model_type(), "cohere_cmd");
     }
 
     #[tokio::test]

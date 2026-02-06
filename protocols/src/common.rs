@@ -427,9 +427,9 @@ impl Serialize for FunctionCall {
 
 impl<'de> Deserialize<'de> for FunctionCall {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
+        let value = Value::deserialize(deserializer)?;
         match &value {
-            serde_json::Value::String(s) => match s.as_str() {
+            Value::String(s) => match s.as_str() {
                 "none" => Ok(FunctionCall::None),
                 "auto" => Ok(FunctionCall::Auto),
                 other => Err(serde::de::Error::custom(format!(
@@ -437,8 +437,8 @@ impl<'de> Deserialize<'de> for FunctionCall {
                     other
                 ))),
             },
-            serde_json::Value::Object(map) => {
-                if let Some(serde_json::Value::String(name)) = map.get("name") {
+            Value::Object(map) => {
+                if let Some(Value::String(name)) = map.get("name") {
                     Ok(FunctionCall::Function { name: name.clone() })
                 } else {
                     Err(serde::de::Error::custom(
@@ -471,6 +471,28 @@ pub struct Usage {
     pub total_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+impl Usage {
+    /// Create a Usage from prompt and completion token counts
+    pub fn from_counts(prompt_tokens: u32, completion_tokens: u32) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+            completion_tokens_details: None,
+        }
+    }
+
+    /// Add reasoning token details to this Usage
+    pub fn with_reasoning_tokens(mut self, reasoning_tokens: u32) -> Self {
+        if reasoning_tokens > 0 {
+            self.completion_tokens_details = Some(CompletionTokensDetails {
+                reasoning_tokens: Some(reasoning_tokens),
+            });
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

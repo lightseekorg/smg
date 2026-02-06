@@ -52,9 +52,7 @@ def wait_for_background_task(
 
         time.sleep(poll_interval)
 
-    raise TimeoutError(
-        f"Background task {response_id} did not complete within {timeout}s"
-    )
+    raise TimeoutError(f"Background task {response_id} did not complete within {timeout}s")
 
 
 # =============================================================================

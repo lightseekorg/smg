@@ -24,11 +24,13 @@ from .constants import (  # Enums; Convenience sets; Fixture parameters; Default
     PARAM_BACKEND_ROUTER,
     PARAM_MODEL,
     PARAM_SETUP_BACKEND,
+    RUNTIME_LABELS,
     ConnectionMode,
     Runtime,
     WorkerType,
     get_runtime,
     is_sglang,
+    is_trtllm,
     is_vllm,
 )
 from .gateway import Gateway, WorkerInfo, launch_cloud_gateway
@@ -40,6 +42,7 @@ from .gpu_allocator import (
     get_open_port,
     get_physical_device_indices,
     nvml_context,
+    release_port,
     wait_for_gpu_memory_to_clear,
 )
 from .gpu_monitor import GPUMonitor
@@ -93,6 +96,7 @@ __all__ = [
     "HEALTH_CHECK_INTERVAL",
     "MAX_RETRY_ATTEMPTS",
     "LOG_SEPARATOR_WIDTH",
+    "RUNTIME_LABELS",
     # Env vars
     "ENV_MODELS",
     "ENV_BACKENDS",
@@ -107,6 +111,7 @@ __all__ = [
     "get_runtime",
     "is_vllm",
     "is_sglang",
+    "is_trtllm",
     # GPU allocation
     "GPUAllocator",
     "GPUInfo",
@@ -114,6 +119,7 @@ __all__ = [
     # GPU utilities
     "nvml_context",
     "get_open_port",
+    "release_port",
     "get_physical_device_indices",
     "get_gpu_memory_usage",
     "wait_for_gpu_memory_to_clear",

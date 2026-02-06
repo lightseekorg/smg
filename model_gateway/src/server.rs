@@ -256,7 +256,7 @@ async fn v1_messages(
 ) -> Response {
     state
         .router
-        .route_messages(Some(&headers), &body, Some(body.model.as_str()))
+        .route_messages(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -545,6 +545,7 @@ pub struct ServerConfig {
     pub max_payload_size: usize,
     pub log_dir: Option<String>,
     pub log_level: Option<String>,
+    pub log_json: bool,
     pub service_discovery_config: Option<ServiceDiscoveryConfig>,
     pub prometheus_config: Option<PrometheusConfig>,
     pub request_timeout_secs: u64,
@@ -735,7 +736,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
                         }
                     })
                     .unwrap_or(Level::INFO),
-                json_format: false,
+                json_format: config.log_json,
                 log_dir: config.log_dir.clone(),
                 colorize: true,
                 log_file_name: "smg".to_string(),

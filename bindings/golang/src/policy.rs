@@ -67,6 +67,8 @@ impl GrpcWorker {
             api_key: None,
             bootstrap_host: String::new(),
             bootstrap_port: None,
+            kv_connector: None,
+            kv_role: None,
             models: Vec::new(),
             default_provider: None,
             default_model_type: smg::core::model_type::ModelType::LLM,

@@ -52,3 +52,6 @@ prost-build = "0.14.1"
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

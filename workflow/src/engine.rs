@@ -564,7 +564,7 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                 // Collect steps ready to launch, deduplicating indices.
                 // A step with depends_on_any([A, B]) appears in pending_check once
                 // per completed dependency, but must only launch once.
-                let mut seen = std::collections::HashSet::new();
+                let mut seen = HashSet::new();
                 let mut ready: Vec<usize> = Vec::new();
                 for idx in newly_ready_from_wait {
                     if seen.insert(idx) {

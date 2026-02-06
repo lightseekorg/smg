@@ -7,12 +7,10 @@ Replaces the shell script for better maintainability and integration.
 """
 
 import argparse
-import os
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
 
 
 class BenchmarkRunner:
@@ -23,14 +21,12 @@ class BenchmarkRunner:
         self.timestamp = time.strftime("%a %b %d %H:%M:%S UTC %Y", time.gmtime())
 
     def run_command(
-        self, cmd: List[str], capture_output: bool = False
+        self, cmd: list[str], capture_output: bool = False
     ) -> subprocess.CompletedProcess:
         """Run a command and handle errors."""
         try:
             if capture_output:
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, cwd=self.project_root
-                )
+                result = subprocess.run(cmd, capture_output=True, text=True, cwd=self.project_root)
             else:
                 result = subprocess.run(cmd, cwd=self.project_root)
             return result
@@ -58,8 +54,8 @@ class BenchmarkRunner:
     def run_benchmarks(
         self,
         quick_mode: bool = False,
-        save_baseline: Optional[str] = None,
-        compare_baseline: Optional[str] = None,
+        save_baseline: str | None = None,
+        compare_baseline: str | None = None,
     ) -> str:
         """Run benchmarks with specified options."""
         bench_args = ["cargo", "bench", "--bench", "request_processing"]
@@ -100,7 +96,7 @@ class BenchmarkRunner:
             f.write(output)
         print(f"Baseline saved to: {filepath}")
 
-    def parse_benchmark_results(self, output: str) -> Dict[str, str]:
+    def parse_benchmark_results(self, output: str) -> dict[str, str]:
         """Parse benchmark output to extract performance metrics."""
         results = {}
 
@@ -140,7 +136,7 @@ class BenchmarkRunner:
         match = re.search(r"(\d+)\s*ns/req", line)
         return match.group(1) if match else "N/A"
 
-    def validate_thresholds(self, results: Dict[str, str]) -> bool:
+    def validate_thresholds(self, results: dict[str, str]) -> bool:
         """Validate benchmark results against performance thresholds."""
         thresholds = {
             "serialization_time": 2000,  # 2μs max
@@ -178,7 +174,7 @@ class BenchmarkRunner:
         return all_passed
 
     def save_results_to_file(
-        self, results: Dict[str, str], filename: str = "benchmark_results.env"
+        self, results: dict[str, str], filename: str = "benchmark_results.env"
     ):
         """Save benchmark results to a file for CI consumption."""
         filepath = self.project_root / filename
@@ -190,23 +186,15 @@ class BenchmarkRunner:
 
 def main():
     parser = argparse.ArgumentParser(description="Run SGLang router benchmarks")
-    parser.add_argument(
-        "--quick", action="store_true", help="Run quick benchmarks (summary only)"
-    )
-    parser.add_argument(
-        "--save-baseline", type=str, help="Save benchmark results as baseline"
-    )
-    parser.add_argument(
-        "--compare-baseline", type=str, help="Compare with saved baseline"
-    )
+    parser.add_argument("--quick", action="store_true", help="Run quick benchmarks (summary only)")
+    parser.add_argument("--save-baseline", type=str, help="Save benchmark results as baseline")
+    parser.add_argument("--compare-baseline", type=str, help="Compare with saved baseline")
     parser.add_argument(
         "--validate-thresholds",
         action="store_true",
         help="Validate results against performance thresholds",
     )
-    parser.add_argument(
-        "--save-results", action="store_true", help="Save results to file for CI"
-    )
+    parser.add_argument("--save-results", action="store_true", help="Save results to file for CI")
 
     args = parser.parse_args()
 
