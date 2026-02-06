@@ -307,11 +307,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y unzip wget
-          sudo apt-get install -y libaio1t64 || sudo apt-get install -y libaio1
-          # Copy libaio into Instant Client dir so it's on LD_LIBRARY_PATH
-          LIBAIO_PATH=$(find /usr/lib -name "libaio.so*" -type f 2>/dev/null | head -1)
-          INSTANT_CLIENT_DIR="$HOME/instant-client"
-          INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.26.1.0.0.zip"
+          # sudo apt-get install -y libaio1t64 || sudo apt-get install -y libaio1
+          # # Copy libaio into Instant Client dir so it's on LD_LIBRARY_PATH
+          # LIBAIO_PATH=$(find /usr/lib -name "libaio.so*" -type f 2>/dev/null | head -1)
+          # INSTANT_CLIENT_DIR="$HOME/instant-client"
+          # INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.26.1.0.0.zip"
 
           if [ ! -d "$INSTANT_CLIENT_DIR/instantclient_23_26" ]; then
             echo "Downloading Oracle Instant Client..."
@@ -324,11 +324,11 @@ jobs:
             echo "Oracle Instant Client already exists, skipping download"
           fi
 
-          # Ensure libaio.so.1 is findable via LD_LIBRARY_PATH
-          if [ -n "$LIBAIO_PATH" ]; then
-            cp "$LIBAIO_PATH" "$INSTANT_CLIENT_DIR/instantclient_23_26/"
-            ln -sf "$INSTANT_CLIENT_DIR/instantclient_23_26/$(basename $LIBAIO_PATH)" "$INSTANT_CLIENT_DIR/instantclient_23_26/libaio.so.1"
-          fi
+          # # Ensure libaio.so.1 is findable via LD_LIBRARY_PATH
+          # if [ -n "$LIBAIO_PATH" ]; then
+          #   cp "$LIBAIO_PATH" "$INSTANT_CLIENT_DIR/instantclient_23_26/"
+          #   ln -sf "$INSTANT_CLIENT_DIR/instantclient_23_26/$(basename $LIBAIO_PATH)" "$INSTANT_CLIENT_DIR/instantclient_23_26/libaio.so.1"
+          # fi
 
           echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_26:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
