@@ -308,6 +308,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y unzip wget
           sudo apt-get install -y libaio1t64 || sudo apt-get install -y libaio1
+          sudo ldconfig
           INSTANT_CLIENT_DIR="$HOME/instant-client"
           INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.9.0.25.07.zip"
 
