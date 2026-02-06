@@ -2,7 +2,6 @@ import argparse
 import dataclasses
 import logging
 import os
-from typing import Dict, List, Optional
 
 from smg.smg_rs import get_available_tool_call_parsers
 
@@ -12,21 +11,21 @@ logger = logging.getLogger(__name__)
 @dataclasses.dataclass
 class RouterArgs:
     # Worker configuration
-    worker_urls: List[str] = dataclasses.field(default_factory=list)
+    worker_urls: list[str] = dataclasses.field(default_factory=list)
     host: str = "0.0.0.0"
     port: int = 30000
 
     # PD-specific configuration
     pd_disaggregation: bool = False  # Enable PD disaggregated mode
-    prefill_urls: List[tuple] = dataclasses.field(
+    prefill_urls: list[tuple] = dataclasses.field(
         default_factory=list
     )  # List of (url, bootstrap_port)
-    decode_urls: List[str] = dataclasses.field(default_factory=list)
+    decode_urls: list[str] = dataclasses.field(default_factory=list)
 
     # Routing policy
     policy: str = "cache_aware"
-    prefill_policy: Optional[str] = None  # Specific policy for prefill nodes in PD mode
-    decode_policy: Optional[str] = None  # Specific policy for decode nodes in PD mode
+    prefill_policy: str | None = None  # Specific policy for prefill nodes in PD mode
+    decode_policy: str | None = None  # Specific policy for decode nodes in PD mode
     worker_startup_timeout_secs: int = 1800
     worker_startup_check_interval: int = 30
     cache_threshold: float = 0.3
@@ -40,25 +39,25 @@ class RouterArgs:
     bucket_adjust_interval_secs: int = 5
     dp_aware: bool = False
     enable_igw: bool = False  # Enable IGW (Inter-Gateway) mode for multi-model support
-    api_key: Optional[str] = None
-    log_dir: Optional[str] = None
-    log_level: Optional[str] = None
+    api_key: str | None = None
+    log_dir: str | None = None
+    log_level: str | None = None
     log_json: bool = False
     # Service discovery configuration
     service_discovery: bool = False
-    selector: Dict[str, str] = dataclasses.field(default_factory=dict)
+    selector: dict[str, str] = dataclasses.field(default_factory=dict)
     service_discovery_port: int = 80
-    service_discovery_namespace: Optional[str] = None
+    service_discovery_namespace: str | None = None
     # PD service discovery configuration
-    prefill_selector: Dict[str, str] = dataclasses.field(default_factory=dict)
-    decode_selector: Dict[str, str] = dataclasses.field(default_factory=dict)
+    prefill_selector: dict[str, str] = dataclasses.field(default_factory=dict)
+    decode_selector: dict[str, str] = dataclasses.field(default_factory=dict)
     bootstrap_port_annotation: str = "sglang.ai/bootstrap-port"
     # Prometheus configuration
-    prometheus_port: Optional[int] = None
-    prometheus_host: Optional[str] = None
-    prometheus_duration_buckets: Optional[List[float]] = None
+    prometheus_port: int | None = None
+    prometheus_host: str | None = None
+    prometheus_duration_buckets: list[float] | None = None
     # Request ID headers configuration
-    request_id_headers: Optional[List[str]] = None
+    request_id_headers: list[str] | None = None
     # Request timeout in seconds
     request_timeout_secs: int = 1800
     # Grace period in seconds to wait for in-flight requests during shutdown
@@ -70,9 +69,9 @@ class RouterArgs:
     # Maximum time (in seconds) a request can wait in queue before timing out
     queue_timeout_secs: int = 60
     # Token bucket refill rate (tokens per second). If not set, defaults to max_concurrent_requests
-    rate_limit_tokens_per_second: Optional[int] = None
+    rate_limit_tokens_per_second: int | None = None
     # CORS allowed origins
-    cors_allowed_origins: List[str] = dataclasses.field(default_factory=list)
+    cors_allowed_origins: list[str] = dataclasses.field(default_factory=list)
     # Retry configuration
     retry_max_retries: int = 5
     retry_initial_backoff_ms: int = 50
@@ -93,54 +92,54 @@ class RouterArgs:
     cb_timeout_duration_secs: int = 60
     cb_window_duration_secs: int = 120
     disable_circuit_breaker: bool = False
-    model_path: Optional[str] = None
-    tokenizer_path: Optional[str] = None
-    chat_template: Optional[str] = None
+    model_path: str | None = None
+    tokenizer_path: str | None = None
+    chat_template: str | None = None
     # Tokenizer cache configuration
     tokenizer_cache_enable_l0: bool = False
     tokenizer_cache_l0_max_entries: int = 10000
     tokenizer_cache_enable_l1: bool = False
     tokenizer_cache_l1_max_memory: int = 50 * 1024 * 1024  # 50MB
-    reasoning_parser: Optional[str] = None
-    tool_call_parser: Optional[str] = None
+    reasoning_parser: str | None = None
+    tool_call_parser: str | None = None
     # MCP server configuration
-    mcp_config_path: Optional[str] = None
+    mcp_config_path: str | None = None
     # Backend selection
     backend: str = "sglang"
     # History backend configuration
     history_backend: str = "memory"
-    oracle_wallet_path: Optional[str] = None
-    oracle_tns_alias: Optional[str] = None
-    oracle_connect_descriptor: Optional[str] = None
-    oracle_username: Optional[str] = None
-    oracle_password: Optional[str] = None
+    oracle_wallet_path: str | None = None
+    oracle_tns_alias: str | None = None
+    oracle_connect_descriptor: str | None = None
+    oracle_username: str | None = None
+    oracle_password: str | None = None
     oracle_pool_min: int = 1
     oracle_pool_max: int = 16
     oracle_pool_timeout_secs: int = 30
-    postgres_db_url: Optional[str] = None
+    postgres_db_url: str | None = None
     postgres_pool_max: int = 16
-    redis_url: Optional[str] = None
+    redis_url: str | None = None
     redis_pool_max: int = 16
     redis_retention_days: int = 30
     # mTLS configuration for worker communication
-    client_cert_path: Optional[str] = None
-    client_key_path: Optional[str] = None
-    ca_cert_paths: List[str] = dataclasses.field(default_factory=list)
+    client_cert_path: str | None = None
+    client_key_path: str | None = None
+    ca_cert_paths: list[str] = dataclasses.field(default_factory=list)
     # Server TLS configuration
-    server_cert_path: Optional[str] = None
-    server_key_path: Optional[str] = None
+    server_cert_path: str | None = None
+    server_key_path: str | None = None
     # Trace
     enable_trace: bool = False
     otlp_traces_endpoint: str = "localhost:4317"
     # Control plane authentication
     # API keys for control plane auth (list of tuples: id, name, key, role)
-    control_plane_api_keys: List[tuple] = dataclasses.field(default_factory=list)
+    control_plane_api_keys: list[tuple] = dataclasses.field(default_factory=list)
     control_plane_audit_enabled: bool = False
     # JWT/OIDC configuration for control plane auth
-    jwt_issuer: Optional[str] = None
-    jwt_audience: Optional[str] = None
-    jwt_jwks_uri: Optional[str] = None
-    jwt_role_mapping: Dict[str, str] = dataclasses.field(default_factory=dict)
+    jwt_issuer: str | None = None
+    jwt_audience: str | None = None
+    jwt_jwks_uri: str | None = None
+    jwt_role_mapping: dict[str, str] = dataclasses.field(default_factory=dict)
 
     @staticmethod
     def add_cli_args(
@@ -224,7 +223,10 @@ class RouterArgs:
                 "--host",
                 type=str,
                 default=RouterArgs.host,
-                help="Host address to bind the router server. Supports IPv4, IPv6 (e.g., ::, ::1), or 0.0.0.0 for all interfaces",
+                help=(
+                    "Host address to bind the router server. Supports IPv4, IPv6 (e.g., ::, ::1),"
+                    " or 0.0.0.0 for all interfaces"
+                ),
             )
             worker_group.add_argument(
                 "--port",
@@ -238,7 +240,10 @@ class RouterArgs:
             type=str,
             nargs="*",
             default=[],
-            help="List of worker URLs. Supports IPv4 and IPv6 addresses (use brackets for IPv6, e.g., http://[::1]:8000 http://192.168.1.1:8000)",
+            help=(
+                "List of worker URLs. Supports IPv4 and IPv6 addresses"
+                " (use brackets for IPv6, e.g., http://[::1]:8000 http://192.168.1.1:8000)"
+            ),
         )
 
         # Routing policy configuration
@@ -247,7 +252,10 @@ class RouterArgs:
             type=str,
             default=RouterArgs.policy,
             choices=["random", "round_robin", "cache_aware", "power_of_two", "manual"],
-            help="Load balancing policy to use. In PD mode, this is used for both prefill and decode unless overridden",
+            help=(
+                "Load balancing policy to use. In PD mode, this is used for both prefill and decode"
+                " unless overridden"
+            ),
         )
         routing_group.add_argument(
             f"--{prefix}prefill-policy",
@@ -261,14 +269,20 @@ class RouterArgs:
                 "manual",
                 "bucket",
             ],
-            help="Specific policy for prefill nodes in PD mode. If not specified, uses the main policy",
+            help=(
+                "Specific policy for prefill nodes in PD mode."
+                " If not specified, uses the main policy"
+            ),
         )
         routing_group.add_argument(
             f"--{prefix}decode-policy",
             type=str,
             default=None,
             choices=["random", "round_robin", "cache_aware", "power_of_two", "manual"],
-            help="Specific policy for decode nodes in PD mode. If not specified, uses the main policy",
+            help=(
+                "Specific policy for decode nodes in PD mode."
+                " If not specified, uses the main policy"
+            ),
         )
         routing_group.add_argument(
             f"--{prefix}cache-threshold",
@@ -280,13 +294,19 @@ class RouterArgs:
             f"--{prefix}balance-abs-threshold",
             type=int,
             default=RouterArgs.balance_abs_threshold,
-            help="Absolute threshold for load difference. Balancing is triggered if `(max_load - min_load) > abs_threshold` and the relative threshold is also met.",
+            help=(
+                "Absolute threshold for load difference. Balancing is triggered if"
+                " `(max_load - min_load) > abs_threshold` and the relative threshold is also met."
+            ),
         )
         routing_group.add_argument(
             f"--{prefix}balance-rel-threshold",
             type=float,
             default=RouterArgs.balance_rel_threshold,
-            help="Relative threshold for load difference. Balancing is triggered if `max_load > min_load * rel_threshold` and the absolute threshold is also met.",
+            help=(
+                "Relative threshold for load difference. Balancing is triggered if"
+                " `max_load > min_load * rel_threshold` and the absolute threshold is also met."
+            ),
         )
         routing_group.add_argument(
             f"--{prefix}bucket-adjust-interval-secs",
@@ -317,7 +337,10 @@ class RouterArgs:
             type=str,
             default=RouterArgs.assignment_mode,
             choices=["random", "min_load", "min_group"],
-            help="Mode for assigning new routing keys in manual policy: random (default), min_load (worker with fewest requests), min_group (worker with fewest routing keys)",
+            help=(
+                "Mode for assigning new routing keys in manual policy: random (default),"
+                " min_load (worker with fewest requests), min_group (worker with fewest routing keys)"
+            ),
         )
         routing_group.add_argument(
             f"--{prefix}max-payload-size",
@@ -361,7 +384,10 @@ class RouterArgs:
             f"--{prefix}worker-startup-timeout-secs",
             type=int,
             default=RouterArgs.worker_startup_timeout_secs,
-            help="Timeout in seconds for worker startup and registration (default: 1800 / 30 minutes). Large models can take significant time to load into GPU memory.",
+            help=(
+                "Timeout in seconds for worker startup and registration (default: 1800 / 30 minutes)."
+                " Large models can take significant time to load into GPU memory."
+            ),
         )
         pd_group.add_argument(
             f"--{prefix}worker-startup-check-interval",
@@ -375,7 +401,9 @@ class RouterArgs:
             f"--{prefix}log-dir",
             type=str,
             default=None,
-            help="Directory to store log files. If not specified, logs are only output to console.",
+            help=(
+                "Directory to store log files. If not specified, logs are only output to console."
+            ),
         )
         logging_group.add_argument(
             f"--{prefix}log-level",
@@ -413,21 +441,29 @@ class RouterArgs:
         k8s_group.add_argument(
             f"--{prefix}service-discovery-namespace",
             type=str,
-            help="Kubernetes namespace to watch for pods. If not provided, watches all namespaces (requires cluster-wide permissions)",
+            help=(
+                "Kubernetes namespace to watch for pods. If not provided, watches all namespaces"
+                " (requires cluster-wide permissions)"
+            ),
         )
         k8s_group.add_argument(
             f"--{prefix}prefill-selector",
             type=str,
             nargs="+",
             default={},
-            help="Label selector for prefill server pods in PD mode (format: key1=value1 key2=value2)",
+            help=(
+                "Label selector for prefill server pods in PD mode"
+                " (format: key1=value1 key2=value2)"
+            ),
         )
         k8s_group.add_argument(
             f"--{prefix}decode-selector",
             type=str,
             nargs="+",
             default={},
-            help="Label selector for decode server pods in PD mode (format: key1=value1 key2=value2)",
+            help=(
+                "Label selector for decode server pods in PD mode (format: key1=value1 key2=value2)"
+            ),
         )
         # Prometheus configuration
         prometheus_group.add_argument(
@@ -440,7 +476,10 @@ class RouterArgs:
             f"--{prefix}prometheus-host",
             type=str,
             default="0.0.0.0",
-            help="Host address to bind the Prometheus metrics server. Supports IPv4, IPv6 (e.g., ::, ::1), or 0.0.0.0 for all interfaces",
+            help=(
+                "Host address to bind the Prometheus metrics server. Supports IPv4, IPv6"
+                " (e.g., ::, ::1), or 0.0.0.0 for all interfaces"
+            ),
         )
         prometheus_group.add_argument(
             f"--{prefix}prometheus-duration-buckets",
@@ -454,7 +493,10 @@ class RouterArgs:
             f"--{prefix}request-id-headers",
             type=str,
             nargs="*",
-            help="Custom HTTP headers to check for request IDs (e.g., x-request-id x-trace-id). If not specified, uses common defaults.",
+            help=(
+                "Custom HTTP headers to check for request IDs (e.g., x-request-id x-trace-id)."
+                " If not specified, uses common defaults."
+            ),
         )
         request_group.add_argument(
             f"--{prefix}request-timeout-secs",
@@ -481,13 +523,19 @@ class RouterArgs:
             f"--{prefix}max-concurrent-requests",
             type=int,
             default=RouterArgs.max_concurrent_requests,
-            help="Maximum number of concurrent requests allowed (for rate limiting). Set to -1 to disable rate limiting.",
+            help=(
+                "Maximum number of concurrent requests allowed (for rate limiting)."
+                " Set to -1 to disable rate limiting."
+            ),
         )
         rate_limit_group.add_argument(
             f"--{prefix}queue-size",
             type=int,
             default=RouterArgs.queue_size,
-            help="Queue size for pending requests when max concurrent limit reached (0 = no queue, return 429 immediately)",
+            help=(
+                "Queue size for pending requests when max concurrent limit reached"
+                " (0 = no queue, return 429 immediately)"
+            ),
         )
         rate_limit_group.add_argument(
             f"--{prefix}queue-timeout-secs",
@@ -499,7 +547,10 @@ class RouterArgs:
             f"--{prefix}rate-limit-tokens-per-second",
             type=int,
             default=RouterArgs.rate_limit_tokens_per_second,
-            help="Token bucket refill rate (tokens per second). If not set, defaults to max_concurrent_requests",
+            help=(
+                "Token bucket refill rate (tokens per second)."
+                " If not set, defaults to max_concurrent_requests"
+            ),
         )
 
         # Retry configuration
@@ -567,7 +618,9 @@ class RouterArgs:
         cb_group.add_argument(
             f"--{prefix}disable-circuit-breaker",
             action="store_true",
-            help="Disable circuit breaker (equivalent to setting cb_failure_threshold to u32::MAX)",
+            help=(
+                "Disable circuit breaker (equivalent to setting cb_failure_threshold to a very large value)"
+            ),
         )
 
         # Health check configuration
@@ -575,13 +628,13 @@ class RouterArgs:
             f"--{prefix}health-failure-threshold",
             type=int,
             default=RouterArgs.health_failure_threshold,
-            help="Number of consecutive health check failures before marking worker unhealthy",
+            help=("Number of consecutive health check failures before marking worker unhealthy"),
         )
         health_group.add_argument(
             f"--{prefix}health-success-threshold",
             type=int,
             default=RouterArgs.health_success_threshold,
-            help="Number of consecutive health check successes before marking worker healthy",
+            help=("Number of consecutive health check successes before marking worker healthy"),
         )
         health_group.add_argument(
             f"--{prefix}health-check-timeout-secs",
@@ -664,7 +717,7 @@ class RouterArgs:
             type=str,
             default=None,
             choices=tool_call_parser_choices,
-            help=f"Specify the parser for tool-call interactions (e.g., json, qwen)",
+            help="Specify the parser for tool-call interactions (e.g., json, qwen)",
         )
         parser_group.add_argument(
             f"--{prefix}mcp-config-path",
@@ -735,9 +788,7 @@ class RouterArgs:
         oracle_group.add_argument(
             f"--{prefix}oracle-pool-timeout-secs",
             type=int,
-            default=int(
-                os.getenv("ATP_POOL_TIMEOUT_SECS", RouterArgs.oracle_pool_timeout_secs)
-            ),
+            default=int(os.getenv("ATP_POOL_TIMEOUT_SECS", RouterArgs.oracle_pool_timeout_secs)),
             help="Oracle connection pool timeout in seconds (default: 30, env: ATP_POOL_TIMEOUT_SECS)",
         )
 
@@ -771,9 +822,7 @@ class RouterArgs:
         redis_group.add_argument(
             f"--{prefix}redis-retention-days",
             type=int,
-            default=int(
-                os.getenv("REDIS_RETENTION_DAYS", RouterArgs.redis_retention_days)
-            ),
+            default=int(os.getenv("REDIS_RETENTION_DAYS", RouterArgs.redis_retention_days)),
             help="Redis data retention in days (-1 for persistent, default: 30, env: REDIS_RETENTION_DAYS)",
         )
 
@@ -795,7 +844,10 @@ class RouterArgs:
             type=str,
             nargs="*",
             default=[],
-            help="Path(s) to CA certificate(s) for verifying worker TLS certificates. Can specify multiple CAs.",
+            help=(
+                "Path(s) to CA certificate(s) for verifying worker TLS certificates."
+                " Can specify multiple CAs."
+            ),
         )
         tls_group.add_argument(
             f"--{prefix}tls-cert-path",
@@ -820,7 +872,10 @@ class RouterArgs:
             f"--{prefix}otlp-traces-endpoint",
             type=str,
             default="localhost:4317",
-            help="Config opentelemetry collector endpoint if --enable-trace is set. format: <ip>:<port>",
+            help=(
+                "Config opentelemetry collector endpoint if --enable-trace is set."
+                " format: <ip>:<port>"
+            ),
         )
 
         # Control plane authentication
@@ -828,15 +883,22 @@ class RouterArgs:
             f"--{prefix}api-key",
             type=str,
             default=None,
-            help="The api key used for the authorization with the worker. Useful when the dp aware scheduling strategy is enabled.",
+            help=(
+                "The api key used for the authorization with the worker."
+                " Useful when the dp aware scheduling strategy is enabled."
+            ),
         )
         auth_group.add_argument(
             f"--{prefix}control-plane-api-keys",
             type=str,
             nargs="*",
             default=[],
-            help="API keys for control plane authentication. Format: 'id:name:role:key' where role is 'admin' or 'user'. "
-            "Example: --control-plane-api-keys 'key1:Service Account:admin:secret123' 'key2:Read Only:user:secret456'",
+            help=(
+                "API keys for control plane authentication. Format: 'id:name:role:key'"
+                " where role is 'admin' or 'user'."
+                " Example: --control-plane-api-keys 'key1:Service Account:admin:secret123'"
+                " 'key2:Read Only:user:secret456'"
+            ),
         )
         auth_group.add_argument(
             f"--{prefix}control-plane-audit-enabled",
@@ -848,27 +910,38 @@ class RouterArgs:
             f"--{prefix}jwt-issuer",
             type=str,
             default=None,
-            help="OIDC issuer URL for JWT authentication (e.g., https://login.microsoftonline.com/{tenant}/v2.0)",
+            help=(
+                "OIDC issuer URL for JWT authentication"
+                " (e.g., https://login.microsoftonline.com/{tenant}/v2.0)"
+            ),
         )
         auth_group.add_argument(
             f"--{prefix}jwt-audience",
             type=str,
             default=None,
-            help="Expected audience claim for JWT tokens (usually the client ID or API identifier)",
+            help=(
+                "Expected audience claim for JWT tokens (usually the client ID or API identifier)"
+            ),
         )
         auth_group.add_argument(
             f"--{prefix}jwt-jwks-uri",
             type=str,
             default=None,
-            help="Explicit JWKS URI. If not provided, discovered from issuer via .well-known/openid-configuration",
+            help=(
+                "Explicit JWKS URI. If not provided, discovered from issuer"
+                " via .well-known/openid-configuration"
+            ),
         )
         auth_group.add_argument(
             f"--{prefix}jwt-role-mapping",
             type=str,
             nargs="*",
             default=[],
-            help="Mapping from IDP role/group names to gateway roles. Format: 'idp_role=gateway_role'. "
-            "Example: --jwt-role-mapping 'Gateway.Admin=admin' 'Gateway.User=user'",
+            help=(
+                "Mapping from IDP role/group names to gateway roles."
+                " Format: 'idp_role=gateway_role'."
+                " Example: --jwt-role-mapping 'Gateway.Admin=admin' 'Gateway.User=user'"
+            ),
         )
 
     @classmethod
@@ -894,7 +967,8 @@ class RouterArgs:
                 args_dict[attr.name] = cli_args_dict[attr.name]
 
             # Special handling for CLI args with dashes vs dataclass fields with underscores
-            # e.g. --tls-cert-path maps to tls_cert_path in args namespace, but we might want server_cert_path in dataclass
+            # e.g. --tls-cert-path maps to tls_cert_path in args namespace,
+            # but we might want server_cert_path in dataclass
             # Wait, dataclass fields are server_cert_path/server_key_path
             # CLI args are tls_cert_path/tls_key_path
             # We need to manually map them if names don't match
@@ -912,9 +986,7 @@ class RouterArgs:
         args_dict["decode_urls"] = cls._parse_decode_urls(
             cli_args_dict.get(f"{prefix}decode", None)
         )
-        args_dict["selector"] = cls._parse_selector(
-            cli_args_dict.get(f"{prefix}selector", None)
-        )
+        args_dict["selector"] = cls._parse_selector(cli_args_dict.get(f"{prefix}selector", None))
         args_dict["prefill_selector"] = cls._parse_selector(
             cli_args_dict.get(f"{prefix}prefill_selector", None)
         )
@@ -988,7 +1060,6 @@ class RouterArgs:
 
         prefill_urls = []
         for prefill_args in prefill_list:
-
             url = prefill_args[0]
 
             # Handle optional bootstrap port

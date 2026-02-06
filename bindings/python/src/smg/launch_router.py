@@ -1,9 +1,9 @@
 import argparse
 import logging
 import sys
-from typing import List, Optional
 
 import setproctitle
+
 from smg.router_args import RouterArgs
 
 logger = logging.getLogger("router")
@@ -11,11 +11,11 @@ logger = logging.getLogger("router")
 try:
     from smg.router import Router
 except ImportError:
-    Router = None
+    Router = None  # type: ignore[assignment,misc]
     logger.warning("Rust Router is not installed")
 
 
-def launch_router(args: argparse.Namespace) -> Optional[Router]:
+def launch_router(args: argparse.Namespace | RouterArgs) -> None:
     """
     Launch the SMG router with the configuration from parsed arguments.
 
@@ -24,7 +24,7 @@ def launch_router(args: argparse.Namespace) -> Optional[Router]:
             Can be either raw argparse.Namespace or converted RouterArgs
 
     Returns:
-        Router instance if successful, None if failed
+        None. Raises on failure.
     """
     setproctitle.setproctitle("smg::router")
     try:
@@ -53,7 +53,7 @@ class CustomHelpFormatter(
     pass
 
 
-def parse_router_args(args: List[str]) -> RouterArgs:
+def parse_router_args(args: list[str]) -> RouterArgs:
     """Parse command line arguments and return RouterArgs instance."""
     parser = argparse.ArgumentParser(
         description="""SMG Router - High-performance request distribution across worker nodes

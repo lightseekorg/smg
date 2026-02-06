@@ -150,6 +150,7 @@ def genai_bench_runner():
         cli = shutil.which("genai-bench")
         if not cli:
             pytest.fail("genai-bench CLI not found")
+        assert cli is not None  # for mypy (pytest.fail raises)
 
         # Clean previous results
         exp_dir = Path.cwd() / experiment_folder
@@ -243,7 +244,7 @@ def genai_bench_runner():
             raise
 
         finally:
-            _cleanup_procs(kill_procs, drain_delay_sec)
+            _cleanup_procs(kill_procs or [], drain_delay_sec)
             if gpu_monitor:
                 gpu_monitor.stop(timeout=2)
 

@@ -2,6 +2,7 @@
 
 use axum::{body::Body, http::StatusCode, response::Response};
 use bytes::Bytes;
+use http::header::{HeaderValue, CONTENT_TYPE};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -386,7 +387,7 @@ impl ResponseStreamEventEmitter {
                 json!({
                     "name": &entry.tool.name,
                     "description": &entry.tool.description,
-                    "input_schema": entry.tool.input_schema.clone()
+                    "input_schema": serde_json::Value::Object((*entry.tool.input_schema).clone())
                 })
             })
             .collect();
@@ -894,6 +895,73 @@ impl ResponseStreamEventEmitter {
         let sse_data = format!("data: {}\n\n", serde_json::to_string(&event).unwrap());
         let _ = tx.send(Ok(Bytes::from(sse_data)));
     }
+
+    /// Emit the full mcp_list_tools output-item sequence.
+    ///
+    /// Allocates an output index, builds the tool-list JSON, then emits the four
+    /// standard events (output_item.added, mcp_list_tools.in_progress,
+    /// mcp_list_tools.completed, output_item.done) and marks the item complete.
+    ///
+    /// `server_label` is taken as an explicit parameter so callers can iterate
+    /// over multiple MCP servers without mutating the emitter's own label.
+    pub fn emit_mcp_list_tools_sequence(
+        &mut self,
+        server_label: &str,
+        tools: &[mcp::ToolEntry],
+        tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
+    ) -> Result<(), String> {
+        let (output_index, item_id) = self.allocate_output_index(OutputItemType::McpListTools);
+
+        // Build per-tool JSON items
+        let tool_items: Vec<_> = tools
+            .iter()
+            .map(|entry| {
+                json!({
+                    "name": entry.tool.name,
+                    "description": entry.tool.description,
+                    "input_schema": serde_json::Value::Object((*entry.tool.input_schema).clone())
+                })
+            })
+            .collect();
+
+        // In-progress item (empty tools)
+        let item_in_progress = json!({
+            "id": item_id,
+            "type": "mcp_list_tools",
+            "server_label": server_label,
+            "status": "in_progress",
+            "tools": []
+        });
+
+        // Emit output_item.added
+        let event = self.emit_output_item_added(output_index, &item_in_progress);
+        self.send_event(&event, tx)?;
+
+        // Emit mcp_list_tools.in_progress
+        let event = self.emit_mcp_list_tools_in_progress(output_index);
+        self.send_event(&event, tx)?;
+
+        // Emit mcp_list_tools.completed
+        let event = self.emit_mcp_list_tools_completed(output_index, tools);
+        self.send_event(&event, tx)?;
+
+        // Completed item (with tools populated)
+        let item_done = json!({
+            "id": item_id,
+            "type": "mcp_list_tools",
+            "server_label": server_label,
+            "status": "completed",
+            "tools": tool_items
+        });
+
+        // Emit output_item.done (also stores item data internally)
+        let event = self.emit_output_item_done(output_index, &item_done);
+        self.send_event(&event, tx)?;
+
+        self.complete_output_item(output_index);
+
+        Ok(())
+    }
 }
 
 /// Build a Server-Sent Events (SSE) response
@@ -905,9 +973,27 @@ pub(crate) fn build_sse_response(
     let stream = UnboundedReceiverStream::new(rx);
     Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .header("Connection", "keep-alive")
+        .header(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream; charset=utf-8"),
+        )
+        .header("Cache-Control", HeaderValue::from_static("no-cache"))
+        .header("Connection", HeaderValue::from_static("keep-alive"))
         .body(Body::from_stream(stream))
         .unwrap()
+}
+
+/// Attach `server_label` to an MCP tool-call JSON item.
+///
+/// Only sets the field when `response_format` indicates a passthrough (mcp_call)
+/// type and a server label is provided, since built-in tool types
+/// (web_search_call, etc.) do not carry a server label.
+pub(crate) fn attach_mcp_server_label(
+    item: &mut serde_json::Value,
+    server_label: Option<&str>,
+    response_format: Option<&ResponseFormat>,
+) {
+    if let (Some(label), Some(ResponseFormat::Passthrough)) = (server_label, response_format) {
+        item["server_label"] = json!(label);
+    }
 }

@@ -41,7 +41,7 @@ _thread_cache: dict[int, _CachedBackend] = {}
 _cache_lock = threading.Lock()
 
 
-def _create_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
+def _create_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
     """Extract configuration from request and return the appropriate backend generator.
 
     Returns a generator that yields (backend_name, model_path, client, gateway).
@@ -85,14 +85,10 @@ def _create_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
 
     # PD disaggregation backends - explicit connection modes
     if backend_name == "pd_http":
-        return _setup_pd_http_backend(
-            request, model_pool, model_id, workers_config, gateway_config
-        )
+        return _setup_pd_http_backend(request, model_pool, model_id, workers_config, gateway_config)
 
     if backend_name == "pd_grpc":
-        return _setup_pd_grpc_backend(
-            request, model_pool, model_id, workers_config, gateway_config
-        )
+        return _setup_pd_grpc_backend(request, model_pool, model_id, workers_config, gateway_config)
 
     # Check if this is a local backend (grpc, http)
     try:
@@ -139,7 +135,7 @@ def _create_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
 
 
 @pytest.fixture(scope="function")
-def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
+def setup_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
     """Function-scoped fixture with per-thread caching for class-level reuse.
 
     Under pytest-parallel's thread model (--tests-per-worker N), class-scoped
@@ -211,9 +207,7 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
 
     try:
         with _cache_lock:
-            _thread_cache[thread_id] = _CachedBackend(
-                gen=gen, value=value, cls=cls, param=param
-            )
+            _thread_cache[thread_id] = _CachedBackend(gen=gen, value=value, cls=cls, param=param)
     except Exception:
         gen.close()
         raise
@@ -252,7 +246,7 @@ def cleanup_all_cached_backends() -> None:
 
 def _setup_pd_http_backend(
     request: pytest.FixtureRequest,
-    model_pool: "ModelPool",
+    model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
     gateway_config: dict,
@@ -272,7 +266,7 @@ def _setup_pd_http_backend(
 
 def _setup_pd_grpc_backend(
     request: pytest.FixtureRequest,
-    model_pool: "ModelPool",
+    model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
     gateway_config: dict,
@@ -291,7 +285,7 @@ def _setup_pd_grpc_backend(
 
 
 def _setup_pd_backend_common(
-    model_pool: "ModelPool",
+    model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
     gateway_config: dict,
@@ -392,9 +386,7 @@ def _setup_pd_backend_common(
                 num_decode,
                 len(workers_to_launch),
             )
-            new_instances = model_pool.launch_workers(
-                workers_to_launch, startup_timeout=300
-            )
+            new_instances = model_pool.launch_workers(workers_to_launch, startup_timeout=300)
 
             if not new_instances:
                 pytest.fail(
@@ -451,8 +443,7 @@ def _setup_pd_backend_common(
     )
 
     logger.info(
-        "Setup %s PD backend: model=%s, %d prefill + %d decode workers, "
-        "gateway=%s, policy=%s",
+        "Setup %s PD backend: model=%s, %d prefill + %d decode workers, gateway=%s, policy=%s",
         runtime_label,
         model_id,
         len(prefills),
@@ -475,7 +466,7 @@ def _setup_pd_backend_common(
 
 def _setup_grpc_backend(
     request: pytest.FixtureRequest,
-    model_pool: "ModelPool",
+    model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
     gateway_config: dict,
@@ -494,6 +485,7 @@ def _setup_grpc_backend(
         instance = model_pool.get_grpc_worker(model_id)
     except RuntimeError as e:
         pytest.fail(str(e))
+    assert instance is not None
 
     model_path = instance.model_path
     worker_urls = [instance.worker_url]
@@ -544,7 +536,7 @@ def _setup_grpc_backend(
 
 def _setup_local_backend(
     request: pytest.FixtureRequest,
-    model_pool: "ModelPool",
+    model_pool: ModelPool,
     backend_name: str,
     model_id: str,
     connection_mode,
@@ -585,9 +577,7 @@ def _setup_local_backend(
                     )
                     for i in range(missing)
                 ]
-                new_instances = model_pool.launch_workers(
-                    workers_to_launch, startup_timeout=300
-                )
+                new_instances = model_pool.launch_workers(workers_to_launch, startup_timeout=300)
                 # Acquire newly launched instances
                 for inst in new_instances:
                     inst.acquire()
@@ -686,9 +676,7 @@ def _setup_cloud_backend(
 
     extra_args = gateway_config.get("extra_args") if gateway_config else None
 
-    logger.info(
-        "Launching cloud backend: %s with storage=%s", backend_name, storage_backend
-    )
+    logger.info("Launching cloud backend: %s with storage=%s", backend_name, storage_backend)
     gateway = launch_cloud_gateway(
         backend_name,
         history_backend=storage_backend,
@@ -709,7 +697,7 @@ def _setup_cloud_backend(
 
 
 @pytest.fixture
-def backend_router(request: pytest.FixtureRequest, model_pool: "ModelPool"):
+def backend_router(request: pytest.FixtureRequest, model_pool: ModelPool):
     """Function-scoped fixture for launching a fresh router per test.
 
     This launches a new Gateway for each test, pointing to workers from the pool.
@@ -735,6 +723,7 @@ def backend_router(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         pytest.skip(f"Model {model_id}:{backend_name} not available in pool")
     except RuntimeError as e:
         pytest.fail(str(e))
+    assert instance is not None
 
     gateway = Gateway()
     try:

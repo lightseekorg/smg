@@ -547,6 +547,21 @@ impl ProtoGenerateComplete {
         }
     }
 
+    /// Get matched stop as a JSON value
+    ///
+    /// Converts the proto MatchedStop oneof into a serde_json::Value:
+    /// - MatchedTokenId → Number
+    /// - MatchedStopStr → String
+    /// - None → None
+    pub fn matched_stop_json(&self) -> Option<serde_json::Value> {
+        self.matched_stop().map(|m| match m {
+            MatchedStop::MatchedTokenId(id) => {
+                serde_json::Value::Number(serde_json::Number::from(*id))
+            }
+            MatchedStop::MatchedStopStr(s) => serde_json::Value::String(s.clone()),
+        })
+    }
+
     /// Get output IDs (decode tokens only)
     pub fn output_ids(&self) -> &[u32] {
         match self {

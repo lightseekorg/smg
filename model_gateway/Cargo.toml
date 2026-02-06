@@ -20,9 +20,6 @@ grpc-server = []
 
 vendored-openssl = ["openssl/vendored"]
 
-[lints.rust]
-unused_qualifications = "warn"
-
 [lib]
 name = "smg"
 crate-type = ["rlib"]
@@ -171,3 +168,6 @@ path = "benches/manual_policy_benchmark.rs"
 name = "radix_tree_benchmark"
 harness = false
 path = "benches/radix_tree_benchmark.rs"
+
+[lints]
+workspace = true

@@ -38,3 +38,6 @@ tokio-postgres = { version = "0.7.15", features = ["runtime", "with-chrono-0_4",
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

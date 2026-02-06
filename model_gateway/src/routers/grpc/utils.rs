@@ -871,64 +871,37 @@ pub(crate) fn create_tool_parser(
 
 /// Convert OutputLogProbs to OpenAI ChatLogProbs format
 ///
-/// This function decodes token IDs using the tokenizer and builds the logprobs structure
-/// expected by the OpenAI API format.
-pub(crate) fn convert_proto_to_openai_logprobs(
+/// Generic over the token decoding strategy. The `decode_token` closure maps a
+/// single token ID to its text representation.
+pub(crate) fn convert_proto_logprobs(
     proto_logprobs: &ProtoOutputLogProbs,
-    tokenizer: &Arc<dyn Tokenizer>,
-) -> Result<ChatLogProbs, String> {
+    decode_token: impl Fn(u32) -> String,
+) -> ChatLogProbs {
     let mut content_items = Vec::with_capacity(proto_logprobs.token_logprobs.len());
 
-    // Decode token IDs to text (always with skip_special_tokens=false for logprobs)
-    let token_texts: Vec<String> = proto_logprobs
-        .token_ids
-        .iter()
-        .map(|&token_id| {
-            tokenizer
-                .decode(&[token_id as u32], false)
-                .unwrap_or_else(|_| format!("<token_{}>", token_id))
-        })
-        .collect();
-
-    // Build ChatLogProbsContent for each token (consume iterator to avoid clones)
-    for (i, (&logprob, token_text)) in proto_logprobs
-        .token_logprobs
-        .iter()
-        .zip(token_texts.into_iter())
-        .enumerate()
-    {
+    for (i, &logprob) in proto_logprobs.token_logprobs.iter().enumerate() {
+        let token_id = proto_logprobs.token_ids.get(i).copied().unwrap_or(0) as u32;
+        let token_text = decode_token(token_id);
         let bytes = Some(token_text.as_bytes().to_vec());
 
         // Build top_logprobs for this position
         let top_logprobs = if let Some(top_logprobs_entry) = proto_logprobs.top_logprobs.get(i) {
-            let mut top_logprobs = Vec::with_capacity(top_logprobs_entry.values.len());
-
-            // Decode top token IDs (always with skip_special_tokens=false)
-            let top_token_texts: Vec<String> = top_logprobs_entry
-                .token_ids
-                .iter()
-                .map(|&tid| {
-                    tokenizer
-                        .decode(&[tid as u32], false)
-                        .unwrap_or_else(|_| format!("<token_{}>", tid))
-                })
-                .collect();
-
-            for (j, (&top_logprob, &_top_token_id)) in top_logprobs_entry
+            top_logprobs_entry
                 .values
                 .iter()
-                .zip(top_logprobs_entry.token_ids.iter())
                 .enumerate()
-            {
-                if let Some(top_token_text) = top_token_texts.get(j) {
-                    top_logprobs.push(TopLogProb {
-                        token: top_token_text.clone(),
-                        logprob: top_logprob,
-                        bytes: Some(top_token_text.as_bytes().to_vec()),
-                    });
-                }
-            }
-            top_logprobs
+                .filter_map(|(j, &top_logprob)| {
+                    top_logprobs_entry.token_ids.get(j).map(|&tid| {
+                        let text = decode_token(tid as u32);
+                        let bytes = Some(text.as_bytes().to_vec());
+                        TopLogProb {
+                            token: text,
+                            logprob: top_logprob,
+                            bytes,
+                        }
+                    })
+                })
+                .collect()
         } else {
             Vec::new()
         };
@@ -941,9 +914,21 @@ pub(crate) fn convert_proto_to_openai_logprobs(
         });
     }
 
-    Ok(ChatLogProbs::Detailed {
+    ChatLogProbs::Detailed {
         content: (!content_items.is_empty()).then_some(content_items),
-    })
+    }
+}
+
+/// Convert OutputLogProbs to OpenAI ChatLogProbs format using a Tokenizer
+pub(crate) fn convert_proto_to_openai_logprobs(
+    proto_logprobs: &ProtoOutputLogProbs,
+    tokenizer: &Arc<dyn Tokenizer>,
+) -> Result<ChatLogProbs, String> {
+    Ok(convert_proto_logprobs(proto_logprobs, |token_id| {
+        tokenizer
+            .decode(&[token_id], false)
+            .unwrap_or_else(|_| format!("<token_{}>", token_id))
+    }))
 }
 
 /// Convert OutputLogProbs to Generate format Vec<Vec<Option<f64>>>

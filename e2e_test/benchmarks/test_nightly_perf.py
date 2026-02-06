@@ -21,7 +21,6 @@ import pytest
 from infra import get_runtime
 from infra.model_specs import get_model_spec
 
-
 # ---------------------------------------------------------------------------
 # Shared constants
 # ---------------------------------------------------------------------------
@@ -78,8 +77,8 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, worker_count=1, **
         router_url=gateway.base_url,
         model_path=model_path,
         experiment_folder=experiment_folder,
-        num_concurrency=None,      # use genai-bench defaults
-        traffic_scenario=None,     # use genai-bench defaults
+        num_concurrency=None,  # use genai-bench defaults
+        traffic_scenario=None,  # use genai-bench defaults
         max_requests_per_run=_MAX_REQUESTS,
         max_time_per_run=_MAX_TIME_PER_RUN,
         timeout_sec=_TIMEOUT_SEC,
@@ -95,16 +94,16 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, worker_count=1, **
 # backends: list of backends to test (default: ["http", "grpc"])
 # ---------------------------------------------------------------------------
 
-_NIGHTLY_MODELS = [
-    ("llama-8b",    "Llama8b",    8, ["http", "grpc"], {}),
-    ("llama-1b",    "Llama1b",    8, ["http", "grpc"], {}),
-    ("qwen-7b",     "Qwen7b",     8, ["http", "grpc"], {}),
-    ("qwen-14b",    "Qwen14b",    4, ["http", "grpc"], {}),
+_NIGHTLY_MODELS: list[tuple[str, str, int, list[str], dict]] = [
+    ("llama-8b", "Llama8b", 8, ["http", "grpc"], {}),
+    ("llama-1b", "Llama1b", 8, ["http", "grpc"], {}),
+    ("qwen-7b", "Qwen7b", 8, ["http", "grpc"], {}),
+    ("qwen-14b", "Qwen14b", 4, ["http", "grpc"], {}),
     ("deepseek-7b", "Deepseek7b", 8, ["http", "grpc"], {}),
-    ("qwen-30b",    "Qwen30b",    2, ["http", "grpc"], {}),
-    ("mistral-7b",  "Mistral7b",  8, ["http", "grpc"], {}),
-    ("gpt-oss",     "GptOss",     4, ["http", "grpc"], {}), 
-    ("llama-4-maverick-17b", "Llama4Maverick", 1, ["http", "grpc"], {}),  
+    ("qwen-30b", "Qwen30b", 2, ["http", "grpc"], {}),
+    ("mistral-7b", "Mistral7b", 8, ["http", "grpc"], {}),
+    ("gpt-oss", "GptOss", 4, ["http", "grpc"], {}),
+    ("llama-4-maverick-17b", "Llama4Maverick", 1, ["http", "grpc"], {}),
 ]
 
 
@@ -126,7 +125,13 @@ def _make_test_class(model_id, worker_count, backends, extra_kwargs):
     @pytest.mark.parametrize("setup_backend", backends, indirect=True)
     class _NightlyTest:
         def test_nightly_perf(self, setup_backend, genai_bench_runner):
-            _run_nightly(setup_backend, genai_bench_runner, model_id, worker_count=_worker_count, **extra_kwargs)
+            _run_nightly(
+                setup_backend,
+                genai_bench_runner,
+                model_id,
+                worker_count=_worker_count,
+                **extra_kwargs,
+            )
 
     return _NightlyTest
 

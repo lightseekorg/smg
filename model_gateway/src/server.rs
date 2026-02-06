@@ -254,7 +254,7 @@ async fn v1_messages(
 ) -> Response {
     state
         .router
-        .route_messages(Some(&headers), &body, Some(body.model.as_str()))
+        .route_messages(Some(&headers), &body, &body.model)
         .await
 }
 

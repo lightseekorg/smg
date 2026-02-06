@@ -39,6 +39,35 @@ jobs:
       - id: check
         uses: ./.github/actions/check-ci
 
+  python-lint:
+    needs: check-ci
+    if: needs.check-ci.outputs.should_run == 'true'
+    runs-on: k8s-runner-cpu
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install linting tools
+        run: pip install ruff mypy
+
+      - name: Ruff check
+        run: ruff check e2e_test/ bindings/python/ scripts/
+
+      - name: Ruff format check
+        run: ruff format --check e2e_test/ bindings/python/ scripts/
+
+      - name: Mypy (e2e_test)
+        run: mypy e2e_test/ --config-file mypy.ini
+
+      - name: Mypy (bindings/python)
+        run: mypy bindings/python/ --config-file mypy.ini
+
   build-wheel:
     needs: check-ci
     if: needs.check-ci.outputs.should_run == 'true'
@@ -185,7 +214,7 @@ jobs:
       matrix:
         include:
           - name: benchmarks
-            timeout: 32
+            timeout: 20
             test_dirs: "e2e_test/benchmarks"
             extra_deps: "genai-bench==0.0.3"
             env_vars: ""
@@ -194,7 +223,7 @@ jobs:
             parallel_opts: ""  # No parallel for benchmarks (performance measurement)
             ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py --ignore=e2e_test/benchmarks/test_nightly_perf.py"  # Go and nightly benchmarks run in dedicated jobs
           - name: responses
-            timeout: 45
+            timeout: 25
             test_dirs: "e2e_test/responses"
             extra_deps: ""
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
@@ -204,7 +233,7 @@ jobs:
             parallel_opts: ""  # Cloud backend tests not compatible with parallel execution
             ignore_opts: ""
           - name: e2e
-            timeout: 45
+            timeout: 20
             test_dirs: "e2e_test/router e2e_test/embeddings"
             extra_deps: "pytest-parallel py"  # py is required for pytest-parallel with newer pytest
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
@@ -212,7 +241,7 @@ jobs:
             parallel_opts: "--workers 1 --tests-per-worker 4"  # Thread-based parallelism
             ignore_opts: ""
           - name: chat-completions-sglang
-            timeout: 45
+            timeout: 20
             test_dirs: "e2e_test/chat_completions"
             extra_deps: "pytest-parallel py"
             env_vars: "E2E_RUNTIME=sglang SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
@@ -221,7 +250,7 @@ jobs:
             test_filter: ""
             ignore_opts: ""
           - name: chat-completions-vllm
-            timeout: 45
+            timeout: 20
             test_dirs: "e2e_test/chat_completions"
             extra_deps: "pytest-parallel py"
             env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
@@ -233,7 +262,7 @@ jobs:
             setup_vllm: true
             ignore_opts: ""
           - name: vllm-pd
-            timeout: 45
+            timeout: 15
             test_dirs: "e2e_test/router/test_pd_mmlu.py"
             extra_deps: ""
             env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
@@ -243,7 +272,7 @@ jobs:
             setup_vllm: true
             ignore_opts: ""
           - name: chat-completions-trtllm
-            timeout: 90
+            timeout: 25
             test_dirs: "e2e_test/chat_completions"
             extra_deps: "pytest-parallel py"
             env_vars: "E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1"
@@ -395,7 +424,7 @@ jobs:
     needs: [check-ci, build-wheel]
     if: needs.check-ci.outputs.should_run == 'true'
     runs-on: k8s-runner-gpu
-    timeout-minutes: 45
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -506,7 +535,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
+    needs: [check-ci, python-lint, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -516,7 +545,7 @@ jobs:
           if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
             echo "CI was skipped (external contributor without run-ci label)"
             exit 0
-          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
+          elif [[ "${{ needs.python-lint.result }}" == "failure" || "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else

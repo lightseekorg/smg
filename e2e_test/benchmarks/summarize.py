@@ -42,9 +42,7 @@ def generate_summary(base_dir: Path) -> str:
     benchmarks = discover_benchmarks(base_dir)
 
     if not benchmarks:
-        return (
-            "## Gateway E2E Genai-Bench Results Summary\n\nNo benchmark results found."
-        )
+        return "## Gateway E2E Genai-Bench Results Summary\n\nNo benchmark results found."
 
     lines = [
         "## Gateway E2E Genai-Bench Results Summary",
@@ -84,9 +82,7 @@ def generate_summary(base_dir: Path) -> str:
                     "| GPU | Mean (%) | p5 | p10 | p25 | p50 | p75 | p90 | p95 |",
                     "|-----|----------|----|-----|-----|-----|-----|-----|-----|",
                 ]
-                for gpu_id, stats in sorted(
-                    gpu.per_gpu.items(), key=lambda x: int(x[0])
-                ):
+                for gpu_id, stats in sorted(gpu.per_gpu.items(), key=lambda x: int(x[0])):
                     gpu_lines.append(
                         f"| {gpu_id} | {stats.get('mean', 0):.2f} | "
                         f"{stats.get('p5', 0):.2f} | {stats.get('p10', 0):.2f} | "

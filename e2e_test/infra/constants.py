@@ -1,16 +1,16 @@
 """Constants and enums for E2E test infrastructure."""
 
-from enum import Enum
+from enum import StrEnum
 
 
-class ConnectionMode(str, Enum):
+class ConnectionMode(StrEnum):
     """Worker connection protocol."""
 
     HTTP = "http"
     GRPC = "grpc"
 
 
-class WorkerType(str, Enum):
+class WorkerType(StrEnum):
     """Worker specialization type."""
 
     REGULAR = "regular"
@@ -18,7 +18,7 @@ class WorkerType(str, Enum):
     DECODE = "decode"
 
 
-class Runtime(str, Enum):
+class Runtime(StrEnum):
     """Inference runtime/backend."""
 
     SGLANG = "sglang"
@@ -99,6 +99,7 @@ def is_trtllm() -> bool:
     """
     return get_runtime() == "trtllm"
 
+
 # Runtime display labels
 RUNTIME_LABELS = {
     "sglang": "SGLang",
@@ -119,14 +120,10 @@ HEALTH_CHECK_INTERVAL = 2  # Check every 2s (was 5s)
 
 # Model loading configuration
 INITIAL_GRACE_PERIOD = 30  # Wait before first health check (model loading time)
-LAUNCH_STAGGER_DELAY = (
-    10  # Delay between launching multiple workers (avoid I/O contention)
-)
+LAUNCH_STAGGER_DELAY = 10  # Delay between launching multiple workers (avoid I/O contention)
 
 # Retry configuration
-MAX_RETRY_ATTEMPTS = (
-    6  # Max retries with exponential backoff (total ~63s: 1+2+4+8+16+32)
-)
+MAX_RETRY_ATTEMPTS = 6  # Max retries with exponential backoff (total ~63s: 1+2+4+8+16+32)
 
 # Display formatting
 LOG_SEPARATOR_WIDTH = 60  # Width for log separator lines (e.g., "="*60)

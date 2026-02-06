@@ -43,6 +43,9 @@ wasmtime-wasi = "41.0"
 tokio-util = { version = "0.7", features = ["rt"] }
 scopeguard = "1.2"
 
+[workspace.lints.rust]
+unused_qualifications = "warn"
+
 [profile.release]
 opt-level = "z"     # Optimize for size
 lto = "fat"         # Full LTO for smaller binaries
