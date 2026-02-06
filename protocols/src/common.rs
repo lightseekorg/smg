@@ -230,23 +230,20 @@ pub struct StreamOptions {
     pub include_usage: Option<bool>,
 }
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolCallDelta {
     pub index: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "type")]
     pub tool_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub function: Option<FunctionCallDelta>,
 }
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FunctionCallDelta {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub arguments: Option<String>,
 }
 
@@ -382,14 +379,13 @@ pub struct Tool {
     pub function: Function,
 }
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Function {
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub parameters: Value, // JSON Schema
     /// Whether to enable strict schema adherence (OpenAI structured outputs)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
 }
 
@@ -501,14 +497,13 @@ pub struct CompletionTokensDetails {
 }
 
 /// Usage information (used by rerank and other endpoints)
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UsageInfo {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
 }
 
@@ -559,14 +554,13 @@ pub struct ErrorResponse {
     pub error: ErrorDetail,
 }
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ErrorDetail {
     pub message: String,
     #[serde(rename = "type")]
     pub error_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub param: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
 }
 
