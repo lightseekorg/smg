@@ -46,21 +46,6 @@ impl Default for McpLoopConfig {
     }
 }
 
-/// Extract MCP server label from request tools, falling back to default.
-pub fn extract_server_label(tools: Option<&[ResponseTool]>, default_label: &str) -> String {
-    tools
-        .and_then(|tools| {
-            tools.iter().find_map(|tool| {
-                if matches!(tool.r#type, ResponseToolType::Mcp) {
-                    tool.server_label.clone()
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or_else(|| default_label.to_string())
-}
-
 /// Resolve the MCP server label for a tool name.
 ///
 /// Uses orchestrator inventory to find the tool's server key, then maps it to the
@@ -346,35 +331,6 @@ mod tests {
         };
 
         Arc::new(McpOrchestrator::new(config).await.unwrap())
-    }
-
-    #[test]
-    fn test_extract_server_label_with_mcp_tool() {
-        let tools = vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
-            server_label: Some("my-server".to_string()),
-            ..Default::default()
-        }];
-
-        let label = extract_server_label(Some(&tools), "default");
-        assert_eq!(label, "my-server");
-    }
-
-    #[test]
-    fn test_extract_server_label_no_mcp_tools() {
-        let tools = vec![ResponseTool {
-            r#type: ResponseToolType::WebSearchPreview,
-            ..Default::default()
-        }];
-
-        let label = extract_server_label(Some(&tools), "default");
-        assert_eq!(label, "default");
-    }
-
-    #[test]
-    fn test_extract_server_label_none_tools() {
-        let label = extract_server_label(None, "default");
-        assert_eq!(label, "default");
     }
 
     #[test]

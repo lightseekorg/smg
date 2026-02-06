@@ -52,7 +52,7 @@ use crate::{
             streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
             ResponsesContext,
         },
-        mcp_utils::{extract_server_label, DEFAULT_MAX_ITERATIONS},
+        mcp_utils::{resolve_tool_server_label, DEFAULT_MAX_ITERATIONS},
     },
 };
 
@@ -492,10 +492,7 @@ async fn execute_tool_loop_streaming_internal(
     model_id: Option<String>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
-    // Extract server label from original request tools
-    let server_label = extract_server_label(original_request.tools.as_deref(), "request-mcp");
-
-    let mut state = ToolLoopState::new(original_request.input.clone(), server_label.clone());
+    let mut state = ToolLoopState::new(original_request.input.clone());
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
     // Generate response ID first so we can use it for both emitter and request context
@@ -524,10 +521,12 @@ async fn execute_tool_loop_streaming_internal(
     emitter.send_event(&event, &tx)?;
 
     // Get MCP tools and convert to chat format (do this once before loop)
-    let mcp_tools = {
+    let (mcp_servers, server_keys): (Vec<(String, String)>, Vec<String>) = {
         let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_orchestrator.list_tools_for_servers(&servers)
+        let keys = servers.iter().map(|(_, key)| key.clone()).collect();
+        (servers.clone(), keys)
     };
+    let mcp_tools = ctx.mcp_orchestrator.list_tools_for_servers(&server_keys);
     let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&mcp_tools);
     trace!(
         "Streaming: Converted {} MCP tools to chat format",
@@ -554,7 +553,13 @@ async fn execute_tool_loop_streaming_internal(
 
         // Emit mcp_list_tools as first output item (only once, on first iteration)
         if !mcp_list_tools_emitted {
-            emitter.emit_mcp_list_tools_sequence(&state.server_label, &mcp_tools, &tx)?;
+            for (label, key) in mcp_servers.iter() {
+                let tools_for_server = ctx
+                    .mcp_orchestrator
+                    .list_tools_for_servers(std::slice::from_ref(key));
+
+                emitter.emit_mcp_list_tools_sequence(label, &tools_for_server, &tx)?;
+            }
             mcp_list_tools_emitted = true;
         }
 
@@ -624,9 +629,10 @@ async fn execute_tool_loop_streaming_internal(
             }
 
             // Get server_keys once before processing tool calls
-            let server_keys: Vec<String> = {
+            let (mcp_servers, server_keys): (Vec<(String, String)>, Vec<String>) = {
                 let servers = ctx.requested_servers.read().unwrap();
-                servers.clone()
+                let keys = servers.iter().map(|(_, key)| key.clone()).collect();
+                (servers.clone(), keys)
             };
 
             // Process each MCP tool call
@@ -653,6 +659,12 @@ async fn execute_tool_loop_streaming_internal(
                     ResponseStreamEventEmitter::type_str_for_format(Some(&response_format));
                 let output_item_type =
                     ResponseStreamEventEmitter::output_item_type_for_format(Some(&response_format));
+                let resolved_label = resolve_tool_server_label(
+                    Some(ctx.mcp_orchestrator.as_ref()),
+                    &tool_call.name,
+                    &mcp_servers,
+                    &server_keys,
+                );
 
                 // Allocate output_index with correct type (generates appropriate item_id prefix)
                 let (output_index, item_id) = emitter.allocate_output_index(output_item_type);
@@ -667,7 +679,7 @@ async fn execute_tool_loop_streaming_internal(
                 });
                 attach_mcp_server_label(
                     &mut item,
-                    Some(&state.server_label),
+                    Some(resolved_label.as_str()),
                     Some(&response_format),
                 );
 
@@ -725,7 +737,7 @@ async fn execute_tool_loop_streaming_internal(
                         &tool_call.name,
                         arguments,
                         &server_keys,
-                        &state.server_label,
+                        &resolved_label,
                         &request_ctx,
                     )
                     .await;
@@ -754,7 +766,7 @@ async fn execute_tool_loop_streaming_internal(
                             });
                             attach_mcp_server_label(
                                 &mut item_done,
-                                Some(&state.server_label),
+                                Some(resolved_label.as_str()),
                                 Some(&response_format),
                             );
 
@@ -782,7 +794,7 @@ async fn execute_tool_loop_streaming_internal(
                             });
                             attach_mcp_server_label(
                                 &mut item_done,
-                                Some(&state.server_label),
+                                Some(resolved_label.as_str()),
                                 Some(&response_format),
                             );
 
@@ -812,7 +824,7 @@ async fn execute_tool_loop_streaming_internal(
                         });
                         attach_mcp_server_label(
                             &mut item_done,
-                            Some(&state.server_label),
+                            Some(resolved_label.as_str()),
                             Some(&response_format),
                         );
 
@@ -852,7 +864,7 @@ async fn execute_tool_loop_streaming_internal(
                     &output_value,
                     &response_format,
                     &tool_call.call_id,
-                    &state.server_label,
+                    &resolved_label,
                     &tool_call.name,
                     &tool_call.arguments,
                 );

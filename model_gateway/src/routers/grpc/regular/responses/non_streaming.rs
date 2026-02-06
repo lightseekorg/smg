@@ -28,7 +28,7 @@ use crate::{
         grpc::common::responses::{
             ensure_mcp_connection, persist_response_if_needed, ResponsesContext,
         },
-        mcp_utils::{extract_server_label, DEFAULT_MAX_ITERATIONS},
+        mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
 };
 
@@ -50,13 +50,13 @@ pub(super) async fn route_responses_internal(
     let modified_request = load_conversation_history(ctx, &request).await?;
 
     // 2. Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) =
+    let (has_mcp_tools, mcp_servers) =
         ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await?;
 
     // Set the server keys in the context
     {
         let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = server_keys;
+        *servers = mcp_servers;
     }
 
     let responses_response = if has_mcp_tools {
@@ -160,17 +160,13 @@ pub(super) async fn execute_tool_loop(
     model_id: Option<String>,
     response_id: Option<String>,
 ) -> Result<ResponsesResponse, Response> {
-    // Get server label from original request tools
-    let server_label = extract_server_label(original_request.tools.as_deref(), "request-mcp");
-
-    let mut state = ToolLoopState::new(original_request.input.clone(), server_label.clone());
+    let mut state = ToolLoopState::new(original_request.input.clone());
 
     // Configuration: max iterations as safety limit
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
     trace!(
-        "Starting MCP tool loop: server_label={}, max_tool_calls={:?}, max_iterations={}",
-        server_label,
+        "Starting MCP tool loop: max_tool_calls={:?}, max_iterations={}",
         max_tool_calls,
         DEFAULT_MAX_ITERATIONS
     );
@@ -188,7 +184,8 @@ pub(super) async fn execute_tool_loop(
     // Get MCP tools and convert to chat format (do this once before loop)
     let mcp_tools = {
         let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_orchestrator.list_tools_for_servers(&servers)
+        let server_keys: Vec<String> = servers.iter().map(|(_, key)| key.clone()).collect();
+        ctx.mcp_orchestrator.list_tools_for_servers(&server_keys)
     };
     let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&mcp_tools);
     trace!(
@@ -324,9 +321,10 @@ pub(super) async fn execute_tool_loop(
             }
 
             // Get server_keys for tool execution
-            let server_keys: Vec<String> = {
+            let (mcp_servers, server_keys): (Vec<(String, String)>, Vec<String>) = {
                 let servers = ctx.requested_servers.read().unwrap();
-                servers.clone()
+                let keys = servers.iter().map(|(_, key)| key.clone()).collect();
+                (servers.clone(), keys)
             };
 
             // Convert tool calls to execution inputs
@@ -342,7 +340,7 @@ pub(super) async fn execute_tool_loop(
             // Execute all MCP tools via unified API
             let results = ctx
                 .mcp_orchestrator
-                .execute_tools(inputs, &server_keys, &server_label, &request_ctx)
+                .execute_tools(inputs, &server_keys, &mcp_servers, &request_ctx)
                 .await;
 
             // Process results: record metrics and state
@@ -421,17 +419,23 @@ pub(super) async fn execute_tool_loop(
 
             // Inject MCP metadata into output
             if state.total_calls > 0 {
-                // Prepend mcp_list_tools item
-                let servers = ctx.requested_servers.read().unwrap();
-                let mcp_list_tools =
-                    build_mcp_list_tools_item(&ctx.mcp_orchestrator, &server_label, &servers);
-                responses_response.output.insert(0, mcp_list_tools);
+                // Prepend mcp_list_tools items for each server
+                let mcp_servers = ctx.requested_servers.read().unwrap();
+                for (label, key) in mcp_servers.iter().rev() {
+                    let mcp_list_tools = build_mcp_list_tools_item(
+                        &ctx.mcp_orchestrator,
+                        label,
+                        std::slice::from_ref(key),
+                    );
+                    responses_response.output.insert(0, mcp_list_tools);
+                }
 
                 // Append all mcp_call items at the end
                 responses_response.output.extend(state.mcp_call_items);
 
                 trace!(
-                    "Injected MCP metadata: 1 mcp_list_tools + {} mcp_call items",
+                    "Injected MCP metadata: {} mcp_list_tools + {} mcp_call items",
+                    mcp_servers.len(),
                     state.total_calls
                 );
             }

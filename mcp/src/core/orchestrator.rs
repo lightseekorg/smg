@@ -28,6 +28,7 @@
 
 use std::{
     borrow::Cow,
+    collections::HashMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -69,7 +70,7 @@ use crate::{
 /// Build request headers from token and custom headers.
 fn build_request_headers(
     token: &Option<String>,
-    custom_headers: &std::collections::HashMap<String, String>,
+    custom_headers: &HashMap<String, String>,
 ) -> McpResult<reqwest::header::HeaderMap> {
     let mut headers = reqwest::header::HeaderMap::new();
 
@@ -99,7 +100,7 @@ fn build_request_headers(
 fn build_http_client(
     proxy_config: Option<&McpProxyConfig>,
     token: &Option<String>,
-    custom_headers: &std::collections::HashMap<String, String>,
+    custom_headers: &HashMap<String, String>,
 ) -> McpResult<reqwest::Client> {
     let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
 
@@ -989,7 +990,7 @@ impl McpOrchestrator {
     /// # Arguments
     /// * `inputs` - Tool calls to execute
     /// * `allowed_servers` - Server keys to search within
-    /// * `server_label` - User-facing label for API responses (from request config)
+    /// * `mcp_servers` - MCP servers for this request (label, server_key)
     /// * `request_ctx` - Request context for approval and tenant isolation
     ///
     /// # Returns
@@ -999,9 +1000,17 @@ impl McpOrchestrator {
         &self,
         inputs: Vec<ToolExecutionInput>,
         allowed_servers: &[String],
-        server_label: &str,
+        mcp_servers: &[(String, String)],
         request_ctx: &McpRequestContext<'_>,
     ) -> Vec<ToolExecutionOutput> {
+        let fallback_label = mcp_servers
+            .first()
+            .map(|(label, _)| label.as_str())
+            .unwrap_or("mcp");
+        let server_label_map: HashMap<_, _> = mcp_servers
+            .iter()
+            .map(|(label, key)| (key.as_str(), label.as_str()))
+            .collect();
         let mut results = Vec::with_capacity(inputs.len());
 
         for input in inputs {
@@ -1024,6 +1033,11 @@ impl McpOrchestrator {
                     ("unknown".to_string(), ResponseFormat::Passthrough, None)
                 }
             };
+
+            let server_label = server_label_map
+                .get(server_key.as_str())
+                .copied()
+                .unwrap_or(fallback_label);
 
             let (output, is_error, error_message) = {
                 let handle_error = |err_msg: String| {

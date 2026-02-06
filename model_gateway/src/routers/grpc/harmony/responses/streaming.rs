@@ -27,7 +27,7 @@ use crate::{
             },
             harmony::{processor::ResponsesIterationResult, streaming::HarmonyStreamingProcessor},
         },
-        mcp_utils::{extract_server_label, DEFAULT_MAX_ITERATIONS},
+        mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
 };
 
@@ -46,7 +46,7 @@ pub(crate) async fn serve_harmony_responses_stream(
     };
 
     // Check MCP connection BEFORE starting stream and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) = match ensure_mcp_connection(
+    let (has_mcp_tools, mcp_servers) = match ensure_mcp_connection(
         &ctx.mcp_orchestrator,
         current_request.tools.as_deref(),
     )
@@ -59,7 +59,7 @@ pub(crate) async fn serve_harmony_responses_stream(
     // Set the server keys in the context
     {
         let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = server_keys;
+        *servers = mcp_servers;
     }
 
     // Create SSE channel
@@ -121,14 +121,17 @@ async fn execute_mcp_tool_loop_streaming(
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) {
-    let server_label = extract_server_label(current_request.tools.as_deref(), "sglang-mcp");
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
 
     // Note: For streaming, the emitter's original_request (set before spawn) preserves
     // the original tools. MCP tools are only merged into current_request for model calls.
 
     // Add filtered MCP tools (static + requested dynamic) to the request
-    let server_keys: Vec<String> = ctx.requested_servers.read().unwrap().clone();
+    let (mcp_servers, server_keys): (Vec<(String, String)>, Vec<String>) = {
+        let servers = ctx.requested_servers.read().unwrap();
+        let keys = servers.iter().map(|(_, key)| key.clone()).collect();
+        (servers.clone(), keys)
+    };
     let mcp_tools = ctx.mcp_orchestrator.list_tools_for_servers(&server_keys);
     if !mcp_tools.is_empty() {
         let mcp_response_tools = convert_mcp_tools_to_response_tools(&mcp_tools);
@@ -156,17 +159,20 @@ async fn execute_mcp_tool_loop_streaming(
         })
         .unwrap_or_default();
 
-    // Set server label for MCP tool call events
-    emitter.set_mcp_server_label(server_label.clone());
-
-    let mut mcp_tracking = McpCallTracking::new(server_label.clone());
+    let mut mcp_tracking = McpCallTracking::new();
 
     // Emit mcp_list_tools on first iteration
-    if emitter
-        .emit_mcp_list_tools_sequence(&server_label, &mcp_tools, tx)
-        .is_err()
-    {
-        return;
+    for (label, key) in mcp_servers.iter() {
+        let tools_for_server = ctx
+            .mcp_orchestrator
+            .list_tools_for_servers(std::slice::from_ref(key));
+
+        if emitter
+            .emit_mcp_list_tools_sequence(label, &tools_for_server, tx)
+            .is_err()
+        {
+            return;
+        }
     }
 
     debug!(
@@ -223,7 +229,7 @@ async fn execute_mcp_tool_loop_streaming(
             emitter,
             tx,
             Some(&ctx.mcp_orchestrator),
-            Some(&server_keys),
+            Some(&mcp_servers),
             Some(&mcp_tool_names),
         )
         .await
@@ -297,14 +303,14 @@ async fn execute_mcp_tool_loop_streaming(
 
                 // Execute MCP tools (if any)
                 let mcp_results = if !mcp_tool_calls.is_empty() {
+                    let mcp_servers = ctx.requested_servers.read().unwrap().clone();
                     match execute_mcp_tools(
                         &ctx.mcp_orchestrator,
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,
                         &request_id,
-                        &server_label,
-                        &mcp_tools,
+                        &mcp_servers,
                     )
                     .await
                     {
