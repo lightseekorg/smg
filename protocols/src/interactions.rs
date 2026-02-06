@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_with::skip_serializing_none;
 use validator::{Validate, ValidationError};
 
 use super::common::{default_model, default_true, Function, GenerationRequest};
@@ -13,6 +14,7 @@ use super::common::{default_model, default_true, Function, GenerationRequest};
 // Request Type
 // ============================================================================
 
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 #[validate(schema(function = "validate_interactions_request"))]
 pub struct InteractionsRequest {
@@ -23,26 +25,21 @@ pub struct InteractionsRequest {
 
     /// Agent name (e.g., "deep-research-pro-preview-12-2025")
     /// Required if model is not provided
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
 
     /// Input content - can be string or array of Content objects
     pub input: InteractionsInput,
 
     /// System instruction for the model
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub system_instruction: Option<String>,
 
     /// Available tools
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<InteractionsTool>>,
 
     /// Response format for structured outputs
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<Value>,
 
     /// MIME type for the response (required if response_format is set)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_mime_type: Option<String>,
 
     /// Whether to stream the response
@@ -58,34 +55,26 @@ pub struct InteractionsRequest {
     pub background: bool,
 
     /// Generation configuration
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub generation_config: Option<GenerationConfig>,
 
     /// Agent configuration (only applicable when agent is specified)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_config: Option<AgentConfig>,
 
     /// Response modalities (text, image, audio)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_modalities: Option<Vec<ResponseModality>>,
 
     /// Link to prior interaction for stateful conversations
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_interaction_id: Option<String>,
 }
 
-fn validate_interactions_request(
-    req: &InteractionsRequest,
-) -> Result<(), ValidationError> {
+fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), ValidationError> {
     // Either model or agent must be provided
     if req.model.is_empty() && req.agent.is_none() {
         return Err(ValidationError::new("model_or_agent_required"));
     }
     // response_mime_type is required when response_format is set
     if req.response_format.is_some() && req.response_mime_type.is_none() {
-        return Err(ValidationError::new(
-            "response_mime_type_required",
-        ));
+        return Err(ValidationError::new("response_mime_type_required"));
     }
     Ok(())
 }
@@ -162,46 +151,37 @@ impl GenerationRequest for InteractionsRequest {
 // Response Type
 // ============================================================================
 
+#[skip_serializing_none]
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct InteractionsResponse {
     /// Model used
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
     /// Agent used
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
 
     /// Interaction ID
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 
     /// Interaction status
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<InteractionsStatus>,
 
     /// Creation timestamp (ISO 8601)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub created: Option<String>,
 
     /// Last update timestamp (ISO 8601)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub updated: Option<String>,
 
     /// Role of the interaction
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
 
     /// Output content
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub outputs: Option<Vec<Content>>,
+    pub outputs: Option<Vec<OutputContent>>,
 
     /// Usage information
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<InteractionsUsage>,
 
     /// Previous interaction ID for conversation threading
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_interaction_id: Option<String>,
 }
 
@@ -232,32 +212,30 @@ impl InteractionsResponse {
 // ============================================================================
 
 /// Query parameters for GET /interactions/{id}
+#[skip_serializing_none]
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct InteractionsGetParams {
     /// Whether to stream the response
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
     /// Last event ID for resuming a stream
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_event_id: Option<String>,
     /// API version
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_version: Option<String>,
 }
 
 /// Query parameters for DELETE /interactions/{id}
+#[skip_serializing_none]
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct InteractionsDeleteParams {
     /// API version
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_version: Option<String>,
 }
 
 /// Query parameters for POST /interactions/{id}/cancel
+#[skip_serializing_none]
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct InteractionsCancelParams {
     /// API version
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_version: Option<String>,
 }
 
@@ -267,6 +245,7 @@ pub struct InteractionsCancelParams {
 
 /// Interaction tool types
 /// See: https://ai.google.dev/api/interactions-api#Resource:Tool
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InteractionsTool {
@@ -280,25 +259,20 @@ pub enum InteractionsTool {
     UrlContext {},
     /// MCP Server tool
     McpServer {
-        #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         url: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         headers: Option<HashMap<String, String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         allowed_tools: Option<AllowedTools>,
     },
 }
 
 /// Allowed tools configuration for MCP server
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct AllowedTools {
     /// Tool choice mode: auto, any, none, or validated
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<ToolChoiceType>,
     /// List of allowed tool names
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
 }
 
@@ -315,36 +289,27 @@ pub enum ToolChoiceType {
 // Generation Config (Gemini-specific)
 // ============================================================================
 
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GenerationConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequences: Option<Vec<String>>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_level: Option<ThinkingLevel>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_summaries: Option<ThinkingSummaries>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub speech_config: Option<SpeechConfig>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub image_config: Option<ImageConfig>,
 }
 
@@ -372,27 +337,24 @@ pub enum ToolChoice {
     Config(ToolChoiceConfig),
 }
 
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ToolChoiceConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<AllowedTools>,
 }
 
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SpeechConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub voice: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,
 }
 
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ImageConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub aspect_ratio: Option<AspectRatio>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub image_size: Option<ImageSize>,
 }
 
@@ -484,68 +446,44 @@ pub enum TurnContent {
 
 /// Content is a polymorphic type representing different content types
 /// See: https://ai.google.dev/api/interactions-api#Resource:Content
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Content {
     /// Text content
     Text {
-        #[serde(skip_serializing_if = "Option::is_none")]
         text: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         annotations: Option<Vec<Annotation>>,
     },
 
     /// Image content
     Image {
-        #[serde(skip_serializing_if = "Option::is_none")]
         data: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         uri: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         mime_type: Option<ImageMimeType>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         resolution: Option<MediaResolution>,
     },
 
     /// Audio content
     Audio {
-        #[serde(skip_serializing_if = "Option::is_none")]
         data: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         uri: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         mime_type: Option<AudioMimeType>,
     },
 
     /// Document content (PDF)
     Document {
-        #[serde(skip_serializing_if = "Option::is_none")]
         data: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         uri: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         mime_type: Option<DocumentMimeType>,
     },
 
     /// Video content
     Video {
-        #[serde(skip_serializing_if = "Option::is_none")]
         data: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         uri: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         mime_type: Option<VideoMimeType>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         resolution: Option<MediaResolution>,
-    },
-
-    /// Thought content (for extended thinking)
-    Thought {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        signature: Option<String>,
-        /// Summary is an array of Content (typically text)
-        #[serde(skip_serializing_if = "Option::is_none")]
-        summary: Option<Vec<Content>>,
     },
 
     /// Function call content
@@ -557,9 +495,7 @@ pub enum Content {
 
     /// Function result content
     FunctionResult {
-        #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
         result: Value,
         call_id: String,
@@ -567,61 +503,43 @@ pub enum Content {
 
     /// Code execution call content
     CodeExecutionCall {
-        #[serde(skip_serializing_if = "Option::is_none")]
         arguments: Option<CodeExecutionArguments>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
 
     /// Code execution result content
     CodeExecutionResult {
-        #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
     },
 
     /// URL context call content
     UrlContextCall {
-        #[serde(skip_serializing_if = "Option::is_none")]
         arguments: Option<UrlContextArguments>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
 
     /// URL context result content
     UrlContextResult {
-        #[serde(skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<UrlContextResultData>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
     },
 
     /// Google search call content
     GoogleSearchCall {
-        #[serde(skip_serializing_if = "Option::is_none")]
         arguments: Option<GoogleSearchArguments>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
 
     /// Google search result content
     GoogleSearchResult {
-        #[serde(skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<GoogleSearchResultData>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
     },
 
@@ -635,45 +553,72 @@ pub enum Content {
 
     /// MCP server tool result content
     McpServerToolResult {
-        #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         server_name: Option<String>,
         result: Value,
         call_id: String,
     },
 }
 
+/// Thought content for extended thinking (output only)
+/// See: https://ai.google.dev/api/interactions-api#Resource:ThoughtContent
+#[skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ThoughtContent {
+    /// Type discriminator, always "thought"
+    #[serde(rename = "type")]
+    pub content_type: ThoughtContentType,
+    /// Opaque signature for the thought
+    pub signature: Option<String>,
+    /// Summary is an array of Content (typically text)
+    pub summary: Option<Vec<Content>>,
+}
+
+/// Type marker for ThoughtContent
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum ThoughtContentType {
+    #[serde(rename = "thought")]
+    Thought,
+}
+
+/// Output content can be either regular Content or ThoughtContent
+/// Used in InteractionsResponse.outputs
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum OutputContent {
+    /// Thought content (for extended thinking)
+    Thought(ThoughtContent),
+    /// Regular content types
+    Content(Content),
+}
+
 /// Annotation for text content (citations)
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Annotation {
     /// Start of the attributed segment, measured in bytes
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub start_index: Option<u32>,
     /// End of the attributed segment, exclusive
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub end_index: Option<u32>,
     /// Source attributed for a portion of the text (URL, title, or other identifier)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
 
 /// Arguments for URL context call
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UrlContextArguments {
     /// The URLs to fetch
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub urls: Option<Vec<String>>,
 }
 
 /// Result data for URL context result
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UrlContextResultData {
     /// The URL that was fetched
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// The status of the URL retrieval
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<UrlContextStatus>,
 }
 
@@ -688,35 +633,32 @@ pub enum UrlContextStatus {
 }
 
 /// Arguments for Google search call
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GoogleSearchArguments {
     /// Web search queries
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub queries: Option<Vec<String>>,
 }
 
 /// Result data for Google search result
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GoogleSearchResultData {
     /// URI reference of the search result
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     /// Title of the search result
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// Web content snippet
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub rendered_content: Option<String>,
 }
 
 /// Arguments for code execution call
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CodeExecutionArguments {
     /// Programming language (currently only Python is supported)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<CodeExecutionLanguage>,
     /// The code to be executed
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
 }
 
@@ -867,35 +809,25 @@ pub enum InteractionsStatus {
 // ============================================================================
 
 /// Token count by modality
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModalityTokens {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub modality: Option<ResponseModality>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<u32>,
 }
 
+#[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InteractionsUsage {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_input_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens_by_modality: Option<Vec<ModalityTokens>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_cached_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_tokens_by_modality: Option<Vec<ModalityTokens>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_output_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens_by_modality: Option<Vec<ModalityTokens>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_tool_use_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_use_tokens_by_modality: Option<Vec<ModalityTokens>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_thought_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u32>,
 }
 
