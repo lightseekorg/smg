@@ -817,22 +817,34 @@ def test_launch_server_process_and_cleanup(monkeypatch):
     assert passed_sa.dp_size == 1
 
     # cleanup_processes
+    import signal as _sig
+
     p1 = FakeProcess(target=None, args=())
     p1._alive = False
     p2 = FakeProcess(target=None, args=())
     p2._alive = True
+    # Process that was never started (pid is None) should be skipped
+    p_no_pid = FakeProcess(target=None, args=())
+    p_no_pid.pid = None
+    p_no_pid._alive = False
 
     calls = []
 
     def fake_killpg(pid, sig):
         calls.append((pid, sig))
+        # Simulate ProcessLookupError for p1 on SIGTERM (already exited)
+        if pid == p1.pid and sig == _sig.SIGTERM:
+            raise ProcessLookupError("No such process")
+        # Simulate ProcessLookupError for p2 on SIGKILL
+        if pid == p2.pid and sig == _sig.SIGKILL:
+            raise ProcessLookupError("No such process")
 
     monkeypatch.setattr(ls.os, "killpg", fake_killpg)
 
-    ls.cleanup_processes([p1, p2])
+    ls.cleanup_processes([p_no_pid, p1, p2])
 
-    import signal as _sig
-
+    # p_no_pid should be skipped (no killpg calls with None pid)
+    assert all(pid is not None for pid, _ in calls)
     assert (p1.pid, _sig.SIGTERM) in calls and (p2.pid, _sig.SIGTERM) in calls
     assert (p2.pid, _sig.SIGKILL) in calls
 
