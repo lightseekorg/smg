@@ -34,6 +34,10 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # Ensure you have the latest stable
 rustup update stable
 rustup default stable
+
+# Install nightly toolchain (required for rustfmt unstable options)
+rustup toolchain install nightly
+rustup component add rustfmt --toolchain nightly
 ```
 
 ### 3. Install Development Tools
