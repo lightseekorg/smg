@@ -83,7 +83,6 @@ pub(crate) struct ResponseStreamEventEmitter {
     accumulated_text: String,
     has_emitted_output_item_added: bool,
     has_emitted_content_part_added: bool,
-    pub(crate) mcp_server_label: Option<String>,
     // Output item tracking
     output_items: Vec<OutputItemState>,
     next_output_index: usize,
@@ -105,7 +104,6 @@ impl ResponseStreamEventEmitter {
             accumulated_text: String::new(),
             has_emitted_output_item_added: false,
             has_emitted_content_part_added: false,
-            mcp_server_label: None,
             output_items: Vec::new(),
             next_output_index: 0,
             current_message_output_index: None,
@@ -117,11 +115,6 @@ impl ResponseStreamEventEmitter {
     /// Set the original request for including all fields in response.completed
     pub fn set_original_request(&mut self, request: ResponsesRequest) {
         self.original_request = Some(request);
-    }
-
-    /// Set the MCP server label for MCP tool call events
-    pub fn set_mcp_server_label(&mut self, server_label: String) {
-        self.mcp_server_label = Some(server_label);
     }
 
     /// Update tool call output items with tool execution results

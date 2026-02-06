@@ -36,16 +36,13 @@ pub(super) struct McpCallRecord {
 /// so we can build proper mcp_list_tools and mcp_call output items.
 #[derive(Debug, Clone)]
 pub(super) struct McpCallTracking {
-    /// MCP server label (e.g., "sglang-mcp")
-    pub server_label: String,
     /// All tool call records across all iterations
     pub tool_calls: Vec<McpCallRecord>,
 }
 
 impl McpCallTracking {
-    pub fn new(server_label: String) -> Self {
+    pub fn new() -> Self {
         Self {
-            server_label,
             tool_calls: Vec::new(),
         }
     }
@@ -188,32 +185,14 @@ pub(super) fn build_next_request_with_tools(
 /// (McpCall, WebSearchCall, CodeInterpreterCall, FileSearchCall).
 ///
 /// Following non-Harmony pipeline pattern:
-/// 1. Prepend mcp_list_tools at the beginning
+/// 1. Prepend mcp_list_tools for each server at the beginning
 /// 2. Append all tool output items at the end
 pub(super) fn inject_mcp_metadata(
     response: &mut ResponsesResponse,
     tracking: &McpCallTracking,
     mcp_tools: &[mcp::ToolEntry],
+    mcp_servers: &[(String, String)],
 ) {
-    // Build mcp_list_tools item
-    let tools_info: Vec<McpToolInfo> = mcp_tools
-        .iter()
-        .map(|entry| McpToolInfo {
-            name: entry.tool.name.to_string(),
-            description: entry.tool.description.as_ref().map(|d| d.to_string()),
-            input_schema: Value::Object((*entry.tool.input_schema).clone()),
-            annotations: Some(json!({
-                "read_only": false
-            })),
-        })
-        .collect();
-
-    let mcp_list_tools = ResponseOutputItem::McpListTools {
-        id: format!("mcpl_{}", Uuid::new_v4()),
-        server_label: tracking.server_label.clone(),
-        tools: tools_info,
-    };
-
     // Collect tool output items (already transformed with correct type)
     let tool_output_items: Vec<ResponseOutputItem> = tracking
         .tool_calls
@@ -222,8 +201,29 @@ pub(super) fn inject_mcp_metadata(
         .collect();
 
     // Inject into response output:
-    // 1. Prepend mcp_list_tools at the beginning
-    response.output.insert(0, mcp_list_tools);
+    // 1. Prepend mcp_list_tools for each server at the beginning
+    for (label, key) in mcp_servers.iter().rev() {
+        let tools_info: Vec<McpToolInfo> = mcp_tools
+            .iter()
+            .filter(|entry| entry.server_key() == key)
+            .map(|entry| McpToolInfo {
+                name: entry.tool.name.to_string(),
+                description: entry.tool.description.as_ref().map(|d| d.to_string()),
+                input_schema: Value::Object((*entry.tool.input_schema).clone()),
+                annotations: Some(json!({
+                    "read_only": false
+                })),
+            })
+            .collect();
+
+        let mcp_list_tools = ResponseOutputItem::McpListTools {
+            id: format!("mcpl_{}", Uuid::new_v4()),
+            server_label: label.clone(),
+            tools: tools_info,
+        };
+
+        response.output.insert(0, mcp_list_tools);
+    }
 
     // 2. Append all tool output items at the end
     response.output.extend(tool_output_items);

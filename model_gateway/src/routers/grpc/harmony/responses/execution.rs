@@ -44,8 +44,7 @@ pub(super) async fn execute_mcp_tools(
     tracking: &mut McpCallTracking,
     model_id: &str,
     request_id: &str,
-    server_label: &str,
-    mcp_tools: &[ToolEntry],
+    mcp_servers: &[(String, String)],
 ) -> Result<Vec<ToolResult>, Response> {
     // Create request context for tool execution
     let request_ctx = mcp_orchestrator.create_request_context(
@@ -56,13 +55,7 @@ pub(super) async fn execute_mcp_tools(
 
     // Extract unique server_keys from mcp_tools
     // For small lists (typical: 1-10 tools), linear scan is faster than HashSet
-    let mut server_keys = Vec::new();
-    for entry in mcp_tools {
-        let key = entry.server_key().to_string();
-        if !server_keys.iter().any(|k| k == &key) {
-            server_keys.push(key);
-        }
-    }
+    let server_keys: Vec<String> = mcp_servers.iter().map(|(_, key)| key.clone()).collect();
 
     // Convert tool calls to execution inputs
     let inputs: Vec<ToolExecutionInput> = tool_calls
@@ -94,7 +87,7 @@ pub(super) async fn execute_mcp_tools(
 
     // Execute all tools via unified batch API
     let outputs = mcp_orchestrator
-        .execute_tools(inputs, &server_keys, server_label, &request_ctx)
+        .execute_tools(inputs, &server_keys, mcp_servers, &request_ctx)
         .await;
 
     // Convert outputs to ToolResults and record metrics/tracking
