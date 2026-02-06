@@ -373,9 +373,7 @@ pub enum Delta {
         call_id: Option<String>,
     },
     /// File search call delta
-    FileSearchCall {
-        id: Option<String>,
-    },
+    FileSearchCall { id: Option<String> },
     /// File search result delta
     FileSearchResult {
         result: Option<Vec<FileSearchResultData>>,
@@ -760,9 +758,7 @@ pub enum Content {
     },
 
     /// File search call content
-    FileSearchCall {
-        id: Option<String>,
-    },
+    FileSearchCall { id: Option<String> },
 
     /// File search result content
     FileSearchResult {
