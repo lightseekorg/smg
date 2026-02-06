@@ -18,6 +18,7 @@ use crate::validated::Normalizable;
 /// Request to create a message using the Anthropic Messages API.
 ///
 /// This is the main request type for `/v1/messages` endpoint.
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct CreateMessageRequest {
     /// The model that will complete your prompt.
@@ -33,56 +34,43 @@ pub struct CreateMessageRequest {
     pub max_tokens: u32,
 
     /// An object describing metadata about the request.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Metadata>,
 
     /// Service tier for the request (auto or standard_only).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<ServiceTier>,
 
     /// Custom text sequences that will cause the model to stop generating.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequences: Option<Vec<String>>,
 
     /// Whether to incrementally stream the response using server-sent events.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
 
     /// System prompt for providing context and instructions.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<SystemContent>,
 
     /// Amount of randomness injected into the response (0.0 to 1.0).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
 
     /// Configuration for extended thinking.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
 
     /// How the model should use the provided tools.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
 
     /// Definitions of tools that the model may use.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
 
     /// Only sample from the top K options for each subsequent token.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
 
     /// Use nucleus sampling.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
 
     // Beta features
     /// Container configuration for code execution (beta).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerConfig>,
 
     /// MCP servers to be utilized in this request (beta).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<Vec<McpServerConfig>>,
 }
 
@@ -183,17 +171,16 @@ pub enum InputContentBlock {
 }
 
 /// Text content block
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextBlock {
     /// The text content
     pub text: String,
 
     /// Cache control for this block
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 
     /// Citations for this text block
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub citations: Option<Vec<Citation>>,
 }
 
@@ -217,25 +204,22 @@ pub enum ImageSource {
 }
 
 /// Document content block
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentBlock {
     /// The document source
     pub source: DocumentSource,
 
     /// Cache control for this block
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 
     /// Optional title for the document
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 
     /// Optional context for the document
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
 
     /// Citations configuration
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub citations: Option<CitationsConfig>,
 }
 
@@ -267,21 +251,19 @@ pub struct ToolUseBlock {
 }
 
 /// Tool result block (in user messages)
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultBlock {
     /// The ID of the tool use this is a result for
     pub tool_use_id: String,
 
     /// The result content (string or blocks)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ToolResultContent>,
 
     /// Whether this result indicates an error
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
 
     /// Cache control for this block
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
@@ -338,6 +320,7 @@ pub struct ServerToolUseBlock {
 }
 
 /// Search result block
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResultBlock {
     /// Source URL or identifier
@@ -350,11 +333,9 @@ pub struct SearchResultBlock {
     pub content: Vec<TextBlock>,
 
     /// Cache control for this block
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 
     /// Citations configuration
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub citations: Option<CitationsConfig>,
 }
 
@@ -512,37 +493,35 @@ pub enum Tool {
 }
 
 /// Custom tool definition
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomTool {
     /// Name of the tool
     pub name: String,
 
     /// Optional type (defaults to "custom")
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "type")]
     pub tool_type: Option<String>,
 
     /// Description of what this tool does
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
     /// JSON schema for the tool's input
     pub input_schema: InputSchema,
 
     /// Cache control for this tool
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
 /// JSON Schema for tool input
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputSchema {
     #[serde(rename = "type")]
     pub schema_type: String,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub properties: Option<HashMap<String, Value>>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub required: Option<Vec<String>>,
 
     /// Additional properties can be stored here
@@ -575,6 +554,7 @@ pub struct TextEditorTool {
 }
 
 /// Web search tool
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSearchTool {
     #[serde(rename = "type")]
@@ -582,38 +562,30 @@ pub struct WebSearchTool {
 
     pub name: String, // "web_search"
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_domains: Option<Vec<String>>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub blocked_domains: Option<Vec<String>>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_uses: Option<u32>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub user_location: Option<UserLocation>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
 /// User location for web search
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserLocation {
     #[serde(rename = "type")]
     pub location_type: String, // "approximate"
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub city: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub country: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
 }
 
@@ -622,23 +594,21 @@ pub struct UserLocation {
 // ============================================================================
 
 /// How the model should use the provided tools
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolChoice {
     /// The model will automatically decide whether to use tools
     Auto {
-        #[serde(skip_serializing_if = "Option::is_none")]
         disable_parallel_tool_use: Option<bool>,
     },
     /// The model will use any available tools
     Any {
-        #[serde(skip_serializing_if = "Option::is_none")]
         disable_parallel_tool_use: Option<bool>,
     },
     /// The model will use the specified tool
     Tool {
         name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         disable_parallel_tool_use: Option<bool>,
     },
     /// The model will not use tools
@@ -747,6 +717,7 @@ pub enum StopReason {
 }
 
 /// Billing and rate-limit usage
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Usage {
     /// The number of input tokens used
@@ -756,23 +727,18 @@ pub struct Usage {
     pub output_tokens: u32,
 
     /// The number of input tokens used to create the cache entry
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u32>,
 
     /// The number of input tokens read from the cache
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u32>,
 
     /// Breakdown of cached tokens by TTL
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_creation: Option<CacheCreation>,
 
     /// Server tool usage information
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub server_tool_use: Option<ServerToolUsage>,
 
     /// Service tier used for the request
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
 }
 
@@ -825,30 +791,26 @@ pub enum MessageStreamEvent {
 }
 
 /// Message delta for streaming updates
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageDelta {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<StopReason>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequence: Option<String>,
 }
 
 /// Usage delta for streaming updates
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageDeltaUsage {
     pub output_tokens: u32,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u32>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u32>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u32>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub server_tool_use: Option<ServerToolUsage>,
 }
 
@@ -901,6 +863,7 @@ pub enum ApiError {
 // ============================================================================
 
 /// Request to count tokens in a message
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CountMessageTokensRequest {
     /// The model to use for token counting
@@ -910,19 +873,15 @@ pub struct CountMessageTokensRequest {
     pub messages: Vec<InputMessage>,
 
     /// System prompt
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<SystemContent>,
 
     /// Thinking configuration
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
 
     /// Tool choice
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
 
     /// Tool definitions
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
 }
 
@@ -967,18 +926,18 @@ pub struct ListModelsResponse {
 // ============================================================================
 
 /// Container configuration for code execution (beta)
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerConfig {
     /// Container ID for reuse across requests
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 
     /// Skills to be loaded in the container
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub skills: Option<Vec<String>>,
 }
 
 /// MCP server configuration (beta)
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Name of the MCP server
@@ -988,23 +947,20 @@ pub struct McpServerConfig {
     pub url: String,
 
     /// Authorization token (if required)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization_token: Option<String>,
 
     /// Tool configuration for this server
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_configuration: Option<McpToolConfiguration>,
 }
 
 /// MCP tool configuration
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolConfiguration {
     /// Whether to allow all tools
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 
     /// Allowed tool names
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
 }
 
@@ -1033,25 +989,24 @@ pub struct McpToolUseBlock {
 }
 
 /// MCP tool result block (beta) - for user messages
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolResultBlock {
     /// The ID of the tool use this is a result for
     pub tool_use_id: String,
 
     /// The result content
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ToolResultContent>,
 
     /// Whether this result indicates an error
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
 
     /// Cache control for this block
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
 /// MCP toolset definition (beta)
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolset {
     #[serde(rename = "type")]
@@ -1061,39 +1016,34 @@ pub struct McpToolset {
     pub mcp_server_name: String,
 
     /// Default configuration applied to all tools from this server
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_config: Option<McpToolDefaultConfig>,
 
     /// Configuration overrides for specific tools
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub configs: Option<HashMap<String, McpToolConfig>>,
 
     /// Cache control for this toolset
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
 /// Default configuration for MCP tools
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolDefaultConfig {
     /// Whether tools are enabled
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 
     /// Whether to defer loading
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub defer_loading: Option<bool>,
 }
 
 /// Per-tool MCP configuration
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolConfig {
     /// Whether this tool is enabled
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 
     /// Whether to defer loading
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub defer_loading: Option<bool>,
 }
 
@@ -1102,6 +1052,7 @@ pub struct McpToolConfig {
 // ============================================================================
 
 /// Code execution tool (beta)
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeExecutionTool {
     #[serde(rename = "type")]
@@ -1110,19 +1061,15 @@ pub struct CodeExecutionTool {
     pub name: String, // "code_execution"
 
     /// Allowed callers for this tool
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_callers: Option<Vec<String>>,
 
     /// Whether to defer loading
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub defer_loading: Option<bool>,
 
     /// Whether to use strict mode
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
 
     /// Cache control for this tool
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
@@ -1336,6 +1283,7 @@ pub enum TextEditorCodeExecutionToolResultErrorCode {
 // ============================================================================
 
 /// Web fetch tool (beta)
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebFetchTool {
     #[serde(rename = "type")]
@@ -1344,15 +1292,12 @@ pub struct WebFetchTool {
     pub name: String, // "web_fetch"
 
     /// Allowed callers for this tool
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_callers: Option<Vec<String>>,
 
     /// Maximum number of uses
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_uses: Option<u32>,
 
     /// Cache control for this tool
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
@@ -1422,6 +1367,7 @@ pub enum WebFetchToolResultErrorCode {
 // ============================================================================
 
 /// Tool search tool (beta)
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSearchTool {
     #[serde(rename = "type")]
@@ -1430,11 +1376,9 @@ pub struct ToolSearchTool {
     pub name: String,
 
     /// Allowed callers for this tool
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_callers: Option<Vec<String>>,
 
     /// Cache control for this tool
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
@@ -1506,6 +1450,7 @@ pub struct ContainerUploadBlock {
 // ============================================================================
 
 /// Memory tool (beta)
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryTool {
     #[serde(rename = "type")]
@@ -1514,23 +1459,18 @@ pub struct MemoryTool {
     pub name: String, // "memory"
 
     /// Allowed callers for this tool
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_callers: Option<Vec<String>>,
 
     /// Whether to defer loading
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub defer_loading: Option<bool>,
 
     /// Whether to use strict mode
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub strict: Option<bool>,
 
     /// Input examples
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub input_examples: Option<Vec<Value>>,
 
     /// Cache control for this tool
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
@@ -1539,6 +1479,7 @@ pub struct MemoryTool {
 // ============================================================================
 
 /// Computer use tool (beta)
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputerUseTool {
     #[serde(rename = "type")]
@@ -1553,15 +1494,12 @@ pub struct ComputerUseTool {
     pub display_height_px: u32,
 
     /// Display number (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub display_number: Option<u32>,
 
     /// Allowed callers for this tool
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_callers: Option<Vec<String>>,
 
     /// Cache control for this tool
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 
@@ -1606,13 +1544,13 @@ pub enum BetaInputContentBlock {
 }
 
 /// Beta output content block types (extends ContentBlock)
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BetaContentBlock {
     // Standard types
     Text {
         text: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         citations: Option<Vec<Citation>>,
     },
     ToolUse {
@@ -1646,9 +1584,7 @@ pub enum BetaContentBlock {
     },
     McpToolResult {
         tool_use_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         content: Option<ToolResultContent>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
     },
 
@@ -1679,7 +1615,6 @@ pub enum BetaContentBlock {
     },
     ToolReference {
         tool_name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
     },
 
@@ -1687,7 +1622,6 @@ pub enum BetaContentBlock {
     ContainerUpload {
         file_id: String,
         file_name: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         file_path: Option<String>,
     },
 }

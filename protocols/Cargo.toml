@@ -23,6 +23,7 @@ chrono.workspace = true
 rand.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
+serde_with.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 # Only used by protocols
