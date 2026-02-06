@@ -1,7 +1,10 @@
 use std::{
     collections::{BTreeMap, HashMap},
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -345,13 +348,13 @@ impl MeshController {
 
                 log::info!("Sync stream handler started for peer {}", peer_name);
 
-                let mut sequence: u64 = 0;
+                let sequence = Arc::new(AtomicU64::new(0));
 
                 // Send initial heartbeat
                 let heartbeat = StreamMessage {
                     message_type: StreamMessageType::Heartbeat as i32,
                     payload: None,
-                    sequence,
+                    sequence: sequence.fetch_add(1, Ordering::Relaxed),
                     peer_id: self_name.clone(),
                 };
                 if tx.send(heartbeat).await.is_err() {
@@ -373,10 +376,10 @@ impl MeshController {
                     let tx_incremental = tx.clone();
                     let self_name_incremental = self_name.clone();
                     let peer_name_incremental = peer_name.clone();
+                    let shared_sequence = sequence.clone();
 
                     tokio::spawn(async move {
                         let mut interval = tokio::time::interval(Duration::from_secs(1));
-                        let mut seq_counter: u64 = 1000; // Start from 1000 to avoid conflicts with main sequence
 
                         loop {
                             interval.tick().await;
@@ -404,8 +407,6 @@ impl MeshController {
                                         }
                                     };
 
-                                    seq_counter += 1;
-
                                     let incremental_update = StreamMessage {
                                         message_type: StreamMessageType::IncrementalUpdate as i32,
                                         payload: Some(
@@ -417,7 +418,7 @@ impl MeshController {
                                                 },
                                             ),
                                         ),
-                                        sequence: seq_counter,
+                                        sequence: shared_sequence.fetch_add(1, Ordering::Relaxed),
                                         peer_id: self_name_incremental.clone(),
                                     };
 
@@ -457,7 +458,7 @@ impl MeshController {
                 while let Some(msg_result) = incoming_stream.next().await {
                     match msg_result {
                         Ok(msg) => {
-                            sequence += 1;
+                            sequence.fetch_add(1, Ordering::Relaxed);
 
                             match msg.message_type() {
                                 StreamMessageType::IncrementalUpdate => {
@@ -577,7 +578,7 @@ impl MeshController {
                                                 error_message: String::new(),
                                             },
                                         )),
-                                        sequence,
+                                        sequence: sequence.fetch_add(1, Ordering::Relaxed),
                                         peer_id: self_name.clone(),
                                     };
                                     if tx.send(ack).await.is_err() {
@@ -602,7 +603,7 @@ impl MeshController {
                                                 error_message: String::new(),
                                             },
                                         )),
-                                        sequence,
+                                        sequence: sequence.fetch_add(1, Ordering::Relaxed),
                                         peer_id: self_name.clone(),
                                     };
                                     if tx.send(ack).await.is_err() {
@@ -616,7 +617,7 @@ impl MeshController {
                                     let heartbeat = StreamMessage {
                                         message_type: StreamMessageType::Heartbeat as i32,
                                         payload: None,
-                                        sequence,
+                                        sequence: sequence.fetch_add(1, Ordering::Relaxed),
                                         peer_id: self_name.clone(),
                                     };
                                     if tx.send(heartbeat).await.is_err() {
@@ -666,7 +667,7 @@ impl MeshController {
                                                 message_type: StreamMessageType::SnapshotChunk
                                                     as i32,
                                                 payload: Some(StreamPayload::SnapshotChunk(chunk)),
-                                                sequence: sequence + sent_chunks,
+                                                sequence: sequence.fetch_add(1, Ordering::Relaxed),
                                                 peer_id: self_name.clone(),
                                             };
 
@@ -681,7 +682,6 @@ impl MeshController {
 
                                             sent_chunks += 1;
                                         }
-                                        sequence += sent_chunks;
 
                                         log::info!(
                                             "Sent {} snapshot chunks for store {:?} to {}",
@@ -770,11 +770,6 @@ impl MeshController {
             .map_err(|e| anyhow::anyhow!("Invalid peer endpoint {}: {}", connect_url, e))?;
 
         if let Some(mtls_manager) = self.mtls_manager.clone() {
-            mtls_manager
-                .load_client_config()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to load mTLS client config: {}", e))?;
-
             let tls_domain = endpoint
                 .uri()
                 .host()

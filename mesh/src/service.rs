@@ -204,11 +204,17 @@ impl MeshServerHandler {
             .unwrap_or(1)
     }
 
-    pub fn write_data(&self, key: String, value: Vec<u8>) {
-        // Calculate the next version based on existing data
-        let version = self.next_version(&key);
+    pub fn write_data(&self, key: String, value: Vec<u8>) -> Result<()> {
+        // Keep app store write and metadata/version update in one lock scope.
+        let mut state = self.state.write();
+        let node = state.get_mut(&self.self_name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Node {} not found in cluster state during write_data",
+                self.self_name
+            )
+        })?;
 
-        // Write to the app store
+        let version = self.next_version(&key);
         let app_state = AppState {
             key: key.clone(),
             value: value.clone(),
@@ -218,12 +224,9 @@ impl MeshServerHandler {
             .app
             .insert(SKey(key.clone()), app_state, self.self_name.clone());
 
-        // Update the node's own metadata in the cluster state
-        let mut state = self.state.write();
-        if let Some(node) = state.get_mut(&self.self_name) {
-            node.metadata.insert(key, value);
-            node.version += 1;
-        }
+        node.metadata.insert(key, value);
+        node.version += 1;
+        Ok(())
     }
 
     pub fn read_data(&self, key: String) -> Option<Vec<u8>> {
@@ -641,7 +644,9 @@ mod tests {
 
         // 2. wait for node A and B to sync and write some data
         tokio::time::sleep(Duration::from_secs(2)).await;
-        handler_a.write_data("hello".into(), "world".into());
+        handler_a
+            .write_data("hello".into(), "world".into())
+            .unwrap();
         log::info!("================================================");
 
         // 3. add node C and D and wait for them to sync

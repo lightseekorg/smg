@@ -288,7 +288,9 @@ async fn test_single_node_data_operations() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Write data
-    handler.write_data("test_key".into(), "test_value".into());
+    handler
+        .write_data("test_key".into(), "test_value".into())
+        .unwrap();
 
     // Verify data was written
     let value = handler.stores.app.get(&SKey("test_key".to_string()));
@@ -373,7 +375,9 @@ async fn test_two_node_data_synchronization() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Write data on node A
-    handler_a.write_data("shared_key".into(), "shared_value".into());
+    handler_a
+        .write_data("shared_key".into(), "shared_value".into())
+        .unwrap();
 
     // Wait for automatic sync via sync_stream
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -386,7 +390,9 @@ async fn test_two_node_data_synchronization() {
     log::info!("Value on B: {:?}", value_b);
 
     // Update data on node A to see if it syncs again
-    handler_a.write_data("shared_key".into(), "shared_value2".into());
+    handler_a
+        .write_data("shared_key".into(), "shared_value2".into())
+        .unwrap();
 
     // Wait for the second update to be synced (increased wait time)
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -522,7 +528,9 @@ async fn test_multi_node_data_propagation() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Write data on node A
-    handler_a.write_data("propagated_key".into(), "propagated_value".into());
+    handler_a
+        .write_data("propagated_key".into(), "propagated_value".into())
+        .unwrap();
 
     // Wait for automatic sync via sync_stream
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -555,7 +563,9 @@ async fn test_multi_node_data_propagation() {
     assert_eq!(val_a, value_c.unwrap().value);
 
     // Write data on node B to verify continued propagation
-    handler_b.write_data("propagated_key".into(), "propagated_value".into());
+    handler_b
+        .write_data("propagated_key".into(), "propagated_value".into())
+        .unwrap();
 
     // Wait for automatic sync via sync_stream
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -609,7 +619,9 @@ async fn test_five_node_cluster_with_failure() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Write some data
-    handler_a.write_data("test_data".into(), "initial_value".into());
+    handler_a
+        .write_data("test_data".into(), "initial_value".into())
+        .unwrap();
     log::info!("Initial data written");
 
     // Add nodes C and D
