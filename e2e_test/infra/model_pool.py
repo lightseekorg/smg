@@ -1156,6 +1156,8 @@ class ModelPool:
                 "pytorch",
                 "--tp_size",
                 str(tp_size),
+                "--max_seq_len",
+                "16384",
             ]
             extra = model_spec.get("trtllm_args", [])
         else:
@@ -1198,9 +1200,11 @@ class ModelPool:
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu_slot.cuda_visible_devices()
 
-        # For TRT-LLM multi-GPU, add NCCL environment variables for compatibility
-        # across different GPU types (H100 with NVSwitch, A10 with PCIe)
-        if runtime == "trtllm" and tp_size > 1:
+        # For TRT-LLM, add NCCL environment variables for compatibility
+        # across different GPU types (H100 with NVSwitch, A10 with PCIe).
+        # Always set these (not just tp>1) because TRT-LLM may initialize NCCL
+        # even for single-GPU runs and the autotuner spawns multi-rank processes.
+        if runtime == "trtllm":
             env["NCCL_DEBUG"] = "WARN"  # Help diagnose NCCL issues
             env["NCCL_IB_DISABLE"] = "1"  # Disable InfiniBand (not on CI runners)
             # Disable shared memory - CI runners have limited /dev/shm (64MB default)

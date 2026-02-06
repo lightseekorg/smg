@@ -27,3 +27,15 @@ runs:
       with:
         path: /tmp/trtllm-wheel
         key: trtllm-wheel-${{ runner.os }}-${{ hashFiles('scripts/ci_install_trtllm.sh') }}
+
+    - name: Set NCCL environment for CI runners
+      shell: bash
+      run: |
+        # CI runner pods have limited /dev/shm (64MB default).
+        # NCCL needs ~33MB per GPU for shared memory segments, which exceeds
+        # the limit on multi-GPU runs. Disable SHM to use fallback transport.
+        echo "NCCL_SHM_DISABLE=1" >> "$GITHUB_ENV"
+        echo "NCCL_IB_DISABLE=1" >> "$GITHUB_ENV"
+        # Disable TRT-LLM allreduce autotuner which spawns multi-rank NCCL
+        # processes that also hit the /dev/shm limit during warmup.
+        echo "TLLM_DISABLE_ALLREDUCE_AUTOTUNE=1" >> "$GITHUB_ENV"
