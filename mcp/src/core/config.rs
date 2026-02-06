@@ -620,8 +620,9 @@ impl McpConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serial_test::serial;
+
+    use super::*;
 
     #[test]
     fn test_default_pool_config() {
