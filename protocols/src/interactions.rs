@@ -176,7 +176,7 @@ pub struct InteractionsResponse {
     pub role: Option<String>,
 
     /// Output content
-    pub outputs: Option<Vec<OutputContent>>,
+    pub outputs: Option<Vec<Content>>,
 
     /// Usage information
     pub usage: Option<InteractionsUsage>,
@@ -486,6 +486,12 @@ pub enum Content {
         resolution: Option<MediaResolution>,
     },
 
+    /// Thought content
+    Thought {
+        signature: Option<String>,
+        summary: Option<Vec<ThoughtSummaryContent>>,
+    },
+
     /// Function call content
     FunctionCall {
         name: String,
@@ -560,36 +566,23 @@ pub enum Content {
     },
 }
 
-/// Thought content for extended thinking (output only)
-/// See: https://ai.google.dev/api/interactions-api#Resource:ThoughtContent
+/// Content types allowed in thought summary (text or image only)
 #[skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ThoughtContent {
-    /// Type discriminator, always "thought"
-    #[serde(rename = "type")]
-    pub content_type: ThoughtContentType,
-    /// Opaque signature for the thought
-    pub signature: Option<String>,
-    /// Summary is an array of Content (typically text)
-    pub summary: Option<Vec<Content>>,
-}
-
-/// Type marker for ThoughtContent
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum ThoughtContentType {
-    #[serde(rename = "thought")]
-    Thought,
-}
-
-/// Output content can be either regular Content or ThoughtContent
-/// Used in InteractionsResponse.outputs
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(untagged)]
-pub enum OutputContent {
-    /// Thought content (for extended thinking)
-    Thought(ThoughtContent),
-    /// Regular content types
-    Content(Content),
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThoughtSummaryContent {
+    /// Text content in thought summary
+    Text {
+        text: Option<String>,
+        annotations: Option<Vec<Annotation>>,
+    },
+    /// Image content in thought summary
+    Image {
+        data: Option<String>,
+        uri: Option<String>,
+        mime_type: Option<ImageMimeType>,
+        resolution: Option<MediaResolution>,
+    },
 }
 
 /// Annotation for text content (citations)
