@@ -117,9 +117,7 @@ class TestToolUseBasic:
                         {
                             "type": "tool_result",
                             "tool_use_id": tool_use.id,
-                            "content": json.dumps(
-                                {"temperature": "22°C", "condition": "sunny"}
-                            ),
+                            "content": json.dumps({"temperature": "22°C", "condition": "sunny"}),
                         }
                     ],
                 },
