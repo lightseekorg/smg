@@ -30,8 +30,8 @@ pub struct MeshController {
     self_name: String,
     self_addr: SocketAddr,
     init_peer: Option<SocketAddr>,
-    stores: Option<Arc<StateStores>>,
-    sync_manager: Option<Arc<MeshSyncManager>>,
+    stores: Arc<StateStores>,
+    sync_manager: Arc<MeshSyncManager>,
     // Track active sync_stream connections
     sync_connections: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
@@ -51,8 +51,8 @@ impl MeshController {
             self_name: self_name.to_string(),
             self_addr,
             init_peer,
-            stores: Some(stores),
-            sync_manager: Some(sync_manager),
+            stores,
+            sync_manager,
             sync_connections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -204,11 +204,8 @@ impl MeshController {
                             });
                     } // Lock is released here
 
-                    // If node is Alive and we have stores/sync_manager, establish sync_stream connection
-                    if node_update.status == NodeStatus::Alive as i32
-                        && self.stores.is_some()
-                        && self.sync_manager.is_some()
-                    {
+                    // If node is Alive, establish sync_stream connection
+                    if node_update.status == NodeStatus::Alive as i32 {
                         if let Err(e) = self.start_sync_stream_connection(peer.clone()).await {
                             log::warn!("Failed to start sync_stream to {}: {}", peer.name, e);
                             // Connection failure doesn't affect ping flow, will retry in next cycle
@@ -223,7 +220,6 @@ impl MeshController {
                     k.ne(&self.self_name)
                         && k.ne(&peer_name)
                         && v.status == NodeStatus::Alive as i32
-                        && v.status != NodeStatus::Leaving as i32
                 });
                 let random_nodes = get_random_values_refs(&map, 3);
                 let mut reachable = false;
@@ -345,7 +341,7 @@ impl MeshController {
                 }
 
                 // Spawn a task to periodically send incremental updates (client-side sender)
-                if let (Some(stores), Some(_sync_manager)) = (&stores, &sync_manager) {
+                let incremental_sender_handle = {
                     use super::{
                         incremental::IncrementalUpdateCollector, service::gossip::IncrementalUpdate,
                         stores::StoreType as LocalStoreType,
@@ -435,8 +431,8 @@ impl MeshController {
                                 }
                             }
                         }
-                    });
-                }
+                    })
+                };
 
                 // Handle incoming messages
                 while let Some(msg_result) = incoming_stream.next().await {
@@ -479,17 +475,13 @@ impl MeshController {
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        if let (Some(ref stores), Some(_)) =
-                                                            (&stores, &sync_manager)
-                                                        {
-                                                            stores.app.insert(
-                                                                super::crdt::SKey(
-                                                                    app_state.key.clone(),
-                                                                ),
-                                                                app_state,
-                                                                state_update.actor.clone(),
-                                                            );
-                                                        }
+                                                        stores.app.insert(
+                                                            super::crdt::SKey(
+                                                                app_state.key.clone(),
+                                                            ),
+                                                            app_state,
+                                                            state_update.actor.clone(),
+                                                        );
                                                     }
                                                 }
                                                 LocalStoreType::Membership => {
@@ -499,17 +491,13 @@ impl MeshController {
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        if let (Some(ref stores), Some(_)) =
-                                                            (&stores, &sync_manager)
-                                                        {
-                                                            stores.membership.insert(
-                                                                super::crdt::SKey(
-                                                                    membership_state.name.clone(),
-                                                                ),
-                                                                membership_state,
-                                                                state_update.actor.clone(),
-                                                            );
-                                                        }
+                                                        stores.membership.insert(
+                                                            super::crdt::SKey(
+                                                                membership_state.name.clone(),
+                                                            ),
+                                                            membership_state,
+                                                            state_update.actor.clone(),
+                                                        );
                                                     }
                                                 }
                                                 LocalStoreType::Worker => {
@@ -519,14 +507,11 @@ impl MeshController {
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        if let Some(ref sync_mgr) = sync_manager {
-                                                            let actor =
-                                                                Some(state_update.actor.clone());
-                                                            sync_mgr.apply_remote_worker_state(
-                                                                worker_state,
-                                                                actor,
-                                                            );
-                                                        }
+                                                        let actor = Some(state_update.actor.clone());
+                                                        sync_manager.apply_remote_worker_state(
+                                                            worker_state,
+                                                            actor,
+                                                        );
                                                     }
                                                 }
                                                 LocalStoreType::Policy => {
@@ -536,14 +521,11 @@ impl MeshController {
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        if let Some(ref sync_mgr) = sync_manager {
-                                                            let actor =
-                                                                Some(state_update.actor.clone());
-                                                            sync_mgr.apply_remote_policy_state(
-                                                                policy_state,
-                                                                actor,
-                                                            );
-                                                        }
+                                                        let actor = Some(state_update.actor.clone());
+                                                        sync_manager.apply_remote_policy_state(
+                                                            policy_state,
+                                                            actor,
+                                                        );
                                                     }
                                                 }
                                                 LocalStoreType::RateLimit => {
@@ -553,15 +535,13 @@ impl MeshController {
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        if let Some(ref sync_mgr) = sync_manager {
-                                                            let sync_counter =
-                                                                super::crdt::SyncPNCounter::new();
-                                                            sync_counter.merge(&counter);
-                                                            sync_mgr.apply_remote_rate_limit_counter(
-                                                                state_update.key.clone(),
-                                                                &sync_counter,
-                                                            );
-                                                        }
+                                                        let sync_counter =
+                                                            super::crdt::SyncPNCounter::new();
+                                                        sync_counter.merge(&counter);
+                                                        sync_manager.apply_remote_rate_limit_counter(
+                                                            state_update.key.clone(),
+                                                            &sync_counter,
+                                                        );
                                                     }
                                                 }
                                             }
@@ -628,70 +608,63 @@ impl MeshController {
                                 StreamMessageType::SnapshotRequest => {
                                     log::info!("Received snapshot request from {}", peer_name);
                                     // Handle snapshot request - generate and send snapshot using GossipService
-                                    if let (Some(ref stores), Some(ref sync_manager)) =
-                                        (&stores, &sync_manager)
-                                    {
-                                        if let Some(StreamPayload::SnapshotRequest(req)) = &msg.payload
-                                        {
-                                            use std::net::SocketAddr;
+                                    if let Some(StreamPayload::SnapshotRequest(req)) = &msg.payload {
+                                        use std::net::SocketAddr;
 
-                                            use super::{
-                                                ping_server::GossipService,
-                                                stores::StoreType as LocalStoreType,
+                                        use super::{
+                                            ping_server::GossipService,
+                                            stores::StoreType as LocalStoreType,
+                                        };
+
+                                        let store_type = LocalStoreType::from_proto(req.store);
+                                        log::info!(
+                                            "Generating snapshot for store {:?}",
+                                            store_type
+                                        );
+
+                                        // Create a temporary GossipService to generate snapshot chunks
+                                        let service = GossipService::new(
+                                            Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
+                                            SocketAddr::from(([0, 0, 0, 0], 0)),
+                                            &self_name,
+                                        )
+                                        .with_stores(stores.clone())
+                                        .with_sync_manager(sync_manager.clone());
+
+                                        let chunks =
+                                            service.create_snapshot_chunks(store_type, 100).await;
+                                        let total_chunks = chunks.len() as u64;
+
+                                        log::info!(
+                                            "Sending {} snapshot chunks for store {:?}",
+                                            total_chunks,
+                                            store_type
+                                        );
+
+                                        for (idx, chunk) in chunks.into_iter().enumerate() {
+                                            let snapshot_chunk = StreamMessage {
+                                                message_type: StreamMessageType::SnapshotChunk
+                                                    as i32,
+                                                payload: Some(StreamPayload::SnapshotChunk(chunk)),
+                                                sequence: sequence + idx as u64,
+                                                peer_id: self_name.clone(),
                                             };
 
-                                            let store_type = LocalStoreType::from_proto(req.store);
-                                            log::info!(
-                                                "Generating snapshot for store {:?}",
-                                                store_type
-                                            );
-
-                                            // Create a temporary GossipService to generate snapshot chunks
-                                            let service = GossipService::new(
-                                                Arc::new(parking_lot::RwLock::new(
-                                                    BTreeMap::new(),
-                                                )),
-                                                SocketAddr::from(([0, 0, 0, 0], 0)),
-                                                &self_name,
-                                            )
-                                            .with_stores(stores.clone())
-                                            .with_sync_manager(sync_manager.clone());
-
-                                            let chunks =
-                                                service.create_snapshot_chunks(store_type, 100).await;
-                                            let total_chunks = chunks.len() as u64;
-
-                                            log::info!(
-                                                "Sending {} snapshot chunks for store {:?}",
-                                                total_chunks,
-                                                store_type
-                                            );
-
-                                            for (idx, chunk) in chunks.into_iter().enumerate() {
-                                                let snapshot_chunk = StreamMessage {
-                                                    message_type: StreamMessageType::SnapshotChunk
-                                                        as i32,
-                                                    payload: Some(StreamPayload::SnapshotChunk(chunk)),
-                                                    sequence: sequence + idx as u64,
-                                                    peer_id: self_name.clone(),
-                                                };
-
-                                                if tx.send(snapshot_chunk).await.is_err() {
-                                                    log::warn!(
-                                                        "Failed to send snapshot chunk {} to {}",
-                                                        idx,
-                                                        peer_name
-                                                    );
-                                                    break;
-                                                }
+                                            if tx.send(snapshot_chunk).await.is_err() {
+                                                log::warn!(
+                                                    "Failed to send snapshot chunk {} to {}",
+                                                    idx,
+                                                    peer_name
+                                                );
+                                                break;
                                             }
-
-                                            log::info!(
-                                                "Sent all snapshot chunks for store {:?} to {}",
-                                                store_type,
-                                                peer_name
-                                            );
                                         }
+
+                                        log::info!(
+                                            "Sent all snapshot chunks for store {:?} to {}",
+                                            store_type,
+                                            peer_name
+                                        );
                                     }
                                 }
                                 StreamMessageType::Ack => {
@@ -724,6 +697,8 @@ impl MeshController {
                     }
                 }
 
+                incremental_sender_handle.abort();
+                let _ = incremental_sender_handle.await;
                 log::info!("Sync stream handler stopped for peer {}", peer_name);
             }
             .instrument(span),

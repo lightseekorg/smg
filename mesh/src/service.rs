@@ -117,7 +117,6 @@ impl MeshServerHandler {
     /// Shutdown immediately without graceful shutdown
     pub fn shutdown(&self) {
         self.stop_rate_limit_task();
-        self.signal_tx.send(true).ok();
     }
 
     /// Graceful shutdown: broadcast LEAVING status to all alive nodes,
@@ -125,31 +124,36 @@ impl MeshServerHandler {
     pub async fn graceful_shutdown(&self) -> Result<()> {
         log::info!("Graceful shutdown for node {}", self.self_name);
 
-        let (leaving_node, alive_nodes) = {
+        let maybe_leaving = {
             let state = self.state.read();
 
-            let mut self_node = if let Some(self_node) = state.get(&self.self_name) {
-                self_node.clone()
-            } else {
-                self.signal_tx.send(true).ok();
-                return Ok(());
-            };
+            if let Some(self_node) = state.get(&self.self_name) {
+                let mut self_node = self_node.clone();
+                if self_node.status == NodeStatus::Leaving as i32 {
+                    None
+                } else {
+                    self_node.status = NodeStatus::Leaving as i32;
+                    self_node.version += 1;
 
-            if self_node.status != NodeStatus::Leaving as i32 {
-                self_node.status = NodeStatus::Leaving as i32;
-                self_node.version += 1;
+                    let alive_nodes = state
+                        .values()
+                        .filter(|node| {
+                            node.status == NodeStatus::Alive as i32 && node.name != self.self_name
+                            // exclude self from broadcast targets
+                        })
+                        .cloned()
+                        .collect::<Vec<NodeState>>();
 
-                let alive_nodes = state
-                    .values()
-                    .filter(|node| {
-                        node.status == NodeStatus::Alive as i32 && node.name != self.self_name
-                        // exclude self from broadcast targets
-                    })
-                    .cloned()
-                    .collect::<Vec<NodeState>>();
-                (self_node.clone(), alive_nodes)
+                    Some((self_node, alive_nodes))
+                }
             } else {
-                self.signal_tx.send(true).ok();
+                None
+            }
+        };
+        let (leaving_node, alive_nodes) = match maybe_leaving {
+            Some(values) => values,
+            None => {
+                self.stop_rate_limit_task();
                 return Ok(());
             }
         };
@@ -181,11 +185,8 @@ impl MeshServerHandler {
         );
         tokio::time::sleep(propagation_delay).await;
 
-        log::info!("Stopping rate limit task");
+        log::info!("Stopping rate limit task and signaling shutdown");
         self.stop_rate_limit_task();
-
-        log::info!("Sending shutdown signal");
-        self.signal_tx.send(true).ok();
         Ok(())
     }
 
