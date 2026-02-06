@@ -225,7 +225,7 @@ jobs:
             parallel_opts: ""  # No parallel for benchmarks (performance measurement)
             ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py --ignore=e2e_test/benchmarks/test_nightly_perf.py"  # Go and nightly benchmarks run in dedicated jobs
           - name: responses
-            timeout: 25
+            timeout: 30
             test_dirs: "e2e_test/responses"
             extra_deps: ""
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
@@ -305,7 +305,7 @@ jobs:
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
         run: |
-          sudo apt-get install -y unzip wget
+          sudo apt-get install -y unzip wget libaio1
           INSTANT_CLIENT_DIR="$HOME/instant-client"
           INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.9.0.25.07.zip"
 
@@ -362,6 +362,8 @@ jobs:
       - name: Run E2E tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
