@@ -1,6 +1,6 @@
-use aho_corasick::AhoCorasick;
 use std::hint::black_box;
 
+use aho_corasick::AhoCorasick;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 
 /// Naive implementation using nested loops with find()

@@ -1,6 +1,4 @@
-use std::{sync::Arc, thread};
-
-use std::hint::black_box;
+use std::{hint::black_box, sync::Arc, thread};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use smg::{

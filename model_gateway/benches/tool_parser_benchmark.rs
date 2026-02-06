@@ -9,6 +9,7 @@
 
 use std::{
     collections::BTreeMap,
+    hint::black_box,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -16,8 +17,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-
-use std::hint::black_box;
 
 use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
 use serde_json::json;

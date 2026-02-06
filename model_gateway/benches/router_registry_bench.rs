@@ -1,6 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
-
-use std::hint::black_box;
+use std::{collections::HashMap, hint::black_box, sync::Arc};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use smg::core::{BasicWorkerBuilder, CircuitBreakerConfig, WorkerRegistry, WorkerType};

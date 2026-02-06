@@ -10,6 +10,7 @@
 
 use std::{
     collections::BTreeMap,
+    hint::black_box,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -17,8 +18,6 @@ use std::{
     thread,
     time::Instant,
 };
-
-use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use kv_index::{StringTree, TokenTree};
