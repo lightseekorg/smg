@@ -330,25 +330,25 @@ jobs:
           path: /tmp/oracle-xe-21-slim-faststart.tar
           key: docker-oracle-xe-21-slim-faststart
 
-      - name: Start Oracle Database
-        if: matrix.setup_oracle
-        run: |
-          if [ -f /tmp/oracle-xe-21-slim-faststart.tar ]; then
-            echo "Loading Oracle image from cache..."
-            docker load -i /tmp/oracle-xe-21-slim-faststart.tar
-          else
-            echo "Pulling Oracle image from Docker Hub..."
-            docker pull gvenzl/oracle-xe:21-slim-faststart
-            echo "Saving Oracle image to cache..."
-            docker save gvenzl/oracle-xe:21-slim-faststart -o /tmp/oracle-xe-21-slim-faststart.tar
-          fi
-          docker run -d -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim-faststart
-          echo "Starting Oracle DB..."
+      # - name: Start Oracle Database
+      #   if: matrix.setup_oracle
+      #   run: |
+      #     if [ -f /tmp/oracle-xe-21-slim-faststart.tar ]; then
+      #       echo "Loading Oracle image from cache..."
+      #       docker load -i /tmp/oracle-xe-21-slim-faststart.tar
+      #     else
+      #       echo "Pulling Oracle image from Docker Hub..."
+      #       docker pull gvenzl/oracle-xe:21-slim-faststart
+      #       echo "Saving Oracle image to cache..."
+      #       docker save gvenzl/oracle-xe:21-slim-faststart -o /tmp/oracle-xe-21-slim-faststart.tar
+      #     fi
+      #     docker run -d -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim-faststart
+      #     echo "Starting Oracle DB..."
 
-          # Export Oracle connection environment variables
-          echo "ATP_USER=system" >> $GITHUB_ENV
-          echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
-          echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
+      #     # Export Oracle connection environment variables
+      #     echo "ATP_USER=system" >> $GITHUB_ENV
+      #     echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
+      #     echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
 
       - name: Cache Brave MCP Docker image
         if: matrix.setup_brave
