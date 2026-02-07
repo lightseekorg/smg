@@ -65,9 +65,12 @@ curl http://localhost:30000/v1/detokenize \
 
 `POST /parse/function_call`
 
+If control-plane auth is configured, include an admin bearer token.
+
 ```bash
 curl http://localhost:30000/parse/function_call \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
   -d '{
     "text": "{\"name\":\"get_weather\",\"arguments\":{\"city\":\"SF\"}}",
     "tool_call_parser": "json",
@@ -96,9 +99,12 @@ curl http://localhost:30000/parse/function_call \
 
 `POST /parse/reasoning`
 
+If control-plane auth is configured, include an admin bearer token.
+
 ```bash
 curl http://localhost:30000/parse/reasoning \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
   -d '{
     "text": "<think>internal reasoning</think>Final answer",
     "reasoning_parser": "deepseek_r1"
@@ -110,7 +116,7 @@ curl http://localhost:30000/parse/reasoning \
 ## Auth Notes
 
 - `tokenize` / `detokenize` are in protected routes and follow API-key middleware when configured.
-- `parse/function_call` and `parse/reasoning` are control-plane admin routes.
+- `parse/function_call` and `parse/reasoning` are control-plane admin routes when control-plane auth is configured.
 
 ---
 

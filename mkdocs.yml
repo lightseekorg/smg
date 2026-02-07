@@ -148,6 +148,7 @@ nav:
           - Logging: getting-started/logging.md
           - TLS: getting-started/tls.md
           - Control Plane Auth: getting-started/control-plane-auth.md
+          - Control Plane Operations: getting-started/control-plane-operations.md
       - Reliability and Data:
           - Reliability Controls: getting-started/reliability-controls.md
           - Data Connections: getting-started/data-connections.md

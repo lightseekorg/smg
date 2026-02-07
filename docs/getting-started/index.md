@@ -4,7 +4,7 @@ title: Getting Started
 
 # Getting Started
 
-Shepherd Model Gateway (SMG) routes requests across LLM inference workers with load balancing, failover, and observability. This page gets you from zero to a working gateway.
+Shepherd Model Gateway (SMG) routes and manages LLM traffic across workers. This page gives you a fast path to a working gateway, then points you to feature-specific setup guides.
 
 ## Install
 
@@ -16,7 +16,10 @@ Shepherd Model Gateway (SMG) routes requests across LLM inference workers with l
     pip install smg
     ```
 
-    This also installs the `smg serve` command for launching workers and the gateway together.
+    This installs both:
+
+    - `smg serve` (Python orchestration command for workers + gateway)
+    - `smg launch` (router launch path in Rust CLI)
 
 === "Cargo (crates.io)"
 
@@ -55,9 +58,13 @@ Shepherd Model Gateway (SMG) routes requests across LLM inference workers with l
 
     The binary is available at `./target/release/smg`.
 
-## Option 1: All-in-One with `smg serve`
+## Step 1: Start SMG
 
-The `smg serve` command launches inference workers and the gateway router together. It supports data parallelism for running multiple worker replicas.
+Choose one of these startup paths.
+
+### Option A: All-in-one with `smg serve`
+
+`smg serve` launches backend worker process(es) and then starts SMG with generated worker URLs.
 
 === "SGLang"
 
@@ -82,7 +89,7 @@ The `smg serve` command launches inference workers and the gateway router togeth
       --port 30000
     ```
 
-=== "TensorRT-LLM"
+=== "TensorRT-LLM (gRPC)"
 
     ```bash
     smg serve \
@@ -93,7 +100,7 @@ The `smg serve` command launches inference workers and the gateway router togeth
       --port 30000
     ```
 
-This starts `--data-parallel-size` worker replicas on separate GPUs, waits for them to become healthy, and then starts the gateway router.
+This starts `--data-parallel-size` worker replicas, waits for readiness, then starts the gateway.
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -104,11 +111,96 @@ This starts `--data-parallel-size` worker replicas on separate GPUs, waits for t
 | `--host` | `127.0.0.1` | Router host |
 | `--port` | `8080` | Router port |
 
-## Option 2: Start SMG and Workers Separately
+### Option B: Launch gateway only with `smg launch`
 
-For more control, start the gateway and workers independently.
+Use this when workers are already running or managed by another platform.
 
-### Start Workers
+For gRPC workers:
+
+```bash
+smg launch \
+  --worker-urls grpc://localhost:50051 \
+  --model-path meta-llama/Llama-3.1-8B-Instruct \
+  --policy round_robin \
+  --host 0.0.0.0 \
+  --port 30000
+```
+
+For HTTP workers:
+
+```bash
+smg launch \
+  --worker-urls http://localhost:8000 \
+  --policy round_robin \
+  --host 0.0.0.0 \
+  --port 30000
+```
+
+## Step 2: Verify Core Endpoints
+
+Health:
+
+```bash
+curl http://localhost:30000/health
+curl http://localhost:30000/readiness
+```
+
+OpenAI-compatible chat completions:
+
+```bash
+curl http://localhost:30000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [{"role": "user", "content": "Say hello in one sentence."}]
+  }'
+```
+
+Responses API:
+
+```bash
+curl http://localhost:30000/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "input": "Say hello in one sentence."
+  }'
+```
+
+## Step 3: Choose Your Setup Track
+
+### Core Deployment
+
+- [Multiple Workers](multiple-workers.md)
+- [gRPC Workers](grpc-workers.md)
+- [PD Disaggregation](pd-disaggregation.md)
+- [Service Discovery](service-discovery.md)
+
+### Operations and Security
+
+- [Monitoring](monitoring.md)
+- [Logging](logging.md)
+- [TLS](tls.md)
+- [Control Plane Auth](control-plane-auth.md)
+- [Control Plane Operations](control-plane-operations.md)
+
+### Reliability and Data
+
+- [Reliability Controls](reliability-controls.md)
+- [Data Connections](data-connections.md)
+- [Tokenization and Parsing APIs](tokenization-and-parsing.md)
+
+### Advanced Features
+
+- [Load Balancing](load-balancing.md)
+- [Tokenizer Caching](tokenizer-caching.md)
+- [MCP in Responses API](mcp.md)
+
+---
+
+## Worker Startup Recipes (Standalone)
+
+Use these when workers are not started via `smg serve`.
 
 === "SGLang (gRPC)"
 
@@ -151,33 +243,6 @@ For more control, start the gateway and workers independently.
       --tp_size 1
     ```
 
-Wait until the worker is ready before starting SMG.
-
-### Start SMG
-
-For gRPC workers, use the `grpc://` URL scheme and provide `--model-path` so the gateway can load the tokenizer:
-
-=== "gRPC Workers"
-
-    ```bash
-    smg \
-      --worker-urls grpc://localhost:50051 \
-      --model-path meta-llama/Llama-3.1-8B-Instruct \
-      --policy round_robin \
-      --host 0.0.0.0 \
-      --port 30000
-    ```
-
-=== "HTTP Workers"
-
-    ```bash
-    smg \
-      --worker-urls http://localhost:8000 \
-      --policy round_robin \
-      --host 0.0.0.0 \
-      --port 30000
-    ```
-
 ### PD Disaggregation Workers
 
 For prefill-decode disaggregation, start separate prefill and decode workers:
@@ -207,7 +272,7 @@ For prefill-decode disaggregation, start separate prefill and decode workers:
     Start SMG with bootstrap ports for SGLang coordination:
 
     ```bash
-    smg \
+    smg launch \
       --pd-disaggregation \
       --prefill grpc://localhost:50051 8998 \
       --decode grpc://localhost:50052 \
@@ -239,7 +304,7 @@ For prefill-decode disaggregation, start separate prefill and decode workers:
     Start SMG with bootstrap ports for SGLang coordination:
 
     ```bash
-    smg \
+    smg launch \
       --pd-disaggregation \
       --prefill http://localhost:8000 8998 \
       --decode http://localhost:8001 \
