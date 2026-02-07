@@ -805,7 +805,7 @@ impl HarmonyStreamingProcessor {
 
                                 let label = session
                                     .map(|s| s.resolve_tool_server_label(tool_name))
-                                    .unwrap_or_default();
+                                    .unwrap_or_else(|| "mcp".to_string());
                                 attach_mcp_server_label(
                                     &mut item,
                                     Some(label.as_str()),
@@ -967,7 +967,7 @@ impl HarmonyStreamingProcessor {
 
                                 let label = session
                                     .map(|s| s.resolve_tool_server_label(tool_name))
-                                    .unwrap_or_default();
+                                    .unwrap_or_else(|| "mcp".to_string());
                                 attach_mcp_server_label(
                                     &mut item,
                                     Some(label.as_str()),
@@ -1098,7 +1098,7 @@ impl HarmonyStreamingProcessor {
 
                         let label = session
                             .map(|s| s.resolve_tool_server_label(tool_name))
-                            .unwrap_or_default();
+                            .unwrap_or_else(|| "mcp".to_string());
                         attach_mcp_server_label(
                             &mut item,
                             Some(label.as_str()),

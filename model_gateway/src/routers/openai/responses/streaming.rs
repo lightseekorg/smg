@@ -139,36 +139,38 @@ pub(super) fn apply_event_transformations_inplace(
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let response_format = ctx
-                            .session
-                            .and_then(|s| s.find_tool_by_name(&tool_name))
-                            .map(|entry| entry.response_format)
-                            .unwrap_or(ResponseFormat::Passthrough);
 
-                        // Determine item type and ID prefix based on response_format
-                        let (new_type, id_prefix) = match response_format {
-                            ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
-                            _ => (ItemType::MCP_CALL, "mcp_"),
-                        };
+                        // Only transform if this is an MCP tool; keep function_call unchanged
+                        if let Some(entry) =
+                            ctx.session.and_then(|s| s.find_tool_by_name(&tool_name))
+                        {
+                            let response_format = entry.response_format;
 
-                        item["type"] = json!(new_type);
-                        if new_type == ItemType::MCP_CALL {
-                            let label = ctx
-                                .session
-                                .map(|s| s.resolve_tool_server_label(&tool_name))
-                                .unwrap_or_default();
-                            item["server_label"] = json!(label);
-                        }
+                            // Determine item type and ID prefix based on response_format
+                            let (new_type, id_prefix) = match response_format {
+                                ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
+                                _ => (ItemType::MCP_CALL, "mcp_"),
+                            };
 
-                        // Transform ID from fc_* to appropriate prefix
-                        if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                            if let Some(stripped) = id.strip_prefix("fc_") {
-                                let new_id = format!("{}{}", id_prefix, stripped);
-                                item["id"] = json!(new_id);
+                            item["type"] = json!(new_type);
+                            if new_type == ItemType::MCP_CALL {
+                                let label = ctx
+                                    .session
+                                    .map(|s| s.resolve_tool_server_label(&tool_name))
+                                    .unwrap_or_else(|| "mcp".to_string());
+                                item["server_label"] = json!(label);
                             }
-                        }
 
-                        changed = true;
+                            // Transform ID from fc_* to appropriate prefix
+                            if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                                if let Some(stripped) = id.strip_prefix("fc_") {
+                                    let new_id = format!("{}{}", id_prefix, stripped);
+                                    item["id"] = json!(new_id);
+                                }
+                            }
+
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -722,10 +724,11 @@ pub(super) async fn handle_streaming_with_tool_interception(
         let mut preserved_response_id: Option<String> = None;
 
         // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)
+        let session_request_id = format!("resp_{}", uuid::Uuid::new_v4());
         let session = McpToolSession::new(
             &orchestrator_clone,
             loop_config.mcp_servers.clone(),
-            "streaming-request",
+            &session_request_id,
         );
 
         let streaming_ctx = StreamingEventContext {

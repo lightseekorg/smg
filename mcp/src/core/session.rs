@@ -113,10 +113,7 @@ impl<'a> McpToolSession<'a> {
             .map(|(label, _)| label.as_str())
             .unwrap_or("mcp");
 
-        let Some(entry) = self
-            .orchestrator
-            .find_tool_by_name(tool_name, &self.server_keys)
-        else {
+        let Some(entry) = self.find_tool_by_name(tool_name) else {
             return fallback_label.to_string();
         };
 

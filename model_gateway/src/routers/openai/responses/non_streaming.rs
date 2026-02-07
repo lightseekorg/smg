@@ -74,7 +74,11 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         };
         prepare_mcp_tools_as_functions(&mut payload, &orchestrator, &server_keys);
 
-        let session = McpToolSession::new(&orchestrator, mcp_servers, "non-streaming-request");
+        let session_request_id = original_body
+            .request_id
+            .clone()
+            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
+        let session = McpToolSession::new(&orchestrator, mcp_servers, &session_request_id);
 
         match execute_tool_loop(
             ctx.components.client(),
