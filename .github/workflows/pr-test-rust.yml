@@ -290,6 +290,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Warm up Docker daemon
+        if: matrix.setup_oracle || matrix.setup_brave
+        run: docker info > /dev/null 2>&1
+
       - name: Setup vLLM backend
         if: matrix.setup_vllm
         uses: ./.github/actions/setup-vllm
@@ -301,6 +305,18 @@ jobs:
       - name: Setup SGLang backend
         if: ${{ !matrix.setup_vllm && !matrix.setup_trtllm }}
         uses: ./.github/actions/setup-sglang
+      
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: smg-wheel
+          path: wheel/
+
+      - name: Install wheel and test dependencies
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+          bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
 
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
@@ -335,7 +351,7 @@ jobs:
       - name: Start Oracle Database
         if: matrix.setup_oracle
         run: |
-          docker run -d -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim
+          docker run -d --rm -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim-faststart
           echo "Starting Oracle DB..."
 
           # Export Oracle connection environment variables
@@ -357,18 +373,6 @@ jobs:
           sleep 2
           curl -f --max-time 1 http://localhost:8001/sse > /dev/null 2>&1 && echo "Brave MCP Server is healthy!" || echo "Brave MCP Server responded"
 
-      - name: Download wheel artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: smg-wheel
-          path: wheel/
-
-      - name: Install wheel and test dependencies
-        run: |
-          pip uninstall -y smg || true
-          pip install wheel/*.whl
-          bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
-
       - name: Run E2E tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -384,14 +388,6 @@ jobs:
         with:
           name: genai-bench-results-all-policies
           path: benchmark_**/
-
-      - name: Cleanup Brave MCP Server
-        if: always() && matrix.setup_brave
-        run: docker rm -f brave-search-server || true
-
-      - name: Cleanup Oracle Database
-        if: always() && matrix.setup_oracle
-        run: docker rm -f oracle-db || true
 
   go-unit-tests:
     name: go-unit-tests
