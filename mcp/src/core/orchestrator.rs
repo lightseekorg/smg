@@ -138,6 +138,17 @@ pub enum ToolCallResult {
     PendingApproval(McpApprovalRequest),
 }
 
+/// Result of looking up a tool by name within allowed servers.
+#[derive(Debug, Clone)]
+pub enum ToolLookupResult {
+    /// Exactly one matching tool was found.
+    Found(Box<ToolEntry>),
+    /// No matching tool was found.
+    NotFound,
+    /// Multiple tools with the same name were found on different servers.
+    Collision(Vec<String>),
+}
+
 /// Internal result type for approval-checked execution.
 ///
 /// Used to avoid code duplication between `execute_tool_with_approval` and
@@ -871,6 +882,18 @@ impl McpOrchestrator {
         tool_name: &str,
         allowed_servers: &[String],
     ) -> Option<ToolEntry> {
+        match self.find_tool_by_name_detailed(tool_name, allowed_servers) {
+            ToolLookupResult::Found(entry) => Some(*entry),
+            ToolLookupResult::NotFound | ToolLookupResult::Collision(_) => None,
+        }
+    }
+
+    /// Find a tool entry by name within allowed servers with explicit collision reporting.
+    pub fn find_tool_by_name_detailed(
+        &self,
+        tool_name: &str,
+        allowed_servers: &[String],
+    ) -> ToolLookupResult {
         // For small server lists (typical case: 1-5), linear scan is faster than HashSet
         let is_allowed =
             |server_key: &str| -> bool { allowed_servers.iter().any(|s| s == server_key) };
@@ -882,12 +905,19 @@ impl McpOrchestrator {
             .filter(|(name, server_key, _)| name == tool_name && is_allowed(server_key))
             .collect();
 
-        // Only return if exactly one match (no collision)
-        if matching.len() == 1 {
-            let (_, server_key, _) = &matching[0];
-            self.tool_inventory.get_entry(server_key, tool_name)
-        } else {
-            None
+        match matching.len() {
+            0 => ToolLookupResult::NotFound,
+            1 => {
+                let (_, server_key, _) = &matching[0];
+                match self.tool_inventory.get_entry(server_key, tool_name) {
+                    Some(entry) => ToolLookupResult::Found(Box::new(entry)),
+                    None => ToolLookupResult::NotFound,
+                }
+            }
+            _ => {
+                let servers = matching.into_iter().map(|(_, s, _)| s).collect();
+                ToolLookupResult::Collision(servers)
+            }
         }
     }
 
@@ -1035,19 +1065,33 @@ impl McpOrchestrator {
         // Preserve arguments string for conversation history
         let arguments_str = input.arguments.to_string();
 
-        // Look up tool entry to get server_key, response_format, and entry itself
-        let tool_entry = self.find_tool_by_name(&input.tool_name, allowed_servers);
+        // Look up tool entry to get server_key, response_format, and entry itself.
+        // Keep collision info so callers get a precise error instead of a not-found fallback.
+        let lookup = self.find_tool_by_name_detailed(&input.tool_name, allowed_servers);
 
-        let (server_key, response_format, entry) = match tool_entry {
-            Some(entry) => (
+        let (server_key, response_format, entry, lookup_error) = match lookup {
+            ToolLookupResult::Found(entry) => (
                 entry.server_key().to_string(),
                 entry.response_format.clone(),
                 Some(entry),
+                None,
             ),
-            None => {
-                // Tool not found - will error below
-                ("unknown".to_string(), ResponseFormat::Passthrough, None)
-            }
+            ToolLookupResult::NotFound => (
+                "unknown".to_string(),
+                ResponseFormat::Passthrough,
+                None,
+                Some(format!("Tool '{}' not found", input.tool_name)),
+            ),
+            ToolLookupResult::Collision(servers) => (
+                "unknown".to_string(),
+                ResponseFormat::Passthrough,
+                None,
+                Some(format!(
+                    "Tool '{}' matches multiple servers: {}",
+                    input.tool_name,
+                    servers.join(", ")
+                )),
+            ),
         };
 
         let server_label = server_label_map
@@ -1063,13 +1107,30 @@ impl McpOrchestrator {
             };
 
             match entry {
-                None => handle_error(format!("Tool '{}' not found", input.tool_name)),
+                None => handle_error(
+                    lookup_error.unwrap_or_else(|| format!("Tool '{}' not found", input.tool_name)),
+                ),
                 Some(entry) => {
-                    // Execute with approval, getting raw result
-                    match self
+                    let qualified = QualifiedToolName::new(entry.server_key(), entry.tool_name());
+
+                    // Keep active execution/shutdown bookkeeping and metrics aligned with `call_tool`.
+                    self.active_executions.fetch_add(1, Ordering::SeqCst);
+                    let _guard = scopeguard::guard(Arc::clone(&self.active_executions), |count| {
+                        count.fetch_sub(1, Ordering::SeqCst);
+                    });
+                    self.metrics.record_call_start(&qualified);
+                    let call_start_time = Instant::now();
+
+                    // Execute with approval, getting raw result.
+                    let raw_result = self
                         .execute_tool_with_approval_raw(&entry, input.arguments, request_ctx)
-                        .await
-                    {
+                        .await;
+
+                    let duration_ms = call_start_time.elapsed().as_millis() as u64;
+                    self.metrics
+                        .record_call_end(&qualified, raw_result.is_ok(), duration_ms);
+
+                    match raw_result {
                         Ok(Some(raw_result)) => {
                             // Convert raw CallToolResult to JSON
                             let output = self.call_result_to_json(&raw_result);

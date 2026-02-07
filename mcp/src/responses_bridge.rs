@@ -66,7 +66,7 @@ pub fn build_response_tools(entries: &[ToolEntry]) -> Vec<ResponseTool> {
             authorization: None,
             headers: None,
             server_label: Some(entry.server_key().to_string()),
-            server_description: entry.tool.description.as_ref().map(|d| d.to_string()),
+            server_description: None,
             require_approval: None,
             allowed_tools: None,
         })
@@ -81,9 +81,11 @@ pub fn build_mcp_tool_infos(entries: &[ToolEntry]) -> Vec<McpToolInfo> {
             name: entry.tool_name().to_string(),
             description: entry.tool.description.as_ref().map(|d| d.to_string()),
             input_schema: Value::Object((*entry.tool.input_schema).clone()),
-            annotations: Some(json!({
-                "read_only": false
-            })),
+            annotations: entry
+                .tool
+                .annotations
+                .as_ref()
+                .and_then(|a| serde_json::to_value(a).ok()),
         })
         .collect()
 }
