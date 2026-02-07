@@ -17,6 +17,7 @@ use super::{
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools},
 };
 use crate::{
+    mcp::McpToolSession,
     observability::metrics::Metrics,
     protocols::responses::{ResponseToolType, ResponsesRequest},
     routers::{
@@ -126,15 +127,15 @@ async fn execute_mcp_tool_loop_streaming(
     // Note: For streaming, the emitter's original_request (set before spawn) preserves
     // the original tools. MCP tools are only merged into current_request for model calls.
 
+    // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
+    let mcp_servers = ctx.requested_servers.read().unwrap().clone();
+    let session_request_id = format!("resp_{}", Uuid::new_v4());
+    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
+
     // Add filtered MCP tools (static + requested dynamic) to the request
-    let (mcp_servers, server_keys): (Vec<(String, String)>, Vec<String>) = {
-        let servers = ctx.requested_servers.read().unwrap();
-        let keys = servers.iter().map(|(_, key)| key.clone()).collect();
-        (servers.clone(), keys)
-    };
-    let mcp_tools = ctx.mcp_orchestrator.list_tools_for_servers(&server_keys);
+    let mcp_tools = session.mcp_tools();
     if !mcp_tools.is_empty() {
-        let mcp_response_tools = convert_mcp_tools_to_response_tools(&mcp_tools);
+        let mcp_response_tools = convert_mcp_tools_to_response_tools(mcp_tools);
         let mut all_tools = current_request.tools.clone().unwrap_or_default();
         all_tools.extend(mcp_response_tools);
         current_request.tools = Some(all_tools);
@@ -162,10 +163,8 @@ async fn execute_mcp_tool_loop_streaming(
     let mut mcp_tracking = McpCallTracking::new();
 
     // Emit mcp_list_tools on first iteration
-    for (label, key) in mcp_servers.iter() {
-        let tools_for_server = ctx
-            .mcp_orchestrator
-            .list_tools_for_servers(std::slice::from_ref(key));
+    for (label, key) in session.mcp_servers().iter() {
+        let tools_for_server = session.list_tools_for_server(key);
 
         if emitter
             .emit_mcp_list_tools_sequence(label, &tools_for_server, tx)
@@ -228,8 +227,7 @@ async fn execute_mcp_tool_loop_streaming(
             execution_result,
             emitter,
             tx,
-            Some(&ctx.mcp_orchestrator),
-            Some(&mcp_servers),
+            Some(&session),
             Some(&mcp_tool_names),
         )
         .await
@@ -248,7 +246,7 @@ async fn execute_mcp_tool_loop_streaming(
                 analysis,
                 partial_text,
                 usage,
-                request_id,
+                request_id: _,
             } => {
                 debug!(
                     tool_call_count = tool_calls.len(),
@@ -303,14 +301,11 @@ async fn execute_mcp_tool_loop_streaming(
 
                 // Execute MCP tools (if any)
                 let mcp_results = if !mcp_tool_calls.is_empty() {
-                    let mcp_servers = ctx.requested_servers.read().unwrap().clone();
                     match execute_mcp_tools(
-                        &ctx.mcp_orchestrator,
+                        &session,
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,
-                        &request_id,
-                        &mcp_servers,
                     )
                     .await
                     {
@@ -445,7 +440,6 @@ async fn execute_without_mcp_streaming(
         execution_result,
         emitter,
         tx,
-        None,
         None,
         None,
     )

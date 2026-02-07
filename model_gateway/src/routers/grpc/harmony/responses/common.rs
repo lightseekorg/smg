@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::execution::ToolResult;
 use crate::{
     data_connector::ResponseId,
-    mcp,
+    mcp::McpToolSession,
     protocols::{
         common::{ToolCall, ToolChoice, ToolChoiceValue},
         responses::{
@@ -190,9 +190,11 @@ pub(super) fn build_next_request_with_tools(
 pub(super) fn inject_mcp_metadata(
     response: &mut ResponsesResponse,
     tracking: &McpCallTracking,
-    mcp_tools: &[mcp::ToolEntry],
-    mcp_servers: &[(String, String)],
+    session: &McpToolSession<'_>,
 ) {
+    let mcp_tools = session.mcp_tools();
+    let mcp_servers = session.mcp_servers();
+
     // Collect tool output items (already transformed with correct type)
     let tool_output_items: Vec<ResponseOutputItem> = tracking
         .tool_calls

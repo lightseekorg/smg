@@ -33,7 +33,7 @@ use super::{
 };
 use crate::{
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::{ApprovalMode, ResponseFormat, ResponseTransformer, TenantContext},
+    mcp::{McpToolSession, ResponseFormat, ResponseTransformer},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         chat::{
@@ -52,7 +52,7 @@ use crate::{
             streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
             ResponsesContext,
         },
-        mcp_utils::{resolve_tool_server_label, DEFAULT_MAX_ITERATIONS},
+        mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
 };
 
@@ -495,15 +495,12 @@ async fn execute_tool_loop_streaming_internal(
     let mut state = ToolLoopState::new(original_request.input.clone());
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
-    // Generate response ID first so we can use it for both emitter and request context
+    // Generate response ID first so we can use it for both emitter and session
     let response_id = format!("resp_{}", Uuid::new_v4());
 
-    // Create a request context for tool execution (using the same response_id)
-    let request_ctx = ctx.mcp_orchestrator.create_request_context(
-        response_id.clone(),
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
-    );
+    // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
+    let mcp_servers = ctx.requested_servers.read().unwrap().clone();
+    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &response_id);
 
     // Create response event emitter
     let model = current_request.model.clone();
@@ -521,13 +518,8 @@ async fn execute_tool_loop_streaming_internal(
     emitter.send_event(&event, &tx)?;
 
     // Get MCP tools and convert to chat format (do this once before loop)
-    let (mcp_servers, server_keys): (Vec<(String, String)>, Vec<String>) = {
-        let servers = ctx.requested_servers.read().unwrap();
-        let keys = servers.iter().map(|(_, key)| key.clone()).collect();
-        (servers.clone(), keys)
-    };
-    let mcp_tools = ctx.mcp_orchestrator.list_tools_for_servers(&server_keys);
-    let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&mcp_tools);
+    let mcp_tools = session.mcp_tools();
+    let mcp_chat_tools = convert_mcp_tools_to_chat_tools(mcp_tools);
     trace!(
         "Streaming: Converted {} MCP tools to chat format",
         mcp_chat_tools.len()
@@ -553,10 +545,8 @@ async fn execute_tool_loop_streaming_internal(
 
         // Emit mcp_list_tools as first output item (only once, on first iteration)
         if !mcp_list_tools_emitted {
-            for (label, key) in mcp_servers.iter() {
-                let tools_for_server = ctx
-                    .mcp_orchestrator
-                    .list_tools_for_servers(std::slice::from_ref(key));
+            for (label, key) in session.mcp_servers().iter() {
+                let tools_for_server = session.list_tools_for_server(key);
 
                 emitter.emit_mcp_list_tools_sequence(label, &tools_for_server, &tx)?;
             }
@@ -628,13 +618,6 @@ async fn execute_tool_loop_streaming_internal(
                 break;
             }
 
-            // Get server_keys once before processing tool calls
-            let (mcp_servers, server_keys): (Vec<(String, String)>, Vec<String>) = {
-                let servers = ctx.requested_servers.read().unwrap();
-                let keys = servers.iter().map(|(_, key)| key.clone()).collect();
-                (servers.clone(), keys)
-            };
-
             // Process each MCP tool call
             for tool_call in mcp_tool_calls {
                 state.total_calls += 1;
@@ -648,23 +631,14 @@ async fn execute_tool_loop_streaming_internal(
                 );
 
                 // Look up response_format for this tool
-                let response_format = ctx
-                    .mcp_orchestrator
-                    .find_tool_by_name(&tool_call.name, &server_keys)
-                    .map(|entry| entry.response_format)
-                    .unwrap_or(ResponseFormat::Passthrough);
+                let response_format = session.tool_response_format(&tool_call.name);
 
                 // Use emitter helpers to determine correct type and allocate index
                 let item_type =
                     ResponseStreamEventEmitter::type_str_for_format(Some(&response_format));
                 let output_item_type =
                     ResponseStreamEventEmitter::output_item_type_for_format(Some(&response_format));
-                let resolved_label = resolve_tool_server_label(
-                    Some(ctx.mcp_orchestrator.as_ref()),
-                    &tool_call.name,
-                    &mcp_servers,
-                    &server_keys,
-                );
+                let resolved_label = session.resolve_tool_server_label(&tool_call.name);
 
                 // Allocate output_index with correct type (generates appropriate item_id prefix)
                 let (output_index, item_id) = emitter.allocate_output_index(output_item_type);
@@ -731,15 +705,8 @@ async fn execute_tool_loop_streaming_internal(
                     serde_json::from_str(&tool_call.arguments).unwrap_or_else(|_| json!({}));
 
                 // Execute tool and convert result using unified serialization
-                let call_result = ctx
-                    .mcp_orchestrator
-                    .call_tool_by_name(
-                        &tool_call.name,
-                        arguments,
-                        &server_keys,
-                        &resolved_label,
-                        &request_ctx,
-                    )
+                let call_result = session
+                    .call_tool_by_name(&tool_call.name, arguments, &resolved_label)
                     .await;
 
                 let (output_str, success, _error) = match call_result {
