@@ -116,12 +116,6 @@ async fn route_responses_streaming(
             Err(response) => return response,
         };
 
-    // Set the server keys in the context
-    {
-        let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = mcp_servers;
-    }
-
     if has_mcp_tools {
         debug!("MCP tools detected in streaming mode, using streaming tool loop");
 
@@ -131,6 +125,7 @@ async fn route_responses_streaming(
             &request,
             headers,
             model_id,
+            mcp_servers,
         )
         .await;
     }
