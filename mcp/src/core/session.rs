@@ -95,6 +95,21 @@ impl<'a> McpToolSession<'a> {
             .await
     }
 
+    /// Execute a single tool via the orchestrator's single-call API.
+    ///
+    /// Delegates to `orchestrator.execute_tool()` with this session's
+    /// `server_keys`, `mcp_servers`, and `request_ctx`.
+    pub async fn execute_tool(&self, input: ToolExecutionInput) -> ToolExecutionOutput {
+        self.orchestrator
+            .execute_tool(
+                input,
+                &self.server_keys,
+                &self.mcp_servers,
+                &self.request_ctx,
+            )
+            .await
+    }
+
     /// Find a tool entry by name within this session's allowed servers.
     pub fn find_tool_by_name(&self, tool_name: &str) -> Option<ToolEntry> {
         self.orchestrator
