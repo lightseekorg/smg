@@ -23,6 +23,7 @@ pub enum PolicyType {
 pub enum BackendType {
     Sglang,
     Openai,
+    Anthropic,
 }
 
 #[pyclass(eq)]
@@ -493,6 +494,10 @@ impl Router {
             }
         } else if matches!(self.backend, BackendType::Openai) {
             RoutingMode::OpenAI {
+                worker_urls: self.worker_urls.clone(),
+            }
+        } else if matches!(self.backend, BackendType::Anthropic) {
+            RoutingMode::Anthropic {
                 worker_urls: self.worker_urls.clone(),
             }
         } else if self.pd_disaggregation {

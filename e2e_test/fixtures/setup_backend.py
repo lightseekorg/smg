@@ -10,12 +10,30 @@ import os
 import threading
 from typing import TYPE_CHECKING
 
+import anthropic
+import openai
 import pytest
 
 if TYPE_CHECKING:
     from infra import ModelPool
 
-from infra import RUNTIME_LABELS, get_runtime, is_trtllm, is_vllm
+from infra import (
+    DEFAULT_MODEL,
+    DEFAULT_ROUTER_TIMEOUT,
+    ENV_MODEL,
+    ENV_SKIP_BACKEND_SETUP,
+    LOCAL_MODES,
+    RUNTIME_LABELS,
+    THIRD_PARTY_MODELS,
+    ConnectionMode,
+    Gateway,
+    WorkerIdentity,
+    WorkerType,
+    get_runtime,
+    is_trtllm,
+    is_vllm,
+    launch_cloud_gateway,
+)
 
 from .markers import get_marker_kwargs, get_marker_value
 
@@ -47,15 +65,6 @@ def _create_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
     Returns a generator that yields (backend_name, model_path, client, gateway).
     The caller should use next(gen) to get the value and gen.close() to trigger cleanup.
     """
-    from infra import (
-        DEFAULT_MODEL,
-        DEFAULT_ROUTER_TIMEOUT,
-        ENV_MODEL,
-        ENV_SKIP_BACKEND_SETUP,
-        LOCAL_MODES,
-        ConnectionMode,
-    )
-
     backend_name = request.param
 
     # Skip if requested
@@ -252,8 +261,6 @@ def _setup_pd_http_backend(
     gateway_config: dict,
 ):
     """Setup SGLang PD disaggregation backend (HTTP mode with bootstrap)."""
-    from infra import ConnectionMode
-
     yield from _setup_pd_backend_common(
         model_pool=model_pool,
         model_id=model_id,
@@ -272,8 +279,6 @@ def _setup_pd_grpc_backend(
     gateway_config: dict,
 ):
     """Setup PD disaggregation backend with gRPC mode."""
-    from infra import ConnectionMode
-
     yield from _setup_pd_backend_common(
         model_pool=model_pool,
         model_id=model_id,
@@ -302,9 +307,6 @@ def _setup_pd_backend_common(
         connection_mode: ConnectionMode.HTTP for SGLang, ConnectionMode.GRPC for vLLM.
         backend_name: Backend name to yield ("pd_http" or "pd_grpc").
     """
-    import openai
-    from infra import Gateway, WorkerIdentity, WorkerType
-
     runtime = get_runtime()
     runtime_label = RUNTIME_LABELS.get(runtime, "SGLang")
     logger.info("Setting up %s PD backend for model %s", runtime_label, model_id)
@@ -472,9 +474,6 @@ def _setup_grpc_backend(
     gateway_config: dict,
 ):
     """Setup a runtime-specific gRPC backend (vLLM or TensorRT-LLM)."""
-    import openai
-    from infra import Gateway
-
     runtime = get_runtime()
     runtime_label = RUNTIME_LABELS.get(runtime, runtime)
 
@@ -544,9 +543,6 @@ def _setup_local_backend(
     gateway_config: dict,
 ):
     """Setup local backend (grpc, http)."""
-    import openai
-    from infra import Gateway, WorkerIdentity, WorkerType
-
     num_workers = workers_config.get("count") or 1
     instances: list = []  # Track instances for reference counting
 
@@ -655,16 +651,13 @@ def _setup_cloud_backend(
     storage_backend: str = "memory",
     gateway_config: dict | None = None,
 ):
-    """Setup cloud backend (openai, xai, etc.).
+    """Setup cloud backend (openai, xai, anthropic, etc.).
 
     Args:
-        backend_name: Cloud backend name (openai, xai).
+        backend_name: Cloud backend name (openai, xai, anthropic).
         storage_backend: History storage backend (memory, oracle).
         gateway_config: Gateway configuration from marker.
     """
-    import openai
-    from infra import THIRD_PARTY_MODELS, launch_cloud_gateway
-
     if backend_name not in THIRD_PARTY_MODELS:
         pytest.fail(f"Unknown cloud runtime: {backend_name}")
 
@@ -684,10 +677,17 @@ def _setup_cloud_backend(
     )
 
     api_key = os.environ.get(api_key_env) if api_key_env else "not-used"
-    client = openai.OpenAI(
-        base_url=f"{gateway.base_url}/v1",
-        api_key=api_key,
-    )
+
+    if cfg.get("client_type") == "anthropic":
+        client = anthropic.Anthropic(
+            base_url=gateway.base_url,
+            api_key=api_key,
+        )
+    else:
+        client = openai.OpenAI(
+            base_url=f"{gateway.base_url}/v1",
+            api_key=api_key,
+        )
 
     try:
         yield backend_name, cfg["model"], client, gateway
@@ -708,8 +708,6 @@ def backend_router(request: pytest.FixtureRequest, model_pool: ModelPool):
         def test_router_state(backend_router):
             gateway = backend_router
     """
-    from infra import DEFAULT_MODEL, ENV_MODEL, ConnectionMode, Gateway
-
     backend_name = request.param
     model_id = os.environ.get(ENV_MODEL, DEFAULT_MODEL)
 

@@ -5,6 +5,7 @@ description = "E2E tests for Shepherd Model Gateway"
 requires-python = ">=3.12"
 
 dependencies = [
+  "anthropic",
   "grpcio",
   "grpcio-health-checking",
   "httpx",

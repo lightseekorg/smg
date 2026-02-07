@@ -27,12 +27,13 @@ class Runtime(StrEnum):
     OPENAI = "openai"
     XAI = "xai"
     GEMINI = "gemini"
+    ANTHROPIC = "anthropic"
 
 
 # Convenience sets
 LOCAL_MODES = frozenset({ConnectionMode.HTTP, ConnectionMode.GRPC})
 LOCAL_RUNTIMES = frozenset({Runtime.SGLANG, Runtime.VLLM, Runtime.TRTLLM})
-CLOUD_RUNTIMES = frozenset({Runtime.OPENAI, Runtime.XAI, Runtime.GEMINI})
+CLOUD_RUNTIMES = frozenset({Runtime.OPENAI, Runtime.XAI, Runtime.GEMINI, Runtime.ANTHROPIC})
 
 # Fixture parameter names (used in @pytest.mark.parametrize)
 PARAM_SETUP_BACKEND = "setup_backend"
