@@ -57,7 +57,7 @@ pub(crate) async fn ensure_mcp_connection(
 
     if let Some(tools) = tools {
         match ensure_request_mcp_client(mcp_orchestrator, tools).await {
-            Some((_orchestrator, mcp_servers)) => {
+            Some(mcp_servers) => {
                 return Ok((true, mcp_servers));
             }
             None => {

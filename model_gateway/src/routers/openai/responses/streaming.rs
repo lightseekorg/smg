@@ -46,7 +46,7 @@ use crate::{
     },
     routers::{
         header_utils::{apply_request_headers, preserve_response_headers},
-        mcp_utils::McpLoopConfig,
+        mcp_utils::DEFAULT_MAX_ITERATIONS,
         openai::context::{RequestContext, StreamingEventContext, StreamingRequest},
         persistence_utils::persist_conversation_items,
     },
@@ -685,7 +685,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
     orchestrator: &Arc<McpOrchestrator>,
-    loop_config: McpLoopConfig,
+    mcp_servers: Vec<(String, String)>,
 ) -> Response {
     let payload = req.payload;
 
@@ -712,7 +712,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
         let session_request_id = format!("resp_{}", uuid::Uuid::new_v4());
         let session = McpToolSession::new(
             &orchestrator_clone,
-            loop_config.mcp_servers.clone(),
+            mcp_servers.clone(),
             &session_request_id,
         );
 
@@ -955,8 +955,8 @@ pub(super) async fn handle_streaming_with_tool_interception(
             state.total_calls += pending_calls.len();
 
             let effective_limit = match max_tool_calls {
-                Some(user_max) => user_max.min(loop_config.max_iterations),
-                None => loop_config.max_iterations,
+                Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
+                None => DEFAULT_MAX_ITERATIONS,
             };
 
             if state.total_calls > effective_limit {
@@ -1028,11 +1028,12 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     let mcp_orchestrator = ctx
         .components
         .mcp_orchestrator()
-        .expect("MCP orchestrator required");
+        .expect("MCP orchestrator required")
+        .clone();
 
     // Check for MCP tools and create request context if needed
-    let mcp_result = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(mcp_orchestrator, tools).await
+    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
+        ensure_request_mcp_client(&mcp_orchestrator, tools).await
     } else {
         None
     };
@@ -1041,7 +1042,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     let req = ctx.into_streaming_context();
 
     // If no MCP tools, use simple passthrough
-    let Some((orchestrator, mcp_servers)) = mcp_result else {
+    let Some(mcp_servers) = mcp_servers else {
         return handle_simple_streaming_passthrough(
             &client,
             circuit_breaker,
@@ -1056,11 +1057,8 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         &client,
         headers.as_ref(),
         req,
-        &orchestrator,
-        McpLoopConfig {
-            mcp_servers,
-            ..McpLoopConfig::default()
-        },
+        &mcp_orchestrator,
+        mcp_servers,
     )
     .await
 }
