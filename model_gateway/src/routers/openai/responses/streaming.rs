@@ -46,7 +46,7 @@ use crate::{
     },
     routers::{
         header_utils::{apply_request_headers, preserve_response_headers},
-        mcp_utils::McpLoopConfig,
+        mcp_utils::DEFAULT_MAX_ITERATIONS,
         openai::context::{RequestContext, StreamingEventContext, StreamingRequest},
         persistence_utils::persist_conversation_items,
     },
@@ -685,16 +685,9 @@ pub(super) async fn handle_streaming_with_tool_interception(
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
     orchestrator: &Arc<McpOrchestrator>,
-    loop_config: McpLoopConfig,
+    mcp_servers: Vec<(String, String)>,
 ) -> Response {
-    let server_keys: Vec<String> = loop_config
-        .mcp_servers
-        .iter()
-        .map(|(_, key)| key.clone())
-        .collect();
-    // Transform MCP tools to function tools in payload
-    let mut payload = req.payload;
-    prepare_mcp_tools_as_functions(&mut payload, orchestrator, &server_keys);
+    let payload = req.payload;
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
     let should_store = req.original_body.store.unwrap_or(false);
@@ -714,22 +707,25 @@ pub(super) async fn handle_streaming_with_tool_interception(
     tokio::spawn(async move {
         let mut state = ToolLoopState::new(original_request.input.clone());
         let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
-        let tools_json = payload_clone.get("tools").cloned().unwrap_or(json!([]));
-        let base_payload = payload_clone.clone();
-        let mut current_payload = payload_clone;
-        let mut mcp_list_tools_sent = false;
-        let mut is_first_iteration = true;
-        let mut sequence_number: u64 = 0;
-        let mut next_output_index: usize = 0;
-        let mut preserved_response_id: Option<String> = None;
 
         // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)
         let session_request_id = format!("resp_{}", uuid::Uuid::new_v4());
         let session = McpToolSession::new(
             &orchestrator_clone,
-            loop_config.mcp_servers.clone(),
+            mcp_servers.clone(),
             &session_request_id,
         );
+
+        // Transform MCP tools to function tools in payload
+        let mut current_payload = payload_clone;
+        prepare_mcp_tools_as_functions(&mut current_payload, &session);
+        let tools_json = current_payload.get("tools").cloned().unwrap_or(json!([]));
+        let base_payload = current_payload.clone();
+        let mut mcp_list_tools_sent = false;
+        let mut is_first_iteration = true;
+        let mut sequence_number: u64 = 0;
+        let mut next_output_index: usize = 0;
+        let mut preserved_response_id: Option<String> = None;
 
         let streaming_ctx = StreamingEventContext {
             original_request: &original_request,
@@ -959,8 +955,8 @@ pub(super) async fn handle_streaming_with_tool_interception(
             state.total_calls += pending_calls.len();
 
             let effective_limit = match max_tool_calls {
-                Some(user_max) => user_max.min(loop_config.max_iterations),
-                None => loop_config.max_iterations,
+                Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
+                None => DEFAULT_MAX_ITERATIONS,
             };
 
             if state.total_calls > effective_limit {
@@ -1032,11 +1028,12 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     let mcp_orchestrator = ctx
         .components
         .mcp_orchestrator()
-        .expect("MCP orchestrator required");
+        .expect("MCP orchestrator required")
+        .clone();
 
     // Check for MCP tools and create request context if needed
-    let mcp_result = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(mcp_orchestrator, tools).await
+    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
+        ensure_request_mcp_client(&mcp_orchestrator, tools).await
     } else {
         None
     };
@@ -1045,7 +1042,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     let req = ctx.into_streaming_context();
 
     // If no MCP tools, use simple passthrough
-    let Some((orchestrator, mcp_servers)) = mcp_result else {
+    let Some(mcp_servers) = mcp_servers else {
         return handle_simple_streaming_passthrough(
             &client,
             circuit_breaker,
@@ -1060,11 +1057,8 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         &client,
         headers.as_ref(),
         req,
-        &orchestrator,
-        McpLoopConfig {
-            mcp_servers,
-            ..McpLoopConfig::default()
-        },
+        &mcp_orchestrator,
+        mcp_servers,
     )
     .await
 }
