@@ -34,7 +34,10 @@ use axum::{
 use tracing::debug;
 use uuid::Uuid;
 
-use super::{common::load_conversation_history, conversions, non_streaming, streaming};
+use super::{
+    common::{load_conversation_history, PipelineParams},
+    conversions, non_streaming, streaming,
+};
 use crate::{
     protocols::responses::ResponsesRequest,
     routers::{
@@ -64,11 +67,19 @@ pub(crate) async fn route_responses(
     // 2. Route based on execution mode
     let is_streaming = request.stream.unwrap_or(false);
     if is_streaming {
-        route_responses_streaming(ctx, request, headers, model_id).await
+        let params = PipelineParams {
+            headers,
+            model_id,
+            response_id: None,
+        };
+        route_responses_streaming(ctx, request, params).await
     } else {
-        // Generate response ID for synchronous execution
-        let response_id = Some(format!("resp_{}", Uuid::new_v4()));
-        route_responses_sync(ctx, request, headers, model_id, response_id).await
+        let params = PipelineParams {
+            headers,
+            model_id,
+            response_id: Some(format!("resp_{}", Uuid::new_v4())),
+        };
+        route_responses_sync(ctx, request, params).await
     }
 }
 
@@ -80,13 +91,9 @@ pub(crate) async fn route_responses(
 async fn route_responses_sync(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
-    headers: Option<http::HeaderMap>,
-    model_id: Option<String>,
-    response_id: Option<String>,
+    params: PipelineParams,
 ) -> Response {
-    match non_streaming::route_responses_internal(ctx, request, headers, model_id, response_id)
-        .await
-    {
+    match non_streaming::route_responses_internal(ctx, request, params).await {
         Ok(responses_response) => axum::Json(responses_response).into_response(),
         Err(response) => response, // Already a Response with proper status code
     }
@@ -100,8 +107,7 @@ async fn route_responses_sync(
 async fn route_responses_streaming(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
-    headers: Option<http::HeaderMap>,
-    model_id: Option<String>,
+    params: PipelineParams,
 ) -> Response {
     // 1. Load conversation history
     let modified_request = match load_conversation_history(ctx, &request).await {
@@ -123,8 +129,7 @@ async fn route_responses_streaming(
             ctx,
             modified_request,
             &request,
-            headers,
-            model_id,
+            params,
             mcp_servers,
         )
         .await;
@@ -142,12 +147,5 @@ async fn route_responses_streaming(
     };
 
     // 4. Execute chat pipeline and convert streaming format (no MCP tools)
-    streaming::convert_chat_stream_to_responses_stream(
-        ctx,
-        chat_request,
-        headers,
-        model_id,
-        &request,
-    )
-    .await
+    streaming::convert_chat_stream_to_responses_stream(ctx, chat_request, params, &request).await
 }
