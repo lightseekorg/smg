@@ -138,13 +138,25 @@ nav:
   - Home: index.md
   - Getting Started:
       - getting-started/index.md
-      - Multiple Workers: getting-started/multiple-workers.md
-      - gRPC Workers: getting-started/grpc-workers.md
-      - PD Disaggregation: getting-started/pd-disaggregation.md
-      - Service Discovery: getting-started/service-discovery.md
-      - Load Balancing: getting-started/load-balancing.md
-      - Tokenizer Caching: getting-started/tokenizer-caching.md
-      - Monitoring: getting-started/monitoring.md
+      - Core Setup:
+          - Multiple Workers: getting-started/multiple-workers.md
+          - gRPC Workers: getting-started/grpc-workers.md
+          - PD Disaggregation: getting-started/pd-disaggregation.md
+          - Service Discovery: getting-started/service-discovery.md
+      - Operations:
+          - Monitoring: getting-started/monitoring.md
+          - Logging: getting-started/logging.md
+          - TLS: getting-started/tls.md
+          - Control Plane Auth: getting-started/control-plane-auth.md
+          - Control Plane Operations: getting-started/control-plane-operations.md
+      - Reliability and Data:
+          - Reliability Controls: getting-started/reliability-controls.md
+          - Data Connections: getting-started/data-connections.md
+          - Tokenization and Parsing APIs: getting-started/tokenization-and-parsing.md
+      - Advanced Features:
+          - Load Balancing: getting-started/load-balancing.md
+          - Tokenizer Caching: getting-started/tokenizer-caching.md
+          - MCP in Responses API: getting-started/mcp.md
   - Concepts:
       - concepts/index.md
       - Architecture:
@@ -171,16 +183,6 @@ nav:
           - Chat History: concepts/data/chat-history.md
       - Security:
           - Authentication: concepts/security/authentication.md
-  - Tasks:
-      - tasks/index.md
-      - Deployment:
-          - Run with Docker: tasks/deployment/docker.md
-          - Deploy to Kubernetes: tasks/deployment/kubernetes.md
-          - Configure TLS: tasks/deployment/tls.md
-      - Operations:
-          - Monitor with Prometheus: tasks/operations/monitoring.md
-          - Configure Logging: tasks/operations/logging.md
-          - Manage Workers: tasks/operations/workers.md
   - Reference:
       - reference/index.md
       - API:

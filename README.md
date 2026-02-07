@@ -95,11 +95,11 @@ That's it. SMG is now load-balancing requests across your workers.
 
 | | |
 |:--|:--|
-| [Getting Started](docs/getting-started/quickstart.md) | Installation and first steps |
+| [Getting Started](docs/getting-started/index.md) | Installation and first steps |
 | [Architecture](docs/concepts/architecture/overview.md) | How SMG works |
 | [Configuration](docs/reference/configuration.md) | CLI reference and options |
 | [API Reference](docs/reference/api/openai.md) | OpenAI-compatible endpoints |
-| [Deployment](docs/tasks/deployment/kubernetes.md) | Production setup |
+| [Kubernetes Setup](docs/getting-started/service-discovery.md) | In-cluster discovery and production setup |
 
 ## Contributing
 

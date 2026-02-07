@@ -27,7 +27,7 @@ When workers connect via gRPC instead of HTTP, SMG becomes a full OpenAI-compati
 | Load balancing | Request-level | Token-aware |
 | Reasoning extraction | Worker | Gateway |
 | Tool call parsing | Worker | Gateway |
-| MCP tool execution | N/A | Gateway |
+| MCP tool execution (Responses API) | N/A | Gateway |
 
 In HTTP mode, SMG is a smart proxy — routing and failover only. In gRPC mode, SMG takes over the full request processing pipeline.
 
@@ -175,14 +175,12 @@ smg \
   --tool-call-parser llama
 ```
 
-With MCP configured, tool calls can be executed automatically:
+For MCP tool execution in Responses API, see the dedicated guide:
 
 ```bash
-smg \
-  --worker-urls grpc://worker:50051 \
-  --model-path meta-llama/Llama-3.2-70B-Instruct \
-  --tool-call-parser llama \
-  --mcp-config-path /path/to/mcp.json
+# See:
+#   Getting Started → MCP in Responses API
+#   /v1/responses + --mcp-config-path
 ```
 
 ### Supported Tool Call Parsers
@@ -212,7 +210,7 @@ Auto-detected from the model name. Override with `--tool-call-parser` if needed.
 | Use Case | Recommended Mode |
 |----------|-----------------|
 | Workers already run OpenAI servers (SGLang, vLLM HTTP) | HTTP |
-| You need gateway-level tool calling or MCP | gRPC |
+| You need gateway-level tool parsing or Responses MCP | gRPC |
 | You want token-aware load balancing | gRPC |
 | You use thinking models and want reasoning extraction | gRPC |
 | Simplest possible setup | HTTP |
@@ -223,5 +221,5 @@ Auto-detected from the model name. Override with `--tool-call-parser` if needed.
 
 - [gRPC Pipeline Concepts](../concepts/architecture/grpc-pipeline.md) — Full pipeline architecture, all supported parsers
 - [Tokenizer Caching](../concepts/performance/tokenizer-caching.md) — Two-level cache for reduced CPU overhead
-- [MCP Integration](../concepts/extensibility/mcp.md) — Configure Model Context Protocol servers
+- [MCP in Responses API](mcp.md) — Configure Model Context Protocol servers for `/v1/responses`
 - [PD Disaggregation](pd-disaggregation.md) — Separate prefill and decode with gRPC workers
