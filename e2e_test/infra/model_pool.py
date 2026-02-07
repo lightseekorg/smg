@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 from .constants import (
     DEFAULT_HOST,
-    DEFAULT_MAX_SEQ_LEN,
+    DEFAULT_MAX_NUM_TOKENS,
     DEFAULT_MODEL,
     DEFAULT_STARTUP_TIMEOUT,
     ENV_SHOW_WORKER_LOGS,
@@ -1135,7 +1135,7 @@ class ModelPool:
                 "--tensor-parallel-size",
                 str(tp_size),
                 "--max-model-len",
-                str(DEFAULT_MAX_SEQ_LEN),
+                str(DEFAULT_MAX_NUM_TOKENS),
                 "--gpu-memory-utilization",
                 "0.9",
                 "--enforce-eager",
@@ -1157,8 +1157,8 @@ class ModelPool:
                 "pytorch",
                 "--tp_size",
                 str(tp_size),
-                "--max_seq_len",
-                str(DEFAULT_MAX_SEQ_LEN),
+                "--max_num_tokens",
+                str(DEFAULT_MAX_NUM_TOKENS),
             ]
             extra = model_spec.get("trtllm_args", [])
         else:
