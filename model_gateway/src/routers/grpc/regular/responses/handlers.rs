@@ -35,7 +35,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use super::{
-    common::{load_conversation_history, PipelineParams},
+    common::{load_conversation_history, ResponsesCallContext},
     conversions, non_streaming, streaming,
 };
 use crate::{
@@ -67,14 +67,14 @@ pub(crate) async fn route_responses(
     // 2. Route based on execution mode
     let is_streaming = request.stream.unwrap_or(false);
     if is_streaming {
-        let params = PipelineParams {
+        let params = ResponsesCallContext {
             headers,
             model_id,
             response_id: None,
         };
         route_responses_streaming(ctx, request, params).await
     } else {
-        let params = PipelineParams {
+        let params = ResponsesCallContext {
             headers,
             model_id,
             response_id: Some(format!("resp_{}", Uuid::new_v4())),
@@ -91,7 +91,7 @@ pub(crate) async fn route_responses(
 async fn route_responses_sync(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
-    params: PipelineParams,
+    params: ResponsesCallContext,
 ) -> Response {
     match non_streaming::route_responses_internal(ctx, request, params).await {
         Ok(responses_response) => axum::Json(responses_response).into_response(),
@@ -107,7 +107,7 @@ async fn route_responses_sync(
 async fn route_responses_streaming(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
-    params: PipelineParams,
+    params: ResponsesCallContext,
 ) -> Response {
     // 1. Load conversation history
     let modified_request = match load_conversation_history(ctx, &request).await {

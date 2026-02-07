@@ -14,7 +14,7 @@ use tracing::{debug, error, trace, warn};
 use super::{
     common::{
         build_next_request, convert_mcp_tools_to_chat_tools, extract_all_tool_calls_from_chat,
-        load_conversation_history, prepare_chat_tools_and_choice, ExtractedToolCall, PipelineParams, ToolLoopState,
+        load_conversation_history, prepare_chat_tools_and_choice, ExtractedToolCall, ResponsesCallContext, ToolLoopState,
     },
     conversions,
 };
@@ -41,7 +41,7 @@ use crate::{
 pub(super) async fn route_responses_internal(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
-    params: PipelineParams,
+    params: ResponsesCallContext,
 ) -> Result<ResponsesResponse, Response> {
     // 1. Load conversation history and build modified request
     let modified_request = load_conversation_history(ctx, &request).await?;
@@ -78,7 +78,7 @@ pub(super) async fn execute_without_mcp(
     ctx: &ResponsesContext,
     modified_request: &ResponsesRequest,
     original_request: &ResponsesRequest,
-    params: PipelineParams,
+    params: ResponsesCallContext,
 ) -> Result<ResponsesResponse, Response> {
     // Convert ResponsesRequest → ChatCompletionRequest
     let chat_request = conversions::responses_to_chat(modified_request).map_err(|e| {
@@ -131,7 +131,7 @@ pub(super) async fn execute_tool_loop(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
-    params: &PipelineParams,
+    params: &ResponsesCallContext,
     mcp_servers: Vec<(String, String)>,
 ) -> Result<ResponsesResponse, Response> {
     let mut state = ToolLoopState::new(original_request.input.clone());

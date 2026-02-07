@@ -27,7 +27,7 @@ use uuid::Uuid;
 use super::{
     common::{
         build_next_request, convert_mcp_tools_to_chat_tools, extract_all_tool_calls_from_chat,
-        prepare_chat_tools_and_choice, ExtractedToolCall, PipelineParams, ToolLoopState,
+        prepare_chat_tools_and_choice, ExtractedToolCall, ResponsesCallContext, ToolLoopState,
     },
     conversions,
 };
@@ -71,7 +71,7 @@ use crate::{
 pub(super) async fn convert_chat_stream_to_responses_stream(
     ctx: &ResponsesContext,
     chat_request: Arc<ChatCompletionRequest>,
-    params: PipelineParams,
+    params: ResponsesCallContext,
     original_request: &ResponsesRequest,
 ) -> Response {
     debug!("Converting chat SSE stream to responses SSE format");
@@ -420,7 +420,7 @@ pub(super) async fn execute_tool_loop_streaming(
     ctx: &ResponsesContext,
     current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
-    params: PipelineParams,
+    params: ResponsesCallContext,
     mcp_servers: Vec<(String, String)>,
 ) -> Response {
     // Create SSE channel for client
@@ -487,7 +487,7 @@ async fn execute_tool_loop_streaming_internal(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
-    params: PipelineParams,
+    params: ResponsesCallContext,
     mcp_servers: Vec<(String, String)>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {

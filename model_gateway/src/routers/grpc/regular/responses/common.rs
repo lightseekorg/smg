@@ -38,7 +38,7 @@ pub(super) struct ToolLoopState {
 
 /// Per-request parameters for chat pipeline execution.
 /// Bundles values that are always threaded together through the regular responses call chain.
-pub(super) struct PipelineParams {
+pub(super) struct ResponsesCallContext {
     pub headers: Option<http::HeaderMap>,
     pub model_id: Option<String>,
     pub response_id: Option<String>,
