@@ -687,14 +687,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
     orchestrator: &Arc<McpOrchestrator>,
     loop_config: McpLoopConfig,
 ) -> Response {
-    let server_keys: Vec<String> = loop_config
-        .mcp_servers
-        .iter()
-        .map(|(_, key)| key.clone())
-        .collect();
-    // Transform MCP tools to function tools in payload
-    let mut payload = req.payload;
-    prepare_mcp_tools_as_functions(&mut payload, orchestrator, &server_keys);
+    let payload = req.payload;
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
     let should_store = req.original_body.store.unwrap_or(false);
@@ -714,14 +707,6 @@ pub(super) async fn handle_streaming_with_tool_interception(
     tokio::spawn(async move {
         let mut state = ToolLoopState::new(original_request.input.clone());
         let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
-        let tools_json = payload_clone.get("tools").cloned().unwrap_or(json!([]));
-        let base_payload = payload_clone.clone();
-        let mut current_payload = payload_clone;
-        let mut mcp_list_tools_sent = false;
-        let mut is_first_iteration = true;
-        let mut sequence_number: u64 = 0;
-        let mut next_output_index: usize = 0;
-        let mut preserved_response_id: Option<String> = None;
 
         // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)
         let session_request_id = format!("resp_{}", uuid::Uuid::new_v4());
@@ -730,6 +715,17 @@ pub(super) async fn handle_streaming_with_tool_interception(
             loop_config.mcp_servers.clone(),
             &session_request_id,
         );
+
+        // Transform MCP tools to function tools in payload
+        let mut current_payload = payload_clone;
+        prepare_mcp_tools_as_functions(&mut current_payload, &session);
+        let tools_json = current_payload.get("tools").cloned().unwrap_or(json!([]));
+        let base_payload = current_payload.clone();
+        let mut mcp_list_tools_sent = false;
+        let mut is_first_iteration = true;
+        let mut sequence_number: u64 = 0;
+        let mut next_output_index: usize = 0;
+        let mut preserved_response_id: Option<String> = None;
 
         let streaming_ctx = StreamingEventContext {
             original_request: &original_request,

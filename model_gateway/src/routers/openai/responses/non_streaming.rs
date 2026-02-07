@@ -67,18 +67,16 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     let mut response_json: Value;
 
     if let Some((orchestrator, mcp_servers)) = mcp_result {
-        let server_keys: Vec<String> = mcp_servers.iter().map(|(_, key)| key.clone()).collect();
-        let config = McpLoopConfig {
-            mcp_servers: mcp_servers.clone(),
-            ..McpLoopConfig::default()
-        };
-        prepare_mcp_tools_as_functions(&mut payload, &orchestrator, &server_keys);
-
         let session_request_id = original_body
             .request_id
             .clone()
             .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
-        let session = McpToolSession::new(&orchestrator, mcp_servers, &session_request_id);
+        let session = McpToolSession::new(&orchestrator, mcp_servers.clone(), &session_request_id);
+        prepare_mcp_tools_as_functions(&mut payload, &session);
+        let config = McpLoopConfig {
+            mcp_servers,
+            ..McpLoopConfig::default()
+        };
 
         match execute_tool_loop(
             ctx.components.client(),

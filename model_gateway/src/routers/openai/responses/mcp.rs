@@ -8,7 +8,7 @@
 //! - Payload transformation for MCP tool interception
 //! - Metadata injection for MCP operations
 
-use std::{io, slice, sync::Arc};
+use std::{io, slice};
 
 use axum::http::HeaderMap;
 use bytes::Bytes;
@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
-    mcp::{McpOrchestrator, McpToolSession, ResponseFormat, ResponseTransformer},
+    mcp::{McpToolSession, ResponseFormat, ResponseTransformer},
     protocols::{
         event_types::{
             is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType,
@@ -280,8 +280,7 @@ pub(super) async fn execute_streaming_tool_calls(
 /// (MCP, builtin), and appends function tools for discovered MCP server tools.
 pub(super) fn prepare_mcp_tools_as_functions(
     payload: &mut Value,
-    orchestrator: &Arc<McpOrchestrator>,
-    server_keys: &[String],
+    session: &McpToolSession<'_>,
 ) {
     let Some(obj) = payload.as_object_mut() else {
         return;
@@ -302,7 +301,7 @@ pub(super) fn prepare_mcp_tools_as_functions(
         }
     }
 
-    let mcp_tools = orchestrator.list_tools_for_servers(server_keys);
+    let mcp_tools = session.mcp_tools();
     let mut tools_json = Vec::with_capacity(retained_tools.len() + mcp_tools.len());
     tools_json.append(&mut retained_tools);
 
