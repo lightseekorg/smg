@@ -518,8 +518,7 @@ async fn execute_tool_loop_streaming_internal(
     emitter.send_event(&event, &tx)?;
 
     // Get MCP tools and convert to chat format (do this once before loop)
-    let mcp_tools = session.mcp_tools();
-    let mcp_chat_tools = convert_mcp_tools_to_chat_tools(mcp_tools);
+    let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&session);
     trace!(
         "Streaming: Converted {} MCP tools to chat format",
         mcp_chat_tools.len()
@@ -586,13 +585,11 @@ async fn execute_tool_loop_streaming_internal(
                 tool_calls.len()
             );
 
-            // Separate MCP and function tool calls
-            let mcp_tool_names: std::collections::HashSet<&str> =
-                mcp_tools.iter().map(|t| t.tool.name.as_ref()).collect();
+            // Separate MCP and function tool calls using session-exposed names.
             let (mcp_tool_calls, function_tool_calls): (Vec<ExtractedToolCall>, Vec<_>) =
                 tool_calls
                     .into_iter()
-                    .partition(|tc| mcp_tool_names.contains(tc.name.as_str()));
+                    .partition(|tc| session.has_exposed_tool(tc.name.as_str()));
 
             trace!(
                 "Separated tool calls: {} MCP, {} function",

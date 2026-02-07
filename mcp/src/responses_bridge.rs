@@ -12,18 +12,36 @@ use openai_protocol::{
 };
 use serde_json::{json, Value};
 
-use crate::inventory::ToolEntry;
+use crate::inventory::{QualifiedToolName, ToolEntry};
+
+fn resolved_name_for_entry<'a>(
+    entry: &'a ToolEntry,
+    exposed_names: Option<&'a std::collections::HashMap<QualifiedToolName, String>>,
+) -> &'a str {
+    exposed_names
+        .and_then(|m| m.get(&entry.qualified_name))
+        .map(|s| s.as_str())
+        .unwrap_or(entry.tool_name())
+}
 
 /// Build function-tool JSON payloads from MCP tool entries.
 ///
 /// These are used when routers expose MCP tools as function tools to upstream model APIs.
 pub fn build_function_tools_json(entries: &[ToolEntry]) -> Vec<Value> {
+    build_function_tools_json_with_names(entries, None)
+}
+
+/// Build function-tool JSON payloads from MCP tool entries with optional exposed names.
+pub fn build_function_tools_json_with_names(
+    entries: &[ToolEntry],
+    exposed_names: Option<&std::collections::HashMap<QualifiedToolName, String>>,
+) -> Vec<Value> {
     entries
         .iter()
         .map(|entry| {
             json!({
                 "type": "function",
-                "name": entry.tool.name,
+                "name": resolved_name_for_entry(entry, exposed_names),
                 "description": entry.tool.description,
                 "parameters": Value::Object((*entry.tool.input_schema).clone())
             })
@@ -33,12 +51,20 @@ pub fn build_function_tools_json(entries: &[ToolEntry]) -> Vec<Value> {
 
 /// Build Chat API function tools from MCP tool entries.
 pub fn build_chat_function_tools(entries: &[ToolEntry]) -> Vec<Tool> {
+    build_chat_function_tools_with_names(entries, None)
+}
+
+/// Build Chat API function tools from MCP tool entries with optional exposed names.
+pub fn build_chat_function_tools_with_names(
+    entries: &[ToolEntry],
+    exposed_names: Option<&std::collections::HashMap<QualifiedToolName, String>>,
+) -> Vec<Tool> {
     entries
         .iter()
         .map(|entry| Tool {
             tool_type: "function".to_string(),
             function: Function {
-                name: entry.tool.name.to_string(),
+                name: resolved_name_for_entry(entry, exposed_names).to_string(),
                 description: entry.tool.description.as_ref().map(|d| d.to_string()),
                 parameters: Value::Object((*entry.tool.input_schema).clone()),
                 strict: None,
@@ -52,12 +78,20 @@ pub fn build_chat_function_tools(entries: &[ToolEntry]) -> Vec<Tool> {
 /// These tools are exposed in Responses requests where MCP tools are represented
 /// as `{"type": "mcp", ...}` tool entries.
 pub fn build_response_tools(entries: &[ToolEntry]) -> Vec<ResponseTool> {
+    build_response_tools_with_names(entries, None)
+}
+
+/// Build Responses API MCP tools from MCP tool entries with optional exposed names.
+pub fn build_response_tools_with_names(
+    entries: &[ToolEntry],
+    exposed_names: Option<&std::collections::HashMap<QualifiedToolName, String>>,
+) -> Vec<ResponseTool> {
     entries
         .iter()
         .map(|entry| ResponseTool {
             r#type: ResponseToolType::Mcp,
             function: Some(Function {
-                name: entry.tool.name.to_string(),
+                name: resolved_name_for_entry(entry, exposed_names).to_string(),
                 description: entry.tool.description.as_ref().map(|d| d.to_string()),
                 parameters: Value::Object((*entry.tool.input_schema).clone()),
                 strict: None,

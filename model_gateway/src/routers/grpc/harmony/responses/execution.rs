@@ -6,12 +6,9 @@ use tracing::{debug, error};
 
 use super::common::McpCallTracking;
 use crate::{
-    mcp::{build_response_tools, McpToolSession, ToolEntry, ToolExecutionInput},
+    mcp::{build_response_tools_with_names, McpToolSession, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
-    protocols::{
-        common::ToolCall,
-        responses::{ResponseTool, ResponseToolType},
-    },
+    protocols::{common::ToolCall, responses::ResponseTool},
 };
 
 /// Tool execution result
@@ -110,12 +107,11 @@ pub(super) async fn execute_mcp_tools(
 ///
 /// Converts MCP ToolEntry (from inventory) to ResponseTool format so the model
 /// knows about available MCP tools when making tool calls.
-pub(crate) fn convert_mcp_tools_to_response_tools(mcp_tools: &[ToolEntry]) -> Vec<ResponseTool> {
-    // Keep type visibility and semantics local while using shared MCP builders.
-    // This retains Harmony call-sites unchanged and removes duplicate mapping logic.
-    let response_tools = build_response_tools(mcp_tools);
-    debug_assert!(response_tools
-        .iter()
-        .all(|t| t.r#type == ResponseToolType::Mcp));
-    response_tools
+pub(crate) fn convert_mcp_tools_to_response_tools(
+    session: &McpToolSession<'_>,
+) -> Vec<ResponseTool> {
+    build_response_tools_with_names(
+        session.mcp_tools(),
+        Some(session.exposed_name_by_qualified()),
+    )
 }

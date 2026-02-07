@@ -49,8 +49,9 @@ pub use inventory::{
     AliasTarget, ArgMapping, QualifiedToolName, ToolCategory, ToolEntry, ToolInventory,
 };
 pub use responses_bridge::{
-    build_chat_function_tools, build_function_tools_json, build_mcp_list_tools_item,
-    build_mcp_list_tools_json, build_mcp_tool_infos, build_response_tools,
+    build_chat_function_tools, build_chat_function_tools_with_names, build_function_tools_json,
+    build_function_tools_json_with_names, build_mcp_list_tools_item, build_mcp_list_tools_json,
+    build_mcp_tool_infos, build_response_tools, build_response_tools_with_names,
 };
 pub use tenant::{SessionId, TenantContext, TenantId};
 // Re-export from transform

@@ -14,8 +14,8 @@ use tracing::{debug, warn};
 use crate::{
     data_connector::{self, ConversationId, ResponseId},
     mcp::{
-        self, build_chat_function_tools, build_mcp_list_tools_item as mcp_build_list_tools_item,
-        McpOrchestrator,
+        build_chat_function_tools_with_names,
+        build_mcp_list_tools_item as mcp_build_list_tools_item, McpOrchestrator, McpToolSession,
     },
     protocols::{
         chat::ChatCompletionRequest,
@@ -143,8 +143,11 @@ pub(super) fn extract_all_tool_calls_from_chat(
 }
 
 /// Convert MCP tools to Chat API tool format
-pub(super) fn convert_mcp_tools_to_chat_tools(mcp_tools: &[mcp::ToolEntry]) -> Vec<Tool> {
-    build_chat_function_tools(mcp_tools)
+pub(super) fn convert_mcp_tools_to_chat_tools(session: &McpToolSession<'_>) -> Vec<Tool> {
+    build_chat_function_tools_with_names(
+        session.mcp_tools(),
+        Some(session.exposed_name_by_qualified()),
+    )
 }
 
 /// Build mcp_list_tools output item

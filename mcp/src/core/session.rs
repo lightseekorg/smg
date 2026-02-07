@@ -1,39 +1,50 @@
 //! MCP Tool Session — bundles all MCP execution state for a single request.
 //!
-//! Instead of threading `orchestrator`, `request_ctx`, `mcp_servers`, `server_keys`,
+//! Instead of threading `orchestrator`, `request_ctx`, `mcp_servers`,
 //! and `mcp_tools` through every function, callers create one `McpToolSession` and
 //! pass `&session` everywhere. When an MCP parameter changes (e.g. `mcp_servers`
 //! representation), only this struct and its constructor need updating — not every
 //! router function signature.
 
-use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 
 use super::orchestrator::{
     McpOrchestrator, McpRequestContext, ToolExecutionInput, ToolExecutionOutput,
 };
 use crate::{
-    approval::ApprovalMode, inventory::ToolEntry, tenant::TenantContext, transform::ResponseFormat,
+    approval::ApprovalMode,
+    inventory::{QualifiedToolName, ToolEntry},
+    tenant::TenantContext,
+    transform::ResponseFormat,
 };
+
+#[derive(Debug, Clone)]
+struct ExposedToolBinding {
+    server_key: String,
+    server_label: String,
+    resolved_tool_name: String,
+    response_format: ResponseFormat,
+}
 
 /// Bundles all MCP execution state for a single request.
 ///
 /// Created once per request, then passed by reference to every function
 /// that needs MCP infrastructure. This eliminates repeated parameter
-/// threading of `orchestrator`, `request_ctx`, `mcp_servers`, `server_keys`,
+/// threading of `orchestrator`, `request_ctx`, `mcp_servers`,
 /// and `mcp_tools`.
 pub struct McpToolSession<'a> {
     orchestrator: &'a McpOrchestrator,
     request_ctx: McpRequestContext<'a>,
     mcp_servers: Vec<(String, String)>,
-    server_keys: Vec<String>,
     mcp_tools: Vec<ToolEntry>,
+    exposed_name_map: HashMap<String, ExposedToolBinding>,
+    exposed_name_by_qualified: HashMap<QualifiedToolName, String>,
 }
 
 impl<'a> McpToolSession<'a> {
     /// Create a new session by performing the setup every path currently repeats:
     /// 1. Create request context with default tenant and policy-only approval
-    /// 2. Extract server_keys from mcp_servers
-    /// 3. List tools for those servers
+    /// 2. List tools for the selected servers
     pub fn new(
         orchestrator: &'a McpOrchestrator,
         mcp_servers: Vec<(String, String)>,
@@ -44,15 +55,19 @@ impl<'a> McpToolSession<'a> {
             TenantContext::default(),
             ApprovalMode::PolicyOnly,
         );
-        let server_keys: Vec<String> = mcp_servers.iter().map(|(_, key)| key.clone()).collect();
+        let mut server_keys = Vec::with_capacity(mcp_servers.len());
+        server_keys.extend(mcp_servers.iter().map(|(_, key)| key.clone()));
         let mcp_tools = orchestrator.list_tools_for_servers(&server_keys);
+        let (exposed_name_map, exposed_name_by_qualified) =
+            Self::build_exposed_function_tools(&mcp_tools, &mcp_servers);
 
         Self {
             orchestrator,
             request_ctx,
             mcp_servers,
-            server_keys,
             mcp_tools,
+            exposed_name_map,
+            exposed_name_by_qualified,
         }
     }
 
@@ -70,50 +85,82 @@ impl<'a> McpToolSession<'a> {
         &self.mcp_servers
     }
 
-    pub fn server_keys(&self) -> &[String] {
-        &self.server_keys
-    }
-
     pub fn mcp_tools(&self) -> &[ToolEntry] {
         &self.mcp_tools
     }
 
+    /// Returns true if the name is exposed to the model for this session.
+    pub fn has_exposed_tool(&self, tool_name: &str) -> bool {
+        self.exposed_name_map.contains_key(tool_name)
+    }
+
+    /// Returns the session's qualified-name -> exposed-name mapping.
+    ///
+    /// Router adapters should use this with response bridge builders.
+    pub fn exposed_name_by_qualified(&self) -> &HashMap<QualifiedToolName, String> {
+        &self.exposed_name_by_qualified
+    }
+
     // --- Delegation methods ---
 
-    /// Execute multiple tools via the orchestrator's batch API.
-    ///
-    /// Delegates to `orchestrator.execute_tools()` with this session's
-    /// `server_keys`, `mcp_servers`, and `request_ctx`.
+    /// Execute multiple tools using this session's exposed-name mapping.
     pub async fn execute_tools(&self, inputs: Vec<ToolExecutionInput>) -> Vec<ToolExecutionOutput> {
-        self.orchestrator
-            .execute_tools(
-                inputs,
-                &self.server_keys,
-                &self.mcp_servers,
-                &self.request_ctx,
-            )
-            .await
+        let mut outputs = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            outputs.push(self.execute_tool(input).await);
+        }
+        outputs
     }
 
-    /// Execute a single tool via the orchestrator's single-call API.
-    ///
-    /// Delegates to `orchestrator.execute_tool()` with this session's
-    /// `server_keys`, `mcp_servers`, and `request_ctx`.
+    /// Execute a single tool using this session's exposed-name mapping.
     pub async fn execute_tool(&self, input: ToolExecutionInput) -> ToolExecutionOutput {
-        self.orchestrator
-            .execute_tool(
-                input,
-                &self.server_keys,
-                &self.mcp_servers,
-                &self.request_ctx,
-            )
-            .await
-    }
+        let invoked_name = input.tool_name.clone();
 
-    /// Find a tool entry by name within this session's allowed servers.
-    pub fn find_tool_by_name(&self, tool_name: &str) -> Option<ToolEntry> {
-        self.orchestrator
-            .find_tool_by_name(tool_name, &self.server_keys)
+        if let Some(binding) = self.exposed_name_map.get(&invoked_name) {
+            let resolved_tool_name = binding.resolved_tool_name.clone();
+            let mut output = self
+                .orchestrator
+                .execute_tool_resolved(
+                    ToolExecutionInput {
+                        call_id: input.call_id,
+                        tool_name: resolved_tool_name.clone(),
+                        arguments: input.arguments,
+                    },
+                    &binding.server_key,
+                    &binding.server_label,
+                    &self.request_ctx,
+                )
+                .await;
+
+            output.invoked_tool_name = Some(invoked_name.clone());
+            output.resolved_tool_name = Some(resolved_tool_name);
+            output.tool_name = invoked_name;
+            output
+        } else {
+            let fallback_label = self
+                .mcp_servers
+                .first()
+                .map(|(label, _)| label.clone())
+                .unwrap_or_else(|| "mcp".to_string());
+            let err = format!(
+                "Tool '{}' is not in this session's exposed tool map",
+                invoked_name
+            );
+            ToolExecutionOutput {
+                call_id: input.call_id,
+                tool_name: invoked_name.clone(),
+                invoked_tool_name: Some(invoked_name),
+                resolved_tool_name: None,
+                server_key: "unknown".to_string(),
+                server_label: fallback_label,
+                arguments_str: input.arguments.to_string(),
+                output: serde_json::json!({ "error": &err }),
+                is_error: true,
+                error_message: Some(err),
+                response_format: ResponseFormat::Passthrough,
+                duration: std::time::Duration::default(),
+            }
+        }
     }
 
     /// Resolve the user-facing server label for a tool.
@@ -128,15 +175,9 @@ impl<'a> McpToolSession<'a> {
             .map(|(label, _)| label.as_str())
             .unwrap_or("mcp");
 
-        let Some(entry) = self.find_tool_by_name(tool_name) else {
-            return fallback_label.to_string();
-        };
-
-        let server_key = entry.qualified_name.server_key();
-        self.mcp_servers
-            .iter()
-            .find(|(_, key)| key == server_key)
-            .map(|(label, _)| label.clone())
+        self.exposed_name_map
+            .get(tool_name)
+            .map(|binding| binding.server_label.clone())
             .unwrap_or_else(|| fallback_label.to_string())
     }
 
@@ -148,34 +189,105 @@ impl<'a> McpToolSession<'a> {
             .list_tools_for_servers(&[server_key.to_string()])
     }
 
-    /// Call a single tool by name (for streaming paths that process tools individually).
-    ///
-    /// Returns the raw `ToolCallResult` for callers that need fine-grained control
-    /// over result handling (e.g. streaming event emission).
-    pub async fn call_tool_by_name(
-        &self,
-        tool_name: &str,
-        arguments: Value,
-        server_label: &str,
-    ) -> crate::error::McpResult<super::orchestrator::ToolCallResult> {
-        self.orchestrator
-            .call_tool_by_name(
-                tool_name,
-                arguments,
-                &self.server_keys,
-                server_label,
-                &self.request_ctx,
-            )
-            .await
-    }
-
     /// Look up the response format for a tool.
     ///
     /// Convenience method that returns `Passthrough` if the tool is not found.
     pub fn tool_response_format(&self, tool_name: &str) -> ResponseFormat {
-        self.find_tool_by_name(tool_name)
-            .map(|entry| entry.response_format)
+        self.exposed_name_map
+            .get(tool_name)
+            .map(|binding| binding.response_format.clone())
             .unwrap_or(ResponseFormat::Passthrough)
+    }
+
+    fn build_exposed_function_tools(
+        tools: &[ToolEntry],
+        mcp_servers: &[(String, String)],
+    ) -> (
+        HashMap<String, ExposedToolBinding>,
+        HashMap<QualifiedToolName, String>,
+    ) {
+        let server_labels: HashMap<&str, &str> = mcp_servers
+            .iter()
+            .map(|(label, key)| (key.as_str(), label.as_str()))
+            .collect();
+
+        let mut name_counts: HashMap<&str, usize> = HashMap::new();
+        for entry in tools {
+            *name_counts.entry(entry.tool_name()).or_insert(0) += 1;
+        }
+
+        let mut used_exposed_names: HashSet<String> = HashSet::with_capacity(tools.len());
+        let mut name_suffixes: HashMap<String, usize> = HashMap::with_capacity(tools.len());
+        let mut exposed_name_map: HashMap<String, ExposedToolBinding> =
+            HashMap::with_capacity(tools.len());
+        let mut exposed_name_by_qualified: HashMap<QualifiedToolName, String> =
+            HashMap::with_capacity(tools.len());
+
+        for entry in tools {
+            let server_key = entry.server_key().to_string();
+            let server_label = server_labels
+                .get(server_key.as_str())
+                .copied()
+                .unwrap_or(server_key.as_str())
+                .to_string();
+            let resolved_tool_name = entry.tool_name().to_string();
+
+            let base_exposed_name = if name_counts.get(entry.tool_name()).copied().unwrap_or(0) <= 1
+            {
+                resolved_tool_name.clone()
+            } else {
+                format!(
+                    "mcp_{}_{}",
+                    sanitize_tool_token(&server_label),
+                    sanitize_tool_token(&resolved_tool_name)
+                )
+            };
+
+            let suffix = name_suffixes.entry(base_exposed_name.clone()).or_insert(0);
+            let mut exposed_name = if *suffix == 0 {
+                base_exposed_name.clone()
+            } else {
+                format!("{}_{}", base_exposed_name, suffix)
+            };
+            while used_exposed_names.contains(&exposed_name) {
+                *suffix += 1;
+                exposed_name = format!("{}_{}", base_exposed_name, suffix);
+            }
+            used_exposed_names.insert(exposed_name.clone());
+
+            exposed_name_by_qualified.insert(entry.qualified_name.clone(), exposed_name.clone());
+
+            exposed_name_map.insert(
+                exposed_name,
+                ExposedToolBinding {
+                    server_key,
+                    server_label,
+                    resolved_tool_name,
+                    response_format: entry.response_format.clone(),
+                },
+            );
+        }
+
+        (exposed_name_map, exposed_name_by_qualified)
+    }
+}
+
+fn sanitize_tool_token(input: &str) -> String {
+    let mut out = String::with_capacity(input.len().max(1));
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    let out = out.trim_matches('_');
+    if out.is_empty() {
+        "tool".to_string()
+    } else {
+        out.to_string()
     }
 }
 
@@ -184,7 +296,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_session_creation_extracts_server_keys() {
+    fn test_session_creation_keeps_servers() {
         let orchestrator = McpOrchestrator::new_test();
         let mcp_servers = vec![
             ("label1".to_string(), "key1".to_string()),
@@ -193,7 +305,6 @@ mod tests {
 
         let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
 
-        assert_eq!(session.server_keys(), &["key1", "key2"]);
         assert_eq!(session.mcp_servers().len(), 2);
         assert_eq!(
             session.mcp_servers()[0],
@@ -206,7 +317,6 @@ mod tests {
         let orchestrator = McpOrchestrator::new_test();
         let session = McpToolSession::new(&orchestrator, vec![], "test-request");
 
-        assert!(session.server_keys().is_empty());
         assert!(session.mcp_servers().is_empty());
         assert!(session.mcp_tools().is_empty());
     }
@@ -233,14 +343,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_tool_by_name_not_found() {
-        let orchestrator = McpOrchestrator::new_test();
-        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
-
-        assert!(session.find_tool_by_name("nonexistent").is_none());
-    }
-
-    #[test]
     fn test_tool_response_format_default() {
         let orchestrator = McpOrchestrator::new_test();
         let session = McpToolSession::new(&orchestrator, vec![], "test-request");
@@ -264,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_tool_with_inventory() {
+    fn test_has_exposed_tool_with_inventory() {
         let orchestrator = McpOrchestrator::new_test();
 
         // Insert a tool into the inventory
@@ -275,8 +377,7 @@ mod tests {
         let mcp_servers = vec![("label1".to_string(), "server1".to_string())];
         let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
 
-        // Should find the tool
-        assert!(session.find_tool_by_name("test_tool").is_some());
+        assert!(session.has_exposed_tool("test_tool"));
         assert_eq!(session.mcp_tools().len(), 1);
     }
 
@@ -293,5 +394,81 @@ mod tests {
 
         let label = session.resolve_tool_server_label("test_tool");
         assert_eq!(label, "my_server");
+    }
+
+    #[test]
+    fn test_exposed_names_are_unique_for_tool_name_collisions() {
+        let orchestrator = McpOrchestrator::new_test();
+
+        let tool_a = create_test_tool("shared_tool");
+        let tool_b = create_test_tool("shared_tool");
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool("server1", tool_a));
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool("server2", tool_b));
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![
+                ("alpha".to_string(), "server1".to_string()),
+                ("beta".to_string(), "server2".to_string()),
+            ],
+            "test-request",
+        );
+
+        let name_a = session
+            .exposed_name_by_qualified()
+            .get(&QualifiedToolName::new("server1", "shared_tool"))
+            .cloned()
+            .expect("missing exposed name for server1 tool");
+        let name_b = session
+            .exposed_name_by_qualified()
+            .get(&QualifiedToolName::new("server2", "shared_tool"))
+            .cloned()
+            .expect("missing exposed name for server2 tool");
+
+        assert_ne!(name_a, name_b);
+        assert_ne!(name_a, "shared_tool");
+        assert_ne!(name_b, "shared_tool");
+        assert!(session.has_exposed_tool(&name_a));
+        assert!(session.has_exposed_tool(&name_b));
+    }
+
+    #[test]
+    fn test_exposed_names_handle_pre_suffixed_name_conflicts() {
+        let orchestrator = McpOrchestrator::new_test();
+
+        let tool_base = create_test_tool("foo");
+        let tool_suffixed = create_test_tool("foo_1");
+        let tool_dup = create_test_tool("foo");
+
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool("s1", tool_base));
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool("s2", tool_suffixed));
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool("s3", tool_dup));
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![
+                ("a".to_string(), "s1".to_string()),
+                ("b".to_string(), "s2".to_string()),
+                ("c".to_string(), "s3".to_string()),
+            ],
+            "test-request",
+        );
+
+        let exposed_names: HashSet<String> = session
+            .exposed_name_by_qualified()
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(exposed_names.len(), 3);
     }
 }
