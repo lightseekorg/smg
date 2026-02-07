@@ -423,6 +423,7 @@ pub(super) async fn execute_tool_loop_streaming(
     original_request: &ResponsesRequest,
     headers: Option<http::HeaderMap>,
     model_id: Option<String>,
+    mcp_servers: Vec<(String, String)>,
 ) -> Response {
     // Create SSE channel for client
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
@@ -439,6 +440,7 @@ pub(super) async fn execute_tool_loop_streaming(
             &original_request_clone,
             headers,
             model_id,
+            mcp_servers,
             tx.clone(),
         )
         .await;
@@ -490,6 +492,7 @@ async fn execute_tool_loop_streaming_internal(
     original_request: &ResponsesRequest,
     headers: Option<http::HeaderMap>,
     model_id: Option<String>,
+    mcp_servers: Vec<(String, String)>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
     let mut state = ToolLoopState::new(original_request.input.clone());
@@ -499,7 +502,6 @@ async fn execute_tool_loop_streaming_internal(
     let response_id = format!("resp_{}", Uuid::new_v4());
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
-    let mcp_servers = ctx.requested_servers.read().unwrap().clone();
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &response_id);
 
     // Create response event emitter

@@ -52,12 +52,6 @@ pub(super) async fn route_responses_internal(
     let (has_mcp_tools, mcp_servers) =
         ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await?;
 
-    // Set the server keys in the context
-    {
-        let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = mcp_servers;
-    }
-
     let responses_response = if has_mcp_tools {
         debug!("MCP tools detected, using tool loop");
 
@@ -69,6 +63,7 @@ pub(super) async fn route_responses_internal(
             headers,
             model_id,
             response_id.clone(),
+            mcp_servers,
         )
         .await?
     } else {
@@ -158,6 +153,7 @@ pub(super) async fn execute_tool_loop(
     headers: Option<http::HeaderMap>,
     model_id: Option<String>,
     response_id: Option<String>,
+    mcp_servers: Vec<(String, String)>,
 ) -> Result<ResponsesResponse, Response> {
     let mut state = ToolLoopState::new(original_request.input.clone());
 
@@ -171,7 +167,6 @@ pub(super) async fn execute_tool_loop(
     );
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
-    let mcp_servers = ctx.requested_servers.read().unwrap().clone();
     let session_request_id = response_id
         .clone()
         .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4()));

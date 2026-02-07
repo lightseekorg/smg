@@ -62,14 +62,8 @@ pub(crate) async fn serve_harmony_responses(
     let (has_mcp_tools, mcp_servers) =
         ensure_mcp_connection(&ctx.mcp_orchestrator, current_request.tools.as_deref()).await?;
 
-    // Set the server keys in the context
-    {
-        let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = mcp_servers;
-    }
-
     let response = if has_mcp_tools {
-        execute_with_mcp_loop(ctx, current_request).await?
+        execute_with_mcp_loop(ctx, current_request, mcp_servers).await?
     } else {
         // No MCP tools - execute pipeline once (may have function tools or no tools)
         execute_without_mcp_loop(ctx, current_request).await?
@@ -94,6 +88,7 @@ pub(crate) async fn serve_harmony_responses(
 async fn execute_with_mcp_loop(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
+    mcp_servers: Vec<(String, String)>,
 ) -> Result<ResponsesResponse, Response> {
     let mut iteration_count = 0;
 
@@ -107,7 +102,6 @@ async fn execute_with_mcp_loop(
     let original_tools = current_request.tools.clone();
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
-    let mcp_servers = ctx.requested_servers.read().unwrap().clone();
     let session_request_id = format!("resp_{}", uuid::Uuid::new_v4());
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
 
