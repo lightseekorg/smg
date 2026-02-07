@@ -7,6 +7,7 @@ use super::common::{GenerationRequest, UsageInfo};
 // Embedding API
 // ============================================================================
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EmbeddingRequest {
     /// ID of the model to use
@@ -16,23 +17,18 @@ pub struct EmbeddingRequest {
     pub input: Value,
 
     /// Optional encoding format (e.g., "float", "base64")
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding_format: Option<String>,
 
     /// Optional user identifier
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
     /// Optional number of dimensions for the embedding
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
 
     /// SGLang extension: request id for tracking
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub rid: Option<String>,
 
     /// SGLang extension: enable/disable logging of metrics for this request
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub log_metrics: Option<bool>,
 }
 

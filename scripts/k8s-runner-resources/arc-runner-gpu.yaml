@@ -1,0 +1,159 @@
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: arc-runner-gpu-h100
+  namespace: actions-runner-system
+spec:
+  replicas: 10
+  template:
+    spec:
+      repository: lightseekorg/smg
+      labels:
+        - 4-gpu-h100
+        - k8s-runner-gpu
+      serviceAccountName: arc-runner-sa
+
+      nodeSelector:
+        nvidia.com/gpu: "true"
+        beta.kubernetes.io/instance-type: BM.GPU.H100.8
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: runner-deployment-name
+                      operator: In
+                      values:
+                        - arc-runner-gpu-h100
+                topologyKey: kubernetes.io/hostname
+
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        - name: docker-sock
+          emptyDir: {}
+        - name: docker-storage
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+      containers:
+        - name: runner
+          image: fra.ocir.io/idqj093njucb/action-runner:v0.0.1
+          resources:
+            limits:
+              nvidia.com/gpu: 4
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: docker-sock
+              mountPath: /var/run
+            - name: dshm
+              mountPath: /dev/shm
+          env:
+            - name: DOCKER_HOST
+              value: unix:///var/run/docker.sock
+        - name: docker
+          image: fra.ocir.io/idqj093njucb/docker:dind
+          securityContext:
+            privileged: true  # Required for DinD
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""  # Disables TLS for shared socket use
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run
+            - name: docker-storage
+              mountPath: /var/lib/docker
+---
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: arc-runner-gpu-a10
+  namespace: actions-runner-system
+spec:
+  replicas: 2
+  template:
+    spec:
+      repository: lightseekorg/smg
+      labels:
+        - 4-gpu-a10
+        - k8s-runner-gpu
+      serviceAccountName: arc-runner-sa
+
+      nodeSelector:
+        nvidia.com/gpu: "true"
+        beta.kubernetes.io/instance-type: BM.GPU.A10.4
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: runner-deployment-name
+                      operator: In
+                      values:
+                        - arc-runner-gpu-a10
+                topologyKey: kubernetes.io/hostname
+
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        - name: docker-sock
+          emptyDir: {}
+        - name: docker-storage
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+      containers:
+        - name: runner
+          image: fra.ocir.io/idqj093njucb/action-runner:v0.0.1
+          resources:
+            limits:
+              nvidia.com/gpu: 4
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: docker-sock
+              mountPath: /var/run
+            - name: dshm
+              mountPath: /dev/shm
+          env:
+            - name: DOCKER_HOST
+              value: unix:///var/run/docker.sock
+        - name: docker
+          image: fra.ocir.io/idqj093njucb/docker:dind
+          securityContext:
+            privileged: true  # Required for DinD
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""  # Disables TLS for shared socket use
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run
+            - name: docker-storage
+              mountPath: /var/lib/docker

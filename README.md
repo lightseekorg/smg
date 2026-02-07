@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/images/logos/amg-logomark-white.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/images/logos/amg-logomark-dark.svg">
-    <img alt="SMG Logo" src="docs/assets/images/logos/amg-logomark-dark.svg" width="80">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/images/logos/logomark-white.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/images/logos/logomark-dark.svg">
+    <img alt="SMG Logo" src="docs/assets/images/logos/logomark-dark.svg" width="80">
   </picture>
 </p>
 
@@ -21,13 +21,13 @@ High-performance model-routing gateway for large-scale LLM deployments. Centrali
 
 ## Why SMG?
 
-| | |
-|:--|:--|
+|                                 |                                                                                                                                                                  |
+|:--------------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **🚀 Maximize GPU Utilization** | Cache-aware routing understands your inference engine's KV cache state—whether vLLM, SGLang, or TensorRT-LLM—to reuse prefixes and reduce redundant computation. |
-| **🔌 One API, Any Backend** | Route to self-hosted models (vLLM, SGLang, TensorRT-LLM) or cloud providers (OpenAI, Anthropic, Gemini, Bedrock, and more) through a single unified endpoint. |
-| **⚡ Built for Speed** | Native Rust with gRPC pipelines, sub-millisecond routing decisions, and zero-copy tokenization. Circuit breakers and automatic failover keep things running. |
-| **🔒 Enterprise Control** | Multi-tenant rate limiting with OIDC, WebAssembly plugins for custom logic, and a privacy boundary that keeps conversation history within your infrastructure. |
-| **📊 Full Observability** | 40+ Prometheus metrics, OpenTelemetry tracing, and structured JSON logs with request correlation—know exactly what's happening at every layer. |
+| **🔌 One API, Any Backend**     | Route to self-hosted models (vLLM, SGLang, TensorRT-LLM) or cloud providers (OpenAI, Anthropic, Gemini, Bedrock, and more) through a single unified endpoint.    |
+| **⚡ Built for Speed**           | Native Rust with gRPC pipelines, sub-millisecond routing decisions, and zero-copy tokenization. Circuit breakers and automatic failover keep things running.     |
+| **🔒 Enterprise Control**       | Multi-tenant rate limiting with OIDC, WebAssembly plugins for custom logic, and a privacy boundary that keeps conversation history within your infrastructure.   |
+| **📊 Full Observability**       | 40+ Prometheus metrics, OpenTelemetry tracing, and structured JSON logs with request correlation—know exactly what's happening at every layer.                   |
 
 **API Coverage:** OpenAI Chat/Completions/Embeddings, Responses API for agents, Anthropic Messages, and MCP tool execution.
 

@@ -620,6 +620,8 @@ impl McpConfig {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     use super::*;
 
     #[test]
@@ -639,6 +641,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_proxy_from_env_empty() {
         // Ensure no proxy env vars are set for this test
         std::env::remove_var("MCP_HTTP_PROXY");
@@ -651,6 +654,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_proxy_from_env_with_vars() {
         std::env::set_var("MCP_HTTP_PROXY", "http://test-proxy:8080");
         std::env::set_var("MCP_NO_PROXY", "localhost,127.0.0.1");

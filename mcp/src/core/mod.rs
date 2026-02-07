@@ -8,6 +8,8 @@ pub mod orchestrator;
 pub mod pool;
 pub mod proxy;
 pub mod reconnect;
+pub mod session;
+
 pub use config::{
     ArgMappingConfig, BuiltinToolType, ConfigValidationError, McpConfig, McpServerConfig,
     McpTransport, PolicyConfig, PolicyDecisionConfig, ResponseFormatConfig, ServerPolicyConfig,
@@ -20,3 +22,4 @@ pub use orchestrator::{
 };
 pub use pool::{McpConnectionPool, PoolKey};
 pub use reconnect::ReconnectionManager;
+pub use session::McpToolSession;

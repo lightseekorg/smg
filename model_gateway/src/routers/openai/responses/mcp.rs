@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
-    mcp::{ApprovalMode, McpOrchestrator, ResponseFormat, ResponseTransformer, TenantContext},
+    mcp::{McpOrchestrator, McpToolSession, ResponseFormat, ResponseTransformer},
     protocols::{
         event_types::{
             is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType,
@@ -25,10 +25,7 @@ use crate::{
         },
         responses::{generate_id, ResponseInput, ResponsesRequest},
     },
-    routers::{
-        header_utils::apply_request_headers,
-        mcp_utils::{resolve_tool_server_label, McpLoopConfig},
-    },
+    routers::{header_utils::apply_request_headers, mcp_utils::McpLoopConfig},
 };
 
 // ============================================================================
@@ -133,24 +130,13 @@ impl FunctionCallInProgress {
 
 /// Execute detected tool calls and send completion events to client
 /// Returns false if client disconnected during execution
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_streaming_tool_calls(
     pending_calls: Vec<FunctionCallInProgress>,
-    orchestrator: &Arc<McpOrchestrator>,
+    session: &McpToolSession<'_>,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     state: &mut ToolLoopState,
     sequence_number: &mut u64,
-    request_id: &str,
-    mcp_servers: &[(String, String)],
-    server_keys: &[String],
 ) -> bool {
-    // Create a request context for tool execution
-    let request_ctx = orchestrator.create_request_context(
-        request_id,
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
-    );
-
     // Execute all pending tool calls (sequential, as PR3 is skipped)
     for call in pending_calls {
         // Skip if name is empty (invalid call)
@@ -175,12 +161,8 @@ pub(super) async fn execute_streaming_tool_calls(
         };
 
         // Look up tool entry to get response_format and server label
-        let response_format = orchestrator
-            .find_tool_by_name(&call.name, server_keys)
-            .map(|entry| entry.response_format)
-            .unwrap_or(ResponseFormat::Passthrough);
-        let server_label =
-            resolve_tool_server_label(Some(orchestrator), &call.name, mcp_servers, server_keys);
+        let response_format = session.tool_response_format(&call.name);
+        let server_label = session.resolve_tool_server_label(&call.name);
 
         // Parse arguments to Value
         let arguments: Value = match serde_json::from_str(args_str) {
@@ -225,14 +207,8 @@ pub(super) async fn execute_streaming_tool_calls(
 
         // Call tool by name within allowed servers
         debug!("Calling MCP tool '{}' with args: {}", call.name, args_str);
-        let call_result = orchestrator
-            .call_tool_by_name(
-                &call.name,
-                arguments,
-                server_keys,
-                &server_label,
-                &request_ctx,
-            )
+        let call_result = session
+            .call_tool_by_name(&call.name, arguments, &server_label)
             .await;
 
         // Get transformed item directly (avoids serialize/parse roundtrip and double transformation)
@@ -415,13 +391,14 @@ pub(super) fn build_resume_payload(
 /// Returns false if client disconnected
 pub(super) fn send_mcp_list_tools_events(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-    orchestrator: &Arc<McpOrchestrator>,
+    session: &McpToolSession<'_>,
     server_label: &str,
     output_index: usize,
     sequence_number: &mut u64,
     server_keys: &[String],
 ) -> bool {
-    let tools_item_full = build_mcp_list_tools_item(orchestrator, server_label, server_keys);
+    let tools_item_full =
+        build_mcp_list_tools_item_from_session(session, server_label, server_keys);
     let item_id = tools_item_full
         .get("id")
         .and_then(|v| v.as_str())
@@ -609,9 +586,10 @@ pub(super) fn send_tool_call_completion_events(
 pub(super) fn inject_mcp_metadata_streaming(
     response: &mut Value,
     state: &ToolLoopState,
-    orchestrator: &Arc<McpOrchestrator>,
-    mcp_servers: &[(String, String)],
+    session: &McpToolSession<'_>,
 ) {
+    let mcp_servers = session.mcp_servers();
+
     if let Some(output_array) = response.get_mut("output").and_then(|v| v.as_array_mut()) {
         output_array.retain(|item| {
             item.get("type").and_then(|t| t.as_str()) != Some(ItemType::MCP_LIST_TOOLS)
@@ -619,7 +597,7 @@ pub(super) fn inject_mcp_metadata_streaming(
 
         for (label, key) in mcp_servers.iter().rev() {
             let list_tools_item =
-                build_mcp_list_tools_item(orchestrator, label, slice::from_ref(key));
+                build_mcp_list_tools_item_from_session(session, label, slice::from_ref(key));
             output_array.insert(0, list_tools_item);
         }
 
@@ -632,8 +610,8 @@ pub(super) fn inject_mcp_metadata_streaming(
     } else if let Some(obj) = response.as_object_mut() {
         let mut output_items = Vec::new();
         for (label, key) in mcp_servers.iter() {
-            output_items.push(build_mcp_list_tools_item(
-                orchestrator,
+            output_items.push(build_mcp_list_tools_item_from_session(
+                session,
                 label,
                 slice::from_ref(key),
             ));
@@ -655,21 +633,10 @@ pub(super) async fn execute_tool_loop(
     headers: Option<&HeaderMap>,
     initial_payload: Value,
     original_body: &ResponsesRequest,
-    orchestrator: &Arc<McpOrchestrator>,
+    session: &McpToolSession<'_>,
     config: &McpLoopConfig,
 ) -> Result<Value, String> {
     let mut state = ToolLoopState::new(original_body.input.clone());
-
-    // Create a request context for tool execution (use request's ID if available)
-    let request_id = original_body
-        .request_id
-        .clone()
-        .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
-    let request_ctx = orchestrator.create_request_context(
-        request_id,
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
-    );
 
     // Get max_tool_calls from request (None means no user-specified limit)
     let max_tool_calls = original_body.max_tool_calls.map(|n| n as usize);
@@ -678,11 +645,6 @@ pub(super) async fn execute_tool_loop(
     let base_payload = initial_payload.clone();
     let tools_json = base_payload.get("tools").cloned().unwrap_or(json!([]));
     let mut current_payload = initial_payload;
-    let server_keys: Vec<String> = config
-        .mcp_servers
-        .iter()
-        .map(|(_, key)| key.clone())
-        .collect();
 
     info!(
         "Starting tool loop: max_tool_calls={:?}, max_iterations={}",
@@ -751,17 +713,13 @@ pub(super) async fn execute_tool_loop(
                     response_json,
                     state,
                     "max_tool_calls",
-                    orchestrator,
+                    session,
                     original_body,
-                    &config.mcp_servers,
                 );
             }
 
             // Look up response_format for transformation
-            let response_format = orchestrator
-                .find_tool_by_name(&tool_name, &server_keys)
-                .map(|entry| entry.response_format)
-                .unwrap_or(ResponseFormat::Passthrough);
+            let response_format = session.tool_response_format(&tool_name);
 
             // Parse arguments to Value
             let arguments: Value = serde_json::from_str(&args_json_str).unwrap_or_else(|e| {
@@ -769,25 +727,14 @@ pub(super) async fn execute_tool_loop(
                 json!({})
             });
 
-            // Execute tool via orchestrator
+            // Execute tool via session
             debug!(
                 "Calling MCP tool '{}' with args: {}",
                 tool_name, args_json_str
             );
-            let resolved_label = resolve_tool_server_label(
-                Some(orchestrator),
-                &tool_name,
-                &config.mcp_servers,
-                &server_keys,
-            );
-            let call_result = orchestrator
-                .call_tool_by_name(
-                    &tool_name,
-                    arguments,
-                    &server_keys,
-                    &resolved_label,
-                    &request_ctx,
-                )
+            let resolved_label = session.resolve_tool_server_label(&tool_name);
+            let call_result = session
+                .call_tool_by_name(&tool_name, arguments, &resolved_label)
                 .await;
 
             // Get transformed item directly (avoids serialize/parse roundtrip and double transformation)
@@ -856,26 +803,7 @@ pub(super) async fn execute_tool_loop(
 
             // Inject MCP output items if we executed any tools
             if state.total_calls > 0 {
-                let mcp_servers = &config.mcp_servers;
-
-                // Insert at beginning of output array
-                if let Some(output_array) = response_json
-                    .get_mut("output")
-                    .and_then(|v| v.as_array_mut())
-                {
-                    for (label, key) in mcp_servers.iter().rev() {
-                        let list_tools_item =
-                            build_mcp_list_tools_item(orchestrator, label, slice::from_ref(key));
-                        output_array.insert(0, list_tools_item);
-                    }
-
-                    // Insert stored mcp_call items after mcp_list_tools (already transformed)
-                    let mut insert_pos = mcp_servers.len();
-                    for item in &state.mcp_call_items {
-                        output_array.insert(insert_pos, item.clone());
-                        insert_pos += 1;
-                    }
-                }
+                inject_mcp_metadata_streaming(&mut response_json, &state, session);
             }
 
             return Ok(response_json);
@@ -888,9 +816,8 @@ pub(super) fn build_incomplete_response(
     mut response: Value,
     state: ToolLoopState,
     reason: &str,
-    orchestrator: &Arc<McpOrchestrator>,
+    session: &McpToolSession<'_>,
     _original_body: &ResponsesRequest,
-    mcp_servers: &[(String, String)],
 ) -> Result<Value, String> {
     let obj = response
         .as_object_mut()
@@ -905,7 +832,7 @@ pub(super) fn build_incomplete_response(
         json!({ "reason": reason }),
     );
 
-    let server_keys: Vec<String> = mcp_servers.iter().map(|(_, key)| key.clone()).collect();
+    let mcp_servers = session.mcp_servers();
 
     // Convert any function_call in output to mcp_call format
     if let Some(output_array) = obj.get_mut("output").and_then(|v| v.as_array_mut()) {
@@ -921,12 +848,7 @@ pub(super) fn build_incomplete_response(
                     .unwrap_or("{}");
 
                 // Mark as incomplete - not executed
-                let resolved_label = resolve_tool_server_label(
-                    Some(orchestrator),
-                    tool_name,
-                    mcp_servers,
-                    &server_keys,
-                );
+                let resolved_label = session.resolve_tool_server_label(tool_name);
                 let mcp_call_item = build_mcp_call_item(
                     tool_name,
                     args,
@@ -943,7 +865,7 @@ pub(super) fn build_incomplete_response(
         if state.total_calls > 0 || !incomplete_items.is_empty() {
             for (label, key) in mcp_servers.iter().rev() {
                 let list_tools_item =
-                    build_mcp_list_tools_item(orchestrator, label, slice::from_ref(key));
+                    build_mcp_list_tools_item_from_session(session, label, slice::from_ref(key));
                 output_array.insert(0, list_tools_item);
             }
 
@@ -986,13 +908,18 @@ pub(super) fn build_incomplete_response(
 // Output Item Builders
 // ============================================================================
 
-/// Build a mcp_list_tools output item
-pub(super) fn build_mcp_list_tools_item(
-    orchestrator: &Arc<McpOrchestrator>,
+/// Build a mcp_list_tools output item using a McpToolSession
+fn build_mcp_list_tools_item_from_session(
+    session: &McpToolSession<'_>,
     server_label: &str,
     server_keys: &[String],
 ) -> Value {
-    let tools = orchestrator.list_tools_for_servers(server_keys);
+    let tools = session.list_tools_for_server(&server_keys[0]);
+    build_mcp_list_tools_value(&tools, server_label)
+}
+
+/// Shared helper to build mcp_list_tools JSON from tool entries
+fn build_mcp_list_tools_value(tools: &[crate::mcp::ToolEntry], server_label: &str) -> Value {
     let tools_json: Vec<Value> = tools
         .iter()
         .map(|entry| {

@@ -1,14 +1,12 @@
 //! MCP tool execution logic for Harmony Responses
 
-use std::sync::Arc;
-
 use axum::response::Response;
 use serde_json::{from_str, json, Value};
 use tracing::{debug, error};
 
 use super::common::McpCallTracking;
 use crate::{
-    mcp::{ApprovalMode, McpOrchestrator, TenantContext, ToolEntry, ToolExecutionInput},
+    mcp::{McpToolSession, ToolEntry, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         common::{Function, ToolCall},
@@ -39,31 +37,11 @@ pub(crate) struct ToolResult {
 ///
 /// Vector of tool results (one per tool call)
 pub(super) async fn execute_mcp_tools(
-    mcp_orchestrator: &Arc<McpOrchestrator>,
+    session: &McpToolSession<'_>,
     tool_calls: &[ToolCall],
     tracking: &mut McpCallTracking,
     model_id: &str,
-    request_id: &str,
-    server_label: &str,
-    mcp_tools: &[ToolEntry],
 ) -> Result<Vec<ToolResult>, Response> {
-    // Create request context for tool execution
-    let request_ctx = mcp_orchestrator.create_request_context(
-        request_id,
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
-    );
-
-    // Extract unique server_keys from mcp_tools
-    // For small lists (typical: 1-10 tools), linear scan is faster than HashSet
-    let mut server_keys = Vec::new();
-    for entry in mcp_tools {
-        let key = entry.server_key().to_string();
-        if !server_keys.iter().any(|k| k == &key) {
-            server_keys.push(key);
-        }
-    }
-
     // Convert tool calls to execution inputs
     let inputs: Vec<ToolExecutionInput> = tool_calls
         .iter()
@@ -93,9 +71,7 @@ pub(super) async fn execute_mcp_tools(
     );
 
     // Execute all tools via unified batch API
-    let outputs = mcp_orchestrator
-        .execute_tools(inputs, &server_keys, server_label, &request_ctx)
-        .await;
+    let outputs = session.execute_tools(inputs).await;
 
     // Convert outputs to ToolResults and record metrics/tracking
     let results: Vec<ToolResult> = outputs

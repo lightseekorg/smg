@@ -35,7 +35,7 @@ use super::{
     },
 };
 use crate::{
-    mcp::{McpOrchestrator, ResponseFormat},
+    mcp::{McpOrchestrator, McpToolSession, ResponseFormat},
     protocols::{
         event_types::{
             is_function_call_type, is_response_event, CodeInterpreterCallEvent,
@@ -46,7 +46,7 @@ use crate::{
     },
     routers::{
         header_utils::{apply_request_headers, preserve_response_headers},
-        mcp_utils::{resolve_tool_server_label, McpLoopConfig},
+        mcp_utils::McpLoopConfig,
         openai::context::{RequestContext, StreamingEventContext, StreamingRequest},
         persistence_utils::persist_conversation_items,
     },
@@ -139,38 +139,38 @@ pub(super) fn apply_event_transformations_inplace(
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let response_format = ctx
-                            .orchestrator
-                            .and_then(|orch| orch.find_tool_by_name(&tool_name, ctx.server_keys))
-                            .map(|entry| entry.response_format)
-                            .unwrap_or(ResponseFormat::Passthrough);
 
-                        // Determine item type and ID prefix based on response_format
-                        let (new_type, id_prefix) = match response_format {
-                            ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
-                            _ => (ItemType::MCP_CALL, "mcp_"),
-                        };
+                        // Only transform if this is an MCP tool; keep function_call unchanged
+                        if let Some(entry) =
+                            ctx.session.and_then(|s| s.find_tool_by_name(&tool_name))
+                        {
+                            let response_format = entry.response_format;
 
-                        item["type"] = json!(new_type);
-                        if new_type == ItemType::MCP_CALL {
-                            let label = resolve_tool_server_label(
-                                ctx.orchestrator.map(|v| v.as_ref()),
-                                &tool_name,
-                                ctx.mcp_servers,
-                                ctx.server_keys,
-                            );
-                            item["server_label"] = json!(label);
-                        }
+                            // Determine item type and ID prefix based on response_format
+                            let (new_type, id_prefix) = match response_format {
+                                ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
+                                _ => (ItemType::MCP_CALL, "mcp_"),
+                            };
 
-                        // Transform ID from fc_* to appropriate prefix
-                        if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                            if let Some(stripped) = id.strip_prefix("fc_") {
-                                let new_id = format!("{}{}", id_prefix, stripped);
-                                item["id"] = json!(new_id);
+                            item["type"] = json!(new_type);
+                            if new_type == ItemType::MCP_CALL {
+                                let label = ctx
+                                    .session
+                                    .map(|s| s.resolve_tool_server_label(&tool_name))
+                                    .unwrap_or_else(|| "mcp".to_string());
+                                item["server_label"] = json!(label);
                             }
-                        }
 
-                        changed = true;
+                            // Transform ID from fc_* to appropriate prefix
+                            if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                                if let Some(stripped) = id.strip_prefix("fc_") {
+                                    let new_id = format!("{}{}", id_prefix, stripped);
+                                    item["id"] = json!(new_id);
+                                }
+                            }
+
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -478,7 +478,6 @@ pub(super) fn send_final_response_event(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     sequence_number: &mut u64,
     state: &ToolLoopState,
-    orchestrator: Option<&Arc<McpOrchestrator>>,
     ctx: &StreamingEventContext<'_>,
 ) -> bool {
     let mut final_response = match handler.snapshot_final_response() {
@@ -495,8 +494,8 @@ pub(super) fn send_final_response_event(
         }
     }
 
-    if let Some(orch) = orchestrator {
-        inject_mcp_metadata_streaming(&mut final_response, state, orch, ctx.mcp_servers);
+    if let Some(session) = ctx.session {
+        inject_mcp_metadata_streaming(&mut final_response, state, session);
     }
 
     restore_original_tools(&mut final_response, ctx.original_request);
@@ -710,7 +709,6 @@ pub(super) async fn handle_streaming_with_tool_interception(
     let headers_opt = headers.cloned();
     let payload_clone = payload.clone();
     let orchestrator_clone = Arc::clone(orchestrator);
-    let server_keys_clone = server_keys.clone();
 
     // Spawn the streaming loop task
     tokio::spawn(async move {
@@ -725,12 +723,18 @@ pub(super) async fn handle_streaming_with_tool_interception(
         let mut next_output_index: usize = 0;
         let mut preserved_response_id: Option<String> = None;
 
+        // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)
+        let session_request_id = format!("resp_{}", uuid::Uuid::new_v4());
+        let session = McpToolSession::new(
+            &orchestrator_clone,
+            loop_config.mcp_servers.clone(),
+            &session_request_id,
+        );
+
         let streaming_ctx = StreamingEventContext {
             original_request: &original_request,
             previous_response_id: previous_response_id.as_deref(),
-            server_keys: &server_keys_clone,
-            mcp_servers: &loop_config.mcp_servers,
-            orchestrator: Some(&orchestrator_clone),
+            session: Some(&session),
         };
 
         loop {
@@ -832,14 +836,13 @@ pub(super) async fn handle_streaming_with_tool_interception(
                                             {
                                                 seen_in_progress = true;
                                                 if !mcp_list_tools_sent {
-                                                    for (label, key) in
-                                                        loop_config.mcp_servers.iter()
+                                                    for (label, key) in session.mcp_servers().iter()
                                                     {
                                                         let list_tools_index = handler
                                                             .allocate_synthetic_output_index();
                                                         if !send_mcp_list_tools_events(
                                                             &tx,
-                                                            &orchestrator_clone,
+                                                            &session,
                                                             label,
                                                             list_tools_index,
                                                             &mut sequence_number,
@@ -901,7 +904,6 @@ pub(super) async fn handle_streaming_with_tool_interception(
                     &tx,
                     &mut sequence_number,
                     &state,
-                    Some(&orchestrator_clone),
                     &streaming_ctx,
                 ) {
                     return;
@@ -919,12 +921,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                             obj.insert("id".to_string(), Value::String(id.clone()));
                         }
                     }
-                    inject_mcp_metadata_streaming(
-                        &mut response_json,
-                        &state,
-                        &orchestrator_clone,
-                        &loop_config.mcp_servers,
-                    );
+                    inject_mcp_metadata_streaming(&mut response_json, &state, &session);
 
                     restore_original_tools(&mut response_json, &original_request);
                     patch_response_with_request_metadata(
@@ -978,18 +975,12 @@ pub(super) async fn handle_streaming_with_tool_interception(
             }
 
             // Execute all pending tool calls
-            let request_id = preserved_response_id
-                .as_deref()
-                .unwrap_or("streaming-request");
             if !execute_streaming_tool_calls(
                 pending_calls,
-                &orchestrator_clone,
+                &session,
                 &tx,
                 &mut state,
                 &mut sequence_number,
-                request_id,
-                &loop_config.mcp_servers,
-                &server_keys_clone,
             )
             .await
             {

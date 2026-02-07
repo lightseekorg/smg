@@ -731,7 +731,7 @@ class RouterArgs:
             f"--{prefix}backend",
             type=str,
             default=RouterArgs.backend,
-            choices=["sglang", "openai"],
+            choices=["sglang", "openai", "anthropic"],
             help="Backend runtime to use (default: sglang)",
         )
         backend_group.add_argument(

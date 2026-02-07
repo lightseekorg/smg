@@ -18,7 +18,7 @@ use super::{
     types::HarmonyChannelDelta, HarmonyParserAdapter,
 };
 use crate::{
-    mcp::{McpOrchestrator, ResponseFormat},
+    mcp::{McpToolSession, ResponseFormat},
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     protocols::{
         chat::{
@@ -573,7 +573,7 @@ impl HarmonyStreamingProcessor {
 
     /// Process streaming chunks for Responses API iteration.
     ///
-    /// When MCP context is provided (orchestrator, server_keys, mcp_tool_names):
+    /// When MCP context is provided (session, mcp_tool_names):
     /// - MCP tools with `ResponseFormat::WebSearchCall` → `web_search_call.*` events
     /// - Other MCP tools → `mcp_call.*` events
     /// - Function tools (not in mcp_tool_names) → `function_call.*` events
@@ -583,22 +583,13 @@ impl HarmonyStreamingProcessor {
         execution_result: context::ExecutionResult,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        orchestrator: Option<&Arc<McpOrchestrator>>,
-        server_keys: Option<&[String]>,
+        session: Option<&McpToolSession<'_>>,
         mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         match execution_result {
             context::ExecutionResult::Single { stream } => {
                 debug!("Processing Responses API single stream mode");
-                Self::process_decode_stream(
-                    stream,
-                    emitter,
-                    tx,
-                    orchestrator,
-                    server_keys,
-                    mcp_tool_names,
-                )
-                .await
+                Self::process_decode_stream(stream, emitter, tx, session, mcp_tool_names).await
             }
             context::ExecutionResult::Dual { prefill, decode } => {
                 debug!("Processing Responses API dual stream mode");
@@ -607,8 +598,7 @@ impl HarmonyStreamingProcessor {
                     *decode,
                     emitter,
                     tx,
-                    orchestrator,
-                    server_keys,
+                    session,
                     mcp_tool_names,
                 )
                 .await
@@ -624,8 +614,7 @@ impl HarmonyStreamingProcessor {
         decode_stream: ProtoStream,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        orchestrator: Option<&Arc<McpOrchestrator>>,
-        server_keys: Option<&[String]>,
+        session: Option<&McpToolSession<'_>>,
         mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         // Phase 1: Drain prefill stream
@@ -634,15 +623,8 @@ impl HarmonyStreamingProcessor {
         }
 
         // Phase 2: Process decode stream
-        let result = Self::process_decode_stream(
-            decode_stream,
-            emitter,
-            tx,
-            orchestrator,
-            server_keys,
-            mcp_tool_names,
-        )
-        .await;
+        let result =
+            Self::process_decode_stream(decode_stream, emitter, tx, session, mcp_tool_names).await;
 
         prefill_stream.mark_completed();
         result
@@ -653,8 +635,7 @@ impl HarmonyStreamingProcessor {
         mut decode_stream: ProtoStream,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        orchestrator: Option<&Arc<McpOrchestrator>>,
-        server_keys: Option<&[String]>,
+        session: Option<&McpToolSession<'_>>,
         mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         let mut parser =
@@ -783,13 +764,8 @@ impl HarmonyStreamingProcessor {
                                 let response_format = if let Some(names) = mcp_tool_names {
                                     if names.contains(tool_name) {
                                         Some(
-                                            orchestrator
-                                                .and_then(|o| {
-                                                    o.find_tool_by_name(
-                                                        tool_name,
-                                                        server_keys.unwrap_or(&[]),
-                                                    )
-                                                })
+                                            session
+                                                .and_then(|s| s.find_tool_by_name(tool_name))
                                                 .map(|e| e.response_format.clone())
                                                 .unwrap_or(ResponseFormat::Passthrough),
                                         )
@@ -827,9 +803,12 @@ impl HarmonyStreamingProcessor {
                                     "status": "in_progress"
                                 });
 
+                                let label = session
+                                    .map(|s| s.resolve_tool_server_label(tool_name))
+                                    .unwrap_or_else(|| "mcp".to_string());
                                 attach_mcp_server_label(
                                     &mut item,
-                                    emitter.mcp_server_label.as_deref(),
+                                    Some(label.as_str()),
                                     response_format.as_ref(),
                                 );
 
@@ -986,9 +965,12 @@ impl HarmonyStreamingProcessor {
                                     "status": "completed"
                                 });
 
+                                let label = session
+                                    .map(|s| s.resolve_tool_server_label(tool_name))
+                                    .unwrap_or_else(|| "mcp".to_string());
                                 attach_mcp_server_label(
                                     &mut item,
-                                    emitter.mcp_server_label.as_deref(),
+                                    Some(label.as_str()),
                                     response_format.as_ref(),
                                 );
 
@@ -1114,9 +1096,12 @@ impl HarmonyStreamingProcessor {
                             "status": "completed"
                         });
 
+                        let label = session
+                            .map(|s| s.resolve_tool_server_label(tool_name))
+                            .unwrap_or_else(|| "mcp".to_string());
                         attach_mcp_server_label(
                             &mut item,
-                            emitter.mcp_server_label.as_deref(),
+                            Some(label.as_str()),
                             response_format.as_ref(),
                         );
 

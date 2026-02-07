@@ -32,34 +32,12 @@ use crate::{
         rerank::RerankRequest,
         responses::{ResponsesGetParams, ResponsesRequest},
     },
-    routers::RouterTrait,
+    routers::{
+        factory::{router_ids, RouterId},
+        RouterFactory, RouterTrait,
+    },
     server::ServerConfig,
 };
-
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct RouterId(&'static str);
-
-impl RouterId {
-    pub const fn new(id: &'static str) -> Self {
-        Self(id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.0
-    }
-}
-
-/// Static router ID constants to avoid heap allocations in hot paths
-pub mod router_ids {
-    use super::RouterId;
-
-    pub const HTTP_REGULAR: RouterId = RouterId::new("http-regular");
-    pub const HTTP_PD: RouterId = RouterId::new("http-pd");
-    pub const HTTP_OPENAI: RouterId = RouterId::new("http-openai");
-    pub const HTTP_ANTHROPIC: RouterId = RouterId::new("http-anthropic");
-    pub const GRPC_REGULAR: RouterId = RouterId::new("grpc-regular");
-    pub const GRPC_PD: RouterId = RouterId::new("grpc-pd");
-}
 
 pub struct RouterManager {
     worker_registry: Arc<WorkerRegistry>,
@@ -80,12 +58,28 @@ impl RouterManager {
         }
     }
 
+    /// Register a router if creation succeeded, log either way.
+    fn try_register(
+        &self,
+        id: RouterId,
+        label: &str,
+        result: Result<Box<dyn RouterTrait>, String>,
+    ) {
+        match result {
+            Ok(router) => {
+                info!("Created {label} router");
+                self.register_router(id, Arc::from(router));
+            }
+            Err(e) => {
+                warn!("Failed to create {label} router: {e}");
+            }
+        }
+    }
+
     pub async fn from_config(
         config: &ServerConfig,
         app_context: &Arc<AppContext>,
     ) -> Result<Arc<Self>, String> {
-        use crate::routers::RouterFactory;
-
         let mut manager = Self::new(app_context.worker_registry.clone());
         manager.enable_igw = config.router_config.enable_igw;
         let manager = Arc::new(manager);
@@ -93,74 +87,11 @@ impl RouterManager {
         if config.router_config.enable_igw {
             info!("Initializing RouterManager in multi-router mode (IGW)");
 
-            match RouterFactory::create_regular_router(app_context).await {
-                Ok(http_regular) => {
-                    info!("Created HTTP Regular router");
-                    manager.register_router(router_ids::HTTP_REGULAR, Arc::from(http_regular));
-                }
-                Err(e) => {
-                    warn!("Failed to create HTTP Regular router: {e}");
-                }
-            }
+            let routers =
+                RouterFactory::create_igw_routers(&config.router_config.policy, app_context).await;
 
-            // Always create gRPC Regular router in IGW mode
-            match RouterFactory::create_grpc_router(app_context).await {
-                Ok(grpc_regular) => {
-                    info!("Created gRPC Regular router");
-                    manager.register_router(router_ids::GRPC_REGULAR, Arc::from(grpc_regular));
-                }
-                Err(e) => {
-                    warn!("Failed to create gRPC Regular router: {e}");
-                }
-            }
-
-            info!("PD disaggregation auto-enabled for IGW mode, creating PD routers");
-
-            // Create HTTP PD router
-            match RouterFactory::create_pd_router(
-                None,
-                None,
-                &config.router_config.policy,
-                app_context,
-            )
-            .await
-            {
-                Ok(http_pd) => {
-                    info!("Created HTTP PD router");
-                    manager.register_router(router_ids::HTTP_PD, Arc::from(http_pd));
-                }
-                Err(e) => {
-                    warn!("Failed to create HTTP PD router: {e}");
-                }
-            }
-
-            // Create gRPC PD router
-            match RouterFactory::create_grpc_pd_router(
-                None,
-                None,
-                &config.router_config.policy,
-                app_context,
-            )
-            .await
-            {
-                Ok(grpc_pd) => {
-                    info!("Created gRPC PD router");
-                    manager.register_router(router_ids::GRPC_PD, Arc::from(grpc_pd));
-                }
-                Err(e) => {
-                    warn!("Failed to create gRPC PD router: {e}");
-                }
-            }
-
-            // Create OpenAI router for external OpenAI-compatible backends
-            match RouterFactory::create_openai_router(app_context).await {
-                Ok(openai) => {
-                    info!("Created OpenAI router");
-                    manager.register_router(router_ids::HTTP_OPENAI, Arc::from(openai));
-                }
-                Err(e) => {
-                    warn!("Failed to create OpenAI router: {e}");
-                }
+            for (id, label, result) in routers {
+                manager.try_register(id, label, result);
             }
 
             info!(

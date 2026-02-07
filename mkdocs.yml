@@ -137,9 +137,14 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Getting Started:
-      - Overview: getting-started/index.md
-      - Installation: getting-started/installation.md
-      - Quickstart: getting-started/quickstart.md
+      - getting-started/index.md
+      - Multiple Workers: getting-started/multiple-workers.md
+      - gRPC Workers: getting-started/grpc-workers.md
+      - PD Disaggregation: getting-started/pd-disaggregation.md
+      - Service Discovery: getting-started/service-discovery.md
+      - Load Balancing: getting-started/load-balancing.md
+      - Tokenizer Caching: getting-started/tokenizer-caching.md
+      - Monitoring: getting-started/monitoring.md
   - Concepts:
       - concepts/index.md
       - Architecture:
@@ -176,10 +181,6 @@ nav:
           - Monitor with Prometheus: tasks/operations/monitoring.md
           - Configure Logging: tasks/operations/logging.md
           - Manage Workers: tasks/operations/workers.md
-  - Tutorials:
-      - tutorials/index.md
-      - Getting Started: tutorials/getting-started.md
-      - Production Deployment: tutorials/production.md
   - Reference:
       - reference/index.md
       - API:

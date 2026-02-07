@@ -91,32 +91,9 @@ vLLM supports two backends for KV cache transfer:
 
 ### SGLang PD (Parallel Dispatch)
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant S as SMG
-    participant P as Prefill Worker
-    participant D as Decode Worker
-
-    C->>S: Chat completion request
-    S->>S: Find P/D pair
-    par Parallel dispatch
-        S->>P: Forward request (with bootstrap metadata)
-        S->>D: Forward request (with bootstrap metadata)
-    end
-    P->>P: Process prompt
-    P->>D: Transfer KV cache (via bootstrap)
-    P-->>S: Prefill complete
-
-    loop Token generation
-        D->>D: Generate token
-        D-->>S: Stream token
-        S-->>C: Stream token
-    end
-
-    D-->>S: Generation complete
-    S-->>C: Final response
-```
+<div class="architecture-diagram">
+  <img src="../../../assets/images/pd-sglang.svg" alt="SGLang PD Parallel Dispatch Sequence">
+</div>
 
 SGLang uses **parallel dispatch** with bootstrap-based coordination:
 
@@ -127,31 +104,9 @@ SGLang uses **parallel dispatch** with bootstrap-based coordination:
 
 ### vLLM PD (Sequential Dispatch)
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant S as SMG
-    participant P as Prefill Worker
-    participant D as Decode Worker
-
-    C->>S: Chat completion request
-    S->>S: Find P/D pair
-    S->>P: Forward request (max_tokens=1)
-    P->>P: Process prompt, compute KV cache
-    P-->>S: Prefill complete (discarded)
-
-    S->>D: Forward original request
-    Note over P,D: NIXL/Mooncake auto-discovers KV cache
-
-    loop Token generation
-        D->>D: Generate token
-        D-->>S: Stream token
-        S-->>C: Stream token
-    end
-
-    D-->>S: Generation complete
-    S-->>C: Final response
-```
+<div class="architecture-diagram">
+  <img src="../../../assets/images/pd-vllm.svg" alt="vLLM PD Sequential Dispatch Sequence">
+</div>
 
 vLLM uses **sequential dispatch** with NIXL or Mooncake KV transfer:
 

@@ -719,6 +719,78 @@ class TestToolChoiceHarmony:
         full_delta_event = "".join(e.delta for e in func_arg_deltas)
         assert "system_name" in full_delta_event.lower() and "astra-7" in full_delta_event.lower()
 
+    def test_mcp_multi_server_tool_call(self, setup_backend):
+        """Test MCP tool call with multiple MCP servers (non-streaming)."""
+        _, model, client, gateway = setup_backend
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model=model,
+            input=MCP_TEST_PROMPT,
+            tools=[DEEPWIKI_MCP_TOOL, BRAVE_MCP_TOOL],
+            stream=False,
+            reasoning={"effort": "low"},
+        )
+
+        assert resp.error is None
+        assert resp.id is not None
+        assert resp.status == "completed"
+        assert resp.output is not None
+
+        list_tools_items = [item for item in resp.output if item.type == "mcp_list_tools"]
+        assert len(list_tools_items) == 2
+        list_tool_labels = {item.server_label for item in list_tools_items}
+        assert list_tool_labels == {"brave", "deepwiki"}
+
+        mcp_calls = [item for item in resp.output if item.type == "mcp_call"]
+        assert len(mcp_calls) > 0
+        for mcp_call in mcp_calls:
+            assert mcp_call.server_label == "brave"
+
+    def test_mcp_multi_server_tool_call_streaming(self, setup_backend):
+        """Test MCP tool call with multiple MCP servers (streaming)."""
+        _, model, client, gateway = setup_backend
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model=model,
+            input=MCP_TEST_PROMPT,
+            tools=[DEEPWIKI_MCP_TOOL, BRAVE_MCP_TOOL],
+            stream=True,
+            reasoning={"effort": "low"},
+        )
+
+        events = list(resp)
+        assert len(events) > 0
+
+        list_tools_events = [
+            event
+            for event in events
+            if event.type == "response.output_item.added"
+            and event.item is not None
+            and event.item.type == "mcp_list_tools"
+        ]
+        assert len(list_tools_events) == 2
+        list_tool_labels = {event.item.server_label for event in list_tools_events}
+        assert list_tool_labels == {"brave", "deepwiki"}
+
+        completed_events = [e for e in events if e.type == "response.completed"]
+        assert len(completed_events) == 1
+        final_response = completed_events[0].response
+        assert final_response.output is not None
+
+        final_list_tools = [item for item in final_response.output if item.type == "mcp_list_tools"]
+        assert len(final_list_tools) == 2
+        final_labels = {item.server_label for item in final_list_tools}
+        assert final_labels == {"brave", "deepwiki"}
+
+        mcp_calls = [item for item in final_response.output if item.type == "mcp_call"]
+        assert len(mcp_calls) > 0
+        for mcp_call in mcp_calls:
+            assert mcp_call.server_label == "brave"
+
 
 # =============================================================================
 # Local Backend Tests (gRPC with Qwen model) - Tool Choice
@@ -944,3 +1016,75 @@ class TestToolChoiceLocal:
 
         full_delta_event = "".join(e.delta for e in func_arg_deltas)
         assert "system_name" in full_delta_event.lower() and "astra-7" in full_delta_event.lower()
+
+    def test_mcp_multi_server_tool_call(self, setup_backend):
+        """Test MCP tool call with multiple MCP servers (non-streaming)."""
+        _, model, client, gateway = setup_backend
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model=model,
+            input=MCP_TEST_PROMPT,
+            tools=[DEEPWIKI_MCP_TOOL, BRAVE_MCP_TOOL],
+            stream=False,
+            reasoning={"effort": "low"},
+        )
+
+        assert resp.error is None
+        assert resp.id is not None
+        assert resp.status == "completed"
+        assert resp.output is not None
+
+        list_tools_items = [item for item in resp.output if item.type == "mcp_list_tools"]
+        assert len(list_tools_items) == 2
+        list_tool_labels = {item.server_label for item in list_tools_items}
+        assert list_tool_labels == {"brave", "deepwiki"}
+
+        mcp_calls = [item for item in resp.output if item.type == "mcp_call"]
+        assert len(mcp_calls) > 0
+        for mcp_call in mcp_calls:
+            assert mcp_call.server_label == "brave"
+
+    def test_mcp_multi_server_tool_call_streaming(self, setup_backend):
+        """Test MCP tool call with multiple MCP servers (streaming)."""
+        _, model, client, gateway = setup_backend
+
+        time.sleep(2)
+
+        resp = client.responses.create(
+            model=model,
+            input=MCP_TEST_PROMPT,
+            tools=[DEEPWIKI_MCP_TOOL, BRAVE_MCP_TOOL],
+            stream=True,
+            reasoning={"effort": "low"},
+        )
+
+        events = list(resp)
+        assert len(events) > 0
+
+        list_tools_events = [
+            event
+            for event in events
+            if event.type == "response.output_item.added"
+            and event.item is not None
+            and event.item.type == "mcp_list_tools"
+        ]
+        assert len(list_tools_events) == 2
+        list_tool_labels = {event.item.server_label for event in list_tools_events}
+        assert list_tool_labels == {"brave", "deepwiki"}
+
+        completed_events = [e for e in events if e.type == "response.completed"]
+        assert len(completed_events) == 1
+        final_response = completed_events[0].response
+        assert final_response.output is not None
+
+        final_list_tools = [item for item in final_response.output if item.type == "mcp_list_tools"]
+        assert len(final_list_tools) == 2
+        final_labels = {item.server_label for item in final_list_tools}
+        assert final_labels == {"brave", "deepwiki"}
+
+        mcp_calls = [item for item in final_response.output if item.type == "mcp_call"]
+        assert len(mcp_calls) > 0
+        for mcp_call in mcp_calls:
+            assert mcp_call.server_label == "brave"

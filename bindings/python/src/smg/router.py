@@ -37,7 +37,11 @@ def backend_from_str(backend_str: str | None) -> BackendType:
         return backend_str
     if backend_str is None:
         return BackendType.Sglang
-    backend_map = {"sglang": BackendType.Sglang, "openai": BackendType.Openai}
+    backend_map = {
+        "sglang": BackendType.Sglang,
+        "openai": BackendType.Openai,
+        "anthropic": BackendType.Anthropic,
+    }
     backend_lower = backend_str.lower()
     if backend_lower not in backend_map:
         raise ValueError(

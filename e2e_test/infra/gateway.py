@@ -44,7 +44,7 @@ class Gateway:
     1. Regular mode: Start with worker URLs
     2. PD mode: Start with prefill/decode workers
     3. IGW mode: Start empty, add workers via API
-    4. Cloud mode: Start with cloud backend (OpenAI, xAI)
+    4. Cloud mode: Start with cloud backend (OpenAI, xAI, Anthropic)
 
     Example (regular mode):
         gateway = Gateway()
@@ -75,8 +75,8 @@ class Gateway:
 
     Example (cloud mode):
         gateway = Gateway()
-        gateway.start(cloud_backend="openai")  # or "xai"
-        # Requires OPENAI_API_KEY or XAI_API_KEY env var
+        gateway.start(cloud_backend="openai")  # or "xai", "anthropic"
+        # Requires OPENAI_API_KEY, XAI_API_KEY, or ANTHROPIC_API_KEY env var
     """
 
     def __init__(
@@ -150,7 +150,7 @@ class Gateway:
             prefill_workers: List of prefill ModelInstance objects for PD mode.
             decode_workers: List of decode ModelInstance objects for PD mode.
             igw_mode: Start in IGW mode (no workers, add via API).
-            cloud_backend: Cloud backend type ("openai" or "xai").
+            cloud_backend: Cloud backend type ("openai", "xai", or "anthropic").
             history_backend: History backend for cloud mode ("memory" or "oracle").
             policy: Routing policy (round_robin, random, etc.)
             timeout: Startup timeout in seconds.
@@ -234,6 +234,13 @@ class Gateway:
             self.cloud_mode = True
             self.cloud_backend = cloud_backend
 
+            # Mapping from cloud backend name to gateway --backend arg
+            cloud_backend_type = {
+                "openai": "openai",
+                "xai": "openai",
+                "anthropic": "anthropic",
+            }
+
             # Get worker URL and API key based on backend
             if cloud_backend == "openai":
                 worker_url = "https://api.openai.com"
@@ -249,12 +256,20 @@ class Gateway:
                     raise ValueError("XAI_API_KEY environment variable required")
                 self._env = os.environ.copy()
                 self._env["XAI_API_KEY"] = api_key
+            elif cloud_backend == "anthropic":
+                worker_url = "https://api.anthropic.com"
+                api_key = os.environ.get("ANTHROPIC_API_KEY")
+                if not api_key:
+                    raise ValueError("ANTHROPIC_API_KEY environment variable required")
+                self._env = os.environ.copy()
+                self._env["ANTHROPIC_API_KEY"] = api_key
             else:
                 raise ValueError(f"Unsupported cloud backend: {cloud_backend}")
 
+            backend_type = cloud_backend_type.get(cloud_backend, "openai")
             mode_args = [
                 "--backend",
-                "openai",  # Both OpenAI and xAI use openai backend type
+                backend_type,
                 "--worker-urls",
                 worker_url,
                 "--history-backend",
