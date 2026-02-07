@@ -161,11 +161,11 @@ Understand SMG's architecture, routing strategies, and reliability features.
 
 <div class="card" markdown>
 
-### :material-wrench: Complete a Task
+### :material-wrench: Ops Setup
 
-Step-by-step guides for deploying, configuring, and operating SMG.
+Continue onboarding with monitoring, logging, and TLS guides.
 
-[Browse Tasks →](tasks/index.md)
+[View Getting Started Guides →](getting-started/index.md)
 
 </div>
 

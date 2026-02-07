@@ -11,6 +11,7 @@ Configure structured logging with multiple output formats and integrate with log
 #### Before you begin
 
 - SMG [installed](../../getting-started/index.md)
+- Completed the [Getting Started](index.md) guide
 - Log aggregation system (optional): Elasticsearch, Loki, or similar
 
 </div>
@@ -25,11 +26,9 @@ SMG supports flexible logging configuration via CLI flags or environment variabl
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--log-level` | `info` | Log level: trace, debug, info, warn, error |
+| `--log-level` | `info` | Log level: debug, info, warn, error |
 | `--log-json` | `false` | Output logs as JSON |
 | `--log-dir` | None | Directory for log files (enables file logging) |
-| `--log-colorize` | `true` | Enable ANSI colors in terminal |
-| `--log-targets` | `smg` | Comma-separated list of modules to log |
 
 ### Environment Variable
 
@@ -51,7 +50,6 @@ RUST_LOG=smg=debug,hyper=warn smg --worker-urls http://worker:8000
 | `warn` | Warnings and errors | Production (recommended) |
 | `info` | Informational messages | Production (verbose) |
 | `debug` | Debug information | Development |
-| `trace` | Trace-level detail | Deep troubleshooting |
 
 ### Set Log Level
 
@@ -338,8 +336,8 @@ This ensures request events are captured in traces when OTEL is active.
 # Enable OTEL with logging
 smg \
   --worker-urls http://worker:8000 \
-  --enable-otel \
-  --otlp-endpoint localhost:4317 \
+  --enable-trace \
+  --otlp-traces-endpoint localhost:4317 \
   --log-level info
 ```
 
@@ -467,5 +465,5 @@ ls -la /tmp/smg-logs/
 
 ## What's Next?
 
-- [Monitor with Prometheus](monitoring.md) — Set up metrics and tracing
-- [Manage Workers](workers.md) — Worker operations
+- [Monitoring](monitoring.md) — Metrics, tracing, and alerting
+- [Configuration Reference](../reference/configuration.md) — Full CLI options

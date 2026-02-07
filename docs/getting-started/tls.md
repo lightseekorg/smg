@@ -4,13 +4,13 @@ title: Configure TLS
 
 # Configure TLS
 
-This task shows you how to secure SMG communications with TLS and mTLS.
+This guide shows how to secure SMG communications with TLS and mTLS planning.
 
 <div class="prerequisites" markdown>
 
 #### Before you begin
 
-- SMG [installed](../../getting-started/index.md)
+- Completed the [Getting Started](index.md) guide
 - TLS certificates (or follow the steps below to generate them)
 
 </div>
@@ -27,7 +27,7 @@ SMG supports TLS configurations for securing communications:
 | **Client mTLS** | Mutual TLS for gateway → worker communication | Planned |
 
 <div class="architecture-diagram">
-  <img src="../../../assets/images/tls-architecture.svg" alt="TLS Configuration Architecture">
+  <img src="../assets/images/tls-architecture.svg" alt="TLS Configuration Architecture">
 </div>
 
 !!! info "Client mTLS"
@@ -261,5 +261,5 @@ curl https://localhost:30000/workers
 
 ## What's Next?
 
-- [Monitor with Prometheus](../operations/monitoring.md) — Set up observability
-- [Security Concepts](../../concepts/reliability/rate-limiting.md) — Learn about rate limiting
+- [Monitoring](monitoring.md) — Set up observability and alerts
+- [Authentication Concepts](../concepts/security/authentication.md) — Security architecture and controls
