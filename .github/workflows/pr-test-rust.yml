@@ -304,6 +304,11 @@ jobs:
           - 8001:8080
         env:
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+        options: >-
+          --health-cmd "nc -z localhost 8080"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 3
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
