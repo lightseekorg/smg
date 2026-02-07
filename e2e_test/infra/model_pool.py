@@ -1158,7 +1158,9 @@ class ModelPool:
                 "--tp_size",
                 str(tp_size),
                 "--max_num_tokens",
-                str(DEFAULT_MAX_NUM_TOKENS),
+                "1024",
+                "--max_seq_len",
+                "1024",
             ]
             extra = model_spec.get("trtllm_args", [])
         else:
