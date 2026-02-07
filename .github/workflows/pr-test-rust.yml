@@ -288,6 +288,29 @@ jobs:
             runner: 4-gpu-h100
     runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
     timeout-minutes: ${{ matrix.timeout }}
+    services:
+      oracle-db:
+        image: ${{ matrix.setup_oracle && 'gvenzl/oracle-xe:21-slim-faststart' || '' }}
+        ports:
+          - 1521:1521
+        env:
+          ORACLE_PASSWORD: oracle
+        options: >-
+          --health-cmd "healthcheck.sh"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      brave-search-server:
+        image: ${{ matrix.setup_brave && 'shoofio/brave-search-mcp-sse:1.0.10' || '' }}
+        ports:
+          - 8001:8080
+        env:
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+        options: >-
+          --health-cmd "nc -z localhost 8080"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 3
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -350,30 +373,12 @@ jobs:
 
           echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_26:$LD_LIBRARY_PATH" >> $GITHUB_ENV
 
-      - name: Start Oracle Database
+      - name: Set Oracle connection environment
         if: matrix.setup_oracle
         run: |
-          docker run -d --rm -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim-faststart
-          echo "Starting Oracle DB..."
-
-          # Export Oracle connection environment variables
           echo "ATP_USER=system" >> $GITHUB_ENV
           echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
           echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
-
-      - name: Start Brave MCP Server
-        if: matrix.setup_brave
-        env:
-          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
-        run: |
-          docker run -d --rm \
-            -p 8001:8080 \
-            -e BRAVE_API_KEY \
-            --name brave-search-server \
-            shoofio/brave-search-mcp-sse:1.0.10
-          echo "Starting Brave MCP Server..."
-          sleep 2
-          curl -f --max-time 1 http://localhost:8001/sse > /dev/null 2>&1 && echo "Brave MCP Server is healthy!" || echo "Brave MCP Server responded"
 
       - name: Run E2E tests
         env:
