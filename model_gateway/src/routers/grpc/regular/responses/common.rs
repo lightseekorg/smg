@@ -9,19 +9,20 @@
 use std::sync::Arc;
 
 use axum::response::Response;
-use serde_json::{json, Value};
 use tracing::{debug, warn};
-use uuid::Uuid;
 
 use crate::{
     data_connector::{self, ConversationId, ResponseId},
-    mcp::{self, McpOrchestrator},
+    mcp::{
+        self, build_chat_function_tools, build_mcp_list_tools_item as mcp_build_list_tools_item,
+        McpOrchestrator,
+    },
     protocols::{
         chat::ChatCompletionRequest,
-        common::{Function, Tool, ToolChoice, ToolChoiceValue},
+        common::{Tool, ToolChoice, ToolChoiceValue},
         responses::{
-            self, McpToolInfo, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
-            ResponseOutputItem, ResponsesRequest,
+            self, ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
+            ResponsesRequest,
         },
     },
     routers::{error, grpc::common::responses::ResponsesContext},
@@ -143,27 +144,7 @@ pub(super) fn extract_all_tool_calls_from_chat(
 
 /// Convert MCP tools to Chat API tool format
 pub(super) fn convert_mcp_tools_to_chat_tools(mcp_tools: &[mcp::ToolEntry]) -> Vec<Tool> {
-    mcp_tools
-        .iter()
-        .map(|entry| Tool {
-            tool_type: "function".to_string(),
-            function: Function {
-                name: entry.tool.name.to_string(),
-                description: entry.tool.description.as_ref().map(|d| d.to_string()),
-                parameters: Value::Object((*entry.tool.input_schema).clone()),
-                strict: None,
-            },
-        })
-        .collect()
-}
-
-// ============================================================================
-// MCP Metadata Builders
-// ============================================================================
-
-/// Generate unique ID for MCP items
-pub(super) fn generate_mcp_id(prefix: &str) -> String {
-    format!("{}_{}", prefix, Uuid::new_v4())
+    build_chat_function_tools(mcp_tools)
 }
 
 /// Build mcp_list_tools output item
@@ -173,23 +154,7 @@ pub(super) fn build_mcp_list_tools_item(
     server_keys: &[String],
 ) -> ResponseOutputItem {
     let tools = mcp.list_tools_for_servers(server_keys);
-    let tools_info: Vec<McpToolInfo> = tools
-        .iter()
-        .map(|t| McpToolInfo {
-            name: t.tool_name().to_string(),
-            description: t.tool.description.as_ref().map(|d| d.to_string()),
-            input_schema: Value::Object((*t.tool.input_schema).clone()),
-            annotations: Some(json!({
-                "read_only": false
-            })),
-        })
-        .collect();
-
-    ResponseOutputItem::McpListTools {
-        id: generate_mcp_id("mcpl"),
-        server_label: server_label.to_string(),
-        tools: tools_info,
-    }
+    mcp_build_list_tools_item(server_label, &tools)
 }
 
 // ============================================================================

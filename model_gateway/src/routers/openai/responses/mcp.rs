@@ -17,7 +17,10 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
-    mcp::{McpToolSession, ResponseFormat, ResponseTransformer},
+    mcp::{
+        build_function_tools_json, build_mcp_list_tools_json, McpToolSession,
+        ResponseFormat, ResponseTransformer,
+    },
     protocols::{
         event_types::{
             is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType,
@@ -301,15 +304,7 @@ pub(super) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpT
     let mcp_tools = session.mcp_tools();
     let mut tools_json = Vec::with_capacity(retained_tools.len() + mcp_tools.len());
     tools_json.append(&mut retained_tools);
-
-    for entry in mcp_tools {
-        tools_json.push(serde_json::json!({
-            "type": ItemType::FUNCTION,
-            "name": entry.tool.name,
-            "description": entry.tool.description,
-            "parameters": Value::Object((*entry.tool.input_schema).clone())
-        }));
-    }
+    tools_json.extend(build_function_tools_json(&mcp_tools));
 
     if !tools_json.is_empty() {
         obj.insert("tools".to_string(), Value::Array(tools_json));
@@ -910,31 +905,7 @@ fn build_mcp_list_tools_item_from_session(
     server_keys: &[String],
 ) -> Value {
     let tools = session.list_tools_for_server(&server_keys[0]);
-    build_mcp_list_tools_value(&tools, server_label)
-}
-
-/// Shared helper to build mcp_list_tools JSON from tool entries
-fn build_mcp_list_tools_value(tools: &[crate::mcp::ToolEntry], server_label: &str) -> Value {
-    let tools_json: Vec<Value> = tools
-        .iter()
-        .map(|entry| {
-            json!({
-                "name": entry.tool.name,
-                "description": entry.tool.description,
-                "input_schema": Value::Object((*entry.tool.input_schema).clone()),
-                "annotations": {
-                    "read_only": false
-                }
-            })
-        })
-        .collect();
-
-    json!({
-        "id": generate_id("mcpl"),
-        "type": ItemType::MCP_LIST_TOOLS,
-        "server_label": server_label,
-        "tools": tools_json
-    })
+    build_mcp_list_tools_json(server_label, &tools)
 }
 
 /// Build a mcp_call output item

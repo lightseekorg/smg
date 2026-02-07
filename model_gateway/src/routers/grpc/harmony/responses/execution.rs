@@ -6,10 +6,10 @@ use tracing::{debug, error};
 
 use super::common::McpCallTracking;
 use crate::{
-    mcp::{McpToolSession, ToolEntry, ToolExecutionInput},
+    mcp::{build_response_tools, McpToolSession, ToolEntry, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
-        common::{Function, ToolCall},
+        common::ToolCall,
         responses::{ResponseTool, ResponseToolType},
     },
 };
@@ -111,23 +111,11 @@ pub(super) async fn execute_mcp_tools(
 /// Converts MCP ToolEntry (from inventory) to ResponseTool format so the model
 /// knows about available MCP tools when making tool calls.
 pub(crate) fn convert_mcp_tools_to_response_tools(mcp_tools: &[ToolEntry]) -> Vec<ResponseTool> {
-    mcp_tools
+    // Keep type visibility and semantics local while using shared MCP builders.
+    // This retains Harmony call-sites unchanged and removes duplicate mapping logic.
+    let response_tools = build_response_tools(mcp_tools);
+    debug_assert!(response_tools
         .iter()
-        .map(|entry| ResponseTool {
-            r#type: ResponseToolType::Mcp,
-            function: Some(Function {
-                name: entry.tool.name.to_string(),
-                description: entry.tool.description.as_ref().map(|d| d.to_string()),
-                parameters: Value::Object((*entry.tool.input_schema).clone()),
-                strict: None,
-            }),
-            server_url: None, // MCP tools from inventory don't have individual server URLs
-            authorization: None,
-            headers: None,
-            server_label: Some(entry.server_key().to_string()),
-            server_description: entry.tool.description.as_ref().map(|d| d.to_string()),
-            require_approval: None,
-            allowed_tools: None,
-        })
-        .collect()
+        .all(|t| t.r#type == ResponseToolType::Mcp));
+    response_tools
 }
