@@ -224,6 +224,7 @@ jobs:
             upload_benchmarks: true
             parallel_opts: ""  # No parallel for benchmarks (performance measurement)
             ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py --ignore=e2e_test/benchmarks/test_nightly_perf.py"  # Go and nightly benchmarks run in dedicated jobs
+            runner: 4-gpu-h100
           - name: agentic-apis
             timeout: 30
             test_dirs: "e2e_test/responses e2e_test/messages"
@@ -284,7 +285,8 @@ jobs:
             test_filter: ""
             setup_trtllm: true
             ignore_opts: ""
-    runs-on: k8s-runner-gpu
+            runner: 4-gpu-h100
+    runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
     timeout-minutes: ${{ matrix.timeout }}
     steps:
       - name: Checkout code
@@ -305,7 +307,7 @@ jobs:
       - name: Setup SGLang backend
         if: ${{ !matrix.setup_vllm && !matrix.setup_trtllm }}
         uses: ./.github/actions/setup-sglang
-      
+
       - name: Download wheel artifact
         uses: actions/download-artifact@v7
         with:
@@ -557,7 +559,7 @@ jobs:
           if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
             echo "CI was skipped (external contributor without run-ci label)"
             exit 0
-          elif [[ "${{ needs.python-lint.result }}" == "failure" || "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
+          elif [[ "${{ needs.python-lint.result }}" == "failure" || "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.python-unit-tests.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else
