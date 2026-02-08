@@ -1,20 +1,20 @@
 //! Shared helpers and state tracking for Harmony Responses
 
 use axum::response::Response;
-use serde_json::{from_value, json, to_string, Value};
+use serde_json::{from_value, to_string, Value};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use super::execution::ToolResult;
 use crate::{
     data_connector::ResponseId,
-    mcp::McpToolSession,
+    mcp::{build_mcp_list_tools_item as mcp_build_list_tools_item, McpToolSession},
     protocols::{
         common::{ToolCall, ToolChoice, ToolChoiceValue},
         responses::{
-            McpToolInfo, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
-            ResponseOutputItem, ResponseReasoningContent, ResponseTool, ResponseToolType,
-            ResponsesRequest, ResponsesResponse, StringOrContentParts,
+            ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
+            ResponseReasoningContent, ResponseTool, ResponseToolType, ResponsesRequest,
+            ResponsesResponse, StringOrContentParts,
         },
     },
     routers::{error, grpc::common::responses::ResponsesContext},
@@ -205,24 +205,12 @@ pub(super) fn inject_mcp_metadata(
     // Inject into response output:
     // 1. Prepend mcp_list_tools for each server at the beginning
     for (label, key) in mcp_servers.iter().rev() {
-        let tools_info: Vec<McpToolInfo> = mcp_tools
+        let tools_for_server: Vec<_> = mcp_tools
             .iter()
             .filter(|entry| entry.server_key() == key)
-            .map(|entry| McpToolInfo {
-                name: entry.tool.name.to_string(),
-                description: entry.tool.description.as_ref().map(|d| d.to_string()),
-                input_schema: Value::Object((*entry.tool.input_schema).clone()),
-                annotations: Some(json!({
-                    "read_only": false
-                })),
-            })
+            .cloned()
             .collect();
-
-        let mcp_list_tools = ResponseOutputItem::McpListTools {
-            id: format!("mcpl_{}", Uuid::new_v4()),
-            server_label: label.clone(),
-            tools: tools_info,
-        };
+        let mcp_list_tools = mcp_build_list_tools_item(label, &tools_for_server);
 
         response.output.insert(0, mcp_list_tools);
     }
