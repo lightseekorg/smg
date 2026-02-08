@@ -765,8 +765,7 @@ impl HarmonyStreamingProcessor {
                                     if names.contains(tool_name) {
                                         Some(
                                             session
-                                                .and_then(|s| s.find_tool_by_name(tool_name))
-                                                .map(|e| e.response_format.clone())
+                                                .map(|s| s.tool_response_format(tool_name))
                                                 .unwrap_or(ResponseFormat::Passthrough),
                                         )
                                     } else {

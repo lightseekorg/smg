@@ -141,10 +141,10 @@ pub(super) fn apply_event_transformations_inplace(
                             .to_string();
 
                         // Only transform if this is an MCP tool; keep function_call unchanged
-                        if let Some(entry) =
-                            ctx.session.and_then(|s| s.find_tool_by_name(&tool_name))
+                        if let Some(session) =
+                            ctx.session.filter(|s| s.has_exposed_tool(&tool_name))
                         {
-                            let response_format = entry.response_format;
+                            let response_format = session.tool_response_format(&tool_name);
 
                             // Determine item type and ID prefix based on response_format
                             let (new_type, id_prefix) = match response_format {
@@ -154,10 +154,7 @@ pub(super) fn apply_event_transformations_inplace(
 
                             item["type"] = json!(new_type);
                             if new_type == ItemType::MCP_CALL {
-                                let label = ctx
-                                    .session
-                                    .map(|s| s.resolve_tool_server_label(&tool_name))
-                                    .unwrap_or_else(|| "mcp".to_string());
+                                let label = session.resolve_tool_server_label(&tool_name);
                                 item["server_label"] = json!(label);
                             }
 
@@ -715,8 +712,6 @@ pub(super) async fn handle_streaming_with_tool_interception(
             mcp_servers.clone(),
             &session_request_id,
         );
-
-        // Transform MCP tools to function tools in payload
         let mut current_payload = payload_clone;
         prepare_mcp_tools_as_functions(&mut current_payload, &session);
         let tools_json = current_payload.get("tools").cloned().unwrap_or(json!([]));

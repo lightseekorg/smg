@@ -114,7 +114,7 @@ async fn execute_with_mcp_loop(
     // Add filtered MCP tools (static + requested dynamic) to the request
     let mcp_tools = session.mcp_tools();
     if !mcp_tools.is_empty() {
-        let mcp_response_tools = convert_mcp_tools_to_response_tools(mcp_tools);
+        let mcp_response_tools = convert_mcp_tools_to_response_tools(&session);
 
         let mut all_tools = current_request.tools.clone().unwrap_or_default();
         all_tools.extend(mcp_response_tools);

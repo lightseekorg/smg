@@ -8,7 +8,7 @@
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -33,7 +33,7 @@ use super::{
 };
 use crate::{
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::{McpToolSession, ResponseFormat, ResponseTransformer},
+    mcp::{McpToolSession, ResponseFormat, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         chat::{
@@ -518,8 +518,7 @@ async fn execute_tool_loop_streaming_internal(
     emitter.send_event(&event, &tx)?;
 
     // Get MCP tools and convert to chat format (do this once before loop)
-    let mcp_tools = session.mcp_tools();
-    let mcp_chat_tools = convert_mcp_tools_to_chat_tools(mcp_tools);
+    let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&session);
     trace!(
         "Streaming: Converted {} MCP tools to chat format",
         mcp_chat_tools.len()
@@ -586,13 +585,11 @@ async fn execute_tool_loop_streaming_internal(
                 tool_calls.len()
             );
 
-            // Separate MCP and function tool calls
-            let mcp_tool_names: std::collections::HashSet<&str> =
-                mcp_tools.iter().map(|t| t.tool.name.as_ref()).collect();
+            // Separate MCP and function tool calls using session-exposed names.
             let (mcp_tool_calls, function_tool_calls): (Vec<ExtractedToolCall>, Vec<_>) =
                 tool_calls
                     .into_iter()
-                    .partition(|tc| mcp_tool_names.contains(tc.name.as_str()));
+                    .partition(|tc| session.has_exposed_tool(tc.name.as_str()));
 
             trace!(
                 "Separated tool calls: {} MCP, {} function",
@@ -698,119 +695,89 @@ async fn execute_tool_loop_streaming_internal(
                     tool_call.name,
                     tool_call.arguments
                 );
-                let tool_start = Instant::now();
-
                 // Parse arguments to Value
                 let arguments: Value =
                     serde_json::from_str(&tool_call.arguments).unwrap_or_else(|_| json!({}));
 
-                // Execute tool and convert result using unified serialization
-                let call_result = session
-                    .call_tool_by_name(&tool_call.name, arguments, &resolved_label)
+                // Execute the single tool via the normalized MCP execution API.
+                // This avoids custom serialization and manual re-transformation in streaming paths.
+                let tool_output = session
+                    .execute_tool(ToolExecutionInput {
+                        call_id: tool_call.call_id.clone(),
+                        tool_name: tool_call.name.clone(),
+                        arguments,
+                    })
                     .await;
 
-                let (output_str, success, _error) = match call_result {
-                    Ok(result) => {
-                        let (output, is_error, err_msg) = result.into_serialized();
+                let success = !tool_output.is_error;
+                let output_str = tool_output.output.to_string();
 
-                        if !is_error {
-                            // Emit tool_call.completed
-                            let event = emitter.emit_tool_call_completed(
-                                output_index,
-                                &item_id,
-                                &response_format,
-                            );
-                            emitter.send_event(&event, &tx)?;
+                if success {
+                    // Emit tool_call.completed
+                    let event =
+                        emitter.emit_tool_call_completed(output_index, &item_id, &response_format);
+                    emitter.send_event(&event, &tx)?;
 
-                            // Build complete item with output
-                            let mut item_done = json!({
-                                "id": item_id,
-                                "type": item_type,
-                                "name": tool_call.name,
-                                "status": "completed",
-                                "arguments": tool_call.arguments,
-                                "output": output
-                            });
-                            attach_mcp_server_label(
-                                &mut item_done,
-                                Some(resolved_label.as_str()),
-                                Some(&response_format),
-                            );
+                    // Build complete item with output
+                    let mut item_done = json!({
+                        "id": item_id,
+                        "type": item_type,
+                        "name": tool_output.tool_name,
+                        "status": "completed",
+                        "arguments": tool_output.arguments_str,
+                        "output": output_str
+                    });
+                    attach_mcp_server_label(
+                        &mut item_done,
+                        Some(tool_output.server_label.as_str()),
+                        Some(&response_format),
+                    );
 
-                            // Emit output_item.done
-                            let event = emitter.emit_output_item_done(output_index, &item_done);
-                            emitter.send_event(&event, &tx)?;
+                    // Emit output_item.done
+                    let event = emitter.emit_output_item_done(output_index, &item_done);
+                    emitter.send_event(&event, &tx)?;
+                    emitter.complete_output_item(output_index);
+                } else {
+                    let err_text = tool_output
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| output_str.clone());
+                    warn!("Tool execution returned error: {}", err_text);
 
-                            emitter.complete_output_item(output_index);
-                            (output, true, None)
-                        } else {
-                            warn!("Tool execution returned error: {}", output);
-                            // Emit mcp_call.failed (no web_search_call.failed event exists)
-                            let event =
-                                emitter.emit_mcp_call_failed(output_index, &item_id, &output);
-                            emitter.send_event(&event, &tx)?;
+                    // Emit mcp_call.failed (no web_search_call.failed event exists)
+                    let event = emitter.emit_mcp_call_failed(output_index, &item_id, &err_text);
+                    emitter.send_event(&event, &tx)?;
 
-                            // Build failed item
-                            let mut item_done = json!({
-                                "id": item_id,
-                                "type": item_type,
-                                "name": tool_call.name,
-                                "status": "failed",
-                                "arguments": tool_call.arguments,
-                                "error": &output
-                            });
-                            attach_mcp_server_label(
-                                &mut item_done,
-                                Some(resolved_label.as_str()),
-                                Some(&response_format),
-                            );
+                    // Build failed item
+                    let mut item_done = json!({
+                        "id": item_id,
+                        "type": item_type,
+                        "name": tool_output.tool_name,
+                        "status": "failed",
+                        "arguments": tool_output.arguments_str,
+                        "error": err_text
+                    });
+                    attach_mcp_server_label(
+                        &mut item_done,
+                        Some(tool_output.server_label.as_str()),
+                        Some(&response_format),
+                    );
 
-                            // Emit output_item.done
-                            let event = emitter.emit_output_item_done(output_index, &item_done);
-                            emitter.send_event(&event, &tx)?;
-
-                            emitter.complete_output_item(output_index);
-                            (output, false, err_msg)
-                        }
-                    }
-                    Err(err) => {
-                        let err_str = format!("Tool call failed: {}", err);
-                        warn!("Tool execution failed: {}", err_str);
-                        // Emit mcp_call.failed (no web_search_call.failed event exists)
-                        let event = emitter.emit_mcp_call_failed(output_index, &item_id, &err_str);
-                        emitter.send_event(&event, &tx)?;
-
-                        // Build failed item
-                        let mut item_done = json!({
-                            "id": item_id,
-                            "type": item_type,
-                            "name": tool_call.name,
-                            "status": "failed",
-                            "arguments": tool_call.arguments,
-                            "error": &err_str
-                        });
-                        attach_mcp_server_label(
-                            &mut item_done,
-                            Some(resolved_label.as_str()),
-                            Some(&response_format),
-                        );
-
-                        // Emit output_item.done
-                        let event = emitter.emit_output_item_done(output_index, &item_done);
-                        emitter.send_event(&event, &tx)?;
-
-                        emitter.complete_output_item(output_index);
-                        let error_json = json!({ "error": &err_str }).to_string();
-                        (error_json, false, Some(err_str))
-                    }
-                };
-                let tool_duration = tool_start.elapsed();
+                    // Emit output_item.done
+                    let event = emitter.emit_output_item_done(output_index, &item_done);
+                    emitter.send_event(&event, &tx)?;
+                    emitter.complete_output_item(output_index);
+                }
 
                 // Record MCP tool metrics
-                Metrics::record_mcp_tool_duration(&model, &tool_call.name, tool_duration);
+                Metrics::record_mcp_tool_duration(
+                    &model,
+                    &tool_output.tool_name,
+                    tool_output.duration,
+                );
                 Metrics::record_mcp_tool_call(
                     &model,
-                    &tool_call.name,
+                    &tool_output.tool_name,
                     if success {
                         metrics_labels::RESULT_SUCCESS
                     } else {
@@ -818,29 +785,14 @@ async fn execute_tool_loop_streaming_internal(
                     },
                 );
 
-                // Note: response_format already looked up at start of loop iteration
-
-                // Parse output for transformer
-                let output_value: Value = serde_json::from_str(&output_str).unwrap_or_else(|e| {
-                    warn!(tool = %tool_call.name, error = %e, "Failed to parse tool output as JSON");
-                    json!({})
-                });
-
-                // Build transformed output item using centralized transformer
-                let output_item = ResponseTransformer::transform(
-                    &output_value,
-                    &response_format,
-                    &tool_call.call_id,
-                    &resolved_label,
-                    &tool_call.name,
-                    &tool_call.arguments,
-                );
+                // Use the centralized tool output transformer from MCP crate output type.
+                let output_item = tool_output.to_response_item();
 
                 // Record the call in state with transformed output item
                 state.record_call(
-                    tool_call.call_id,
-                    tool_call.name,
-                    tool_call.arguments,
+                    tool_output.call_id,
+                    tool_output.tool_name,
+                    tool_output.arguments_str,
                     output_str,
                     output_item,
                     success,
