@@ -843,14 +843,22 @@ impl McpOrchestrator {
             .get_entry(server_key, tool_name)
             .ok_or_else(|| McpError::ToolNotFound(qualified.to_string()))?;
 
-        // Enforce rate limits and acquire concurrency permit
-        let _permit = self
-            .check_and_acquire_permit(&request_ctx.tenant_ctx, &qualified)
-            .await?;
-
         // Record metrics start
         self.metrics.record_call_start(&qualified);
         let start_time = Instant::now();
+
+        // Enforce rate limits and acquire concurrency permit
+        let _permit = match self
+            .check_and_acquire_permit(&request_ctx.tenant_ctx, &qualified)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                let duration_ms = start_time.elapsed().as_millis() as u64;
+                self.metrics.record_call_end(&qualified, false, duration_ms);
+                return Err(e);
+            }
+        };
 
         // Execute with approval flow
         let result = self
