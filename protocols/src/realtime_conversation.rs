@@ -3,11 +3,17 @@
 //
 // Session configuration and audio types live in `realtime_session`.
 // Event type constants live in `event_types`.
-// This module covers conversation items, content parts.
+// This module covers conversation items, content parts, the realtime response
+// object, usage, errors, rate limits, and MCP approval types.
 
-use std::fmt;
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+
+use crate::realtime_session::{
+    MaxOutputTokens, RealtimeSessionConfig, RealtimeTool, RealtimeToolChoice, Truncation, Voice,
+};
 
 // ============================================================================
 // Conversation Item
@@ -22,16 +28,6 @@ use serde::{Deserialize, Serialize};
 /// - `mcp_list_tools`        — MCP list-tools result
 /// - `mcp_approval_request`  — server asks client to approve an MCP call
 /// - `mcp_approval_response` — client approves/denies an MCP call
-///
-/// # Content-part / role constraints
-///
-/// The OpenAI spec restricts which content-part types are valid per role:
-/// - `system`    → `input_text` only
-/// - `user`      → `input_text`, `input_audio`, `input_image`
-/// - `assistant` → `output_text`, `output_audio`
-///
-/// Serde does not enforce this. Call [`RealtimeConversationItem::validate()`]
-/// after deserialization to check these invariants.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -85,71 +81,6 @@ pub enum RealtimeConversationItem {
         reason: Option<String>,
     },
 }
-
-impl RealtimeConversationItem {
-    /// Validates role→content-part constraints per the OpenAI spec.
-    ///
-    /// - `system`    → `input_text` only
-    /// - `user`      → `input_text`, `input_audio`, `input_image`
-    /// - `assistant` → `output_text`, `output_audio`
-    ///
-    /// Non-`Message` variants are always valid.
-    pub fn validate(&self) -> Result<(), ContentPartValidationError> {
-        let (role, content) = match self {
-            Self::Message { role, content, .. } => (role, content),
-            _ => return Ok(()),
-        };
-
-        for (i, part) in content.iter().enumerate() {
-            let allowed = match role {
-                ConversationItemRole::System => {
-                    matches!(part, RealtimeContentPart::InputText { .. })
-                }
-                ConversationItemRole::User => matches!(
-                    part,
-                    RealtimeContentPart::InputText { .. }
-                        | RealtimeContentPart::InputAudio { .. }
-                        | RealtimeContentPart::InputImage { .. }
-                ),
-                ConversationItemRole::Assistant => matches!(
-                    part,
-                    RealtimeContentPart::OutputText { .. }
-                        | RealtimeContentPart::OutputAudio { .. }
-                ),
-            };
-
-            if !allowed {
-                return Err(ContentPartValidationError {
-                    role: role.clone(),
-                    content_type: part.type_name(),
-                    index: i,
-                });
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Error returned when a content part is invalid for the message role.
-#[derive(Debug, Clone)]
-pub struct ContentPartValidationError {
-    pub role: ConversationItemRole,
-    pub content_type: &'static str,
-    pub index: usize,
-}
-
-impl fmt::Display for ContentPartValidationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "content[{}]: {:?} role does not allow \"{}\" content parts",
-            self.index, self.role, self.content_type
-        )
-    }
-}
-
-impl std::error::Error for ContentPartValidationError {}
 
 /// Object type for conversation items. Always `"realtime.item"`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -205,19 +136,6 @@ pub enum RealtimeContentPart {
     },
 }
 
-impl RealtimeContentPart {
-    /// Returns the wire-format type name (e.g. `"input_text"`).
-    pub const fn type_name(&self) -> &'static str {
-        match self {
-            Self::InputText { .. } => "input_text",
-            Self::InputAudio { .. } => "input_audio",
-            Self::InputImage { .. } => "input_image",
-            Self::OutputText { .. } => "output_text",
-            Self::OutputAudio { .. } => "output_audio",
-        }
-    }
-}
-
 /// Detail level for image processing.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -226,6 +144,180 @@ pub enum ImageDetail {
     High,
     #[default]
     Auto,
+}
+
+// ============================================================================
+// Logprobs
+// ============================================================================
+
+/// A single logprob entry for output text or audio transcription.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogprobEntry {
+    pub token: String,
+    pub logprob: f64,
+    pub bytes: Option<Vec<u8>>,
+    pub top_logprobs: Option<Vec<TopLogprob>>,
+}
+
+/// A top-logprob alternative token.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopLogprob {
+    pub token: String,
+    pub logprob: f64,
+    pub bytes: Option<Vec<u8>>,
+}
+
+// ============================================================================
+// Realtime Response
+// ============================================================================
+
+/// Status of a realtime response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RealtimeResponseStatus {
+    InProgress,
+    Completed,
+    Cancelled,
+    Incomplete,
+    Failed,
+}
+
+/// Reason the response was cancelled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelledReason {
+    TurnDetected,
+    ClientCancelled,
+}
+
+/// Reason the response is incomplete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncompleteReason {
+    MaxOutputTokens,
+    ContentFilter,
+    Interruption,
+}
+
+/// Status details for a realtime response (discriminated by `type`).
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RealtimeResponseStatusDetails {
+    Completed {},
+    Cancelled { reason: Option<CancelledReason> },
+    Incomplete { reason: Option<IncompleteReason> },
+    Failed { error: Option<RealtimeError> },
+}
+
+/// The realtime response object returned by the server.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealtimeResponse {
+    pub id: String,
+    pub object: Option<String>,
+    pub status: RealtimeResponseStatus,
+    pub status_details: Option<RealtimeResponseStatusDetails>,
+    pub output: Vec<RealtimeConversationItem>,
+    pub usage: Option<RealtimeUsage>,
+    pub metadata: Option<HashMap<String, String>>,
+}
+
+// ============================================================================
+// Response Create Parameters
+// ============================================================================
+
+/// Parameters for the `response.create` client event.
+///
+/// These allow per-response overrides of session-level settings.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseCreateParams {
+    pub modalities: Option<Vec<String>>,
+    pub instructions: Option<String>,
+    pub voice: Option<Voice>,
+    pub output_audio_format: Option<String>,
+    pub tools: Option<Vec<RealtimeTool>>,
+    pub tool_choice: Option<RealtimeToolChoice>,
+    pub temperature: Option<f64>,
+    pub max_output_tokens: Option<MaxOutputTokens>,
+    pub conversation: Option<ResponseConversation>,
+    pub metadata: Option<HashMap<String, String>>,
+    pub input: Option<Vec<RealtimeConversationItem>>,
+    pub truncation: Option<Truncation>,
+}
+
+/// Conversation mode for `response.create`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseConversation {
+    /// Use the default session conversation.
+    Auto,
+    /// No conversation context — ephemeral response.
+    None,
+}
+
+// ============================================================================
+// Usage
+// ============================================================================
+
+/// Token usage for a realtime response.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealtimeUsage {
+    pub total_tokens: u32,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub input_token_details: Option<RealtimeInputTokenDetails>,
+    pub output_token_details: Option<RealtimeOutputTokenDetails>,
+}
+
+/// Breakdown of input tokens.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealtimeInputTokenDetails {
+    pub cached_tokens: Option<u32>,
+    pub text_tokens: Option<u32>,
+    pub audio_tokens: Option<u32>,
+}
+
+/// Breakdown of output tokens.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealtimeOutputTokenDetails {
+    pub text_tokens: Option<u32>,
+    pub audio_tokens: Option<u32>,
+}
+
+// ============================================================================
+// Error
+// ============================================================================
+
+/// An error returned in a realtime server event.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealtimeError {
+    #[serde(rename = "type")]
+    pub r#type: Option<String>,
+    pub code: Option<String>,
+    pub message: String,
+    pub param: Option<String>,
+    pub event_id: Option<String>,
+}
+
+// ============================================================================
+// Rate Limits
+// ============================================================================
+
+/// A single rate limit entry from `rate_limits.updated`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimit {
+    pub name: String,
+    pub limit: u64,
+    pub remaining: u64,
+    pub reset_seconds: f64,
 }
 
 // ============================================================================
@@ -238,8 +330,8 @@ pub enum ImageDetail {
 pub struct McpListToolEntry {
     pub name: String,
     pub description: Option<String>,
-    pub input_schema: serde_json::Value,
-    pub annotations: Option<serde_json::Value>,
+    pub input_schema: Option<JsonValue>,
+    pub annotations: Option<JsonValue>,
 }
 
 /// Error from an MCP tool call.
@@ -255,4 +347,55 @@ pub enum McpCallError {
     ToolExecutionError { message: String },
     /// HTTP-level error communicating with the MCP server.
     HttpError { code: i32, message: String },
+}
+
+// ============================================================================
+// Conversation
+// ============================================================================
+
+/// The conversation object returned by `conversation.created`.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealtimeConversation {
+    pub id: String,
+    pub object: Option<String>,
+}
+
+// ============================================================================
+// Transcription Events
+// ============================================================================
+
+/// Audio transcription result.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptionResult {
+    pub item_id: String,
+    pub content_index: u32,
+    pub transcript: String,
+    pub logprobs: Option<Vec<LogprobEntry>>,
+}
+
+/// Audio transcription segment from transcription session mode.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptionSegment {
+    pub item_id: String,
+    pub content_index: u32,
+    pub text: String,
+    pub start_ms: Option<u64>,
+    pub end_ms: Option<u64>,
+    pub logprobs: Option<Vec<LogprobEntry>>,
+}
+
+// ============================================================================
+// Session Update Payloads
+// ============================================================================
+
+/// Payload for the `session.update` client event.
+///
+/// Wraps the full session config. The server merges the provided
+/// fields into the current session state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionUpdatePayload {
+    pub session: RealtimeSessionConfig,
 }
