@@ -1,6 +1,6 @@
 """Nightly comprehensive benchmark tests.
 
-Runs all models on an 8-GPU H200 node using genai-bench default scenarios
+Runs models on k8s H100 or H200 runners using genai-bench default scenarios
 and concurrency levels. No performance thresholds — results are uploaded
 as artifacts for tracking over time.
 
