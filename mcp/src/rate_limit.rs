@@ -200,7 +200,8 @@ impl RateLimiter {
 
         // Check Tenant-wide limits
         // Use get_mut to allow cleanup and recording atomically
-        if let Some(mut window) = self.tenant_calls.entry(ctx.tenant_id.clone()).or_default() {
+        {
+            let mut window = self.tenant_calls.entry(ctx.tenant_id.clone()).or_default();
             window.cleanup();
             if let Some(max) = limits.max_calls_per_minute {
                 if window.calls_per_minute() >= max {
@@ -224,7 +225,8 @@ impl RateLimiter {
 
         // Check Tool-specific limits (isolated per tenant)
         let key = (ctx.tenant_id.clone(), tool.clone());
-        if let Some(mut window) = self.tool_calls.entry(key).or_default() {
+        {
+            let mut window = self.tool_calls.entry(key).or_default();
             window.cleanup();
             if let Some(max) = limits.max_calls_per_minute {
                 if window.calls_per_minute() >= max {
