@@ -3,12 +3,6 @@ name: Nightly Benchmark
 on:
   schedule:
     - cron: '0 0 * * *'
-  push:
-    branches: [ main ]
-    paths-ignore:
-      - "docs/**"
-      - "mkdocs.yml"
-      - "*.md"
   workflow_dispatch:
     inputs:
       models:
