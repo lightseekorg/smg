@@ -392,20 +392,25 @@ impl McpOrchestrator {
         tenant_ctx: &TenantContext,
         qualified: &QualifiedToolName,
     ) -> McpResult<tokio::sync::OwnedSemaphorePermit> {
-        // Check if allowed
+        // Atomic check and record
         self.rate_limiter
-            .check(tenant_ctx, qualified)
+            .acquire_slot(tenant_ctx, qualified)
             .inspect_err(|_| self.metrics.record_rate_limited())?;
 
         // Acquire concurrency permit
-        let permit = self
+        let permit = match self
             .rate_limiter
             .acquire_concurrent_permit(tenant_ctx)
             .await
-            .inspect_err(|_| self.metrics.record_rate_limited())?;
-
-        // Record the call
-        self.rate_limiter.record(&tenant_ctx.tenant_id, qualified);
+        {
+            Ok(p) => p,
+            Err(e) => {
+                // Rollback the slot reservation since we couldn't get a concurrency permit
+                self.rate_limiter.rollback(tenant_ctx, qualified);
+                self.metrics.record_rate_limited();
+                return Err(e);
+            }
+        };
 
         Ok(permit)
     }
@@ -1041,6 +1046,8 @@ impl McpOrchestrator {
             Ok(permit) => permit,
             Err(e) => {
                 let err = e.to_string();
+                let duration_ms = call_start_time.elapsed().as_millis() as u64;
+                self.metrics.record_call_end(&qualified, false, duration_ms);
                 return (
                     entry.response_format.clone(),
                     serde_json::json!({ "error": &err }),
