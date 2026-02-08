@@ -387,13 +387,16 @@ impl McpOrchestrator {
     }
 
     /// Internal helper to enforce rate limits and acquire a concurrency permit.
+
     async fn check_and_acquire_permit(
         &self,
         tenant_ctx: &TenantContext,
         qualified: &QualifiedToolName,
     ) -> McpResult<tokio::sync::OwnedSemaphorePermit> {
         // Atomic check and record
-        self.rate_limiter
+        // We get back the timestamp of the reservation so we can rollback exactly this call if needed
+        let timestamp = self
+            .rate_limiter
             .acquire_slot(tenant_ctx, qualified)
             .inspect_err(|_| self.metrics.record_rate_limited())?;
 
@@ -406,7 +409,7 @@ impl McpOrchestrator {
             Ok(p) => p,
             Err(e) => {
                 // Rollback the slot reservation since we couldn't get a concurrency permit
-                self.rate_limiter.rollback(tenant_ctx, qualified);
+                self.rate_limiter.rollback(tenant_ctx, qualified, timestamp);
                 self.metrics.record_rate_limited();
                 return Err(e);
             }

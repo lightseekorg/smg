@@ -38,10 +38,16 @@ struct CallWindow {
 
 impl CallWindow {
     /// Records a new call at the current timestamp.
-    fn record(&mut self) {
+    fn record(&mut self) -> Instant {
         let now = Instant::now();
-        self.minute_calls.push(now);
-        self.hour_calls.push(now);
+        self.record_at(now);
+        now
+    }
+
+    /// Records a call at a specific timestamp.
+    fn record_at(&mut self, timestamp: Instant) {
+        self.minute_calls.push(timestamp);
+        self.hour_calls.push(timestamp);
         self.cleanup();
     }
 
@@ -63,10 +69,14 @@ impl CallWindow {
         self.hour_calls.len()
     }
 
-    /// Removes the most recently recorded call.
-    fn remove_last(&mut self) {
-        self.minute_calls.pop();
-        self.hour_calls.pop();
+    /// Removes a specific timestamp call.
+    fn remove(&mut self, timestamp: Instant) {
+        if let Some(pos) = self.minute_calls.iter().rposition(|&t| t == timestamp) {
+            self.minute_calls.remove(pos);
+        }
+        if let Some(pos) = self.hour_calls.iter().rposition(|&t| t == timestamp) {
+            self.hour_calls.remove(pos);
+        }
     }
 }
 
@@ -195,7 +205,12 @@ impl RateLimiter {
     ///
     /// This prevents TOCTOU race conditions where multiple requests might pass the check
     /// concurrently before any of them record usage.
-    pub fn acquire_slot(&self, ctx: &TenantContext, tool: &QualifiedToolName) -> McpResult<()> {
+    pub fn acquire_slot(
+        &self,
+        ctx: &TenantContext,
+        tool: &QualifiedToolName,
+    ) -> McpResult<Instant> {
+        let now = Instant::now();
         let limits = ctx.limits.unwrap_or(self.defaults);
 
         // Check Tenant-wide limits
@@ -220,7 +235,7 @@ impl RateLimiter {
                 }
             }
             // Limit met, record immediately
-            window.record();
+            window.record_at(now);
         }
 
         // Check Tool-specific limits (isolated per tenant)
@@ -231,7 +246,7 @@ impl RateLimiter {
             if let Some(max) = limits.max_calls_per_minute {
                 if window.calls_per_minute() >= max {
                     if let Some(mut tenant_window) = self.tenant_calls.get_mut(&ctx.tenant_id) {
-                        tenant_window.remove_last();
+                        tenant_window.remove(now);
                     }
 
                     return Err(McpError::RateLimitExceeded(format!(
@@ -244,7 +259,7 @@ impl RateLimiter {
                 if window.calls_per_hour() >= max {
                     // Rollback tenant usage
                     if let Some(mut tenant_window) = self.tenant_calls.get_mut(&ctx.tenant_id) {
-                        tenant_window.remove_last();
+                        tenant_window.remove(now);
                     }
 
                     return Err(McpError::RateLimitExceeded(format!(
@@ -254,24 +269,24 @@ impl RateLimiter {
                 }
             }
             // Limit met, record immediately
-            window.record();
+            window.record_at(now);
         }
 
-        Ok(())
+        Ok(now)
     }
 
     /// Rolls back a recorded usage.
     ///
     /// Used when a request acquired a slot but failed to acquire a concurrency permit
     /// or other resource, to avoid leaking quota.
-    pub fn rollback(&self, ctx: &TenantContext, tool: &QualifiedToolName) {
+    pub fn rollback(&self, ctx: &TenantContext, tool: &QualifiedToolName, timestamp: Instant) {
         if let Some(mut window) = self.tenant_calls.get_mut(&ctx.tenant_id) {
-            window.remove_last();
+            window.remove(timestamp);
         }
 
         let key = (ctx.tenant_id.clone(), tool.clone());
         if let Some(mut window) = self.tool_calls.get_mut(&key) {
-            window.remove_last();
+            window.remove(timestamp);
         }
     }
 }
