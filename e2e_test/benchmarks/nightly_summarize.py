@@ -61,17 +61,24 @@ def parse_folder_name(folder_name: str) -> dict:
     """Parse experiment info from folder name.
 
     Expected patterns (newest to oldest):
-    - nightly_llama-8b_http_sglang_single -> model=llama-8b, protocol=http, runtime=sglang, worker_type=single
-    - nightly_llama-8b_grpc_vllm_multi -> model=llama-8b, protocol=grpc, runtime=vllm, worker_type=multi
-    - nightly_llama-8b_http_sglang -> model=llama-8b, protocol=http, runtime=sglang (worker_type=single)
-    - nightly_llama-8b_http (legacy) -> model=llama-8b, protocol=http
+    - nightly_meta-llama/Llama-3.1-8B-Instruct_http_sglang_single
+      -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=http,
+      runtime=sglang, worker_type=single
+    - nightly_meta-llama/Llama-3.1-8B-Instruct_grpc_vllm_multi
+      -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=grpc,
+      runtime=vllm, worker_type=multi
+    - nightly_meta-llama/Llama-3.1-8B-Instruct_http_sglang
+      -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=http,
+      runtime=sglang (worker_type=single)
+    - nightly_meta-llama/Llama-3.1-8B-Instruct_http (legacy)
+      -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=http
     """
     info = {"model": "unknown", "protocol": "unknown", "runtime": None, "worker_type": "single"}
 
     # Remove nightly_ prefix
     name = folder_name.replace("nightly_", "")
 
-    # Try newest format: model_protocol_runtime_worker_type (e.g., llama-8b_grpc_sglang_single)
+    # Try newest format: model_protocol_runtime_worker_type (e.g., meta-llama/Llama-3.1-8B-Instruct_grpc_sglang_single)
     parts = name.rsplit("_", 3)
 
     if len(parts) >= 4 and parts[-1] in ("single", "multi") and parts[-2] in ("sglang", "vllm"):

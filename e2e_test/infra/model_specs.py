@@ -9,6 +9,7 @@ Each model spec defines:
 
 from __future__ import annotations
 
+import json
 import os
 
 # Environment variable for local model paths (CI uses local copies for speed)
@@ -26,28 +27,28 @@ def _resolve_model_path(hf_path: str) -> str:
 
 MODEL_SPECS: dict[str, dict] = {
     # Primary chat model - used for most tests
-    "llama-8b": {
+    "meta-llama/Llama-3.1-8B-Instruct": {
         "model": _resolve_model_path("meta-llama/Llama-3.1-8B-Instruct"),
         "memory_gb": 16,
         "tp": 1,
         "features": ["chat", "streaming", "function_calling"],
     },
     # Small model for quick tests
-    "llama-1b": {
+    "meta-llama/Llama-3.2-1B-Instruct": {
         "model": _resolve_model_path("meta-llama/Llama-3.2-1B-Instruct"),
         "memory_gb": 4,
         "tp": 1,
         "features": ["chat", "streaming", "tool_choice"],
     },
     # Function calling specialist
-    "qwen-7b": {
+    "Qwen/Qwen2.5-7B-Instruct": {
         "model": _resolve_model_path("Qwen/Qwen2.5-7B-Instruct"),
         "memory_gb": 14,
         "tp": 1,
         "features": ["chat", "streaming", "function_calling", "pythonic_tools"],
     },
     # Function calling specialist (larger, for Response API tests)
-    "qwen-14b": {
+    "Qwen/Qwen2.5-14B-Instruct": {
         "model": _resolve_model_path("Qwen/Qwen2.5-14B-Instruct"),
         "memory_gb": 28,
         "tp": 2,
@@ -55,21 +56,21 @@ MODEL_SPECS: dict[str, dict] = {
         "worker_args": ["--context-length=16384"],  # Faster startup, prevents memory issues
     },
     # Reasoning model
-    "deepseek-7b": {
+    "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B": {
         "model": _resolve_model_path("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"),
         "memory_gb": 14,
         "tp": 1,
         "features": ["chat", "streaming", "reasoning"],
     },
     # Thinking/reasoning model (larger)
-    "qwen-30b": {
+    "Qwen/Qwen3-30B-A3B": {
         "model": _resolve_model_path("Qwen/Qwen3-30B-A3B"),
         "memory_gb": 60,
         "tp": 4,
         "features": ["chat", "streaming", "thinking", "reasoning"],
     },
     # Mistral for function calling
-    "mistral-7b": {
+    "mistralai/Mistral-7B-Instruct-v0.3": {
         "model": _resolve_model_path("mistralai/Mistral-7B-Instruct-v0.3"),
         "memory_gb": 14,
         "tp": 1,
@@ -83,14 +84,14 @@ MODEL_SPECS: dict[str, dict] = {
         "features": ["embedding"],
     },
     # GPT-OSS model (Harmony)
-    "gpt-oss": {
+    "openai/gpt-oss-20b": {
         "model": _resolve_model_path("openai/gpt-oss-20b"),
         "memory_gb": 40,
         "tp": 2,
         "features": ["chat", "streaming", "reasoning", "harmony"],
     },
     # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
-    "llama-4-maverick-17b": {
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
         "model": _resolve_model_path("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
         "memory_gb": 34,  # ~1 byte per parameter for FP8 quantized 17B params
         "tp": 8,  # Tensor parallelism across 8 GPUs
@@ -123,7 +124,19 @@ def get_model_spec(model_id: str) -> dict:
     """Get spec for a specific model, raising KeyError if not found."""
     if model_id not in MODEL_SPECS:
         raise KeyError(f"Unknown model: {model_id}. Available: {list(MODEL_SPECS.keys())}")
-    return MODEL_SPECS[model_id]
+    spec = dict(MODEL_SPECS[model_id])
+    tp_overrides_json = os.environ.get("E2E_MODEL_TP_OVERRIDES")
+    if tp_overrides_json:
+        try:
+            tp_overrides = json.loads(tp_overrides_json)
+            if isinstance(tp_overrides, dict):
+                override = tp_overrides.get(model_id)
+                if isinstance(override, int) and override > 0:
+                    spec["tp"] = override
+        except json.JSONDecodeError:
+            # Ignore malformed override config and fall back to canonical specs.
+            pass
+    return spec
 
 
 # Convenience groupings for test parametrization
@@ -137,13 +150,15 @@ FUNCTION_CALLING_MODELS = get_models_with_feature("function_calling")
 # Default model path constants (for backward compatibility with existing tests)
 # =============================================================================
 
-DEFAULT_MODEL_PATH = MODEL_SPECS["llama-8b"]["model"]
-DEFAULT_SMALL_MODEL_PATH = MODEL_SPECS["llama-1b"]["model"]
-DEFAULT_REASONING_MODEL_PATH = MODEL_SPECS["deepseek-7b"]["model"]
-DEFAULT_ENABLE_THINKING_MODEL_PATH = MODEL_SPECS["qwen-30b"]["model"]
-DEFAULT_QWEN_FUNCTION_CALLING_MODEL_PATH = MODEL_SPECS["qwen-7b"]["model"]
-DEFAULT_MISTRAL_FUNCTION_CALLING_MODEL_PATH = MODEL_SPECS["mistral-7b"]["model"]
-DEFAULT_GPT_OSS_MODEL_PATH = MODEL_SPECS["gpt-oss"]["model"]
+DEFAULT_MODEL_PATH = MODEL_SPECS["meta-llama/Llama-3.1-8B-Instruct"]["model"]
+DEFAULT_SMALL_MODEL_PATH = MODEL_SPECS["meta-llama/Llama-3.2-1B-Instruct"]["model"]
+DEFAULT_REASONING_MODEL_PATH = MODEL_SPECS["deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"]["model"]
+DEFAULT_ENABLE_THINKING_MODEL_PATH = MODEL_SPECS["Qwen/Qwen3-30B-A3B"]["model"]
+DEFAULT_QWEN_FUNCTION_CALLING_MODEL_PATH = MODEL_SPECS["Qwen/Qwen2.5-7B-Instruct"]["model"]
+DEFAULT_MISTRAL_FUNCTION_CALLING_MODEL_PATH = MODEL_SPECS["mistralai/Mistral-7B-Instruct-v0.3"][
+    "model"
+]
+DEFAULT_GPT_OSS_MODEL_PATH = MODEL_SPECS["openai/gpt-oss-20b"]["model"]
 DEFAULT_EMBEDDING_MODEL_PATH = MODEL_SPECS["embedding"]["model"]
 
 

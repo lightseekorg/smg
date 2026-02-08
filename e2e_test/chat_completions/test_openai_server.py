@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-@pytest.mark.model("llama-8b")
+@pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestChatCompletion:
@@ -318,7 +318,7 @@ convenient hands-free control to your smart devices.
 # =============================================================================
 
 
-@pytest.mark.model("gpt-oss")
+@pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
 class TestChatCompletionGptOss(TestChatCompletion):
     """Tests for chat completions API with GPT-OSS model (Harmony).

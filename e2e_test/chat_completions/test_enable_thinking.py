@@ -24,7 +24,7 @@ API_KEY = "not-used"
 # =============================================================================
 
 
-@pytest.mark.model("qwen-30b")
+@pytest.mark.model("Qwen/Qwen3-30B-A3B")
 @pytest.mark.gateway(extra_args=["--reasoning-parser", "qwen3", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestEnableThinking:

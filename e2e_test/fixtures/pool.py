@@ -63,7 +63,7 @@ def model_pool(request: pytest.FixtureRequest) -> ModelPool:
     - @pytest.mark.workers(prefill=N, decode=N) for PD workers
 
     Environment variable overrides:
-    - E2E_MODELS: Comma-separated model IDs (e.g., "llama-8b,qwen-7b")
+    - E2E_MODELS: Comma-separated model IDs (e.g., "meta-llama/Llama-3.1-8B-Instruct,Qwen/Qwen2.5-7B-Instruct")
     - E2E_BACKENDS: Comma-separated backends (e.g., "grpc,http")
     - SKIP_MODEL_POOL: Set to "1" to skip worker startup
     """
@@ -174,7 +174,7 @@ def model_client(
     """Get OpenAI client for the model specified by @pytest.mark.model().
 
     Usage:
-        @pytest.mark.model("llama-8b")
+        @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
         def test_chat(model_client):
             response = model_client.chat.completions.create(...)
     """
@@ -214,7 +214,7 @@ def model_base_url(
     """Get the base URL for the model specified by @pytest.mark.model().
 
     Usage:
-        @pytest.mark.model("llama-8b")
+        @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
         def test_direct_http(model_base_url):
             response = httpx.get(f"{model_base_url}/health")
     """

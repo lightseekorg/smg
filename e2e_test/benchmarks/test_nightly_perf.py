@@ -1,6 +1,6 @@
 """Nightly comprehensive benchmark tests.
 
-Runs all models on an 8-GPU H200 node using genai-bench default scenarios
+Runs models on k8s H100 or H200 runners using genai-bench default scenarios
 and concurrency levels. No performance thresholds — results are uploaded
 as artifacts for tracking over time.
 
@@ -54,8 +54,9 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, worker_count=1, **
     # Total GPU count = tp * workers
     gpu_count = tp_per_worker * worker_count
 
-    # Include runtime and worker type in folder name
-    experiment_folder = f"nightly_{model_id}_{backend}_{runtime}_{worker_type}"
+    # Keep folder names filesystem-safe while retaining the canonical HF model id in metadata.
+    safe_model_id = model_id.replace("/", "__")
+    experiment_folder = f"nightly_{safe_model_id}_{backend}_{runtime}_{worker_type}"
 
     if _TEST_MODE:
         genai_bench_runner(
@@ -95,15 +96,21 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, worker_count=1, **
 # ---------------------------------------------------------------------------
 
 _NIGHTLY_MODELS: list[tuple[str, str, int, list[str], dict]] = [
-    ("llama-8b", "Llama8b", 8, ["http", "grpc"], {}),
-    ("llama-1b", "Llama1b", 8, ["http", "grpc"], {}),
-    ("qwen-7b", "Qwen7b", 8, ["http", "grpc"], {}),
-    ("qwen-14b", "Qwen14b", 4, ["http", "grpc"], {}),
-    ("deepseek-7b", "Deepseek7b", 8, ["http", "grpc"], {}),
-    ("qwen-30b", "Qwen30b", 2, ["http", "grpc"], {}),
-    ("mistral-7b", "Mistral7b", 8, ["http", "grpc"], {}),
-    ("gpt-oss", "GptOss", 4, ["http", "grpc"], {}),
-    ("llama-4-maverick-17b", "Llama4Maverick", 1, ["http", "grpc"], {}),
+    ("meta-llama/Llama-3.1-8B-Instruct", "Llama8b", 4, ["http", "grpc"], {}),
+    ("meta-llama/Llama-3.2-1B-Instruct", "Llama1b", 4, ["http", "grpc"], {}),
+    ("Qwen/Qwen2.5-7B-Instruct", "Qwen7b", 4, ["http", "grpc"], {}),
+    ("Qwen/Qwen2.5-14B-Instruct", "Qwen14b", 4, ["http", "grpc"], {}),
+    ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "Deepseek7b", 4, ["http", "grpc"], {}),
+    ("Qwen/Qwen3-30B-A3B", "Qwen30b", 4, ["http", "grpc"], {}),
+    ("mistralai/Mistral-7B-Instruct-v0.3", "Mistral7b", 4, ["http", "grpc"], {}),
+    ("openai/gpt-oss-20b", "GptOss", 4, ["http", "grpc"], {}),
+    (
+        "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+        "Llama4Maverick",
+        1,
+        ["http", "grpc"],
+        {},
+    ),
 ]
 
 

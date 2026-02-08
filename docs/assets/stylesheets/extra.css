@@ -58,7 +58,7 @@
 
 /* Hero title: dark gradient text instead of white.
    background shorthand resets background-clip and background-size,
-   so all properties must be re-declared here. */
+   so all properties must be redeclared here. */
 [data-md-color-scheme="default"] .md-typeset .hero h1 {
   background: linear-gradient(
     135deg,
@@ -130,7 +130,7 @@
 
 /* Stat values: dark gradient instead of white.
    background shorthand resets background-clip and background-size,
-   so all properties must be re-declared here. */
+   so all properties must be redeclared here. */
 [data-md-color-scheme="default"] .md-typeset .stat-value {
   background: linear-gradient(135deg, var(--md-code-fg-color) 0%, var(--mesh-purple) 50%, var(--mesh-cyan) 100%);
   background-size: 200% 200%;

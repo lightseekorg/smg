@@ -423,7 +423,7 @@ class TestToolCallingCloud:
 
 
 @pytest.mark.e2e
-@pytest.mark.model("gpt-oss")
+@pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestToolChoiceHarmony:
@@ -798,7 +798,7 @@ class TestToolChoiceHarmony:
 
 
 @pytest.mark.e2e
-@pytest.mark.model("qwen-14b")
+@pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestToolChoiceLocal:
