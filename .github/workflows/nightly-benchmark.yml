@@ -81,7 +81,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Single-worker: one model per job for better isolation and debugging.
-  # DeepSeek runs on H200; all other models run on k8s H100.
+  # Llama-4 Maverick runs on H200; all other models run on k8s H100.
   # ---------------------------------------------------------------------------
 
   single-worker:
@@ -126,6 +126,12 @@ jobs:
       - name: Checkout code
         if: steps.filter.outputs.skip != 'true'
         uses: actions/checkout@v6
+
+      - name: Setup Python (H200 runners)
+        if: steps.filter.outputs.skip != 'true' && matrix.model.gpu_type == 'H200'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
       - name: Setup vLLM backend
         if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_vllm
@@ -187,7 +193,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Multi-worker: one model per job.
-  # DeepSeek runs on H200; all other models run on k8s H100.
+  # Llama-4 Maverick runs on H200; all other models run on k8s H100.
   # ---------------------------------------------------------------------------
 
   multi-worker:
@@ -232,6 +238,12 @@ jobs:
       - name: Checkout code
         if: steps.filter.outputs.skip != 'true'
         uses: actions/checkout@v6
+
+      - name: Setup Python (H200 runners)
+        if: steps.filter.outputs.skip != 'true' && matrix.model.gpu_type == 'H200'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
       - name: Setup vLLM backend
         if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_vllm

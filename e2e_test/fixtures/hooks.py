@@ -111,8 +111,8 @@ def pytest_collection_modifyitems(
 
         try:
             spec = get_model_spec(model_id)
-        except KeyError:
-            return 0
+        except KeyError as exc:
+            raise pytest.UsageError(f"Unknown model in test markers: {model_id}") from exc
         tp = spec.get("tp", 1)
         return tp * (prefill + decode + regular)
 
