@@ -1,5 +1,4 @@
 //! Test utilities for mesh module
-
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
@@ -7,9 +6,9 @@ use std::{
 
 use parking_lot::RwLock;
 
-use super::{
+use crate::{
     service::{gossip::NodeState, ClusterState},
-    stores::{MembershipState, StateStores},
+    stores::StateStores,
     sync::MeshSyncManager,
 };
 
@@ -42,18 +41,6 @@ pub fn create_test_cluster_state(
         );
     }
     Arc::new(RwLock::new(state))
-}
-
-/// Create test membership state
-#[allow(dead_code)]
-pub fn create_test_membership_state(name: String, address: String, status: i32) -> MembershipState {
-    MembershipState {
-        name,
-        address,
-        status,
-        version: 1,
-        metadata: BTreeMap::new(),
-    }
 }
 
 #[cfg(test)]
