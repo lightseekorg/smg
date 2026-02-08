@@ -387,12 +387,11 @@ impl McpOrchestrator {
     }
 
     /// Internal helper to enforce rate limits and acquire a concurrency permit.
-
     async fn check_and_acquire_permit(
         &self,
         tenant_ctx: &TenantContext,
         qualified: &QualifiedToolName,
-    ) -> McpResult<tokio::sync::OwnedSemaphorePermit> {
+    ) -> McpResult<Option<tokio::sync::OwnedSemaphorePermit>> {
         // Atomic check and record
         // We get back the timestamp of the reservation so we can rollback exactly this call if needed
         let timestamp = self

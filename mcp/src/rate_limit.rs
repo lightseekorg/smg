@@ -170,9 +170,14 @@ impl RateLimiter {
     pub async fn acquire_concurrent_permit(
         &self,
         ctx: &TenantContext,
-    ) -> McpResult<OwnedSemaphorePermit> {
+    ) -> McpResult<Option<OwnedSemaphorePermit>> {
         let limits = ctx.limits.unwrap_or(self.defaults);
-        let max_concurrent = limits.max_concurrent.unwrap_or(10);
+
+        // If no limit is set, return None indicating unlimited concurrency
+        let max_concurrent = match limits.max_concurrent {
+            Some(max) => max,
+            None => return Ok(None),
+        };
 
         //  Get or create the semaphore
         let semaphore = {
@@ -198,6 +203,7 @@ impl RateLimiter {
         semaphore
             .acquire_owned()
             .await
+            .map(Some)
             .map_err(|_| McpError::RateLimitExceeded("Concurrency semaphore closed".to_string()))
     }
 
