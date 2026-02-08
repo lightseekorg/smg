@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from .constants import DEFAULT_HOST, DEFAULT_ROUTER_TIMEOUT, ENV_SHOW_ROUTER_LOGS
-from .gpu_allocator import get_open_port
+from .gpu_allocator import get_open_port, release_port
 from .process_utils import kill_process_tree, wait_for_health, wait_for_workers_ready
 
 if TYPE_CHECKING:
@@ -44,7 +44,7 @@ class Gateway:
     1. Regular mode: Start with worker URLs
     2. PD mode: Start with prefill/decode workers
     3. IGW mode: Start empty, add workers via API
-    4. Cloud mode: Start with cloud backend (OpenAI, xAI)
+    4. Cloud mode: Start with cloud backend (OpenAI, xAI, Anthropic)
 
     Example (regular mode):
         gateway = Gateway()
@@ -75,8 +75,8 @@ class Gateway:
 
     Example (cloud mode):
         gateway = Gateway()
-        gateway.start(cloud_backend="openai")  # or "xai"
-        # Requires OPENAI_API_KEY or XAI_API_KEY env var
+        gateway.start(cloud_backend="openai")  # or "xai", "anthropic"
+        # Requires OPENAI_API_KEY, XAI_API_KEY, or ANTHROPIC_API_KEY env var
     """
 
     def __init__(
@@ -93,6 +93,9 @@ class Gateway:
             prometheus_port: Port for prometheus metrics. If None, auto-assigns.
         """
         self.host = host
+        # Track whether we auto-allocated ports (for cleanup)
+        self._port_auto_allocated = port is None
+        self._prometheus_port_auto_allocated = prometheus_port is None
         self.port = port or get_open_port()
         self.prometheus_port = prometheus_port or get_open_port()
         self.base_url = f"http://{self.host}:{self.port}"
@@ -120,8 +123,8 @@ class Gateway:
         worker_urls: list[str] | None = None,
         model_path: str | None = None,
         # PD mode arguments
-        prefill_workers: list["ModelInstance"] | None = None,
-        decode_workers: list["ModelInstance"] | None = None,
+        prefill_workers: list[ModelInstance] | None = None,
+        decode_workers: list[ModelInstance] | None = None,
         # IGW mode arguments
         igw_mode: bool = False,
         # Cloud mode arguments
@@ -147,7 +150,7 @@ class Gateway:
             prefill_workers: List of prefill ModelInstance objects for PD mode.
             decode_workers: List of decode ModelInstance objects for PD mode.
             igw_mode: Start in IGW mode (no workers, add via API).
-            cloud_backend: Cloud backend type ("openai" or "xai").
+            cloud_backend: Cloud backend type ("openai", "xai", or "anthropic").
             history_backend: History backend for cloud mode ("memory" or "oracle").
             policy: Routing policy (round_robin, random, etc.)
             timeout: Startup timeout in seconds.
@@ -207,9 +210,15 @@ class Gateway:
 
             mode_args = ["--pd-disaggregation"]
             for pf in prefills:
-                mode_args += ["--prefill", pf.base_url, str(pf.bootstrap_port)]
+                if pf.bootstrap_port is not None:
+                    # SGLang HTTP PD: use base_url (HTTP) with bootstrap port
+                    mode_args += ["--prefill", pf.base_url, str(pf.bootstrap_port)]
+                else:
+                    # gRPC PD (vLLM/SGLang): use worker_url (gRPC or HTTP based on mode)
+                    mode_args += ["--prefill", pf.worker_url]
             for dc in decodes:
-                mode_args += ["--decode", dc.base_url]
+                # Use worker_url to get correct protocol (HTTP or gRPC)
+                mode_args += ["--decode", dc.worker_url]
 
             self._launch(
                 mode_args=mode_args,
@@ -224,6 +233,13 @@ class Gateway:
             self.igw_mode = False
             self.cloud_mode = True
             self.cloud_backend = cloud_backend
+
+            # Mapping from cloud backend name to gateway --backend arg
+            cloud_backend_type = {
+                "openai": "openai",
+                "xai": "openai",
+                "anthropic": "anthropic",
+            }
 
             # Get worker URL and API key based on backend
             if cloud_backend == "openai":
@@ -240,12 +256,20 @@ class Gateway:
                     raise ValueError("XAI_API_KEY environment variable required")
                 self._env = os.environ.copy()
                 self._env["XAI_API_KEY"] = api_key
+            elif cloud_backend == "anthropic":
+                worker_url = "https://api.anthropic.com"
+                api_key = os.environ.get("ANTHROPIC_API_KEY")
+                if not api_key:
+                    raise ValueError("ANTHROPIC_API_KEY environment variable required")
+                self._env = os.environ.copy()
+                self._env["ANTHROPIC_API_KEY"] = api_key
             else:
                 raise ValueError(f"Unsupported cloud backend: {cloud_backend}")
 
+            backend_type = cloud_backend_type.get(cloud_backend, "openai")
             mode_args = [
                 "--backend",
-                "openai",  # Both OpenAI and xAI use openai backend type
+                backend_type,
                 "--worker-urls",
                 worker_url,
                 "--history-backend",
@@ -263,6 +287,8 @@ class Gateway:
             # Regular mode: worker URLs
             if model_path is None:
                 raise ValueError("model_path is required for regular mode")
+            if not worker_urls:
+                raise ValueError("worker_urls is required and must be non-empty for regular mode")
             self.model_path = model_path
             self.pd_mode = False
             self.igw_mode = False
@@ -326,11 +352,18 @@ class Gateway:
         logger.info("Gateway ready at %s", self.base_url)
 
     def shutdown(self) -> None:
-        """Shutdown the gateway process."""
+        """Shutdown the gateway process and release allocated ports."""
         if self.process is not None:
             logger.info("Shutting down gateway (PID %d)", self.process.pid)
             kill_process_tree(self.process.pid)
             self.process = None
+
+        # Release auto-allocated ports back to the pool
+        if self._port_auto_allocated:
+            release_port(self.port)
+        if self._prometheus_port_auto_allocated:
+            release_port(self.prometheus_port)
+
         self._started = False
 
     def _build_base_cmd(self) -> list[str]:
@@ -421,9 +454,7 @@ class Gateway:
             resp = httpx.get(f"{self.base_url}/workers", timeout=timeout)
             if resp.status_code == 200:
                 data = resp.json()
-                return [
-                    self._worker_from_api_response(w) for w in data.get("workers", [])
-                ]
+                return [self._worker_from_api_response(w) for w in data.get("workers", [])]
             return []
         except (httpx.RequestError, httpx.TimeoutException):
             return []
@@ -549,7 +580,7 @@ class Gateway:
     # Context manager support
     # -------------------------------------------------------------------------
 
-    def __enter__(self) -> "Gateway":
+    def __enter__(self) -> Gateway:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -580,8 +611,7 @@ def launch_cloud_gateway(
 
     if runtime not in THIRD_PARTY_MODELS:
         raise ValueError(
-            f"Unknown cloud runtime: {runtime}. "
-            f"Available: {list(THIRD_PARTY_MODELS.keys())}"
+            f"Unknown cloud runtime: {runtime}. Available: {list(THIRD_PARTY_MODELS.keys())}"
         )
 
     gateway = Gateway()

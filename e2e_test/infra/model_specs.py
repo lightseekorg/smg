@@ -52,9 +52,7 @@ MODEL_SPECS: dict[str, dict] = {
         "memory_gb": 28,
         "tp": 2,
         "features": ["chat", "streaming", "function_calling", "pythonic_tools"],
-        "worker_args": [
-            "--context-length=1000"
-        ],  # Faster startup, prevents memory issues
+        "worker_args": ["--context-length=16384"],  # Faster startup, prevents memory issues
     },
     # Reasoning model
     "deepseek-7b": {
@@ -91,24 +89,40 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 2,
         "features": ["chat", "streaming", "reasoning", "harmony"],
     },
+    # Llama-4-Maverick (17B with 128 experts, FP8) - Nightly benchmarks
+    "llama-4-maverick-17b": {
+        "model": _resolve_model_path("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
+        "memory_gb": 34,  # ~1 byte per parameter for FP8 quantized 17B params
+        "tp": 8,  # Tensor parallelism across 8 GPUs
+        "features": ["chat", "streaming", "function_calling", "moe"],
+        "worker_args": [
+            "--trust-remote-code",
+            "--context-length=163840",  # 160K context length (SGLang)
+            "--prefill-attention-backend=flashinfer",  # MLA attention backend
+            "--decode-attention-backend=flashinfer",  # MLA attention backend
+            "--flashinfer-mla-disable-ragged",  # Disable ragged attention for MLA
+            "--mem-fraction-static=0.9",  # 90% GPU memory for static allocation
+            "--cuda-graph-max-bs=256",  # CUDA graph batch size optimization
+        ],
+        "vllm_args": [
+            "--trust-remote-code",
+            "--max-model-len=163840",  # 160K context length (vLLM)
+        ],
+    },
 }
 
 
 def get_models_with_feature(feature: str) -> list[str]:
     """Get list of model IDs that support a specific feature."""
     return [
-        model_id
-        for model_id, spec in MODEL_SPECS.items()
-        if feature in spec.get("features", [])
+        model_id for model_id, spec in MODEL_SPECS.items() if feature in spec.get("features", [])
     ]
 
 
 def get_model_spec(model_id: str) -> dict:
     """Get spec for a specific model, raising KeyError if not found."""
     if model_id not in MODEL_SPECS:
-        raise KeyError(
-            f"Unknown model: {model_id}. Available: {list(MODEL_SPECS.keys())}"
-        )
+        raise KeyError(f"Unknown model: {model_id}. Available: {list(MODEL_SPECS.keys())}")
     return MODEL_SPECS[model_id]
 
 
@@ -147,5 +161,11 @@ THIRD_PARTY_MODELS: dict[str, dict] = {
         "description": "xAI API",
         "model": "grok-4-fast",
         "api_key_env": "XAI_API_KEY",
+    },
+    "anthropic": {
+        "description": "Anthropic API",
+        "model": "claude-sonnet-4-20250514",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "client_type": "anthropic",
     },
 }

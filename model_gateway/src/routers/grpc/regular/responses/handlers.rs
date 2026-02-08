@@ -110,7 +110,7 @@ async fn route_responses_streaming(
     };
 
     // 2. Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) =
+    let (has_mcp_tools, mcp_servers) =
         match ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await {
             Ok(result) => result,
             Err(response) => return response,
@@ -119,7 +119,7 @@ async fn route_responses_streaming(
     // Set the server keys in the context
     {
         let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = server_keys;
+        *servers = mcp_servers;
     }
 
     if has_mcp_tools {

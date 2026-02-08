@@ -22,6 +22,7 @@ pub mod approval;
 pub mod core;
 pub mod inventory;
 pub mod rate_limit;
+pub mod responses_bridge;
 
 // Backward-compatible re-exports (old module paths)
 // These allow `mcp::config::*` to continue working
@@ -30,9 +31,9 @@ pub use core::{config, pool as connection_pool};
 pub use core::{
     ArgMappingConfig, BuiltinToolType, ConfigValidationError, HandlerRequestContext,
     LatencySnapshot, McpConfig, McpMetrics, McpOrchestrator, McpRequestContext, McpServerConfig,
-    McpTransport, MetricsSnapshot, PolicyConfig, PolicyDecisionConfig, PoolKey, RefreshRequest,
-    ResponseFormatConfig, ServerPolicyConfig, SmgClientHandler, Tool, ToolCallResult, ToolConfig,
-    ToolExecutionInput, ToolExecutionOutput, TrustLevelConfig,
+    McpToolSession, McpTransport, MetricsSnapshot, PolicyConfig, PolicyDecisionConfig, PoolKey,
+    RefreshRequest, ResponseFormatConfig, ServerPolicyConfig, SmgClientHandler, Tool,
+    ToolCallResult, ToolConfig, ToolExecutionInput, ToolExecutionOutput, TrustLevelConfig,
 };
 
 // Re-export shared types
@@ -49,6 +50,11 @@ pub use inventory::{
     AliasTarget, ArgMapping, QualifiedToolName, ToolCategory, ToolEntry, ToolInventory,
 };
 pub use rate_limit::{RateLimiter, RateLimits};
+pub use responses_bridge::{
+    build_chat_function_tools, build_chat_function_tools_with_names, build_function_tools_json,
+    build_function_tools_json_with_names, build_mcp_list_tools_item, build_mcp_list_tools_json,
+    build_mcp_tool_infos, build_response_tools, build_response_tools_with_names,
+};
 pub use tenant::{SessionId, TenantContext, TenantId};
 // Re-export from transform
 pub use transform::{ResponseFormat, ResponseTransformer};

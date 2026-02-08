@@ -20,7 +20,7 @@ use super::{
     conversions,
 };
 use crate::{
-    mcp::{ApprovalMode, TenantContext, ToolExecutionInput},
+    mcp::{McpToolSession, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse},
     routers::{
@@ -28,7 +28,7 @@ use crate::{
         grpc::common::responses::{
             ensure_mcp_connection, persist_response_if_needed, ResponsesContext,
         },
-        mcp_utils::{extract_server_label, DEFAULT_MAX_ITERATIONS},
+        mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
 };
 
@@ -50,13 +50,13 @@ pub(super) async fn route_responses_internal(
     let modified_request = load_conversation_history(ctx, &request).await?;
 
     // 2. Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) =
+    let (has_mcp_tools, mcp_servers) =
         ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await?;
 
     // Set the server keys in the context
     {
         let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = server_keys;
+        *servers = mcp_servers;
     }
 
     let responses_response = if has_mcp_tools {
@@ -160,37 +160,26 @@ pub(super) async fn execute_tool_loop(
     model_id: Option<String>,
     response_id: Option<String>,
 ) -> Result<ResponsesResponse, Response> {
-    // Get server label from original request tools
-    let server_label = extract_server_label(original_request.tools.as_deref(), "request-mcp");
-
-    let mut state = ToolLoopState::new(original_request.input.clone(), server_label.clone());
+    let mut state = ToolLoopState::new(original_request.input.clone());
 
     // Configuration: max iterations as safety limit
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
     trace!(
-        "Starting MCP tool loop: server_label={}, max_tool_calls={:?}, max_iterations={}",
-        server_label,
+        "Starting MCP tool loop: max_tool_calls={:?}, max_iterations={}",
         max_tool_calls,
         DEFAULT_MAX_ITERATIONS
     );
 
-    // Create a request context for tool execution (use response_id if available)
-    let request_id = response_id
+    // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
+    let mcp_servers = ctx.requested_servers.read().unwrap().clone();
+    let session_request_id = response_id
         .clone()
         .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4()));
-    let request_ctx = ctx.mcp_orchestrator.create_request_context(
-        request_id,
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
-    );
+    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
 
     // Get MCP tools and convert to chat format (do this once before loop)
-    let mcp_tools = {
-        let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_orchestrator.list_tools_for_servers(&servers)
-    };
-    let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&mcp_tools);
+    let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&session);
     trace!(
         "Converted {} MCP tools to chat format",
         mcp_chat_tools.len()
@@ -240,13 +229,11 @@ pub(super) async fn execute_tool_loop(
                 tool_calls.len()
             );
 
-            // Separate MCP and function tool calls
-            let mcp_tool_names: std::collections::HashSet<&str> =
-                mcp_tools.iter().map(|t| t.tool.name.as_ref()).collect();
+            // Separate MCP and function tool calls using session-exposed names.
             let (mcp_tool_calls, function_tool_calls): (Vec<ExtractedToolCall>, Vec<_>) =
                 tool_calls
                     .into_iter()
-                    .partition(|tc| mcp_tool_names.contains(tc.name.as_str()));
+                    .partition(|tc| session.has_exposed_tool(tc.name.as_str()));
 
             trace!(
                 "Separated tool calls: {} MCP, {} function",
@@ -323,12 +310,6 @@ pub(super) async fn execute_tool_loop(
                 return Ok(responses_response);
             }
 
-            // Get server_keys for tool execution
-            let server_keys: Vec<String> = {
-                let servers = ctx.requested_servers.read().unwrap();
-                servers.clone()
-            };
-
             // Convert tool calls to execution inputs
             let inputs: Vec<ToolExecutionInput> = mcp_tool_calls
                 .into_iter()
@@ -339,11 +320,8 @@ pub(super) async fn execute_tool_loop(
                 })
                 .collect();
 
-            // Execute all MCP tools via unified API
-            let results = ctx
-                .mcp_orchestrator
-                .execute_tools(inputs, &server_keys, &server_label, &request_ctx)
-                .await;
+            // Execute all MCP tools via session
+            let results = session.execute_tools(inputs).await;
 
             // Process results: record metrics and state
             for result in results {
@@ -421,17 +399,22 @@ pub(super) async fn execute_tool_loop(
 
             // Inject MCP metadata into output
             if state.total_calls > 0 {
-                // Prepend mcp_list_tools item
-                let servers = ctx.requested_servers.read().unwrap();
-                let mcp_list_tools =
-                    build_mcp_list_tools_item(&ctx.mcp_orchestrator, &server_label, &servers);
-                responses_response.output.insert(0, mcp_list_tools);
+                // Prepend mcp_list_tools items for each server
+                for (label, key) in session.mcp_servers().iter().rev() {
+                    let mcp_list_tools = build_mcp_list_tools_item(
+                        &ctx.mcp_orchestrator,
+                        label,
+                        std::slice::from_ref(key),
+                    );
+                    responses_response.output.insert(0, mcp_list_tools);
+                }
 
                 // Append all mcp_call items at the end
                 responses_response.output.extend(state.mcp_call_items);
 
                 trace!(
-                    "Injected MCP metadata: 1 mcp_list_tools + {} mcp_call items",
+                    "Injected MCP metadata: {} mcp_list_tools + {} mcp_call items",
+                    session.mcp_servers().len(),
                     state.total_calls
                 );
             }

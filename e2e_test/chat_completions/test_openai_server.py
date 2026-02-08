@@ -11,6 +11,7 @@ import json
 import logging
 
 import pytest
+from infra import is_trtllm
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,8 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion(self, setup_backend, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
+        if is_trtllm() and parallel_sample_num > 1:
+            pytest.skip("TRT-LLM does not support n>1 with greedy decoding")
         _, model, client, gateway = setup_backend
         self._run_chat_completion(client, model, logprobs, parallel_sample_num)
 
@@ -37,18 +40,21 @@ class TestChatCompletion:
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion_stream(self, setup_backend, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
+        if is_trtllm() and parallel_sample_num > 1:
+            pytest.skip("TRT-LLM does not support n>1 with greedy decoding")
         _, model, client, gateway = setup_backend
         self._run_chat_completion_stream(client, model, logprobs, parallel_sample_num)
 
+    @pytest.mark.skip_for_runtime(
+        "trtllm",
+        reason="TRT-LLM gRPC bug: uses 'guided_decoding_params' instead of 'guided_decoding'",
+    )
     def test_regex(self, setup_backend):
         """Test structured output with regex constraint."""
         _, model, client, gateway = setup_backend
 
         regex = (
-            r"""\{\n"""
-            + r"""   "name": "[\w]+",\n"""
-            + r"""   "population": [\d]+\n"""
-            + r"""\}"""
+            r"""\{\n""" + r"""   "name": "[\w]+",\n""" + r"""   "population": [\d]+\n""" + r"""\}"""
         )
 
         response = client.chat.completions.create(
@@ -101,7 +107,10 @@ class TestChatCompletion:
 Extract the name, size, price, and color from this product description as a JSON object:
 
 <description>
-The SmartHome Mini is a compact smart home assistant available in black or white for only $49.99. At just 5 inches wide, it lets you control lights, thermostats, and other connected devices via voice or app—no matter where you place it in your home. This affordable little hub brings convenient hands-free control to your smart devices.
+The SmartHome Mini is a compact smart home assistant available in black or white for only $49.99.
+At just 5 inches wide, it lets you control lights, thermostats, and other connected devices via
+voice or app—no matter where you place it in your home. This affordable little hub brings
+convenient hands-free control to your smart devices.
 </description>
 """,
                 },
@@ -114,10 +123,61 @@ The SmartHome Mini is a compact smart home assistant available in black or white
             extra_body={"continue_final_message": True},
         )
 
-        assert (
-            response.choices[0]
-            .message.content.strip()
-            .startswith('"name": "SmartHome Mini",')
+        assert response.choices[0].message.content.strip().startswith('"name": "SmartHome Mini",')
+
+    def test_streaming_token_count_matches_chunks(self, setup_backend):
+        """Test that streaming completion_tokens matches the number of content chunks.
+
+        This verifies that the usage.completion_tokens reported at the end of a
+        streaming response matches the actual number of content chunks received.
+        Each chunk with content should correspond to one token.
+        """
+        _, model, client, gateway = setup_backend
+
+        generator = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful AI assistant"},
+                {"role": "user", "content": "What is the capital of France?"},
+            ],
+            temperature=0,
+            max_tokens=50,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+
+        content_chunk_count = 0
+        usage_completion_tokens = None
+
+        for response in generator:
+            # Capture usage from the final chunk
+            if response.usage is not None:
+                usage_completion_tokens = response.usage.completion_tokens
+                continue
+
+            # Skip if no choices
+            if not response.choices:
+                continue
+
+            delta = response.choices[0].delta
+
+            # Count chunks that have actual content (not just role or finish_reason)
+            # Each chunk with content or reasoning_content represents one token
+            if delta.content or getattr(delta, "reasoning_content", None):
+                content_chunk_count += 1
+
+        assert usage_completion_tokens is not None, "No usage chunk received"
+        assert content_chunk_count > 0, "No content chunks received"
+        # completion_tokens should be >= content chunks because some tokens
+        # (like EOS) don't produce visible content
+        assert usage_completion_tokens >= content_chunk_count, (
+            f"completion_tokens ({usage_completion_tokens}) should be >= "
+            f"content chunk count ({content_chunk_count})"
+        )
+        # But they should be close - allow small difference for special tokens
+        assert usage_completion_tokens - content_chunk_count <= 2, (
+            f"completion_tokens ({usage_completion_tokens}) differs too much from "
+            f"content chunk count ({content_chunk_count})"
         )
 
     def test_model_list(self, setup_backend):
@@ -127,9 +187,7 @@ The SmartHome Mini is a compact smart home assistant available in black or white
         models = list(client.models.list().data)
         assert len(models) == 1
 
-    @pytest.mark.skip(
-        reason="Skipping retrieve model test as it is not supported by the router"
-    )
+    @pytest.mark.skip(reason="Skipping retrieve model test as it is not supported by the router")
     def test_retrieve_model(self, setup_backend):
         """Test retrieving a specific model."""
         import openai
@@ -165,16 +223,10 @@ The SmartHome Mini is a compact smart home assistant available in black or white
         )
 
         if logprobs:
-            assert isinstance(
-                response.choices[0].logprobs.content[0].top_logprobs[0].token, str
-            )
+            assert isinstance(response.choices[0].logprobs.content[0].top_logprobs[0].token, str)
 
-            ret_num_top_logprobs = len(
-                response.choices[0].logprobs.content[0].top_logprobs
-            )
-            assert (
-                ret_num_top_logprobs == logprobs
-            ), f"{ret_num_top_logprobs} vs {logprobs}"
+            ret_num_top_logprobs = len(response.choices[0].logprobs.content[0].top_logprobs)
+            assert ret_num_top_logprobs == logprobs, f"{ret_num_top_logprobs} vs {logprobs}"
 
         assert len(response.choices) == parallel_sample_num
         assert response.choices[0].message.role == "assistant"
@@ -185,9 +237,7 @@ The SmartHome Mini is a compact smart home assistant available in black or white
         assert response.usage.completion_tokens > 0
         assert response.usage.total_tokens > 0
 
-    def _run_chat_completion_stream(
-        self, client, model, logprobs, parallel_sample_num=1
-    ):
+    def _run_chat_completion_stream(self, client, model, logprobs, parallel_sample_num=1):
         """Run a streaming chat completion and verify response chunks."""
         generator = client.chat.completions.create(
             model=model,
@@ -223,9 +273,7 @@ The SmartHome Mini is a compact smart home assistant available in black or white
             data = response.choices[0].delta
 
             if is_firsts.get(index, True):
-                assert (
-                    data.role == "assistant"
-                ), "data.role was not 'assistant' for first chunk"
+                assert data.role == "assistant", "data.role was not 'assistant' for first chunk"
                 is_firsts[index] = False
                 continue
 
@@ -234,15 +282,11 @@ The SmartHome Mini is a compact smart home assistant available in black or white
                 assert isinstance(
                     response.choices[0].logprobs.content[0].top_logprobs[0].token, str
                 ), "top_logprobs token was not a string"
-                assert isinstance(
-                    response.choices[0].logprobs.content[0].top_logprobs, list
-                ), "top_logprobs was not a list"
-                ret_num_top_logprobs = len(
-                    response.choices[0].logprobs.content[0].top_logprobs
+                assert isinstance(response.choices[0].logprobs.content[0].top_logprobs, list), (
+                    "top_logprobs was not a list"
                 )
-                assert (
-                    ret_num_top_logprobs == logprobs
-                ), f"{ret_num_top_logprobs} vs {logprobs}"
+                ret_num_top_logprobs = len(response.choices[0].logprobs.content[0].top_logprobs)
+                assert ret_num_top_logprobs == logprobs, f"{ret_num_top_logprobs} vs {logprobs}"
 
             assert (
                 isinstance(data.content, str)
@@ -254,14 +298,10 @@ The SmartHome Mini is a compact smart home assistant available in black or white
             assert response.created
 
         for index in range(parallel_sample_num):
-            assert not is_firsts.get(
-                index, True
-            ), f"index {index} is not found in the response"
+            assert not is_firsts.get(index, True), f"index {index} is not found in the response"
 
         for index in range(parallel_sample_num):
-            assert (
-                index in finish_reason_counts
-            ), f"No finish_reason found for index {index}"
+            assert index in finish_reason_counts, f"No finish_reason found for index {index}"
             assert finish_reason_counts[index] == 1, (
                 f"Expected 1 finish_reason chunk for index {index}, "
                 f"got {finish_reason_counts[index]}"
@@ -279,9 +319,7 @@ The SmartHome Mini is a compact smart home assistant available in black or white
 
 
 @pytest.mark.model("gpt-oss")
-@pytest.mark.gateway(
-    extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"]
-)
+@pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
 class TestChatCompletionGptOss(TestChatCompletion):
     """Tests for chat completions API with GPT-OSS model (Harmony).
 
@@ -299,9 +337,7 @@ class TestChatCompletionGptOss(TestChatCompletion):
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion_stream(self, setup_backend, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
-        super().test_chat_completion_stream(
-            setup_backend, logprobs, parallel_sample_num
-        )
+        super().test_chat_completion_stream(setup_backend, logprobs, parallel_sample_num)
 
     @pytest.mark.skip(reason="OSS models don't support regex constraints")
     def test_regex(self, setup_backend):

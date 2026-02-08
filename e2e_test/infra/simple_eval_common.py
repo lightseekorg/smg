@@ -8,6 +8,7 @@ import os
 import resource
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from multiprocessing.pool import ThreadPool
 from typing import Any
@@ -16,7 +17,7 @@ import httpx
 import jinja2
 import numpy as np
 import openai
-import requests
+import requests  # type: ignore[import-untyped]
 from openai import OpenAI
 from tqdm import tqdm
 
@@ -138,18 +139,16 @@ class ChatCompletionSampler(SamplerBase):
 
     def __call__(self, message_list: MessageList) -> str:
         if self.system_message:
-            message_list = [
-                self._pack_message("system", self.system_message)
-            ] + message_list
+            message_list = [self._pack_message("system", self.system_message)] + message_list
         trial = 0
         while trial < MAX_RETRY_ATTEMPTS:
             try:
                 response = self.client.chat.completions.create(
                     model=self.model,
-                    messages=message_list,
+                    messages=message_list,  # type: ignore[arg-type]
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
-                    reasoning_effort=self.reasoning_effort,
+                    reasoning_effort=self.reasoning_effort,  # type: ignore[arg-type]
                     extra_body=self.extra_body,
                 )
                 return response.choices[0].message.content or ""
@@ -177,7 +176,8 @@ class ChatCompletionSampler(SamplerBase):
 
 
 QUERY_TEMPLATE_MULTICHOICE = """
-Answer the following multiple choice question. The last line of your response should be of the following format: 'Answer: $LETTER' (without quotes) where LETTER is one of ABCD. Think step by step before answering.
+Answer the following multiple choice question. The last line of your response should be of the following
+format: 'Answer: $LETTER' (without quotes) where LETTER is one of ABCD. Think step by step before answering.
 
 {Question}
 
@@ -192,7 +192,8 @@ ANSWER_PATTERN = r"(?i)Answer\s*:\s*([^\n]+)"
 
 
 EQUALITY_TEMPLATE = r"""
-Look at the following two expressions (answers to a math problem) and judge whether they are equivalent. Only perform trivial simplifications
+Look at the following two expressions (answers to a math problem) and judge whether they are equivalent.
+Only perform trivial simplifications
 
 Examples:
 
@@ -320,12 +321,12 @@ def aggregate_results(
     return EvalResult(
         score=final_metrics.pop("score", None),
         metrics=final_metrics,
-        htmls=htmls,
-        convos=convos,
+        htmls=htmls,  # type: ignore[arg-type]
+        convos=convos,  # type: ignore[arg-type]
     )
 
 
-def map_with_progress(f: callable, xs: list[Any], num_threads: int) -> list[Any]:
+def map_with_progress(f: Callable, xs: list[Any], num_threads: int) -> list[Any]:
     """Apply f to each element of xs, using a ThreadPool, and show progress."""
     # Use quiet progress bar that doesn't pollute logs
     if os.getenv("debug"):
@@ -448,9 +449,7 @@ def make_report_from_example_htmls(htmls: list[str]):
     """
     Create a standalone HTML report from a list of example htmls
     """
-    return jinja_env.from_string(_report_template).render(
-        score=None, metrics={}, htmls=htmls
-    )
+    return jinja_env.from_string(_report_template).render(score=None, metrics={}, htmls=htmls)
 
 
 def download_dataset(path: str, url: str) -> None:
@@ -463,14 +462,17 @@ def download_dataset(path: str, url: str) -> None:
         total_size = int(response.headers.get("content-length", 0))
         block_size = 8192
 
-        with open(path, "wb") as f, tqdm(
-            desc="Downloading",
-            total=total_size,
-            unit="iB",
-            unit_scale=True,
-            unit_divisor=1024,
-            leave=False,
-        ) as progress_bar:
+        with (
+            open(path, "wb") as f,
+            tqdm(
+                desc="Downloading",
+                total=total_size,
+                unit="iB",
+                unit_scale=True,
+                unit_divisor=1024,
+                leave=False,
+            ) as progress_bar,
+        ):
             for data in response.iter_content(block_size):
                 size = f.write(data)
                 progress_bar.update(size)

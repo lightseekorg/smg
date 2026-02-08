@@ -3,11 +3,17 @@ name: PR Test (SMG)
 on:
   push:
     branches: [ main ]
-    paths:
-      - "**"
+    paths-ignore:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "*.md"
   pull_request:
     branches: [ main ]
     types: [opened, synchronize, reopened, labeled]
+    paths-ignore:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "*.md"
   workflow_dispatch:
 
 permissions:
@@ -23,7 +29,7 @@ env:
 
 jobs:
   check-ci:
-    runs-on: ubuntu-latest
+    runs-on: k8s-runner-cpu
     permissions:
       contents: read
     outputs:
@@ -35,6 +41,35 @@ jobs:
       - id: check
         uses: ./.github/actions/check-ci
 
+  python-lint:
+    needs: check-ci
+    if: needs.check-ci.outputs.should_run == 'true'
+    runs-on: k8s-runner-cpu
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install linting tools
+        run: pip install ruff mypy
+
+      - name: Ruff check
+        run: ruff check e2e_test/ bindings/python/ scripts/
+
+      - name: Ruff format check
+        run: ruff format --check e2e_test/ bindings/python/ scripts/
+
+      - name: Mypy (e2e_test)
+        run: mypy e2e_test/ --config-file mypy.ini
+
+      - name: Mypy (bindings/python)
+        run: mypy bindings/python/ --config-file mypy.ini
+
   build-wheel:
     needs: check-ci
     if: needs.check-ci.outputs.should_run == 'true'
@@ -44,10 +79,23 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Cache wheel and Go FFI artifacts
+        id: cache-wheel
+        uses: actions/cache@v5
+        with:
+          path: |
+            bindings/python/dist/*.whl
+            bindings/golang/target/release/libsmg_go.*
+          key: wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'auth/src/**', 'bindings/python/src/**', 'data_connector/src/**', 'grpc_client/src/**', 'kv_index/src/**', 'mcp/src/**', 'mesh/src/**', 'model_gateway/src/**', 'multimodal/src/**', 'protocols/src/**', 'reasoning_parser/src/**', 'tokenizer/src/**', 'tool_parser/src/**', 'wasm/src/**', 'workflow/src/**', 'bindings/golang/src/**') }}
+          restore-keys: |
+            wheel-${{ runner.os }}-
+
       - name: Setup Rust
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
         uses: ./.github/actions/setup-rust
 
       - name: Build Python wheel and Go FFI library
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: |
           bash scripts/ci_setup_python_venv.sh
           bash scripts/ci_build_wheel.sh
@@ -66,6 +114,15 @@ jobs:
           path: bindings/golang/target/release/libsmg_go.*
           retention-days: 1
 
+      - name: Show sccache stats
+        if: always() && steps.cache-wheel.outputs.cache-hit != 'true'
+        run: sccache --show-stats
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - name: Test wheel install
         run: |
           pip install bindings/python/dist/*.whl
@@ -75,7 +132,7 @@ jobs:
 
   python-unit-tests:
     needs: build-wheel
-    runs-on: ubuntu-latest
+    runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
@@ -104,11 +161,16 @@ jobs:
   unit-tests:
     needs: check-ci
     if: needs.check-ci.outputs.should_run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
@@ -154,17 +216,18 @@ jobs:
       matrix:
         include:
           - name: benchmarks
-            timeout: 32
+            timeout: 20
             test_dirs: "e2e_test/benchmarks"
             extra_deps: "genai-bench==0.0.3"
             env_vars: ""
             reruns: ""
             upload_benchmarks: true
             parallel_opts: ""  # No parallel for benchmarks (performance measurement)
-            ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py"  # Go benchmark runs in dedicated job
-          - name: responses
-            timeout: 45
-            test_dirs: "e2e_test/responses"
+            ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py --ignore=e2e_test/benchmarks/test_nightly_perf.py"  # Go and nightly benchmarks run in dedicated jobs
+            runner: 4-gpu-h100
+          - name: agentic-apis
+            timeout: 30
+            test_dirs: "e2e_test/responses e2e_test/messages"
             extra_deps: ""
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
@@ -173,15 +236,16 @@ jobs:
             parallel_opts: ""  # Cloud backend tests not compatible with parallel execution
             ignore_opts: ""
           - name: e2e
-            timeout: 45
+            timeout: 20
             test_dirs: "e2e_test/router e2e_test/embeddings"
-            extra_deps: "pytest-parallel py"  # py is required for pytest-parallel with newer pytest
+            # py is needed for pytest-parallel; sentence-transformers provides HuggingFace reference embeddings
+            extra_deps: "pytest-parallel py sentence-transformers"
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"  # Thread-based parallelism
             ignore_opts: ""
           - name: chat-completions-sglang
-            timeout: 45
+            timeout: 20
             test_dirs: "e2e_test/chat_completions"
             extra_deps: "pytest-parallel py"
             env_vars: "E2E_RUNTIME=sglang SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
@@ -190,7 +254,7 @@ jobs:
             test_filter: ""
             ignore_opts: ""
           - name: chat-completions-vllm
-            timeout: 45
+            timeout: 20
             test_dirs: "e2e_test/chat_completions"
             extra_deps: "pytest-parallel py"
             env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
@@ -201,73 +265,71 @@ jobs:
             test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
             setup_vllm: true
             ignore_opts: ""
-    runs-on: k8s-runner-gpu
+          - name: vllm-pd
+            timeout: 15
+            test_dirs: "e2e_test/router/test_pd_mmlu.py"
+            extra_deps: ""
+            env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
+            reruns: "--reruns 2 --reruns-delay 5"
+            parallel_opts: ""
+            test_filter: ""
+            setup_vllm: true
+            ignore_opts: ""
+          - name: chat-completions-trtllm
+            timeout: 25
+            test_dirs: "e2e_test/chat_completions"
+            extra_deps: "pytest-parallel py"
+            env_vars: "E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1"
+            reruns: "--reruns 2 --reruns-delay 5"
+            parallel_opts: "--workers 1 --tests-per-worker 4"
+            test_filter: ""
+            setup_trtllm: true
+            ignore_opts: ""
+            runner: 4-gpu-h100
+    runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
     timeout-minutes: ${{ matrix.timeout }}
+    services:
+      oracle-db:
+        image: ${{ matrix.setup_oracle && 'gvenzl/oracle-xe:21-slim-faststart' || '' }}
+        ports:
+          - 1521:1521
+        env:
+          ORACLE_PASSWORD: oracle
+        options: >-
+          --health-cmd "healthcheck.sh"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      brave-search-server:
+        image: ${{ matrix.setup_brave && 'shoofio/brave-search-mcp-sse:1.0.10' || '' }}
+        ports:
+          - 8001:8080
+        env:
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+        options: >-
+          --health-cmd "nc -z localhost 8080"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 3
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Cache flash-attn build
+      - name: Warm up Docker daemon
+        if: matrix.setup_oracle || matrix.setup_brave
+        run: docker info > /dev/null 2>&1
+
+      - name: Setup vLLM backend
         if: matrix.setup_vllm
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip/wheels
-          key: flash-attn-${{ runner.os }}-py310-${{ hashFiles('scripts/ci_install_vllm.sh') }}
+        uses: ./.github/actions/setup-vllm
 
-      - name: Install inference backend
-        run: |
-          bash scripts/ci_setup_python_venv.sh
-          source .venv/bin/activate
-          if [ "${{ matrix.setup_vllm }}" == "true" ]; then
-            bash scripts/ci_install_vllm.sh
-          else
-            bash scripts/ci_install_sglang.sh
-          fi
+      - name: Setup TRT-LLM backend
+        if: matrix.setup_trtllm
+        uses: ./.github/actions/setup-trtllm
 
-      - name: Setup Oracle Instant Client
-        if: matrix.setup_oracle
-        run: |
-          sudo apt-get install -y unzip
-          INSTANT_CLIENT_DIR="$HOME/instant-client"
-          INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.9.0.25.07.zip"
-
-          if [ ! -d "$INSTANT_CLIENT_DIR/instantclient_23_9" ]; then
-            echo "Downloading Oracle Instant Client..."
-            mkdir -p "$INSTANT_CLIENT_DIR"
-            cd "$INSTANT_CLIENT_DIR"
-            wget https://download.oracle.com/otn_software/linux/instantclient/2390000/$INSTANT_CLIENT_ZIP
-            unzip $INSTANT_CLIENT_ZIP
-            rm $INSTANT_CLIENT_ZIP
-          else
-            echo "Oracle Instant Client already exists, skipping download"
-          fi
-
-          echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_9:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-
-      - name: Start Oracle Database
-        if: matrix.setup_oracle
-        run: |
-          docker run -d -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim
-          echo "Starting Oracle DB..."
-
-          # Export Oracle connection environment variables
-          echo "ATP_USER=system" >> $GITHUB_ENV
-          echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
-          echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
-
-      - name: Start Brave MCP Server
-        if: matrix.setup_brave
-        env:
-          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
-        run: |
-          docker run -d --rm \
-            -p 8001:8080 \
-            -e BRAVE_API_KEY \
-            --name brave-search-server \
-            shoofio/brave-search-mcp-sse:1.0.10
-          echo "Starting Brave MCP Server..."
-          sleep 2
-          curl -f --max-time 1 http://localhost:8001/sse > /dev/null 2>&1 && echo "Brave MCP Server is healthy!" || echo "Brave MCP Server responded"
+      - name: Setup SGLang backend
+        if: ${{ !matrix.setup_vllm && !matrix.setup_trtllm }}
+        uses: ./.github/actions/setup-sglang
 
       - name: Download wheel artifact
         uses: actions/download-artifact@v7
@@ -281,9 +343,49 @@ jobs:
           pip install wheel/*.whl
           bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
 
+      - name: Setup Oracle Instant Client
+        if: matrix.setup_oracle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip wget
+          sudo apt-get install -y libaio1t64 || sudo apt-get install -y libaio1
+          # Copy libaio into Instant Client dir so it's on LD_LIBRARY_PATH
+          LIBAIO_PATH=$(find /usr/lib -name "libaio.so*" -type f 2>/dev/null | head -1)
+          INSTANT_CLIENT_DIR="$HOME/instant-client"
+          INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.26.1.0.0.zip"
+
+          if [ ! -d "$INSTANT_CLIENT_DIR/instantclient_23_26" ]; then
+            echo "Downloading Oracle Instant Client..."
+            mkdir -p "$INSTANT_CLIENT_DIR"
+            cd "$INSTANT_CLIENT_DIR"
+            wget https://download.oracle.com/otn_software/linux/instantclient/2326100/$INSTANT_CLIENT_ZIP
+            unzip $INSTANT_CLIENT_ZIP
+            rm $INSTANT_CLIENT_ZIP
+          else
+            echo "Oracle Instant Client already exists, skipping download"
+          fi
+
+          # Ensure libaio.so.1 is findable via LD_LIBRARY_PATH
+          if [ -n "$LIBAIO_PATH" ]; then
+            cp "$LIBAIO_PATH" "$INSTANT_CLIENT_DIR/instantclient_23_26/"
+            ln -sf "$INSTANT_CLIENT_DIR/instantclient_23_26/$(basename $LIBAIO_PATH)" "$INSTANT_CLIENT_DIR/instantclient_23_26/libaio.so.1"
+          fi
+
+          echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_26:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: Set Oracle connection environment
+        if: matrix.setup_oracle
+        run: |
+          echo "ATP_USER=system" >> $GITHUB_ENV
+          echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
+          echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
+
       - name: Run E2E tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
@@ -295,23 +397,11 @@ jobs:
           name: genai-bench-results-all-policies
           path: benchmark_**/
 
-      - name: Cleanup Brave MCP Server
-        if: always() && matrix.setup_brave
-        run: |
-          docker stop brave-search-server || true
-          docker rm brave-search-server || true
-
-      - name: Cleanup Oracle Database
-        if: always() && matrix.setup_oracle
-        run: |
-          docker stop oracle-db || true
-          docker rm oracle-db || true
-
   go-unit-tests:
     name: go-unit-tests
     needs: [check-ci, build-wheel]
     if: needs.check-ci.outputs.should_run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: k8s-runner-cpu
     timeout-minutes: 15
     permissions:
       contents: read
@@ -326,6 +416,11 @@ jobs:
           cache: true
           cache-dependency-path: bindings/golang/go.sum
 
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
       - name: Download Go FFI library
         uses: actions/download-artifact@v7
         with:
@@ -338,6 +433,7 @@ jobs:
       - name: Run Go unit tests
         run: |
           cd bindings/golang
+          export CGO_ENABLED=1
           export CGO_LDFLAGS="-L$(pwd)/target/release"
           export LD_LIBRARY_PATH="$(pwd)/target/release:$LD_LIBRARY_PATH"
           go test -v ./...
@@ -347,18 +443,15 @@ jobs:
     needs: [check-ci, build-wheel]
     if: needs.check-ci.outputs.should_run == 'true'
     runs-on: k8s-runner-gpu
-    timeout-minutes: 45
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Setup Python venv and SGLang
-        run: |
-          bash scripts/ci_setup_python_venv.sh
-          source .venv/bin/activate
-          bash scripts/ci_install_sglang.sh
+      - name: Setup SGLang backend
+        uses: ./.github/actions/setup-sglang
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -401,7 +494,7 @@ jobs:
   go-bindings-benchmark:
     name: go-bindings-benchmark
     needs: [check-ci, build-wheel]
-    if: needs.check-ci.outputs.should_run == 'true'
+    if: false  # Disabled
     runs-on: k8s-runner-gpu
     timeout-minutes: 32
     permissions:
@@ -410,14 +503,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Install inference backend
-        run: |
-          bash scripts/ci_setup_python_venv.sh
-          source .venv/bin/activate
-          bash scripts/ci_install_sglang.sh
+      - name: Setup SGLang backend
+        uses: ./.github/actions/setup-sglang
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.24'
           cache: true
@@ -464,9 +554,9 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e, go-bindings-benchmark]
+    needs: [check-ci, python-lint, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: k8s-runner-cpu
     permissions: {}
     steps:
       - name: Check CI result
@@ -474,7 +564,7 @@ jobs:
           if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
             echo "CI was skipped (external contributor without run-ci label)"
             exit 0
-          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" || "${{ needs.go-bindings-benchmark.result }}" == "failure" ]]; then
+          elif [[ "${{ needs.python-lint.result }}" == "failure" || "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.python-unit-tests.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else
@@ -482,8 +572,8 @@ jobs:
           fi
 
   summarize-benchmarks:
-    needs: [gateway-e2e, go-bindings-benchmark]
-    runs-on: ubuntu-latest
+    needs: [gateway-e2e]
+    runs-on: k8s-runner-cpu
     if: success()
     permissions:
       contents: read
@@ -491,16 +581,15 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v6
 
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.13"
+
     - name: Download gateway benchmark results
       uses: actions/download-artifact@v7
       with:
         name: genai-bench-results-all-policies
-
-    - name: Download Go bindings benchmark results
-      uses: actions/download-artifact@v7
-      with:
-        name: genai-bench-results-go-bindings
-        path: benchmark_go_bindings
 
     - name: Create benchmark summary
       run: python3 e2e_test/benchmarks/summarize.py .

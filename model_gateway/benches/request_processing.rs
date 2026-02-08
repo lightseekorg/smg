@@ -1,6 +1,6 @@
-use std::time::Instant;
+use std::{hint::black_box, time::Instant};
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde_json::{from_str, to_string, to_value, to_vec};
 use smg::{
     core::{BasicWorker, BasicWorkerBuilder, Worker, WorkerType},
@@ -577,7 +577,7 @@ fn bench_full_round_trip(c: &mut Criterion) {
 fn benchmark_summary(c: &mut Criterion) {
     let group = c.benchmark_group("benchmark_summary");
 
-    println!("\nSGLang Model Gateway Performance Benchmark Suite");
+    println!("\nShepherd Model Gateway Performance Benchmark Suite");
     println!("=================================================");
 
     // Quick performance overview

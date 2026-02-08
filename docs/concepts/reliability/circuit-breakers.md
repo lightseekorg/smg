@@ -212,70 +212,21 @@ smg \
 
 ### Normal Operation
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant S as SMG
-    participant W as Worker
-
-    Note over W: Circuit: Closed
-    C->>S: Request 1
-    S->>W: Forward
-    W-->>S: Success
-    S-->>C: Response
-
-    C->>S: Request 2
-    S->>W: Forward
-    W-->>S: Success
-    S-->>C: Response
-```
+<div class="architecture-diagram">
+  <img src="../../../assets/images/circuit-breaker-normal.svg" alt="Circuit Breaker Normal Operation">
+</div>
 
 ### Worker Fails
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant S as SMG
-    participant W as Worker
-
-    Note over W: Circuit: Closed
-    C->>S: Request 1
-    S->>W: Forward
-    W--xS: Error (failure 1)
-    S-->>C: Error
-
-    C->>S: Request 2
-    S->>W: Forward
-    W--xS: Error (failure 5)
-    Note over W: Circuit: OPEN
-
-    C->>S: Request 3
-    Note over S: Circuit open, reject immediately
-    S-->>C: 503 Service Unavailable
-```
+<div class="architecture-diagram">
+  <img src="../../../assets/images/circuit-breaker-failure.svg" alt="Circuit Breaker Worker Failure">
+</div>
 
 ### Recovery
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant S as SMG
-    participant W as Worker
-
-    Note over W: Circuit: Open (30s elapsed)
-    Note over W: Circuit: Half-Open
-
-    C->>S: Request 1
-    S->>W: Test request
-    W-->>S: Success!
-    S-->>C: Response
-
-    C->>S: Request 2
-    S->>W: Test request
-    W-->>S: Success! (threshold met)
-    Note over W: Circuit: CLOSED
-    S-->>C: Response
-```
+<div class="architecture-diagram">
+  <img src="../../../assets/images/circuit-breaker-recovery.svg" alt="Circuit Breaker Recovery">
+</div>
 
 ---
 

@@ -23,6 +23,7 @@ pub enum PolicyType {
 pub enum BackendType {
     Sglang,
     Openai,
+    Anthropic,
 }
 
 #[pyclass(eq)]
@@ -360,6 +361,7 @@ struct Router {
     api_key: Option<String>,
     log_dir: Option<String>,
     log_level: Option<String>,
+    log_json: bool,
     service_discovery: bool,
     selector: HashMap<String, String>,
     service_discovery_port: u16,
@@ -492,6 +494,10 @@ impl Router {
             }
         } else if matches!(self.backend, BackendType::Openai) {
             RoutingMode::OpenAI {
+                worker_urls: self.worker_urls.clone(),
+            }
+        } else if matches!(self.backend, BackendType::Anthropic) {
+            RoutingMode::Anthropic {
                 worker_urls: self.worker_urls.clone(),
             }
         } else if self.pd_disaggregation {
@@ -675,6 +681,7 @@ impl Router {
         api_key = None,
         log_dir = None,
         log_level = None,
+        log_json = false,
         service_discovery = false,
         selector = HashMap::new(),
         service_discovery_port = 80,
@@ -761,6 +768,7 @@ impl Router {
         api_key: Option<String>,
         log_dir: Option<String>,
         log_level: Option<String>,
+        log_json: bool,
         service_discovery: bool,
         selector: HashMap<String, String>,
         service_discovery_port: u16,
@@ -860,6 +868,7 @@ impl Router {
             api_key,
             log_dir,
             log_level,
+            log_json,
             service_discovery,
             selector,
             service_discovery_port,
@@ -981,6 +990,7 @@ impl Router {
                 max_payload_size: self.max_payload_size,
                 log_dir: self.log_dir.clone(),
                 log_level: self.log_level.clone(),
+                log_json: self.log_json,
                 service_discovery_config,
                 prometheus_config,
                 request_timeout_secs: self.request_timeout_secs,

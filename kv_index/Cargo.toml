@@ -20,5 +20,8 @@ parking_lot = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 rand = { workspace = true }
+
+[lints]
+workspace = true

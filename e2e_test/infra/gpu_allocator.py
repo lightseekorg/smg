@@ -12,6 +12,12 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+# Port reservation system to prevent TOCTOU race conditions in parallel tests.
+# When multiple threads call get_open_port() simultaneously, the kernel can
+# return the same port to different threads between socket close and actual bind.
+_reserved_ports: set[int] = set()
+_port_lock = threading.Lock()
+
 # Try to import nvidia-ml-py for GPU detection
 try:
     import pynvml
@@ -73,13 +79,59 @@ class GPUSlot:
         return ",".join(str(g) for g in self.gpu_ids)
 
 
-def get_open_port() -> int:
-    """Get an available port by binding to port 0 and reading the assigned port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        s.listen(1)
-        port = s.getsockname()[1]
-    return port
+def get_open_port(max_attempts: int = 10) -> int:
+    """Get an available port with reservation to prevent race conditions.
+
+    Uses a two-phase approach to prevent TOCTOU (time-of-check-time-of-use) races
+    when multiple threads request ports simultaneously:
+    1. Find an available port from the kernel
+    2. Reserve it in our tracking set before releasing the socket
+
+    Args:
+        max_attempts: Maximum attempts to find an unreserved port.
+
+    Returns:
+        An available port number that is reserved until release_port() is called.
+
+    Raises:
+        RuntimeError: If unable to find an available port after max_attempts.
+    """
+    for attempt in range(max_attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("", 0))
+            s.listen(1)
+            port = s.getsockname()[1]
+
+        # Reserve the port before releasing the socket
+        with _port_lock:
+            if port not in _reserved_ports:
+                _reserved_ports.add(port)
+                logger.debug("Reserved port %d (attempt %d)", port, attempt + 1)
+                return port
+
+        # Port was already reserved by another thread, try again
+        logger.debug(
+            "Port %d already reserved, retrying (attempt %d/%d)",
+            port,
+            attempt + 1,
+            max_attempts,
+        )
+
+    raise RuntimeError(f"Failed to find available port after {max_attempts} attempts")
+
+
+def release_port(port: int) -> None:
+    """Release a reserved port back to the available pool.
+
+    Should be called when the process using the port has terminated.
+
+    Args:
+        port: The port number to release.
+    """
+    with _port_lock:
+        _reserved_ports.discard(port)
+        logger.debug("Released port %d", port)
 
 
 def get_physical_device_indices(devices: list[int]) -> list[int]:
@@ -394,10 +446,12 @@ class GPUAllocator:
         with self._lock:
             for gpu_id in gpu_ids:
                 self._used_gpus.discard(gpu_id)
-            # Remove slots that used these GPUs
-            self.slots = [
-                s for s in self.slots if not any(g in gpu_ids for g in s.gpu_ids)
-            ]
+            # Remove slots that used these GPUs and release their ports
+            released_slots = [s for s in self.slots if any(g in gpu_ids for g in s.gpu_ids)]
+            for slot in released_slots:
+                if slot.port is not None:
+                    release_port(slot.port)
+            self.slots = [s for s in self.slots if not any(g in gpu_ids for g in s.gpu_ids)]
             logger.info("Released GPUs %s, now used: %s", gpu_ids, self._used_gpus)
 
     def release_slot(self, slot: GPUSlot) -> None:

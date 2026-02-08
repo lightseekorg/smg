@@ -8,6 +8,8 @@ Tests the gateway's worker management endpoints:
 
 Usage:
     pytest e2e_test/router/test_worker_api.py -v
+
+Note: These tests use HTTP mode which is not supported by vLLM.
 """
 
 from __future__ import annotations
@@ -18,6 +20,9 @@ import pytest
 from infra import ConnectionMode, Gateway, ModelPool
 
 logger = logging.getLogger(__name__)
+
+# Skip all tests in this module for vLLM (HTTP mode not supported)
+pytestmark = pytest.mark.skip_for_runtime("vllm", reason="vLLM does not support HTTP mode")
 
 
 @pytest.mark.e2e
@@ -106,6 +111,7 @@ class TestIGWMode:
             logger.info("Models available: %d", len(models))
         finally:
             gateway.shutdown()
+            http_instance.release()
 
     def test_igw_add_and_remove_worker(self, model_pool: ModelPool):
         """Test adding and removing workers dynamically."""
@@ -132,6 +138,7 @@ class TestIGWMode:
                 logger.warning("Remove worker not supported: %s", msg)
         finally:
             gateway.shutdown()
+            http_instance.release()
 
     def test_igw_multiple_workers(self, model_pool: ModelPool):
         """Test adding multiple workers (HTTP + gRPC) to IGW gateway."""
@@ -157,15 +164,15 @@ class TestIGWMode:
                 logger.info("Worker: id=%s, url=%s", w.id, w.url)
         finally:
             gateway.shutdown()
+            http_instance.release()
+            grpc_instance.release()
 
 
 @pytest.mark.e2e
 class TestDisableHealthCheck:
     """Tests for --disable-health-check CLI option."""
 
-    def test_disable_health_check_workers_immediately_healthy(
-        self, model_pool: ModelPool
-    ):
+    def test_disable_health_check_workers_immediately_healthy(self, model_pool: ModelPool):
         """Test that workers are immediately healthy when health checks are disabled."""
         http_instance = model_pool.get("llama-8b", ConnectionMode.HTTP)
 
@@ -197,11 +204,12 @@ class TestDisableHealthCheck:
                     worker.metadata.get("disable_health_check"),
                 )
                 # Worker should be healthy immediately
-                assert (
-                    worker.status == "healthy"
-                ), "Worker should be healthy when health checks disabled"
+                assert worker.status == "healthy", (
+                    "Worker should be healthy when health checks disabled"
+                )
         finally:
             gateway.shutdown()
+            http_instance.release()
 
     def test_disable_health_check_gateway_starts_without_health_checker(
         self, model_pool: ModelPool

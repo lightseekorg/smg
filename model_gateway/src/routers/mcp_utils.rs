@@ -12,15 +12,6 @@ use crate::{
 /// Default maximum tool loop iterations (safety limit).
 pub const DEFAULT_MAX_ITERATIONS: usize = 10;
 
-/// Configuration for MCP tool calling loops.
-#[derive(Debug, Clone)]
-pub struct McpLoopConfig {
-    /// Maximum iterations (default: DEFAULT_MAX_ITERATIONS).
-    pub max_iterations: usize,
-    /// MCP servers for this request (label, server_key).
-    pub mcp_servers: Vec<(String, String)>,
-}
-
 /// Routing information for a built-in tool type.
 ///
 /// When a built-in tool type (web_search_preview, code_interpreter, file_search)
@@ -35,58 +26,6 @@ pub struct BuiltinToolRouting {
     pub tool_name: String,
     /// The response format for transforming the output.
     pub response_format: ResponseFormat,
-}
-
-impl Default for McpLoopConfig {
-    fn default() -> Self {
-        Self {
-            max_iterations: DEFAULT_MAX_ITERATIONS,
-            mcp_servers: Vec::new(),
-        }
-    }
-}
-
-/// Extract MCP server label from request tools, falling back to default.
-pub fn extract_server_label(tools: Option<&[ResponseTool]>, default_label: &str) -> String {
-    tools
-        .and_then(|tools| {
-            tools.iter().find_map(|tool| {
-                if matches!(tool.r#type, ResponseToolType::Mcp) {
-                    tool.server_label.clone()
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or_else(|| default_label.to_string())
-}
-
-/// Resolve the MCP server label for a tool name.
-///
-/// Uses orchestrator inventory to find the tool's server key, then maps it to the
-/// request's MCP server label. Falls back to the first MCP server label (or "mcp").
-pub fn resolve_tool_server_label(
-    orchestrator: Option<&McpOrchestrator>,
-    tool_name: &str,
-    mcp_servers: &[(String, String)],
-    server_keys: &[String],
-) -> String {
-    let fallback_label = mcp_servers
-        .first()
-        .map(|(label, _)| label.as_str())
-        .unwrap_or("mcp");
-    let Some(orchestrator) = orchestrator else {
-        return fallback_label.to_string();
-    };
-    let Some(entry) = orchestrator.find_tool_by_name(tool_name, server_keys) else {
-        return fallback_label.to_string();
-    };
-    let server_key = entry.qualified_name.server_key();
-    mcp_servers
-        .iter()
-        .find(|(_, key)| key == server_key)
-        .map(|(label, _)| label.clone())
-        .unwrap_or_else(|| fallback_label.to_string())
 }
 
 /// Collect routing information for built-in tools in a request.
@@ -158,12 +97,12 @@ pub fn collect_builtin_routing(
 ///
 /// Headers for MCP servers come from the tool payload (`tool.headers`), not HTTP request headers.
 ///
-/// Returns `Some((orchestrator, mcp_servers))` if MCP tools or built-in routing is available,
+/// Returns `Some(mcp_servers)` if MCP tools or built-in routing is available,
 /// `None` otherwise.
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
-) -> Option<(Arc<McpOrchestrator>, Vec<(String, String)>)> {
+) -> Option<Vec<(String, String)>> {
     let mut mcp_servers = Vec::new();
 
     // 1. Process explicit MCP tools (dynamic via `server_url`, or static via `server_label`)
@@ -260,43 +199,19 @@ pub async fn ensure_request_mcp_client(
     if mcp_servers.is_empty() {
         None
     } else {
-        Some((mcp_orchestrator.clone(), mcp_servers))
+        Some(mcp_servers)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{borrow::Cow, collections::HashMap, sync::Arc};
-
-    use serde_json::{Map, Value};
+    use std::{collections::HashMap, sync::Arc};
 
     use super::*;
     use crate::{
-        mcp::{McpConfig, ResponseFormatConfig, Tool, ToolConfig, ToolEntry},
+        mcp::{McpConfig, ResponseFormatConfig, ToolConfig},
         protocols::responses::ResponseTool,
     };
-
-    fn create_test_tool(name: &str) -> Tool {
-        let schema_obj = serde_json::json!({
-            "type": "object",
-            "properties": {}
-        });
-        let schema_map = if let Value::Object(m) = schema_obj {
-            m
-        } else {
-            Map::new()
-        };
-
-        Tool {
-            name: Cow::Owned(name.to_string()),
-            title: None,
-            description: Some(Cow::Owned(format!("Test tool: {}", name))),
-            input_schema: Arc::new(schema_map),
-            output_schema: None,
-            annotations: None,
-            icons: None,
-        }
-    }
 
     /// Create a test orchestrator with a built-in server configuration
     async fn create_test_orchestrator_with_builtin() -> Arc<McpOrchestrator> {
@@ -348,94 +263,6 @@ mod tests {
         };
 
         Arc::new(McpOrchestrator::new(config).await.unwrap())
-    }
-
-    #[test]
-    fn test_extract_server_label_with_mcp_tool() {
-        let tools = vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
-            server_label: Some("my-server".to_string()),
-            ..Default::default()
-        }];
-
-        let label = extract_server_label(Some(&tools), "default");
-        assert_eq!(label, "my-server");
-    }
-
-    #[test]
-    fn test_extract_server_label_no_mcp_tools() {
-        let tools = vec![ResponseTool {
-            r#type: ResponseToolType::WebSearchPreview,
-            ..Default::default()
-        }];
-
-        let label = extract_server_label(Some(&tools), "default");
-        assert_eq!(label, "default");
-    }
-
-    #[test]
-    fn test_extract_server_label_none_tools() {
-        let label = extract_server_label(None, "default");
-        assert_eq!(label, "default");
-    }
-
-    #[test]
-    fn test_resolve_tool_server_label_no_orchestrator_uses_first() {
-        let mcp_servers = vec![
-            ("brave".to_string(), "http://localhost:8001/sse".to_string()),
-            (
-                "deepwiki".to_string(),
-                "https://mcp.deepwiki.com/mcp".to_string(),
-            ),
-        ];
-        let server_keys: Vec<String> = mcp_servers.iter().map(|(_, key)| key.clone()).collect();
-
-        let label = resolve_tool_server_label(None, "search", &mcp_servers, &server_keys);
-        assert_eq!(label, "brave");
-    }
-
-    #[test]
-    fn test_resolve_tool_server_label_empty_servers_falls_back_mcp() {
-        let mcp_servers: Vec<(String, String)> = Vec::new();
-        let server_keys: Vec<String> = Vec::new();
-
-        let label = resolve_tool_server_label(None, "search", &mcp_servers, &server_keys);
-        assert_eq!(label, "mcp");
-    }
-
-    #[tokio::test]
-    async fn test_resolve_tool_server_label_missing_tool_fallbacks() {
-        let orchestrator = create_test_orchestrator_no_builtin().await;
-        let mcp_servers = vec![("brave".to_string(), "http://localhost:8001/sse".to_string())];
-        let server_keys: Vec<String> = mcp_servers.iter().map(|(_, key)| key.clone()).collect();
-
-        let label = resolve_tool_server_label(
-            Some(orchestrator.as_ref()),
-            "missing_tool",
-            &mcp_servers,
-            &server_keys,
-        );
-        assert_eq!(label, "brave");
-    }
-
-    #[tokio::test]
-    async fn test_resolve_tool_server_label_happy_path() {
-        let orchestrator = create_test_orchestrator_no_builtin().await;
-        let server_key = "http://localhost:8001/sse".to_string();
-
-        let tool = create_test_tool("search");
-        let entry = ToolEntry::from_server_tool(&server_key, tool);
-        orchestrator.tool_inventory().insert_entry(entry);
-
-        let mcp_servers = vec![("brave".to_string(), server_key)];
-        let server_keys: Vec<String> = mcp_servers.iter().map(|(_, key)| key.clone()).collect();
-        let label = resolve_tool_server_label(
-            Some(orchestrator.as_ref()),
-            "search",
-            &mcp_servers,
-            &server_keys,
-        );
-        assert_eq!(label, "brave");
     }
 
     #[tokio::test]
@@ -628,7 +455,7 @@ mod tests {
         // Should return Some because built-in routing is configured
         assert!(result.is_some());
 
-        let (_, mcp_servers) = result.unwrap();
+        let mcp_servers = result.unwrap();
         assert_eq!(mcp_servers.len(), 1);
 
         // The server key should be the static server name
@@ -692,7 +519,7 @@ mod tests {
         // Should return Some because web_search_preview has built-in routing
         assert!(result.is_some());
 
-        let (_, mcp_servers) = result.unwrap();
+        let mcp_servers = result.unwrap();
         assert_eq!(mcp_servers.len(), 1);
         assert_eq!(mcp_servers[0].0, "search-server");
     }

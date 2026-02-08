@@ -7,61 +7,64 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import TYPE_CHECKING
 
+import anthropic
+import openai
 import pytest
 
 if TYPE_CHECKING:
     from infra import ModelPool
 
-from infra import get_runtime, is_vllm
+from infra import (
+    DEFAULT_MODEL,
+    DEFAULT_ROUTER_TIMEOUT,
+    ENV_MODEL,
+    ENV_SKIP_BACKEND_SETUP,
+    LOCAL_MODES,
+    RUNTIME_LABELS,
+    THIRD_PARTY_MODELS,
+    ConnectionMode,
+    Gateway,
+    WorkerIdentity,
+    WorkerType,
+    get_runtime,
+    is_trtllm,
+    is_vllm,
+    launch_cloud_gateway,
+)
 
 from .markers import get_marker_kwargs, get_marker_value
 
 logger = logging.getLogger(__name__)
 
 
-@pytest.fixture(scope="class")
-def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
-    """Class-scoped fixture that launches a router for each test class.
+class _CachedBackend:
+    """A cached backend that can be reused across tests on the same thread."""
 
-    Routers are cheap to start (~1-2s) compared to workers (~30-60s), so we
-    launch a fresh router per test class for isolation while reusing the
-    expensive workers from model_pool.
+    __slots__ = ("gen", "value", "cls", "param")
 
-    Backend types:
-    - "http", "grpc": Gets existing worker from model_pool, launches router
-    - "pd": Launches prefill/decode workers via model_pool, launches PD router
-    - "openai", "xai", etc.: Launches cloud router (no local workers)
+    def __init__(self, gen, value, cls, param):
+        self.gen = gen  # Generator from _setup_*; close() triggers finally block
+        self.value = value  # Yielded (backend_name, model_path, client, gateway)
+        self.cls = cls  # Test class this was created for
+        self.param = param  # Fixture parameter (backend type)
 
-    Configuration via markers:
-    - @pytest.mark.model("model-id"): Override default model
-    - @pytest.mark.workers(count=1): Number of regular workers behind router
-    - @pytest.mark.workers(prefill=1, decode=1): PD worker configuration
-    - @pytest.mark.gateway(policy="round_robin", timeout=60): Gateway configuration
 
-    Returns:
-        Tuple of (backend_name, model_path, openai_client, gateway)
+# Per-thread cache: maps thread_id -> _CachedBackend
+# Allows function-scoped fixture to reuse backends within the same class,
+# while correctly tearing down when the test class changes on a thread.
+_thread_cache: dict[int, _CachedBackend] = {}
+_cache_lock = threading.Lock()
 
-    Usage:
-        @pytest.mark.parametrize("setup_backend", ["http"], indirect=True)
-        class TestBasic:
-            def test_chat(self, setup_backend):
-                backend, model, client, gateway = setup_backend
+
+def _create_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
+    """Extract configuration from request and return the appropriate backend generator.
+
+    Returns a generator that yields (backend_name, model_path, client, gateway).
+    The caller should use next(gen) to get the value and gen.close() to trigger cleanup.
     """
-    import openai
-    from infra import (
-        DEFAULT_MODEL,
-        DEFAULT_ROUTER_TIMEOUT,
-        ENV_MODEL,
-        ENV_SKIP_BACKEND_SETUP,
-        LOCAL_MODES,
-        ConnectionMode,
-        Gateway,
-        WorkerIdentity,
-        WorkerType,
-    )
-
     backend_name = request.param
 
     # Skip if requested
@@ -89,12 +92,12 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         },
     )
 
-    # PD disaggregation backend
-    if backend_name == "pd":
-        yield from _setup_pd_backend(
-            request, model_pool, model_id, workers_config, gateway_config
-        )
-        return
+    # PD disaggregation backends - explicit connection modes
+    if backend_name == "pd_http":
+        return _setup_pd_http_backend(request, model_pool, model_id, workers_config, gateway_config)
+
+    if backend_name == "pd_grpc":
+        return _setup_pd_grpc_backend(request, model_pool, model_id, workers_config, gateway_config)
 
     # Check if this is a local backend (grpc, http)
     try:
@@ -109,21 +112,21 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         # For gRPC mode, check E2E_RUNTIME environment variable
         if connection_mode == ConnectionMode.GRPC:
             runtime = get_runtime()
+            runtime_label = RUNTIME_LABELS.get(runtime, "SGLang")
             logger.info(
                 "gRPC backend detected: E2E_RUNTIME=%s, routing to %s backend",
                 runtime,
-                "vLLM" if is_vllm() else "SGLang",
+                runtime_label,
             )
 
-            # Route to vLLM gRPC if runtime is vllm
-            if is_vllm():
-                yield from _setup_vllm_grpc_backend(
+            # Route to runtime-specific gRPC backend (vLLM, TRT-LLM)
+            if is_vllm() or is_trtllm():
+                return _setup_grpc_backend(
                     request, model_pool, model_id, workers_config, gateway_config
                 )
-                return
 
         # Otherwise use regular local backend (sglang grpc or http)
-        yield from _setup_local_backend(
+        return _setup_local_backend(
             request,
             model_pool,
             backend_name,
@@ -132,129 +135,309 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
             workers_config,
             gateway_config,
         )
-        return
 
     # Get storage backend from marker (default: memory)
     storage_backend = get_marker_value(request, "storage", default="memory")
 
     # Cloud backends: launch cloud router
-    yield from _setup_cloud_backend(backend_name, storage_backend, gateway_config)
+    return _setup_cloud_backend(backend_name, storage_backend, gateway_config)
 
 
-def _setup_pd_backend(
+@pytest.fixture(scope="function")
+def setup_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
+    """Function-scoped fixture with per-thread caching for class-level reuse.
+
+    Under pytest-parallel's thread model (--tests-per-worker N), class-scoped
+    fixtures leak across class boundaries on the same thread. This fixture uses
+    function scope for correctness but manually caches backends per thread,
+    only tearing down and recreating when the test class or backend param changes.
+
+    Same performance as class-scoped: gateway startup (~1-2s) only happens on
+    class transitions, not for every test function.
+
+    Backend types:
+    - "http", "grpc": Gets existing worker from model_pool, launches router
+    - "pd_http", "pd_grpc": Launches prefill/decode workers via model_pool, launches PD router
+    - "openai", "xai", etc.: Launches cloud router (no local workers)
+
+    Configuration via markers:
+    - @pytest.mark.model("model-id"): Override default model
+    - @pytest.mark.workers(count=1): Number of regular workers behind router
+    - @pytest.mark.workers(prefill=1, decode=1): PD worker configuration
+    - @pytest.mark.gateway(policy="round_robin", timeout=60): Gateway configuration
+
+    Returns:
+        Tuple of (backend_name, model_path, openai_client, gateway)
+
+    Usage:
+        @pytest.mark.parametrize("setup_backend", ["http"], indirect=True)
+        class TestBasic:
+            def test_chat(self, setup_backend):
+                backend, model, client, gateway = setup_backend
+    """
+    thread_id = threading.get_ident()
+    cls = request.cls
+    param = request.param
+
+    # Check thread-local cache
+    reuse_value = None
+    old_entry = None
+    with _cache_lock:
+        cached = _thread_cache.get(thread_id)
+        if cached is not None:
+            if cached.cls is cls and cached.param == param:
+                reuse_value = cached.value
+            else:
+                old_entry = _thread_cache.pop(thread_id)
+
+    if reuse_value is not None:
+        logger.info(
+            "Thread %s: reusing cached backend (class=%s, param=%s)",
+            threading.current_thread().name,
+            cls.__name__ if cls else "N/A",
+            param,
+        )
+        yield reuse_value
+        return
+
+    # Teardown old backend if class/param changed on this thread
+    if old_entry is not None:
+        logger.info(
+            "Thread %s: class changed %s -> %s, tearing down old backend",
+            threading.current_thread().name,
+            old_entry.cls.__name__ if old_entry.cls else "N/A",
+            cls.__name__ if cls else "N/A",
+        )
+        old_entry.gen.close()
+
+    # Create new backend via the appropriate _setup_* generator
+    gen = _create_backend(request, model_pool)
+    value = next(gen)
+
+    try:
+        with _cache_lock:
+            _thread_cache[thread_id] = _CachedBackend(gen=gen, value=value, cls=cls, param=param)
+    except Exception:
+        gen.close()
+        raise
+
+    logger.info(
+        "Thread %s: created new backend (class=%s, param=%s)",
+        threading.current_thread().name,
+        cls.__name__ if cls else "N/A",
+        param,
+    )
+
+    yield value
+
+
+def cleanup_all_cached_backends() -> None:
+    """Cleanup all thread-cached backends.
+
+    Called from pytest_sessionfinish hook to ensure it runs exactly once,
+    not per-test (which is what happens with session-scoped autouse fixtures
+    under pytest-parallel's thread model).
+    """
+    with _cache_lock:
+        entries = list(_thread_cache.values())
+        _thread_cache.clear()
+    for entry in entries:
+        try:
+            logger.info(
+                "Session cleanup: tearing down cached backend (class=%s, param=%s)",
+                entry.cls.__name__ if entry.cls else "N/A",
+                entry.param,
+            )
+            entry.gen.close()
+        except Exception as e:
+            logger.warning("Failed to cleanup cached backend: %s", e)
+
+
+def _setup_pd_http_backend(
     request: pytest.FixtureRequest,
-    model_pool: "ModelPool",
+    model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
     gateway_config: dict,
 ):
-    """Setup PD disaggregation backend."""
-    import openai
-    from infra import ConnectionMode, Gateway, WorkerIdentity, WorkerType
+    """Setup SGLang PD disaggregation backend (HTTP mode with bootstrap)."""
+    yield from _setup_pd_backend_common(
+        model_pool=model_pool,
+        model_id=model_id,
+        workers_config=workers_config,
+        gateway_config=gateway_config,
+        connection_mode=ConnectionMode.HTTP,
+        backend_name="pd_http",
+    )
 
-    logger.info("Setting up PD backend for model %s", model_id)
 
-    # Get PD configuration from workers marker
+def _setup_pd_grpc_backend(
+    request: pytest.FixtureRequest,
+    model_pool: ModelPool,
+    model_id: str,
+    workers_config: dict,
+    gateway_config: dict,
+):
+    """Setup PD disaggregation backend with gRPC mode."""
+    yield from _setup_pd_backend_common(
+        model_pool=model_pool,
+        model_id=model_id,
+        workers_config=workers_config,
+        gateway_config=gateway_config,
+        connection_mode=ConnectionMode.GRPC,
+        backend_name="pd_grpc",
+    )
+
+
+def _setup_pd_backend_common(
+    model_pool: ModelPool,
+    model_id: str,
+    workers_config: dict,
+    gateway_config: dict,
+    connection_mode,
+    backend_name: str,
+):
+    """Common setup for PD disaggregation backends.
+
+    Args:
+        model_pool: The model pool instance.
+        model_id: Model identifier.
+        workers_config: Worker configuration from markers.
+        gateway_config: Gateway configuration from markers.
+        connection_mode: ConnectionMode.HTTP for SGLang, ConnectionMode.GRPC for vLLM.
+        backend_name: Backend name to yield ("pd_http" or "pd_grpc").
+    """
+    runtime = get_runtime()
+    runtime_label = RUNTIME_LABELS.get(runtime, "SGLang")
+    logger.info("Setting up %s PD backend for model %s", runtime_label, model_id)
+
     num_prefill = workers_config.get("prefill") or 1
     num_decode = workers_config.get("decode") or 1
-    logger.info("PD config: %d prefill, %d decode workers", num_prefill, num_decode)
+    logger.info(
+        "%s PD config: %d prefill, %d decode workers",
+        runtime_label,
+        num_prefill,
+        num_decode,
+    )
 
-    # Try to use pre-launched PD workers, or launch additional ones if needed
     # get_workers_by_type auto-acquires all returned workers
-    existing_prefills = model_pool.get_workers_by_type(model_id, WorkerType.PREFILL)
-    existing_decodes = model_pool.get_workers_by_type(model_id, WorkerType.DECODE)
+    # Filter by connection_mode to ensure we use the right worker type (HTTP vs gRPC)
+    all_prefills = model_pool.get_workers_by_type(model_id, WorkerType.PREFILL)
+    all_decodes = model_pool.get_workers_by_type(model_id, WorkerType.DECODE)
 
-    # Calculate how many more we need
+    # Filter by connection mode and release workers we won't use
+    existing_prefills = [w for w in all_prefills if w.mode == connection_mode]
+    existing_decodes = [w for w in all_decodes if w.mode == connection_mode]
+
+    # Release workers that don't match the requested connection mode
+    for w in all_prefills:
+        if w not in existing_prefills:
+            w.release()
+    for w in all_decodes:
+        if w not in existing_decodes:
+            w.release()
+
     missing_prefill = max(0, num_prefill - len(existing_prefills))
     missing_decode = max(0, num_decode - len(existing_decodes))
 
-    if missing_prefill == 0 and missing_decode == 0:
-        prefills = existing_prefills[:num_prefill]
-        decodes = existing_decodes[:num_decode]
-        # Release excess workers we won't use
-        for w in existing_prefills[num_prefill:]:
-            w.release()
-        for w in existing_decodes[num_decode:]:
-            w.release()
-        logger.info(
-            "Using pre-launched PD workers: %d prefill, %d decode",
-            len(prefills),
-            len(decodes),
-        )
-    else:
-        # Build WorkerIdentity list for missing workers
-        workers_to_launch: list[WorkerIdentity] = []
-        for i in range(missing_prefill):
-            workers_to_launch.append(
-                WorkerIdentity(
-                    model_id,
-                    ConnectionMode.HTTP,
-                    WorkerType.PREFILL,
-                    len(existing_prefills) + i,
-                )
-            )
-        for i in range(missing_decode):
-            workers_to_launch.append(
-                WorkerIdentity(
-                    model_id,
-                    ConnectionMode.HTTP,
-                    WorkerType.DECODE,
-                    len(existing_decodes) + i,
-                )
-            )
+    # Track all acquired workers for cleanup on failure
+    acquired_workers: list = []
 
-        logger.info(
-            "Have %d/%d prefill, %d/%d decode. Launching %d more workers",
-            len(existing_prefills),
-            num_prefill,
-            len(existing_decodes),
-            num_decode,
-            len(workers_to_launch),
-        )
-        new_instances = model_pool.launch_workers(
-            workers_to_launch, startup_timeout=300
-        )
-
-        if not new_instances:
-            # Release any existing workers we acquired
-            for w in existing_prefills + existing_decodes:
+    try:
+        if missing_prefill == 0 and missing_decode == 0:
+            prefills = existing_prefills[:num_prefill]
+            decodes = existing_decodes[:num_decode]
+            acquired_workers = prefills + decodes
+            for w in existing_prefills[num_prefill:]:
                 w.release()
-            pytest.fail(
-                f"Failed to launch PD workers: needed {len(workers_to_launch)} workers "
-                f"but could not allocate GPUs (all in use or timeout)"
+            for w in existing_decodes[num_decode:]:
+                w.release()
+            logger.info(
+                "Using pre-launched %s PD workers: %d prefill, %d decode",
+                runtime_label,
+                len(prefills),
+                len(decodes),
             )
+        else:
+            acquired_workers = existing_prefills + existing_decodes
+            workers_to_launch: list[WorkerIdentity] = []
+            for i in range(missing_prefill):
+                workers_to_launch.append(
+                    WorkerIdentity(
+                        model_id,
+                        connection_mode,
+                        WorkerType.PREFILL,
+                        len(existing_prefills) + i,
+                    )
+                )
+            for i in range(missing_decode):
+                workers_to_launch.append(
+                    WorkerIdentity(
+                        model_id,
+                        connection_mode,
+                        WorkerType.DECODE,
+                        len(existing_decodes) + i,
+                    )
+                )
 
-        # Acquire newly launched instances (launch_workers doesn't auto-acquire)
-        for inst in new_instances:
-            inst.acquire()
+            logger.info(
+                "Have %d/%d prefill, %d/%d decode. Launching %d more workers",
+                len(existing_prefills),
+                num_prefill,
+                len(existing_decodes),
+                num_decode,
+                len(workers_to_launch),
+            )
+            new_instances = model_pool.launch_workers(workers_to_launch, startup_timeout=300)
 
-        new_prefills = [w for w in new_instances if w.worker_type == WorkerType.PREFILL]
-        new_decodes = [w for w in new_instances if w.worker_type == WorkerType.DECODE]
-        prefills = existing_prefills + new_prefills
-        decodes = existing_decodes + new_decodes
+            if not new_instances:
+                pytest.fail(
+                    f"Failed to launch {runtime_label} PD workers: needed "
+                    f"{len(workers_to_launch)} workers but could not allocate GPUs"
+                )
 
-    # All workers in prefills and decodes are now acquired
+            for inst in new_instances:
+                inst.acquire()
+                acquired_workers.append(inst)
 
-    if not prefills or not decodes:
-        # This shouldn't happen but guard against it
-        for w in prefills + decodes:
-            w.release()
-        pytest.fail(
-            f"PD setup incomplete: have {len(prefills)} prefill, {len(decodes)} decode "
-            f"(need {num_prefill} prefill, {num_decode} decode)"
-        )
+            new_prefills = [w for w in new_instances if w.worker_type == WorkerType.PREFILL]
+            new_decodes = [w for w in new_instances if w.worker_type == WorkerType.DECODE]
+            prefills = existing_prefills + new_prefills
+            decodes = existing_decodes + new_decodes
+
+        if not prefills or not decodes:
+            pytest.fail(
+                f"{runtime_label} PD setup incomplete: have {len(prefills)} prefill, "
+                f"{len(decodes)} decode (need {num_prefill} prefill, {num_decode} decode)"
+            )
+    except Exception:
+        # Release all acquired workers on any failure
+        for w in acquired_workers:
+            try:
+                w.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        raise
 
     model_path = prefills[0].model_path
 
-    # Launch PD gateway
     gateway = Gateway()
-    gateway.start(
-        prefill_workers=prefills,
-        decode_workers=decodes,
-        policy=gateway_config["policy"],
-        timeout=gateway_config["timeout"],
-        extra_args=gateway_config["extra_args"],
-    )
+    try:
+        gateway.start(
+            prefill_workers=prefills,
+            decode_workers=decodes,
+            policy=gateway_config["policy"],
+            timeout=gateway_config["timeout"],
+            extra_args=gateway_config["extra_args"],
+        )
+    except Exception:
+        # Release workers if gateway fails to start
+        for w in acquired_workers:
+            try:
+                w.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        raise
 
     client = openai.OpenAI(
         base_url=f"{gateway.base_url}/v1",
@@ -262,8 +445,8 @@ def _setup_pd_backend(
     )
 
     logger.info(
-        "Setup PD backend: model=%s, %d prefill + %d decode workers, "
-        "gateway=%s, policy=%s",
+        "Setup %s PD backend: model=%s, %d prefill + %d decode workers, gateway=%s, policy=%s",
+        runtime_label,
         model_id,
         len(prefills),
         len(decodes),
@@ -272,47 +455,57 @@ def _setup_pd_backend(
     )
 
     try:
-        yield "pd", model_path, client, gateway
+        yield backend_name, model_path, client, gateway
     finally:
-        logger.info("Tearing down PD gateway")
+        logger.info("Tearing down %s PD gateway", runtime_label)
         gateway.shutdown()
-        # Release references to allow eviction
-        for worker in prefills + decodes:
-            worker.release()
+        for worker in acquired_workers:
+            try:
+                worker.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
 
 
-def _setup_vllm_grpc_backend(
+def _setup_grpc_backend(
     request: pytest.FixtureRequest,
-    model_pool: "ModelPool",
+    model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
     gateway_config: dict,
 ):
-    """Setup vLLM gRPC backend."""
-    import openai
-    from infra import Gateway
+    """Setup a runtime-specific gRPC backend (vLLM or TensorRT-LLM)."""
+    runtime = get_runtime()
+    runtime_label = RUNTIME_LABELS.get(runtime, runtime)
 
-    logger.info("Setting up vLLM gRPC backend for model %s", model_id)
+    logger.info("Setting up %s gRPC backend for model %s", runtime_label, model_id)
 
-    # vLLM currently only supports single worker per test
-    # get_vllm_grpc_worker() auto-acquires the returned instance
+    instance = None
     try:
-        instance = model_pool.get_vllm_grpc_worker(model_id)
+        instance = model_pool.get_grpc_worker(model_id)
     except RuntimeError as e:
         pytest.fail(str(e))
+    assert instance is not None
 
     model_path = instance.model_path
     worker_urls = [instance.worker_url]
 
-    # Launch gateway
     gateway = Gateway()
-    gateway.start(
-        worker_urls=worker_urls,
-        model_path=model_path,
-        policy=gateway_config["policy"],
-        timeout=gateway_config["timeout"],
-        extra_args=gateway_config["extra_args"],
-    )
+    try:
+        gateway.start(
+            worker_urls=worker_urls,
+            model_path=model_path,
+            policy=gateway_config["policy"],
+            timeout=gateway_config["timeout"],
+            extra_args=gateway_config["extra_args"],
+        )
+    except Exception:
+        # Release worker if gateway fails to start
+        if instance is not None:
+            try:
+                instance.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        raise
 
     client = openai.OpenAI(
         base_url=f"{gateway.base_url}/v1",
@@ -320,7 +513,8 @@ def _setup_vllm_grpc_backend(
     )
 
     logger.info(
-        "Setup vLLM gRPC backend: model=%s, worker=%s, gateway=%s, policy=%s",
+        "Setup %s gRPC backend: model=%s, worker=%s, gateway=%s, policy=%s",
+        runtime_label,
         model_id,
         instance.worker_url,
         gateway.base_url,
@@ -330,15 +524,18 @@ def _setup_vllm_grpc_backend(
     try:
         yield "grpc", model_path, client, gateway
     finally:
-        logger.info("Tearing down vLLM gRPC gateway")
+        logger.info("Tearing down %s gRPC gateway", runtime_label)
         gateway.shutdown()
-        # Release reference to allow eviction
-        instance.release()
+        if instance is not None:
+            try:
+                instance.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
 
 
 def _setup_local_backend(
     request: pytest.FixtureRequest,
-    model_pool: "ModelPool",
+    model_pool: ModelPool,
     backend_name: str,
     model_id: str,
     connection_mode,
@@ -346,9 +543,6 @@ def _setup_local_backend(
     gateway_config: dict,
 ):
     """Setup local backend (grpc, http)."""
-    import openai
-    from infra import Gateway, WorkerIdentity, WorkerType
-
     num_workers = workers_config.get("count") or 1
     instances: list = []  # Track instances for reference counting
 
@@ -379,9 +573,7 @@ def _setup_local_backend(
                     )
                     for i in range(missing)
                 ]
-                new_instances = model_pool.launch_workers(
-                    workers_to_launch, startup_timeout=300
-                )
+                new_instances = model_pool.launch_workers(workers_to_launch, startup_timeout=300)
                 # Acquire newly launched instances
                 for inst in new_instances:
                     inst.acquire()
@@ -397,18 +589,35 @@ def _setup_local_backend(
             instances = [instance]
             worker_urls = [instance.worker_url]
             model_path = instance.model_path
-    except RuntimeError as e:
-        pytest.fail(str(e))
+    except Exception as e:
+        # Release any acquired instances on failure
+        for inst in instances:
+            try:
+                inst.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        if isinstance(e, RuntimeError):
+            pytest.fail(str(e))
+        raise
 
     # Launch gateway
     gateway = Gateway()
-    gateway.start(
-        worker_urls=worker_urls,
-        model_path=model_path,
-        policy=gateway_config["policy"],
-        timeout=gateway_config["timeout"],
-        extra_args=gateway_config["extra_args"],
-    )
+    try:
+        gateway.start(
+            worker_urls=worker_urls,
+            model_path=model_path,
+            policy=gateway_config["policy"],
+            timeout=gateway_config["timeout"],
+            extra_args=gateway_config["extra_args"],
+        )
+    except Exception:
+        # Release workers if gateway fails to start
+        for inst in instances:
+            try:
+                inst.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        raise
 
     client = openai.OpenAI(
         base_url=f"{gateway.base_url}/v1",
@@ -431,7 +640,10 @@ def _setup_local_backend(
         gateway.shutdown()
         # Release references to allow eviction
         for inst in instances:
-            inst.release()
+            try:
+                inst.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
 
 
 def _setup_cloud_backend(
@@ -439,16 +651,13 @@ def _setup_cloud_backend(
     storage_backend: str = "memory",
     gateway_config: dict | None = None,
 ):
-    """Setup cloud backend (openai, xai, etc.).
+    """Setup cloud backend (openai, xai, anthropic, etc.).
 
     Args:
-        backend_name: Cloud backend name (openai, xai).
+        backend_name: Cloud backend name (openai, xai, anthropic).
         storage_backend: History storage backend (memory, oracle).
         gateway_config: Gateway configuration from marker.
     """
-    import openai
-    from infra import THIRD_PARTY_MODELS, launch_cloud_gateway
-
     if backend_name not in THIRD_PARTY_MODELS:
         pytest.fail(f"Unknown cloud runtime: {backend_name}")
 
@@ -456,13 +665,11 @@ def _setup_cloud_backend(
     api_key_env = cfg.get("api_key_env")
 
     if api_key_env and not os.environ.get(api_key_env):
-        pytest.skip(f"{api_key_env} not set, skipping {backend_name} tests")
+        pytest.fail(f"{api_key_env} not set for {backend_name} tests")
 
     extra_args = gateway_config.get("extra_args") if gateway_config else None
 
-    logger.info(
-        "Launching cloud backend: %s with storage=%s", backend_name, storage_backend
-    )
+    logger.info("Launching cloud backend: %s with storage=%s", backend_name, storage_backend)
     gateway = launch_cloud_gateway(
         backend_name,
         history_backend=storage_backend,
@@ -470,10 +677,17 @@ def _setup_cloud_backend(
     )
 
     api_key = os.environ.get(api_key_env) if api_key_env else "not-used"
-    client = openai.OpenAI(
-        base_url=f"{gateway.base_url}/v1",
-        api_key=api_key,
-    )
+
+    if cfg.get("client_type") == "anthropic":
+        client = anthropic.Anthropic(
+            base_url=gateway.base_url,
+            api_key=api_key,
+        )
+    else:
+        client = openai.OpenAI(
+            base_url=f"{gateway.base_url}/v1",
+            api_key=api_key,
+        )
 
     try:
         yield backend_name, cfg["model"], client, gateway
@@ -483,7 +697,7 @@ def _setup_cloud_backend(
 
 
 @pytest.fixture
-def backend_router(request: pytest.FixtureRequest, model_pool: "ModelPool"):
+def backend_router(request: pytest.FixtureRequest, model_pool: ModelPool):
     """Function-scoped fixture for launching a fresh router per test.
 
     This launches a new Gateway for each test, pointing to workers from the pool.
@@ -494,13 +708,12 @@ def backend_router(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         def test_router_state(backend_router):
             gateway = backend_router
     """
-    from infra import DEFAULT_MODEL, ENV_MODEL, ConnectionMode, Gateway
-
     backend_name = request.param
     model_id = os.environ.get(ENV_MODEL, DEFAULT_MODEL)
 
     connection_mode = ConnectionMode(backend_name)
 
+    instance = None
     try:
         # get() auto-acquires the returned instance
         instance = model_pool.get(model_id, connection_mode)
@@ -508,16 +721,30 @@ def backend_router(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         pytest.skip(f"Model {model_id}:{backend_name} not available in pool")
     except RuntimeError as e:
         pytest.fail(str(e))
+    assert instance is not None
 
     gateway = Gateway()
-    gateway.start(
-        worker_urls=[instance.worker_url],
-        model_path=instance.model_path,
-    )
+    try:
+        gateway.start(
+            worker_urls=[instance.worker_url],
+            model_path=instance.model_path,
+        )
+    except Exception:
+        # Release worker if gateway fails to start
+        if instance is not None:
+            try:
+                instance.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        raise
 
     try:
         yield gateway
     finally:
         gateway.shutdown()
         # Release reference to allow eviction
-        instance.release()
+        if instance is not None:
+            try:
+                instance.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)

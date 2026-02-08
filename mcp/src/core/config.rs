@@ -121,7 +121,7 @@ impl<'de> Deserialize<'de> for PolicyDecisionConfig {
         impl<'de> Visitor<'de> for PolicyDecisionVisitor {
             type Value = PolicyDecisionConfig;
 
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
                 f.write_str("\"allow\", \"deny\", or {\"deny_with_reason\": \"...\"}")
             }
 
@@ -252,8 +252,8 @@ pub enum ConfigValidationError {
     },
 }
 
-impl std::fmt::Display for ConfigValidationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ConfigValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConfigValidationError::MissingBuiltinToolName { server } => {
                 write!(
@@ -623,6 +623,8 @@ impl McpConfig {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     use super::*;
 
     #[test]
@@ -642,6 +644,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_proxy_from_env_empty() {
         // Ensure no proxy env vars are set for this test
         std::env::remove_var("MCP_HTTP_PROXY");
@@ -654,6 +657,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_proxy_from_env_with_vars() {
         std::env::set_var("MCP_HTTP_PROXY", "http://test-proxy:8080");
         std::env::set_var("MCP_NO_PROXY", "localhost,127.0.0.1");

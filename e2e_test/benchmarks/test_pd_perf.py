@@ -5,7 +5,7 @@ import pytest
 
 @pytest.mark.e2e
 @pytest.mark.workers(prefill=2, decode=2)
-@pytest.mark.parametrize("setup_backend", ["pd"], indirect=True)
+@pytest.mark.parametrize("setup_backend", ["pd_http"], indirect=True)
 class TestPDPerf:
     """Performance benchmark for PD disaggregation router."""
 
@@ -20,7 +20,7 @@ class TestPDPerf:
             # accurate GPU utilization sampling (at least 30+ seconds)
             max_requests_per_run=200,
             thresholds={
-                "ttft_mean_max": 13,
+                "ttft_mean_max": 5,
                 "e2e_latency_mean_max": 16,
                 "input_throughput_mean_min": 350,
                 "output_throughput_mean_min": 18,

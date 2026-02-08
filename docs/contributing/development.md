@@ -34,6 +34,10 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # Ensure you have the latest stable
 rustup update stable
 rustup default stable
+
+# Install nightly toolchain (required for rustfmt unstable options)
+rustup toolchain install nightly
+rustup component add rustfmt --toolchain nightly
 ```
 
 ### 3. Install Development Tools
@@ -126,21 +130,50 @@ cargo test -- --nocapture
 cargo test --test integration
 ```
 
-### Linting and Formatting
+### Linting and Formatting (Rust)
 
 ```bash
-# Format code
-cargo fmt
+# Format code (requires nightly for unstable rustfmt options)
+cargo +nightly fmt --all
 
 # Check formatting
-cargo fmt --check
+cargo +nightly fmt --all -- --check
 
 # Run clippy
-cargo clippy -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 
 # Fix clippy warnings automatically
-cargo clippy --fix
+cargo clippy --all-targets --all-features --fix --allow-dirty -- -D warnings
 ```
+
+### Linting and Formatting (Python)
+
+Python code in `e2e_test/`, `bindings/python/`, and `scripts/` is checked with
+[ruff](https://docs.astral.sh/ruff/) (linting + formatting) and
+[mypy](https://mypy-lang.org/) (type checking).
+
+**Pre-commit hooks** run these checks automatically on every commit. To set up:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+To run checks manually:
+
+```bash
+# Lint (with auto-fix)
+ruff check --fix e2e_test/ bindings/python/ scripts/
+
+# Format
+ruff format e2e_test/ bindings/python/ scripts/
+
+# Type check
+mypy e2e_test/ --config-file mypy.ini
+mypy bindings/python/ --config-file mypy.ini
+```
+
+Configuration lives in `ruff.toml` and `mypy.ini` at the repo root.
 
 ---
 
@@ -381,7 +414,7 @@ cargo test -- --test-threads=1
 Run clippy locally before pushing:
 
 ```bash
-cargo clippy -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 ---

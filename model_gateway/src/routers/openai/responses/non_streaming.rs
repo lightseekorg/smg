@@ -14,11 +14,14 @@ use super::{
     mcp::{execute_tool_loop, prepare_mcp_tools_as_functions},
     utils::{patch_response_with_request_metadata, restore_original_tools},
 };
-use crate::routers::{
-    header_utils::{apply_provider_headers, extract_auth_header},
-    mcp_utils::{ensure_request_mcp_client, McpLoopConfig},
-    openai::context::{PayloadState, RequestContext},
-    persistence_utils::persist_conversation_items,
+use crate::{
+    mcp::McpToolSession,
+    routers::{
+        header_utils::{apply_provider_headers, extract_auth_header},
+        mcp_utils::ensure_request_mcp_client,
+        openai::context::{PayloadState, RequestContext},
+        persistence_utils::persist_conversation_items,
+    },
 };
 
 /// Handle a non-streaming responses request
@@ -54,8 +57,8 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         }
     };
 
-    // Check for MCP tools and create request context if needed
-    let mcp_result = if let Some(tools) = original_body.tools.as_deref() {
+    // Check for MCP tools and create session if needed
+    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
         ensure_request_mcp_client(mcp_orchestrator, tools).await
     } else {
         None
@@ -63,13 +66,13 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
 
     let mut response_json: Value;
 
-    if let Some((orchestrator, mcp_servers)) = mcp_result {
-        let server_keys: Vec<String> = mcp_servers.iter().map(|(_, key)| key.clone()).collect();
-        let config = McpLoopConfig {
-            mcp_servers,
-            ..McpLoopConfig::default()
-        };
-        prepare_mcp_tools_as_functions(&mut payload, &orchestrator, &server_keys);
+    if let Some(mcp_servers) = mcp_servers {
+        let session_request_id = original_body
+            .request_id
+            .clone()
+            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
+        let session = McpToolSession::new(mcp_orchestrator, mcp_servers, &session_request_id);
+        prepare_mcp_tools_as_functions(&mut payload, &session);
 
         match execute_tool_loop(
             ctx.components.client(),
@@ -77,8 +80,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             ctx.headers(),
             payload,
             original_body,
-            &orchestrator,
-            &config,
+            &session,
         )
         .await
         {

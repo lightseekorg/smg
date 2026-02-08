@@ -47,3 +47,6 @@ debug = 1
 split-debuginfo = "unpacked"
 incremental = true
 codegen-units = 256
+
+[lints]
+workspace = true

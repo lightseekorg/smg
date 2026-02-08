@@ -9,7 +9,7 @@ use super::provider::Provider;
 use crate::{
     core::Worker,
     data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::McpOrchestrator,
+    mcp::{McpOrchestrator, McpToolSession},
     protocols::{chat::ChatCompletionRequest, responses::ResponsesRequest},
 };
 
@@ -237,9 +237,7 @@ impl RequestContext {
 pub struct StreamingEventContext<'a> {
     pub original_request: &'a ResponsesRequest,
     pub previous_response_id: Option<&'a str>,
-    pub server_keys: &'a [String],
-    pub mcp_servers: &'a [(String, String)],
-    pub orchestrator: Option<&'a Arc<McpOrchestrator>>,
+    pub session: Option<&'a McpToolSession<'a>>,
 }
 
 pub type StreamingRequest = OwnedStreamingContext;
