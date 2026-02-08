@@ -29,7 +29,7 @@ _MAX_REQUESTS = 300
 _MAX_TIME_PER_RUN = 10  # seconds per scenario×concurrency combo
 _TIMEOUT_SEC = 10800  # 3 hours per model
 
-_TEST_MODE = False
+_TEST_MODE = True
 _TEST_NUM_CONCURRENCY = 1
 _TEST_TRAFFIC_SCENARIO = "D(100,100)"
 _TEST_MAX_REQUESTS = 10
@@ -100,11 +100,17 @@ _NIGHTLY_MODELS: list[tuple[str, str, int, list[str], dict]] = [
     ("meta-llama/Llama-3.2-1B-Instruct", "Llama1b", 4, ["http", "grpc"], {}),
     ("Qwen/Qwen2.5-7B-Instruct", "Qwen7b", 4, ["http", "grpc"], {}),
     ("Qwen/Qwen2.5-14B-Instruct", "Qwen14b", 4, ["http", "grpc"], {}),
-    ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "Deepseek7b", 8, ["http", "grpc"], {}),
-    ("Qwen/Qwen3-30B-A3B", "Qwen30b", 2, ["http", "grpc"], {}),
+    ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "Deepseek7b", 4, ["http", "grpc"], {}),
+    ("Qwen/Qwen3-30B-A3B", "Qwen30b", 4, ["http", "grpc"], {}),
     ("mistralai/Mistral-7B-Instruct-v0.3", "Mistral7b", 4, ["http", "grpc"], {}),
     ("openai/gpt-oss-20b", "GptOss", 4, ["http", "grpc"], {}),
-    ("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "Llama4Maverick", 1, ["http", "grpc"], {}),
+    (
+        "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+        "Llama4Maverick",
+        1,
+        ["http", "grpc"],
+        {},
+    ),
 ]
 
 

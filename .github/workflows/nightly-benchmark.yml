@@ -1,8 +1,17 @@
 name: Nightly Benchmark
 
 on:
-  schedule:
-    - cron: '0 0 * * 0'
+#  schedule:
+#    - cron: '0 0 * * 0'
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "*.md"
+  pull_request:
+    branches: [ main ]
+    types: [ opened, synchronize, reopened, labeled ]
   workflow_dispatch:
     inputs:
       models:
@@ -21,26 +30,42 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
 jobs:
   # ---------------------------------------------------------------------------
   # Build wheel once and reuse across all jobs
   # ---------------------------------------------------------------------------
 
   build-wheel:
-    runs-on: k8s-runner-cpu
+    runs-on: k8s-runner-gpu
     permissions:
       contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Cache wheel artifacts
+        id: cache-wheel
+        uses: actions/cache@v5
+        with:
+          path: bindings/python/dist/*.whl
+          key: nightly-wheel-${{ runner.os }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'auth/src/**', 'bindings/python/src/**', 'data_connector/src/**', 'grpc_client/src/**', 'kv_index/src/**', 'mcp/src/**', 'mesh/src/**', 'model_gateway/src/**', 'multimodal/src/**', 'protocols/src/**', 'reasoning_parser/src/**', 'tokenizer/src/**', 'tool_parser/src/**', 'wasm/src/**', 'workflow/src/**') }}
+          restore-keys: |
+            nightly-wheel-${{ runner.os }}-
+
       - name: Setup Rust
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
         uses: ./.github/actions/setup-rust
 
       - name: Setup Python venv
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: bash scripts/ci_setup_python_venv.sh
 
       - name: Build Python wheel
+        if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: bash scripts/ci_build_wheel.sh
 
       - name: Upload wheel artifact
@@ -49,6 +74,10 @@ jobs:
           name: smg-wheel
           path: bindings/python/dist/*.whl
           retention-days: 7
+
+      - name: Show sccache stats
+        if: always() && steps.cache-wheel.outputs.cache-hit != 'true'
+        run: sccache --show-stats
 
   # ---------------------------------------------------------------------------
   # Single-worker: one model per job for better isolation and debugging.
@@ -74,7 +103,7 @@ jobs:
           - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bSingle, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
           - { id: mistralai/Mistral-7B-Instruct-v0.3, slug: mistralai-Mistral-7B-Instruct-v0.3, test_class: TestNightlyMistral7bSingle, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
           - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOssSingle, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
-          - { id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8, slug: meta-llama-Llama-4-Maverick-17B-128E-Instruct-FP8, test_class: TestNightlyLlama4MaverickSingle, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8, slug: meta-llama-Llama-4-Maverick-17B-128E-Instruct-FP8, test_class: TestNightlyLlama4MaverickSingle, runs_on: '["8-gpu-h200"]', gpu_type: H200 }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false" }
           - { id: vllm,   runtime: vllm,   grpc_only: "true" }
@@ -98,18 +127,13 @@ jobs:
         if: steps.filter.outputs.skip != 'true'
         uses: actions/checkout@v6
 
-      - name: Install inference backend
-        if: steps.filter.outputs.skip != 'true'
-        env:
-          SGLANG_USE_LATEST_TAG: "1"
-        run: |
-          bash scripts/ci_setup_python_venv.sh
-          source .venv/bin/activate
-          if [ "${{ matrix.variant.runtime }}" == "vllm" ]; then
-            bash scripts/ci_install_vllm.sh
-          else
-            bash scripts/ci_install_sglang.sh
-          fi
+      - name: Setup vLLM backend
+        if: steps.filter.outputs.skip != 'true' && matrix.variant.runtime == 'vllm'
+        uses: ./.github/actions/setup-vllm
+
+      - name: Setup SGLang backend
+        if: steps.filter.outputs.skip != 'true' && matrix.variant.runtime == 'sglang'
+        uses: ./.github/actions/setup-sglang
 
       - name: Download wheel artifact
         if: steps.filter.outputs.skip != 'true'
@@ -130,6 +154,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GPU_TYPE: ${{ matrix.model.gpu_type }}
+          E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"meta-llama/Llama-3.2-1B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen2.5-14B-Instruct":1,"deepseek-ai/DeepSeek-R1-Distill-Qwen-7B":1,"Qwen/Qwen3-30B-A3B":1,"mistralai/Mistral-7B-Instruct-v0.3":1,"openai/gpt-oss-20b":1}'
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
 
@@ -204,18 +229,13 @@ jobs:
         if: steps.filter.outputs.skip != 'true'
         uses: actions/checkout@v6
 
-      - name: Install inference backend
-        if: steps.filter.outputs.skip != 'true'
-        env:
-          SGLANG_USE_LATEST_TAG: "1"
-        run: |
-          bash scripts/ci_setup_python_venv.sh
-          source .venv/bin/activate
-          if [ "${{ matrix.variant.runtime }}" == "vllm" ]; then
-            bash scripts/ci_install_vllm.sh
-          else
-            bash scripts/ci_install_sglang.sh
-          fi
+      - name: Setup vLLM backend
+        if: steps.filter.outputs.skip != 'true' && matrix.variant.runtime == 'vllm'
+        uses: ./.github/actions/setup-vllm
+
+      - name: Setup SGLang backend
+        if: steps.filter.outputs.skip != 'true' && matrix.variant.runtime == 'sglang'
+        uses: ./.github/actions/setup-sglang
 
       - name: Download wheel artifact
         if: steps.filter.outputs.skip != 'true'
@@ -236,6 +256,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GPU_TYPE: ${{ matrix.model.gpu_type }}
+          E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"meta-llama/Llama-3.2-1B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen2.5-14B-Instruct":1,"deepseek-ai/DeepSeek-R1-Distill-Qwen-7B":1,"Qwen/Qwen3-30B-A3B":1,"mistralai/Mistral-7B-Instruct-v0.3":1,"openai/gpt-oss-20b":1}'
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
 

@@ -61,10 +61,17 @@ def parse_folder_name(folder_name: str) -> dict:
     """Parse experiment info from folder name.
 
     Expected patterns (newest to oldest):
-    - nightly_meta-llama/Llama-3.1-8B-Instruct_http_sglang_single -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=http, runtime=sglang, worker_type=single
-    - nightly_meta-llama/Llama-3.1-8B-Instruct_grpc_vllm_multi -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=grpc, runtime=vllm, worker_type=multi
-    - nightly_meta-llama/Llama-3.1-8B-Instruct_http_sglang -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=http, runtime=sglang (worker_type=single)
-    - nightly_meta-llama/Llama-3.1-8B-Instruct_http (legacy) -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=http
+    - nightly_meta-llama/Llama-3.1-8B-Instruct_http_sglang_single
+      -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=http,
+      runtime=sglang, worker_type=single
+    - nightly_meta-llama/Llama-3.1-8B-Instruct_grpc_vllm_multi
+      -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=grpc,
+      runtime=vllm, worker_type=multi
+    - nightly_meta-llama/Llama-3.1-8B-Instruct_http_sglang
+      -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=http,
+      runtime=sglang (worker_type=single)
+    - nightly_meta-llama/Llama-3.1-8B-Instruct_http (legacy)
+      -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=http
     """
     info = {"model": "unknown", "protocol": "unknown", "runtime": None, "worker_type": "single"}
 

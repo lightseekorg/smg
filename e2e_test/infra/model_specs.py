@@ -9,6 +9,7 @@ Each model spec defines:
 
 from __future__ import annotations
 
+import json
 import os
 
 # Environment variable for local model paths (CI uses local copies for speed)
@@ -111,6 +112,7 @@ MODEL_SPECS: dict[str, dict] = {
     },
 }
 
+
 def get_models_with_feature(feature: str) -> list[str]:
     """Get list of model IDs that support a specific feature."""
     return [
@@ -122,7 +124,19 @@ def get_model_spec(model_id: str) -> dict:
     """Get spec for a specific model, raising KeyError if not found."""
     if model_id not in MODEL_SPECS:
         raise KeyError(f"Unknown model: {model_id}. Available: {list(MODEL_SPECS.keys())}")
-    return MODEL_SPECS[model_id]
+    spec = dict(MODEL_SPECS[model_id])
+    tp_overrides_json = os.environ.get("E2E_MODEL_TP_OVERRIDES")
+    if tp_overrides_json:
+        try:
+            tp_overrides = json.loads(tp_overrides_json)
+            if isinstance(tp_overrides, dict):
+                override = tp_overrides.get(model_id)
+                if isinstance(override, int) and override > 0:
+                    spec["tp"] = override
+        except json.JSONDecodeError:
+            # Ignore malformed override config and fall back to canonical specs.
+            pass
+    return spec
 
 
 # Convenience groupings for test parametrization
@@ -141,7 +155,9 @@ DEFAULT_SMALL_MODEL_PATH = MODEL_SPECS["meta-llama/Llama-3.2-1B-Instruct"]["mode
 DEFAULT_REASONING_MODEL_PATH = MODEL_SPECS["deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"]["model"]
 DEFAULT_ENABLE_THINKING_MODEL_PATH = MODEL_SPECS["Qwen/Qwen3-30B-A3B"]["model"]
 DEFAULT_QWEN_FUNCTION_CALLING_MODEL_PATH = MODEL_SPECS["Qwen/Qwen2.5-7B-Instruct"]["model"]
-DEFAULT_MISTRAL_FUNCTION_CALLING_MODEL_PATH = MODEL_SPECS["mistralai/Mistral-7B-Instruct-v0.3"]["model"]
+DEFAULT_MISTRAL_FUNCTION_CALLING_MODEL_PATH = MODEL_SPECS["mistralai/Mistral-7B-Instruct-v0.3"][
+    "model"
+]
 DEFAULT_GPT_OSS_MODEL_PATH = MODEL_SPECS["openai/gpt-oss-20b"]["model"]
 DEFAULT_EMBEDDING_MODEL_PATH = MODEL_SPECS["embedding"]["model"]
 
