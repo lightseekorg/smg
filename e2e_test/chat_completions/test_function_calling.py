@@ -102,7 +102,7 @@ PYTHONIC_MESSAGES = [
 @pytest.mark.skip_for_runtime(
     "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
 )
-@pytest.mark.model("llama-1b")
+@pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestOpenAIServerFunctionCalling:
@@ -719,7 +719,7 @@ class TestOpenAIServerFunctionCalling:
 # =============================================================================
 
 
-@pytest.mark.model("llama-8b")
+@pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "pythonic", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestOpenAIPythonicFunctionCalling:
@@ -1514,7 +1514,7 @@ class _TestToolChoiceBase:
 @pytest.mark.skip_for_runtime(
     "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
 )
-@pytest.mark.model("llama-1b")
+@pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "llama", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestToolChoiceLlama(_TestToolChoiceBase):
@@ -1535,7 +1535,7 @@ class TestToolChoiceLlama(_TestToolChoiceBase):
 @pytest.mark.skip_for_runtime(
     "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
 )
-@pytest.mark.model("qwen-7b")
+@pytest.mark.model("Qwen/Qwen2.5-7B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestToolChoiceQwen(_TestToolChoiceBase):
@@ -1553,7 +1553,7 @@ class TestToolChoiceQwen(_TestToolChoiceBase):
 @pytest.mark.skip_for_runtime(
     "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
 )
-@pytest.mark.model("mistral-7b")
+@pytest.mark.model("mistralai/Mistral-7B-Instruct-v0.3")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "mistral", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestToolChoiceMistral(_TestToolChoiceBase):

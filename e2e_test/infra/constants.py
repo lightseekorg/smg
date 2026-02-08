@@ -41,7 +41,7 @@ PARAM_BACKEND_ROUTER = "backend_router"
 PARAM_MODEL = "model"
 
 # Default model
-DEFAULT_MODEL = "llama-8b"
+DEFAULT_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 
 # Default runtime for gRPC tests
 DEFAULT_RUNTIME = "sglang"

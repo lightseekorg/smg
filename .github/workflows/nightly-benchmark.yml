@@ -27,7 +27,7 @@ jobs:
   # ---------------------------------------------------------------------------
 
   build-wheel:
-    runs-on: 8-gpu-h200
+    runs-on: k8s-runner-cpu
     permissions:
       contents: read
     steps:
@@ -51,29 +51,30 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # Single-worker: one model per job for better isolation and debugging
+  # Single-worker: one model per job for better isolation and debugging.
+  # DeepSeek runs on H200; all other models run on k8s H100.
   # ---------------------------------------------------------------------------
 
   single-worker:
     name: "${{ matrix.model.id }} / single-${{ matrix.variant.id }}"
     needs: build-wheel
     if: ${{ !cancelled() }}
-    runs-on: 8-gpu-h200
+    runs-on: ${{ fromJson(matrix.model.runs_on) }}
     timeout-minutes: 1440
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 8
       matrix:
         model:
-          - { id: llama-8b,    test_class: TestNightlyLlama8bSingle }
-          - { id: llama-1b,    test_class: TestNightlyLlama1bSingle }
-          - { id: qwen-7b,     test_class: TestNightlyQwen7bSingle }
-          - { id: qwen-14b,    test_class: TestNightlyQwen14bSingle }
-          - { id: deepseek-7b, test_class: TestNightlyDeepseek7bSingle }
-          - { id: qwen-30b,    test_class: TestNightlyQwen30bSingle }
-          - { id: mistral-7b,  test_class: TestNightlyMistral7bSingle }
-          - { id: gpt-oss,     test_class: TestNightlyGptOssSingle }
-          - { id: llama-4-maverick-17b, test_class: TestNightlyLlama4MaverickSingle }
+          - { id: meta-llama/Llama-3.1-8B-Instruct, slug: meta-llama-Llama-3.1-8B-Instruct, test_class: TestNightlyLlama8bSingle, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: meta-llama/Llama-3.2-1B-Instruct, slug: meta-llama-Llama-3.2-1B-Instruct, test_class: TestNightlyLlama1bSingle, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bSingle, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: Qwen/Qwen2.5-14B-Instruct, slug: Qwen-Qwen2.5-14B-Instruct, test_class: TestNightlyQwen14bSingle, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B, slug: deepseek-ai-DeepSeek-R1-Distill-Qwen-7B, test_class: TestNightlyDeepseek7bSingle, runs_on: '["8-gpu-h200"]', gpu_type: H200 }
+          - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bSingle, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: mistralai/Mistral-7B-Instruct-v0.3, slug: mistralai-Mistral-7B-Instruct-v0.3, test_class: TestNightlyMistral7bSingle, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOssSingle, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8, slug: meta-llama-Llama-4-Maverick-17B-128E-Instruct-FP8, test_class: TestNightlyLlama4MaverickSingle, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false" }
           - { id: vllm,   runtime: vllm,   grpc_only: "true" }
@@ -85,7 +86,7 @@ jobs:
           MODELS="${{ github.event.inputs.models || 'all' }}"
           RUNTIME="${{ github.event.inputs.runtime || 'all' }}"
           SKIP="false"
-          if [ "$MODELS" != "all" ] && ! echo ",$MODELS," | grep -q ",${{ matrix.model.id }},"; then
+          if [ "$MODELS" != "all" ] && ! echo ",$MODELS," | grep -Fq ",${{ matrix.model.id }},"; then
             SKIP="true"
           fi
           if [ "$RUNTIME" != "all" ] && [ "$RUNTIME" != "${{ matrix.variant.id }}" ]; then
@@ -128,6 +129,7 @@ jobs:
         if: steps.filter.outputs.skip != 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GPU_TYPE: ${{ matrix.model.gpu_type }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
 
@@ -146,7 +148,7 @@ jobs:
         if: always() && steps.filter.outputs.skip != 'true'
         uses: actions/upload-artifact@v6
         with:
-          name: nightly-${{ matrix.model.id }}-single-${{ matrix.variant.id }}-${{ github.run_id }}
+          name: nightly-${{ matrix.model.slug }}-single-${{ matrix.variant.id }}-${{ github.run_id }}
           path: nightly_*/
           retention-days: 90
 
@@ -155,29 +157,30 @@ jobs:
         run: bash scripts/ci_killall_sglang.sh || true
 
   # ---------------------------------------------------------------------------
-  # Multi-worker: one model per job (uses all 8 GPUs)
+  # Multi-worker: one model per job.
+  # DeepSeek runs on H200; all other models run on k8s H100.
   # ---------------------------------------------------------------------------
 
   multi-worker:
     name: "${{ matrix.model.id }} / multi-${{ matrix.variant.id }}"
-    needs: [build-wheel, single-worker]
+    needs: build-wheel
     if: ${{ !cancelled() }}
-    runs-on: 8-gpu-h200
+    runs-on: ${{ fromJson(matrix.model.runs_on) }}
     timeout-minutes: 1440
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 8
       matrix:
         model:
-          - { id: llama-8b,    test_class: TestNightlyLlama8bMulti }
-          - { id: llama-1b,    test_class: TestNightlyLlama1bMulti }
-          - { id: qwen-7b,     test_class: TestNightlyQwen7bMulti }
-          - { id: qwen-14b,    test_class: TestNightlyQwen14bMulti }
-          - { id: deepseek-7b, test_class: TestNightlyDeepseek7bMulti }
-          - { id: qwen-30b,    test_class: TestNightlyQwen30bMulti }
-          - { id: mistral-7b,  test_class: TestNightlyMistral7bMulti }
-          - { id: gpt-oss,     test_class: TestNightlyGptOssMulti }
-          # - { id: llama-4-maverick-17b, test_class: TestNightlyLlama4MaverickMulti } # 1 worker uses all 8 GPUs (tp=8)
+          - { id: meta-llama/Llama-3.1-8B-Instruct, slug: meta-llama-Llama-3.1-8B-Instruct, test_class: TestNightlyLlama8bMulti, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: meta-llama/Llama-3.2-1B-Instruct, slug: meta-llama-Llama-3.2-1B-Instruct, test_class: TestNightlyLlama1bMulti, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bMulti, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: Qwen/Qwen2.5-14B-Instruct, slug: Qwen-Qwen2.5-14B-Instruct, test_class: TestNightlyQwen14bMulti, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B, slug: deepseek-ai-DeepSeek-R1-Distill-Qwen-7B, test_class: TestNightlyDeepseek7bMulti, runs_on: '["8-gpu-h200"]', gpu_type: H200 }
+          - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bMulti, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: mistralai/Mistral-7B-Instruct-v0.3, slug: mistralai-Mistral-7B-Instruct-v0.3, test_class: TestNightlyMistral7bMulti, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOssMulti, runs_on: '["k8s-runner-gpu","4-gpu-h100"]', gpu_type: H100 }
+          # - { id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8, test_class: TestNightlyLlama4MaverickMulti } # tp=8, keep disabled for nightly
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false" }
           - { id: vllm,   runtime: vllm,   grpc_only: "true" }
@@ -189,7 +192,7 @@ jobs:
           MODELS="${{ github.event.inputs.models || 'all' }}"
           RUNTIME="${{ github.event.inputs.runtime || 'all' }}"
           SKIP="false"
-          if [ "$MODELS" != "all" ] && ! echo ",$MODELS," | grep -q ",${{ matrix.model.id }},"; then
+          if [ "$MODELS" != "all" ] && ! echo ",$MODELS," | grep -Fq ",${{ matrix.model.id }},"; then
             SKIP="true"
           fi
           if [ "$RUNTIME" != "all" ] && [ "$RUNTIME" != "${{ matrix.variant.id }}" ]; then
@@ -232,6 +235,7 @@ jobs:
         if: steps.filter.outputs.skip != 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GPU_TYPE: ${{ matrix.model.gpu_type }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
 
@@ -250,7 +254,7 @@ jobs:
         if: always() && steps.filter.outputs.skip != 'true'
         uses: actions/upload-artifact@v6
         with:
-          name: nightly-${{ matrix.model.id }}-multi-${{ matrix.variant.id }}-${{ github.run_id }}
+          name: nightly-${{ matrix.model.slug }}-multi-${{ matrix.variant.id }}-${{ github.run_id }}
           path: nightly_*/
           retention-days: 90
 

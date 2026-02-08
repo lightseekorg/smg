@@ -45,10 +45,10 @@ class WorkerIdentity:
 
     Each worker is uniquely identified by (model_id, mode, worker_type, index).
     For example:
-    - llama-8b:http (regular worker, index 0)
-    - llama-8b:http:prefill_0 (first prefill worker)
-    - llama-8b:http:prefill_1 (second prefill worker)
-    - llama-8b:http:decode_0 (first decode worker)
+    - meta-llama/Llama-3.1-8B-Instruct:http (regular worker, index 0)
+    - meta-llama/Llama-3.1-8B-Instruct:http:prefill_0 (first prefill worker)
+    - meta-llama/Llama-3.1-8B-Instruct:http:prefill_1 (second prefill worker)
+    - meta-llama/Llama-3.1-8B-Instruct:http:decode_0 (first decode worker)
 
     Frozen/hashable so it can be used in sets and as dict keys for deduplication.
     """
@@ -102,7 +102,7 @@ class ModelInstance:
     port: int
     process: subprocess.Popen
     gpu_slot: GPUSlot | None
-    key: str  # Unique instance key (e.g., "llama-8b:http:prefill_0")
+    key: str  # Unique instance key (e.g., "meta-llama/Llama-3.1-8B-Instruct:http:prefill_0")
     worker_type: WorkerType = WorkerType.REGULAR
     bootstrap_port: int | None = None  # For prefill workers in PD mode
     last_used: float = 0.0  # Timestamp for MRU eviction
@@ -310,8 +310,8 @@ class ModelPool:
     - The needed model is then launched on-demand
 
     Instance keys:
-    - Regular workers: "model_id:mode" (e.g., "llama-8b:http")
-    - PD workers: "model_id:mode:worker_type" (e.g., "llama-8b:http:prefill")
+    - Regular workers: "model_id:mode" (e.g., "meta-llama/Llama-3.1-8B-Instruct:http")
+    - PD workers: "model_id:mode:worker_type" (e.g., "meta-llama/Llama-3.1-8B-Instruct:http:prefill")
 
     Limitations:
     - Currently one worker instance per (model_id, mode) combination
@@ -320,8 +320,8 @@ class ModelPool:
 
     Usage:
         pool = ModelPool()
-        pool.startup(requirements=[("llama-8b", ConnectionMode.HTTP)])
-        instance = pool.get("llama-8b", "http")  # Pre-launched or on-demand
+        pool.startup(requirements=[("meta-llama/Llama-3.1-8B-Instruct", ConnectionMode.HTTP)])
+        instance = pool.get("meta-llama/Llama-3.1-8B-Instruct", "http")  # Pre-launched or on-demand
     """
 
     def __init__(self, allocator: GPUAllocator | None = None):
@@ -807,7 +807,7 @@ class ModelPool:
         Caller MUST call release() on the instance when done.
 
         Args:
-            model_id: The model ID (e.g., "llama-8b")
+            model_id: The model ID (e.g., "meta-llama/Llama-3.1-8B-Instruct")
             mode: The mode (ConnectionMode.HTTP or ConnectionMode.GRPC, or string)
             worker_type: The worker type (REGULAR, PREFILL, DECODE). Defaults to REGULAR.
             wait_for_gpus: If True, wait for GPUs to become available when all
