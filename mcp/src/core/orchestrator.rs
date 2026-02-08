@@ -399,6 +399,12 @@ impl McpOrchestrator {
             .acquire_slot(tenant_ctx, qualified)
             .inspect_err(|_| self.metrics.record_rate_limited())?;
 
+        // Guard against cancellation or errors during semaphore acquisition
+        let guard = scopeguard::guard(timestamp, |ts| {
+            self.rate_limiter.rollback(tenant_ctx, qualified, ts);
+            self.metrics.record_rate_limited();
+        });
+
         // Acquire concurrency permit
         let permit = match self
             .rate_limiter
@@ -407,12 +413,13 @@ impl McpOrchestrator {
         {
             Ok(p) => p,
             Err(e) => {
-                // Rollback the slot reservation since we couldn't get a concurrency permit
-                self.rate_limiter.rollback(tenant_ctx, qualified, timestamp);
-                self.metrics.record_rate_limited();
+                // Guard will handle rollback when dropped
                 return Err(e);
             }
         };
+
+        // Success - consume the guard so rollback doesn't happen
+        let _ = scopeguard::ScopeGuard::into_inner(guard);
 
         Ok(permit)
     }
@@ -830,16 +837,16 @@ impl McpOrchestrator {
 
         let qualified = QualifiedToolName::new(server_key, tool_name);
 
-        // Enforce rate limits and acquire concurrency permit
-        let _permit = self
-            .check_and_acquire_permit(&request_ctx.tenant_ctx, &qualified)
-            .await?;
-
-        // Get tool entry
+        // Get tool entry first (fail fast if not found, don't consume quota)
         let entry = self
             .tool_inventory
             .get_entry(server_key, tool_name)
             .ok_or_else(|| McpError::ToolNotFound(qualified.to_string()))?;
+
+        // Enforce rate limits and acquire concurrency permit
+        let _permit = self
+            .check_and_acquire_permit(&request_ctx.tenant_ctx, &qualified)
+            .await?;
 
         // Record metrics start
         self.metrics.record_call_start(&qualified);
