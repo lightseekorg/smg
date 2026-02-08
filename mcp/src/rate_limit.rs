@@ -40,14 +40,18 @@ impl CallWindow {
     /// Records a new call at the current timestamp.
     fn record(&mut self) -> Instant {
         let now = Instant::now();
-        self.record_at(now);
+        self.record_at(now, true, true);
         now
     }
 
     /// Records a call at a specific timestamp.
-    fn record_at(&mut self, timestamp: Instant) {
-        self.minute_calls.push(timestamp);
-        self.hour_calls.push(timestamp);
+    fn record_at(&mut self, timestamp: Instant, track_minute: bool, track_hour: bool) {
+        if track_minute {
+            self.minute_calls.push(timestamp);
+        }
+        if track_hour {
+            self.hour_calls.push(timestamp);
+        }
         self.cleanup();
     }
 
@@ -125,6 +129,20 @@ impl RateLimiter {
                     )));
                 }
             }
+        } else {
+            // No window exists yet, but we must still check for failed-fast 0 limits
+            if limits.max_calls_per_minute == Some(0) {
+                return Err(McpError::RateLimitExceeded(format!(
+                    "Tenant '{}' minute limit reached (0)",
+                    ctx.tenant_id
+                )));
+            }
+            if limits.max_calls_per_hour == Some(0) {
+                return Err(McpError::RateLimitExceeded(format!(
+                    "Tenant '{}' hour limit reached (0)",
+                    ctx.tenant_id
+                )));
+            }
         }
 
         // Check Tool-specific limits (isolated per tenant)
@@ -146,6 +164,20 @@ impl RateLimiter {
                         tool, ctx.tenant_id, max
                     )));
                 }
+            }
+        } else {
+            // No window exists yet, but we must still check for failed-fast 0 limits
+            if limits.max_calls_per_minute == Some(0) {
+                return Err(McpError::RateLimitExceeded(format!(
+                    "Tool '{}' minute limit reached for tenant '{}' (0)",
+                    tool, ctx.tenant_id
+                )));
+            }
+            if limits.max_calls_per_hour == Some(0) {
+                return Err(McpError::RateLimitExceeded(format!(
+                    "Tool '{}' hour limit reached for tenant '{}' (0)",
+                    tool, ctx.tenant_id
+                )));
             }
         }
 
@@ -178,6 +210,12 @@ impl RateLimiter {
             Some(max) => max,
             None => return Ok(None),
         };
+
+        if max_concurrent == 0 {
+            return Err(McpError::RateLimitExceeded(
+                "Concurrency limit is zero".to_string(),
+            ));
+        }
 
         //  Get or create the semaphore
         let semaphore = {
@@ -241,7 +279,11 @@ impl RateLimiter {
                 }
             }
             // Limit met, record immediately
-            window.record_at(now);
+            window.record_at(
+                now,
+                limits.max_calls_per_minute.is_some(),
+                limits.max_calls_per_hour.is_some(),
+            );
         }
 
         // Check Tool-specific limits (isolated per tenant)
@@ -275,7 +317,11 @@ impl RateLimiter {
                 }
             }
             // Limit met, record immediately
-            window.record_at(now);
+            window.record_at(
+                now,
+                limits.max_calls_per_minute.is_some(),
+                limits.max_calls_per_hour.is_some(),
+            );
         }
 
         Ok(now)
