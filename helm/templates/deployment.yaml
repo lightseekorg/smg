@@ -64,13 +64,40 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- with .Values.volumeMounts }}
+          {{- $csiMounts := default (list) .Values.csiSecretsStore.mounts }}
+          {{- $csiEnabled := and .Values.csiSecretsStore.enabled (gt (len $csiMounts) 0) }}
+          {{- if or (gt (len (default (list) .Values.volumeMounts)) 0) $csiEnabled }}
           volumeMounts:
-            {{- toYaml . | nindent 12 }}
+            {{- if gt (len (default (list) .Values.volumeMounts)) 0 }}
+            {{- toYaml .Values.volumeMounts | nindent 12 }}
+            {{- end }}
+            {{- if $csiEnabled }}
+            {{- range $mount := $csiMounts }}
+            - name: {{ $mount.name }}
+              mountPath: {{ $mount.mountPath | quote }}
+              {{- if hasKey $mount "readOnly" }}
+              readOnly: {{ $mount.readOnly }}
+              {{- else }}
+              readOnly: true
+              {{- end }}
+            {{- end }}
+            {{- end }}
           {{- end }}
-      {{- with .Values.volumes }}
+      {{- if or (gt (len (default (list) .Values.volumes)) 0) $csiEnabled }}
       volumes:
-        {{- toYaml . | nindent 8 }}
+        {{- if gt (len (default (list) .Values.volumes)) 0 }}
+        {{- toYaml .Values.volumes | nindent 8 }}
+        {{- end }}
+        {{- if $csiEnabled }}
+        {{- range $mount := $csiMounts }}
+        - name: {{ $mount.name }}
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ default (printf "%s-oci-vault" (include "helm.fullname" $)) $mount.secretProviderClassName | quote }}
+        {{- end }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

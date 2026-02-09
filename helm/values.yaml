@@ -134,6 +134,17 @@ volumeMounts: []
 #   mountPath: "/etc/foo"
 #   readOnly: true
 
+csiSecretsStore:
+  enabled: true
+  mounts:
+    - name: openai-secret
+      mountPath: "/mnt/openai-secrets"
+      region: "us-sanjose-1"
+      vaultId: "ocid1.vault.oc1.us-sanjose-1.gruoavluaagvg.abzwuljrzskormigtxjyl2k5xylbfnh5hfqhnsxq3ebyr53zum3jq2ujchya"
+      secrets:
+        - name: "openai-passthrough-api-key"
+          fileName: "openai-passthrough-api-key"
+
 nodeSelector: {}
 
 tolerations: []
