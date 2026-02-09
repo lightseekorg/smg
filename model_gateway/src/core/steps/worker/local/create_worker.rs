@@ -73,6 +73,10 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
             final_labels.insert(key.clone(), value.clone());
         }
 
+        // Extract KV transfer config (stored in dedicated metadata fields, not labels)
+        let kv_connector = final_labels.remove("kv_connector");
+        let kv_role = final_labels.remove("kv_role");
+
         // Determine model_id: config > served_model_name > model_id > model_path > UNKNOWN_MODEL_ID
         // TODO: Normalize field names in ModelInfo::to_labels() so all backends use consistent
         // names (e.g., always "model_id"). This would eliminate the need for backend-specific
@@ -135,6 +139,8 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
                 health_config,
                 config,
                 &final_labels,
+                kv_connector.as_deref(),
+                kv_role.as_deref(),
             )?
         } else {
             create_single_worker(
@@ -147,6 +153,8 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
                 health_config,
                 config,
                 &final_labels,
+                kv_connector.as_deref(),
+                kv_role.as_deref(),
             )
         };
 
@@ -310,7 +318,9 @@ fn create_dp_aware_workers(
     circuit_breaker_config: CircuitBreakerConfig,
     health_config: HealthConfig,
     config: &WorkerConfigRequest,
-    final_labels: &HashMap<String, String>,
+    labels: &HashMap<String, String>,
+    kv_connector: Option<&str>,
+    kv_role: Option<&str>,
 ) -> Result<Vec<Arc<dyn Worker>>, WorkflowError> {
     let dp_info = data
         .dp_info
@@ -336,8 +346,14 @@ fn create_dp_aware_workers(
         if let Some(ref api_key) = config.api_key {
             builder = builder.api_key(api_key.clone());
         }
-        if !final_labels.is_empty() {
-            builder = builder.labels(final_labels.clone());
+        if !labels.is_empty() {
+            builder = builder.labels(labels.clone());
+        }
+        if let Some(connector) = kv_connector {
+            builder = builder.kv_connector(connector);
+        }
+        if let Some(role) = kv_role {
+            builder = builder.kv_role(role);
         }
 
         let worker = Arc::new(builder.build()) as Arc<dyn Worker>;
@@ -367,7 +383,9 @@ fn create_single_worker(
     circuit_breaker_config: CircuitBreakerConfig,
     health_config: HealthConfig,
     config: &WorkerConfigRequest,
-    final_labels: &HashMap<String, String>,
+    labels: &HashMap<String, String>,
+    kv_connector: Option<&str>,
+    kv_role: Option<&str>,
 ) -> Vec<Arc<dyn Worker>> {
     let health_check_disabled = health_config.disable_health_check;
 
@@ -382,8 +400,14 @@ fn create_single_worker(
     if let Some(ref api_key) = config.api_key {
         builder = builder.api_key(api_key.clone());
     }
-    if !final_labels.is_empty() {
-        builder = builder.labels(final_labels.clone());
+    if !labels.is_empty() {
+        builder = builder.labels(labels.clone());
+    }
+    if let Some(connector) = kv_connector {
+        builder = builder.kv_connector(connector);
+    }
+    if let Some(role) = kv_role {
+        builder = builder.kv_role(role);
     }
 
     let worker = Arc::new(builder.build()) as Arc<dyn Worker>;
@@ -397,7 +421,7 @@ fn create_single_worker(
         "Created worker object for {} ({:?}) with {} labels",
         normalized_url,
         connection_mode,
-        final_labels.len()
+        labels.len()
     );
 
     vec![worker]

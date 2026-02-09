@@ -39,7 +39,7 @@ prost-types = "0.14.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2.2"
 tokio-stream = "0.1"
-tonic = { version = "0.14.2", features = ["gzip", "transport"] }
+tonic = { version = "0.14.2", features = ["gzip", "transport", "tls-ring"] }
 tonic-prost = "0.14.2"
 
 # Workspace crates
@@ -52,3 +52,6 @@ prost-build = "0.14.1"
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

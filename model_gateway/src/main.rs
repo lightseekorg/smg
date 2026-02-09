@@ -1116,6 +1116,7 @@ impl CliArgs {
                     self_name,
                     self_addr: addr,
                     init_peer: peer,
+                    mtls_config: None,
                 })
             } else {
                 tracing::warn!("Invalid mesh server address, so mesh server will not be started");

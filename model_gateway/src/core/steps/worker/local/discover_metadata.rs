@@ -185,12 +185,36 @@ async fn fetch_grpc_metadata(
         .await
         .map_err(|e| format!("Failed to connect to gRPC: {}", e))?;
 
+    // Fetch model info for labels
     let model_info = client
         .get_model_info()
         .await
-        .map_err(|e| format!("Failed to fetch gRPC metadata: {}", e))?;
+        .map_err(|e| format!("Failed to fetch gRPC model info: {}", e))?;
 
-    Ok((model_info.to_labels(), runtime_type.to_string()))
+    let mut labels = model_info.to_labels();
+
+    // Fetch server info for KV transfer config (PD disaggregation)
+    match client.get_server_info().await {
+        Ok(server_info) => {
+            if let Some(kv_connector) = server_info.kv_connector() {
+                debug!("Discovered kv_connector: {}", kv_connector);
+                labels.insert("kv_connector".to_string(), kv_connector);
+            }
+            if let Some(kv_role) = server_info.kv_role() {
+                debug!("Discovered kv_role: {}", kv_role);
+                labels.insert("kv_role".to_string(), kv_role);
+            }
+        }
+        Err(e) => {
+            // Server info is optional - log warning but don't fail
+            warn!(
+                "Failed to fetch gRPC server info (KV config may not be available): {}",
+                e
+            );
+        }
+    }
+
+    Ok((labels, runtime_type.to_string()))
 }
 
 /// Step 2a: Discover metadata from worker.

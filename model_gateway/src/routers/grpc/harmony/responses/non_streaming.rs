@@ -17,6 +17,7 @@ use super::{
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools, ToolResult},
 };
 use crate::{
+    mcp::McpToolSession,
     observability::metrics::Metrics,
     protocols::{
         common::{ToolCall, Usage},
@@ -33,7 +34,7 @@ use crate::{
             },
             harmony::processor::ResponsesIterationResult,
         },
-        mcp_utils::{extract_server_label, DEFAULT_MAX_ITERATIONS},
+        mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
 };
 
@@ -58,13 +59,13 @@ pub(crate) async fn serve_harmony_responses(
     let current_request = load_previous_messages(ctx, request).await?;
 
     // Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) =
+    let (has_mcp_tools, mcp_servers) =
         ensure_mcp_connection(&ctx.mcp_orchestrator, current_request.tools.as_deref()).await?;
 
     // Set the server keys in the context
     {
         let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = server_keys;
+        *servers = mcp_servers;
     }
 
     let response = if has_mcp_tools {
@@ -96,9 +97,7 @@ async fn execute_with_mcp_loop(
 ) -> Result<ResponsesResponse, Response> {
     let mut iteration_count = 0;
 
-    // Extract server_label from request tools
-    let server_label = extract_server_label(current_request.tools.as_deref(), "sglang-mcp");
-    let mut mcp_tracking = McpCallTracking::new(server_label.clone());
+    let mut mcp_tracking = McpCallTracking::new();
 
     // Extract user's max_tool_calls limit (if set)
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
@@ -107,13 +106,15 @@ async fn execute_with_mcp_loop(
     // The response should show the user's original request tools, not internal MCP tools
     let original_tools = current_request.tools.clone();
 
+    // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
+    let mcp_servers = ctx.requested_servers.read().unwrap().clone();
+    let session_request_id = format!("resp_{}", uuid::Uuid::new_v4());
+    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
+
     // Add filtered MCP tools (static + requested dynamic) to the request
-    let mcp_tools = {
-        let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_orchestrator.list_tools_for_servers(&servers)
-    };
+    let mcp_tools = session.mcp_tools();
     if !mcp_tools.is_empty() {
-        let mcp_response_tools = convert_mcp_tools_to_response_tools(&mcp_tools);
+        let mcp_response_tools = convert_mcp_tools_to_response_tools(&session);
 
         let mut all_tools = current_request.tools.clone().unwrap_or_default();
         all_tools.extend(mcp_response_tools);
@@ -233,7 +234,7 @@ async fn execute_with_mcp_loop(
 
                     // Inject MCP metadata if any calls were executed
                     if mcp_tracking.total_calls() > 0 {
-                        inject_mcp_metadata(&mut response, &mcp_tracking, &mcp_tools);
+                        inject_mcp_metadata(&mut response, &mcp_tracking, &session);
                     }
 
                     return Ok(response);
@@ -242,13 +243,10 @@ async fn execute_with_mcp_loop(
                 // Execute MCP tools (if any)
                 let mcp_results = if !mcp_tool_calls.is_empty() {
                     execute_mcp_tools(
-                        &ctx.mcp_orchestrator,
+                        &session,
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,
-                        &request_id,
-                        &server_label,
-                        &mcp_tools,
                     )
                     .await?
                 } else {
@@ -281,7 +279,7 @@ async fn execute_with_mcp_loop(
 
                     // Inject MCP metadata for all executed calls
                     if mcp_tracking.total_calls() > 0 {
-                        inject_mcp_metadata(&mut response, &mcp_tracking, &mcp_tools);
+                        inject_mcp_metadata(&mut response, &mcp_tracking, &session);
                     }
 
                     return Ok(response);
@@ -314,7 +312,7 @@ async fn execute_with_mcp_loop(
                 );
 
                 // Inject MCP metadata into final response
-                inject_mcp_metadata(&mut response, &mcp_tracking, &mcp_tools);
+                inject_mcp_metadata(&mut response, &mcp_tracking, &session);
 
                 // Restore original tools (hide internal MCP tools from response)
                 response.tools = original_tools.clone().unwrap_or_default();

@@ -50,7 +50,7 @@ class EvalConfig:
     port: int = 30000
 
 
-def _get_eval(eval_name: str, num_examples: int, num_threads: int) -> "Eval":
+def _get_eval(eval_name: str, num_examples: int, num_threads: int) -> Eval:
     """Get the evaluation object by name."""
     if eval_name == "mmlu":
         from .simple_eval_mmlu import MMLUEval
@@ -124,13 +124,15 @@ def run_eval(args: Any) -> dict:
 
     # Build metrics
     metrics = result.metrics.copy() if result.metrics else {}
-    metrics["score"] = result.score
+    if result.score is None:
+        logger.warning("%s eval returned no score, defaulting to 0.0", eval_name)
+    metrics["score"] = result.score if result.score is not None else 0.0
     metrics["latency"] = latency
 
     logger.info(
         "%s eval complete: score=%.3f, latency=%.1fs, model=%s",
         eval_name,
-        result.score,
+        result.score if result.score is not None else 0.0,
         latency,
         sampler.model,
     )

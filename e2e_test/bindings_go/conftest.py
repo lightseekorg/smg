@@ -13,8 +13,9 @@ import signal
 import socket
 import subprocess
 import time
+from collections.abc import Generator
 from pathlib import Path
-from typing import TYPE_CHECKING, Generator
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -43,7 +44,7 @@ def _wait_for_server(host: str, port: int, timeout: float = 30.0) -> bool:
         try:
             with socket.create_connection((host, port), timeout=1.0):
                 return True
-        except (ConnectionRefusedError, socket.timeout, OSError):
+        except (TimeoutError, ConnectionRefusedError, OSError):
             time.sleep(0.5)
     return False
 
@@ -108,7 +109,7 @@ def go_oai_binary(go_ffi_library: Path) -> Path:
 
 
 @pytest.fixture(scope="class")
-def grpc_worker(request, model_pool: "ModelPool") -> Generator["ModelInstance", None, None]:
+def grpc_worker(request, model_pool: ModelPool) -> Generator[ModelInstance, None, None]:
     """Get a gRPC worker from the model pool.
 
     Uses the @pytest.mark.model marker to determine which model to use.
@@ -138,7 +139,7 @@ def grpc_worker(request, model_pool: "ModelPool") -> Generator["ModelInstance", 
 
 
 @pytest.fixture(scope="class")
-def grpc_workers(request, model_pool: "ModelPool") -> Generator[list["ModelInstance"], None, None]:
+def grpc_workers(request, model_pool: ModelPool) -> Generator[list[ModelInstance], None, None]:
     """Get multiple gRPC workers from the model pool.
 
     Uses markers to determine configuration:
@@ -207,8 +208,12 @@ def grpc_workers(request, model_pool: "ModelPool") -> Generator[list["ModelInsta
             instance = model_pool.get(model_id, ConnectionMode.GRPC)
             instances = [instance]
 
-        logger.info(f"Got {len(instances)} gRPC workers at ports: {[inst.port for inst in instances]}")
-        assert len(instances) == num_workers, f"Worker count mismatch: got {len(instances)}, expected {num_workers}"
+        logger.info(
+            f"Got {len(instances)} gRPC workers at ports: {[inst.port for inst in instances]}"
+        )
+        assert len(instances) == num_workers, (
+            f"Worker count mismatch: got {len(instances)}, expected {num_workers}"
+        )
 
         yield instances
 
@@ -223,7 +228,7 @@ def grpc_workers(request, model_pool: "ModelPool") -> Generator[list["ModelInsta
 @pytest.fixture(scope="class")
 def go_oai_server(
     request,
-    grpc_worker: "ModelInstance",
+    grpc_worker: ModelInstance,
     go_oai_binary: Path,
     go_ffi_library: Path,
 ) -> Generator[tuple[str, int, str], None, None]:
@@ -249,7 +254,9 @@ def go_oai_server(
     env["PORT"] = str(oai_port)
 
     # Start the Go OAI server
-    logger.info(f"Starting Go OAI server on port {oai_port}, connecting to gRPC worker at {grpc_endpoint}")
+    logger.info(
+        f"Starting Go OAI server on port {oai_port}, connecting to gRPC worker at {grpc_endpoint}"
+    )
     logger.info(f"Tokenizer path: {grpc_worker.model_path}")
 
     cmd = [str(go_oai_binary)]
@@ -289,7 +296,7 @@ def go_oai_server(
 @pytest.fixture(scope="class")
 def go_oai_server_multi(
     request,
-    grpc_workers: list["ModelInstance"],
+    grpc_workers: list[ModelInstance],
     go_oai_binary: Path,
     go_ffi_library: Path,
 ) -> Generator[tuple[str, int, str], None, None]:

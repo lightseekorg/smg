@@ -1,0 +1,16 @@
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = ["E", "F", "I", "W", "UP"]
+
+[lint.pycodestyle]
+# More lenient limit for comments, docstrings, and help strings
+max-line-length = 120
+
+[lint.per-file-ignores]
+"e2e_test/**" = ["F841", "E402"]
+"bindings/python/tests/**" = ["F841", "E402"]
+
+[format]
+# Black-compatible defaults

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -62,17 +61,24 @@ def parse_folder_name(folder_name: str) -> dict:
     """Parse experiment info from folder name.
 
     Expected patterns (newest to oldest):
-    - nightly_llama-8b_http_sglang_single -> model=llama-8b, protocol=http, runtime=sglang, worker_type=single
-    - nightly_llama-8b_grpc_vllm_multi -> model=llama-8b, protocol=grpc, runtime=vllm, worker_type=multi
-    - nightly_llama-8b_http_sglang -> model=llama-8b, protocol=http, runtime=sglang (worker_type=single)
-    - nightly_llama-8b_http (legacy) -> model=llama-8b, protocol=http
+    - nightly_meta-llama/Llama-3.1-8B-Instruct_http_sglang_single
+      -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=http,
+      runtime=sglang, worker_type=single
+    - nightly_meta-llama/Llama-3.1-8B-Instruct_grpc_vllm_multi
+      -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=grpc,
+      runtime=vllm, worker_type=multi
+    - nightly_meta-llama/Llama-3.1-8B-Instruct_http_sglang
+      -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=http,
+      runtime=sglang (worker_type=single)
+    - nightly_meta-llama/Llama-3.1-8B-Instruct_http (legacy)
+      -> model=meta-llama/Llama-3.1-8B-Instruct, protocol=http
     """
     info = {"model": "unknown", "protocol": "unknown", "runtime": None, "worker_type": "single"}
 
     # Remove nightly_ prefix
     name = folder_name.replace("nightly_", "")
 
-    # Try newest format: model_protocol_runtime_worker_type (e.g., llama-8b_grpc_sglang_single)
+    # Try newest format: model_protocol_runtime_worker_type (e.g., meta-llama/Llama-3.1-8B-Instruct_grpc_sglang_single)
     parts = name.rsplit("_", 3)
 
     if len(parts) >= 4 and parts[-1] in ("single", "multi") and parts[-2] in ("sglang", "vllm"):
@@ -200,14 +206,14 @@ def discover_experiments(base_dir: Path) -> list[ExperimentInfo]:
 def format_throughput(val: float) -> str:
     """Format throughput with K suffix."""
     if val >= 1000:
-        return f"{val/1000:.1f}K"
+        return f"{val / 1000:.1f}K"
     return f"{val:.0f}"
 
 
 def format_latency(val: float) -> str:
     """Format latency in ms or s."""
     if val < 1:
-        return f"{val*1000:.0f}ms"
+        return f"{val * 1000:.0f}ms"
     return f"{val:.2f}s"
 
 
@@ -219,7 +225,10 @@ def generate_table(runs: list[RunResult]) -> list[str]:
     sorted_runs = sorted(runs, key=lambda r: (r.scenario, r.concurrency))
 
     lines = [
-        "| Scenario | Concurrency | RPS | Output (tok/s) | TTFT (mean) | TTFT (p99) | TPOT (mean) | TPOT (p99) | E2E (mean) | E2E (p99) |",
+        (
+            "| Scenario | Concurrency | RPS | Output (tok/s) | TTFT (mean) | TTFT (p99) | "
+            "TPOT (mean) | TPOT (p99) | E2E (mean) | E2E (p99) |"
+        ),
         "|----------|-------------|-----|----------------|-------------|------------|-------------|------------|------------|-----------|",
     ]
 
@@ -262,7 +271,7 @@ def generate_overview_table(
                 # Check if any run had errors (0 RPS or 0 throughput indicates failure)
                 has_errors = any(r.rps == 0 or r.output_throughput == 0 for r in exp.runs)
                 if has_errors:
-                    row.append("\u26A0\uFE0F")  # Warning sign (partial failure)
+                    row.append("\u26a0\ufe0f")  # Warning sign (partial failure)
                 else:
                     row.append("\u2705")  # Green checkmark (success)
 
@@ -314,7 +323,7 @@ def generate_summary(base_dir: Path) -> str:
             # Show GPU info per runtime/worker combination
             gpu_info = f" ({exp.gpu_count}x {exp.gpu_type})" if exp.gpu_type != "unknown" else ""
 
-            lines.append(f"<details>")
+            lines.append("<details>")
             lines.append(f"<summary><b>{table_title}</b>{gpu_info}</summary>")
             lines.append("")
             lines.extend(generate_table(exp.runs))

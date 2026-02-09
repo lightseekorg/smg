@@ -1,0 +1,7 @@
+<svg width="180" height="64" viewBox="0 0 180 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- SMG Lockup - Color on Dark -->
+  <path d="M8 32 L32 10 L56 32 L32 23 Z" fill="#6366f1"/>
+  <path d="M8 42 L32 20 L56 42 L32 33 Z" fill="#818cf8"/>
+  <path d="M8 52 L32 30 L56 52 L32 43 Z" fill="#a5b4fc"/>
+  <text x="68" y="42" fill="#ffffff" font-family="Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif" font-size="28" font-weight="600" letter-spacing="3">SMG</text>
+</svg>

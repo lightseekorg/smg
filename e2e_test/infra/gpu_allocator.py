@@ -447,15 +447,11 @@ class GPUAllocator:
             for gpu_id in gpu_ids:
                 self._used_gpus.discard(gpu_id)
             # Remove slots that used these GPUs and release their ports
-            released_slots = [
-                s for s in self.slots if any(g in gpu_ids for g in s.gpu_ids)
-            ]
+            released_slots = [s for s in self.slots if any(g in gpu_ids for g in s.gpu_ids)]
             for slot in released_slots:
                 if slot.port is not None:
                     release_port(slot.port)
-            self.slots = [
-                s for s in self.slots if not any(g in gpu_ids for g in s.gpu_ids)
-            ]
+            self.slots = [s for s in self.slots if not any(g in gpu_ids for g in s.gpu_ids)]
             logger.info("Released GPUs %s, now used: %s", gpu_ids, self._used_gpus)
 
     def release_slot(self, slot: GPUSlot) -> None:

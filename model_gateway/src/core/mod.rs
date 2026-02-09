@@ -35,7 +35,7 @@ pub use model_card::{ModelCard, ProviderType};
 pub use retry::{is_retryable_status, RetryExecutor};
 pub use worker::{
     AttachedBody, BasicWorker, ConnectionMode, HealthConfig, RuntimeType, Worker, WorkerLoadGuard,
-    WorkerType,
+    WorkerType, DEFAULT_BOOTSTRAP_PORT, MOONCAKE_CONNECTOR,
 };
 pub use worker_builder::{BasicWorkerBuilder, DPAwareWorkerBuilder};
 pub use worker_manager::{LoadMonitor, WorkerManager};

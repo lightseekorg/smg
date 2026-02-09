@@ -1,0 +1,29 @@
+name: 'Setup TRT-LLM Backend'
+description: 'Create Python venv, restore/save TRT-LLM wheel cache, and install TRT-LLM.'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python venv
+      shell: bash
+      run: bash scripts/ci_setup_python_venv.sh
+
+    - name: Restore TRT-LLM wheel cache
+      id: trtllm-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: /tmp/trtllm-wheel
+        key: trtllm-wheel-${{ runner.os }}-${{ hashFiles('scripts/ci_install_trtllm.sh') }}
+        restore-keys: |
+          trtllm-wheel-${{ runner.os }}-
+
+    - name: Install TRT-LLM
+      shell: bash
+      run: bash scripts/ci_install_trtllm.sh
+
+    - name: Save TRT-LLM wheel cache
+      if: steps.trtllm-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: /tmp/trtllm-wheel
+        key: trtllm-wheel-${{ runner.os }}-${{ hashFiles('scripts/ci_install_trtllm.sh') }}

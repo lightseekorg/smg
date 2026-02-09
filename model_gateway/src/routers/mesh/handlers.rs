@@ -240,7 +240,14 @@ pub async fn update_app_config(
         )
             .into_response();
     };
-    handler.write_data(request.key.clone(), value);
+    if let Err(e) = handler.write_data(request.key.clone(), value) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to write app config: {}", e)})),
+        )
+            .into_response();
+    }
+
     info!("Updated app config: {}", request.key);
     (
         StatusCode::OK,
@@ -309,7 +316,16 @@ pub async fn set_global_rate_limit(
             }
         };
 
-        handler.write_data(GLOBAL_RATE_LIMIT_KEY.to_string(), config_bytes);
+        if let Err(e) = handler.write_data(GLOBAL_RATE_LIMIT_KEY.to_string(), config_bytes) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Failed to persist rate limit config: {}", e)
+                })),
+            )
+                .into_response();
+        }
+
         info!("Set global rate limit: {} req/s", request.limit_per_second);
 
         (

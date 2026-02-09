@@ -1,5 +1,7 @@
+use std::hint::black_box;
+
 use aho_corasick::AhoCorasick;
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 
 /// Naive implementation using nested loops with find()
 fn find_stop_sequence_naive(text: &str, stop_sequences: &[String]) -> Option<(usize, usize)> {

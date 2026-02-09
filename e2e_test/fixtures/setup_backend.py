@@ -7,61 +7,64 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import TYPE_CHECKING
 
+import anthropic
+import openai
 import pytest
 
 if TYPE_CHECKING:
     from infra import ModelPool
 
-from infra import RUNTIME_LABELS, get_runtime, is_trtllm, is_vllm
+from infra import (
+    DEFAULT_MODEL,
+    DEFAULT_ROUTER_TIMEOUT,
+    ENV_MODEL,
+    ENV_SKIP_BACKEND_SETUP,
+    LOCAL_MODES,
+    RUNTIME_LABELS,
+    THIRD_PARTY_MODELS,
+    ConnectionMode,
+    Gateway,
+    WorkerIdentity,
+    WorkerType,
+    get_runtime,
+    is_trtllm,
+    is_vllm,
+    launch_cloud_gateway,
+)
 
 from .markers import get_marker_kwargs, get_marker_value
 
 logger = logging.getLogger(__name__)
 
 
-@pytest.fixture(scope="class")
-def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
-    """Class-scoped fixture that launches a router for each test class.
+class _CachedBackend:
+    """A cached backend that can be reused across tests on the same thread."""
 
-    Routers are cheap to start (~1-2s) compared to workers (~30-60s), so we
-    launch a fresh router per test class for isolation while reusing the
-    expensive workers from model_pool.
+    __slots__ = ("gen", "value", "cls", "param")
 
-    Backend types:
-    - "http", "grpc": Gets existing worker from model_pool, launches router
-    - "pd_http", "pd_grpc": Launches prefill/decode workers via model_pool, launches PD router
-    - "openai", "xai", etc.: Launches cloud router (no local workers)
+    def __init__(self, gen, value, cls, param):
+        self.gen = gen  # Generator from _setup_*; close() triggers finally block
+        self.value = value  # Yielded (backend_name, model_path, client, gateway)
+        self.cls = cls  # Test class this was created for
+        self.param = param  # Fixture parameter (backend type)
 
-    Configuration via markers:
-    - @pytest.mark.model("model-id"): Override default model
-    - @pytest.mark.workers(count=1): Number of regular workers behind router
-    - @pytest.mark.workers(prefill=1, decode=1): PD worker configuration
-    - @pytest.mark.gateway(policy="round_robin", timeout=60): Gateway configuration
 
-    Returns:
-        Tuple of (backend_name, model_path, openai_client, gateway)
+# Per-thread cache: maps thread_id -> _CachedBackend
+# Allows function-scoped fixture to reuse backends within the same class,
+# while correctly tearing down when the test class changes on a thread.
+_thread_cache: dict[int, _CachedBackend] = {}
+_cache_lock = threading.Lock()
 
-    Usage:
-        @pytest.mark.parametrize("setup_backend", ["http"], indirect=True)
-        class TestBasic:
-            def test_chat(self, setup_backend):
-                backend, model, client, gateway = setup_backend
+
+def _create_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
+    """Extract configuration from request and return the appropriate backend generator.
+
+    Returns a generator that yields (backend_name, model_path, client, gateway).
+    The caller should use next(gen) to get the value and gen.close() to trigger cleanup.
     """
-    import openai
-    from infra import (
-        DEFAULT_MODEL,
-        DEFAULT_ROUTER_TIMEOUT,
-        ENV_MODEL,
-        ENV_SKIP_BACKEND_SETUP,
-        LOCAL_MODES,
-        ConnectionMode,
-        Gateway,
-        WorkerIdentity,
-        WorkerType,
-    )
-
     backend_name = request.param
 
     # Skip if requested
@@ -91,17 +94,10 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
 
     # PD disaggregation backends - explicit connection modes
     if backend_name == "pd_http":
-        yield from _setup_pd_http_backend(
-            request, model_pool, model_id, workers_config, gateway_config
-        )
-        return
+        return _setup_pd_http_backend(request, model_pool, model_id, workers_config, gateway_config)
 
     if backend_name == "pd_grpc":
-        # gRPC mode PD
-        yield from _setup_pd_grpc_backend(
-            request, model_pool, model_id, workers_config, gateway_config
-        )
-        return
+        return _setup_pd_grpc_backend(request, model_pool, model_id, workers_config, gateway_config)
 
     # Check if this is a local backend (grpc, http)
     try:
@@ -125,13 +121,12 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
 
             # Route to runtime-specific gRPC backend (vLLM, TRT-LLM)
             if is_vllm() or is_trtllm():
-                yield from _setup_grpc_backend(
+                return _setup_grpc_backend(
                     request, model_pool, model_id, workers_config, gateway_config
                 )
-                return
 
         # Otherwise use regular local backend (sglang grpc or http)
-        yield from _setup_local_backend(
+        return _setup_local_backend(
             request,
             model_pool,
             backend_name,
@@ -140,25 +135,132 @@ def setup_backend(request: pytest.FixtureRequest, model_pool: "ModelPool"):
             workers_config,
             gateway_config,
         )
-        return
 
     # Get storage backend from marker (default: memory)
     storage_backend = get_marker_value(request, "storage", default="memory")
 
     # Cloud backends: launch cloud router
-    yield from _setup_cloud_backend(backend_name, storage_backend, gateway_config)
+    return _setup_cloud_backend(backend_name, storage_backend, gateway_config)
+
+
+@pytest.fixture(scope="function")
+def setup_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
+    """Function-scoped fixture with per-thread caching for class-level reuse.
+
+    Under pytest-parallel's thread model (--tests-per-worker N), class-scoped
+    fixtures leak across class boundaries on the same thread. This fixture uses
+    function scope for correctness but manually caches backends per thread,
+    only tearing down and recreating when the test class or backend param changes.
+
+    Same performance as class-scoped: gateway startup (~1-2s) only happens on
+    class transitions, not for every test function.
+
+    Backend types:
+    - "http", "grpc": Gets existing worker from model_pool, launches router
+    - "pd_http", "pd_grpc": Launches prefill/decode workers via model_pool, launches PD router
+    - "openai", "xai", etc.: Launches cloud router (no local workers)
+
+    Configuration via markers:
+    - @pytest.mark.model("model-id"): Override default model
+    - @pytest.mark.workers(count=1): Number of regular workers behind router
+    - @pytest.mark.workers(prefill=1, decode=1): PD worker configuration
+    - @pytest.mark.gateway(policy="round_robin", timeout=60): Gateway configuration
+
+    Returns:
+        Tuple of (backend_name, model_path, openai_client, gateway)
+
+    Usage:
+        @pytest.mark.parametrize("setup_backend", ["http"], indirect=True)
+        class TestBasic:
+            def test_chat(self, setup_backend):
+                backend, model, client, gateway = setup_backend
+    """
+    thread_id = threading.get_ident()
+    cls = request.cls
+    param = request.param
+
+    # Check thread-local cache
+    reuse_value = None
+    old_entry = None
+    with _cache_lock:
+        cached = _thread_cache.get(thread_id)
+        if cached is not None:
+            if cached.cls is cls and cached.param == param:
+                reuse_value = cached.value
+            else:
+                old_entry = _thread_cache.pop(thread_id)
+
+    if reuse_value is not None:
+        logger.info(
+            "Thread %s: reusing cached backend (class=%s, param=%s)",
+            threading.current_thread().name,
+            cls.__name__ if cls else "N/A",
+            param,
+        )
+        yield reuse_value
+        return
+
+    # Teardown old backend if class/param changed on this thread
+    if old_entry is not None:
+        logger.info(
+            "Thread %s: class changed %s -> %s, tearing down old backend",
+            threading.current_thread().name,
+            old_entry.cls.__name__ if old_entry.cls else "N/A",
+            cls.__name__ if cls else "N/A",
+        )
+        old_entry.gen.close()
+
+    # Create new backend via the appropriate _setup_* generator
+    gen = _create_backend(request, model_pool)
+    value = next(gen)
+
+    try:
+        with _cache_lock:
+            _thread_cache[thread_id] = _CachedBackend(gen=gen, value=value, cls=cls, param=param)
+    except Exception:
+        gen.close()
+        raise
+
+    logger.info(
+        "Thread %s: created new backend (class=%s, param=%s)",
+        threading.current_thread().name,
+        cls.__name__ if cls else "N/A",
+        param,
+    )
+
+    yield value
+
+
+def cleanup_all_cached_backends() -> None:
+    """Cleanup all thread-cached backends.
+
+    Called from pytest_sessionfinish hook to ensure it runs exactly once,
+    not per-test (which is what happens with session-scoped autouse fixtures
+    under pytest-parallel's thread model).
+    """
+    with _cache_lock:
+        entries = list(_thread_cache.values())
+        _thread_cache.clear()
+    for entry in entries:
+        try:
+            logger.info(
+                "Session cleanup: tearing down cached backend (class=%s, param=%s)",
+                entry.cls.__name__ if entry.cls else "N/A",
+                entry.param,
+            )
+            entry.gen.close()
+        except Exception as e:
+            logger.warning("Failed to cleanup cached backend: %s", e)
 
 
 def _setup_pd_http_backend(
     request: pytest.FixtureRequest,
-    model_pool: "ModelPool",
+    model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
     gateway_config: dict,
 ):
     """Setup SGLang PD disaggregation backend (HTTP mode with bootstrap)."""
-    from infra import ConnectionMode
-
     yield from _setup_pd_backend_common(
         model_pool=model_pool,
         model_id=model_id,
@@ -171,14 +273,12 @@ def _setup_pd_http_backend(
 
 def _setup_pd_grpc_backend(
     request: pytest.FixtureRequest,
-    model_pool: "ModelPool",
+    model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
     gateway_config: dict,
 ):
     """Setup PD disaggregation backend with gRPC mode."""
-    from infra import ConnectionMode
-
     yield from _setup_pd_backend_common(
         model_pool=model_pool,
         model_id=model_id,
@@ -190,7 +290,7 @@ def _setup_pd_grpc_backend(
 
 
 def _setup_pd_backend_common(
-    model_pool: "ModelPool",
+    model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
     gateway_config: dict,
@@ -207,9 +307,6 @@ def _setup_pd_backend_common(
         connection_mode: ConnectionMode.HTTP for SGLang, ConnectionMode.GRPC for vLLM.
         backend_name: Backend name to yield ("pd_http" or "pd_grpc").
     """
-    import openai
-    from infra import Gateway, WorkerIdentity, WorkerType
-
     runtime = get_runtime()
     runtime_label = RUNTIME_LABELS.get(runtime, "SGLang")
     logger.info("Setting up %s PD backend for model %s", runtime_label, model_id)
@@ -291,9 +388,7 @@ def _setup_pd_backend_common(
                 num_decode,
                 len(workers_to_launch),
             )
-            new_instances = model_pool.launch_workers(
-                workers_to_launch, startup_timeout=300
-            )
+            new_instances = model_pool.launch_workers(workers_to_launch, startup_timeout=300)
 
             if not new_instances:
                 pytest.fail(
@@ -350,8 +445,7 @@ def _setup_pd_backend_common(
     )
 
     logger.info(
-        "Setup %s PD backend: model=%s, %d prefill + %d decode workers, "
-        "gateway=%s, policy=%s",
+        "Setup %s PD backend: model=%s, %d prefill + %d decode workers, gateway=%s, policy=%s",
         runtime_label,
         model_id,
         len(prefills),
@@ -374,15 +468,12 @@ def _setup_pd_backend_common(
 
 def _setup_grpc_backend(
     request: pytest.FixtureRequest,
-    model_pool: "ModelPool",
+    model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
     gateway_config: dict,
 ):
     """Setup a runtime-specific gRPC backend (vLLM or TensorRT-LLM)."""
-    import openai
-    from infra import Gateway
-
     runtime = get_runtime()
     runtime_label = RUNTIME_LABELS.get(runtime, runtime)
 
@@ -393,6 +484,7 @@ def _setup_grpc_backend(
         instance = model_pool.get_grpc_worker(model_id)
     except RuntimeError as e:
         pytest.fail(str(e))
+    assert instance is not None
 
     model_path = instance.model_path
     worker_urls = [instance.worker_url]
@@ -443,7 +535,7 @@ def _setup_grpc_backend(
 
 def _setup_local_backend(
     request: pytest.FixtureRequest,
-    model_pool: "ModelPool",
+    model_pool: ModelPool,
     backend_name: str,
     model_id: str,
     connection_mode,
@@ -451,9 +543,6 @@ def _setup_local_backend(
     gateway_config: dict,
 ):
     """Setup local backend (grpc, http)."""
-    import openai
-    from infra import Gateway, WorkerIdentity, WorkerType
-
     num_workers = workers_config.get("count") or 1
     instances: list = []  # Track instances for reference counting
 
@@ -484,9 +573,7 @@ def _setup_local_backend(
                     )
                     for i in range(missing)
                 ]
-                new_instances = model_pool.launch_workers(
-                    workers_to_launch, startup_timeout=300
-                )
+                new_instances = model_pool.launch_workers(workers_to_launch, startup_timeout=300)
                 # Acquire newly launched instances
                 for inst in new_instances:
                     inst.acquire()
@@ -564,16 +651,13 @@ def _setup_cloud_backend(
     storage_backend: str = "memory",
     gateway_config: dict | None = None,
 ):
-    """Setup cloud backend (openai, xai, etc.).
+    """Setup cloud backend (openai, xai, anthropic, etc.).
 
     Args:
-        backend_name: Cloud backend name (openai, xai).
+        backend_name: Cloud backend name (openai, xai, anthropic).
         storage_backend: History storage backend (memory, oracle).
         gateway_config: Gateway configuration from marker.
     """
-    import openai
-    from infra import THIRD_PARTY_MODELS, launch_cloud_gateway
-
     if backend_name not in THIRD_PARTY_MODELS:
         pytest.fail(f"Unknown cloud runtime: {backend_name}")
 
@@ -581,13 +665,11 @@ def _setup_cloud_backend(
     api_key_env = cfg.get("api_key_env")
 
     if api_key_env and not os.environ.get(api_key_env):
-        pytest.skip(f"{api_key_env} not set, skipping {backend_name} tests")
+        pytest.fail(f"{api_key_env} not set for {backend_name} tests")
 
     extra_args = gateway_config.get("extra_args") if gateway_config else None
 
-    logger.info(
-        "Launching cloud backend: %s with storage=%s", backend_name, storage_backend
-    )
+    logger.info("Launching cloud backend: %s with storage=%s", backend_name, storage_backend)
     gateway = launch_cloud_gateway(
         backend_name,
         history_backend=storage_backend,
@@ -595,10 +677,17 @@ def _setup_cloud_backend(
     )
 
     api_key = os.environ.get(api_key_env) if api_key_env else "not-used"
-    client = openai.OpenAI(
-        base_url=f"{gateway.base_url}/v1",
-        api_key=api_key,
-    )
+
+    if cfg.get("client_type") == "anthropic":
+        client = anthropic.Anthropic(
+            base_url=gateway.base_url,
+            api_key=api_key,
+        )
+    else:
+        client = openai.OpenAI(
+            base_url=f"{gateway.base_url}/v1",
+            api_key=api_key,
+        )
 
     try:
         yield backend_name, cfg["model"], client, gateway
@@ -608,7 +697,7 @@ def _setup_cloud_backend(
 
 
 @pytest.fixture
-def backend_router(request: pytest.FixtureRequest, model_pool: "ModelPool"):
+def backend_router(request: pytest.FixtureRequest, model_pool: ModelPool):
     """Function-scoped fixture for launching a fresh router per test.
 
     This launches a new Gateway for each test, pointing to workers from the pool.
@@ -619,8 +708,6 @@ def backend_router(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         def test_router_state(backend_router):
             gateway = backend_router
     """
-    from infra import DEFAULT_MODEL, ENV_MODEL, ConnectionMode, Gateway
-
     backend_name = request.param
     model_id = os.environ.get(ENV_MODEL, DEFAULT_MODEL)
 
@@ -634,6 +721,7 @@ def backend_router(request: pytest.FixtureRequest, model_pool: "ModelPool"):
         pytest.skip(f"Model {model_id}:{backend_name} not available in pool")
     except RuntimeError as e:
         pytest.fail(str(e))
+    assert instance is not None
 
     gateway = Gateway()
     try:

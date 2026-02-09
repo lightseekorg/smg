@@ -24,3 +24,6 @@ tracing.workspace = true
 # Only used by tool-parser
 regex = "1.10"
 rustpython-parser = "0.4.0"
+
+[lints]
+workspace = true

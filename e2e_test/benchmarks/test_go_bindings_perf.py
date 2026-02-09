@@ -17,7 +17,7 @@ pytest_plugins = ["e2e_test.bindings_go.conftest"]
 @pytest.mark.e2e
 @pytest.mark.workers(count=4)
 @pytest.mark.gateway(policy="round_robin")
-@pytest.mark.model("llama-1b")
+@pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 class TestGoBindingsPerf:
     """Performance benchmark for Go OAI server.
 

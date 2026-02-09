@@ -16,6 +16,7 @@ use super::common::{GenerationRequest, UsageInfo};
 // ============================================================================
 
 /// Classification request - compatible with vLLM's /v1/classify API
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClassifyRequest {
     /// ID of the model to use
@@ -28,19 +29,15 @@ pub struct ClassifyRequest {
     pub input: Value,
 
     /// Optional user identifier
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
     /// SGLang extension: request id for tracking
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub rid: Option<String>,
 
     /// SGLang extension: request priority
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
 
     /// SGLang extension: enable/disable logging of metrics
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub log_metrics: Option<bool>,
 }
 

@@ -21,6 +21,7 @@ use super::{
         record_snapshot_duration, record_snapshot_trigger, update_peer_connections,
         ConvergenceTracker,
     },
+    mtls::MTLSManager,
     node_state_machine::NodeStateMachine,
     partition::PartitionDetector,
     service::{
@@ -46,11 +47,12 @@ pub struct GossipService {
     sync_manager: Option<Arc<MeshSyncManager>>, // Optional sync manager for applying remote updates
     state_machine: Option<Arc<NodeStateMachine>>,
     partition_detector: Option<Arc<PartitionDetector>>,
+    mtls_manager: Option<Arc<MTLSManager>>,
 }
 
 impl GossipService {
     /// Create snapshot chunks for a store
-    async fn create_snapshot_chunks(
+    pub async fn create_snapshot_chunks(
         &self,
         store_type: LocalStoreType,
         chunk_size: usize,
@@ -235,6 +237,7 @@ impl GossipService {
             sync_manager: None,
             state_machine: None,
             partition_detector: None,
+            mtls_manager: None,
         }
     }
 
@@ -261,12 +264,21 @@ impl GossipService {
         self
     }
 
+    pub fn with_mtls_manager(mut self, mtls_manager: Arc<MTLSManager>) -> Self {
+        self.mtls_manager = Some(mtls_manager);
+        self
+    }
+
     pub async fn serve_ping_with_shutdown<F: std::future::Future<Output = ()>>(
         self,
         signal: F,
     ) -> Result<()> {
         let listen_addr = self.self_addr;
         let service = GossipServer::new(self);
+
+        // For now, start without TLS support
+        // TODO: Implement TLS support using tonic's transport layer
+        // The mTLS manager is available but needs proper integration with tonic's transport
         Server::builder()
             .add_service(service)
             .serve_with_shutdown(listen_addr, signal)
@@ -332,7 +344,7 @@ impl Gossip for GossipService {
             }
             Some(gossip::gossip_message::Payload::PingReq(PingReq { node: Some(node) })) => {
                 log::info!("PingReq to node {} addr:{}", node.name, node.address);
-                let res = try_ping(&node, None).await?;
+                let res = try_ping(&node, None, self.mtls_manager.clone()).await?;
                 Ok(Response::new(res))
             }
             _ => Err(Status::invalid_argument("Invalid message payload")),
@@ -559,7 +571,7 @@ impl Gossip for GossipService {
                                     }
 
                                     let store_type = LocalStoreType::from_proto(update.store);
-                                    log::info!("Received incremental update from {}: store={:?}, {} updates",
+                                    log::debug!("Received incremental update from {}: store={:?}, {} updates",
                                         peer_id, store_type, update.updates.len());
 
                                     // Apply incremental updates to state stores
@@ -624,6 +636,42 @@ impl Gossip for GossipService {
                                                         }
                                                     }
                                                 }
+                                                LocalStoreType::App => {
+                                                    // Deserialize and apply app state
+                                                    if let Ok(app_state) = serde_json::from_slice::<
+                                                        super::stores::AppState,
+                                                    >(
+                                                        &state_update.value
+                                                    ) {
+                                                        // Apply app state directly to the store
+                                                        if let Some(ref stores) = stores {
+                                                            stores.app.insert(
+                                                                SKey(app_state.key.clone()),
+                                                                app_state,
+                                                                state_update.actor.clone(),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                LocalStoreType::Membership => {
+                                                    // Deserialize and apply membership state
+                                                    if let Ok(membership_state) =
+                                                        serde_json::from_slice::<
+                                                            super::stores::MembershipState,
+                                                        >(
+                                                            &state_update.value
+                                                        )
+                                                    {
+                                                        // Apply membership state directly to the store
+                                                        if let Some(ref stores) = stores {
+                                                            stores.membership.insert(
+                                                                SKey(membership_state.name.clone()),
+                                                                membership_state,
+                                                                state_update.actor.clone(),
+                                                            );
+                                                        }
+                                                    }
+                                                }
                                                 LocalStoreType::RateLimit => {
                                                     // Deserialize and apply rate limit counter
                                                     if let Ok(counter) = serde_json::from_slice::<
@@ -641,9 +689,6 @@ impl Gossip for GossipService {
                                                                 &sync_counter,
                                                             );
                                                     }
-                                                }
-                                                _ => {
-                                                    // Other store types handled elsewhere
                                                 }
                                             }
                                         }
@@ -686,6 +731,7 @@ impl Gossip for GossipService {
                                         sync_manager: sync_manager.clone(),
                                         state_machine: None,
                                         partition_detector: None,
+                                        mtls_manager: None,
                                     };
                                     let chunks =
                                         service.create_snapshot_chunks(store_type, 100).await; // chunk_size = 100 entries

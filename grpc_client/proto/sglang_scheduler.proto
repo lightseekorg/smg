@@ -232,7 +232,7 @@ message GenerateError {
 // Output logprobs - all values are present (no None)
 message OutputLogProbs {
   repeated float token_logprobs = 1;
-  repeated int32 token_ids = 2;
+  repeated uint32 token_ids = 2;
 
   // Top logprobs at each position
   repeated TopLogProbs top_logprobs = 3;
@@ -241,7 +241,7 @@ message OutputLogProbs {
 // Input logprobs - first token has no logprob (None)
 message InputLogProbs {
   repeated InputTokenLogProb token_logprobs = 1;
-  repeated int32 token_ids = 2;
+  repeated uint32 token_ids = 2;
 
   // Top logprobs at each position
   repeated TopLogProbs top_logprobs = 3;
@@ -254,7 +254,7 @@ message InputTokenLogProb {
 
 message TopLogProbs {
   repeated float values = 1;
-  repeated int32 token_ids = 2;
+  repeated uint32 token_ids = 2;
 }
 
 message HiddenStates {

@@ -20,6 +20,7 @@ use crate::{builders::ResponsesResponseBuilder, validated::Normalizable};
 // Response Tools (MCP and others)
 // ============================================================================
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResponseTool {
     #[serde(rename = "type")]
@@ -27,23 +28,15 @@ pub struct ResponseTool {
     // Function tool fields (used when type == "function")
     // In Responses API, function fields are flattened at the top level
     #[serde(flatten)]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub function: Option<Function>,
     // MCP-specific fields (used when type == "mcp")
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization: Option<String>,
     /// Custom headers to send to MCP server (from request payload, not HTTP headers)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub server_label: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub server_description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub require_approval: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
 }
 
@@ -76,12 +69,11 @@ pub enum ResponseToolType {
 // Reasoning Parameters
 // ============================================================================
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResponseReasoningParam {
     #[serde(default = "default_reasoning_effort")]
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<ReasoningSummary>,
 }
 
@@ -197,16 +189,16 @@ pub enum ResponseReasoningContent {
 }
 
 /// MCP Tool information for the mcp_list_tools output item
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpToolInfo {
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Value>,
 }
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
@@ -223,7 +215,6 @@ pub enum ResponseOutputItem {
         id: String,
         summary: Vec<String>,
         content: Vec<ResponseReasoningContent>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
     },
     #[serde(rename = "function_call")]
@@ -232,7 +223,6 @@ pub enum ResponseOutputItem {
         call_id: String,
         name: String,
         arguments: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         output: Option<String>,
         status: String,
     },
@@ -246,10 +236,8 @@ pub enum ResponseOutputItem {
     McpCall {
         id: String,
         status: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         approval_request_id: Option<String>,
         arguments: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
         name: String,
         output: String,
@@ -266,9 +254,7 @@ pub enum ResponseOutputItem {
         id: String,
         status: CodeInterpreterCallStatus,
         container_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         code: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         outputs: Option<Vec<CodeInterpreterOutput>>,
     },
     #[serde(rename = "file_search_call")]
@@ -276,7 +262,6 @@ pub enum ResponseOutputItem {
         id: String,
         status: FileSearchCallStatus,
         queries: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         results: Option<Vec<FileSearchResult>>,
     },
 }
@@ -355,15 +340,13 @@ pub enum FileSearchCallStatus {
 }
 
 /// A result from file search.
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FileSearchResult {
     pub file_id: String,
     pub filename: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub attributes: Option<Value>,
 }
 
@@ -400,11 +383,10 @@ pub enum ResponseStatus {
     Cancelled,
 }
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReasoningInfo {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 }
 
@@ -420,6 +402,7 @@ pub struct TextConfig {
 }
 
 /// Text format: text (default), json_object (legacy), or json_schema (recommended)
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum TextFormat {
@@ -433,9 +416,7 @@ pub enum TextFormat {
     JsonSchema {
         name: String,
         schema: Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         strict: Option<bool>,
     },
 }
@@ -462,14 +443,13 @@ pub enum IncludeField {
 // ============================================================================
 
 /// OpenAI Responses API usage format (different from standard UsageInfo)
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResponseUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub total_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens_details: Option<InputTokensDetails>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens_details: Option<OutputTokensDetails>,
 }
 
@@ -1213,6 +1193,7 @@ pub fn generate_id(prefix: &str) -> String {
     format!("{}_{}", prefix, hex_string)
 }
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResponsesResponse {
     /// Response ID
@@ -1229,19 +1210,15 @@ pub struct ResponsesResponse {
     pub status: ResponseStatus,
 
     /// Error information if status is failed
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Value>,
 
     /// Incomplete details if response was truncated
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub incomplete_details: Option<Value>,
 
     /// System instructions used
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
 
     /// Max output tokens setting
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
 
     /// Model name
@@ -1256,11 +1233,9 @@ pub struct ResponsesResponse {
     pub parallel_tool_calls: bool,
 
     /// Previous response ID if this is a continuation
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_response_id: Option<String>,
 
     /// Reasoning information
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningInfo>,
 
     /// Whether the response is stored
@@ -1268,11 +1243,9 @@ pub struct ResponsesResponse {
     pub store: bool,
 
     /// Temperature setting used
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
 
     /// Text format settings
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<TextConfig>,
 
     /// Tool choice setting
@@ -1284,23 +1257,18 @@ pub struct ResponsesResponse {
     pub tools: Vec<ResponseTool>,
 
     /// Top-p setting used
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
 
     /// Truncation strategy used
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation: Option<String>,
 
     /// Usage information
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<ResponsesUsage>,
 
     /// User identifier
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
     /// Safety identifier for content moderation
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub safety_identifier: Option<String>,
 
     /// Additional metadata

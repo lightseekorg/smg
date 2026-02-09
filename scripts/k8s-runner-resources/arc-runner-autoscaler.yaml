@@ -1,0 +1,39 @@
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: HorizontalRunnerAutoscaler
+metadata:
+  name: arc-runner-h100-autoscaler
+  namespace: actions-runner-system
+spec:
+  scaleTargetRef:
+    kind: RunnerDeployment
+    name: arc-runner-gpu-h100
+
+  minReplicas: 10
+  maxReplicas: 20
+
+  metrics:
+    - type: PercentageRunnersBusy
+      scaleUpThreshold: "0.95"
+      scaleDownThreshold: "0.25"
+      scaleUpFactor: "0.5"
+      scaleDownFactor: "0.5"
+---
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: HorizontalRunnerAutoscaler
+metadata:
+  name: arc-cpu-runner-autoscaler
+  namespace: actions-runner-system
+spec:
+  scaleTargetRef:
+    kind: RunnerDeployment
+    name: arc-runner-cpu
+
+  minReplicas: 4
+  maxReplicas: 8
+
+  metrics:
+    - type: PercentageRunnersBusy
+      scaleUpThreshold: "0.95"
+      scaleDownThreshold: "0.25"
+      scaleUpFactor: "0.5"
+      scaleDownFactor: "0.5"

@@ -1,5 +1,4 @@
 default_stages: [pre-commit, pre-push, manual]
-exclude: ^(bindings/golang/|bindings/python/|e2e_test/)
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -52,3 +51,10 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format

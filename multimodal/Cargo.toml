@@ -39,3 +39,6 @@ anyhow = "1.0.100"
 npyz = { version = "0.8", features = ["npz"] }
 tempfile = "3.8"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

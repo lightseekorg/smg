@@ -195,9 +195,7 @@ def generate_golden_llava_next(image_path: str, output_dir: str) -> dict:
         print("LlavaNextImageProcessor not available, skipping llava_next")
         return None
 
-    processor = LlavaNextImageProcessor.from_pretrained(
-        "llava-hf/llava-v1.6-mistral-7b-hf"
-    )
+    processor = LlavaNextImageProcessor.from_pretrained("llava-hf/llava-v1.6-mistral-7b-hf")
     image = Image.open(image_path).convert("RGB")
     original_size = image.size
 
@@ -330,9 +328,7 @@ def generate_golden_qwen3_vl(image_path: str, output_dir: str) -> dict:
     """
     from transformers import AutoProcessor
 
-    processor = AutoProcessor.from_pretrained(
-        "Qwen/Qwen3-VL-8B-Instruct", trust_remote_code=True
-    )
+    processor = AutoProcessor.from_pretrained("Qwen/Qwen3-VL-8B-Instruct", trust_remote_code=True)
     image = Image.open(image_path).convert("RGB")
     original_size = image.size
 
@@ -654,9 +650,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate golden outputs for vision processor testing"
     )
-    parser.add_argument(
-        "--model", "-m", help="Specific model to generate (default: all)"
-    )
+    parser.add_argument("--model", "-m", help="Specific model to generate (default: all)")
     parser.add_argument("--image", "-i", action="append", help="Specific image path(s)")
     parser.add_argument(
         "--output-dir",

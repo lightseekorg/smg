@@ -19,6 +19,7 @@ from .hooks import (
     pytest_collection_modifyitems,
     pytest_configure,
     pytest_runtest_setup,
+    pytest_sessionfinish,
     validate_gpu_requirements,
 )
 
@@ -35,6 +36,7 @@ __all__ = [
     "pytest_collection_finish",
     "pytest_configure",
     "pytest_runtest_setup",
+    "pytest_sessionfinish",
     "get_pool_requirements",
     "validate_gpu_requirements",
     "is_parallel_execution",

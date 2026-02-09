@@ -18,22 +18,16 @@ class BenchmarkResult:
     file_name: str
 
     @classmethod
-    def from_json(cls, path: Path) -> "BenchmarkResult":
+    def from_json(cls, path: Path) -> BenchmarkResult:
         """Parse benchmark results from JSON file."""
         with path.open() as f:
             data = json.load(f)
         stats = data.get("aggregated_metrics", {}).get("stats", {})
         return cls(
             ttft_mean=float(stats.get("ttft", {}).get("mean", float("inf"))),
-            e2e_latency_mean=float(
-                stats.get("e2e_latency", {}).get("mean", float("inf"))
-            ),
-            input_throughput_mean=float(
-                stats.get("input_throughput", {}).get("mean", 0.0)
-            ),
-            output_throughput_mean=float(
-                stats.get("output_throughput", {}).get("mean", 0.0)
-            ),
+            e2e_latency_mean=float(stats.get("e2e_latency", {}).get("mean", float("inf"))),
+            input_throughput_mean=float(stats.get("input_throughput", {}).get("mean", 0.0)),
+            output_throughput_mean=float(stats.get("output_throughput", {}).get("mean", 0.0)),
             file_name=path.name,
         )
 
@@ -85,7 +79,7 @@ class GPUUtilization:
     per_gpu: dict[str, dict[str, float]]
 
     @classmethod
-    def from_json(cls, path: Path) -> "GPUUtilization | None":
+    def from_json(cls, path: Path) -> GPUUtilization | None:
         """Parse GPU utilization from JSON file."""
         try:
             with path.open() as f:

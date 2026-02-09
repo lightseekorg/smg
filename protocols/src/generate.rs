@@ -267,20 +267,18 @@ pub struct GenerateResponse {
 }
 
 /// Metadata for a single generate completion
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateMetaInfo {
     pub id: String,
     pub finish_reason: GenerateFinishReason,
     pub prompt_tokens: u32,
     pub weight_version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub input_token_logprobs: Option<Vec<Vec<Option<f64>>>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub output_token_logprobs: Option<Vec<Vec<Option<f64>>>>,
     pub completion_tokens: u32,
     pub cached_tokens: u32,
     pub e2e_latency: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_stop: Option<Value>,
 }
 

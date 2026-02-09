@@ -8,14 +8,13 @@ import random
 import signal
 import sys
 import time
-from typing import List
 
 import requests
 from setproctitle import setproctitle
-from smg.launch_router import RouterArgs, launch_router
-
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import is_port_available
+
+from smg.launch_router import RouterArgs, launch_router
 
 
 def setup_logger():
@@ -42,8 +41,10 @@ def run_server(server_args, dp_rank):
     """
     Note:
 
-    1. Without os.setpgrp(), all processes share the same PGID. When you press Ctrl+C, the terminal sends SIGINT to all processes in the group simultaneously.
-    This can cause leaf processes to terminate first, which messes up the cleaning order and produces orphaned processes.
+    1. Without os.setpgrp(), all processes share the same PGID. When you press Ctrl+C,
+    the terminal sends SIGINT to all processes in the group simultaneously.
+    This can cause leaf processes to terminate first, which messes up the cleaning order
+    and produces orphaned processes.
 
     Terminal (PGID=100)
     └── Main Python Process (PGID=100)
@@ -83,9 +84,7 @@ def run_server(server_args, dp_rank):
         launch_server(server_args)
 
 
-def launch_server_process(
-    server_args: ServerArgs, worker_port: int, dp_id: int
-) -> mp.Process:
+def launch_server_process(server_args: ServerArgs, worker_port: int, dp_id: int) -> mp.Process:
     """Launch a single server process with the given args and port."""
     server_args = copy.deepcopy(server_args)
     server_args.port = worker_port
@@ -113,9 +112,9 @@ def wait_for_server_health(host: str, port: int, timeout: int = 300) -> bool:
     return False
 
 
-def find_available_ports(base_port: int, count: int) -> List[int]:
+def find_available_ports(base_port: int, count: int) -> list[int]:
     """Find consecutive available ports starting from base_port."""
-    available_ports = []
+    available_ports: list[int] = []
     current_port = base_port
 
     while len(available_ports) < count:
@@ -126,8 +125,10 @@ def find_available_ports(base_port: int, count: int) -> List[int]:
     return available_ports
 
 
-def cleanup_processes(processes: List[mp.Process]):
+def cleanup_processes(processes: list[mp.Process]):
     for process in processes:
+        if process.pid is None:
+            continue
         logger.info(f"Terminating process group {process.pid}")
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -138,10 +139,8 @@ def cleanup_processes(processes: List[mp.Process]):
     # Wait for processes to terminate
     for process in processes:
         process.join(timeout=5)
-        if process.is_alive():
-            logger.warning(
-                f"Process {process.pid} did not terminate gracefully, forcing kill"
-            )
+        if process.is_alive() and process.pid is not None:
+            logger.warning(f"Process {process.pid} did not terminate gracefully, forcing kill")
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
@@ -154,9 +153,7 @@ def main():
     # CUDA runtime isn't fork-safe, which can lead to subtle bugs or crashes
     mp.set_start_method("spawn")
 
-    parser = argparse.ArgumentParser(
-        description="Launch SGLang router and server processes"
-    )
+    parser = argparse.ArgumentParser(description="Launch SGLang router and server processes")
 
     ServerArgs.add_cli_args(parser)
     RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
@@ -173,9 +170,7 @@ def main():
     router_args = RouterArgs.from_cli_args(args, use_router_prefix=True)
 
     # Find available ports for workers
-    worker_ports = find_available_ports(
-        args.router_dp_worker_base_port, server_args.dp_size
-    )
+    worker_ports = find_available_ports(args.router_dp_worker_base_port, server_args.dp_size)
 
     # Start server processes
     server_processes = []
@@ -185,20 +180,18 @@ def main():
         proc = launch_server_process(server_args, worker_port, i)
         server_processes.append(proc)
 
-    signal.signal(signal.SIGINT, lambda sig, frame: cleanup_processes(server_processes))
-    signal.signal(
-        signal.SIGTERM, lambda sig, frame: cleanup_processes(server_processes)
-    )
-    signal.signal(
-        signal.SIGQUIT, lambda sig, frame: cleanup_processes(server_processes)
-    )
+    def _handle_shutdown(sig, frame):
+        cleanup_processes(server_processes)
+        sys.exit(128 + sig)
+
+    signal.signal(signal.SIGINT, _handle_shutdown)
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+    signal.signal(signal.SIGQUIT, _handle_shutdown)
 
     # Update router args with worker URLs
     # Use grpc:// protocol if server is in gRPC mode, otherwise http://
     protocol = "grpc" if server_args.grpc_mode else "http"
-    router_args.worker_urls = [
-        f"{protocol}://{server_args.host}:{port}" for port in worker_ports
-    ]
+    router_args.worker_urls = [f"{protocol}://{server_args.host}:{port}" for port in worker_ports]
 
     # Start the router
     try:
