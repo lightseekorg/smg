@@ -18,22 +18,10 @@ pub mod generate;
 pub mod interactions;
 pub mod messages;
 pub mod parser;
-<<<<<<< HEAD
 pub mod realtime_conversation;
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
+pub mod realtime_events;
 pub mod realtime_response;
-=======
 pub mod realtime_session;
->>>>>>> 2be1dc8 (feat(realtime api):realtime api conversation protocol)
-=======
->>>>>>> d1a99af (feat(realtime api):realtime api response protocol)
-=======
-=======
-pub mod realtime_session;
->>>>>>> a68799f (feat(realtime api) realtime api session and transcription_session protocol)
->>>>>>> c8a34b8 (feat(realtime api) realtime api session and transcription_session protocol)
 pub mod rerank;
 pub mod responses;
 pub mod sampling_params;
