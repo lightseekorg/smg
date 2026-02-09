@@ -627,6 +627,12 @@ pub(super) async fn handle_simple_streaming_passthrough(
                     previous_response_id.as_deref(),
                 );
 
+                // Read conversation_store_id from task-local storage in async context
+                let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
+                    .try_with(|id| id.clone())
+                    .ok()
+                    .flatten();
+
                 // Always persist conversation items and response (even without conversation)
                 if let Err(err) = persist_conversation_items(
                     storage.conversation.clone(),
@@ -634,6 +640,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                     storage.response.clone(),
                     &response_json,
                     &original_request,
+                    conversation_store_id,
                 )
                 .await
                 {
@@ -911,6 +918,12 @@ pub(super) async fn handle_streaming_with_tool_interception(
                         previous_response_id.as_deref(),
                     );
 
+                    // Read conversation_store_id from task-local storage in async context
+                    let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
+                        .try_with(|id| id.clone())
+                        .ok()
+                        .flatten();
+
                     // Always persist conversation items and response (even without conversation)
                     if let Err(err) = persist_conversation_items(
                         storage.conversation.clone(),
@@ -918,6 +931,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                         storage.response.clone(),
                         &response_json,
                         &original_request,
+                        conversation_store_id,
                     )
                     .await
                     {
