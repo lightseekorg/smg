@@ -14,6 +14,10 @@ use super::orchestrator::{
 use crate::{
     approval::ApprovalMode,
     inventory::{QualifiedToolName, ToolEntry},
+    responses_bridge::{
+        build_chat_function_tools_with_names, build_function_tools_json_with_names,
+        build_mcp_list_tools_item, build_mcp_list_tools_json, build_response_tools_with_names,
+    },
     tenant::TenantContext,
     transform::ResponseFormat,
 };
@@ -201,26 +205,17 @@ impl<'a> McpToolSession<'a> {
 
     /// Build function-tool JSON payloads for upstream model calls.
     pub fn build_function_tools_json(&self) -> Vec<serde_json::Value> {
-        crate::responses_bridge::build_function_tools_json_with_names(
-            &self.mcp_tools,
-            Some(&self.exposed_name_by_qualified),
-        )
+        build_function_tools_json_with_names(&self.mcp_tools, Some(&self.exposed_name_by_qualified))
     }
 
     /// Build Chat API `Tool` structs for chat completions.
     pub fn build_chat_function_tools(&self) -> Vec<openai_protocol::common::Tool> {
-        crate::responses_bridge::build_chat_function_tools_with_names(
-            &self.mcp_tools,
-            Some(&self.exposed_name_by_qualified),
-        )
+        build_chat_function_tools_with_names(&self.mcp_tools, Some(&self.exposed_name_by_qualified))
     }
 
     /// Build Responses API `ResponseTool` structs.
     pub fn build_response_tools(&self) -> Vec<openai_protocol::responses::ResponseTool> {
-        crate::responses_bridge::build_response_tools_with_names(
-            &self.mcp_tools,
-            Some(&self.exposed_name_by_qualified),
-        )
+        build_response_tools_with_names(&self.mcp_tools, Some(&self.exposed_name_by_qualified))
     }
 
     /// Build `mcp_list_tools` JSON for a specific server.
@@ -230,7 +225,7 @@ impl<'a> McpToolSession<'a> {
         server_key: &str,
     ) -> serde_json::Value {
         let tools = self.list_tools_for_server(server_key);
-        crate::responses_bridge::build_mcp_list_tools_json(server_label, &tools)
+        build_mcp_list_tools_json(server_label, &tools)
     }
 
     /// Build typed `mcp_list_tools` output item for a specific server.
@@ -240,7 +235,7 @@ impl<'a> McpToolSession<'a> {
         server_key: &str,
     ) -> openai_protocol::responses::ResponseOutputItem {
         let tools = self.list_tools_for_server(server_key);
-        crate::responses_bridge::build_mcp_list_tools_item(server_label, &tools)
+        build_mcp_list_tools_item(server_label, &tools)
     }
 
     fn build_exposed_function_tools(
