@@ -143,7 +143,7 @@ docs(readme): update installation instructions
 
 - **Questions**: Open a [GitHub Discussion](https://github.com/lightseekorg/smg/discussions)
 - **Bugs**: Open an [Issue](https://github.com/lightseekorg/smg/issues)
-- **Chat**: Join our community on Discord
+- **Chat**: Join our community on [Discord](https://discord.gg/wkQ73CVTvR)
 
 ---
 
