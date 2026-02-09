@@ -73,6 +73,7 @@ impl CrdtOrMap {
 
     /// Insert key-value pair (transparent operation)
     pub fn insert(&self, key: String, value: Vec<u8>) -> Option<Vec<u8>> {
+        let prev = self.store.get(&key);
         let timestamp = self.clock.tick();
         let operation = Operation::insert(key.clone(), value.clone(), timestamp, self.replica_id);
 
@@ -85,7 +86,7 @@ impl CrdtOrMap {
 
         self.apply_insert(&key, value.clone(), timestamp, self.replica_id);
 
-        self.store.insert(key, value)
+        prev
     }
 
     /// Atomically update a key under the same DashMap entry lock.
@@ -121,9 +122,7 @@ impl CrdtOrMap {
             key, timestamp, self.replica_id
         );
 
-        self.apply_remove(key, timestamp, self.replica_id);
-
-        self.store.remove(key)
+        self.apply_remove(key, timestamp, self.replica_id)
     }
 
     /// Get value by key
@@ -169,7 +168,7 @@ impl CrdtOrMap {
                 replica_id,
             } => {
                 self.clock.update(*timestamp);
-                self.apply_remove(key, *timestamp, *replica_id);
+                let _ = self.apply_remove(key, *timestamp, *replica_id);
             }
         }
     }
@@ -246,16 +245,19 @@ impl CrdtOrMap {
     }
 
     /// Apply remove
-    fn apply_remove(&self, key: &str, timestamp: u64, replica_id: ReplicaId) {
+    fn apply_remove(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> Option<Vec<u8>> {
         let tombstone = ValueMetadata::tombstone(timestamp, replica_id);
+        let mut removed_value = None;
 
         self.metadata
             .entry(key.to_string())
             .and_modify(|versions| {
                 versions.push(tombstone.clone());
-                self.store.remove(key);
+                removed_value = self.store.remove(key);
             })
             .or_insert_with(|| vec![tombstone]);
+
+        removed_value
     }
 }
 
