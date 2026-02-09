@@ -89,6 +89,7 @@ jobs:
           mkdir -p grpc_client/python/smg_grpc_proto/proto
           cp grpc_client/proto/*.proto grpc_client/python/smg_grpc_proto/proto/
           pip install build grpcio-tools
+          rm -rf grpc_client/python/dist/
           cd grpc_client/python && python -m build
 
       - name: Test import
@@ -113,7 +114,7 @@ jobs:
       - name: Install protoc and Go plugins
         run: |
           sudo apt-get update && sudo apt-get install -y protobuf-compiler
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 
       - name: Regenerate Go stubs
