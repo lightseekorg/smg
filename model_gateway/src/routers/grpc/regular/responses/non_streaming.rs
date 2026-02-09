@@ -14,7 +14,8 @@ use tracing::{debug, error, trace, warn};
 use super::{
     common::{
         build_next_request, convert_mcp_tools_to_chat_tools, extract_all_tool_calls_from_chat,
-        load_conversation_history, prepare_chat_tools_and_choice, ExtractedToolCall, ResponsesCallContext, ToolLoopState,
+        load_conversation_history, prepare_chat_tools_and_choice, ExtractedToolCall,
+        ResponsesCallContext, ToolLoopState,
     },
     conversions,
 };
