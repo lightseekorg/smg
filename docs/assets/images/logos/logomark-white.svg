@@ -1,4 +1,4 @@
-<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <!-- AMG Logomark - Mono White -->
   <path d="M8 32 L32 10 L56 32 L32 23 Z" fill="#ffffff"/>
   <path d="M8 42 L32 20 L56 42 L32 33 Z" fill="rgba(255,255,255,0.7)"/>
