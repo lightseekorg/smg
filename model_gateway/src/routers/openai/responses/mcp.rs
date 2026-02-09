@@ -17,10 +17,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
-    mcp::{
-        build_function_tools_json_with_names, build_mcp_list_tools_json, McpToolSession,
-        ResponseFormat, ResponseTransformer, ToolExecutionInput,
-    },
+    mcp::{McpToolSession, ResponseFormat, ResponseTransformer, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         event_types::{
@@ -283,10 +280,7 @@ pub(super) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpT
         }
     }
 
-    let session_tools = build_function_tools_json_with_names(
-        session.mcp_tools(),
-        Some(session.exposed_name_by_qualified()),
-    );
+    let session_tools = session.build_function_tools_json();
     let mut tools_json = Vec::with_capacity(retained_tools.len() + session_tools.len());
     tools_json.append(&mut retained_tools);
     tools_json.extend(session_tools);
@@ -373,7 +367,7 @@ pub(super) fn send_mcp_list_tools_events(
     sequence_number: &mut u64,
     server_key: &str,
 ) -> bool {
-    let tools_item_full = build_mcp_list_tools_item_from_session(session, server_label, server_key);
+    let tools_item_full = session.build_mcp_list_tools_json(server_label, server_key);
     let item_id = tools_item_full
         .get("id")
         .and_then(|v| v.as_str())
@@ -571,7 +565,7 @@ pub(super) fn inject_mcp_metadata_streaming(
         });
 
         for (label, key) in mcp_servers.iter().rev() {
-            let list_tools_item = build_mcp_list_tools_item_from_session(session, label, key);
+            let list_tools_item = session.build_mcp_list_tools_json(label, key);
             output_array.insert(0, list_tools_item);
         }
 
@@ -584,7 +578,7 @@ pub(super) fn inject_mcp_metadata_streaming(
     } else if let Some(obj) = response.as_object_mut() {
         let mut output_items = Vec::new();
         for (label, key) in mcp_servers.iter() {
-            output_items.push(build_mcp_list_tools_item_from_session(session, label, key));
+            output_items.push(session.build_mcp_list_tools_json(label, key));
         }
         // Use stored transformed items (no reconstruction needed)
         output_items.extend(state.mcp_call_items.iter().cloned());
@@ -818,7 +812,7 @@ pub(super) fn build_incomplete_response(
         // Add mcp_list_tools and executed mcp_call items at the beginning
         if state.total_calls > 0 || !incomplete_items.is_empty() {
             for (label, key) in mcp_servers.iter().rev() {
-                let list_tools_item = build_mcp_list_tools_item_from_session(session, label, key);
+                let list_tools_item = session.build_mcp_list_tools_json(label, key);
                 output_array.insert(0, list_tools_item);
             }
 
@@ -860,16 +854,6 @@ pub(super) fn build_incomplete_response(
 // ============================================================================
 // Output Item Builders
 // ============================================================================
-
-/// Build a mcp_list_tools output item using a McpToolSession
-fn build_mcp_list_tools_item_from_session(
-    session: &McpToolSession<'_>,
-    server_label: &str,
-    server_key: &str,
-) -> Value {
-    let tools = session.list_tools_for_server(server_key);
-    build_mcp_list_tools_json(server_label, &tools)
-}
 
 /// Build a mcp_call output item
 pub(super) fn build_mcp_call_item(
