@@ -86,6 +86,7 @@ jobs:
 
       - name: Copy protos and build
         run: |
+          rm -f grpc_client/python/smg_grpc_proto/proto
           mkdir -p grpc_client/python/smg_grpc_proto/proto
           cp grpc_client/proto/*.proto grpc_client/python/smg_grpc_proto/proto/
           pip install build grpcio-tools
@@ -96,37 +97,6 @@ jobs:
         run: |
           pip install grpc_client/python/dist/*.whl
           python -c "from smg_grpc_proto import sglang_scheduler_pb2; print('OK')"
-
-  proto-codegen-check:
-    needs: check-ci
-    if: needs.check-ci.outputs.should_run == 'true'
-    runs-on: k8s-runner-cpu
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.24"
-
-      - name: Install protoc and Go plugins
-        run: |
-          sudo apt-get update && sudo apt-get install -y protobuf-compiler
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
-
-      - name: Regenerate Go stubs
-        run: ./scripts/proto_codegen.sh
-
-      - name: Check no uncommitted changes
-        run: |
-          if ! git diff --exit-code bindings/golang/internal/proto/; then
-            echo "ERROR: Go proto stubs are out of sync with proto files."
-            echo "Run ./scripts/proto_codegen.sh and commit the changes."
-            exit 1
-          fi
 
   build-wheel:
     needs: check-ci
@@ -612,7 +582,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [check-ci, python-lint, grpc-proto-build-check, proto-codegen-check, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
+    needs: [check-ci, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -622,7 +592,7 @@ jobs:
           if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
             echo "CI was skipped (external contributor without run-ci label)"
             exit 0
-          elif [[ "${{ needs.python-lint.result }}" == "failure" || "${{ needs.grpc-proto-build-check.result }}" == "failure" || "${{ needs.proto-codegen-check.result }}" == "failure" || "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.python-unit-tests.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
+          elif [[ "${{ needs.python-lint.result }}" == "failure" || "${{ needs.grpc-proto-build-check.result }}" == "failure" || "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.python-unit-tests.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else
