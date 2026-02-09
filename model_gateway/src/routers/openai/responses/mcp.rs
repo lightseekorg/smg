@@ -8,7 +8,7 @@
 //! - Payload transformation for MCP tool interception
 //! - Metadata injection for MCP operations
 
-use std::{io, slice};
+use std::io;
 
 use axum::http::HeaderMap;
 use bytes::Bytes;
@@ -21,6 +21,7 @@ use crate::{
         build_function_tools_json_with_names, build_mcp_list_tools_json, McpToolSession,
         ResponseFormat, ResponseTransformer, ToolExecutionInput,
     },
+    observability::metrics::{metrics_labels, Metrics},
     protocols::{
         event_types::{
             is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType,
@@ -139,6 +140,7 @@ pub(super) async fn execute_streaming_tool_calls(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     state: &mut ToolLoopState,
     sequence_number: &mut u64,
+    model_id: &str,
 ) -> bool {
     // Execute all pending tool calls (sequential, as PR3 is skipped)
     for call in pending_calls {
@@ -216,6 +218,19 @@ pub(super) async fn execute_streaming_tool_calls(
                 arguments,
             })
             .await;
+
+        // Record MCP tool metrics
+        Metrics::record_mcp_tool_duration(model_id, &tool_output.tool_name, tool_output.duration);
+        Metrics::record_mcp_tool_call(
+            model_id,
+            &tool_output.tool_name,
+            if tool_output.is_error {
+                metrics_labels::RESULT_ERROR
+            } else {
+                metrics_labels::RESULT_SUCCESS
+            },
+        );
+
         let output_str = tool_output.output.to_string();
         let mcp_call_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
             warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
@@ -356,10 +371,9 @@ pub(super) fn send_mcp_list_tools_events(
     server_label: &str,
     output_index: usize,
     sequence_number: &mut u64,
-    server_keys: &[String],
+    server_key: &str,
 ) -> bool {
-    let tools_item_full =
-        build_mcp_list_tools_item_from_session(session, server_label, server_keys);
+    let tools_item_full = build_mcp_list_tools_item_from_session(session, server_label, server_key);
     let item_id = tools_item_full
         .get("id")
         .and_then(|v| v.as_str())
@@ -557,8 +571,7 @@ pub(super) fn inject_mcp_metadata_streaming(
         });
 
         for (label, key) in mcp_servers.iter().rev() {
-            let list_tools_item =
-                build_mcp_list_tools_item_from_session(session, label, slice::from_ref(key));
+            let list_tools_item = build_mcp_list_tools_item_from_session(session, label, key);
             output_array.insert(0, list_tools_item);
         }
 
@@ -571,11 +584,7 @@ pub(super) fn inject_mcp_metadata_streaming(
     } else if let Some(obj) = response.as_object_mut() {
         let mut output_items = Vec::new();
         for (label, key) in mcp_servers.iter() {
-            output_items.push(build_mcp_list_tools_item_from_session(
-                session,
-                label,
-                slice::from_ref(key),
-            ));
+            output_items.push(build_mcp_list_tools_item_from_session(session, label, key));
         }
         // Use stored transformed items (no reconstruction needed)
         output_items.extend(state.mcp_call_items.iter().cloned());
@@ -641,6 +650,9 @@ pub(super) async fn execute_tool_loop(
             state.iteration += 1;
             state.total_calls += 1;
 
+            // Record tool loop iteration metric
+            Metrics::record_mcp_tool_iteration(&original_body.model);
+
             info!(
                 "Tool loop iteration {}: calling {} (call_id: {})",
                 state.iteration, tool_name, call_id
@@ -696,6 +708,23 @@ pub(super) async fn execute_tool_loop(
                     arguments,
                 })
                 .await;
+
+            // Record MCP tool metrics
+            Metrics::record_mcp_tool_duration(
+                &original_body.model,
+                &tool_output.tool_name,
+                tool_output.duration,
+            );
+            Metrics::record_mcp_tool_call(
+                &original_body.model,
+                &tool_output.tool_name,
+                if tool_output.is_error {
+                    metrics_labels::RESULT_ERROR
+                } else {
+                    metrics_labels::RESULT_SUCCESS
+                },
+            );
+
             let output_str = tool_output.output.to_string();
             let transformed_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
                 warn!(tool = %tool_name, error = %e, "Failed to convert item to Value");
@@ -789,8 +818,7 @@ pub(super) fn build_incomplete_response(
         // Add mcp_list_tools and executed mcp_call items at the beginning
         if state.total_calls > 0 || !incomplete_items.is_empty() {
             for (label, key) in mcp_servers.iter().rev() {
-                let list_tools_item =
-                    build_mcp_list_tools_item_from_session(session, label, slice::from_ref(key));
+                let list_tools_item = build_mcp_list_tools_item_from_session(session, label, key);
                 output_array.insert(0, list_tools_item);
             }
 
@@ -837,9 +865,9 @@ pub(super) fn build_incomplete_response(
 fn build_mcp_list_tools_item_from_session(
     session: &McpToolSession<'_>,
     server_label: &str,
-    server_keys: &[String],
+    server_key: &str,
 ) -> Value {
-    let tools = session.list_tools_for_server(&server_keys[0]);
+    let tools = session.list_tools_for_server(server_key);
     build_mcp_list_tools_json(server_label, &tools)
 }
 
