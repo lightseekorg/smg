@@ -545,14 +545,24 @@ impl MeshController {
                                                     }
                                                 }
                                                 LocalStoreType::RateLimit => {
-                                                    // Deserialize and apply rate limit operation log
+                                                    // Backward-compatible rate-limit decoding:
+                                                    // old payloads may send OperationLog, newer ones send raw i64.
                                                     if let Ok(log) = serde_json::from_slice::<
                                                         super::crdt_kv::OperationLog,
-                                                    >(
-                                                        &state_update.value
-                                                    ) {
+                                                    >(&state_update.value)
+                                                    {
                                                         sync_manager
                                                             .apply_remote_rate_limit_counter(&log);
+                                                    } else if let Ok(counter_value) =
+                                                        serde_json::from_slice::<i64>(
+                                                            &state_update.value,
+                                                        )
+                                                    {
+                                                        sync_manager
+                                                            .apply_remote_rate_limit_counter_value(
+                                                                state_update.key.clone(),
+                                                                counter_value,
+                                                            );
                                                     }
                                                 }
                                             }

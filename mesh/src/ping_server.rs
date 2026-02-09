@@ -674,14 +674,11 @@ impl Gossip for GossipService {
                                                             &state_update.value,
                                                         )
                                                     {
-                                                        // Apply counter update through sync manager
-                                                        if let Some(ref stores) = stores {
-                                                            stores.rate_limit.inc(
+                                                        sync_manager
+                                                            .apply_remote_rate_limit_counter_value(
                                                                 state_update.key.clone(),
-                                                                state_update.actor.clone(),
                                                                 counter_value,
                                                             );
-                                                        }
                                                     }
                                                 }
                                             }
@@ -913,11 +910,13 @@ impl Gossip for GossipService {
                                                             LocalStoreType::RateLimit => {
                                                                 // For rate limit counters, deserialize and apply
                                                                 if let Ok(counter_value) = serde_json::from_slice::<i64>(&entry.value) {
-                                                                    stores.rate_limit.inc(
-                                                                        entry.key.clone(),
-                                                                        entry.actor.clone(),
-                                                                        counter_value,
-                                                                    );
+                                                                    if let Some(ref sync_manager) = sync_manager {
+                                                                        sync_manager
+                                                                            .apply_remote_rate_limit_counter_value(
+                                                                                entry.key.clone(),
+                                                                                counter_value,
+                                                                            );
+                                                                    }
                                                                 }
                                                             }
                                                         }

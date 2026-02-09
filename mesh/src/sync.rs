@@ -242,6 +242,17 @@ impl MeshSyncManager {
         debug!("Applied remote rate-limit counter update");
     }
 
+    /// Apply remote rate-limit counter snapshot encoded as raw i64.
+    /// This keeps wire compatibility with incremental updates while
+    /// reusing the existing OperationLog merge path.
+    pub fn apply_remote_rate_limit_counter_value(&self, key: String, counter_value: i64) {
+        let log = self
+            .stores
+            .rate_limit
+            .operation_log_for_counter_value(key, counter_value);
+        self.apply_remote_rate_limit_counter(&log);
+    }
+
     /// Get rate-limit value (aggregate from all owners)
     pub fn get_rate_limit_value(&self, key: &str) -> Option<i64> {
         self.stores.rate_limit.value(key)

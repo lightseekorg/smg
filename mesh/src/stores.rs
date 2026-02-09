@@ -25,11 +25,11 @@ use super::{
 /// Provides transparent serialization/deserialization
 trait CrdtValue: Serialize + DeserializeOwned + Clone {
     fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(self).expect("Serialization should never fail for valid types")
+        serde_json::to_vec(self).expect("Serialization should never fail for valid types")
     }
 
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        bincode::deserialize(bytes).ok()
+        serde_json::from_slice(bytes).ok()
     }
 }
 
@@ -78,6 +78,17 @@ impl<T: CrdtValue> CrdtStore<T> {
         self.inner
             .remove(key)
             .and_then(|bytes| T::from_bytes(&bytes))
+    }
+
+    fn update<F>(&self, key: String, updater: F) -> Option<T>
+    where
+        F: FnOnce(Option<T>) -> T,
+    {
+        let updated_bytes = self.inner.upsert(key, |current_bytes| {
+            let current = current_bytes.and_then(T::from_bytes);
+            updater(current).to_bytes()
+        });
+        T::from_bytes(&updated_bytes)
     }
 
     // fn contains_key(&self, key: &str) -> bool {
@@ -485,11 +496,22 @@ impl RateLimitStore {
             return;
         }
 
-        let current = self.counters.get(&key).unwrap_or_default();
-        let new_value = CounterValue {
-            value: current.value + delta,
-        };
-        self.counters.insert(key, new_value);
+        let _ = self.counters.update(key, |current| CounterValue {
+            value: current.map_or(delta, |existing| existing.value + delta),
+        });
+    }
+
+    /// Build a minimal operation log for a counter snapshot.
+    /// This keeps the sync manager API compatible with OperationLog merge flow.
+    pub fn operation_log_for_counter_value(&self, key: String, counter_value: i64) -> OperationLog {
+        let temp_store = CrdtStore::<CounterValue>::new();
+        let _ = temp_store.insert(
+            key,
+            CounterValue {
+                value: counter_value,
+            },
+        );
+        temp_store.get_operation_log()
     }
 
     /// Get counter value
