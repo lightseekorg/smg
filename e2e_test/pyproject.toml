@@ -2,9 +2,10 @@
 name = "smg-e2e-tests"
 version = "0.1.0"
 description = "E2E tests for Shepherd Model Gateway"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 
 dependencies = [
+  "anthropic",
   "grpcio",
   "grpcio-health-checking",
   "httpx",
@@ -17,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "mypy",
   "ruff",
 ]
 

@@ -156,6 +156,26 @@ impl GrpcClient {
         }
     }
 
+    /// Get server info (returns enum wrapping backend-specific response)
+    pub async fn get_server_info(
+        &self,
+    ) -> Result<ServerInfo, Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            Self::Sglang(client) => {
+                let info = client.get_server_info().await?;
+                Ok(ServerInfo::Sglang(Box::new(info)))
+            }
+            Self::Vllm(client) => {
+                let info = client.get_server_info().await?;
+                Ok(ServerInfo::Vllm(info))
+            }
+            Self::Trtllm(client) => {
+                let info = client.get_server_info().await?;
+                Ok(ServerInfo::Trtllm(info))
+            }
+        }
+    }
+
     /// Generate streaming response from request
     ///
     /// Dispatches to the appropriate backend client and wraps the result in ProtoStream
@@ -289,6 +309,31 @@ pub enum ModelInfo {
     Sglang(Box<crate::grpc_client::sglang_proto::GetModelInfoResponse>),
     Vllm(crate::grpc_client::vllm_proto::GetModelInfoResponse),
     Trtllm(crate::grpc_client::trtllm_proto::GetModelInfoResponse),
+}
+
+/// Unified ServerInfo wrapper
+pub enum ServerInfo {
+    Sglang(Box<crate::grpc_client::sglang_proto::GetServerInfoResponse>),
+    Vllm(crate::grpc_client::vllm_proto::GetServerInfoResponse),
+    Trtllm(crate::grpc_client::trtllm_proto::GetServerInfoResponse),
+}
+
+impl ServerInfo {
+    /// Get KV connector type (only available for vLLM)
+    pub fn kv_connector(&self) -> Option<String> {
+        match self {
+            ServerInfo::Vllm(info) => Some(info.kv_connector.clone()).filter(|c| !c.is_empty()),
+            _ => None,
+        }
+    }
+
+    /// Get KV role (only available for vLLM)
+    pub fn kv_role(&self) -> Option<String> {
+        match self {
+            ServerInfo::Vllm(info) => Some(info.kv_role.clone()).filter(|r| !r.is_empty()),
+            _ => None,
+        }
+    }
 }
 
 impl ModelInfo {

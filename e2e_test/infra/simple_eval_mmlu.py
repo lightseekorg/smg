@@ -100,12 +100,10 @@ class MMLUEval(Eval):
         self.examples = examples
         self.num_threads = num_threads
 
-    def __call__(self, sampler: "SamplerBase") -> EvalResult:
+    def __call__(self, sampler: SamplerBase) -> EvalResult:
         def fn(row: dict) -> SingleEvalResult:
             prompt_messages = [
-                sampler._pack_message(
-                    content=format_multichoice_question(row), role="user"
-                )
+                sampler._pack_message(content=format_multichoice_question(row), role="user")  # type: ignore[attr-defined]
             ]
             response_text = sampler(prompt_messages)
             response_text = response_text or ""
@@ -121,9 +119,7 @@ class MMLUEval(Eval):
             )
             convo = prompt_messages + [dict(content=response_text, role="assistant")]
             category = SUBJECT_TO_CATEGORY.get(row["Subject"], "other")
-            return SingleEvalResult(
-                html=html, score=score, metrics={category: score}, convo=convo
-            )
+            return SingleEvalResult(html=html, score=score, metrics={category: score}, convo=convo)
 
         results = common.map_with_progress(fn, self.examples, self.num_threads)
         return common.aggregate_results(results)

@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 280">
+  <defs>
+    <linearGradient id="cbf-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="cbf-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="cbf-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="cbf-redGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ef4444"/>
+      <stop offset="100%" style="stop-color:#f87171"/>
+    </linearGradient>
+    <linearGradient id="cbf-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <pattern id="cbf-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+  </defs>
+
+  <style>
+    .cbf-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .cbf-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .cbf-msg { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 9px; font-weight: 500; }
+    .cbf-note { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 8px; }
+  </style>
+
+  <!-- Background -->
+  <rect width="600" height="280" rx="16" fill="url(#cbf-bgGrad)"/>
+  <rect width="600" height="280" fill="url(#cbf-grid)" rx="16"/>
+
+  <!-- Title -->
+  <text x="300" y="25" text-anchor="middle" class="cbf-label" font-size="13" fill="#e2e8f0">Worker Failure — Circuit Opens</text>
+
+  <!-- Participants -->
+  <rect x="60" y="38" width="80" height="26" rx="8" fill="url(#cbf-blueGrad)"/>
+  <text x="100" y="55" text-anchor="middle" class="cbf-label" font-size="10" fill="white">Client</text>
+
+  <rect x="240" y="38" width="80" height="26" rx="8" fill="url(#cbf-primaryGrad)"/>
+  <text x="280" y="55" text-anchor="middle" class="cbf-label" font-size="10" fill="white">SMG</text>
+
+  <rect x="430" y="38" width="80" height="26" rx="8" fill="url(#cbf-greenGrad)"/>
+  <text x="470" y="55" text-anchor="middle" class="cbf-label" font-size="10" fill="white">Worker</text>
+
+  <!-- Lifelines -->
+  <line x1="100" y1="64" x2="100" y2="255" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+  <line x1="280" y1="64" x2="280" y2="255" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+  <line x1="470" y1="64" x2="470" y2="255" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+
+  <!-- Note: Circuit Closed -->
+  <rect x="430" y="70" width="85" height="16" rx="4" fill="#10b981" opacity="0.2" stroke="#10b981" stroke-width="1"/>
+  <text x="472" y="82" text-anchor="middle" class="cbf-note" fill="#34d399" font-weight="600">Circuit: Closed</text>
+
+  <!-- Request 1: Error -->
+  <line x1="100" y1="98" x2="275" y2="98" stroke="#38bdf8" stroke-width="1.5"/>
+  <polygon points="272,94 280,98 272,102" fill="#38bdf8"/>
+  <text x="188" y="93" text-anchor="middle" class="cbf-msg" fill="#38bdf8">Request 1</text>
+
+  <line x1="280" y1="110" x2="465" y2="110" stroke="#34d399" stroke-width="1.5"/>
+  <polygon points="462,106 470,110 462,114" fill="#34d399"/>
+  <text x="373" y="106" text-anchor="middle" class="cbf-msg" fill="#34d399">Forward</text>
+
+  <!-- X mark for error -->
+  <line x1="463" y1="118" x2="477" y2="132" stroke="#ef4444" stroke-width="2.5"/>
+  <line x1="477" y1="118" x2="463" y2="132" stroke="#ef4444" stroke-width="2.5"/>
+  <text x="505" y="128" class="cbf-msg" fill="#f87171">Error (failure 1)</text>
+
+  <line x1="280" y1="140" x2="105" y2="140" stroke="#f87171" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="108,136 100,140 108,144" fill="#f87171"/>
+  <text x="188" y="137" text-anchor="middle" class="cbf-msg" fill="#f87171">Error</text>
+
+  <!-- Request 2: Error (failure 5) -->
+  <line x1="100" y1="158" x2="275" y2="158" stroke="#38bdf8" stroke-width="1.5"/>
+  <polygon points="272,154 280,158 272,162" fill="#38bdf8"/>
+  <text x="188" y="153" text-anchor="middle" class="cbf-msg" fill="#38bdf8">Request 2</text>
+
+  <line x1="280" y1="170" x2="465" y2="170" stroke="#34d399" stroke-width="1.5"/>
+  <polygon points="462,166 470,170 462,174" fill="#34d399"/>
+
+  <line x1="463" y1="178" x2="477" y2="192" stroke="#ef4444" stroke-width="2.5"/>
+  <line x1="477" y1="178" x2="463" y2="192" stroke="#ef4444" stroke-width="2.5"/>
+  <text x="505" y="188" class="cbf-msg" fill="#f87171">Error (failure 5)</text>
+
+  <!-- Note: Circuit OPEN -->
+  <rect x="425" y="195" width="95" height="18" rx="4" fill="#ef4444" opacity="0.3" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="472" y="208" text-anchor="middle" class="cbf-note" fill="#f87171" font-weight="700">Circuit: OPEN</text>
+
+  <!-- Request 3: Rejected immediately -->
+  <line x1="100" y1="222" x2="275" y2="222" stroke="#38bdf8" stroke-width="1.5"/>
+  <polygon points="272,218 280,222 272,226" fill="#38bdf8"/>
+  <text x="188" y="217" text-anchor="middle" class="cbf-msg" fill="#38bdf8">Request 3</text>
+
+  <!-- Note: Circuit open, reject -->
+  <rect x="195" y="228" width="165" height="16" rx="4" fill="#ef4444" opacity="0.15" stroke="#ef4444" stroke-width="1"/>
+  <text x="277" y="240" text-anchor="middle" class="cbf-note" fill="#f87171">Circuit open — reject immediately</text>
+
+  <line x1="280" y1="250" x2="105" y2="250" stroke="#f87171" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="108,246 100,250 108,254" fill="#f87171"/>
+  <text x="188" y="247" text-anchor="middle" class="cbf-msg" fill="#f87171">503 Service Unavailable</text>
+
+  <!-- Tagline -->
+  <text x="300" y="272" text-anchor="middle" class="cbf-sublabel" font-size="10" fill="#64748b">Consecutive failures trigger circuit opening — fast-fail protects the system</text>
+</svg>

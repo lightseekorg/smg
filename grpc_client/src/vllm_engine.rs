@@ -278,6 +278,7 @@ impl VllmEngineClient {
             )),
             sampling_params: Some(sampling_params),
             stream: body.stream,
+            kv_transfer_params: None,
         };
 
         Ok(grpc_request)
@@ -304,6 +305,7 @@ impl VllmEngineClient {
             )),
             sampling_params: Some(sampling_params),
             stream: body.stream,
+            kv_transfer_params: None,
         };
 
         Ok(grpc_request)
@@ -341,6 +343,7 @@ impl VllmEngineClient {
             )),
             sampling_params: Some(sampling_params),
             stream: body.stream.unwrap_or(false),
+            kv_transfer_params: None,
         };
 
         Ok(grpc_request)
@@ -661,6 +664,7 @@ mod tests {
             )),
             sampling_params: Some(sampling_params),
             stream: false,
+            kv_transfer_params: None,
         };
 
         assert_eq!(gen_req.request_id, "test-req-123");

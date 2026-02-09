@@ -3,8 +3,8 @@ import warnings
 
 from setuptools import setup
 
-with_rust = os.environ.get("SMG_BUILD_WITH_RUST", None)
-with_rust = with_rust is None or (not with_rust.lower() in ["0", "false", "no"])
+_rust_env = os.environ.get("SMG_BUILD_WITH_RUST", None)
+with_rust = _rust_env is None or (_rust_env.lower() not in ["0", "false", "no"])
 
 rust_extensions = []
 if with_rust:
@@ -18,9 +18,7 @@ if with_rust:
         )
     )
 else:
-    warnings.warn(
-        "Building 'smg' without Rust support. Performance may be degraded."
-    )
+    warnings.warn("Building 'smg' without Rust support. Performance may be degraded.")
 
 setup(
     rust_extensions=rust_extensions,

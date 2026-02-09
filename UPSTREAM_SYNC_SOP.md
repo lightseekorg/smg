@@ -15,7 +15,7 @@ internal Bitbucket repo in a controlled and auditable way.
 - Never commit to or push to `upstream/*` remote-tracking branches.
 - Do not force-push to `main`.
 - Every upstream sync must be done on a dedicated branch: `sync/upstream-YYYYMMDD`.
-- Upstream syncs must use **merge** (not rebase) to preserve a clear audit trail.
+- Upstream syncs may be **squashed into a single commit** for review simplicity.
 
 ## Branch Naming
 
@@ -70,6 +70,38 @@ git status
 ```
 
 Resolve conflicts if any, then run required build/tests
+
+### Conflict Handling Guidance
+
+When conflicts happen:
+
+1) Identify whether the conflicting file was last changed by a prior upstream sync.
+   - If yes, accept **upstream** for that file.
+2) If the file contains downstream customizations, keep **upstream as the baseline** and
+   reapply the downstream changes on top (do not overwrite with the old file).
+
+Recommended workflow for downstream customizations:
+
+- Keep downstream changes as a **separate commit** (after the upstream squash commit).
+- Reapply only the specific diff for the affected files; do not cherry-pick an entire
+  downstream PR if it touches unrelated files (to avoid extra conflicts).
+
+This keeps upstream history clean and makes future syncs predictable.
+
+### Squash Mode Steps
+
+When using squash mode for upstream sync:
+
+1) Merge `upstream/main` into `sync/upstream-YYYYMMDD` and resolve conflicts.
+2) Create a temporary merge commit to exit the merge state.
+3) Squash all upstream changes into one commit:
+
+```bash
+git reset --soft origin/main
+git commit -m "Sync/upstream YYYYMMDD"
+```
+
+4) Reapply downstream changes as a separate commit.
 
 1) Push the sync branch to origin
 

@@ -6,7 +6,7 @@ use tracing::{debug, error, info_span, Instrument};
 
 use super::PipelineStage;
 use crate::{
-    core::RuntimeType,
+    core::{RuntimeType, DEFAULT_BOOTSTRAP_PORT, MOONCAKE_CONNECTOR},
     routers::{
         error,
         grpc::{
@@ -318,7 +318,11 @@ impl RequestExecutionStage {
     }
 
     /// Execute vLLM PD: send to prefill with max_tokens=1 first, wait for completion,
-    /// then send original request to decode. NIXL handles KV cache transfer transparently.
+    /// then send original request to decode. NIXL/Mooncake handles KV cache transfer.
+    ///
+    /// For Mooncake: uses bootstrap_host/port from prefill worker metadata to inject
+    /// kv_transfer_params into decode request so decode knows where to fetch KV cache.
+    /// For NIXL: no kv_transfer_params needed (uses prompt prefix matching).
     async fn execute_sequential_pd(
         &self,
         proto_request: ProtoGenerateRequest,
@@ -335,6 +339,42 @@ impl RequestExecutionStage {
                 "Expected dual clients but got single",
             )
         })?;
+
+        // Get bootstrap info from prefill worker metadata (only for Mooncake PD)
+        // NIXL uses prefix matching and doesn't need kv_transfer_params
+        let kv_transfer_params: Option<(String, u32)> = workers
+            .prefill_worker()
+            .map(|w| w.metadata())
+            .filter(|meta| meta.kv_connector.as_deref() == Some(MOONCAKE_CONNECTOR))
+            .map(|meta| {
+                let port = meta.bootstrap_port.unwrap_or(DEFAULT_BOOTSTRAP_PORT);
+                (meta.bootstrap_host.clone(), port as u32)
+            });
+
+        if let Some((ref host, port)) = kv_transfer_params {
+            debug!(
+                bootstrap_host = %host,
+                bootstrap_port = port,
+                "vLLM PD (Mooncake): will inject kv_transfer_params into decode request"
+            );
+        } else {
+            // Log at info level since this could indicate misconfiguration if user expects Mooncake
+            // NIXL doesn't need kv_transfer_params (uses automatic prefix matching)
+            // If user expects Mooncake but kv_connector wasn't discovered, they can manually set
+            // labels: { "kv_connector": "MooncakeConnector" } in worker config
+            let has_kv_connector = workers
+                .prefill_worker()
+                .map(|w| w.metadata().kv_connector.is_some())
+                .unwrap_or(false);
+            if has_kv_connector {
+                debug!("vLLM PD (NIXL): using automatic prefix matching for KV transfer");
+            } else {
+                debug!(
+                    "vLLM PD: no kv_connector detected (server may not support GetServerInfo kv fields). \
+                     Assuming NIXL mode. For Mooncake, set labels.kv_connector=MooncakeConnector in worker config"
+                );
+            }
+        }
 
         // Clone request and set max_tokens=1, stream=false for prefill
         let mut prefill_request = proto_request.clone_inner();
@@ -363,19 +403,24 @@ impl RequestExecutionStage {
                 )
             })?;
 
-        // Drain prefill response (only KV cache computation matters)
+        // Drain prefill response (we just need to wait for completion)
         while let Some(result) = prefill_stream.next().await {
-            if let Err(e) = result {
-                workers.record_outcome_prefill(false);
-                error!(
-                    function = "execute_sequential_pd",
-                    error = %e,
-                    "Prefill stream error"
-                );
-                return Err(error::internal_error(
-                    "prefill_stream_error",
-                    format!("Prefill stream error: {}", e),
-                ));
+            match result {
+                Ok(_response) => {
+                    // Just consume the response, we use bootstrap info from worker metadata
+                }
+                Err(e) => {
+                    workers.record_outcome_prefill(false);
+                    error!(
+                        function = "execute_sequential_pd",
+                        error = %e,
+                        "Prefill stream error"
+                    );
+                    return Err(error::internal_error(
+                        "prefill_stream_error",
+                        format!("Prefill stream error: {}", e),
+                    ));
+                }
             }
         }
         prefill_stream.mark_completed();
@@ -383,8 +428,19 @@ impl RequestExecutionStage {
 
         debug!("vLLM PD: prefill completed, sending decode request");
 
-        // Send original request to decode
-        let decode_stream = decode_client.generate(proto_request).await.map_err(|e| {
+        // Clone original request and inject kv_transfer_params if present (Mooncake)
+        let mut decode_request = proto_request;
+        if let Some((remote_host, remote_port)) = kv_transfer_params {
+            debug!(
+                remote_host = %remote_host,
+                remote_port = remote_port,
+                "vLLM PD: injecting kv_transfer_params into decode request"
+            );
+            decode_request.set_kv_transfer_params(remote_host, remote_port);
+        }
+
+        // Send request to decode
+        let decode_stream = decode_client.generate(decode_request).await.map_err(|e| {
             workers.record_outcome_decode(false);
             error!(
                 function = "execute_sequential_pd",

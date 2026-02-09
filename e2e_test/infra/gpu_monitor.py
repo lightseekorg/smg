@@ -27,9 +27,7 @@ def _percentile(samples: list[float], p: float) -> float:
     sorted_samples = sorted(samples)
     idx = max(
         0,
-        min(
-            len(sorted_samples) - 1, int(round((p / 100.0) * (len(sorted_samples) - 1)))
-        ),
+        min(len(sorted_samples) - 1, int(round((p / 100.0) * (len(sorted_samples) - 1)))),
     )
     return float(sorted_samples[idx])
 
@@ -186,9 +184,7 @@ def _write_result(
                     "interval_sec": interval,
                     "count": len(overall_samples),
                     "overall": _compute_stats(overall_samples),
-                    "per_gpu": {
-                        k: _compute_stats(v) for k, v in per_gpu_samples.items()
-                    },
+                    "per_gpu": {k: _compute_stats(v) for k, v in per_gpu_samples.items()},
                     "raw": {
                         "overall": overall_samples,
                         "per_gpu": per_gpu_samples,
@@ -348,17 +344,17 @@ class GPUMonitor:
         mean_threshold = thresholds.get("gpu_util_mean_min")
         if mean_threshold is not None:
             mean_value = overall.get("mean", 0.0)
-            assert (
-                mean_value >= mean_threshold
-            ), f"GPU utilization mean below threshold: {mean_value:.2f}% < {mean_threshold}%"
+            assert mean_value >= mean_threshold, (
+                f"GPU utilization mean below threshold: {mean_value:.2f}% < {mean_threshold}%"
+            )
 
         p50_threshold = thresholds.get("gpu_util_p50_min")
         if p50_threshold is not None:
             p50_value = overall.get("p50")
             if p50_value is not None:
-                assert (
-                    p50_value >= p50_threshold
-                ), f"GPU utilization p50 below threshold: {p50_value:.2f}% < {p50_threshold}%"
+                assert p50_value >= p50_threshold, (
+                    f"GPU utilization p50 below threshold: {p50_value:.2f}% < {p50_threshold}%"
+                )
 
 
 def should_monitor(thresholds: dict[str, Any] | None) -> bool:

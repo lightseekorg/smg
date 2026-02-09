@@ -4,16 +4,13 @@
 
 use std::{collections::HashMap, io, sync::Arc, time::Instant};
 
-use axum::{body::Body, http::StatusCode, response::Response};
+use axum::response::Response;
 use bytes::Bytes;
-use http::header::{HeaderValue, CONTENT_TYPE};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, mpsc::UnboundedSender};
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, warn};
 
 use crate::{
-    grpc_client::sglang_proto::generate_complete::MatchedStop::{MatchedStopStr, MatchedTokenId},
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     protocols::{
         chat::{ChatCompletionRequest, ChatCompletionStreamResponse},
@@ -25,6 +22,7 @@ use crate::{
     },
     reasoning_parser::{ParserFactory as ReasoningParserFactory, ParserResult, ReasoningParser},
     routers::grpc::{
+        common::{response_formatting::CompletionTokenTracker, responses::build_sse_response},
         context,
         proto_wrapper::{ProtoResponseVariant, ProtoStream},
         utils,
@@ -212,7 +210,7 @@ impl StreamingProcessor {
         let mut finish_reasons: HashMap<u32, String> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<Value>> = HashMap::new();
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
-        let mut completion_tokens: HashMap<u32, u32> = HashMap::new();
+        let mut completion_tokens = CompletionTokenTracker::new();
         let mut cached_tokens: HashMap<u32, u32> = HashMap::new();
 
         // Parser state (lazy initialization per index)
@@ -288,12 +286,7 @@ impl StreamingProcessor {
 
                     let index = chunk.index();
 
-                    // For vLLM, accumulate completion tokens (vLLM sends deltas)
-                    // For SGLang, skip (SGLang sends cumulative values)
-                    if chunk.is_vllm() {
-                        let tokens_count = completion_tokens.entry(index).or_insert(0);
-                        *tokens_count += chunk.token_ids().len() as u32;
-                    }
+                    completion_tokens.record_chunk(&chunk);
 
                     // Get or create stop decoder for this index
                     let stop_decoder = stop_decoders.entry(index).or_insert_with(|| {
@@ -473,26 +466,12 @@ impl StreamingProcessor {
                     // Store metadata
                     prompt_tokens.insert(index, complete.prompt_tokens());
 
-                    // For vLLM, use accumulated count (we tracked deltas)
-                    // For SGLang, use complete value (already cumulative)
-                    if complete.is_vllm() {
-                        completion_tokens.entry(index).or_insert(0);
-                    } else {
-                        completion_tokens.insert(index, complete.completion_tokens());
-                    }
+                    completion_tokens.record_complete(&complete);
 
                     cached_tokens.insert(index, complete.cached_tokens());
                     finish_reasons.insert(index, complete.finish_reason().to_string());
 
-                    // Extract matched_stop
-                    let matched_stop_value = match complete.matched_stop() {
-                        Some(MatchedTokenId(token_id)) => {
-                            Some(Value::Number(serde_json::Number::from(*token_id)))
-                        }
-                        Some(MatchedStopStr(stop_str)) => Some(Value::String(stop_str.clone())),
-                        None => None,
-                    };
-                    matched_stops.insert(index, matched_stop_value);
+                    matched_stops.insert(index, complete.matched_stop_json());
 
                     // Don't break - continue reading all Complete messages for n>1
                 }
@@ -563,16 +542,11 @@ impl StreamingProcessor {
         if let Some(stream_opts) = stream_options {
             if stream_opts.include_usage.unwrap_or(false) {
                 let total_prompt: u32 = prompt_tokens.values().sum();
-                let total_completion: u32 = completion_tokens.values().sum();
+                let total_completion: u32 = completion_tokens.total();
 
                 let usage_chunk = ChatCompletionStreamResponse::builder(request_id, model)
                     .created(created)
-                    .usage(Usage {
-                        prompt_tokens: total_prompt,
-                        completion_tokens: total_completion,
-                        total_tokens: total_prompt + total_completion,
-                        completion_tokens_details: None,
-                    })
+                    .usage(Usage::from_counts(total_prompt, total_completion))
                     .maybe_system_fingerprint(system_fingerprint)
                     .build();
 
@@ -588,7 +562,7 @@ impl StreamingProcessor {
 
         // Record streaming metrics
         let total_prompt: u32 = prompt_tokens.values().sum();
-        let total_completion: u32 = completion_tokens.values().sum();
+        let total_completion: u32 = completion_tokens.total();
         Metrics::record_streaming_metrics(StreamingMetricsParams {
             router_type: metrics_labels::ROUTER_GRPC,
             backend_type: self.backend_type,
@@ -1337,23 +1311,4 @@ impl StreamingProcessor {
         }
         buffer.extend_from_slice(b"\n\n");
     }
-}
-
-/// Build SSE response with proper headers
-pub(crate) fn build_sse_response(
-    rx: mpsc::UnboundedReceiver<Result<Bytes, io::Error>>,
-) -> Response {
-    let stream = UnboundedReceiverStream::new(rx);
-    let mut response = Response::new(Body::from_stream(stream));
-    *response.status_mut() = StatusCode::OK;
-    response
-        .headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-    response
-        .headers_mut()
-        .insert("Cache-Control", HeaderValue::from_static("no-cache"));
-    response
-        .headers_mut()
-        .insert("Connection", HeaderValue::from_static("keep-alive"));
-    response
 }

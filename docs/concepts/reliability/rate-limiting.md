@@ -65,20 +65,9 @@ Rate limiting ensures **fair access** and **predictable performance**.
 
 SMG uses a **token bucket** algorithm:
 
-```mermaid
-flowchart TD
-    R[Request] --> B{Tokens available?}
-    B -->|"Yes"| T[Take token]
-    T --> P[Process request]
-    B -->|"No"| Q{Queue enabled?}
-    Q -->|"Yes, space"| W[Wait in queue]
-    Q -->|"Yes, full"| R429[429 Too Many Requests]
-    Q -->|"No"| R429
-    W -->|"Token available"| T
-    W -->|"Timeout"| R408[408 Request Timeout]
-
-    Refill[Refill tokens] -->|"Every second"| B
-```
+<div class="architecture-diagram">
+  <img src="../../../assets/images/rate-limiting.svg" alt="Token Bucket Rate Limiting">
+</div>
 
 ### Token Bucket
 

@@ -26,3 +26,6 @@ opt-level = 2       # Lighter optimization (still fast runtime, much faster comp
 lto = "thin"        # Thin LTO - good balance
 codegen-units = 16  # More parallelization for faster builds
 strip = true
+
+[lints]
+workspace = true

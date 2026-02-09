@@ -4,59 +4,41 @@ use validator::Validate;
 use super::common::StringOrArray;
 
 /// Sampling parameters for text generation
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, Validate)]
 #[validate(schema(function = "validate_sampling_params"))]
 pub struct SamplingParams {
     /// Temperature for sampling (must be >= 0.0, no upper limit)
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(range(min = 0.0))]
     pub temperature: Option<f32>,
     /// Maximum number of new tokens to generate (must be >= 0)
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(range(min = 0))]
     pub max_new_tokens: Option<u32>,
     /// Top-p nucleus sampling (0.0 < top_p <= 1.0)
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(custom(function = "validate_top_p_value"))]
     pub top_p: Option<f32>,
     /// Top-k sampling (-1 to disable, or >= 1)
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(custom(function = "validate_top_k_value"))]
     pub top_k: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(range(min = -2.0, max = 2.0))]
     pub frequency_penalty: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(range(min = -2.0, max = 2.0))]
     pub presence_penalty: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(range(min = 0.0, max = 2.0))]
     pub repetition_penalty: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<StringOrArray>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub ignore_eos: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub skip_special_tokens: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub json_schema: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub regex: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub ebnf: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[validate(range(min = 0.0, max = 1.0))]
     pub min_p: Option<f32>,
     /// Minimum number of new tokens (validated in schema function for cross-field check with max_new_tokens)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub min_new_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_token_ids: Option<Vec<u32>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub no_stop_trim: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub n: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub sampling_seed: Option<u64>,
 }
 

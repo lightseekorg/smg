@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 400">
+  <defs>
+    <linearGradient id="gs-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="gs-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="gs-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="gs-redGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ef4444"/>
+      <stop offset="100%" style="stop-color:#f87171"/>
+    </linearGradient>
+    <linearGradient id="gs-amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="gs-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <pattern id="gs-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+  </defs>
+
+  <style>
+    .gs-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .gs-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .gs-msg { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 9px; font-weight: 500; }
+    .gs-note { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 8px; }
+  </style>
+
+  <!-- Background -->
+  <rect width="700" height="400" rx="16" fill="url(#gs-bgGrad)"/>
+  <rect width="700" height="400" fill="url(#gs-grid)" rx="16"/>
+
+  <!-- Title -->
+  <text x="350" y="28" text-anchor="middle" class="gs-label" font-size="14" fill="#e2e8f0">Graceful Shutdown Sequence</text>
+
+  <!-- Participant boxes -->
+  <rect x="50" y="42" width="100" height="28" rx="8" fill="url(#gs-amberGrad)"/>
+  <text x="100" y="61" text-anchor="middle" class="gs-label" font-size="10" fill="#1e293b">Kubernetes</text>
+
+  <rect x="230" y="42" width="110" height="28" rx="8" fill="url(#gs-primaryGrad)"/>
+  <text x="285" y="61" text-anchor="middle" class="gs-label" font-size="10" fill="white">SMG Gateway</text>
+
+  <rect x="420" y="42" width="80" height="28" rx="8" fill="url(#gs-blueGrad)"/>
+  <text x="460" y="61" text-anchor="middle" class="gs-label" font-size="10" fill="white">Clients</text>
+
+  <rect x="570" y="42" width="80" height="28" rx="8" fill="url(#gs-greenGrad)"/>
+  <text x="610" y="61" text-anchor="middle" class="gs-label" font-size="10" fill="white">Workers</text>
+
+  <!-- Lifelines -->
+  <line x1="100" y1="70" x2="100" y2="370" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+  <line x1="285" y1="70" x2="285" y2="370" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+  <line x1="460" y1="70" x2="460" y2="370" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+  <line x1="610" y1="70" x2="610" y2="370" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+
+  <!-- 1. K8s → SMG: SIGTERM -->
+  <line x1="100" y1="95" x2="280" y2="95" stroke="#ef4444" stroke-width="2"/>
+  <polygon points="277,91 285,95 277,99" fill="#ef4444"/>
+  <text x="190" y="89" text-anchor="middle" class="gs-msg" fill="#f87171" font-weight="700">SIGTERM</text>
+
+  <!-- Note: Stop accepting new requests -->
+  <rect x="200" y="105" width="170" height="18" rx="4" fill="#ef4444" opacity="0.15" stroke="#ef4444" stroke-width="1"/>
+  <text x="285" y="117" text-anchor="middle" class="gs-note" fill="#f87171">1. Stop accepting new requests</text>
+
+  <!-- 2. Client → SMG: New Request (rejected) -->
+  <line x1="460" y1="140" x2="290" y2="140" stroke="#38bdf8" stroke-width="1.5"/>
+  <polygon points="293,136 285,140 293,144" fill="#38bdf8"/>
+  <text x="375" y="134" text-anchor="middle" class="gs-msg" fill="#38bdf8">New Request</text>
+
+  <!-- SMG → Client: 503 -->
+  <line x1="285" y1="158" x2="455" y2="158" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="452,154 460,158 452,162" fill="#ef4444"/>
+  <text x="370" y="155" text-anchor="middle" class="gs-msg" fill="#f87171">503 Service Unavailable</text>
+
+  <!-- Note: Wait for in-flight -->
+  <rect x="200" y="172" width="170" height="18" rx="4" fill="#f59e0b" opacity="0.15" stroke="#f59e0b" stroke-width="1"/>
+  <text x="285" y="184" text-anchor="middle" class="gs-note" fill="#fbbf24">2. Wait for in-flight requests</text>
+
+  <!-- SMG → Workers: Continue processing -->
+  <line x1="285" y1="200" x2="605" y2="200" stroke="#34d399" stroke-width="1.5"/>
+  <polygon points="602,196 610,200 602,204" fill="#34d399"/>
+  <text x="447" y="195" text-anchor="middle" class="gs-msg" fill="#34d399">Continue processing...</text>
+
+  <!-- Workers → SMG: Response -->
+  <line x1="610" y1="220" x2="290" y2="220" stroke="#34d399" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="293,216 285,220 293,224" fill="#34d399"/>
+  <text x="447" y="216" text-anchor="middle" class="gs-msg" fill="#34d399">Response</text>
+
+  <!-- SMG → Client: Response (existing) -->
+  <line x1="285" y1="238" x2="455" y2="238" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="452,234 460,238 452,242" fill="#a78bfa"/>
+  <text x="370" y="234" text-anchor="middle" class="gs-msg" fill="#a78bfa">Response (existing request)</text>
+
+  <!-- Note: Grace period timer -->
+  <rect x="200" y="252" width="170" height="18" rx="4" fill="#f59e0b" opacity="0.15" stroke="#f59e0b" stroke-width="1"/>
+  <text x="285" y="264" text-anchor="middle" class="gs-note" fill="#fbbf24">3. Grace period timer starts</text>
+
+  <!-- Alt block: All requests complete vs Force shutdown -->
+  <rect x="200" y="278" width="240" height="75" rx="6" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <rect x="204" y="278" width="40" height="16" rx="4" fill="#475569" opacity="0.5"/>
+  <text x="224" y="290" text-anchor="middle" class="gs-note" fill="#94a3b8" font-weight="600">alt</text>
+
+  <!-- Path 1: Clean exit -->
+  <rect x="210" y="298" width="160" height="18" rx="4" fill="#10b981" opacity="0.15" stroke="#10b981" stroke-width="1"/>
+  <text x="290" y="310" text-anchor="middle" class="gs-note" fill="#34d399">All complete → Clean exit</text>
+
+  <!-- Divider -->
+  <line x1="200" y1="322" x2="440" y2="322" stroke="#475569" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="215" y="320" class="gs-note" fill="#94a3b8" font-size="7">[else]</text>
+
+  <!-- Path 2: Force shutdown -->
+  <rect x="210" y="328" width="160" height="18" rx="4" fill="#ef4444" opacity="0.15" stroke="#ef4444" stroke-width="1"/>
+  <text x="290" y="340" text-anchor="middle" class="gs-note" fill="#f87171">Grace period → Force shutdown</text>
+
+  <!-- Bottom tagline -->
+  <text x="350" y="390" text-anchor="middle" class="gs-sublabel" font-size="11" fill="#64748b">Zero-Downtime Deployments  •  In-Flight Request Draining  •  Configurable Grace Period</text>
+</svg>

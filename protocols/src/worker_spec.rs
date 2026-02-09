@@ -17,55 +17,45 @@ use serde_json::{json, Value};
 use super::UNKNOWN_MODEL_ID;
 
 /// Worker configuration for API requests
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WorkerConfigRequest {
     /// Worker URL (required)
     pub url: String,
 
     /// Worker API key (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 
     /// Model ID (optional, will query from server if not provided)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
 
     /// Worker priority (optional, default: 50, higher = preferred)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<u32>,
 
     /// Worker cost factor (optional, default: 1.0)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<f32>,
 
     /// Worker type (optional: "regular", "prefill", "decode")
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_type: Option<String>,
 
     /// Bootstrap port for prefill workers (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub bootstrap_port: Option<u16>,
 
     /// Runtime type (optional: "sglang", "vllm", default: "sglang")
     /// Only relevant for gRPC workers
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
 
     // gRPC-specific configuration (optional, ignored in HTTP mode)
     /// Tokenizer path for gRPC mode
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tokenizer_path: Option<String>,
 
     /// Reasoning parser type for gRPC mode
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_parser: Option<String>,
 
     /// Tool parser type for gRPC mode
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_parser: Option<String>,
 
     /// Chat template for gRPC mode
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template: Option<String>,
 
     /// Additional labels (optional)
@@ -123,6 +113,7 @@ fn default_max_connection_attempts() -> u32 {
 }
 
 /// Worker information for API responses
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkerInfo {
     /// Worker unique identifier
@@ -153,24 +144,18 @@ pub struct WorkerInfo {
     pub connection_mode: String,
 
     /// Runtime type (sglang or vllm, for gRPC workers)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_type: Option<String>,
 
     // gRPC-specific fields (None for HTTP workers)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tokenizer_path: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_parser: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_parser: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template: Option<String>,
 
     /// Bootstrap port for prefill workers
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub bootstrap_port: Option<u16>,
 
     /// Additional metadata
@@ -181,7 +166,6 @@ pub struct WorkerInfo {
     pub disable_health_check: bool,
 
     /// Job status for async operations (if available)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub job_status: Option<JobStatus>,
 }
 
@@ -298,42 +282,34 @@ pub struct WorkerTypeStats {
 }
 
 /// Worker update request
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerUpdateRequest {
     /// Update priority
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<u32>,
 
     /// Update cost
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<f32>,
 
     /// Update labels
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<HashMap<String, String>>,
 
     /// Update API key (for key rotation)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 
     /// Update health check timeout in seconds
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub health_check_timeout_secs: Option<u64>,
 
     /// Update health check interval in seconds
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub health_check_interval_secs: Option<u64>,
 
     /// Update health success threshold
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub health_success_threshold: Option<u32>,
 
     /// Update health failure threshold
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub health_failure_threshold: Option<u32>,
 
     /// Disable periodic health checks for this worker
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub disable_health_check: Option<bool>,
 }
 
@@ -355,34 +331,26 @@ pub struct WorkerErrorResponse {
 }
 
 /// Server info response from /get_server_info endpoint
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerInfo {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_path: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<u32>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<f32>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_type: Option<String>,
 
     // gRPC-specific
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tokenizer_path: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_parser: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_parser: Option<String>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template: Option<String>,
 }
 

@@ -4,7 +4,8 @@
 #
 # Usage:
 #   ./scripts/launch-pd-workers.sh sglang /path/to/model   # Launch SGLang PD workers
-#   ./scripts/launch-pd-workers.sh vllm /path/to/model     # Launch vLLM PD workers
+#   ./scripts/launch-pd-workers.sh vllm /path/to/model     # Launch vLLM PD workers (NIXL)
+#   KV_BACKEND=mooncake ./scripts/launch-pd-workers.sh vllm /path/to/model  # vLLM with Mooncake
 #
 # Environment variables:
 #   PREFILL_GPU=0          GPU ID for prefill worker (default: 0)
@@ -15,13 +16,21 @@
 #   MAX_MODEL_LEN=4096     Maximum model length (default: 4096)
 #   GPU_MEM_UTIL=0.9       GPU memory utilization (default: 0.9)
 #   TP_SIZE=1              Tensor parallel size (default: 1)
+#   KV_BACKEND=nixl        KV transfer backend for vLLM: nixl or mooncake (default: nixl)
+#
+# Mooncake environment variables:
+#   MOONCAKE_BOOTSTRAP_PORT  Bootstrap port for Mooncake prefill workers (default: 8998)
+#                            Each prefill worker needs a unique port
 #
 # Examples:
 #   # Launch SGLang PD with default settings
 #   ./scripts/launch-pd-workers.sh sglang /raid/models/meta-llama/Llama-3.1-8B-Instruct
 #
-#   # Launch vLLM PD on specific GPUs
+#   # Launch vLLM PD with NIXL (default)
 #   PREFILL_GPU=2 DECODE_GPU=3 ./scripts/launch-pd-workers.sh vllm /raid/models/meta-llama/Llama-3.1-8B-Instruct
+#
+#   # Launch vLLM PD with Mooncake
+#   KV_BACKEND=mooncake ./scripts/launch-pd-workers.sh vllm /raid/models/meta-llama/Llama-3.1-8B-Instruct
 #
 
 set -euo pipefail
@@ -55,6 +64,13 @@ TP_SIZE="${TP_SIZE:-1}"
 NIXL_PREFILL_PORT="${NIXL_PREFILL_PORT:-5600}"
 NIXL_DECODE_PORT="${NIXL_DECODE_PORT:-5601}"
 
+# KV transfer backend: nixl or mooncake
+KV_BACKEND="${KV_BACKEND:-nixl}"
+
+# Mooncake-specific configuration
+# Each prefill worker needs a unique bootstrap port
+MOONCAKE_BOOTSTRAP_PORT="${MOONCAKE_BOOTSTRAP_PORT:-8998}"
+
 info() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
@@ -78,18 +94,28 @@ print_usage() {
     echo "  model_path  Path to the model directory"
     echo ""
     echo "Environment variables:"
-    echo "  PREFILL_GPU      GPU ID for prefill worker (default: 0)"
-    echo "  DECODE_GPU       GPU ID for decode worker (default: 1)"
-    echo "  PREFILL_PORT     gRPC port for prefill worker (default: 50051)"
-    echo "  DECODE_PORT      gRPC port for decode worker (default: 50052)"
-    echo "  BOOTSTRAP_PORT   Bootstrap port for SGLang PD (default: 8998)"
-    echo "  MAX_MODEL_LEN    Maximum model length (default: 4096)"
-    echo "  GPU_MEM_UTIL     GPU memory utilization (default: 0.9)"
-    echo "  TP_SIZE          Tensor parallel size (default: 1)"
+    echo "  PREFILL_GPU           GPU ID for prefill worker (default: 0)"
+    echo "  DECODE_GPU            GPU ID for decode worker (default: 1)"
+    echo "  PREFILL_PORT          gRPC port for prefill worker (default: 50051)"
+    echo "  DECODE_PORT           gRPC port for decode worker (default: 50052)"
+    echo "  BOOTSTRAP_PORT        Bootstrap port for SGLang PD (default: 8998)"
+    echo "  MAX_MODEL_LEN         Maximum model length (default: 4096)"
+    echo "  GPU_MEM_UTIL          GPU memory utilization (default: 0.9)"
+    echo "  TP_SIZE               Tensor parallel size (default: 1)"
+    echo ""
+    echo "vLLM-specific environment variables:"
+    echo "  KV_BACKEND              KV transfer backend: 'nixl' or 'mooncake' (default: nixl)"
+    echo "  MOONCAKE_BOOTSTRAP_PORT Bootstrap port for Mooncake prefill (default: 8998)"
     echo ""
     echo "Examples:"
+    echo "  # SGLang PD"
     echo "  $0 sglang /raid/models/meta-llama/Llama-3.1-8B-Instruct"
+    echo ""
+    echo "  # vLLM PD with NIXL (default)"
     echo "  PREFILL_GPU=2 DECODE_GPU=3 $0 vllm /raid/models/meta-llama/Llama-3.1-8B-Instruct"
+    echo ""
+    echo "  # vLLM PD with Mooncake"
+    echo "  KV_BACKEND=mooncake $0 vllm /raid/models/meta-llama/Llama-3.1-8B-Instruct"
 }
 
 launch_sglang_pd() {
@@ -150,6 +176,22 @@ launch_sglang_pd() {
 launch_vllm_pd() {
     local model_path="$1"
 
+    case "$KV_BACKEND" in
+        nixl)
+            launch_vllm_pd_nixl "$model_path"
+            ;;
+        mooncake)
+            launch_vllm_pd_mooncake "$model_path"
+            ;;
+        *)
+            error "Unknown KV_BACKEND: $KV_BACKEND. Use 'nixl' or 'mooncake'."
+            ;;
+    esac
+}
+
+launch_vllm_pd_nixl() {
+    local model_path="$1"
+
     info "Launching vLLM PD workers with NIXL..."
     info "  Model: $model_path"
     info "  Prefill: GPU $PREFILL_GPU, port $PREFILL_PORT, NIXL port $NIXL_PREFILL_PORT"
@@ -197,6 +239,67 @@ launch_vllm_pd() {
     echo ""
     info "To start SMG gateway in PD mode:"
     echo "  smg --pd-disaggregation --prefill grpc://localhost:$PREFILL_PORT --decode grpc://localhost:$DECODE_PORT"
+    echo ""
+    info "Press Ctrl+C to stop workers"
+
+    # Wait for both processes
+    wait
+}
+
+launch_vllm_pd_mooncake() {
+    local model_path="$1"
+
+    info "Launching vLLM PD workers with Mooncake..."
+    info "  Model: $model_path"
+    info "  Prefill: GPU $PREFILL_GPU, port $PREFILL_PORT, bootstrap port $MOONCAKE_BOOTSTRAP_PORT"
+    info "  Decode:  GPU $DECODE_GPU, port $DECODE_PORT"
+
+    # Mooncake uses simple config - no kv_rank/kv_parallel_size needed
+    # Each prefill worker needs unique VLLM_MOONCAKE_BOOTSTRAP_PORT
+    local prefill_kv_config='{"kv_connector":"MooncakeConnector","kv_role":"kv_producer"}'
+    local decode_kv_config='{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer"}'
+
+    # Launch prefill worker (kv_producer)
+    info "Starting prefill worker (kv_producer)..."
+    CUDA_VISIBLE_DEVICES="$PREFILL_GPU" \
+    VLLM_MOONCAKE_BOOTSTRAP_PORT="$MOONCAKE_BOOTSTRAP_PORT" \
+    python3 -m vllm.entrypoints.grpc_server \
+        --model "$model_path" \
+        --host 0.0.0.0 \
+        --port "$PREFILL_PORT" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --max-model-len "$MAX_MODEL_LEN" \
+        --gpu-memory-utilization "$GPU_MEM_UTIL" \
+        --kv-transfer-config "$prefill_kv_config" &
+
+    local prefill_pid=$!
+    info "Prefill worker started (PID: $prefill_pid)"
+
+    # Wait for prefill to be ready
+    sleep 10
+
+    # Launch decode worker (kv_consumer)
+    info "Starting decode worker (kv_consumer)..."
+    CUDA_VISIBLE_DEVICES="$DECODE_GPU" \
+    python3 -m vllm.entrypoints.grpc_server \
+        --model "$model_path" \
+        --host 0.0.0.0 \
+        --port "$DECODE_PORT" \
+        --tensor-parallel-size "$TP_SIZE" \
+        --max-model-len "$MAX_MODEL_LEN" \
+        --gpu-memory-utilization "$GPU_MEM_UTIL" \
+        --kv-transfer-config "$decode_kv_config" &
+
+    local decode_pid=$!
+    info "Decode worker started (PID: $decode_pid)"
+
+    echo ""
+    info "vLLM PD workers launched successfully!"
+    echo -e "${BLUE}Prefill:${NC} grpc://localhost:$PREFILL_PORT (bootstrap: $MOONCAKE_BOOTSTRAP_PORT)"
+    echo -e "${BLUE}Decode:${NC}  grpc://localhost:$DECODE_PORT"
+    echo ""
+    info "To start SMG gateway in PD mode:"
+    echo "  smg --pd-disaggregation --prefill grpc://localhost:$PREFILL_PORT $MOONCAKE_BOOTSTRAP_PORT --decode grpc://localhost:$DECODE_PORT --model-path \$MODEL_PATH"
     echo ""
     info "Press Ctrl+C to stop workers"
 

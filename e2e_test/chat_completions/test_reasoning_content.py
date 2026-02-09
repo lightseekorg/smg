@@ -19,8 +19,10 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-@pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support reasoning content extraction")
-@pytest.mark.model("deepseek-7b")
+@pytest.mark.skip_for_runtime(
+    "trtllm", reason="TRT-LLM does not support reasoning content extraction"
+)
+@pytest.mark.model("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")
 @pytest.mark.gateway(
     extra_args=["--reasoning-parser", "deepseek_r1", "--history-backend", "memory"]
 )
@@ -84,9 +86,7 @@ class TestReasoningContentAPI:
         assert len(reasoning_content) > 0
         assert len(content) > 0
 
-    def test_streaming_separate_reasoning_true_stream_reasoning_false(
-        self, setup_backend
-    ):
+    def test_streaming_separate_reasoning_true_stream_reasoning_false(self, setup_backend):
         """Test streaming with separate_reasoning=True and stream_reasoning=False."""
         _, model, client, gateway = setup_backend
 

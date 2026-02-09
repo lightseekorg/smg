@@ -6,15 +6,16 @@ use rand::Rng;
 use tracing::debug;
 
 use crate::{
-    core::{RuntimeType, Worker},
+    core::{RuntimeType, Worker, DEFAULT_BOOTSTRAP_PORT},
     grpc_client::sglang_proto::DisaggregatedParams,
     routers::grpc::{context::WorkerSelection, proto_wrapper::ProtoGenerateRequest},
 };
 
-/// Inject PD bootstrap metadata if needed.
+/// Inject PD bootstrap metadata for SGLang if needed.
 ///
-/// Only SGLang uses bootstrap-based PD. vLLM PD uses NIXL for transparent
-/// KV transfer and does not need metadata injection.
+/// SGLang uses DisaggregatedParams with bootstrap host/port/room.
+/// vLLM uses different mechanisms: NIXL (automatic prefix matching) or
+/// Mooncake (kv_transfer_params injected in request_execution stage).
 pub(crate) fn maybe_inject_pd_metadata(
     request: &mut ProtoGenerateRequest,
     workers: &WorkerSelection,
@@ -37,7 +38,9 @@ fn inject_sglang_bootstrap_metadata(
     prefill_worker: &Arc<dyn Worker>,
 ) {
     let hostname = prefill_worker.bootstrap_host();
-    let bootstrap_port = prefill_worker.bootstrap_port().unwrap_or(8998);
+    let bootstrap_port = prefill_worker
+        .bootstrap_port()
+        .unwrap_or(DEFAULT_BOOTSTRAP_PORT);
     let room_id = rand::rng().random_range(0..i32::MAX);
 
     let disagg_params = DisaggregatedParams {

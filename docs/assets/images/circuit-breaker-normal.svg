@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 230">
+  <defs>
+    <linearGradient id="cbn-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="cbn-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="cbn-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="cbn-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <pattern id="cbn-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+  </defs>
+
+  <style>
+    .cbn-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .cbn-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .cbn-msg { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 9px; font-weight: 500; }
+    .cbn-note { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 8px; }
+  </style>
+
+  <!-- Background -->
+  <rect width="600" height="230" rx="16" fill="url(#cbn-bgGrad)"/>
+  <rect width="600" height="230" fill="url(#cbn-grid)" rx="16"/>
+
+  <!-- Title -->
+  <text x="300" y="25" text-anchor="middle" class="cbn-label" font-size="13" fill="#e2e8f0">Normal Operation — Circuit Closed</text>
+
+  <!-- Participants -->
+  <rect x="60" y="38" width="80" height="26" rx="8" fill="url(#cbn-blueGrad)"/>
+  <text x="100" y="55" text-anchor="middle" class="cbn-label" font-size="10" fill="white">Client</text>
+
+  <rect x="240" y="38" width="80" height="26" rx="8" fill="url(#cbn-primaryGrad)"/>
+  <text x="280" y="55" text-anchor="middle" class="cbn-label" font-size="10" fill="white">SMG</text>
+
+  <rect x="430" y="38" width="80" height="26" rx="8" fill="url(#cbn-greenGrad)"/>
+  <text x="470" y="55" text-anchor="middle" class="cbn-label" font-size="10" fill="white">Worker</text>
+
+  <!-- Lifelines -->
+  <line x1="100" y1="64" x2="100" y2="205" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+  <line x1="280" y1="64" x2="280" y2="205" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+  <line x1="470" y1="64" x2="470" y2="205" stroke="#34d399" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.4"/>
+
+  <!-- Note: Circuit Closed -->
+  <rect x="430" y="70" width="85" height="16" rx="4" fill="#10b981" opacity="0.2" stroke="#10b981" stroke-width="1"/>
+  <text x="472" y="82" text-anchor="middle" class="cbn-note" fill="#34d399" font-weight="600">Circuit: Closed</text>
+
+  <!-- Request 1 -->
+  <line x1="100" y1="98" x2="275" y2="98" stroke="#38bdf8" stroke-width="1.5"/>
+  <polygon points="272,94 280,98 272,102" fill="#38bdf8"/>
+  <text x="188" y="93" text-anchor="middle" class="cbn-msg" fill="#38bdf8">Request 1</text>
+
+  <line x1="280" y1="110" x2="465" y2="110" stroke="#34d399" stroke-width="1.5"/>
+  <polygon points="462,106 470,110 462,114" fill="#34d399"/>
+  <text x="373" y="106" text-anchor="middle" class="cbn-msg" fill="#34d399">Forward</text>
+
+  <line x1="470" y1="122" x2="285" y2="122" stroke="#34d399" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="288,118 280,122 288,126" fill="#34d399"/>
+  <text x="373" y="119" text-anchor="middle" class="cbn-msg" fill="#34d399">Success</text>
+
+  <line x1="280" y1="134" x2="105" y2="134" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="108,130 100,134 108,138" fill="#a78bfa"/>
+  <text x="188" y="131" text-anchor="middle" class="cbn-msg" fill="#a78bfa">Response</text>
+
+  <!-- Request 2 -->
+  <line x1="100" y1="152" x2="275" y2="152" stroke="#38bdf8" stroke-width="1.5"/>
+  <polygon points="272,148 280,152 272,156" fill="#38bdf8"/>
+  <text x="188" y="147" text-anchor="middle" class="cbn-msg" fill="#38bdf8">Request 2</text>
+
+  <line x1="280" y1="164" x2="465" y2="164" stroke="#34d399" stroke-width="1.5"/>
+  <polygon points="462,160 470,164 462,168" fill="#34d399"/>
+  <text x="373" y="160" text-anchor="middle" class="cbn-msg" fill="#34d399">Forward</text>
+
+  <line x1="470" y1="176" x2="285" y2="176" stroke="#34d399" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="288,172 280,176 288,180" fill="#34d399"/>
+  <text x="373" y="173" text-anchor="middle" class="cbn-msg" fill="#34d399">Success</text>
+
+  <line x1="280" y1="188" x2="105" y2="188" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <polygon points="108,184 100,188 108,192" fill="#a78bfa"/>
+  <text x="188" y="185" text-anchor="middle" class="cbn-msg" fill="#a78bfa">Response</text>
+
+  <!-- Tagline -->
+  <text x="300" y="220" text-anchor="middle" class="cbn-sublabel" font-size="10" fill="#64748b">All requests flow through normally when circuit is closed</text>
+</svg>

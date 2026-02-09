@@ -410,9 +410,8 @@ orchestrator.register_alias(
     ResponseFormat::WebSearchCall,
 )?;
 
-// Now callable as just "search"
-// server_label is the user-facing name for API responses
-let result = orchestrator.call_tool_by_name("search", args, &allowed_servers, "my-search", &request_ctx).await?;
+// In router code, build a session and execute through session mapping.
+// The model-visible tool name is resolved to {server_key, tool_name} per request.
 ```
 
 ### Batch Tool Execution
@@ -420,7 +419,7 @@ let result = orchestrator.call_tool_by_name("search", args, &allowed_servers, "m
 For executing multiple tools efficiently (e.g., parallel tool calls from LLM):
 
 ```rust
-use smg_mcp::{ToolExecutionInput, ToolExecutionOutput};
+use smg_mcp::{McpToolSession, ToolExecutionInput, ToolExecutionOutput};
 
 // Convert tool calls to inputs
 let inputs: Vec<ToolExecutionInput> = tool_calls
@@ -432,10 +431,14 @@ let inputs: Vec<ToolExecutionInput> = tool_calls
     })
     .collect();
 
-// Execute all tools (sequential, with approval checking)
-let outputs: Vec<ToolExecutionOutput> = orchestrator
-    .execute_tools(inputs, &server_keys, "my-server", &request_ctx)
-    .await;
+let session = McpToolSession::new(
+    &orchestrator,
+    vec![("my-server".to_string(), "my-server".to_string())],
+    "req-123",
+);
+
+// Execute all tools through session mapping
+let outputs: Vec<ToolExecutionOutput> = session.execute_tools(inputs).await;
 
 // Process results
 for output in outputs {
@@ -455,7 +458,12 @@ for output in outputs {
 **Key types:**
 - `ToolExecutionInput`: Tool call ID, name, and arguments
 - `ToolExecutionOutput`: Full result including raw output, transformed item, duration, and error info
+  - `tool_name`: Name used in transformed output items
+  - `invoked_tool_name`: Name originally provided by the caller/model (when available)
+  - `resolved_tool_name`: Canonical MCP tool name used for execution (when available)
 - `server_label`: User-facing label for API responses (distinct from internal `server_key`)
+
+Router code should use `McpToolSession` so exposed tool names are collision-safe and execution always resolves through session mapping (exposed name -> `{server_key, tool_name}`).
 
 ## Approval System
 

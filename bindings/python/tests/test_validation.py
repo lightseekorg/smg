@@ -163,9 +163,7 @@ class TestParameterValidation:
         # Valid backoff parameters
         valid_backoff_ms = [1, 50, 100, 1000, 30000]
         for backoff in valid_backoff_ms:
-            args = RouterArgs(
-                retry_initial_backoff_ms=backoff, retry_max_backoff_ms=backoff
-            )
+            args = RouterArgs(retry_initial_backoff_ms=backoff, retry_max_backoff_ms=backoff)
             assert args.retry_initial_backoff_ms == backoff
             assert args.retry_max_backoff_ms == backoff
 
@@ -198,9 +196,7 @@ class TestParameterValidation:
         # Valid timeout durations
         valid_timeouts = [10, 30, 60, 120, 300]
         for timeout in valid_timeouts:
-            args = RouterArgs(
-                cb_timeout_duration_secs=timeout, cb_window_duration_secs=timeout
-            )
+            args = RouterArgs(cb_timeout_duration_secs=timeout, cb_window_duration_secs=timeout)
             assert args.cb_timeout_duration_secs == timeout
             assert args.cb_window_duration_secs == timeout
 

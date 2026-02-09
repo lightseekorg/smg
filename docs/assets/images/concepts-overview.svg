@@ -1,0 +1,165 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 280">
+  <defs>
+    <linearGradient id="co-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="co-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="co-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="co-amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="co-tealGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#14b8a6"/>
+      <stop offset="100%" style="stop-color:#2dd4bf"/>
+    </linearGradient>
+    <linearGradient id="co-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <filter id="co-softGlow">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="co-glow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="co-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+    <clipPath id="co-clipFlow1">
+      <rect x="135" y="115" width="60" height="25"/>
+    </clipPath>
+  </defs>
+
+  <style>
+    .co-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .co-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .co-feature { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #94a3b8; }
+    .co-layer-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+
+    @keyframes co-flow { 0% { transform: translateX(0); opacity: 0; } 10% { opacity: 1; } 90% { opacity: 1; } 100% { transform: translateX(45px); opacity: 0; } }
+    @keyframes co-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+    .co-packet1 { animation: co-flow 0.8s linear infinite; }
+    .co-packet2 { animation: co-flow 0.8s linear infinite 0.4s; }
+    .co-pulse { animation: co-pulse 2s ease-in-out infinite; }
+  </style>
+
+  <!-- Background -->
+  <rect width="800" height="280" rx="16" fill="url(#co-bgGrad)"/>
+  <rect width="800" height="280" fill="url(#co-grid)" rx="16"/>
+
+  <!-- Glow effects -->
+  <ellipse cx="70" cy="130" rx="50" ry="60" fill="#0ea5e9" opacity="0.08" filter="url(#co-softGlow)"/>
+  <ellipse cx="250" cy="130" rx="60" ry="60" fill="#6366f1" opacity="0.08" filter="url(#co-softGlow)"/>
+  <ellipse cx="470" cy="130" rx="80" ry="80" fill="#8b5cf6" opacity="0.06" filter="url(#co-softGlow)"/>
+  <ellipse cx="700" cy="100" rx="60" ry="50" fill="#10b981" opacity="0.06" filter="url(#co-softGlow)"/>
+  <ellipse cx="700" cy="190" rx="60" ry="50" fill="#f59e0b" opacity="0.06" filter="url(#co-softGlow)"/>
+
+  <!-- Title -->
+  <text x="400" y="30" text-anchor="middle" class="co-label" font-size="14" fill="#e2e8f0">Core Components</text>
+
+  <!-- Client box -->
+  <rect x="20" y="90" width="110" height="80" rx="10" fill="#1e293b" stroke="#0ea5e9" stroke-width="2"/>
+  <rect x="20" y="90" width="110" height="26" rx="10" fill="url(#co-blueGrad)"/>
+  <rect x="20" y="108" width="110" height="8" fill="url(#co-blueGrad)"/>
+  <text x="75" y="108" text-anchor="middle" class="co-label" font-size="11" fill="white">Client</text>
+  <text x="75" y="135" text-anchor="middle" class="co-feature" fill="#e2e8f0">HTTP / gRPC</text>
+  <text x="75" y="150" text-anchor="middle" class="co-feature">OpenAI SDK</text>
+
+  <!-- API Layer box -->
+  <rect x="190" y="75" width="120" height="110" rx="10" fill="#1e293b" stroke="#6366f1" stroke-width="2"/>
+  <rect x="190" y="75" width="120" height="26" rx="10" fill="url(#co-primaryGrad)"/>
+  <rect x="190" y="93" width="120" height="8" fill="url(#co-primaryGrad)"/>
+  <text x="250" y="93" text-anchor="middle" class="co-label" font-size="11" fill="white">API Layer</text>
+  <text x="250" y="120" text-anchor="middle" class="co-feature" fill="#e2e8f0">Inference</text>
+  <text x="250" y="135" text-anchor="middle" class="co-feature" fill="#e2e8f0">Utility</text>
+  <text x="250" y="150" text-anchor="middle" class="co-feature" fill="#e2e8f0">Admin</text>
+  <text x="250" y="165" text-anchor="middle" class="co-feature">Endpoints</text>
+
+  <!-- Router Manager container -->
+  <rect x="370" y="50" width="230" height="200" rx="12" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="485" y="70" text-anchor="middle" class="co-layer-label" fill="#64748b">Router Manager</text>
+
+  <!-- gRPC box -->
+  <rect x="390" y="82" width="90" height="40" rx="8" fill="#1e293b" stroke="#8b5cf6" stroke-width="1.5"/>
+  <rect x="390" y="82" width="90" height="20" rx="8" fill="url(#co-primaryGrad)"/>
+  <rect x="390" y="96" width="90" height="6" fill="url(#co-primaryGrad)"/>
+  <text x="435" y="97" text-anchor="middle" class="co-label" font-size="9" fill="white">gRPC</text>
+  <text x="435" y="115" text-anchor="middle" class="co-feature">Full Server Mode</text>
+
+  <!-- HTTP box -->
+  <rect x="490" y="82" width="90" height="40" rx="8" fill="#1e293b" stroke="#14b8a6" stroke-width="1.5"/>
+  <rect x="490" y="82" width="90" height="20" rx="8" fill="url(#co-tealGrad)"/>
+  <rect x="490" y="96" width="90" height="6" fill="url(#co-tealGrad)"/>
+  <text x="535" y="97" text-anchor="middle" class="co-label" font-size="9" fill="white">HTTP</text>
+  <text x="535" y="115" text-anchor="middle" class="co-feature">Smart Proxy</text>
+
+  <!-- External box -->
+  <rect x="440" y="135" width="100" height="40" rx="8" fill="#1e293b" stroke="#f59e0b" stroke-width="1.5"/>
+  <rect x="440" y="135" width="100" height="20" rx="8" fill="url(#co-amberGrad)"/>
+  <rect x="440" y="149" width="100" height="6" fill="url(#co-amberGrad)"/>
+  <text x="490" y="150" text-anchor="middle" class="co-label" font-size="9" fill="#1e293b">External</text>
+  <text x="490" y="168" text-anchor="middle" class="co-feature">Unified Router</text>
+
+  <!-- Workers box -->
+  <rect x="650" y="70" width="120" height="65" rx="10" fill="#1e293b" stroke="#10b981" stroke-width="2" class="co-pulse"/>
+  <rect x="650" y="70" width="120" height="26" rx="10" fill="url(#co-greenGrad)"/>
+  <rect x="650" y="88" width="120" height="8" fill="url(#co-greenGrad)"/>
+  <text x="710" y="88" text-anchor="middle" class="co-label" font-size="10" fill="white">Workers</text>
+  <text x="710" y="110" text-anchor="middle" class="co-feature" fill="#e2e8f0">vLLM / SGLang</text>
+  <text x="710" y="125" text-anchor="middle" class="co-feature">TensorRT-LLM</text>
+
+  <!-- Cloud APIs box -->
+  <rect x="650" y="155" width="120" height="65" rx="10" fill="#1e293b" stroke="#f59e0b" stroke-width="2"/>
+  <rect x="650" y="155" width="120" height="26" rx="10" fill="url(#co-amberGrad)"/>
+  <rect x="650" y="173" width="120" height="8" fill="url(#co-amberGrad)"/>
+  <text x="710" y="173" text-anchor="middle" class="co-label" font-size="10" fill="#1e293b">Cloud APIs</text>
+  <text x="710" y="195" text-anchor="middle" class="co-feature" fill="#e2e8f0">OpenAI / Claude</text>
+  <text x="710" y="210" text-anchor="middle" class="co-feature">Gemini</text>
+
+  <!-- Connections: Client → API -->
+  <line x1="130" y1="130" x2="190" y2="130" stroke="#6366f1" stroke-width="2"/>
+  <polygon points="187,126 195,130 187,134" fill="#6366f1"/>
+
+  <!-- Connections: API → Router -->
+  <line x1="310" y1="130" x2="370" y2="130" stroke="#8b5cf6" stroke-width="1.5"/>
+  <polygon points="367,126 375,130 367,134" fill="#8b5cf6"/>
+
+  <!-- Connections: gRPC/HTTP → Workers -->
+  <line x1="480" y1="100" x2="650" y2="100" stroke="#10b981" stroke-width="1.5"/>
+  <polygon points="647,96 655,100 647,104" fill="#10b981"/>
+
+  <line x1="580" y1="100" x2="605" y2="100" stroke="#10b981" stroke-width="0" opacity="0"/>
+  <!-- HTTP line merges with gRPC line at Workers -->
+
+  <!-- Connections: External → Cloud APIs -->
+  <line x1="540" y1="155" x2="580" y2="155" stroke="#f59e0b" stroke-width="1.5"/>
+  <line x1="580" y1="155" x2="580" y2="187" stroke="#f59e0b" stroke-width="1.5"/>
+  <line x1="580" y1="187" x2="650" y2="187" stroke="#f59e0b" stroke-width="1.5"/>
+  <polygon points="647,183 655,187 647,191" fill="#f59e0b"/>
+
+  <!-- Animated flow -->
+  <g clip-path="url(#co-clipFlow1)">
+    <circle cx="140" cy="130" r="4" fill="#818cf8" class="co-packet1" filter="url(#co-glow)"/>
+    <circle cx="140" cy="130" r="4" fill="#a78bfa" class="co-packet2" filter="url(#co-glow)"/>
+  </g>
+
+  <!-- Bottom tagline -->
+  <text x="400" y="268" text-anchor="middle" class="co-sublabel" font-size="11" fill="#64748b">gRPC Full Server  •  HTTP Smart Proxy  •  External Unified Router</text>
+</svg>

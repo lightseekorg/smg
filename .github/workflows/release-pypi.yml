@@ -75,7 +75,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: bindings/python
+          working-directory: smg-repo/bindings/python
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
           args: --release --out dist --features vendored-openssl --interpreter ${{ matrix.interpreter || '3.9 3.10 3.11 3.12 3.13 3.14' }}
@@ -103,15 +103,15 @@ jobs:
             protoc --version
 
       - name: List built packages
-        run: ${{ matrix.ls || 'ls -lh' }} bindings/python/dist/
+        run: ${{ matrix.ls || 'ls -lh' }} smg-repo/bindings/python/dist/
 
       - name: Check packages
-        run: twine check --strict bindings/python/dist/*
+        run: twine check --strict smg-repo/bindings/python/dist/*
 
       - uses: actions/upload-artifact@v6
         with:
           name: packages-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.manylinux || 'auto' }}
-          path: bindings/python/dist/
+          path: smg-repo/bindings/python/dist/
 
   build-sdist:
     name: Build SDist
@@ -131,7 +131,7 @@ jobs:
       - name: Build SDist
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: bindings/python
+          working-directory: smg-repo/bindings/python
           command: sdist
           args: --out dist
           rust-toolchain: stable
@@ -139,7 +139,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: sdist
-          path: bindings/python/dist/*.tar.gz
+          path: smg-repo/bindings/python/dist/*.tar.gz
 
   upload:
     name: Upload to PyPI

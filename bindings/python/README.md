@@ -2,6 +2,52 @@
 
 This directory contains the Python bindings for SMG (Shepherd Model Gateway), built using [maturin](https://github.com/PyO3/maturin) and [PyO3](https://github.com/PyO3/pyo3).
 
+## Quick Start
+
+### Installation
+
+```bash
+pip install maturin
+cd smg/bindings/python
+maturin develop --features vendored-openssl
+```
+
+### Usage
+
+The `smg serve` command launches backend workers and the SMG router in a single command:
+
+```bash
+# sglang with gRPC (default)
+smg serve --backend sglang --model-path /path/to/model --port 8080
+
+# sglang with HTTP
+smg serve --backend sglang --model-path /path/to/model --port 8080 --connection-mode http
+
+# vLLM (gRPC only)
+smg serve --backend vllm --model /path/to/model --port 8080
+
+# TensorRT-LLM (gRPC only)
+smg serve --backend trtllm --model /path/to/model --port 8080
+
+# Multiple workers (data parallel)
+smg serve --backend sglang --model-path /path/to/model --port 8080 --dp-size 4
+```
+
+### Serve Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--backend` | `sglang` | Backend to use: `sglang`, `vllm`, or `trtllm` |
+| `--connection-mode` | `grpc` | Connection mode: `grpc` or `http`. vllm/trtllm only support grpc |
+| `--host` | `127.0.0.1` | Host for the router |
+| `--port` | `8080` | Port for the router |
+| `--dp-size` | `1` | Data parallel size (number of worker replicas) |
+| `--worker-host` | `127.0.0.1` | Host for worker processes |
+| `--worker-base-port` | `31000` | Base port for workers |
+| `--worker-startup-timeout` | `300` | Seconds to wait for workers to become healthy |
+
+Backend-specific options (e.g., `--tensor-parallel-size`, `--quantization`) are passed through to the backend.
+
 ## Directory Structure
 
 ```
@@ -10,23 +56,15 @@ bindings/python/
 │   ├── lib.rs              # Rust/PyO3 bindings implementation
 │   └── smg/                # Python source code
 │       ├── __init__.py
-│       ├── version.py
+│       ├── cli.py          # CLI entry point
+│       ├── serve.py        # smg serve implementation
 │       ├── launch_server.py
 │       ├── launch_router.py
 │       ├── router.py
-│       ├── router_args.py
-│       └── mini_lb.py
+│       └── router_args.py
 ├── tests/                  # Python unit tests
-│   ├── conftest.py
-│   ├── test_validation.py
-│   ├── test_arg_parser.py
-│   ├── test_router_config.py
-│   └── test_startup_sequence.py
-├── Cargo.toml              # Rust package configuration for bindings
+├── Cargo.toml              # Rust package configuration
 ├── pyproject.toml          # Python package configuration
-├── setup.py                # Setup configuration
-├── MANIFEST.in             # Package manifest
-├── .coveragerc             # Test coverage configuration
 └── README.md               # This file
 ```
 
@@ -35,10 +73,7 @@ bindings/python/
 ### Development Build
 
 ```bash
-# Install maturin
 pip install maturin
-
-# Build and install in development mode
 cd smg/bindings/python
 maturin develop --features vendored-openssl
 ```
@@ -46,32 +81,14 @@ maturin develop --features vendored-openssl
 ### Production Build
 
 ```bash
-# Build wheel
 cd smg/bindings/python
 maturin build --release --out dist --features vendored-openssl
-
-# Install the built wheel
 pip install dist/smg-*.whl
 ```
 
 ## Testing
 
 ```bash
-# Run Python unit tests (after maturin develop)
 cd smg/bindings/python
 pytest tests/
 ```
-
-## Configuration
-
-- **pyproject.toml**: Defines package metadata, dependencies, and build configuration
-- **python-source**: Set to `"src"` indicating Python source uses the src layout
-- **module-name**: `smg.smg_rs` - the Rust extension module name
-
-## Notes
-
-- The Rust bindings source code is located in `src/lib.rs`
-- The bindings have their own `Cargo.toml` in this directory
-- The main SMG library is located in `../../model_gateway/` and is used as a dependency
-- The package includes both Python code and Rust extensions built with PyO3
-- PyO3 types are prefixed with `Py` in Rust but exposed to Python without the prefix using the `name` attribute

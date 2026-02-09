@@ -23,20 +23,9 @@ Unlike generic load balancers, SMG understands LLM patterns: prefix caching, tok
 
 ## Core Components
 
-```mermaid
-flowchart LR
-    Client([Client]) --> API[API Layer]
-    API --> Router
-
-    subgraph Router["Router Manager"]
-        gRPC
-        HTTP
-        External
-    end
-
-    gRPC & HTTP --> Workers([Workers])
-    External --> Providers([Cloud APIs])
-```
+<div class="architecture-diagram">
+  <img src="../assets/images/concepts-overview.svg" alt="Core Components Architecture">
+</div>
 
 | Layer | Purpose |
 |-------|---------|

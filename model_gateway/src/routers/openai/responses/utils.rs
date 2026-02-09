@@ -5,7 +5,7 @@ use tracing::warn;
 
 use crate::protocols::{
     event_types::is_response_event,
-    responses::{ResponseToolType, ResponsesRequest},
+    responses::{ResponseTool, ResponseToolType, ResponsesRequest},
 };
 
 /// Check if a JSON value is missing, null, or an empty string
@@ -206,6 +206,33 @@ pub(super) fn insert_optional_string(
     }
 }
 
+/// Convert a single ResponseTool back to its original JSON representation.
+///
+/// Handles MCP tools (with server metadata), web_search_preview, and code_interpreter.
+/// Returns None for function tools and other types that don't need restoration.
+pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
+    match tool.r#type {
+        ResponseToolType::Mcp if tool.server_url.is_some() => {
+            let mut m = Map::new();
+            m.insert("type".to_string(), json!("mcp"));
+            insert_optional_string(&mut m, "server_label", &tool.server_label);
+            insert_optional_string(&mut m, "server_url", &tool.server_url);
+            insert_optional_string(&mut m, "server_description", &tool.server_description);
+            insert_optional_string(&mut m, "require_approval", &tool.require_approval);
+            if let Some(allowed) = &tool.allowed_tools {
+                m.insert(
+                    "allowed_tools".to_string(),
+                    Value::Array(allowed.iter().map(|s| json!(s)).collect()),
+                );
+            }
+            Some(Value::Object(m))
+        }
+        ResponseToolType::WebSearchPreview => Some(json!({"type": "web_search_preview"})),
+        ResponseToolType::CodeInterpreter => Some(json!({"type": "code_interpreter"})),
+        _ => None,
+    }
+}
+
 /// Restore original tools (MCP and builtin) in response for client.
 ///
 /// The model receives function tools, but the response should mirror the original
@@ -217,33 +244,7 @@ pub(super) fn restore_original_tools(resp: &mut Value, original_body: &Responses
 
     let restored_tools: Vec<Value> = original_tools
         .iter()
-        .filter_map(|t| {
-            match t.r#type {
-                // MCP tools - restore with server metadata
-                ResponseToolType::Mcp if t.server_url.is_some() => {
-                    let mut m = Map::new();
-                    m.insert("type".to_string(), json!("mcp"));
-                    insert_optional_string(&mut m, "server_label", &t.server_label);
-                    insert_optional_string(&mut m, "server_url", &t.server_url);
-                    insert_optional_string(&mut m, "server_description", &t.server_description);
-                    insert_optional_string(&mut m, "require_approval", &t.require_approval);
-
-                    if let Some(allowed) = &t.allowed_tools {
-                        m.insert(
-                            "allowed_tools".to_string(),
-                            Value::Array(allowed.iter().map(|s| json!(s)).collect()),
-                        );
-                    }
-                    Some(Value::Object(m))
-                }
-                // Builtin tools - restore with type only
-                ResponseToolType::WebSearchPreview => Some(json!({"type": "web_search_preview"})),
-                ResponseToolType::CodeInterpreter => Some(json!({"type": "code_interpreter"})),
-                // Note: FileSearch not yet in ResponseToolType, add when available
-                // Function tools and others - skip (not transformed)
-                _ => None,
-            }
-        })
+        .filter_map(response_tool_to_value)
         .collect();
 
     if restored_tools.is_empty() {
