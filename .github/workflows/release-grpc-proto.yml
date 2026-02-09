@@ -1,0 +1,63 @@
+name: Release smg-grpc-proto to PyPI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - grpc_client/python/pyproject.toml  # Triggered when version bumped
+      - grpc_client/proto/**                # Or when protos change
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build smg-grpc-proto
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build deps
+        run: pip install build twine grpcio-tools
+
+      - name: Copy proto files (avoid symlink issues)
+        run: |
+          mkdir -p grpc_client/python/smg_grpc_proto/proto
+          cp grpc_client/proto/*.proto grpc_client/python/smg_grpc_proto/proto/
+
+      - name: Build package
+        run: cd grpc_client/python && python -m build
+
+      - name: Check package
+        run: twine check --strict grpc_client/python/dist/*
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: grpc-proto-dist
+          path: grpc_client/python/dist/
+
+  upload:
+    name: Upload to PyPI
+    if: github.repository == 'lightseekorg/smg'
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: grpc-proto-dist
+          path: dist
+
+      - name: Upload to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_PROTO }}
+        run: |
+          pip install twine
+          twine upload dist/* --verbose
