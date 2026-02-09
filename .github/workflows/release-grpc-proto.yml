@@ -26,8 +26,9 @@ jobs:
       - name: Install build deps
         run: pip install build twine grpcio-tools
 
-      - name: Copy proto files (avoid symlink issues)
+      - name: Copy proto files (replace symlink with real files)
         run: |
+          rm -f grpc_client/python/smg_grpc_proto/proto
           mkdir -p grpc_client/python/smg_grpc_proto/proto
           cp grpc_client/proto/*.proto grpc_client/python/smg_grpc_proto/proto/
 
@@ -52,6 +53,11 @@ jobs:
         with:
           name: grpc-proto-dist
           path: dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
       - name: Upload to PyPI
         env:
