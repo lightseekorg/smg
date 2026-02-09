@@ -26,8 +26,10 @@ protoc \
     --proto_path="$PROTO_DIR" \
     --go_out="$GO_OUT_DIR" \
     --go_opt=paths=source_relative \
+    --go_opt=Msglang_scheduler.proto=github.com/lightseekorg/smg/bindings/golang/internal/proto \
     --go-grpc_out="$GO_OUT_DIR" \
     --go-grpc_opt=paths=source_relative \
+    --go-grpc_opt=Msglang_scheduler.proto=github.com/lightseekorg/smg/bindings/golang/internal/proto \
     "$PROTO_FILE"
 
 echo "Generated:"
