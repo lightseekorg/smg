@@ -1,9 +1,8 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/images/logos/logomark-white.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/images/logos/logomark-dark.svg">
-    <img alt="SMG Logo" src="docs/assets/images/logos/logomark-dark.svg" width="80">
-  </picture>
+  <a href="https://lightseekorg.github.io/smg">
+    <img alt="SMG Logo" src="docs/assets/images/logos/logomark-dark.svg#gh-light-mode-only" width="80">
+    <img alt="SMG Logo" src="docs/assets/images/logos/logomark-white.svg#gh-dark-mode-only" width="80">
+  </a>
 </p>
 
 <h1 align="center">Shepherd Model Gateway</h1>
