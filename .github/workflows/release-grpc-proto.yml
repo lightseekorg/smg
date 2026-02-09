@@ -6,7 +6,6 @@ on:
       - main
     paths:
       - grpc_client/python/pyproject.toml  # Triggered when version bumped
-      - grpc_client/proto/**                # Or when protos change
   workflow_dispatch:
 
 permissions:
