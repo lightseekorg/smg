@@ -66,66 +66,7 @@ impl std::fmt::Debug for OpenAIRouter {
     }
 }
 
-/// Error response helpers for consistent API error formatting
-mod error_responses {
-    use axum::{
-        http::StatusCode,
-        response::{IntoResponse, Response},
-        Json,
-    };
-    use serde_json::json;
-
-    pub fn bad_request(message: impl Into<String>) -> Response {
-        (StatusCode::BAD_REQUEST, message.into()).into_response()
-    }
-
-    pub fn not_found(resource: &str, id: &str) -> Response {
-        (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": {
-                    "message": format!("No {} found with id '{}'", resource, id),
-                    "type": "invalid_request_error",
-                    "param": null,
-                    "code": "not_found"
-                }
-            })),
-        )
-            .into_response()
-    }
-
-    pub fn internal_error(message: impl Into<String>) -> Response {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": {
-                    "message": message.into(),
-                    "type": "internal_error",
-                    "param": null,
-                    "code": "storage_error"
-                }
-            })),
-        )
-            .into_response()
-    }
-
-    pub fn service_unavailable(message: impl Into<String>) -> Response {
-        (StatusCode::SERVICE_UNAVAILABLE, message.into()).into_response()
-    }
-
-    pub fn model_not_found(model: &str) -> Response {
-        (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": {
-                    "message": format!("No worker available for model '{}'", model),
-                    "type": "model_not_found",
-                }
-            })),
-        )
-            .into_response()
-    }
-}
+use crate::routers::error;
 
 impl OpenAIRouter {
     const MAX_CONVERSATION_HISTORY_ITEMS: usize = 100;
@@ -313,12 +254,15 @@ impl OpenAIRouter {
         self.find_best_worker_for_model(model_id).ok_or_else(|| {
             // Check if the model exists but all workers are circuit-broken
             if self.any_worker_supports_model(model_id) {
-                error_responses::service_unavailable(format!(
-                    "All workers for model '{}' are temporarily unavailable",
-                    model_id
-                ))
+                error::service_unavailable(
+                    "service_unavailable",
+                    format!(
+                        "All workers for model '{}' are temporarily unavailable",
+                        model_id
+                    ),
+                )
             } else {
-                error_responses::model_not_found(model_id)
+                error::model_not_found(model_id)
             }
         })
     }
@@ -372,7 +316,10 @@ impl crate::routers::RouterTrait for OpenAIRouter {
     async fn health_generate(&self, _req: Request<Body>) -> Response {
         let external_workers = self.external_workers();
         if external_workers.is_empty() {
-            return error_responses::service_unavailable("No external workers registered");
+            return error::service_unavailable(
+                "service_unavailable",
+                "No external workers registered",
+            );
         }
 
         let (healthy, unhealthy): (Vec<_>, Vec<_>) =
@@ -389,12 +336,15 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                 .iter()
                 .map(|w| format!("{} ({})", w.model_id(), w.url()))
                 .collect();
-            error_responses::service_unavailable(format!(
-                "{}/{} workers unhealthy: {}",
-                unhealthy.len(),
-                external_workers.len(),
-                unhealthy_info.join(", ")
-            ))
+            error::service_unavailable(
+                "service_unavailable",
+                format!(
+                    "{}/{} workers unhealthy: {}",
+                    unhealthy.len(),
+                    external_workers.len(),
+                    unhealthy_info.join(", ")
+                ),
+            )
         }
     }
 
@@ -417,7 +367,10 @@ impl crate::routers::RouterTrait for OpenAIRouter {
     async fn get_models(&self, req: Request<Body>) -> Response {
         let external_workers = self.external_workers();
         if external_workers.is_empty() {
-            return error_responses::service_unavailable("No external workers registered");
+            return error::service_unavailable(
+                "service_unavailable",
+                "No external workers registered",
+            );
         }
 
         let auth_header = extract_auth_header(Some(req.headers()), &None);
@@ -518,7 +471,10 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                     metrics_labels::ENDPOINT_CHAT,
                     metrics_labels::ERROR_VALIDATION,
                 );
-                return error_responses::bad_request(format!("Failed to serialize request: {}", e));
+                return error::bad_request(
+                    "invalid_request",
+                    format!("Failed to serialize request: {}", e),
+                );
             }
         };
 
@@ -532,7 +488,10 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                 metrics_labels::ENDPOINT_CHAT,
                 metrics_labels::ERROR_VALIDATION,
             );
-            return error_responses::bad_request(format!("Provider transform error: {}", e));
+            return error::bad_request(
+                "invalid_request",
+                format!("Provider transform error: {}", e),
+            );
         }
 
         let mut ctx = RequestContext::for_chat(
@@ -585,11 +544,10 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                         Ok(r) => r,
                         Err(e) => {
                             worker.circuit_breaker().record_failure();
-                            return (
-                                StatusCode::SERVICE_UNAVAILABLE,
+                            return error::service_unavailable(
+                                "upstream_error",
                                 format!("Failed to contact upstream: {}", e),
-                            )
-                                .into_response();
+                            );
                         }
                     };
 
@@ -618,11 +576,10 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                             }
                             Err(e) => {
                                 worker.circuit_breaker().record_failure();
-                                (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                error::internal_error(
+                                    "upstream_error",
                                     format!("Failed to read response: {}", e),
                                 )
-                                    .into_response()
                             }
                         }
                     } else {
@@ -795,7 +752,10 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                     metrics_labels::ENDPOINT_RESPONSES,
                     metrics_labels::ERROR_VALIDATION,
                 );
-                return error_responses::not_found("conversation", &conv_id.0);
+                return error::not_found(
+                    "not_found",
+                    format!("No conversation found with id '{}'", conv_id.0),
+                );
             }
 
             let params = ListParams {
@@ -912,7 +872,10 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                     metrics_labels::ENDPOINT_RESPONSES,
                     metrics_labels::ERROR_VALIDATION,
                 );
-                return error_responses::bad_request(format!("Failed to serialize request: {}", e));
+                return error::bad_request(
+                    "invalid_request",
+                    format!("Failed to serialize request: {}", e),
+                );
             }
         };
 
@@ -926,7 +889,10 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                 metrics_labels::ENDPOINT_RESPONSES,
                 metrics_labels::ERROR_VALIDATION,
             );
-            return error_responses::bad_request(format!("Provider transform error: {}", e));
+            return error::bad_request(
+                "invalid_request",
+                format!("Provider transform error: {}", e),
+            );
         }
 
         let mut ctx = RequestContext::for_responses(
@@ -988,8 +954,13 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                 }
                 (StatusCode::OK, Json(response_json)).into_response()
             }
-            Ok(None) => error_responses::not_found("response", response_id),
-            Err(e) => error_responses::internal_error(format!("Failed to get response: {}", e)),
+            Ok(None) => error::not_found(
+                "not_found",
+                format!("No response found with id '{}'", response_id),
+            ),
+            Err(e) => {
+                error::internal_error("storage_error", format!("Failed to get response: {}", e))
+            }
         }
     }
 
@@ -1031,10 +1002,16 @@ impl crate::routers::RouterTrait for OpenAIRouter {
 
                 (StatusCode::OK, Json(response_body)).into_response()
             }
-            Ok(None) => error_responses::not_found("response", response_id),
+            Ok(None) => error::not_found(
+                "not_found",
+                format!("No response found with id '{}'", response_id),
+            ),
             Err(e) => {
                 warn!("Failed to retrieve input items for {}: {}", response_id, e);
-                error_responses::internal_error(format!("Failed to retrieve input items: {}", e))
+                error::internal_error(
+                    "storage_error",
+                    format!("Failed to retrieve input items: {}", e),
+                )
             }
         }
     }

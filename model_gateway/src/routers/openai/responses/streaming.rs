@@ -16,7 +16,7 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -30,7 +30,7 @@ use super::{
     },
     tool_handler::{StreamAction, StreamingToolHandler},
     utils::{
-        insert_optional_string, patch_response_with_request_metadata, restore_original_tools,
+        patch_response_with_request_metadata, response_tool_to_value, restore_original_tools,
         rewrite_streaming_block,
     },
 };
@@ -46,6 +46,7 @@ use crate::{
         responses::{ResponseToolType, ResponsesRequest},
     },
     routers::{
+        error,
         header_utils::{apply_request_headers, preserve_response_headers},
         mcp_utils::DEFAULT_MAX_ITERATIONS,
         openai::context::{RequestContext, StreamingEventContext, StreamingRequest},
@@ -197,23 +198,8 @@ fn build_mcp_tools_value(original_body: &ResponsesRequest) -> Option<Value> {
     let tools = original_body.tools.as_ref()?;
     let mcp_tools: Vec<Value> = tools
         .iter()
-        .filter(|t| matches!(t.r#type, ResponseToolType::Mcp) && t.server_url.is_some())
-        .map(|t| {
-            let mut m = Map::new();
-            m.insert("type".to_string(), json!("mcp"));
-            insert_optional_string(&mut m, "server_label", &t.server_label);
-            insert_optional_string(&mut m, "server_url", &t.server_url);
-            insert_optional_string(&mut m, "server_description", &t.server_description);
-            insert_optional_string(&mut m, "require_approval", &t.require_approval);
-
-            if let Some(allowed) = &t.allowed_tools {
-                m.insert(
-                    "allowed_tools".to_string(),
-                    Value::Array(allowed.iter().map(|s| json!(s)).collect()),
-                );
-            }
-            Value::Object(m)
-        })
+        .filter(|t| matches!(t.r#type, ResponseToolType::Mcp))
+        .filter_map(response_tool_to_value)
         .collect();
 
     if mcp_tools.is_empty() {
@@ -740,7 +726,8 @@ pub(super) async fn handle_streaming_with_tool_interception(
             let response = match request_builder.send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    send_sse_event(&tx, "error", &json!({"error": {"message": e.to_string()}}));
+                    let _ =
+                        send_sse_event(&tx, "error", &json!({"error": {"message": e.to_string()}}));
                     return;
                 }
             };
@@ -748,7 +735,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                send_sse_event(
+                let _ = send_sse_event(
                     &tx,
                     "error",
                     &json!({"error": {"message": format!("Upstream error {}: {}", status, body)}}),
@@ -876,7 +863,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                         }
                     }
                     Err(e) => {
-                        send_sse_event(
+                        let _ = send_sse_event(
                             &tx,
                             "error",
                             &json!({"error": {"message": format!("Stream error: {}", e)}}),
@@ -1032,7 +1019,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     let worker = match ctx.worker() {
         Some(w) => w.clone(),
         None => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Worker not selected").into_response();
+            return error::internal_error("internal_error", "Worker not selected");
         }
     };
     let circuit_breaker = worker.circuit_breaker();
@@ -1040,21 +1027,13 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     let original_body = match ctx.responses_request() {
         Some(r) => r,
         None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Expected responses request",
-            )
-                .into_response();
+            return error::internal_error("internal_error", "Expected responses request");
         }
     };
     let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
         Some(m) => m.clone(),
         None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "MCP orchestrator required",
-            )
-                .into_response();
+            return error::internal_error("internal_error", "MCP orchestrator required");
         }
     };
 
@@ -1069,7 +1048,7 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     let req = match ctx.into_streaming_context() {
         Ok(r) => r,
         Err(msg) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
+            return error::internal_error("internal_error", msg);
         }
     };
 
