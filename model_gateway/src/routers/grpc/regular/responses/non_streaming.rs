@@ -13,9 +13,8 @@ use tracing::{debug, error, trace, warn};
 
 use super::{
     common::{
-        build_mcp_list_tools_item, build_next_request, convert_mcp_tools_to_chat_tools,
-        extract_all_tool_calls_from_chat, load_conversation_history, prepare_chat_tools_and_choice,
-        ExtractedToolCall, ToolLoopState,
+        build_next_request, convert_mcp_tools_to_chat_tools, extract_all_tool_calls_from_chat,
+        load_conversation_history, prepare_chat_tools_and_choice, ExtractedToolCall, ToolLoopState,
     },
     conversions,
 };
@@ -401,11 +400,7 @@ pub(super) async fn execute_tool_loop(
             if state.total_calls > 0 {
                 // Prepend mcp_list_tools items for each server
                 for (label, key) in session.mcp_servers().iter().rev() {
-                    let mcp_list_tools = build_mcp_list_tools_item(
-                        &ctx.mcp_orchestrator,
-                        label,
-                        std::slice::from_ref(key),
-                    );
+                    let mcp_list_tools = session.build_mcp_list_tools_item(label, key);
                     responses_response.output.insert(0, mcp_list_tools);
                 }
 
