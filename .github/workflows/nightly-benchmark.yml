@@ -92,7 +92,7 @@ jobs:
           - { id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B, slug: deepseek-ai-DeepSeek-R1-Distill-Qwen-7B, test_class: TestNightlyDeepseek7bSingle }
           - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bSingle }
           - { id: mistralai/Mistral-7B-Instruct-v0.3, slug: mistralai-Mistral-7B-Instruct-v0.3, test_class: TestNightlyMistral7bSingle }
-          - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOssSingle }
+          - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bSingle }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
           - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
@@ -196,7 +196,7 @@ jobs:
           - { id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B, slug: deepseek-ai-DeepSeek-R1-Distill-Qwen-7B, test_class: TestNightlyDeepseek7bMulti }
           - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bMulti }
           - { id: mistralai/Mistral-7B-Instruct-v0.3, slug: mistralai-Mistral-7B-Instruct-v0.3, test_class: TestNightlyMistral7bMulti }
-          - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOssMulti }
+          - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bMulti }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
           - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
