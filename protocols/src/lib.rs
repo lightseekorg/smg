@@ -18,6 +18,8 @@ pub mod generate;
 pub mod interactions;
 pub mod messages;
 pub mod parser;
+pub mod realtime_conversation;
+pub mod realtime_response;
 pub mod rerank;
 pub mod responses;
 pub mod sampling_params;
