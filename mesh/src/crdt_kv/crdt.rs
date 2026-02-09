@@ -73,7 +73,13 @@ impl CrdtOrMap {
 
     /// Insert key-value pair (transparent operation)
     pub fn insert(&self, key: String, value: Vec<u8>) -> Option<Vec<u8>> {
-        let prev = self.store.get(&key);
+        let mut prev = None;
+        let value_for_store = value.clone();
+        let _ = self.store.upsert(key.clone(), |current| {
+            prev = current.map(|bytes| bytes.to_vec());
+            value_for_store
+        });
+
         let timestamp = self.clock.tick();
         let operation = Operation::insert(key.clone(), value.clone(), timestamp, self.replica_id);
 
@@ -84,7 +90,7 @@ impl CrdtOrMap {
             key, timestamp, self.replica_id
         );
 
-        self.apply_insert(&key, value.clone(), timestamp, self.replica_id);
+        let _ = self.record_insert_metadata(&key, value, timestamp, self.replica_id);
 
         prev
     }
