@@ -39,7 +39,16 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         previous_response_id,
     } = payload_state;
 
-    let original_body = ctx.responses_request();
+    let original_body = match ctx.responses_request() {
+        Some(r) => r,
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Expected responses request",
+            )
+                .into_response();
+        }
+    };
     let worker = match ctx.worker() {
         Some(w) => w.clone(),
         None => {
