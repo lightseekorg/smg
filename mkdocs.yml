@@ -78,7 +78,7 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/lightseekorg/smg
     - icon: fontawesome/brands/slack
-      link: https://lightseekorg.slack.com
+      link: https://join.slack.com/t/lightseekorg/shared_invite/zt-3py6mpreo-XUGd064dSsWeQizh3YKQrQ
   generator: false
   version:
     provider: mike
