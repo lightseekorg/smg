@@ -1,7 +1,6 @@
 <p align="center">
   <a href="https://lightseekorg.github.io/smg">
-    <img alt="SMG Logo" src="docs/assets/images/logos/logomark-dark.svg#gh-light-mode-only" width="80">
-    <img alt="SMG Logo" src="docs/assets/images/logos/logomark-white.svg#gh-dark-mode-only" width="80">
+    <img alt="SMG Logo" src="docs/assets/images/logos/logomark-white.svg" width="80">
   </a>
 </p>
 
