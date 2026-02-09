@@ -449,23 +449,17 @@ class TestToolCallingCloud:
             resp_brave = future_brave.result(timeout=120)
             resp_deepwiki = future_deepwiki.result(timeout=120)
 
-        # Brave response should only reference brave server
-        assert resp_brave.error is None
-        brave_calls = [item for item in resp_brave.output if item.type == "mcp_call"]
-        assert len(brave_calls) > 0
-        for call in brave_calls:
-            assert call.server_label == "brave", (
-                f"Brave request got server_label={call.server_label}"
-            )
+        def _check_response(resp, expected_label):
+            assert resp.error is None
+            calls = [item for item in resp.output if item.type == "mcp_call"]
+            assert len(calls) > 0
+            for call in calls:
+                assert call.server_label == expected_label, (
+                    f"{expected_label} request got server_label={call.server_label}"
+                )
 
-        # Deepwiki response should only reference deepwiki server
-        assert resp_deepwiki.error is None
-        deepwiki_calls = [item for item in resp_deepwiki.output if item.type == "mcp_call"]
-        assert len(deepwiki_calls) > 0
-        for call in deepwiki_calls:
-            assert call.server_label == "deepwiki", (
-                f"Deepwiki request got server_label={call.server_label}"
-            )
+        _check_response(resp_brave, "brave")
+        _check_response(resp_deepwiki, "deepwiki")
 
     def test_concurrent_mcp_different_servers_streaming(self, setup_backend):
         """Concurrent streaming requests with different MCP servers don't contaminate each other."""
@@ -503,33 +497,22 @@ class TestToolCallingCloud:
             events_brave = future_brave.result(timeout=120)
             events_deepwiki = future_deepwiki.result(timeout=120)
 
-        # Brave stream: mcp_list_tools events should have server_label=brave
-        brave_list_tools = [
-            e
-            for e in events_brave
-            if e.type == "response.output_item.added"
-            and e.item is not None
-            and e.item.type == "mcp_list_tools"
-        ]
-        assert len(brave_list_tools) > 0
-        for e in brave_list_tools:
-            assert e.item.server_label == "brave", (
-                f"Brave stream got mcp_list_tools server_label={e.item.server_label}"
-            )
+        def _check_stream(events, expected_label):
+            list_tools = [
+                e
+                for e in events
+                if e.type == "response.output_item.added"
+                and e.item is not None
+                and e.item.type == "mcp_list_tools"
+            ]
+            assert len(list_tools) > 0
+            for e in list_tools:
+                assert e.item.server_label == expected_label, (
+                    f"{expected_label} stream got mcp_list_tools server_label={e.item.server_label}"
+                )
 
-        # Deepwiki stream: mcp_list_tools events should have server_label=deepwiki
-        deepwiki_list_tools = [
-            e
-            for e in events_deepwiki
-            if e.type == "response.output_item.added"
-            and e.item is not None
-            and e.item.type == "mcp_list_tools"
-        ]
-        assert len(deepwiki_list_tools) > 0
-        for e in deepwiki_list_tools:
-            assert e.item.server_label == "deepwiki", (
-                f"Deepwiki stream got mcp_list_tools server_label={e.item.server_label}"
-            )
+        _check_stream(events_brave, "brave")
+        _check_stream(events_deepwiki, "deepwiki")
 
 
 # =============================================================================
