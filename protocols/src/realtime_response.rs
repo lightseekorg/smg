@@ -10,10 +10,12 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::realtime_conversation::RealtimeConversationItem;
-use crate::realtime_session::{
-    MaxOutputTokens, OutputModality, Prompt, RealtimeAudioFormat, RealtimeTool,
-    RealtimeToolChoice, Voice,
+use crate::{
+    realtime_conversation::RealtimeConversationItem,
+    realtime_session::{
+        MaxOutputTokens, OutputModality, Prompt, RealtimeAudioFormat, RealtimeTool,
+        RealtimeToolChoice, Voice,
+    },
 };
 
 // ============================================================================

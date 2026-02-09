@@ -109,7 +109,9 @@ pub enum ConversationItemRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RealtimeContentPart {
-    InputText { text: String },
+    InputText {
+        text: String,
+    },
     InputAudio {
         audio: Option<String>,
         transcript: Option<String>,
@@ -118,7 +120,9 @@ pub enum RealtimeContentPart {
         image_url: Option<String>,
         detail: Option<ImageDetail>,
     },
-    OutputText { text: String },
+    OutputText {
+        text: String,
+    },
     OutputAudio {
         audio: Option<String>,
         transcript: Option<String>,
