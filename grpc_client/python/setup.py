@@ -22,8 +22,7 @@ def compile_grpc_protos():
 
     proto_files = list(proto_dir.glob("*.proto"))
     if not proto_files:
-        print("Warning: No .proto files found in", proto_dir)
-        return
+        raise FileNotFoundError(f"No .proto files found in {proto_dir}")
 
     # Use grpc_tools.protoc Python API (same approach as vLLM)
     try:

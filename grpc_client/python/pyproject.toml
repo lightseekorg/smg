@@ -37,4 +37,4 @@ where = ["."]
 include = ["smg_grpc_proto*"]
 
 [tool.setuptools.package-data]
-smg_grpc_proto = ["proto/*.proto", "generated/*.py"]
+smg_grpc_proto = ["proto/*.proto", "generated/*.py", "generated/*.pyi"]
