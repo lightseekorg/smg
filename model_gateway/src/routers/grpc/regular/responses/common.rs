@@ -6,7 +6,7 @@
 //! - MCP metadata builders
 //! - Conversation history loading
 
-use axum::response::Response;
+use axum::{http, response::Response};
 use tracing::{debug, warn};
 
 use crate::{
@@ -34,6 +34,14 @@ pub(super) struct ToolLoopState {
     pub conversation_history: Vec<ResponseInputOutputItem>,
     pub original_input: ResponseInput,
     pub mcp_call_items: Vec<ResponseOutputItem>,
+}
+
+/// Per-request parameters for chat pipeline execution.
+/// Bundles values that are always threaded together through the regular responses call chain.
+pub(super) struct ResponsesCallContext {
+    pub headers: Option<http::HeaderMap>,
+    pub model_id: Option<String>,
+    pub response_id: Option<String>,
 }
 
 impl ToolLoopState {

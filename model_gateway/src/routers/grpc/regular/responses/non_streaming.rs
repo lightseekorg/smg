@@ -14,7 +14,8 @@ use tracing::{debug, error, trace, warn};
 use super::{
     common::{
         build_next_request, convert_mcp_tools_to_chat_tools, extract_all_tool_calls_from_chat,
-        load_conversation_history, prepare_chat_tools_and_choice, ExtractedToolCall, ToolLoopState,
+        load_conversation_history, prepare_chat_tools_and_choice, ExtractedToolCall,
+        ResponsesCallContext, ToolLoopState,
     },
     conversions,
 };
@@ -41,9 +42,7 @@ use crate::{
 pub(super) async fn route_responses_internal(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
-    headers: Option<http::HeaderMap>,
-    model_id: Option<String>,
-    response_id: Option<String>,
+    params: ResponsesCallContext,
 ) -> Result<ResponsesResponse, Response> {
     // 1. Load conversation history and build modified request
     let modified_request = load_conversation_history(ctx, &request).await?;
@@ -52,36 +51,14 @@ pub(super) async fn route_responses_internal(
     let (has_mcp_tools, mcp_servers) =
         ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await?;
 
-    // Set the server keys in the context
-    {
-        let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = mcp_servers;
-    }
-
     let responses_response = if has_mcp_tools {
         debug!("MCP tools detected, using tool loop");
 
         // Execute with MCP tool loop
-        execute_tool_loop(
-            ctx,
-            modified_request,
-            &request,
-            headers,
-            model_id,
-            response_id.clone(),
-        )
-        .await?
+        execute_tool_loop(ctx, modified_request, &request, &params, mcp_servers).await?
     } else {
         // No MCP tools - execute without MCP (may have function tools or no tools)
-        execute_without_mcp(
-            ctx,
-            &modified_request,
-            &request,
-            headers,
-            model_id,
-            response_id.clone(),
-        )
-        .await?
+        execute_without_mcp(ctx, &modified_request, &request, params).await?
     };
 
     // 5. Persist response to storage if store=true
@@ -102,9 +79,7 @@ pub(super) async fn execute_without_mcp(
     ctx: &ResponsesContext,
     modified_request: &ResponsesRequest,
     original_request: &ResponsesRequest,
-    headers: Option<http::HeaderMap>,
-    model_id: Option<String>,
-    response_id: Option<String>,
+    params: ResponsesCallContext,
 ) -> Result<ResponsesResponse, Response> {
     // Convert ResponsesRequest → ChatCompletionRequest
     let chat_request = conversions::responses_to_chat(modified_request).map_err(|e| {
@@ -124,24 +99,26 @@ pub(super) async fn execute_without_mcp(
         .pipeline
         .execute_chat_for_responses(
             Arc::new(chat_request),
-            headers,
-            model_id,
+            params.headers,
+            params.model_id,
             ctx.components.clone(),
         )
         .await?; // Preserve the Response error as-is
 
     // Convert ChatCompletionResponse → ResponsesResponse
-    conversions::chat_to_responses(&chat_response, original_request, response_id).map_err(|e| {
-        error!(
-            function = "execute_without_mcp",
-            error = %e,
-            "Failed to convert ChatCompletionResponse to ResponsesResponse"
-        );
-        error::internal_error(
-            "convert_to_responses_format_failed",
-            format!("Failed to convert to responses format: {}", e),
-        )
-    })
+    conversions::chat_to_responses(&chat_response, original_request, params.response_id).map_err(
+        |e| {
+            error!(
+                function = "execute_without_mcp",
+                error = %e,
+                "Failed to convert ChatCompletionResponse to ResponsesResponse"
+            );
+            error::internal_error(
+                "convert_to_responses_format_failed",
+                format!("Failed to convert to responses format: {}", e),
+            )
+        },
+    )
 }
 
 /// Execute the MCP tool calling loop
@@ -155,9 +132,8 @@ pub(super) async fn execute_tool_loop(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
-    headers: Option<http::HeaderMap>,
-    model_id: Option<String>,
-    response_id: Option<String>,
+    params: &ResponsesCallContext,
+    mcp_servers: Vec<(String, String)>,
 ) -> Result<ResponsesResponse, Response> {
     let mut state = ToolLoopState::new(original_request.input.clone());
 
@@ -171,8 +147,8 @@ pub(super) async fn execute_tool_loop(
     );
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
-    let mcp_servers = ctx.requested_servers.read().unwrap().clone();
-    let session_request_id = response_id
+    let session_request_id = params
+        .response_id
         .clone()
         .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4()));
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
@@ -207,8 +183,8 @@ pub(super) async fn execute_tool_loop(
             .pipeline
             .execute_chat_for_responses(
                 Arc::new(chat_request),
-                headers.clone(),
-                model_id.clone(),
+                params.headers.clone(),
+                params.model_id.clone(),
                 ctx.components.clone(),
             )
             .await?;
@@ -246,7 +222,7 @@ pub(super) async fn execute_tool_loop(
                 let responses_response = conversions::chat_to_responses(
                     &chat_response,
                     original_request,
-                    response_id.clone(),
+                    params.response_id.clone(),
                 )
                 .map_err(|e| {
                     error!(
@@ -286,7 +262,7 @@ pub(super) async fn execute_tool_loop(
                 let mut responses_response = conversions::chat_to_responses(
                     &chat_response,
                     original_request,
-                    response_id.clone(),
+                    params.response_id.clone(),
                 )
                 .map_err(|e| {
                     error!(
@@ -380,7 +356,7 @@ pub(super) async fn execute_tool_loop(
             let mut responses_response = conversions::chat_to_responses(
                 &chat_response,
                 original_request,
-                response_id.clone(),
+                params.response_id.clone(),
             )
             .map_err(|e| {
                 error!(

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -415,6 +416,103 @@ class TestToolCallingCloud:
         assert len(mcp_calls) > 0
         for mcp_call in mcp_calls:
             assert mcp_call.server_label == "brave"
+
+    def test_concurrent_mcp_different_servers(self, setup_backend):
+        """Concurrent non-streaming requests with different MCP servers don't contaminate each other."""
+        _, model, client, gateway = setup_backend
+
+        def brave_request():
+            return client.responses.create(
+                model=model,
+                input=MCP_TEST_PROMPT,
+                tools=[BRAVE_MCP_TOOL],
+                stream=False,
+                reasoning={"effort": "low"},
+            )
+
+        def deepwiki_request():
+            return client.responses.create(
+                model=model,
+                input=(
+                    "What transport protocols does the 2025-03-26 version of the MCP spec "
+                    "(modelcontextprotocol/modelcontextprotocol) support?"
+                ),
+                tools=[DEEPWIKI_MCP_TOOL],
+                stream=False,
+                reasoning={"effort": "low"},
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            future_brave = pool.submit(brave_request)
+            future_deepwiki = pool.submit(deepwiki_request)
+
+            resp_brave = future_brave.result(timeout=120)
+            resp_deepwiki = future_deepwiki.result(timeout=120)
+
+        def _check_response(resp, expected_label):
+            assert resp.error is None
+            calls = [item for item in resp.output if item.type == "mcp_call"]
+            assert len(calls) > 0
+            for call in calls:
+                assert call.server_label == expected_label, (
+                    f"{expected_label} request got server_label={call.server_label}"
+                )
+
+        _check_response(resp_brave, "brave")
+        _check_response(resp_deepwiki, "deepwiki")
+
+    def test_concurrent_mcp_different_servers_streaming(self, setup_backend):
+        """Concurrent streaming requests with different MCP servers don't contaminate each other."""
+        _, model, client, gateway = setup_backend
+
+        def brave_stream():
+            return list(
+                client.responses.create(
+                    model=model,
+                    input=MCP_TEST_PROMPT,
+                    tools=[BRAVE_MCP_TOOL],
+                    stream=True,
+                    reasoning={"effort": "low"},
+                )
+            )
+
+        def deepwiki_stream():
+            return list(
+                client.responses.create(
+                    model=model,
+                    input=(
+                        "What transport protocols does the 2025-03-26 version of the MCP spec "
+                        "(modelcontextprotocol/modelcontextprotocol) support?"
+                    ),
+                    tools=[DEEPWIKI_MCP_TOOL],
+                    stream=True,
+                    reasoning={"effort": "low"},
+                )
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            future_brave = pool.submit(brave_stream)
+            future_deepwiki = pool.submit(deepwiki_stream)
+
+            events_brave = future_brave.result(timeout=120)
+            events_deepwiki = future_deepwiki.result(timeout=120)
+
+        def _check_stream(events, expected_label):
+            list_tools = [
+                e
+                for e in events
+                if e.type == "response.output_item.added"
+                and e.item is not None
+                and e.item.type == "mcp_list_tools"
+            ]
+            assert len(list_tools) > 0
+            for e in list_tools:
+                assert e.item.server_label == expected_label, (
+                    f"{expected_label} stream got mcp_list_tools server_label={e.item.server_label}"
+                )
+
+        _check_stream(events_brave, "brave")
+        _check_stream(events_deepwiki, "deepwiki")
 
 
 # =============================================================================
