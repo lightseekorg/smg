@@ -9,8 +9,10 @@
 <h1 align="center">Shepherd Model Gateway</h1>
 
 <p align="center">
+  <a href="https://github.com/lightseekorg/smg/releases/latest"><img src="https://img.shields.io/github/v/release/lightseekorg/smg?logo=github&label=Release" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
   <a href="https://lightseekorg.github.io/smg"><img src="https://img.shields.io/badge/docs-latest-brightgreen.svg" alt="Docs"></a>
+  <a href="https://discord.gg/wkQ73CVTvR"><img src="https://img.shields.io/badge/Discord-Join%20Us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 High-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
