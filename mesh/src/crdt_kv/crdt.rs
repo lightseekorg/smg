@@ -88,6 +88,27 @@ impl CrdtOrMap {
         self.store.insert(key, value)
     }
 
+    /// Atomically update a key under the same DashMap entry lock.
+    pub fn upsert<F>(&self, key: String, updater: F) -> Vec<u8>
+    where
+        F: FnOnce(Option<&[u8]>) -> Vec<u8>,
+    {
+        let updated_value = self.store.upsert(key.clone(), updater);
+        let timestamp = self.clock.tick();
+        let operation = Operation::insert(
+            key.clone(),
+            updated_value.clone(),
+            timestamp,
+            self.replica_id,
+        );
+
+        self.operation_log.write().append(operation);
+        let _ =
+            self.record_insert_metadata(&key, updated_value.clone(), timestamp, self.replica_id);
+
+        updated_value
+    }
+
     /// Remove key (transparent operation)
     pub fn remove(&self, key: &str) -> Option<Vec<u8>> {
         let timestamp = self.clock.tick();
@@ -184,7 +205,20 @@ impl CrdtOrMap {
 
     /// Apply insert (Add-wins semantic)
     fn apply_insert(&self, key: &str, value: Vec<u8>, timestamp: u64, replica_id: ReplicaId) {
-        let new_metadata = ValueMetadata::new(value.clone(), timestamp, replica_id);
+        if self.record_insert_metadata(key, value.clone(), timestamp, replica_id) {
+            self.store.insert(key.to_string(), value);
+        }
+    }
+
+    fn record_insert_metadata(
+        &self,
+        key: &str,
+        value: Vec<u8>,
+        timestamp: u64,
+        replica_id: ReplicaId,
+    ) -> bool {
+        let new_metadata = ValueMetadata::new(value, timestamp, replica_id);
+        let mut should_store = false;
 
         self.metadata
             .entry(key.to_string())
@@ -198,15 +232,17 @@ impl CrdtOrMap {
                 if !has_newer_remove {
                     // Add-wins: only add if there's no newer remove
                     versions.push(new_metadata.clone());
-                    self.store.insert(key.to_string(), value.clone());
+                    should_store = true;
                 } else {
                     warn!("Insert was overwritten by Remove: key={}", key);
                 }
             })
             .or_insert_with(|| {
-                self.store.insert(key.to_string(), value);
+                should_store = true;
                 vec![new_metadata]
             });
+
+        should_store
     }
 
     /// Apply remove

@@ -107,14 +107,14 @@ impl OperationLog {
         serde_json::from_str(json)
     }
 
-    /// Serialize to binary (bincode)
-    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
-        bincode::serialize(self)
+    /// Serialize to JSON bytes
+    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
     }
 
     /// Deserialize from binary
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        bincode::deserialize(bytes)
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(bytes)
     }
 
     /// Get number of operations
