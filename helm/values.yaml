@@ -150,3 +150,7 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# Region airport code (injected from Terraform via helm_release set)
+regionAirportCode: ""
+ 

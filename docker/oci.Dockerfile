@@ -76,4 +76,8 @@ RUN rm -rf /root/.cache dist/
 RUN microdnf install -y procps-ng \
     && microdnf clean all
 
-ENTRYPOINT ["python3", "-m", "smg.launch_router"]
+# Copy and setup secrets initialization script
+COPY scripts/startup.sh /app/startup.sh
+RUN chmod +x /app/startup.sh
+
+ENTRYPOINT ["/app/startup.sh"]
