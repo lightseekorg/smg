@@ -10,12 +10,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    realtime_conversation::RealtimeConversationItem,
-    realtime_session::{
-        MaxOutputTokens, OutputModality, Prompt, RealtimeAudioFormat, RealtimeTool,
-        RealtimeToolChoice, Voice,
-    },
+use crate::realtime_conversation::RealtimeConversationItem;
+use crate::realtime_session::{
+    MaxOutputTokens, OutputModality, Prompt, RealtimeAudioFormat, RealtimeTool,
+    RealtimeToolChoice, Voice,
 };
 
 // ============================================================================
@@ -147,19 +145,19 @@ pub struct ResponseAudioConfig {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedTokensDetails {
-    pub text_tokens: Option<u64>,
-    pub image_tokens: Option<u64>,
-    pub audio_tokens: Option<u64>,
+    pub text_tokens: Option<u32>,
+    pub image_tokens: Option<u32>,
+    pub audio_tokens: Option<u32>,
 }
 
 /// Input token usage details.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RealtimeInputTokenDetails {
-    pub cached_tokens: Option<u64>,
-    pub text_tokens: Option<u64>,
-    pub image_tokens: Option<u64>,
-    pub audio_tokens: Option<u64>,
+    pub cached_tokens: Option<u32>,
+    pub text_tokens: Option<u32>,
+    pub image_tokens: Option<u32>,
+    pub audio_tokens: Option<u32>,
     pub cached_tokens_details: Option<CachedTokensDetails>,
 }
 
@@ -167,17 +165,17 @@ pub struct RealtimeInputTokenDetails {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RealtimeOutputTokenDetails {
-    pub text_tokens: Option<u64>,
-    pub audio_tokens: Option<u64>,
+    pub text_tokens: Option<u32>,
+    pub audio_tokens: Option<u32>,
 }
 
 /// Token usage for a realtime response.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RealtimeUsage {
-    pub total_tokens: Option<u64>,
-    pub input_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u32>,
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
     pub input_token_details: Option<RealtimeInputTokenDetails>,
     pub output_token_details: Option<RealtimeOutputTokenDetails>,
 }
