@@ -139,7 +139,9 @@ VERSION_FILES := Cargo.toml \
                  bindings/golang/Cargo.toml \
                  bindings/python/Cargo.toml \
                  bindings/python/pyproject.toml \
-                 bindings/python/src/smg/version.py
+                 bindings/python/src/smg/version.py \
+                 grpc_client/python/pyproject.toml \
+                 grpc_client/python/smg_grpc_proto/__init__.py
 
 show-version: ## Show current version across all files
 	@echo "Current versions:"
@@ -148,6 +150,8 @@ show-version: ## Show current version across all files
 	@echo "  bindings/python/Cargo.toml: $$(grep -m1 '^version = ' bindings/python/Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
 	@echo "  bindings/python/pyproject.toml: $$(grep -m1 '^version = ' bindings/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')"
 	@echo "  bindings/python/.../version.py: $$(grep '__version__' bindings/python/src/smg/version.py | sed 's/__version__ = "\(.*\)"/\1/')"
+	@echo "  grpc_client/python/pyproject.toml: $$(grep -m1 '^version = ' grpc_client/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')"
+	@echo "  grpc_client/python/.../__init__.py: $$(grep '__version__' grpc_client/python/smg_grpc_proto/__init__.py | sed 's/__version__ = "\(.*\)"/\1/')"
 
 bump-version: ## Bump version across all files (usage: make bump-version VERSION=0.3.3)
 	@if [ -z "$(VERSION)" ]; then \
@@ -169,12 +173,18 @@ bump-version: ## Bump version across all files (usage: make bump-version VERSION
 	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' bindings/python/pyproject.toml && rm -f bindings/python/pyproject.toml.bak
 	@# Update version.py
 	@sed -i.bak 's/__version__ = ".*"/__version__ = "$(VERSION)"/' bindings/python/src/smg/version.py && rm -f bindings/python/src/smg/version.py.bak
+	@# Update grpc_client/python/pyproject.toml
+	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' grpc_client/python/pyproject.toml && rm -f grpc_client/python/pyproject.toml.bak
+	@# Update grpc_client/python/smg_grpc_proto/__init__.py
+	@sed -i.bak 's/__version__ = ".*"/__version__ = "$(VERSION)"/' grpc_client/python/smg_grpc_proto/__init__.py && rm -f grpc_client/python/smg_grpc_proto/__init__.py.bak
 	@echo "Version updated to $(VERSION) in all files:"
 	@echo "  - Cargo.toml"
 	@echo "  - bindings/golang/Cargo.toml"
 	@echo "  - bindings/python/Cargo.toml"
 	@echo "  - bindings/python/pyproject.toml"
 	@echo "  - bindings/python/src/smg/version.py"
+	@echo "  - grpc_client/python/pyproject.toml"
+	@echo "  - grpc_client/python/smg_grpc_proto/__init__.py"
 	@echo ""
 	@echo "Verify with: make show-version"
 

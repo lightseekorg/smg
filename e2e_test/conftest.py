@@ -20,7 +20,7 @@ This module defines several pytest markers for configuring E2E tests:
     Specify which model to use for the test.
 
     Args:
-        name: Model ID from MODEL_SPECS (e.g., "llama-8b", "qwen-7b")
+        name: Model ID from MODEL_SPECS (e.g., "meta-llama/Llama-3.1-8B-Instruct", "Qwen/Qwen2.5-7B-Instruct")
 
     GPU Resource Management:
         When GPUs are limited (e.g., 4 GPUs, 6 models), the model pool uses
@@ -31,8 +31,8 @@ This module defines several pytest markers for configuring E2E tests:
         3. The needed model is then launched on-demand
 
     Examples:
-        @pytest.mark.model("llama-8b")
-        @pytest.mark.model("qwen-72b")
+        @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
+        @pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
 
 @pytest.mark.workers(count=1, prefill=None, decode=None)
     Configure worker topology for the test.
@@ -95,7 +95,7 @@ Basic test with default model:
 Test with specific model and multiple backends:
 
     @pytest.mark.e2e
-    @pytest.mark.model("qwen-7b")
+    @pytest.mark.model("Qwen/Qwen2.5-7B-Instruct")
     @pytest.mark.parametrize("setup_backend", ["grpc", "http"], indirect=True)
     class TestQwen:
         def test_generate(self, setup_backend):

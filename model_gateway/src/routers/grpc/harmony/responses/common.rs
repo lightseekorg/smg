@@ -1,7 +1,7 @@
 //! Shared helpers and state tracking for Harmony Responses
 
 use axum::response::Response;
-use serde_json::{from_value, json, to_string, Value};
+use serde_json::{from_value, to_string, Value};
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
@@ -12,9 +12,9 @@ use crate::{
     protocols::{
         common::{ToolCall, ToolChoice, ToolChoiceValue},
         responses::{
-            McpToolInfo, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
-            ResponseOutputItem, ResponseReasoningContent, ResponseTool, ResponseToolType,
-            ResponsesRequest, ResponsesResponse, StringOrContentParts,
+            ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
+            ResponseReasoningContent, ResponseTool, ResponseToolType, ResponsesRequest,
+            ResponsesResponse, StringOrContentParts,
         },
     },
     routers::{error, grpc::common::responses::ResponsesContext},
@@ -178,57 +178,18 @@ pub(super) fn build_next_request_with_tools(
     Ok(request)
 }
 
-/// Inject MCP metadata into final response
-///
-/// Adds mcp_list_tools and tool output items to the response output array.
-/// The output items respect the tool's response_format configuration
-/// (McpCall, WebSearchCall, CodeInterpreterCall, FileSearchCall).
-///
-/// Following non-Harmony pipeline pattern:
-/// 1. Prepend mcp_list_tools for each server at the beginning
-/// 2. Append all tool output items at the end
 pub(super) fn inject_mcp_metadata(
     response: &mut ResponsesResponse,
     tracking: &McpCallTracking,
     session: &McpToolSession<'_>,
 ) {
-    let mcp_tools = session.mcp_tools();
-    let mcp_servers = session.mcp_servers();
-
-    // Collect tool output items (already transformed with correct type)
     let tool_output_items: Vec<ResponseOutputItem> = tracking
         .tool_calls
         .iter()
         .map(|record| record.output_item.clone())
         .collect();
 
-    // Inject into response output:
-    // 1. Prepend mcp_list_tools for each server at the beginning
-    for (label, key) in mcp_servers.iter().rev() {
-        let tools_info: Vec<McpToolInfo> = mcp_tools
-            .iter()
-            .filter(|entry| entry.server_key() == key)
-            .map(|entry| McpToolInfo {
-                name: entry.tool.name.to_string(),
-                description: entry.tool.description.as_ref().map(|d| d.to_string()),
-                input_schema: Value::Object((*entry.tool.input_schema).clone()),
-                annotations: Some(json!({
-                    "read_only": false
-                })),
-            })
-            .collect();
-
-        let mcp_list_tools = ResponseOutputItem::McpListTools {
-            id: format!("mcpl_{}", Uuid::new_v4()),
-            server_label: label.clone(),
-            tools: tools_info,
-        };
-
-        response.output.insert(0, mcp_list_tools);
-    }
-
-    // 2. Append all tool output items at the end
-    response.output.extend(tool_output_items);
+    session.inject_mcp_output_items(&mut response.output, tool_output_items);
 }
 
 /// Load previous conversation messages from storage

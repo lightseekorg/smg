@@ -8,7 +8,7 @@
 //! - Payload transformation for MCP tool interception
 //! - Metadata injection for MCP operations
 
-use std::{io, slice, sync::Arc};
+use std::io;
 
 use axum::http::HeaderMap;
 use bytes::Bytes;
@@ -17,7 +17,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
-    mcp::{McpOrchestrator, McpToolSession, ResponseFormat, ResponseTransformer},
+    mcp::{McpToolSession, ResponseFormat, ResponseTransformer, ToolExecutionInput},
+    observability::metrics::{metrics_labels, Metrics},
     protocols::{
         event_types::{
             is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType,
@@ -25,7 +26,7 @@ use crate::{
         },
         responses::{generate_id, ResponseInput, ResponsesRequest},
     },
-    routers::{header_utils::apply_request_headers, mcp_utils::McpLoopConfig},
+    routers::{header_utils::apply_request_headers, mcp_utils::DEFAULT_MAX_ITERATIONS},
 };
 
 // ============================================================================
@@ -136,6 +137,7 @@ pub(super) async fn execute_streaming_tool_calls(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     state: &mut ToolLoopState,
     sequence_number: &mut u64,
+    model_id: &str,
 ) -> bool {
     // Execute all pending tool calls (sequential, as PR3 is skipped)
     for call in pending_calls {
@@ -205,52 +207,32 @@ pub(super) async fn execute_streaming_tool_calls(
             return false;
         }
 
-        // Call tool by name within allowed servers
         debug!("Calling MCP tool '{}' with args: {}", call.name, args_str);
-        let call_result = session
-            .call_tool_by_name(&call.name, arguments, &server_label)
+        let tool_output = session
+            .execute_tool(ToolExecutionInput {
+                call_id: call.call_id.clone(),
+                tool_name: call.name.clone(),
+                arguments,
+            })
             .await;
 
-        // Get transformed item directly (avoids serialize/parse roundtrip and double transformation)
-        let (mcp_call_item, output_str) = match call_result {
-            Ok(result) => {
-                // call_tool_by_name returns already-transformed ResponseOutputItem
-                match result.into_item() {
-                    Some(item) => {
-                        // Serialize for conversation history and convert to Value for events
-                        let output_str = serde_json::to_string(&item).unwrap_or_else(|e| {
-                            warn!(tool = %call.name, error = %e, "Failed to serialize tool output");
-                            json!({ "error": "serialization failed" }).to_string()
-                        });
-                        let item_value = to_value(&item).unwrap_or_else(|e| {
-                            warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
-                            json!({})
-                        });
-                        (item_value, output_str)
-                    }
-                    None => {
-                        // PendingApproval case - not supported in streaming
-                        let err = json!({ "error": "Tool requires approval (not supported)" });
-                        (err.clone(), err.to_string())
-                    }
-                }
-            }
-            Err(err) => {
-                let err_str = format!("tool call failed: {}", err);
-                warn!("Tool execution failed during streaming: {}", err_str);
-                // Build error mcp_call item with transformer (only for error case)
-                let error_output = json!({ "error": &err_str });
-                let mcp_call_item = build_transformed_mcp_call_item(
-                    &error_output,
-                    &response_format,
-                    &call.call_id,
-                    &server_label,
-                    &call.name,
-                    &call.arguments_buffer,
-                );
-                (mcp_call_item, error_output.to_string())
-            }
-        };
+        // Record MCP tool metrics
+        Metrics::record_mcp_tool_duration(model_id, &tool_output.tool_name, tool_output.duration);
+        Metrics::record_mcp_tool_call(
+            model_id,
+            &tool_output.tool_name,
+            if tool_output.is_error {
+                metrics_labels::RESULT_ERROR
+            } else {
+                metrics_labels::RESULT_SUCCESS
+            },
+        );
+
+        let output_str = tool_output.output.to_string();
+        let mcp_call_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
+            warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
+            json!({})
+        });
 
         // Send mcp_call completion event to client
         if !send_tool_call_completion_events(tx, &call, mcp_call_item.clone(), sequence_number) {
@@ -278,11 +260,7 @@ pub(super) async fn execute_streaming_tool_calls(
 ///
 /// Retains existing function tools from the request, removes non-function tools
 /// (MCP, builtin), and appends function tools for discovered MCP server tools.
-pub(super) fn prepare_mcp_tools_as_functions(
-    payload: &mut Value,
-    orchestrator: &Arc<McpOrchestrator>,
-    server_keys: &[String],
-) {
+pub(super) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpToolSession<'_>) {
     let Some(obj) = payload.as_object_mut() else {
         return;
     };
@@ -302,18 +280,10 @@ pub(super) fn prepare_mcp_tools_as_functions(
         }
     }
 
-    let mcp_tools = orchestrator.list_tools_for_servers(server_keys);
-    let mut tools_json = Vec::with_capacity(retained_tools.len() + mcp_tools.len());
+    let session_tools = session.build_function_tools_json();
+    let mut tools_json = Vec::with_capacity(retained_tools.len() + session_tools.len());
     tools_json.append(&mut retained_tools);
-
-    for entry in mcp_tools {
-        tools_json.push(serde_json::json!({
-            "type": ItemType::FUNCTION,
-            "name": entry.tool.name,
-            "description": entry.tool.description,
-            "parameters": Value::Object((*entry.tool.input_schema).clone())
-        }));
-    }
+    tools_json.extend(session_tools);
 
     if !tools_json.is_empty() {
         obj.insert("tools".to_string(), Value::Array(tools_json));
@@ -395,10 +365,9 @@ pub(super) fn send_mcp_list_tools_events(
     server_label: &str,
     output_index: usize,
     sequence_number: &mut u64,
-    server_keys: &[String],
+    server_key: &str,
 ) -> bool {
-    let tools_item_full =
-        build_mcp_list_tools_item_from_session(session, server_label, server_keys);
+    let tools_item_full = session.build_mcp_list_tools_json(server_label, server_key);
     let item_id = tools_item_full
         .get("id")
         .and_then(|v| v.as_str())
@@ -596,8 +565,7 @@ pub(super) fn inject_mcp_metadata_streaming(
         });
 
         for (label, key) in mcp_servers.iter().rev() {
-            let list_tools_item =
-                build_mcp_list_tools_item_from_session(session, label, slice::from_ref(key));
+            let list_tools_item = session.build_mcp_list_tools_json(label, key);
             output_array.insert(0, list_tools_item);
         }
 
@@ -610,11 +578,7 @@ pub(super) fn inject_mcp_metadata_streaming(
     } else if let Some(obj) = response.as_object_mut() {
         let mut output_items = Vec::new();
         for (label, key) in mcp_servers.iter() {
-            output_items.push(build_mcp_list_tools_item_from_session(
-                session,
-                label,
-                slice::from_ref(key),
-            ));
+            output_items.push(session.build_mcp_list_tools_json(label, key));
         }
         // Use stored transformed items (no reconstruction needed)
         output_items.extend(state.mcp_call_items.iter().cloned());
@@ -634,7 +598,6 @@ pub(super) async fn execute_tool_loop(
     initial_payload: Value,
     original_body: &ResponsesRequest,
     session: &McpToolSession<'_>,
-    config: &McpLoopConfig,
 ) -> Result<Value, String> {
     let mut state = ToolLoopState::new(original_body.input.clone());
 
@@ -648,7 +611,7 @@ pub(super) async fn execute_tool_loop(
 
     info!(
         "Starting tool loop: max_tool_calls={:?}, max_iterations={}",
-        max_tool_calls, config.max_iterations
+        max_tool_calls, DEFAULT_MAX_ITERATIONS
     );
 
     loop {
@@ -681,6 +644,9 @@ pub(super) async fn execute_tool_loop(
             state.iteration += 1;
             state.total_calls += 1;
 
+            // Record tool loop iteration metric
+            Metrics::record_mcp_tool_iteration(&original_body.model);
+
             info!(
                 "Tool loop iteration {}: calling {} (call_id: {})",
                 state.iteration, tool_name, call_id
@@ -688,8 +654,8 @@ pub(super) async fn execute_tool_loop(
 
             // Check combined limit: use minimum of user's max_tool_calls (if set) and safety max_iterations
             let effective_limit = match max_tool_calls {
-                Some(user_max) => user_max.min(config.max_iterations),
-                None => config.max_iterations,
+                Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
+                None => DEFAULT_MAX_ITERATIONS,
             };
 
             if state.total_calls > effective_limit {
@@ -699,13 +665,13 @@ pub(super) async fn execute_tool_loop(
                     } else {
                         warn!(
                             "Reached safety max_iterations limit: {}",
-                            config.max_iterations
+                            DEFAULT_MAX_ITERATIONS
                         );
                     }
                 } else {
                     warn!(
                         "Reached safety max_iterations limit: {}",
-                        config.max_iterations
+                        DEFAULT_MAX_ITERATIONS
                     );
                 }
 
@@ -718,9 +684,6 @@ pub(super) async fn execute_tool_loop(
                 );
             }
 
-            // Look up response_format for transformation
-            let response_format = session.tool_response_format(&tool_name);
-
             // Parse arguments to Value
             let arguments: Value = serde_json::from_str(&args_json_str).unwrap_or_else(|e| {
                 warn!(tool = %tool_name, error = %e, "Failed to parse tool arguments as JSON");
@@ -732,50 +695,35 @@ pub(super) async fn execute_tool_loop(
                 "Calling MCP tool '{}' with args: {}",
                 tool_name, args_json_str
             );
-            let resolved_label = session.resolve_tool_server_label(&tool_name);
-            let call_result = session
-                .call_tool_by_name(&tool_name, arguments, &resolved_label)
+            let tool_output = session
+                .execute_tool(ToolExecutionInput {
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    arguments,
+                })
                 .await;
 
-            // Get transformed item directly (avoids serialize/parse roundtrip and double transformation)
-            let (transformed_item, output_str) = match call_result {
-                Ok(result) => {
-                    // call_tool_by_name returns already-transformed ResponseOutputItem
-                    match result.into_item() {
-                        Some(item) => {
-                            let output_str = serde_json::to_string(&item)
-                                .unwrap_or_else(|e| {
-                                    warn!(tool = %tool_name, error = %e, "Failed to serialize tool output");
-                                    json!({ "error": "serialization failed" }).to_string()
-                                });
-                            let item_value = to_value(&item).unwrap_or_else(|e| {
-                                warn!(tool = %tool_name, error = %e, "Failed to convert item to Value");
-                                json!({})
-                            });
-                            (item_value, output_str)
-                        }
-                        None => {
-                            // PendingApproval case - not supported in non-streaming
-                            let err = json!({ "error": "Tool requires approval (not supported)" });
-                            (err.clone(), err.to_string())
-                        }
-                    }
-                }
-                Err(err) => {
-                    warn!("Tool execution failed: {}", err);
-                    // Build error mcp_call item with transformer (only for error case)
-                    let error_output = json!({ "error": format!("tool call failed: {}", err) });
-                    let mcp_call_item = build_transformed_mcp_call_item(
-                        &error_output,
-                        &response_format,
-                        &call_id,
-                        &resolved_label,
-                        &tool_name,
-                        &args_json_str,
-                    );
-                    (mcp_call_item, error_output.to_string())
-                }
-            };
+            // Record MCP tool metrics
+            Metrics::record_mcp_tool_duration(
+                &original_body.model,
+                &tool_output.tool_name,
+                tool_output.duration,
+            );
+            Metrics::record_mcp_tool_call(
+                &original_body.model,
+                &tool_output.tool_name,
+                if tool_output.is_error {
+                    metrics_labels::RESULT_ERROR
+                } else {
+                    metrics_labels::RESULT_SUCCESS
+                },
+            );
+
+            let output_str = tool_output.output.to_string();
+            let transformed_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
+                warn!(tool = %tool_name, error = %e, "Failed to convert item to Value");
+                json!({})
+            });
 
             // Record the call with transformed item
             state.record_call(
@@ -864,8 +812,7 @@ pub(super) fn build_incomplete_response(
         // Add mcp_list_tools and executed mcp_call items at the beginning
         if state.total_calls > 0 || !incomplete_items.is_empty() {
             for (label, key) in mcp_servers.iter().rev() {
-                let list_tools_item =
-                    build_mcp_list_tools_item_from_session(session, label, slice::from_ref(key));
+                let list_tools_item = session.build_mcp_list_tools_json(label, key);
                 output_array.insert(0, list_tools_item);
             }
 
@@ -907,40 +854,6 @@ pub(super) fn build_incomplete_response(
 // ============================================================================
 // Output Item Builders
 // ============================================================================
-
-/// Build a mcp_list_tools output item using a McpToolSession
-fn build_mcp_list_tools_item_from_session(
-    session: &McpToolSession<'_>,
-    server_label: &str,
-    server_keys: &[String],
-) -> Value {
-    let tools = session.list_tools_for_server(&server_keys[0]);
-    build_mcp_list_tools_value(&tools, server_label)
-}
-
-/// Shared helper to build mcp_list_tools JSON from tool entries
-fn build_mcp_list_tools_value(tools: &[crate::mcp::ToolEntry], server_label: &str) -> Value {
-    let tools_json: Vec<Value> = tools
-        .iter()
-        .map(|entry| {
-            json!({
-                "name": entry.tool.name,
-                "description": entry.tool.description,
-                "input_schema": Value::Object((*entry.tool.input_schema).clone()),
-                "annotations": {
-                    "read_only": false
-                }
-            })
-        })
-        .collect();
-
-    json!({
-        "id": generate_id("mcpl"),
-        "type": ItemType::MCP_LIST_TOOLS,
-        "server_label": server_label,
-        "tools": tools_json
-    })
-}
 
 /// Build a mcp_call output item
 pub(super) fn build_mcp_call_item(

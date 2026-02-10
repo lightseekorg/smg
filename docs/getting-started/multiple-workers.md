@@ -195,5 +195,5 @@ curl http://localhost:30000/v1/chat/completions \
 ## Next Steps
 
 - [Monitoring](monitoring.md) — Track request rates, latency, and worker health
-- [gRPC Workers](grpc-workers.md) — Enable tokenization, chat templates, and tool calling at the gateway
+- [gRPC Workers](grpc-workers.md) — Enable tokenization, chat templates, and tool parsing at the gateway
 - [PD Disaggregation](pd-disaggregation.md) — Separate prefill and decode onto specialized workers

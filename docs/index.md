@@ -161,11 +161,11 @@ Understand SMG's architecture, routing strategies, and reliability features.
 
 <div class="card" markdown>
 
-### :material-wrench: Complete a Task
+### :material-wrench: Ops Setup
 
-Step-by-step guides for deploying, configuring, and operating SMG.
+Continue onboarding with monitoring, logging, and TLS guides.
 
-[Browse Tasks →](tasks/index.md)
+[View Getting Started Guides →](getting-started/index.md)
 
 </div>
 
@@ -182,5 +182,5 @@ Complete reference for the OpenAI-compatible API and SMG extensions.
 </div>
 
 <div class="community-links" markdown>
-:fontawesome-brands-github: [GitHub](https://github.com/lightseekorg/smg) · :fontawesome-brands-slack: [Slack](https://lightseekorg.slack.com) · :fontawesome-brands-discord: [Discord](https://discord.gg/lightseekorg)
+:fontawesome-brands-github: [GitHub](https://github.com/lightseekorg/smg) · :fontawesome-brands-slack: [Slack](https://join.slack.com/t/lightseekorg/shared_invite/zt-3py6mpreo-XUGd064dSsWeQizh3YKQrQ) · :fontawesome-brands-discord: [Discord](https://discord.gg/wkQ73CVTvR)
 </div>

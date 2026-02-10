@@ -88,7 +88,6 @@ def pytest_collection_modifyitems(
 
     from infra import (
         DEFAULT_MODEL,
-        MODEL_SPECS,
         PARAM_MODEL,
         PARAM_SETUP_BACKEND,
         ConnectionMode,
@@ -108,9 +107,13 @@ def pytest_collection_modifyitems(
 
     def calculate_test_gpus(model_id: str, prefill: int, decode: int, regular: int) -> int:
         """Calculate GPU requirement for a single test."""
-        if model_id not in MODEL_SPECS:
-            return 0
-        tp = MODEL_SPECS[model_id].get("tp", 1)
+        from infra.model_specs import get_model_spec
+
+        try:
+            spec = get_model_spec(model_id)
+        except KeyError as exc:
+            raise pytest.UsageError(f"Unknown model in test markers: {model_id}") from exc
+        tp = spec.get("tp", 1)
         return tp * (prefill + decode + regular)
 
     # Filter items based on -k expression to only scan tests that will actually run

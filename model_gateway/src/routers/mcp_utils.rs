@@ -12,15 +12,6 @@ use crate::{
 /// Default maximum tool loop iterations (safety limit).
 pub const DEFAULT_MAX_ITERATIONS: usize = 10;
 
-/// Configuration for MCP tool calling loops.
-#[derive(Debug, Clone)]
-pub struct McpLoopConfig {
-    /// Maximum iterations (default: DEFAULT_MAX_ITERATIONS).
-    pub max_iterations: usize,
-    /// MCP servers for this request (label, server_key).
-    pub mcp_servers: Vec<(String, String)>,
-}
-
 /// Routing information for a built-in tool type.
 ///
 /// When a built-in tool type (web_search_preview, code_interpreter, file_search)
@@ -35,15 +26,6 @@ pub struct BuiltinToolRouting {
     pub tool_name: String,
     /// The response format for transforming the output.
     pub response_format: ResponseFormat,
-}
-
-impl Default for McpLoopConfig {
-    fn default() -> Self {
-        Self {
-            max_iterations: DEFAULT_MAX_ITERATIONS,
-            mcp_servers: Vec::new(),
-        }
-    }
 }
 
 /// Collect routing information for built-in tools in a request.
@@ -115,12 +97,12 @@ pub fn collect_builtin_routing(
 ///
 /// Headers for MCP servers come from the tool payload (`tool.headers`), not HTTP request headers.
 ///
-/// Returns `Some((orchestrator, mcp_servers))` if MCP tools or built-in routing is available,
+/// Returns `Some(mcp_servers)` if MCP tools or built-in routing is available,
 /// `None` otherwise.
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
-) -> Option<(Arc<McpOrchestrator>, Vec<(String, String)>)> {
+) -> Option<Vec<(String, String)>> {
     let mut mcp_servers = Vec::new();
 
     // 1. Process explicit MCP tools (dynamic via `server_url`, or static via `server_label`)
@@ -217,7 +199,7 @@ pub async fn ensure_request_mcp_client(
     if mcp_servers.is_empty() {
         None
     } else {
-        Some((mcp_orchestrator.clone(), mcp_servers))
+        Some(mcp_servers)
     }
 }
 
@@ -470,7 +452,7 @@ mod tests {
         // Should return Some because built-in routing is configured
         assert!(result.is_some());
 
-        let (_, mcp_servers) = result.unwrap();
+        let mcp_servers = result.unwrap();
         assert_eq!(mcp_servers.len(), 1);
 
         // The server key should be the static server name
@@ -534,7 +516,7 @@ mod tests {
         // Should return Some because web_search_preview has built-in routing
         assert!(result.is_some());
 
-        let (_, mcp_servers) = result.unwrap();
+        let mcp_servers = result.unwrap();
         assert_eq!(mcp_servers.len(), 1);
         assert_eq!(mcp_servers[0].0, "search-server");
     }

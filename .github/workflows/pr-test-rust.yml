@@ -70,6 +70,34 @@ jobs:
       - name: Mypy (bindings/python)
         run: mypy bindings/python/ --config-file mypy.ini
 
+  grpc-proto-build-check:
+    needs: check-ci
+    if: needs.check-ci.outputs.should_run == 'true'
+    runs-on: k8s-runner-cpu
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Copy protos and build
+        run: |
+          rm -f grpc_client/python/smg_grpc_proto/proto
+          mkdir -p grpc_client/python/smg_grpc_proto/proto
+          cp grpc_client/proto/*.proto grpc_client/python/smg_grpc_proto/proto/
+          pip install build grpcio-tools
+          rm -rf grpc_client/python/dist/
+          cd grpc_client/python && python -m build
+
+      - name: Test import
+        run: |
+          pip install grpc_client/python/dist/*.whl
+          python -c "from smg_grpc_proto import sglang_scheduler_pb2; print('OK')"
+
   build-wheel:
     needs: check-ci
     if: needs.check-ci.outputs.should_run == 'true'
@@ -554,7 +582,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [check-ci, python-lint, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
+    needs: [check-ci, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -564,7 +592,7 @@ jobs:
           if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
             echo "CI was skipped (external contributor without run-ci label)"
             exit 0
-          elif [[ "${{ needs.python-lint.result }}" == "failure" || "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.python-unit-tests.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
+          elif [[ "${{ needs.python-lint.result }}" == "failure" || "${{ needs.grpc-proto-build-check.result }}" == "failure" || "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.python-unit-tests.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else
