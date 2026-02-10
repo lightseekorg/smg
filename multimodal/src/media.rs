@@ -197,14 +197,11 @@ impl MediaConnector {
     ) -> Result<Arc<ImageFrame>, MediaConnectorError> {
         // Use bytes directly for decoding
         let cursor = std::io::Cursor::new(bytes.clone());
-        let reader = image::ImageReader::new(cursor)
-            .with_guessed_format()
-            .map_err(|e| MediaConnectorError::ImageDecode(e.to_string()))?;
+        let reader = image::ImageReader::new(cursor).with_guessed_format()?;
 
         let image = task::spawn_blocking(move || reader.decode())
             .await
-            .map_err(MediaConnectorError::Blocking)?
-            .map_err(|e| MediaConnectorError::ImageDecode(e.to_string()))?;
+            .map_err(MediaConnectorError::Blocking)??;
 
         Ok(Arc::new(ImageFrame::new(image, bytes, detail, source)))
     }
