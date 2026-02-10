@@ -14,8 +14,8 @@ dependencies = [
 readme = "README.md"
 license = { text = "Apache-2.0" }
 authors = [
-    {name = "Simo Lin", email = "linsimo.mark@gmail.com"},
     {name = "Chang Su", email = "mckvtl@gmail.com"},
+    {name = "Simo Lin", email = "linsimo.mark@gmail.com"},
     {name = "Keyang Ru", email = "rukeyang@gmail.com"}
 ]
 classifiers = [
