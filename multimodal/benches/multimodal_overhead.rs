@@ -14,7 +14,7 @@ fn current_image_ingestion_path(data: &Bytes) -> Arc<ImageFrame> {
 
     Arc::new(ImageFrame::new(
         dummy_img,
-        Arc::new(raw.to_vec()),
+        raw,
         ImageDetail::Auto,
         ImageSource::InlineBytes,
     ))
@@ -26,7 +26,7 @@ fn create_multimodal_payload(data: &Bytes) -> MultiModalInputs {
     let tensor = MultiModalTensor {
         shape: vec![1, 3, 224, 224],
         dtype: "float16".to_string(),
-        data: data.to_vec(), // MultiModalTensor expects Vec<u8>
+        data: data.clone(), // MultiModalTensor expects Bytes
     };
 
     inputs

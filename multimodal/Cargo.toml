@@ -30,6 +30,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "fs", "rt-multi-thread"] }
 tracing.workspace = true
 url = "2.5.4"
+memmap2 = "0.9.9"
+uuid = { version = "1.10", features = ["v4"] }
 
 # Workspace crates
 llm-tokenizer = { version = "1.0.0", path = "../tokenizer" }

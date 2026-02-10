@@ -153,6 +153,15 @@ message MultimodalInputs {
 
   // Modality metadata
   repeated string modalities = 8;
+  
+  // Zero-copy shared memory handles
+  repeated SharedMemoryHandle shared_memory_handles = 9;
+}
+
+message SharedMemoryHandle {
+  string uuid = 1;
+  uint64 size = 2;
+  uint64 offset = 3;
 }
 
 // =====================
