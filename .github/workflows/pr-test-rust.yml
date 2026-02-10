@@ -402,7 +402,7 @@ jobs:
         run: |
           echo "ATP_USER=system" >> $GITHUB_ENV
           echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
-          echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
+          echo "ATP_DSN=localhost:1521/FREEPDB1" >> $GITHUB_ENV
 
       - name: Run E2E tests
         env:
