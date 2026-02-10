@@ -374,14 +374,8 @@ pub(super) async fn execute_tool_loop(
 
             // Inject MCP metadata into output
             if state.total_calls > 0 {
-                // Prepend mcp_list_tools items for each server
-                for (label, key) in session.mcp_servers().iter().rev() {
-                    let mcp_list_tools = session.build_mcp_list_tools_item(label, key);
-                    responses_response.output.insert(0, mcp_list_tools);
-                }
-
-                // Append all mcp_call items at the end
-                responses_response.output.extend(state.mcp_call_items);
+                session
+                    .inject_mcp_output_items(&mut responses_response.output, state.mcp_call_items);
 
                 trace!(
                     "Injected MCP metadata: {} mcp_list_tools + {} mcp_call items",

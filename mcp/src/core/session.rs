@@ -238,6 +238,32 @@ impl<'a> McpToolSession<'a> {
         build_mcp_list_tools_item(server_label, &tools)
     }
 
+    /// Inject MCP metadata into a response output array.
+    ///
+    /// Standardized ordering:
+    /// 1. `mcp_list_tools` items (one per server) — prepended
+    /// 2. `tool_call_items` (mcp_call / web_search_call / etc.) — after list_tools
+    /// 3. Existing items (messages, etc.) — remain at end
+    pub fn inject_mcp_output_items(
+        &self,
+        output: &mut Vec<openai_protocol::responses::ResponseOutputItem>,
+        tool_call_items: Vec<openai_protocol::responses::ResponseOutputItem>,
+    ) {
+        let num_servers = self.mcp_servers.len();
+
+        // 1. Prepend mcp_list_tools for each server
+        for (label, key) in self.mcp_servers.iter().rev() {
+            output.insert(0, self.build_mcp_list_tools_item(label, key));
+        }
+
+        // 2. Insert tool call items right after mcp_list_tools
+        let mut insert_pos = num_servers;
+        for item in tool_call_items {
+            output.insert(insert_pos, item);
+            insert_pos += 1;
+        }
+    }
+
     fn build_exposed_function_tools(
         tools: &[ToolEntry],
         mcp_servers: &[(String, String)],
