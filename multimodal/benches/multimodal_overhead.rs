@@ -35,6 +35,18 @@ fn create_multimodal_payload(data: &Bytes) -> MultiModalInputs {
     inputs
 }
 
+use prost::Message;
+
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtoMultiModalTensor {
+    #[prost(uint64, repeated, tag = "1")]
+    pub shape: Vec<u64>,
+    #[prost(string, tag = "2")]
+    pub dtype: String,
+    #[prost(bytes, tag = "3")]
+    pub data: Bytes,
+}
+
 fn bench_multimodal_overhead(c: &mut Criterion) {
     let mut group = c.benchmark_group("multimodal_payload_cloning");
 
@@ -59,14 +71,31 @@ fn bench_multimodal_overhead(c: &mut Criterion) {
             |b, data| b.iter(|| create_multimodal_payload(black_box(data))),
         );
 
-        // Serialization Latency
+        // JSON Serialization Latency (Baseline)
         let payload = create_multimodal_payload(&bytes_data);
         group.bench_with_input(
-            BenchmarkId::new("serialization_cost", format!("{}MB", size_mb)),
+            BenchmarkId::new("json_serialization", format!("{}MB", size_mb)),
             &payload,
             |b, p| {
                 b.iter(|| {
                     let encoded = to_vec(black_box(p)).unwrap();
+                    black_box(encoded);
+                })
+            },
+        );
+
+        // Prost (gRPC) Serialization Latency
+        let proto_tensor = ProtoMultiModalTensor {
+            shape: vec![1, 3, 224, 224],
+            dtype: "float16".to_string(),
+            data: bytes_data.clone(),
+        };
+        group.bench_with_input(
+            BenchmarkId::new("prost_serialization", format!("{}MB", size_mb)),
+            &proto_tensor,
+            |b, p| {
+                b.iter(|| {
+                    let encoded = p.encode_to_vec();
                     black_box(encoded);
                 })
             },
