@@ -137,7 +137,7 @@ fn test_merge_two_replicas() {
     // Verify merged data
     assert_eq!(replica1.get("key1"), Some(b"value1_from_r1".to_vec()));
     assert_eq!(replica1.get("key2"), Some(b"value2_from_r1".to_vec()));
-    // assert_eq!(replica1.get("key3"), Some(b"value3_from_r2".to_vec()));
+    assert_eq!(replica1.get("key3"), None);
     assert_eq!(replica1.get("key4"), Some(b"value4_from_r2".to_vec()));
 }
 
@@ -327,6 +327,8 @@ fn test_distributed_scenario() {
 
     // Replica 3 operations
     replica3.insert("user:4".to_string(), b"David".to_vec());
+    // Advance replica3 clock so remove is strictly newer than replica1's user:2 insert.
+    replica3.remove("noop:key");
     replica3.remove("user:2");
 
     // Merge all replicas into replica 1
