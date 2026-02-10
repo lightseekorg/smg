@@ -61,17 +61,9 @@ pub(crate) async fn ensure_mcp_connection(
         }
     };
 
-    let inputs: Vec<mcp_utils::McpServerInput> = mcp_server_configs
-        .iter()
-        .map(|server| mcp_utils::McpServerInput {
-            label: server.name.clone(),
-            url: server.url.clone(),
-            authorization: server.authorization_token.clone(),
-            headers: HashMap::new(),
-        })
-        .collect();
+    let tools = mcp_utils::to_response_tools(&mcp_server_configs);
 
-    let mcp_servers = match mcp_utils::connect_mcp_servers(orchestrator, &inputs).await {
+    let mcp_servers = match mcp_utils::ensure_request_mcp_client(orchestrator, &tools).await {
         Some(servers) => servers,
         None => {
             error!("Failed to connect to any MCP servers");
