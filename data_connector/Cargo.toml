@@ -33,7 +33,7 @@ deadpool-postgres = "0.14.1"
 deadpool-redis = "0.18.0"
 futures = "0.3"
 oracle = { version = "0.6.3", features = ["chrono"] }
-redis = { version = "0.27.6", features = ["tokio-comp", "json", "connection-manager"] }
+redis = { version = "1.0.3", features = ["tokio-comp", "json", "connection-manager"] }
 tokio-postgres = { version = "0.7.15", features = ["runtime", "with-chrono-0_4", "with-serde_json-1", "array-impls"] }
 
 [dev-dependencies]
