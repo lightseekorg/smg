@@ -39,13 +39,6 @@ anyhow = "1.0.100"
 npyz = { version = "0.8", features = ["npz"] }
 tempfile = "3.8"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-criterion = "0.5"
-prost = { workspace = true }
-prost-types = { workspace = true }
-
-[[bench]]
-name = "multimodal_overhead"
-harness = false
 
 [lints]
 workspace = true
