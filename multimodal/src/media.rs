@@ -120,37 +120,14 @@ impl MediaConnector {
 
         let resp = resp.error_for_status()?;
         let bytes = resp.bytes().await?;
-        async fn decode_image(
-            &self,
-            data: bytes::Bytes,
-            detail: Option<ImageDetail>,
-            source: ImageSource,
-        ) -> Result<Arc<ImageFrame>, MediaConnectorError> {
-            // ... (decoding logic needs access to bytes)
-            // Ensure image decoding uses the Bytes object efficiently if possible
-            let format = image::guess_format(&data)
-                .map_err(|e| MediaConnectorError::ImageDecode(e.to_string()))?;
-
-            // image crate usually takes a Reader or &[u8]
-            let img = image::load_from_memory_with_format(&data, format)
-                .map_err(|e| MediaConnectorError::ImageDecode(e.to_string()))?;
-
-            // ... resizing logic ...
-            // For brevity, assuming simple case or existing logic is preserved.
-            // Wait, I need to see the full function to patching it correctly.
-            // Let's assume I just update the return:
-
-            let final_image = img; // Placeholder for actual logic
-
-            // ...
-
-            Ok(Arc::new(ImageFrame::new(
-                final_image,
-                data,
-                detail.unwrap_or_default(),
-                source,
-            )))
-        }
+        self.decode_image(
+            bytes,
+            cfg.detail,
+            ImageSource::Url {
+                url: parsed.to_string(),
+            },
+        )
+        .await
     }
 
     async fn fetch_data_url(
@@ -219,11 +196,17 @@ impl MediaConnector {
         detail: ImageDetail,
         source: ImageSource,
     ) -> Result<Arc<ImageFrame>, MediaConnectorError> {
-        let raw: Arc<Vec<u8>> = Arc::new(bytes.to_vec());
-        let raw_clone = raw.clone();
-        let image: DynamicImage =
-            task::spawn_blocking(move || image::load_from_memory(&raw_clone)).await??;
+        // Use bytes directly for decoding
+        let cursor = std::io::Cursor::new(bytes.clone());
+        let reader = image::io::Reader::new(cursor)
+            .with_guessed_format()
+            .map_err(|e| MediaConnectorError::ImageDecode(e.to_string()))?;
 
-        Ok(Arc::new(ImageFrame::new(image, raw, detail, source)))
+        let image = task::spawn_blocking(move || reader.decode())
+            .await
+            .map_err(|e| MediaConnectorError::Blocking(e))?
+            .map_err(|e| MediaConnectorError::ImageDecode(e.to_string()))?;
+
+        Ok(Arc::new(ImageFrame::new(image, bytes, detail, source)))
     }
 }

@@ -121,10 +121,10 @@ pub enum ImageSource {
 }
 
 /// Concrete image payload captured by the media connector.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ImageFrame {
-    image: DynamicImage,
-    raw_bytes: Arc<Vec<u8>>,
+    pub image: DynamicImage,
+    pub raw_bytes: bytes::Bytes,
     pub detail: ImageDetail,
     pub source: ImageSource,
 }
@@ -132,7 +132,7 @@ pub struct ImageFrame {
 impl ImageFrame {
     pub fn new(
         image: DynamicImage,
-        raw_bytes: Arc<Vec<u8>>,
+        raw_bytes: bytes::Bytes,
         detail: ImageDetail,
         source: ImageSource,
     ) -> Self {
@@ -159,6 +159,14 @@ impl ImageFrame {
     pub fn size(&self) -> ImageSize {
         ImageSize::new(self.image.width(), self.image.height())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiModalTensor {
+    pub shape: Vec<usize>,
+    pub dtype: String,
+    #[serde(with = "serde_bytes")]
+    pub data: Vec<u8>,
 }
 
 /// Container for all supported multimodal media objects.
