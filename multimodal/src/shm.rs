@@ -17,7 +17,7 @@ pub enum ShmError {
 }
 
 /// Handle to a shared memory region.
-/// 
+///
 /// This struct manages the lifecycle of the shared memory file.
 /// When it is dropped, the underlying file is deleted (unlinked).
 #[derive(Debug)]

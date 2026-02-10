@@ -1,6 +1,7 @@
 pub mod error;
 pub mod media;
 pub mod registry;
+pub mod shm;
 pub mod tracker;
 pub mod types;
 pub mod vision;
