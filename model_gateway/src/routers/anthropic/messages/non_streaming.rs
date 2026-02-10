@@ -21,9 +21,8 @@ pub(crate) async fn execute_tool_loop(
     mut request: CreateMessageRequest,
     headers: Option<HeaderMap>,
     model_id: &str,
+    mcp_servers: Vec<(String, String)>,
 ) -> Response {
-    let mcp_servers = messages_ctx.requested_servers.read().unwrap().clone();
-
     let request_id = format!("msg_{}", uuid::Uuid::new_v4());
     let session = McpToolSession::new(&messages_ctx.mcp_orchestrator, mcp_servers, &request_id);
 
@@ -54,7 +53,7 @@ pub(crate) async fn execute_tool_loop(
         );
 
         let (new_calls, assistant_blocks, tool_result_blocks) =
-            match execute_mcp_tool_calls(&message, &session, model_id).await {
+            match execute_mcp_tool_calls(&message.content, &tool_calls, &session, model_id).await {
                 Ok(result) => result,
                 Err(e) => {
                     error!(error = %e, "MCP tool execution failed");

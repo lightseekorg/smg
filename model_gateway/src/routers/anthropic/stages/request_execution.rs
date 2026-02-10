@@ -85,8 +85,6 @@ impl PipelineStage for RequestExecutionStage {
                 // Note: Circuit breaker outcome is deferred to ResponseProcessingStage
                 // to avoid misreporting success when parsing/streaming fails later
 
-                // Store response for next stage
-                ctx.state.response.status_code = Some(status.as_u16());
                 ctx.state.response.worker_response = Some(response);
                 Ok(None)
             }

@@ -123,20 +123,20 @@ impl RouterTrait for AnthropicRouter {
         let mut request = body.clone();
         let headers_owned = headers.cloned();
 
-        let mcp_active = if request.mcp_servers.is_some() {
-            match ensure_mcp_connection(&mut request, &self.messages_ctx).await {
-                Ok(()) => true,
+        let mcp_servers = if request.mcp_servers.is_some() {
+            match ensure_mcp_connection(&mut request, &self.messages_ctx.mcp_orchestrator).await {
+                Ok(servers) => Some(servers),
                 Err(response) => return response,
             }
         } else {
-            false
+            None
         };
 
         let streaming = request.stream.unwrap_or(false);
         info!(
             model = %model_id,
             streaming = %streaming,
-            mcp = %mcp_active,
+            mcp = %mcp_servers.is_some(),
             "Processing Messages API request"
         );
 
@@ -148,12 +148,13 @@ impl RouterTrait for AnthropicRouter {
                 .await;
         }
 
-        if mcp_active {
+        if let Some(mcp_servers) = mcp_servers {
             return super::messages::non_streaming::execute_tool_loop(
                 &self.messages_ctx,
                 request,
                 headers_owned,
                 model_id,
+                mcp_servers,
             )
             .await;
         }
