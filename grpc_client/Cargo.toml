@@ -29,6 +29,9 @@ tonic-prost.workspace = true
 prost.workspace = true
 prost-types.workspace = true
 
+# Local dependencies
+llm-multimodal = { version = "1.0.0", path = "../multimodal" }
+
 # Async/concurrency
 futures.workspace = true
 

@@ -341,7 +341,7 @@ impl SglangSchedulerClient {
                 if !data.is_empty() {
                     match self.shm_manager.alloc(data.len()) {
                         Ok(mut handle) => {
-                            handle.as_slice_mut().copy_from_slice(data);
+                            handle.as_slice_mut().copy_from_slice(&data[..]);
                             handles.push(proto::SharedMemoryHandle {
                                 uuid: handle.uuid.clone(),
                                 size: handle.size as u64,
