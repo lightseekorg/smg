@@ -61,18 +61,24 @@ pub(crate) async fn ensure_mcp_connection(
         }
     };
 
-    let tools = mcp_utils::to_response_tools(&mcp_server_configs);
+    let inputs: Vec<mcp_utils::McpServerInput> = mcp_server_configs
+        .iter()
+        .map(|server| mcp_utils::McpServerInput {
+            label: server.name.clone(),
+            url: Some(server.url.clone()),
+            authorization: server.authorization_token.clone(),
+            headers: HashMap::new(),
+        })
+        .collect();
 
-    let mcp_servers = match mcp_utils::ensure_request_mcp_client(orchestrator, &tools).await {
-        Some(servers) => servers,
-        None => {
-            error!("Failed to connect to any MCP servers");
-            return Err(router_error::bad_gateway(
-                "mcp_connection_failed",
-                "Failed to connect to MCP servers. Check server URLs and authorization.",
-            ));
-        }
-    };
+    let mcp_servers = mcp_utils::connect_mcp_servers(orchestrator, &inputs).await;
+    if mcp_servers.is_empty() {
+        error!("Failed to connect to any MCP servers");
+        return Err(router_error::bad_gateway(
+            "mcp_connection_failed",
+            "Failed to connect to MCP servers. Check server URLs and authorization.",
+        ));
+    }
 
     info!(
         server_count = mcp_servers.len(),
