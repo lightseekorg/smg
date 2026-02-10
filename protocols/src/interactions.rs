@@ -9,7 +9,7 @@ use serde_with::skip_serializing_none;
 use validator::{Validate, ValidationError};
 
 use super::{
-    common::{default_model, default_true, Function, GenerationRequest},
+    common::{default_true, Function, GenerationRequest},
     sampling_params::validate_top_p_value,
 };
 
@@ -77,7 +77,7 @@ pub struct InteractionsRequest {
 impl Default for InteractionsRequest {
     fn default() -> Self {
         Self {
-            model: Some(default_model()),
+            model: Some("gemini-2.5-flash".to_string()),
             agent: None,
             agent_config: None,
             input: InteractionsInput::Text(String::new()),
@@ -1091,7 +1091,11 @@ const VALID_MODELS: &[&str] = &[
 const VALID_AGENTS: &[&str] = &["deep-research-pro-preview-12-2025"];
 
 fn validate_agent(agent: &str) -> Result<(), ValidationError> {
-    let agent = agent.trim();
+    if agent != agent.trim() {
+        let mut e = ValidationError::new("invalid_agent");
+        e.message = Some("Agent identifier must not have leading or trailing whitespace.".into());
+        return Err(e);
+    }
     if !agent.is_empty() && !VALID_AGENTS.contains(&agent) {
         let mut e = ValidationError::new("invalid_agent");
         e.message =
@@ -1102,7 +1106,11 @@ fn validate_agent(agent: &str) -> Result<(), ValidationError> {
 }
 
 fn validate_model(model: &str) -> Result<(), ValidationError> {
-    let model = model.trim();
+    if model != model.trim() {
+        let mut e = ValidationError::new("invalid_model");
+        e.message = Some("Model identifier must not have leading or trailing whitespace.".into());
+        return Err(e);
+    }
     if !model.is_empty() && !VALID_MODELS.contains(&model) {
         let mut e = ValidationError::new("invalid_model");
         e.message =
@@ -1156,13 +1164,13 @@ fn validate_input(input: &InteractionsInput) -> Result<(), ValidationError> {
             return Err(e);
         }
         InteractionsInput::Contents(contents)
-            if contents.is_empty() || contents.iter().all(is_content_empty) =>
+            if contents.is_empty() || contents.iter().any(is_content_empty) =>
         {
             let mut e = ValidationError::new("input_cannot_be_empty");
             e.message = Some("Input content array cannot be empty".into());
             return Err(e);
         }
-        InteractionsInput::Turns(turns) if turns.is_empty() || turns.iter().all(is_turn_empty) => {
+        InteractionsInput::Turns(turns) if turns.is_empty() || turns.iter().any(is_turn_empty) => {
             let mut e = ValidationError::new("input_cannot_be_empty");
             e.message = Some("Input turns array cannot be empty".into());
             return Err(e);
@@ -1224,7 +1232,7 @@ fn is_turn_empty(turn: &Turn) -> bool {
         None => true,
         Some(TurnContent::Text(s)) => s.trim().is_empty(),
         Some(TurnContent::Contents(contents)) => {
-            contents.is_empty() || contents.iter().all(is_content_empty)
+            contents.is_empty() || contents.iter().any(is_content_empty)
         }
     }
 }
