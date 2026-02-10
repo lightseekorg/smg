@@ -14,7 +14,7 @@ fn current_image_ingestion_path(data: &Bytes) -> Arc<ImageFrame> {
 
     Arc::new(ImageFrame::new(
         dummy_img,
-        raw,
+        Arc::new(raw.to_vec()),
         ImageDetail::Auto,
         ImageSource::InlineBytes,
     ))
