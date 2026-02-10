@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dashmap::{mapref::entry::Entry as MapEntry, DashMap};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use super::{
@@ -60,6 +60,7 @@ impl ValueMetadata {
 pub struct CrdtOrMap {
     store: KvStore,
     metadata: Arc<DashMap<String, Vec<ValueMetadata>>>, // Key to list of versions
+    key_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,    // Per-key critical section lock
     replica_id: ReplicaId,
     clock: LamportClock,
     operation_log: Arc<RwLock<OperationLog>>,
@@ -77,14 +78,25 @@ impl CrdtOrMap {
         Self {
             store: KvStore::new(),
             metadata: Arc::new(DashMap::new()),
+            key_locks: Arc::new(DashMap::new()),
             replica_id,
             clock: LamportClock::new(),
             operation_log: Arc::new(RwLock::new(OperationLog::new())),
         }
     }
 
+    fn key_lock_for(&self, key: &str) -> Arc<Mutex<()>> {
+        self.key_locks
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     /// Insert key-value pair (transparent operation)
     pub fn insert(&self, key: String, value: Vec<u8>) -> Option<Vec<u8>> {
+        let key_lock = self.key_lock_for(&key);
+        let _key_guard = key_lock.lock();
+
         let timestamp = self.clock.tick();
         if !self.record_insert_metadata(&key, value.clone(), timestamp, self.replica_id) {
             return self.store.get(&key).map(|bytes| bytes.to_vec());
@@ -98,8 +110,7 @@ impl CrdtOrMap {
         });
 
         let operation = Operation::insert(key.clone(), value, timestamp, self.replica_id);
-
-        self.operation_log.write().append(operation.clone());
+        self.operation_log.write().append(operation);
 
         debug!(
             "Insert: key={}, timestamp={}, replica={}",
@@ -114,6 +125,9 @@ impl CrdtOrMap {
     where
         F: FnOnce(Option<&[u8]>) -> Vec<u8>,
     {
+        let key_lock = self.key_lock_for(&key);
+        let _key_guard = key_lock.lock();
+
         let current_value = self.store.get(&key);
         let updated_value = updater(current_value.as_deref());
         let timestamp = self.clock.tick();
@@ -129,8 +143,8 @@ impl CrdtOrMap {
             self.replica_id,
         );
 
-        self.operation_log.write().append(operation);
         self.store.insert(key, updated_value.clone());
+        self.operation_log.write().append(operation);
 
         updated_value
     }
@@ -229,6 +243,9 @@ impl CrdtOrMap {
 
     /// Apply insert (Add-wins semantic)
     fn apply_insert(&self, key: &str, value: Vec<u8>, timestamp: u64, replica_id: ReplicaId) {
+        let key_lock = self.key_lock_for(key);
+        let _key_guard = key_lock.lock();
+
         if self.record_insert_metadata(key, value.clone(), timestamp, replica_id) {
             self.store.insert(key.to_string(), value);
         }
@@ -285,6 +302,9 @@ impl CrdtOrMap {
 
     /// Apply remove
     fn apply_remove(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> Option<Vec<u8>> {
+        let key_lock = self.key_lock_for(key);
+        let _key_guard = key_lock.lock();
+
         if self.record_remove_metadata(key, timestamp, replica_id) {
             return self.store.remove(key);
         }
@@ -302,6 +322,13 @@ impl CrdtOrMap {
                     .iter()
                     .any(|v| v.is_tombstone && v.matches_version(timestamp, replica_id));
                 if has_existing_entry {
+                    return false;
+                }
+
+                let has_newer_insert = versions
+                    .iter()
+                    .any(|v| !v.is_tombstone && v.is_newer_than(timestamp, replica_id));
+                if has_newer_insert {
                     return false;
                 }
 
