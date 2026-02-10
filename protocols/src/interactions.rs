@@ -1204,7 +1204,7 @@ fn validate_input(input: &InteractionsInput) -> Result<(), ValidationError> {
 
 fn is_content_empty(content: &Content) -> bool {
     match content {
-        Content::Text { text, .. } => text.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true),
+        Content::Text { text, .. } => is_option_blank(text),
         Content::Image { data, uri, .. }
         | Content::Audio { data, uri, .. }
         | Content::Document { data, uri, .. }
@@ -1230,6 +1230,11 @@ fn is_turn_empty(turn: &Turn) -> bool {
 }
 
 fn validate_stop_sequences(seqs: &[String]) -> Result<(), ValidationError> {
+    if seqs.len() > 5 {
+        let mut e = ValidationError::new("too_many_stop_sequences");
+        e.message = Some("Maximum 5 stop sequences allowed".into());
+        return Err(e);
+    }
     if seqs.iter().any(|s| s.is_empty()) {
         let mut e = ValidationError::new("stop_sequences_cannot_be_empty");
         e.message = Some("Stop sequences cannot contain empty strings".into());
