@@ -5,7 +5,10 @@ use tracing_subscriber::{
     filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
 };
 
-use super::{crdt::CrdtOrMap, operation::OperationLog};
+use super::{
+    crdt::CrdtOrMap,
+    operation::{Operation, OperationLog},
+};
 static INIT: Once = Once::new();
 
 /// Initialize test logging infrastructure
@@ -183,6 +186,37 @@ fn test_remove_after_insert() {
 
     // Remove operation should win (because remove has newer timestamp)
     assert!(!replica1.contains_key("key1"));
+}
+
+#[test]
+fn test_older_insert_applied_later_does_not_overwrite_winner() {
+    init_test_logging();
+    let source = CrdtOrMap::new();
+
+    source.insert("key1".to_string(), b"older_value".to_vec());
+    source.insert("key1".to_string(), b"newer_value".to_vec());
+
+    let full_log = source.get_operation_log();
+    let stale_insert = full_log
+        .operations()
+        .iter()
+        .find_map(|op| match op {
+            Operation::Insert { value, .. } if value.as_slice() == b"older_value" => {
+                Some(op.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+
+    let replica = CrdtOrMap::new();
+    replica.merge(&full_log);
+    assert_eq!(replica.get("key1"), Some(b"newer_value".to_vec()));
+
+    let mut stale_log = OperationLog::new();
+    stale_log.append(stale_insert);
+    replica.merge(&stale_log);
+
+    assert_eq!(replica.get("key1"), Some(b"newer_value".to_vec()));
 }
 
 // ============================================================================
