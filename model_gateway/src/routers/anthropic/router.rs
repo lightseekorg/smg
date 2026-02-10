@@ -146,7 +146,7 @@ impl RouterTrait for AnthropicRouter {
             return self
                 .messages_ctx
                 .pipeline
-                .execute(request, headers_owned, model_id)
+                .execute_streaming(request, headers_owned, model_id)
                 .await;
         }
 

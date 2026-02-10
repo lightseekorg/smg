@@ -1,6 +1,9 @@
 //! MCP tool integration for Messages API
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use axum::response::Response;
 use serde_json::Value;
@@ -317,6 +320,10 @@ fn build_assistant_content_blocks(content: &[ContentBlock]) -> Vec<InputContentB
 }
 
 /// Replace tool_use blocks with mcp_tool_use/mcp_tool_result pairs in the response.
+///
+/// MCP blocks are spliced in-place: each matched ToolUse block is replaced by the
+/// corresponding McpToolUse + McpToolResult pair at the same position. Non-matching
+/// blocks are preserved in their original order. Any unmatched MCP calls are appended.
 pub(super) fn rebuild_response_with_mcp_blocks(
     mut message: Message,
     mcp_calls: &[McpToolCall],
@@ -330,42 +337,52 @@ pub(super) fn rebuild_response_with_mcp_blocks(
         .map(|c| (c.original_id.as_str(), c))
         .collect();
 
+    let original_content = std::mem::take(&mut message.content);
     let mut new_content: Vec<ContentBlock> = Vec::new();
+    let mut matched: HashSet<&str> = HashSet::new();
 
-    for call in mcp_calls {
-        new_content.push(ContentBlock::McpToolUse {
-            id: call.mcp_id.clone(),
-            name: call.name.clone(),
-            server_name: call.server_name.clone(),
-            input: call.input.clone(),
-        });
-        new_content.push(ContentBlock::McpToolResult {
-            tool_use_id: call.mcp_id.clone(),
-            content: Some(ToolResultContent::Blocks(vec![
-                crate::protocols::messages::ToolResultContentBlock::Text(TextBlock {
-                    text: call.result_content.clone(),
-                    cache_control: None,
-                    citations: None,
-                }),
-            ])),
-            is_error: call.is_error.then_some(true),
-        });
-    }
-
-    for block in message.content {
+    for block in original_content {
         match &block {
             ContentBlock::ToolUse { id, .. } => {
-                if call_lookup.contains_key(id.as_str()) {
-                    continue;
+                if let Some(call) = call_lookup.get(id.as_str()) {
+                    matched.insert(call.original_id.as_str());
+                    push_mcp_blocks(&mut new_content, call);
+                } else {
+                    new_content.push(block);
                 }
-                new_content.push(block);
             }
             _ => new_content.push(block),
         }
     }
 
+    for call in mcp_calls {
+        if !matched.contains(call.original_id.as_str()) {
+            push_mcp_blocks(&mut new_content, call);
+        }
+    }
+
     message.content = new_content;
     message
+}
+
+fn push_mcp_blocks(content: &mut Vec<ContentBlock>, call: &McpToolCall) {
+    content.push(ContentBlock::McpToolUse {
+        id: call.mcp_id.clone(),
+        name: call.name.clone(),
+        server_name: call.server_name.clone(),
+        input: call.input.clone(),
+    });
+    content.push(ContentBlock::McpToolResult {
+        tool_use_id: call.mcp_id.clone(),
+        content: Some(ToolResultContent::Blocks(vec![
+            crate::protocols::messages::ToolResultContentBlock::Text(TextBlock {
+                text: call.result_content.clone(),
+                cache_control: None,
+                citations: None,
+            }),
+        ])),
+        is_error: call.is_error.then_some(true),
+    });
 }
 
 /// Extract output content string from a `ToolExecutionOutput` value.

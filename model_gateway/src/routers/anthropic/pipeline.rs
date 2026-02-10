@@ -49,7 +49,7 @@ impl MessagesPipeline {
     }
 
     /// Execute the pipeline for a streaming request, returning the SSE `Response`.
-    pub async fn execute(
+    pub async fn execute_streaming(
         &self,
         request: CreateMessageRequest,
         headers: Option<HeaderMap>,
