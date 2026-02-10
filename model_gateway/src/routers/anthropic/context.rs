@@ -5,7 +5,7 @@
 //! accumulated processing state.
 
 use std::{
-    sync::{Arc, RwLock as StdRwLock},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -66,8 +66,6 @@ impl std::fmt::Debug for SharedComponents {
 pub(crate) struct MessagesContext {
     pub pipeline: Arc<MessagesPipeline>,
     pub mcp_orchestrator: Arc<McpOrchestrator>,
-    /// MCP servers `(label, server_key)` connected for this request.
-    pub requested_servers: Arc<StdRwLock<Vec<(String, String)>>>,
 }
 
 impl MessagesContext {
@@ -75,7 +73,6 @@ impl MessagesContext {
         Self {
             pipeline,
             mcp_orchestrator,
-            requested_servers: Arc::new(StdRwLock::new(Vec::new())),
         }
     }
 }
@@ -93,7 +90,6 @@ pub(crate) struct HttpRequestState {
 #[derive(Debug, Default)]
 pub(crate) struct ResponseState {
     pub worker_response: Option<reqwest::Response>,
-    pub status_code: Option<u16>,
 }
 
 #[derive(Debug, Default)]
