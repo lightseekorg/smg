@@ -149,7 +149,7 @@ impl ImageFrame {
     }
 
     pub fn raw_bytes(&self) -> &[u8] {
-        self.raw_bytes.as_slice()
+        &self.raw_bytes
     }
 
     pub fn source(&self) -> &ImageSource {
@@ -167,47 +167,6 @@ pub struct MultiModalTensor {
     pub dtype: String,
     #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
-}
-
-/// Container for all supported multimodal media objects.
-#[derive(Debug, Clone)]
-pub enum TrackedMedia {
-    Image(Arc<ImageFrame>),
-    /// Placeholder variants for future modalities.
-    Audio,
-    Video,
-    Embeddings,
-}
-
-pub type MultiModalData = HashMap<Modality, Vec<TrackedMedia>>;
-pub type MultiModalUUIDs = HashMap<Modality, Vec<Option<String>>>;
-
-pub type TokenId = i32;
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ImageSize {
-    pub width: u32,
-    pub height: u32,
-}
-
-impl ImageSize {
-    pub fn new(width: u32, height: u32) -> Self {
-        Self { width, height }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PlaceholderRange {
-    pub offset: usize,
-    pub length: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MultiModalTensor {
-    pub shape: Vec<usize>,
-    pub dtype: String,
-    #[serde(with = "serde_bytes")]
-    pub data: bytes::Bytes,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
