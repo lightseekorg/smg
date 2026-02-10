@@ -595,6 +595,11 @@ pub enum ServerEvent {
 }
 
 impl ServerEvent {
+    /// Create a new builder for constructing ServerEvent variants.
+    pub fn builder(event_id: impl Into<String>) -> crate::builders::realtime::ServerEventBuilder {
+        crate::builders::realtime::ServerEventBuilder::new(event_id)
+    }
+
     /// Returns the event type string (e.g. `"session.created"`).
     pub const fn event_type(&self) -> &'static str {
         match self {
@@ -783,13 +788,51 @@ impl From<&ServerEvent> for RealtimeServerEvent {
 ///
 /// Discriminated by the `type` field: `"realtime"` or `"transcription"`.
 /// Used by `session.update`, `session.created`, and `session.updated` events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+///
+/// Uses custom serde impls because both inner structs have their own `type`
+/// field (needed for standalone use via `#[serde(flatten)]` in session objects).
+/// `#[serde(tag = "type")]` would produce duplicate `"type"` keys on serialization.
+#[derive(Debug, Clone)]
 pub enum SessionConfig {
-    #[serde(rename = "realtime")]
     Realtime(Box<RealtimeSessionConfig>),
-    #[serde(rename = "transcription")]
     Transcription(Box<RealtimeTranscriptionSessionConfig>),
+}
+
+impl Serialize for SessionConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            SessionConfig::Realtime(config) => config.serialize(serializer),
+            SessionConfig::Transcription(config) => config.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+
+        let type_str = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| serde::de::Error::missing_field("type"))?;
+
+        match type_str {
+            "realtime" => {
+                let config: RealtimeSessionConfig =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(SessionConfig::Realtime(Box::new(config)))
+            }
+            "transcription" => {
+                let config: RealtimeTranscriptionSessionConfig =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(SessionConfig::Transcription(Box::new(config)))
+            }
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["realtime", "transcription"],
+            )),
+        }
+    }
 }
 
 // ============================================================================
