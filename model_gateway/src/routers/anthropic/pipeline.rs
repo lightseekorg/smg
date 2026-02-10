@@ -16,10 +16,11 @@ use super::{
         WorkerSelectionStage,
     },
 };
-use crate::routers::error;
-
-// Note: Arc is still used for SharedComponents (shared across stages) but not for
-// CreateMessageRequest (flows through sequential stages without shared ownership)
+use crate::{
+    core::WorkerRegistry,
+    protocols::messages::{CreateMessageRequest, Message},
+    routers::error,
+};
 
 /// Messages API pipeline that processes requests through stages
 ///
@@ -33,11 +34,9 @@ pub(crate) struct MessagesPipeline {
 }
 
 impl MessagesPipeline {
-    pub fn new(components: Arc<SharedComponents>) -> Self {
+    pub fn new(components: Arc<SharedComponents>, worker_registry: Arc<WorkerRegistry>) -> Self {
         let stages: Vec<Box<dyn PipelineStage>> = vec![
-            Box::new(WorkerSelectionStage::new(
-                components.worker_registry.clone(),
-            )),
+            Box::new(WorkerSelectionStage::new(worker_registry)),
             Box::new(RequestBuildingStage::new()),
             Box::new(RequestExecutionStage::new(
                 components.http_client.clone(),
@@ -49,57 +48,85 @@ impl MessagesPipeline {
         Self { stages }
     }
 
-    /// Execute the pipeline for a Messages API request
+    /// Execute the pipeline for a streaming request, returning the SSE `Response`.
     pub async fn execute(
         &self,
         request: CreateMessageRequest,
         headers: Option<HeaderMap>,
         model_id: &str,
     ) -> Response {
-        let streaming = request.stream.unwrap_or(false);
-
-        info!(
-            model = %model_id,
-            streaming = %streaming,
-            "Processing Messages API request through pipeline"
-        );
-
         let mut ctx = RequestContext::new(request, headers, model_id);
 
-        for stage in &self.stages {
+        match self.run_stages(&mut ctx, &self.stages).await {
+            Some(response) => response,
+            None => {
+                error!(function = "execute", "No response produced by pipeline");
+                error::internal_error("no_response_produced", "No response produced")
+            }
+        }
+    }
+
+    /// Execute the pipeline for a non-streaming request, returning the parsed `Message`.
+    pub async fn execute_for_messages(
+        &self,
+        request: CreateMessageRequest,
+        headers: Option<HeaderMap>,
+        model_id: &str,
+    ) -> Result<Message, Response> {
+        let mut ctx = RequestContext::new(request, headers, model_id);
+
+        if let Some(response) = self.run_stages(&mut ctx, &self.stages).await {
+            return Err(response);
+        }
+
+        match ctx.state.parsed_message {
+            Some(message) => Ok(message),
+            None => {
+                error!(
+                    function = "execute_for_messages",
+                    "No parsed message produced by pipeline"
+                );
+                Err(error::internal_error(
+                    "no_response_produced",
+                    "No response produced",
+                ))
+            }
+        }
+    }
+
+    /// Run a set of stages, returning None if all complete with Ok(None),
+    /// or Some(Response) if any stage returns early or errors.
+    async fn run_stages(
+        &self,
+        ctx: &mut RequestContext,
+        stages: &[Box<dyn PipelineStage>],
+    ) -> Option<Response> {
+        for stage in stages {
             let stage_name = stage.name();
             debug!(stage = %stage_name, "Executing pipeline stage");
 
-            match stage.execute(&mut ctx).await {
+            match stage.execute(ctx).await {
                 Ok(Some(response)) => {
-                    // Early return (streaming response)
                     debug!(
                         stage = %stage_name,
-                        "Stage returned early response (streaming)"
+                        "Stage returned early response"
                     );
-                    return response;
+                    return Some(response);
                 }
                 Ok(None) => {
-                    // Continue to next stage
                     debug!(stage = %stage_name, "Stage completed, continuing");
                 }
                 Err(response) => {
-                    // Error or final response
                     debug!(
                         stage = %stage_name,
                         status = %response.status(),
-                        "Stage returned response"
+                        "Stage returned error response"
                     );
-                    return response;
+                    return Some(response);
                 }
             }
         }
-
-        error!("Pipeline completed without producing a response");
-        error::internal_error(
-            "no_response",
-            "Internal error: pipeline completed without response",
-        )
+        None
     }
 }
 
