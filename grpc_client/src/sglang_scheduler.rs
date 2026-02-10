@@ -314,7 +314,7 @@ impl SglangSchedulerClient {
         let sampling_params =
             self.build_grpc_sampling_params_from_chat(body, tool_call_constraint)?;
 
-        let mut grpc_request = proto::GenerateRequest {
+        let grpc_request = proto::GenerateRequest {
             request_id,
             tokenized: Some(proto::TokenizedInput {
                 original_text: processed_text,

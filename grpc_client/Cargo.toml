@@ -29,9 +29,6 @@ tonic-prost.workspace = true
 prost.workspace = true
 prost-types.workspace = true
 
-# Local dependencies
-
-
 # Async/concurrency
 futures.workspace = true
 
