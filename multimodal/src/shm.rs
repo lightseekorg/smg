@@ -1,7 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
     path::PathBuf,
-    sync::Arc,
 };
 
 use memmap2::MmapMut;

@@ -2,8 +2,7 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use bytes::Bytes;
-use image::DynamicImage;
-use reqwest::Client;
+use image::GenericImageView;
 use tokio::{fs, task};
 use url::Url;
 
@@ -198,7 +197,7 @@ impl MediaConnector {
     ) -> Result<Arc<ImageFrame>, MediaConnectorError> {
         // Use bytes directly for decoding
         let cursor = std::io::Cursor::new(bytes.clone());
-        let reader = image::io::Reader::new(cursor)
+        let reader = image::ImageReader::new(cursor)
             .with_guessed_format()
             .map_err(|e| MediaConnectorError::ImageDecode(e.to_string()))?;
 
