@@ -52,6 +52,12 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: check-deep-imports
+        name: check-deep-imports
+        description: Reject internal imports with more than 4 path segments
+        entry: scripts/check-deep-imports.sh
+        language: script
+        types: [rust]
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.0
     hooks:

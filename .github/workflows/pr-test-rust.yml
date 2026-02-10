@@ -41,6 +41,19 @@ jobs:
       - id: check
         uses: ./.github/actions/check-ci
 
+  lint-imports:
+    needs: check-ci
+    if: needs.check-ci.outputs.should_run == 'true'
+    runs-on: k8s-runner-cpu
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check for deeply nested imports
+        run: |
+          bash scripts/check-deep-imports.sh $(find . -name '*.rs' -not -path './target/*' -not -path './TensorRT-LLM/*')
+
   python-lint:
     needs: check-ci
     if: needs.check-ci.outputs.should_run == 'true'
@@ -578,7 +591,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [check-ci, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
+    needs: [check-ci, lint-imports, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -588,7 +601,7 @@ jobs:
           if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
             echo "CI was skipped (external contributor without run-ci label)"
             exit 0
-          elif [[ "${{ needs.python-lint.result }}" == "failure" || "${{ needs.grpc-proto-build-check.result }}" == "failure" || "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.python-unit-tests.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
+          elif [[ "${{ needs.lint-imports.result }}" == "failure" || "${{ needs.python-lint.result }}" == "failure" || "${{ needs.grpc-proto-build-check.result }}" == "failure" || "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.python-unit-tests.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else
