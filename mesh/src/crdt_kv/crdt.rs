@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry as MapEntry, DashMap};
 use parking_lot::RwLock;
 use tracing::{debug, info, warn};
 
@@ -40,6 +40,18 @@ impl ValueMetadata {
             replica_id,
             is_tombstone: true,
         }
+    }
+
+    fn version_key(&self) -> (u64, ReplicaId) {
+        (self.timestamp, self.replica_id)
+    }
+
+    fn matches_version(&self, timestamp: u64, replica_id: ReplicaId) -> bool {
+        self.timestamp == timestamp && self.replica_id == replica_id
+    }
+
+    fn is_newer_than(&self, timestamp: u64, replica_id: ReplicaId) -> bool {
+        self.version_key() > (timestamp, replica_id)
     }
 }
 
@@ -230,38 +242,45 @@ impl CrdtOrMap {
         replica_id: ReplicaId,
     ) -> bool {
         let new_metadata = ValueMetadata::new(value, timestamp, replica_id);
-        let mut should_store = false;
 
-        self.metadata
-            .entry(key.to_string())
-            .and_modify(|versions| {
-                let has_existing_entry = versions.iter().any(|v| {
-                    !v.is_tombstone && v.timestamp == timestamp && v.replica_id == replica_id
-                });
+        match self.metadata.entry(key.to_string()) {
+            MapEntry::Occupied(mut entry) => {
+                let versions = entry.get_mut();
+
+                let has_existing_entry = versions
+                    .iter()
+                    .any(|v| !v.is_tombstone && v.matches_version(timestamp, replica_id));
                 if has_existing_entry {
-                    return;
+                    return false;
                 }
 
-                let has_newer_remove = versions.iter().any(|v| {
-                    v.is_tombstone
-                        && (v.timestamp > timestamp
-                            || (v.timestamp == timestamp && v.replica_id > replica_id))
-                });
+                let current_winner = versions
+                    .iter()
+                    .filter(|v| !v.is_tombstone)
+                    .max_by_key(|v| v.version_key());
 
-                if !has_newer_remove {
-                    // Add-wins: only add if there's no newer remove
-                    versions.push(new_metadata.clone());
-                    should_store = true;
-                } else {
+                if current_winner.is_some_and(|winner| winner.is_newer_than(timestamp, replica_id))
+                {
+                    return false;
+                }
+
+                let has_newer_remove = versions
+                    .iter()
+                    .any(|v| v.is_tombstone && v.is_newer_than(timestamp, replica_id));
+                if has_newer_remove {
                     warn!("Insert was overwritten by Remove: key={}", key);
+                    return false;
                 }
-            })
-            .or_insert_with(|| {
-                should_store = true;
-                vec![new_metadata]
-            });
 
-        should_store
+                // Add-wins: only add if there is no newer remove.
+                versions.push(new_metadata);
+                true
+            }
+            MapEntry::Vacant(entry) => {
+                entry.insert(vec![new_metadata]);
+                true
+            }
+        }
     }
 
     /// Apply remove
@@ -275,27 +294,25 @@ impl CrdtOrMap {
 
     fn record_remove_metadata(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> bool {
         let tombstone = ValueMetadata::tombstone(timestamp, replica_id);
-        let mut should_remove = false;
 
-        self.metadata
-            .entry(key.to_string())
-            .and_modify(|versions| {
-                let has_existing_entry = versions.iter().any(|v| {
-                    v.is_tombstone && v.timestamp == timestamp && v.replica_id == replica_id
-                });
+        match self.metadata.entry(key.to_string()) {
+            MapEntry::Occupied(mut entry) => {
+                let versions = entry.get_mut();
+                let has_existing_entry = versions
+                    .iter()
+                    .any(|v| v.is_tombstone && v.matches_version(timestamp, replica_id));
                 if has_existing_entry {
-                    return;
+                    return false;
                 }
 
-                versions.push(tombstone.clone());
-                should_remove = true;
-            })
-            .or_insert_with(|| {
-                should_remove = true;
-                vec![tombstone]
-            });
-
-        should_remove
+                versions.push(tombstone);
+                true
+            }
+            MapEntry::Vacant(entry) => {
+                entry.insert(vec![tombstone]);
+                true
+            }
+        }
     }
 }
 
