@@ -39,6 +39,13 @@ pub struct RealtimeResponse {
     pub max_output_tokens: Option<MaxOutputTokens>,
 }
 
+impl RealtimeResponse {
+    /// Create a builder for constructing a RealtimeResponse.
+    pub fn builder(id: impl Into<String>) -> crate::builders::realtime::RealtimeResponseBuilder {
+        crate::builders::realtime::RealtimeResponseBuilder::new(id)
+    }
+}
+
 // ============================================================================
 // Response Create Params
 // ============================================================================
