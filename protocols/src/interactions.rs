@@ -1121,14 +1121,33 @@ fn validate_model(model: &str) -> Result<(), ValidationError> {
 }
 
 fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), ValidationError> {
-    // Either model or agent must be provided
+    // Exactly one of model or agent must be provided
     if is_option_blank(&req.model) && is_option_blank(&req.agent) {
         return Err(ValidationError::new("model_or_agent_required"));
     }
+    if !is_option_blank(&req.model) && !is_option_blank(&req.agent) {
+        let mut e = ValidationError::new("model_and_agent_mutually_exclusive");
+        e.message = Some("Cannot set both model and agent. Provide exactly one.".into());
+        return Err(e);
+    }
+
     // response_mime_type is required when response_format is set
     if req.response_format.is_some() && is_option_blank(&req.response_mime_type) {
         return Err(ValidationError::new("response_mime_type_required"));
     }
+
+    // background mode is required for agent interactions, and only for agents
+    if !is_option_blank(&req.agent) && !req.background {
+        let mut e = ValidationError::new("agent_requires_background");
+        e.message = Some("Agent interactions require background mode to be enabled.".into());
+        return Err(e);
+    }
+    if !is_option_blank(&req.model) && req.background {
+        let mut e = ValidationError::new("background_requires_agent");
+        e.message = Some("Background mode is only supported for agent interactions.".into());
+        return Err(e);
+    }
+
     // background and stream are mutually exclusive
     if req.background && req.stream {
         let mut e = ValidationError::new("background_conflicts_with_stream");
@@ -1216,7 +1235,7 @@ fn is_content_empty(content: &Content) -> bool {
         Content::Image { data, uri, .. }
         | Content::Audio { data, uri, .. }
         | Content::Document { data, uri, .. }
-        | Content::Video { data, uri, .. } => data.is_none() && uri.is_none(),
+        | Content::Video { data, uri, .. } => is_option_blank(data) && is_option_blank(uri),
         Content::CodeExecutionCall { id, .. }
         | Content::UrlContextCall { id, .. }
         | Content::GoogleSearchCall { id, .. } => is_option_blank(id),
@@ -1243,7 +1262,7 @@ fn validate_stop_sequences(seqs: &[String]) -> Result<(), ValidationError> {
         e.message = Some("Maximum 5 stop sequences allowed".into());
         return Err(e);
     }
-    if seqs.iter().any(|s| s.is_empty()) {
+    if seqs.iter().any(|s| s.trim().is_empty()) {
         let mut e = ValidationError::new("stop_sequences_cannot_be_empty");
         e.message = Some("Stop sequences cannot contain empty strings".into());
         return Err(e);
