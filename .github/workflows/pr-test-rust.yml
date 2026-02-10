@@ -318,7 +318,7 @@ jobs:
     timeout-minutes: ${{ matrix.timeout }}
     services:
       oracle-db:
-        image: ${{ matrix.setup_oracle && 'gvenzl/oracle-xe:21-slim-faststart' || '' }}
+        image: ${{ matrix.setup_oracle && 'gvenzl/oracle-free:23-slim-faststart' || '' }}
         ports:
           - 1521:1521
         env:
@@ -342,10 +342,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
-
-      - name: Warm up Docker daemon
-        if: matrix.setup_oracle || matrix.setup_brave
-        run: docker info > /dev/null 2>&1
 
       - name: Setup vLLM backend
         if: matrix.setup_vllm
@@ -406,7 +402,7 @@ jobs:
         run: |
           echo "ATP_USER=system" >> $GITHUB_ENV
           echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
-          echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
+          echo "ATP_DSN=localhost:1521/FREEPDB1" >> $GITHUB_ENV
 
       - name: Run E2E tests
         env:
