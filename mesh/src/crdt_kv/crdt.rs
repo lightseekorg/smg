@@ -151,17 +151,26 @@ impl CrdtOrMap {
 
     /// Remove key (transparent operation)
     pub fn remove(&self, key: &str) -> Option<Vec<u8>> {
+        let key_lock = self.key_lock_for(key);
+        let _key_guard = key_lock.lock();
+
         let timestamp = self.clock.tick();
         let operation = Operation::remove(key.to_string(), timestamp, self.replica_id);
-
-        self.operation_log.write().append(operation.clone());
 
         debug!(
             "Remove: key={}, timestamp={}, replica={}",
             key, timestamp, self.replica_id
         );
 
-        self.apply_remove(key, timestamp, self.replica_id)
+        let removed = if self.record_remove_metadata(key, timestamp, self.replica_id) {
+            self.store.remove(key)
+        } else {
+            None
+        };
+
+        self.operation_log.write().append(operation);
+
+        removed
     }
 
     /// Get value by key
