@@ -121,7 +121,6 @@ impl futures::Stream for AbortOnDropStream {
 pub struct SglangSchedulerClient {
     client: proto::sglang_scheduler_client::SglangSchedulerClient<Channel>,
     trace_injector: BoxedTraceInjector,
-    shm_manager: Arc<llm_multimodal::shm::SharedMemoryManager>,
 }
 
 impl SglangSchedulerClient {
@@ -157,12 +156,10 @@ impl SglangSchedulerClient {
             .await?;
 
         let client = proto::sglang_scheduler_client::SglangSchedulerClient::new(channel);
-        let shm_manager = Arc::new(llm_multimodal::shm::SharedMemoryManager::new());
 
         Ok(Self {
             client,
             trace_injector,
-            shm_manager,
         })
     }
 
@@ -332,44 +329,6 @@ impl SglangSchedulerClient {
             stream: body.stream,
             ..Default::default()
         };
-
-        // Shared Memory Optimization for Multimodal Inputs
-        if let Some(mm) = &mut grpc_request.mm_inputs {
-            let mut handles = Vec::new();
-            // Iterate over image_data and move to shared memory
-            for data in &mm.image_data {
-                if !data.is_empty() {
-                    match self.shm_manager.alloc(data.len()) {
-                        Ok(mut handle) => {
-                            let dest: &mut [u8] = handle.as_slice_mut();
-                            dest.copy_from_slice(&data);
-                            handles.push(proto::SharedMemoryHandle {
-                                uuid: handle.uuid.clone(),
-                                size: handle.size as u64,
-                                offset: 0,
-                            });
-
-                            // Persist the file so the SGLang backend can open it.
-                            handle.persist();
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to allocate shared memory: {}", e);
-                            // Fallback: data remains in image_data
-                        }
-                    }
-                }
-            }
-
-            if !handles.is_empty() {
-                // If we successfully offloaded to SHM, clear the raw data and attach handles
-                grpc_request
-                    .mm_inputs
-                    .as_mut()
-                    .unwrap()
-                    .shared_memory_handles = handles;
-                grpc_request.mm_inputs.as_mut().unwrap().image_data.clear();
-            }
-        }
 
         Ok(grpc_request)
     }
