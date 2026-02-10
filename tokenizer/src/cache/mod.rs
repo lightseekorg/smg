@@ -268,6 +268,10 @@ impl Tokenizer for CachedTokenizer {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn backend(&self) -> crate::traits::TokenizerBackend {
+        self.inner.backend()
+    }
 }
 
 #[cfg(test)]

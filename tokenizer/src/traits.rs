@@ -28,6 +28,22 @@ pub trait Tokenizer: Encoder + Decoder {
 
     /// Enable downcasting to concrete types
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Get the backend type of the tokenizer
+    fn backend(&self) -> TokenizerBackend;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenizerBackend {
+    HuggingFace,
+    Tiktoken,
+    Mock,
+}
+
+impl std::fmt::Display for TokenizerBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 /// Contains the results of tokenizing text: token IDs, string tokens, and their spans

@@ -3,6 +3,7 @@
 //! These types mirror the SGLang Python implementation for compatibility.
 //! See: python/sglang/srt/entrypoints/openai/protocol.py
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::UNKNOWN_MODEL_ID;
@@ -161,6 +162,9 @@ pub struct TokenizerInfo {
     /// Source path or HuggingFace model ID
     pub source: String,
     pub vocab_size: usize,
+    pub chat_template_path: Option<String>,
+    pub backend: String,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Request schema for removing a tokenizer

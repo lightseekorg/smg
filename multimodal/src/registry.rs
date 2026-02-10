@@ -394,6 +394,10 @@ mod tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
+
+        fn backend(&self) -> llm_tokenizer::TokenizerBackend {
+            llm_tokenizer::TokenizerBackend::Mock
+        }
     }
 
     #[test]

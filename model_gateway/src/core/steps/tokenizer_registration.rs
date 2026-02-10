@@ -107,7 +107,7 @@ impl StepExecutor<TokenizerWorkflowData> for LoadTokenizerStep {
         // This handles: validation, deduplication, and loading
         let result = app_context
             .tokenizer_registry
-            .load(&id, &name, &source, || {
+            .load(&id, &name, &source, chat_template.as_deref(), || {
                 let source = source.clone();
                 let chat_template = chat_template.clone();
                 let cache_cfg = cache_config.clone();
