@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use super::replica::ReplicaId;
@@ -7,7 +9,7 @@ use super::replica::ReplicaId;
 // ============================================================================
 
 /// CRDT operation type
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Operation {
     /// Insert operation: key, value, timestamp, replica_id
     Insert {
@@ -129,7 +131,13 @@ impl OperationLog {
 
     /// Merge another operation log
     pub fn merge(&mut self, other: &OperationLog) {
-        self.operations.extend_from_slice(&other.operations);
+        let mut seen: HashSet<Operation> = self.operations.iter().cloned().collect();
+
+        for operation in &other.operations {
+            if seen.insert(operation.clone()) {
+                self.operations.push(operation.clone());
+            }
+        }
     }
 }
 

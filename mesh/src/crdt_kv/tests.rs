@@ -230,6 +230,26 @@ fn test_operation_log_binary_serialization() {
 }
 
 #[test]
+fn test_operation_log_merge_deduplicates() {
+    init_test_logging();
+    let map = CrdtOrMap::new();
+
+    map.insert("key1".to_string(), b"value1".to_vec());
+    map.insert("key2".to_string(), b"value2".to_vec());
+    map.remove("key1");
+
+    let log = map.get_operation_log();
+
+    let mut merged_log = OperationLog::new();
+    merged_log.merge(&log);
+    let merged_once_len = merged_log.len();
+
+    // Re-merging the same log should be a no-op for log length.
+    merged_log.merge(&log);
+    assert_eq!(merged_log.len(), merged_once_len);
+}
+
+#[test]
 fn test_apply_operation_log() {
     init_test_logging();
     let replica1 = CrdtOrMap::new();

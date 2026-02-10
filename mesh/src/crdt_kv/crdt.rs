@@ -73,6 +73,11 @@ impl CrdtOrMap {
 
     /// Insert key-value pair (transparent operation)
     pub fn insert(&self, key: String, value: Vec<u8>) -> Option<Vec<u8>> {
+        let timestamp = self.clock.tick();
+        if !self.record_insert_metadata(&key, value.clone(), timestamp, self.replica_id) {
+            return self.store.get(&key).map(|bytes| bytes.to_vec());
+        }
+
         let mut prev = None;
         let value_for_store = value.clone();
         let _ = self.store.upsert(key.clone(), |current| {
@@ -80,8 +85,7 @@ impl CrdtOrMap {
             value_for_store
         });
 
-        let timestamp = self.clock.tick();
-        let operation = Operation::insert(key.clone(), value.clone(), timestamp, self.replica_id);
+        let operation = Operation::insert(key.clone(), value, timestamp, self.replica_id);
 
         self.operation_log.write().append(operation.clone());
 
@@ -90,18 +94,22 @@ impl CrdtOrMap {
             key, timestamp, self.replica_id
         );
 
-        let _ = self.record_insert_metadata(&key, value, timestamp, self.replica_id);
-
         prev
     }
 
-    /// Atomically update a key under the same DashMap entry lock.
+    /// Update a key using the current store value and CRDT insert semantics.
     pub fn upsert<F>(&self, key: String, updater: F) -> Vec<u8>
     where
         F: FnOnce(Option<&[u8]>) -> Vec<u8>,
     {
-        let updated_value = self.store.upsert(key.clone(), updater);
+        let current_value = self.store.get(&key);
+        let updated_value = updater(current_value.as_deref());
         let timestamp = self.clock.tick();
+
+        if !self.record_insert_metadata(&key, updated_value.clone(), timestamp, self.replica_id) {
+            return self.store.get(&key).unwrap_or_default();
+        }
+
         let operation = Operation::insert(
             key.clone(),
             updated_value.clone(),
@@ -110,8 +118,7 @@ impl CrdtOrMap {
         );
 
         self.operation_log.write().append(operation);
-        let _ =
-            self.record_insert_metadata(&key, updated_value.clone(), timestamp, self.replica_id);
+        self.store.insert(key, updated_value.clone());
 
         updated_value
     }
@@ -228,6 +235,13 @@ impl CrdtOrMap {
         self.metadata
             .entry(key.to_string())
             .and_modify(|versions| {
+                let has_existing_entry = versions.iter().any(|v| {
+                    !v.is_tombstone && v.timestamp == timestamp && v.replica_id == replica_id
+                });
+                if has_existing_entry {
+                    return;
+                }
+
                 let has_newer_remove = versions.iter().any(|v| {
                     v.is_tombstone
                         && (v.timestamp > timestamp
@@ -252,18 +266,36 @@ impl CrdtOrMap {
 
     /// Apply remove
     fn apply_remove(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> Option<Vec<u8>> {
+        if self.record_remove_metadata(key, timestamp, replica_id) {
+            return self.store.remove(key);
+        }
+
+        None
+    }
+
+    fn record_remove_metadata(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> bool {
         let tombstone = ValueMetadata::tombstone(timestamp, replica_id);
-        let mut removed_value = None;
+        let mut should_remove = false;
 
         self.metadata
             .entry(key.to_string())
             .and_modify(|versions| {
-                versions.push(tombstone.clone());
-                removed_value = self.store.remove(key);
-            })
-            .or_insert_with(|| vec![tombstone]);
+                let has_existing_entry = versions.iter().any(|v| {
+                    v.is_tombstone && v.timestamp == timestamp && v.replica_id == replica_id
+                });
+                if has_existing_entry {
+                    return;
+                }
 
-        removed_value
+                versions.push(tombstone.clone());
+                should_remove = true;
+            })
+            .or_insert_with(|| {
+                should_remove = true;
+                vec![tombstone]
+            });
+
+        should_remove
     }
 }
 
