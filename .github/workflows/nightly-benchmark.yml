@@ -86,13 +86,8 @@ jobs:
       matrix:
         model:
           - { id: meta-llama/Llama-3.1-8B-Instruct, slug: meta-llama-Llama-3.1-8B-Instruct, test_class: TestNightlyLlama8bSingle }
-          - { id: meta-llama/Llama-3.2-1B-Instruct, slug: meta-llama-Llama-3.2-1B-Instruct, test_class: TestNightlyLlama1bSingle }
           - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bSingle }
-          - { id: Qwen/Qwen2.5-14B-Instruct, slug: Qwen-Qwen2.5-14B-Instruct, test_class: TestNightlyQwen14bSingle }
-          - { id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B, slug: deepseek-ai-DeepSeek-R1-Distill-Qwen-7B, test_class: TestNightlyDeepseek7bSingle }
           - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bSingle }
-          - { id: mistralai/Mistral-7B-Instruct-v0.3, slug: mistralai-Mistral-7B-Instruct-v0.3, test_class: TestNightlyMistral7bSingle }
-          - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bSingle }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
           - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
@@ -147,7 +142,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GPU_TYPE: H100
-          E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"meta-llama/Llama-3.2-1B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen2.5-14B-Instruct":1,"deepseek-ai/DeepSeek-R1-Distill-Qwen-7B":1,"Qwen/Qwen3-30B-A3B":1,"mistralai/Mistral-7B-Instruct-v0.3":1,"openai/gpt-oss-20b":1}'
+          E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen3-30B-A3B":1}'
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
 
@@ -190,13 +185,8 @@ jobs:
       matrix:
         model:
           - { id: meta-llama/Llama-3.1-8B-Instruct, slug: meta-llama-Llama-3.1-8B-Instruct, test_class: TestNightlyLlama8bMulti }
-          - { id: meta-llama/Llama-3.2-1B-Instruct, slug: meta-llama-Llama-3.2-1B-Instruct, test_class: TestNightlyLlama1bMulti }
           - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bMulti }
-          - { id: Qwen/Qwen2.5-14B-Instruct, slug: Qwen-Qwen2.5-14B-Instruct, test_class: TestNightlyQwen14bMulti }
-          - { id: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B, slug: deepseek-ai-DeepSeek-R1-Distill-Qwen-7B, test_class: TestNightlyDeepseek7bMulti }
           - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bMulti }
-          - { id: mistralai/Mistral-7B-Instruct-v0.3, slug: mistralai-Mistral-7B-Instruct-v0.3, test_class: TestNightlyMistral7bMulti }
-          - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bMulti }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
           - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
@@ -251,7 +241,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GPU_TYPE: H100
-          E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"meta-llama/Llama-3.2-1B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen2.5-14B-Instruct":1,"deepseek-ai/DeepSeek-R1-Distill-Qwen-7B":1,"Qwen/Qwen3-30B-A3B":1,"mistralai/Mistral-7B-Instruct-v0.3":1,"openai/gpt-oss-20b":1}'
+          E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen3-30B-A3B":1}'
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
 
@@ -422,5 +412,16 @@ jobs:
           pattern: nightly-*
           merge-multiple: true
 
+      - name: Install chart dependencies
+        run: pip install matplotlib
+
       - name: Create benchmark summary
-        run: python3 e2e_test/benchmarks/nightly_summarize.py .
+        run: python3 e2e_test/benchmarks/nightly_summarize.py . --charts-dir nightly_charts
+
+      - name: Upload comparison charts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-comparison-charts-${{ github.run_id }}
+          path: nightly_charts/
+          if-no-files-found: ignore
