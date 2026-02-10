@@ -23,7 +23,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{
     context::{MessagesContext, SharedComponents},
@@ -126,7 +126,10 @@ impl RouterTrait for AnthropicRouter {
         let mcp_servers = if request.mcp_servers.is_some() {
             match ensure_mcp_connection(&mut request, &self.messages_ctx.mcp_orchestrator).await {
                 Ok(servers) => Some(servers),
-                Err(response) => return response,
+                Err(response) => {
+                    warn!(model = %model_id, "MCP connection setup failed");
+                    return response;
+                }
             }
         } else {
             None
