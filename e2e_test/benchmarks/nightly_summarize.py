@@ -19,6 +19,105 @@ from pathlib import Path
 from statistics import median
 
 # ---------------------------------------------------------------------------
+# Metric definitions — single source of truth
+#
+# Each metric is defined once in _METRIC_REGISTRY. Section-specific lists
+# are composed by selecting from the registry, avoiding tuple duplication.
+# ---------------------------------------------------------------------------
+
+# (label, field_name, lower_is_better)
+_MetricDef = tuple[str, str, bool]
+
+# Canonical definitions — every metric appears exactly once.
+_M_TTFT_MEAN: _MetricDef = ("TTFT mean", "ttft_mean", True)
+_M_TTFT_P99: _MetricDef = ("TTFT p99", "ttft_p99", True)
+_M_TPOT_MEAN: _MetricDef = ("TPOT mean", "tpot_mean", True)
+_M_TPOT_P99: _MetricDef = ("TPOT p99", "tpot_p99", True)
+_M_E2E_MEAN: _MetricDef = ("E2E mean", "e2e_mean", True)
+_M_E2E_P99: _MetricDef = ("E2E p99", "e2e_p99", True)
+_M_OUT_TPUT: _MetricDef = ("Output tput", "output_throughput", False)
+_M_TOT_TPUT: _MetricDef = ("Total throughput", "total_throughput", False)
+_M_RPS: _MetricDef = ("RPS", "rps", False)
+
+# Per-section selections (composed, not copy-pasted).
+AGGREGATE_METRICS: list[_MetricDef] = [
+    _M_TTFT_MEAN,
+    _M_TTFT_P99,
+    _M_E2E_MEAN,
+    _M_E2E_P99,
+    _M_TPOT_MEAN,
+    _M_TPOT_P99,
+    _M_OUT_TPUT,
+    _M_TOT_TPUT,
+    _M_RPS,
+]
+TOP_WINS_METRICS: list[_MetricDef] = [
+    _M_TTFT_P99,
+    _M_TTFT_MEAN,
+    _M_E2E_MEAN,
+    _M_E2E_P99,
+    _M_TPOT_P99,
+    _M_OUT_TPUT,
+    _M_RPS,
+]
+PER_MODEL_METRICS: list[_MetricDef] = [_M_TTFT_P99, _M_TPOT_P99, _M_E2E_P99, _M_OUT_TPUT]
+CONCURRENCY_METRICS: list[_MetricDef] = [
+    _M_TTFT_MEAN,
+    _M_TTFT_P99,
+    _M_TPOT_MEAN,
+    _M_TPOT_P99,
+    _M_E2E_MEAN,
+    _M_E2E_P99,
+    _M_OUT_TPUT,
+]
+SCORECARD_METRICS: list[_MetricDef] = [_M_E2E_MEAN, _M_TTFT_MEAN, _M_OUT_TPUT]
+
+# Chart metrics carry a unit for axis labels.
+CHART_METRICS: list[tuple[str, str, bool, str]] = [
+    (*_M_TTFT_P99, "ms"),
+    (*_M_TPOT_P99, "ms"),
+    (*_M_E2E_P99, "s"),
+    (*_M_OUT_TPUT, "tok/s"),
+]
+
+# ---------------------------------------------------------------------------
+# Glossary — displayed once in the summary header
+# ---------------------------------------------------------------------------
+
+_GLOSSARY_LINES = [
+    "#### Metrics",
+    "",
+    "| Metric | Description |",
+    "|--------|-------------|",
+    "| **TTFT** | Time To First Token — latency from request sent to first token received |",
+    "| **TPOT** | Time Per Output Token — average time between consecutive output tokens |",
+    "| **E2E** | End-to-End latency — total time from request sent to last token received |",
+    "| **Output tput** | Output throughput — tokens generated per second (tok/s) |",
+    "| **Total tput** | Total throughput — input + output tokens processed per second |",
+    "| **RPS** | Requests Per Second — completed requests per second |",
+    "| **p99** | 99th percentile — the value below which 99% of observations fall (worst 1% of requests) |",
+    "| **mean** | Arithmetic average across all requests |",
+    "",
+    "#### Traffic Scenarios",
+    "",
+    "| Pattern | Description |",
+    "|---------|-------------|",
+    "| **D(in, out)** | Deterministic — fixed input/output token lengths, e.g. `D(100,100)` |",
+    "| **N(μ,σ)/(μ,σ)** | Normal distribution — input/output lengths drawn from Gaussian |",
+    "| **E(size)** | Embedding — input of given token length, used for embedding model benchmarks |",
+    "",
+    "#### Comparison Columns",
+    "",
+    "| Value | Meaning |",
+    "|-------|---------|",
+    "| **gRPC X%** | gRPC is X% better than HTTP for this metric |",
+    "| **HTTP X%** | HTTP is X% better than gRPC for this metric |",
+    "| **~** | Difference is within 2% — essentially a tie |",
+    "",
+    "*Lower is better for latency metrics (TTFT, TPOT, E2E). Higher is better for throughput (tput, RPS).*",
+]
+
+# ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
 
@@ -75,6 +174,19 @@ class ComparisonPoint:
     concurrency: int
     grpc: RunResult
     http: RunResult
+
+    @property
+    def config(self) -> str:
+        return f"{self.runtime}/{self.worker_type}"
+
+
+@dataclass
+class SummaryResult:
+    """Return value of generate_summary."""
+
+    markdown: str
+    experiments: list[ExperimentInfo]
+    comparisons: list[ComparisonPoint]
 
 
 # ---------------------------------------------------------------------------
@@ -260,77 +372,306 @@ def build_comparisons(experiments: list[ExperimentInfo]) -> list[ComparisonPoint
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
+#
+# All percentages are shown as "gRPC advantage": positive = gRPC is better.
+# For latency metrics (lower=better): advantage = (HTTP - gRPC) / HTTP
+# For throughput metrics (higher=better): advantage = (gRPC - HTTP) / HTTP
 # ---------------------------------------------------------------------------
 
 
-def _pct(grpc_val: float, http_val: float) -> float | None:
-    """(gRPC - HTTP) / HTTP * 100."""
+def _advantage(grpc_val: float, http_val: float, lower_is_better: bool) -> float | None:
+    """gRPC advantage %: positive = gRPC is better, negative = HTTP is better."""
     if http_val == 0:
         return None
-    return (grpc_val - http_val) / http_val * 100
+    pct = (grpc_val - http_val) / http_val * 100
+    return -pct if lower_is_better else pct
 
 
-def _fmt_pct(pct: float | None) -> str:
+def _cp_advantage(cp: ComparisonPoint, fld: str, lower_is_better: bool) -> float | None:
+    """Shorthand: compute gRPC advantage for a ComparisonPoint and field name."""
+    return _advantage(getattr(cp.grpc, fld), getattr(cp.http, fld), lower_is_better)
+
+
+def _avg_advantage(cps: list[ComparisonPoint], fld: str, lower_is_better: bool) -> float | None:
+    """Average gRPC advantage across a list of comparison points."""
+    advs = [a for cp in cps if (a := _cp_advantage(cp, fld, lower_is_better)) is not None]
+    return sum(advs) / len(advs) if advs else None
+
+
+def _fmt_winner(pct: float | None, threshold: float = 2.0, bold: bool = False) -> str:
+    """Format as 'gRPC X%' or 'HTTP X%' or '~'. pct is gRPC advantage."""
     if pct is None:
         return "N/A"
-    return f"{pct:+.1f}%"
+    if abs(pct) < threshold:
+        return "~"
+    name = "gRPC" if pct > 0 else "HTTP"
+    if bold:
+        name = f"**{name}**"
+    return f"{name} {abs(pct):.1f}%"
 
 
 def _fmt_latency_s(val_s: float) -> str:
     """Format latency value (in seconds) for display."""
     ms = val_s * 1000
-    if ms < 1000:
-        return f"{ms:.0f}ms"
-    return f"{val_s:.2f}s"
+    return f"{ms:.0f}ms" if ms < 1000 else f"{val_s:.2f}s"
 
 
 def _fmt_throughput(val: float) -> str:
-    if val >= 1000:
-        return f"{val / 1000:.1f}K"
-    return f"{val:.0f}"
+    return f"{val / 1000:.1f}K" if val >= 1000 else f"{val:.0f}"
 
 
-def _winner(pct: float | None, lower_is_better: bool, threshold: float = 2.0) -> str:
-    if pct is None:
-        return ""
-    if abs(pct) < threshold:
-        return "~Tie"
-    if lower_is_better:
-        return "**gRPC**" if pct < 0 else "HTTP"
-    return "**gRPC**" if pct > 0 else "HTTP"
+def _fmt_metric_value(val: float, label: str) -> str:
+    """Format a metric value based on its label/type."""
+    label_lower = label.lower()
+    if any(k in label_lower for k in ("ttft", "e2e")):
+        return _fmt_latency_s(val)
+    if "tpot" in label_lower:
+        ms = val * 1000
+        return f"{ms:.1f}ms" if ms >= 1 else f"{ms:.2f}ms"
+    if "tput" in label_lower or "throughput" in label_lower:
+        return f"{_fmt_throughput(val)} tok/s"
+    if "rps" in label_lower:
+        return f"{val:.1f}"
+    return f"{val:.1f}"
 
 
-def _safe_avg(vals: list[float]) -> float | None:
-    return sum(vals) / len(vals) if vals else None
+def _group_by_concurrency(
+    comparisons: list[ComparisonPoint],
+) -> tuple[dict[int, list[ComparisonPoint]], list[int]]:
+    """Group comparisons by concurrency level, return (mapping, sorted_levels)."""
+    by_conc: dict[int, list[ComparisonPoint]] = defaultdict(list)
+    for cp in comparisons:
+        by_conc[cp.concurrency].append(cp)
+    return by_conc, sorted(by_conc.keys())
+
+
+# ---------------------------------------------------------------------------
+# Chart generation (optional — requires matplotlib)
+# ---------------------------------------------------------------------------
+
+
+def _plot_comparison_grid(
+    title: str,
+    by_conc: dict[int, list[ComparisonPoint]],
+    conc_levels: list[int],
+    output_dir: Path,
+    filename: str,
+) -> str | None:
+    """Plot a 2x2 grid of CHART_METRICS. Returns filename or None on failure."""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return None
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(title, fontsize=16, fontweight="bold")
+
+    for ax, (label, fld, _lower_better, unit) in zip(axes.flat, CHART_METRICS):
+        grpc_vals, http_vals = [], []
+        for conc in conc_levels:
+            cps = by_conc[conc]
+            g = sum(getattr(cp.grpc, fld) for cp in cps) / len(cps)
+            h = sum(getattr(cp.http, fld) for cp in cps) / len(cps)
+            if unit == "ms":
+                g *= 1000
+                h *= 1000
+            grpc_vals.append(g)
+            http_vals.append(h)
+
+        x = range(len(conc_levels))
+        ax.plot(x, grpc_vals, "o-", label="gRPC", color="#2196F3", linewidth=2)
+        ax.plot(x, http_vals, "s--", label="HTTP", color="#FF9800", linewidth=2)
+        ax.set_title(label, fontsize=12, fontweight="bold")
+        ax.set_xlabel("Concurrency")
+        ax.set_ylabel(f"{label} ({unit})")
+        ax.set_xticks(list(x))
+        ax.set_xticklabels([str(c) for c in conc_levels])
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        nz = [v for v in grpc_vals + http_vals if v > 0]
+        if nz and max(nz) > 10 * min(nz):
+            ax.set_yscale("log")
+
+    fig.tight_layout()
+    fig.savefig(output_dir / filename, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return filename
+
+
+def generate_charts(
+    comparisons: list[ComparisonPoint],
+    output_dir: Path,
+) -> list[str]:
+    """Generate comparison charts as PNGs. Returns list of generated filenames."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    charts: list[str] = []
+
+    by_conc, conc_levels = _group_by_concurrency(comparisons)
+    if not conc_levels:
+        return []
+
+    # Aggregate comparison
+    fname = _plot_comparison_grid(
+        "gRPC vs HTTP — Aggregate Comparison",
+        by_conc,
+        conc_levels,
+        output_dir,
+        "aggregate_comparison.png",
+    )
+    if fname:
+        charts.append(fname)
+
+    # Per-model/config charts
+    by_model_config: dict[str, list[ComparisonPoint]] = defaultdict(list)
+    for cp in comparisons:
+        by_model_config[f"{cp.model}|{cp.config}"].append(cp)
+
+    for key, cps in sorted(by_model_config.items()):
+        model, config = key.split("|", 1)
+        mc_conc, mc_levels = _group_by_concurrency(cps)
+        if len(mc_levels) < 3:
+            continue
+
+        display_name = model.split("/")[-1] if "/" in model else model
+        safe = model.replace("/", "__")
+        safe_cfg = config.replace("/", "_")
+        fname = _plot_comparison_grid(
+            f"{display_name} ({config}): gRPC vs HTTP",
+            mc_conc,
+            mc_levels,
+            output_dir,
+            f"{safe}_{safe_cfg}_comparison.png",
+        )
+        if fname:
+            charts.append(fname)
+
+    return charts
 
 
 # ---------------------------------------------------------------------------
 # Section generators
 # ---------------------------------------------------------------------------
 
-
 _RUNTIME_DISPLAY = {"sglang": "SGLang", "vllm": "vLLM", "trtllm": "TRT-LLM"}
 _PROTOCOL_DISPLAY = {"http": "HTTP", "grpc": "gRPC"}
 
 
-def _section_overview(experiments: list[ExperimentInfo]) -> list[str]:
-    """Overview table with status per model/config — columns discovered dynamically."""
+def _section_key_findings(
+    comparisons: list[ComparisonPoint],
+    experiments: list[ExperimentInfo],
+) -> list[str]:
+    """Auto-generated executive summary of the benchmark results."""
+    if not comparisons:
+        return []
+
+    lines = ["### Key Findings", ""]
+
+    # 1. Overall verdict per key metric
+    for label, fld, lower_better, _unit in CHART_METRICS:
+        advs = [a for cp in comparisons if (a := _cp_advantage(cp, fld, lower_better)) is not None]
+        if not advs:
+            continue
+        avg_adv = sum(advs) / len(advs)
+        grpc_wins = sum(1 for a in advs if a > 2)
+        http_wins = sum(1 for a in advs if a < -2)
+        ties = len(advs) - grpc_wins - http_wins
+        if abs(avg_adv) < 1:
+            lines.append(f"- **{label}**: No clear winner — essentially tied across all scenarios")
+        else:
+            winner = "gRPC" if avg_adv > 0 else "HTTP"
+            lines.append(
+                f"- **{label}**: {winner} wins {max(grpc_wins, http_wins)}/{len(advs)} "
+                f"comparisons (avg {abs(avg_adv):.1f}% better), "
+                f"{min(grpc_wins, http_wins)} losses, {ties} ties"
+            )
+
+    # 2. Error rates
+    total_runs = sum(len(e.runs) for e in experiments)
+    error_runs = [(e, r) for e in experiments for r in e.runs if r.error_rate > 0]
+    if error_runs:
+        lines.append(f"- **Errors**: {len(error_runs)}/{total_runs} runs had non-zero error rates")
+    else:
+        lines.append(f"- **Errors**: All {total_runs} runs completed with 0% error rate")
+
+    # 3. Biggest outliers
+    biggest_grpc_win = biggest_http_win = None
+    biggest_grpc_adv = biggest_http_adv = 0.0
+    for cp in comparisons:
+        for label, fld, lower_better, _ in CHART_METRICS:
+            adv = _cp_advantage(cp, fld, lower_better)
+            if adv is not None and adv > biggest_grpc_adv:
+                biggest_grpc_adv = adv
+                biggest_grpc_win = (cp, label)
+            if adv is not None and adv < biggest_http_adv:
+                biggest_http_adv = adv
+                biggest_http_win = (cp, label)
+
+    if biggest_grpc_win and biggest_grpc_adv > 10:
+        cp, metric = biggest_grpc_win
+        lines.append(
+            f"- **Largest gRPC win**: {biggest_grpc_adv:.0f}% on {metric} "
+            f"— {cp.model} `{cp.scenario}` C={cp.concurrency}"
+        )
+    if biggest_http_win and abs(biggest_http_adv) > 10:
+        cp, metric = biggest_http_win
+        lines.append(
+            f"- **Largest HTTP win**: {abs(biggest_http_adv):.0f}% on {metric} "
+            f"— {cp.model} `{cp.scenario}` C={cp.concurrency}"
+        )
+
+    lines.append("")
+    return lines
+
+
+def _section_error_rates(experiments: list[ExperimentInfo]) -> list[str]:
+    """Surface any non-zero error rates."""
+    errors = [(e, r) for e in experiments for r in e.runs if r.error_rate > 0]
+    if not errors:
+        return []
+
+    lines = [
+        "<details>",
+        f"<summary><b>Runs with Errors</b> ({len(errors)} runs)</summary>",
+        "",
+        "| Model | Protocol | Runtime | Workers | Scenario | C | Error Rate |",
+        "|-------|----------|---------|---------|----------|--:|-----------:|",
+    ]
+
+    for e, r in sorted(errors, key=lambda x: x[1].error_rate, reverse=True):
+        lines.append(
+            f"| {e.model} | {e.protocol} | {e.runtime} | {e.worker_type} "
+            f"| `{r.scenario}` | {r.concurrency} | {r.error_rate:.1%} |"
+        )
+
+    lines.extend(["", "</details>", ""])
+    return lines
+
+
+def _section_overview(experiments: list[ExperimentInfo], models_with_data: set[str]) -> list[str]:
+    """Overview table — only models that have comparison data."""
     by_model: dict[str, dict[str, ExperimentInfo]] = defaultdict(dict)
     for exp in experiments:
         by_model[exp.model][exp.table_key] = exp
 
-    # Discover all (protocol, runtime, worker_type) combos that actually exist
+    # Discover columns dynamically
     all_keys: set[str] = set()
-    for model_exps in by_model.values():
-        all_keys.update(model_exps.keys())
+    for model in models_with_data:
+        if model in by_model:
+            all_keys.update(by_model[model].keys())
 
-    # Sort: single before multi, then by runtime name, then http before grpc
     _worker_order = {"single": 0, "multi": 1}
     _protocol_order = {"http": 0, "grpc": 1}
 
     def _col_sort_key(key: str) -> tuple:
         protocol, runtime, worker = key.split("_")
-        return (_worker_order.get(worker, 9), runtime, _protocol_order.get(protocol, 9))
+        return (
+            _worker_order.get(worker, 9),
+            runtime,
+            _protocol_order.get(protocol, 9),
+        )
 
     table_order = []
     for key in sorted(all_keys, key=_col_sort_key):
@@ -348,7 +689,9 @@ def _section_overview(experiments: list[ExperimentInfo]) -> list[str]:
         "|" + "|".join(["---"] * len(header_cols)) + "|",
     ]
 
-    for model in sorted(by_model.keys()):
+    for model in sorted(models_with_data):
+        if model not in by_model:
+            continue
         model_exps = by_model[model]
         row = [model]
         for table_key, _ in table_order:
@@ -360,6 +703,13 @@ def _section_overview(experiments: list[ExperimentInfo]) -> list[str]:
                 row.append("\u26a0\ufe0f" if has_errors else "\u2705")
         lines.append("| " + " | ".join(row) + " |")
 
+    # Note excluded models
+    excluded = set(by_model.keys()) - models_with_data
+    if excluded:
+        names = ", ".join(sorted(excluded))
+        lines.append("")
+        lines.append(f"*Excluded from comparison (no matched gRPC/HTTP data): {names}*")
+
     lines.append("")
     return lines
 
@@ -369,40 +719,24 @@ def _section_aggregate(comparisons: list[ComparisonPoint]) -> list[str]:
     if not comparisons:
         return ["*No gRPC vs HTTP comparison data available.*", ""]
 
-    metrics = [
-        ("TTFT mean", "ttft_mean", True),
-        ("TTFT p99", "ttft_p99", True),
-        ("E2E mean", "e2e_mean", True),
-        ("E2E p99", "e2e_p99", True),
-        ("TPOT mean", "tpot_mean", True),
-        ("Output throughput", "output_throughput", False),
-        ("Total throughput", "total_throughput", False),
-        ("RPS", "rps", False),
-    ]
-
     lines = [
         "### Aggregate: gRPC vs HTTP",
         "",
-        f"*{len(comparisons)} matched data points (error-free pairs only). "
-        "Negative % = gRPC lower (better for latency). "
-        "Positive % = gRPC higher (better for throughput).*",
+        f"*{len(comparisons)} matched data points. "
+        "Shows which protocol is better and by how much.*",
         "",
-        "| Metric | Avg % | Median % | Winner |",
-        "|--------|------:|--------:|--------|",
+        "| Metric | Avg | Median | Verdict |",
+        "|--------|----:|-------:|---------|",
     ]
 
-    for label, fld, lower_better in metrics:
-        diffs = []
-        for cp in comparisons:
-            p = _pct(getattr(cp.grpc, fld), getattr(cp.http, fld))
-            if p is not None:
-                diffs.append(p)
-        if not diffs:
+    for label, fld, lower_better in AGGREGATE_METRICS:
+        advs = [a for cp in comparisons if (a := _cp_advantage(cp, fld, lower_better)) is not None]
+        if not advs:
             continue
-        avg = sum(diffs) / len(diffs)
-        med = median(diffs)
+        avg = sum(advs) / len(advs)
+        med = median(advs)
         lines.append(
-            f"| {label} | {_fmt_pct(avg)} | {_fmt_pct(med)} | {_winner(avg, lower_better)} |"
+            f"| {label} | {_fmt_winner(avg)} | {_fmt_winner(med)} | {_fmt_winner(avg, bold=True)} |"
         )
 
     lines.append("")
@@ -414,76 +748,30 @@ def _section_by_concurrency(comparisons: list[ComparisonPoint]) -> list[str]:
     if not comparisons:
         return []
 
-    by_conc: dict[int, list[ComparisonPoint]] = defaultdict(list)
-    for cp in comparisons:
-        by_conc[cp.concurrency].append(cp)
-    conc_levels = sorted(by_conc.keys())
-
+    by_conc, conc_levels = _group_by_concurrency(comparisons)
     lines = ["### Performance by Concurrency", ""]
 
-    # TTFT mean
-    lines.extend(
-        [
+    for title, fld, lower_is_better in CONCURRENCY_METRICS:
+        tbl = [
             "<details>",
-            "<summary><b>TTFT Mean by Concurrency</b></summary>",
+            f"<summary><b>{title}</b></summary>",
             "",
-            "| Concurrency | gRPC avg | HTTP avg | Diff % | Winner |",
-            "|---:|---:|---:|---:|:---|",
+            "| Concurrency | gRPC | HTTP | Faster |",
+            "|---:|---:|---:|:---|",
         ]
-    )
-    for conc in conc_levels:
-        cps = by_conc[conc]
-        g_avg = sum(cp.grpc.ttft_mean * 1000 for cp in cps) / len(cps)
-        h_avg = sum(cp.http.ttft_mean * 1000 for cp in cps) / len(cps)
-        pct = _pct(g_avg, h_avg)
-        lines.append(
-            f"| {conc} | {g_avg:.0f}ms | {h_avg:.0f}ms | {_fmt_pct(pct)} | "
-            f"{_winner(pct, lower_is_better=True)} |"
-        )
-    lines.extend(["", "</details>", ""])
 
-    # E2E mean
-    lines.extend(
-        [
-            "<details>",
-            "<summary><b>E2E Latency Mean by Concurrency</b></summary>",
-            "",
-            "| Concurrency | gRPC avg | HTTP avg | Diff % | Winner |",
-            "|---:|---:|---:|---:|:---|",
-        ]
-    )
-    for conc in conc_levels:
-        cps = by_conc[conc]
-        g_avg = sum(cp.grpc.e2e_mean * 1000 for cp in cps) / len(cps)
-        h_avg = sum(cp.http.e2e_mean * 1000 for cp in cps) / len(cps)
-        pct = _pct(g_avg, h_avg)
-        lines.append(
-            f"| {conc} | {g_avg:.0f}ms | {h_avg:.0f}ms | {_fmt_pct(pct)} | "
-            f"{_winner(pct, lower_is_better=True)} |"
-        )
-    lines.extend(["", "</details>", ""])
-
-    # Output throughput
-    lines.extend(
-        [
-            "<details>",
-            "<summary><b>Output Throughput by Concurrency</b></summary>",
-            "",
-            "| Concurrency | gRPC avg | HTTP avg | Diff % | Winner |",
-            "|---:|---:|---:|---:|:---|",
-        ]
-    )
-    for conc in conc_levels:
-        cps = by_conc[conc]
-        g_avg = sum(cp.grpc.output_throughput for cp in cps) / len(cps)
-        h_avg = sum(cp.http.output_throughput for cp in cps) / len(cps)
-        pct = _pct(g_avg, h_avg)
-        lines.append(
-            f"| {conc} | {_fmt_throughput(g_avg)} tok/s | "
-            f"{_fmt_throughput(h_avg)} tok/s | {_fmt_pct(pct)} | "
-            f"{_winner(pct, lower_is_better=False)} |"
-        )
-    lines.extend(["", "</details>", ""])
+        for conc in conc_levels:
+            cps = by_conc[conc]
+            g_avg = sum(getattr(cp.grpc, fld) for cp in cps) / len(cps)
+            h_avg = sum(getattr(cp.http, fld) for cp in cps) / len(cps)
+            adv = _advantage(g_avg, h_avg, lower_is_better)
+            tbl.append(
+                f"| {conc} | {_fmt_metric_value(g_avg, title)} "
+                f"| {_fmt_metric_value(h_avg, title)} "
+                f"| {_fmt_winner(adv, bold=True)} |"
+            )
+        tbl.extend(["", "</details>", ""])
+        lines.extend(tbl)
 
     return lines
 
@@ -496,23 +784,18 @@ def _section_scorecard(comparisons: list[ComparisonPoint]) -> list[str]:
     lines = [
         "### Win/Loss Scorecard",
         "",
-        "*How often does gRPC beat HTTP beyond a given threshold?*",
+        "*How often is one protocol better by > N%?*",
         "",
     ]
 
-    metrics = [
-        ("E2E mean", "e2e_mean", True),
-        ("TTFT mean", "ttft_mean", True),
-        ("Output throughput", "output_throughput", False),
-    ]
     thresholds = [1, 2, 5, 10]
 
-    for label, fld, lower_better in metrics:
+    for label, fld, lower_better in SCORECARD_METRICS:
         lines.extend(
             [
                 f"**{label}:**",
                 "",
-                "| Threshold | gRPC wins | HTTP wins | Within |",
+                "| Threshold | gRPC better | HTTP better | Within |",
                 "|---:|---:|---:|---:|",
             ]
         )
@@ -520,23 +803,15 @@ def _section_scorecard(comparisons: list[ComparisonPoint]) -> list[str]:
         for thresh in thresholds:
             grpc_w = http_w = within = 0
             for cp in comparisons:
-                pct = _pct(getattr(cp.grpc, fld), getattr(cp.http, fld))
-                if pct is None:
+                adv = _cp_advantage(cp, fld, lower_better)
+                if adv is None:
                     continue
-                if lower_better:
-                    if pct < -thresh:
-                        grpc_w += 1
-                    elif pct > thresh:
-                        http_w += 1
-                    else:
-                        within += 1
+                if adv > thresh:
+                    grpc_w += 1
+                elif adv < -thresh:
+                    http_w += 1
                 else:
-                    if pct > thresh:
-                        grpc_w += 1
-                    elif pct < -thresh:
-                        http_w += 1
-                    else:
-                        within += 1
+                    within += 1
 
             g_str = f"**{grpc_w}**" if grpc_w > http_w else str(grpc_w)
             h_str = f"**{http_w}**" if http_w > grpc_w else str(http_w)
@@ -547,61 +822,38 @@ def _section_scorecard(comparisons: list[ComparisonPoint]) -> list[str]:
     return lines
 
 
-def _section_top_wins(comparisons: list[ComparisonPoint], top_n: int = 15) -> list[str]:
-    """Table of largest gRPC wins (>10% improvement)."""
+def _section_top_wins(comparisons: list[ComparisonPoint], threshold: float = 30.0) -> list[str]:
+    """Table of all gRPC wins exceeding the threshold."""
     if not comparisons:
         return []
 
-    metric_defs = [
-        ("TTFT p99", "ttft_p99", True),
-        ("TTFT mean", "ttft_mean", True),
-        ("E2E mean", "e2e_mean", True),
-        ("E2E p99", "e2e_p99", True),
-        ("Output tput", "output_throughput", False),
-        ("RPS", "rps", False),
-    ]
-
-    wins: list[tuple[float, float, str, ComparisonPoint, float, float]] = []
+    wins: list[tuple[float, str, ComparisonPoint, float, float]] = []
     for cp in comparisons:
-        for label, fld, lower_better in metric_defs:
+        for label, fld, lower_better in TOP_WINS_METRICS:
             g = getattr(cp.grpc, fld)
             h = getattr(cp.http, fld)
-            pct = _pct(g, h)
-            if pct is None:
-                continue
-            if lower_better and pct < -10:
-                wins.append((abs(pct), pct, label, cp, g, h))
-            elif not lower_better and pct > 10:
-                wins.append((abs(pct), pct, label, cp, g, h))
+            adv = _advantage(g, h, lower_better)
+            if adv is not None and adv > threshold:
+                wins.append((adv, label, cp, g, h))
 
     wins.sort(key=lambda x: x[0], reverse=True)
-    wins = wins[:top_n]
 
     if not wins:
         return []
 
     lines = [
         "<details>",
-        "<summary><b>Top gRPC Wins (&gt;10% improvement)</b></summary>",
+        f"<summary><b>Top gRPC Wins (&gt;{threshold:.0f}%)</b> — {len(wins)} entries</summary>",
         "",
-        "| Diff | Model | Config | Scenario | C | Metric | gRPC | HTTP |",
-        "|-----:|-------|--------|----------|--:|--------|-----:|-----:|",
+        "| gRPC better by | Model | Config | Scenario | C | Metric | gRPC | HTTP |",
+        "|---------------:|-------|--------|----------|--:|--------|-----:|-----:|",
     ]
 
-    for _, pct, label, cp, g, h in wins:
-        config = f"{cp.runtime}/{cp.worker_type}"
-        is_latency = any(k in label.lower() for k in ("ttft", "e2e", "tpot"))
-        if is_latency:
-            g_str = _fmt_latency_s(g)
-            h_str = _fmt_latency_s(h)
-        elif "tput" in label.lower():
-            g_str = f"{_fmt_throughput(g)} tok/s"
-            h_str = f"{_fmt_throughput(h)} tok/s"
-        else:
-            g_str = f"{g:.1f}"
-            h_str = f"{h:.1f}"
+    for adv, label, cp, g, h in wins:
+        g_str = _fmt_metric_value(g, label)
+        h_str = _fmt_metric_value(h, label)
         lines.append(
-            f"| {_fmt_pct(pct)} | {cp.model} | {config} | "
+            f"| {adv:.1f}% | {cp.model} | {cp.config} | "
             f"`{cp.scenario}` | {cp.concurrency} | {label} | {g_str} | {h_str} |"
         )
 
@@ -618,33 +870,20 @@ def _section_per_model(comparisons: list[ComparisonPoint]) -> list[str]:
     for cp in comparisons:
         by_model[cp.model].append(cp)
 
-    lines = ["### Per-Model Summary", ""]
-
-    # Compact summary: one row per model
-    lines.extend(
-        [
-            "| Model | TTFT mean | TTFT p99 | E2E mean | Output tput | N |",
-            "|-------|--------:|--------:|--------:|--------:|---:|",
-        ]
-    )
-
-    def _avg_or_na(vals: list[float]) -> str:
-        return _fmt_pct(sum(vals) / len(vals)) if vals else "N/A"
+    headers = [m[0] for m in PER_MODEL_METRICS]
+    lines = [
+        "### Per-Model Summary",
+        "",
+        "*Each cell shows which protocol is better and by how much.*",
+        "",
+        "| Model | " + " | ".join(headers) + " | N |",
+        "|-------" + "|--------:" * len(headers) + "|---:|",
+    ]
 
     for model in sorted(by_model.keys()):
         cps = by_model[model]
-        ttft = [p for cp in cps if (p := _pct(cp.grpc.ttft_mean, cp.http.ttft_mean)) is not None]
-        ttft_p99 = [p for cp in cps if (p := _pct(cp.grpc.ttft_p99, cp.http.ttft_p99)) is not None]
-        e2e = [p for cp in cps if (p := _pct(cp.grpc.e2e_mean, cp.http.e2e_mean)) is not None]
-        tput = [
-            p
-            for cp in cps
-            if (p := _pct(cp.grpc.output_throughput, cp.http.output_throughput)) is not None
-        ]
-        lines.append(
-            f"| {model} | {_avg_or_na(ttft)} | {_avg_or_na(ttft_p99)} | "
-            f"{_avg_or_na(e2e)} | {_avg_or_na(tput)} | {len(cps)} |"
-        )
+        cells = [_fmt_winner(_avg_advantage(cps, fld, lb)) for _, fld, lb in PER_MODEL_METRICS]
+        lines.append(f"| {model} | " + " | ".join(cells) + f" | {len(cps)} |")
 
     lines.append("")
 
@@ -653,28 +892,25 @@ def _section_per_model(comparisons: list[ComparisonPoint]) -> list[str]:
         cps = by_model[model]
         by_config: dict[str, list[ComparisonPoint]] = defaultdict(list)
         for cp in cps:
-            by_config[f"{cp.runtime}/{cp.worker_type}"].append(cp)
+            by_config[cp.config].append(cp)
 
         for config in sorted(by_config.keys()):
             config_cps = sorted(by_config[config], key=lambda x: (x.scenario, x.concurrency))
             lines.extend(
                 [
                     "<details>",
-                    f"<summary><b>{model} ({config})</b> — {len(config_cps)} data points</summary>",
+                    f"<summary><b>{model} ({config})</b> — {len(config_cps)} points</summary>",
                     "",
-                    "| Scenario | C | TTFT mean | TTFT p99 | E2E mean | Tput |",
-                    "|----------|--:|--------:|--------:|--------:|--------:|",
+                    "| Scenario | C | " + " | ".join(headers) + " |",
+                    "|----------|--:" + "|--------:" * len(headers) + "|",
                 ]
             )
 
             for cp in config_cps:
-                lines.append(
-                    f"| `{cp.scenario}` | {cp.concurrency} | "
-                    f"{_fmt_pct(_pct(cp.grpc.ttft_mean, cp.http.ttft_mean))} | "
-                    f"{_fmt_pct(_pct(cp.grpc.ttft_p99, cp.http.ttft_p99))} | "
-                    f"{_fmt_pct(_pct(cp.grpc.e2e_mean, cp.http.e2e_mean))} | "
-                    f"{_fmt_pct(_pct(cp.grpc.output_throughput, cp.http.output_throughput))} |"
-                )
+                cells = [
+                    _fmt_winner(_cp_advantage(cp, fld, lb)) for _, fld, lb in PER_MODEL_METRICS
+                ]
+                lines.append(f"| `{cp.scenario}` | {cp.concurrency} | " + " | ".join(cells) + " |")
 
             lines.extend(["", "</details>", ""])
 
@@ -686,14 +922,21 @@ def _section_per_model(comparisons: list[ComparisonPoint]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def generate_summary(base_dir: Path) -> str:
+def generate_summary(base_dir: Path) -> SummaryResult:
     """Generate the full markdown summary."""
     experiments = discover_experiments(base_dir)
 
     if not experiments:
-        return "## Nightly Benchmark Summary\n\nNo benchmark results found."
+        return SummaryResult(
+            markdown="## Nightly Benchmark Summary\n\nNo benchmark results found.",
+            experiments=[],
+            comparisons=[],
+        )
 
     comparisons = build_comparisons(experiments)
+
+    # Only include models that have comparison data
+    models_with_data = {cp.model for cp in comparisons}
 
     grpc_count = sum(1 for e in experiments if e.protocol == "grpc")
     http_count = sum(1 for e in experiments if e.protocol == "http")
@@ -706,38 +949,77 @@ def generate_summary(base_dir: Path) -> str:
         f"**{total_runs} benchmark runs**, "
         f"**{len(comparisons)} matched comparison points**",
         "",
+        "<details>",
+        "<summary><b>Glossary</b></summary>",
+        "",
+        *_GLOSSARY_LINES,
+        "",
+        "</details>",
+        "",
         "---",
         "",
     ]
 
-    lines.extend(_section_overview(experiments))
+    lines.extend(_section_key_findings(comparisons, experiments))
+    lines.extend(_section_overview(experiments, models_with_data))
     lines.extend(_section_aggregate(comparisons))
     lines.extend(_section_by_concurrency(comparisons))
     lines.extend(_section_scorecard(comparisons))
     lines.extend(_section_top_wins(comparisons))
     lines.extend(_section_per_model(comparisons))
+    lines.extend(_section_error_rates(experiments))
 
     lines.append("---")
     lines.append(
         f"*Generated from {len(experiments)} experiment(s), {len(comparisons)} comparison points*"
     )
 
-    return "\n".join(lines)
+    return SummaryResult(
+        markdown="\n".join(lines),
+        experiments=experiments,
+        comparisons=comparisons,
+    )
 
 
 def main() -> None:
-    """Main entry point."""
-    base_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.cwd()
-    summary = generate_summary(base_dir)
+    """Main entry point.
+
+    Usage: nightly_summarize.py [base_dir] [--charts-dir DIR]
+    """
+    args = sys.argv[1:]
+    base_dir = Path.cwd()
+    charts_dir: Path | None = None
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--charts-dir" and i + 1 < len(args):
+            charts_dir = Path(args[i + 1])
+            i += 2
+        elif not args[i].startswith("-"):
+            base_dir = Path(args[i])
+            i += 1
+        else:
+            i += 1
+
+    result = generate_summary(base_dir)
+
+    # Generate comparison charts if requested
+    if charts_dir and result.comparisons:
+        chart_files = generate_charts(result.comparisons, charts_dir)
+        if chart_files:
+            print(
+                f"Generated {len(chart_files)} chart(s) in {charts_dir}",
+                file=sys.stderr,
+            )
 
     summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_file:
         with open(summary_file, "a") as f:
-            f.write(summary)
+            f.write(result.markdown)
             f.write("\n")
         print(f"Summary written to {summary_file}")
     else:
-        print(summary)
+        print(result.markdown)
 
 
 if __name__ == "__main__":
