@@ -6,17 +6,12 @@
 //! - MCP metadata builders
 //! - Conversation history loading
 
-use std::sync::Arc;
-
-use axum::response::Response;
+use axum::{http, response::Response};
 use tracing::{debug, warn};
 
 use crate::{
     data_connector::{self, ConversationId, ResponseId},
-    mcp::{
-        build_chat_function_tools_with_names,
-        build_mcp_list_tools_item as mcp_build_list_tools_item, McpOrchestrator, McpToolSession,
-    },
+    mcp::McpToolSession,
     protocols::{
         chat::ChatCompletionRequest,
         common::{Tool, ToolChoice, ToolChoiceValue},
@@ -39,6 +34,14 @@ pub(super) struct ToolLoopState {
     pub conversation_history: Vec<ResponseInputOutputItem>,
     pub original_input: ResponseInput,
     pub mcp_call_items: Vec<ResponseOutputItem>,
+}
+
+/// Per-request parameters for chat pipeline execution.
+/// Bundles values that are always threaded together through the regular responses call chain.
+pub(super) struct ResponsesCallContext {
+    pub headers: Option<http::HeaderMap>,
+    pub model_id: Option<String>,
+    pub response_id: Option<String>,
 }
 
 impl ToolLoopState {
@@ -142,22 +145,8 @@ pub(super) fn extract_all_tool_calls_from_chat(
     }
 }
 
-/// Convert MCP tools to Chat API tool format
 pub(super) fn convert_mcp_tools_to_chat_tools(session: &McpToolSession<'_>) -> Vec<Tool> {
-    build_chat_function_tools_with_names(
-        session.mcp_tools(),
-        Some(session.exposed_name_by_qualified()),
-    )
-}
-
-/// Build mcp_list_tools output item
-pub(super) fn build_mcp_list_tools_item(
-    mcp: &Arc<McpOrchestrator>,
-    server_label: &str,
-    server_keys: &[String],
-) -> ResponseOutputItem {
-    let tools = mcp.list_tools_for_servers(server_keys);
-    mcp_build_list_tools_item(server_label, &tools)
+    session.build_chat_function_tools()
 }
 
 // ============================================================================

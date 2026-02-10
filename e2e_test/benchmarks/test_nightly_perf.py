@@ -27,7 +27,7 @@ from infra.model_specs import get_model_spec
 
 _MAX_REQUESTS = 300
 _MAX_TIME_PER_RUN = 10  # seconds per scenario×concurrency combo
-_TIMEOUT_SEC = 10800  # 3 hours per model
+_TIMEOUT_SEC = 1440 * 60  # match workflow timeout-minutes
 
 _TEST_MODE = False
 _TEST_NUM_CONCURRENCY = 1
@@ -103,7 +103,7 @@ _NIGHTLY_MODELS: list[tuple[str, str, int, list[str], dict]] = [
     ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "Deepseek7b", 4, ["http", "grpc"], {}),
     ("Qwen/Qwen3-30B-A3B", "Qwen30b", 4, ["http", "grpc"], {}),
     ("mistralai/Mistral-7B-Instruct-v0.3", "Mistral7b", 4, ["http", "grpc"], {}),
-    ("openai/gpt-oss-20b", "GptOss", 4, ["http", "grpc"], {}),
+    ("openai/gpt-oss-20b", "GptOss20b", 4, ["http", "grpc"], {}),
     (
         "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
         "Llama4Maverick",

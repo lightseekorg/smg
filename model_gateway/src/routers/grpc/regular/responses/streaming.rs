@@ -13,7 +13,7 @@ use std::{
 
 use axum::{
     body::Body,
-    http::{self, header, StatusCode},
+    http::{header, StatusCode},
     response::Response,
 };
 use bytes::Bytes;
@@ -27,7 +27,7 @@ use uuid::Uuid;
 use super::{
     common::{
         build_next_request, convert_mcp_tools_to_chat_tools, extract_all_tool_calls_from_chat,
-        prepare_chat_tools_and_choice, ExtractedToolCall, ToolLoopState,
+        prepare_chat_tools_and_choice, ExtractedToolCall, ResponsesCallContext, ToolLoopState,
     },
     conversions,
 };
@@ -71,8 +71,7 @@ use crate::{
 pub(super) async fn convert_chat_stream_to_responses_stream(
     ctx: &ResponsesContext,
     chat_request: Arc<ChatCompletionRequest>,
-    headers: Option<http::HeaderMap>,
-    model_id: Option<String>,
+    params: ResponsesCallContext,
     original_request: &ResponsesRequest,
 ) -> Response {
     debug!("Converting chat SSE stream to responses SSE format");
@@ -82,8 +81,8 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
         .pipeline
         .execute_chat(
             chat_request.clone(),
-            headers,
-            model_id,
+            params.headers,
+            params.model_id,
             ctx.components.clone(),
         )
         .await;
@@ -421,8 +420,8 @@ pub(super) async fn execute_tool_loop_streaming(
     ctx: &ResponsesContext,
     current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
-    headers: Option<http::HeaderMap>,
-    model_id: Option<String>,
+    params: ResponsesCallContext,
+    mcp_servers: Vec<(String, String)>,
 ) -> Response {
     // Create SSE channel for client
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
@@ -437,8 +436,8 @@ pub(super) async fn execute_tool_loop_streaming(
             &ctx_clone,
             current_request,
             &original_request_clone,
-            headers,
-            model_id,
+            params,
+            mcp_servers,
             tx.clone(),
         )
         .await;
@@ -488,8 +487,8 @@ async fn execute_tool_loop_streaming_internal(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
-    headers: Option<http::HeaderMap>,
-    model_id: Option<String>,
+    params: ResponsesCallContext,
+    mcp_servers: Vec<(String, String)>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
     let mut state = ToolLoopState::new(original_request.input.clone());
@@ -499,7 +498,6 @@ async fn execute_tool_loop_streaming_internal(
     let response_id = format!("resp_{}", Uuid::new_v4());
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
-    let mcp_servers = ctx.requested_servers.read().unwrap().clone();
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &response_id);
 
     // Create response event emitter
@@ -564,8 +562,8 @@ async fn execute_tool_loop_streaming_internal(
             .pipeline
             .execute_chat(
                 Arc::new(chat_request),
-                headers.clone(),
-                model_id.clone(),
+                params.headers.clone(),
+                params.model_id.clone(),
                 ctx.components.clone(),
             )
             .await;
