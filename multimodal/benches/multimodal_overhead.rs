@@ -26,7 +26,7 @@ fn create_multimodal_payload(data: &Bytes) -> MultiModalInputs {
     let tensor = MultiModalTensor {
         shape: vec![1, 3, 224, 224],
         dtype: "float16".to_string(),
-        data: data.clone(), // MultiModalTensor expects Bytes
+        data: data.clone(),
     };
 
     inputs
