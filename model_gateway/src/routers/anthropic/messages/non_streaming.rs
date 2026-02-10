@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use super::tools::{execute_mcp_tool_calls, rebuild_response_with_mcp_blocks, McpToolCall};
 use crate::{
@@ -41,9 +41,27 @@ pub(crate) async fn execute_tool_loop(
         Metrics::record_mcp_tool_iteration(model_id);
 
         let tool_calls = super::tools::extract_tool_calls(&message.content);
-        if tool_calls.is_empty() || message.stop_reason != Some(StopReason::ToolUse) {
+        if tool_calls.is_empty() {
             let final_message = rebuild_response_with_mcp_blocks(message, &all_mcp_calls);
             return (StatusCode::OK, Json(final_message)).into_response();
+        }
+
+        if message.stop_reason != Some(StopReason::ToolUse) {
+            warn!(
+                iteration = iteration,
+                tool_count = tool_calls.len(),
+                stop_reason = ?message.stop_reason,
+                "Tool use blocks present but stop_reason is not tool_use; tool calls dropped"
+            );
+            return error::bad_gateway(
+                "inconsistent_tool_state",
+                format!(
+                    "Model returned {} tool_use block(s) but stop_reason is {:?}; \
+                     tool calls will not be executed",
+                    tool_calls.len(),
+                    message.stop_reason
+                ),
+            );
         }
 
         info!(
