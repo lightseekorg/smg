@@ -73,6 +73,12 @@ impl MessagesPipeline {
         headers: Option<HeaderMap>,
         model_id: &str,
     ) -> Result<Message, Response> {
+        if request.stream.unwrap_or(false) {
+            return Err(error::bad_request(
+                "invalid_request",
+                "execute_for_messages does not support streaming requests",
+            ));
+        }
         let mut ctx = RequestContext::new(request, headers, model_id);
 
         if let Some(response) = self.run_stages(&mut ctx, &self.stages).await {

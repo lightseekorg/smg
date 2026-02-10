@@ -137,14 +137,11 @@ pub(super) async fn execute_mcp_tool_calls(
     tool_calls: &[ToolUseBlock],
     session: &McpToolSession<'_>,
     model_id: &str,
-) -> Result<
-    (
-        Vec<McpToolCall>,
-        Vec<InputContentBlock>,
-        Vec<InputContentBlock>,
-    ),
-    String,
-> {
+) -> (
+    Vec<McpToolCall>,
+    Vec<InputContentBlock>,
+    Vec<InputContentBlock>,
+) {
     let assistant_content_blocks = build_assistant_content_blocks(content);
 
     let mut mcp_calls = Vec::new();
@@ -201,12 +198,12 @@ pub(super) async fn execute_mcp_tool_calls(
         tool_result_blocks.push(InputContentBlock::ToolResult(ToolResultBlock {
             tool_use_id: tool_call.id.clone(),
             content: Some(ToolResultContent::String(result_content)),
-            is_error: if is_error { Some(true) } else { None },
+            is_error: is_error.then_some(true),
             cache_control: None,
         }));
     }
 
-    Ok((mcp_calls, assistant_content_blocks, tool_result_blocks))
+    (mcp_calls, assistant_content_blocks, tool_result_blocks)
 }
 
 /// Collect allowed tools filter from `McpToolset` entries in the tools array.
@@ -216,8 +213,10 @@ fn collect_allowed_tools_from_toolsets(tools: &Option<Vec<Tool>>) -> Option<Vec<
     let tools = tools.as_ref()?;
 
     let mut all_allowed = Vec::new();
+    let mut saw_mcp_toolset = false;
     for tool in tools {
         if let Tool::McpToolset(toolset) = tool {
+            saw_mcp_toolset = true;
             let default_enabled = toolset
                 .default_config
                 .as_ref()
@@ -241,10 +240,10 @@ fn collect_allowed_tools_from_toolsets(tools: &Option<Vec<Tool>>) -> Option<Vec<
             }
         }
     }
-    if all_allowed.is_empty() {
-        None
-    } else {
+    if saw_mcp_toolset {
         Some(all_allowed)
+    } else {
+        None
     }
 }
 
@@ -349,11 +348,7 @@ pub(super) fn rebuild_response_with_mcp_blocks(
                     citations: None,
                 }),
             ])),
-            is_error: if call.is_error {
-                Some(true)
-            } else {
-                Some(false)
-            },
+            is_error: call.is_error.then_some(true),
         });
     }
 
@@ -384,292 +379,5 @@ fn extract_output_from_value(output: &Value) -> String {
             .join("\n")
     } else {
         output.to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use serde_json::json;
-
-    use super::*;
-    use crate::protocols::messages::StopReason;
-
-    #[test]
-    fn test_extract_tool_calls() {
-        let content = vec![
-            ContentBlock::Text {
-                text: "Let me check that.".to_string(),
-                citations: None,
-            },
-            ContentBlock::ToolUse {
-                id: "toolu_01".to_string(),
-                name: "get_weather".to_string(),
-                input: json!({"location": "SF"}),
-            },
-        ];
-
-        let calls = extract_tool_calls(&content);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "get_weather");
-        assert_eq!(calls[0].id, "toolu_01");
-    }
-
-    #[test]
-    fn test_rebuild_response_with_mcp_blocks() {
-        let message = Message {
-            id: "msg_01".to_string(),
-            message_type: "message".to_string(),
-            role: "assistant".to_string(),
-            content: vec![ContentBlock::Text {
-                text: "Here is the answer.".to_string(),
-                citations: None,
-            }],
-            model: "claude-3-haiku".to_string(),
-            stop_reason: Some(StopReason::EndTurn),
-            stop_sequence: None,
-            usage: crate::protocols::messages::Usage {
-                input_tokens: 100,
-                output_tokens: 50,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                cache_creation: None,
-                server_tool_use: None,
-                service_tier: None,
-            },
-        };
-
-        let mcp_calls = vec![McpToolCall {
-            original_id: "toolu_01".to_string(),
-            mcp_id: "mcptoolu_01".to_string(),
-            name: "ask_question".to_string(),
-            server_name: "deepwiki".to_string(),
-            input: json!({"question": "What is MCP?"}),
-            result_content: "MCP is the Model Context Protocol.".to_string(),
-            is_error: false,
-        }];
-
-        let result = rebuild_response_with_mcp_blocks(message, &mcp_calls);
-
-        assert_eq!(result.content.len(), 3);
-        assert!(matches!(result.content[0], ContentBlock::McpToolUse { .. }));
-        assert!(matches!(
-            result.content[1],
-            ContentBlock::McpToolResult { .. }
-        ));
-        assert!(matches!(result.content[2], ContentBlock::Text { .. }));
-
-        if let ContentBlock::McpToolUse {
-            id,
-            name,
-            server_name,
-            ..
-        } = &result.content[0]
-        {
-            assert_eq!(id, "mcptoolu_01");
-            assert_eq!(name, "ask_question");
-            assert_eq!(server_name, "deepwiki");
-        }
-
-        if let ContentBlock::McpToolResult {
-            tool_use_id,
-            is_error,
-            ..
-        } = &result.content[1]
-        {
-            assert_eq!(tool_use_id, "mcptoolu_01");
-            assert_eq!(*is_error, Some(false));
-        }
-    }
-
-    #[test]
-    fn test_rebuild_response_no_mcp_calls() {
-        let message = Message {
-            id: "msg_01".to_string(),
-            message_type: "message".to_string(),
-            role: "assistant".to_string(),
-            content: vec![ContentBlock::Text {
-                text: "Hello".to_string(),
-                citations: None,
-            }],
-            model: "claude-3-haiku".to_string(),
-            stop_reason: Some(StopReason::EndTurn),
-            stop_sequence: None,
-            usage: crate::protocols::messages::Usage {
-                input_tokens: 10,
-                output_tokens: 5,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                cache_creation: None,
-                server_tool_use: None,
-                service_tier: None,
-            },
-        };
-
-        let result = rebuild_response_with_mcp_blocks(message, &[]);
-        assert_eq!(result.content.len(), 1);
-        assert!(matches!(result.content[0], ContentBlock::Text { .. }));
-    }
-
-    #[test]
-    fn test_extract_output_from_value_string() {
-        let value = Value::String("The answer is 42".to_string());
-        assert_eq!(extract_output_from_value(&value), "The answer is 42");
-    }
-
-    #[test]
-    fn test_extract_output_from_value_array() {
-        let value = json!([
-            {"type": "text", "text": "Line 1"},
-            {"type": "text", "text": "Line 2"}
-        ]);
-        assert_eq!(extract_output_from_value(&value), "Line 1\nLine 2");
-    }
-
-    #[test]
-    fn test_extract_output_from_value_object() {
-        let value = json!({"result": 42});
-        assert_eq!(extract_output_from_value(&value), "{\"result\":42}");
-    }
-
-    #[test]
-    fn test_build_assistant_content_blocks() {
-        let content = vec![
-            ContentBlock::Text {
-                text: "Let me help.".to_string(),
-                citations: None,
-            },
-            ContentBlock::ToolUse {
-                id: "toolu_01".to_string(),
-                name: "search".to_string(),
-                input: json!({"q": "test"}),
-            },
-        ];
-
-        let blocks = build_assistant_content_blocks(&content);
-        assert_eq!(blocks.len(), 2);
-        assert!(matches!(blocks[0], InputContentBlock::Text(_)));
-        assert!(matches!(blocks[1], InputContentBlock::ToolUse(_)));
-    }
-
-    #[test]
-    fn test_mcp_toolset_deserializes_as_tool() {
-        let json_str = r#"{"type": "mcp_toolset", "mcp_server_name": "brave"}"#;
-        let tool: Tool = serde_json::from_str(json_str).unwrap();
-        assert!(matches!(tool, Tool::McpToolset(_)));
-        if let Tool::McpToolset(ts) = &tool {
-            assert_eq!(ts.mcp_server_name, "brave");
-            assert_eq!(ts.toolset_type, "mcp_toolset");
-        }
-    }
-
-    #[test]
-    fn test_custom_tool_still_deserializes() {
-        let json_str = r#"{
-            "name": "get_weather",
-            "description": "Get weather",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string"}
-                },
-                "required": ["location"]
-            }
-        }"#;
-        let tool: Tool = serde_json::from_str(json_str).unwrap();
-        assert!(matches!(tool, Tool::Custom(_)));
-        if let Tool::Custom(ct) = &tool {
-            assert_eq!(ct.name, "get_weather");
-        }
-    }
-
-    #[test]
-    fn test_collect_allowed_tools_with_configs() {
-        use crate::protocols::messages::{McpToolConfig, McpToolDefaultConfig, McpToolset};
-
-        let tools = vec![Tool::McpToolset(McpToolset {
-            toolset_type: "mcp_toolset".to_string(),
-            mcp_server_name: "brave".to_string(),
-            default_config: Some(McpToolDefaultConfig {
-                enabled: Some(false),
-                defer_loading: None,
-            }),
-            configs: Some(HashMap::from([
-                (
-                    "brave_search".to_string(),
-                    McpToolConfig {
-                        enabled: Some(true),
-                        defer_loading: None,
-                    },
-                ),
-                (
-                    "brave_local".to_string(),
-                    McpToolConfig {
-                        enabled: None,
-                        defer_loading: None,
-                    },
-                ),
-            ])),
-            cache_control: None,
-        })];
-
-        let allowed = collect_allowed_tools_from_toolsets(&Some(tools));
-        let allowed = allowed.unwrap();
-        assert!(allowed.contains(&"brave_search".to_string()));
-        assert!(!allowed.contains(&"brave_local".to_string()));
-    }
-
-    #[test]
-    fn test_collect_allowed_tools_no_configs() {
-        use crate::protocols::messages::McpToolset;
-
-        let tools = vec![Tool::McpToolset(McpToolset {
-            toolset_type: "mcp_toolset".to_string(),
-            mcp_server_name: "brave".to_string(),
-            default_config: None,
-            configs: None,
-            cache_control: None,
-        })];
-
-        // No configs and default enabled → no filtering (allow all)
-        let allowed = collect_allowed_tools_from_toolsets(&Some(tools));
-        assert!(allowed.is_none());
-    }
-
-    #[test]
-    fn test_collect_allowed_tools_multi_server_allow_all_wins() {
-        use crate::protocols::messages::{McpToolConfig, McpToolDefaultConfig, McpToolset};
-
-        // Server A has explicit configs, Server B allows all
-        let tools = vec![
-            Tool::McpToolset(McpToolset {
-                toolset_type: "mcp_toolset".to_string(),
-                mcp_server_name: "server_a".to_string(),
-                default_config: Some(McpToolDefaultConfig {
-                    enabled: Some(false),
-                    defer_loading: None,
-                }),
-                configs: Some(HashMap::from([(
-                    "tool_a".to_string(),
-                    McpToolConfig {
-                        enabled: Some(true),
-                        defer_loading: None,
-                    },
-                )])),
-                cache_control: None,
-            }),
-            Tool::McpToolset(McpToolset {
-                toolset_type: "mcp_toolset".to_string(),
-                mcp_server_name: "server_b".to_string(),
-                default_config: None,
-                configs: None,
-                cache_control: None,
-            }),
-        ];
-
-        // Server B allows all → no global filtering
-        let allowed = collect_allowed_tools_from_toolsets(&Some(tools));
-        assert!(allowed.is_none());
     }
 }

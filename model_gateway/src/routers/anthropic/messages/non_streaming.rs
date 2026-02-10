@@ -5,7 +5,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use tracing::{error, info};
+use tracing::info;
 
 use super::tools::{execute_mcp_tool_calls, rebuild_response_with_mcp_blocks, McpToolCall};
 use crate::{
@@ -53,13 +53,7 @@ pub(crate) async fn execute_tool_loop(
         );
 
         let (new_calls, assistant_blocks, tool_result_blocks) =
-            match execute_mcp_tool_calls(&message.content, &tool_calls, &session, model_id).await {
-                Ok(result) => result,
-                Err(e) => {
-                    error!(error = %e, "MCP tool execution failed");
-                    return error::bad_gateway("mcp_tool_execution_failed", e);
-                }
-            };
+            execute_mcp_tool_calls(&message.content, &tool_calls, &session, model_id).await;
 
         all_mcp_calls.extend(new_calls);
 
