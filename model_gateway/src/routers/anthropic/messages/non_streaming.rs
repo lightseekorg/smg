@@ -94,6 +94,13 @@ pub(crate) async fn execute_tool_loop(
         };
     }
 
+    // The last pipeline call produced a message — check if it completed naturally
+    let tool_calls = super::tools::extract_tool_calls(&message.content);
+    if tool_calls.is_empty() {
+        let final_message = rebuild_response_with_mcp_blocks(message, &all_mcp_calls);
+        return (StatusCode::OK, Json(final_message)).into_response();
+    }
+
     error::bad_gateway(
         "mcp_max_iterations",
         format!(

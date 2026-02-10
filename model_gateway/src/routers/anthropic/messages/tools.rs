@@ -14,7 +14,8 @@ use crate::{
     observability::metrics::{metrics_labels, Metrics},
     protocols::messages::{
         ContentBlock, CreateMessageRequest, CustomTool, InputContentBlock, InputSchema, Message,
-        TextBlock, Tool, ToolChoice, ToolResultBlock, ToolResultContent, ToolUseBlock,
+        RedactedThinkingBlock, ServerToolUseBlock, TextBlock, ThinkingBlock, Tool, ToolChoice,
+        ToolResultBlock, ToolResultContent, ToolUseBlock, WebSearchToolResultBlock,
     },
     routers::{error as router_error, mcp_utils},
 };
@@ -298,11 +299,11 @@ fn build_assistant_content_blocks(content: &[ContentBlock]) -> Vec<InputContentB
     let mut blocks = Vec::new();
     for block in content {
         match block {
-            ContentBlock::Text { text, .. } => {
+            ContentBlock::Text { text, citations } => {
                 blocks.push(InputContentBlock::Text(TextBlock {
                     text: text.clone(),
                     cache_control: None,
-                    citations: None,
+                    citations: citations.clone(),
                 }));
             }
             ContentBlock::ToolUse { id, name, input } => {
@@ -313,7 +314,42 @@ fn build_assistant_content_blocks(content: &[ContentBlock]) -> Vec<InputContentB
                     cache_control: None,
                 }));
             }
-            _ => {}
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                blocks.push(InputContentBlock::Thinking(ThinkingBlock {
+                    thinking: thinking.clone(),
+                    signature: signature.clone(),
+                }));
+            }
+            ContentBlock::RedactedThinking { data } => {
+                blocks.push(InputContentBlock::RedactedThinking(RedactedThinkingBlock {
+                    data: data.clone(),
+                }));
+            }
+            ContentBlock::ServerToolUse { id, name, input } => {
+                blocks.push(InputContentBlock::ServerToolUse(ServerToolUseBlock {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    cache_control: None,
+                }));
+            }
+            ContentBlock::WebSearchToolResult {
+                tool_use_id,
+                content,
+            } => {
+                blocks.push(InputContentBlock::WebSearchToolResult(
+                    WebSearchToolResultBlock {
+                        tool_use_id: tool_use_id.clone(),
+                        content: content.clone(),
+                        cache_control: None,
+                    },
+                ));
+            }
+            // MCP blocks are handled separately by rebuild_response_with_mcp_blocks
+            ContentBlock::McpToolUse { .. } | ContentBlock::McpToolResult { .. } => {}
         }
     }
     blocks
