@@ -4,7 +4,7 @@ metadata:
   name: arc-runner-gpu-h100
   namespace: actions-runner-system
 spec:
-  replicas: 10
+  replicas: 12
   template:
     spec:
       repository: lightseekorg/smg
@@ -43,7 +43,9 @@ spec:
         - name: docker-sock
           emptyDir: {}
         - name: docker-storage
-          emptyDir: {}
+          hostPath:
+            path: /var/lib/dind-storage
+            type: DirectoryOrCreate
         - name: dshm
           emptyDir:
             medium: Memory
@@ -123,7 +125,9 @@ spec:
         - name: docker-sock
           emptyDir: {}
         - name: docker-storage
-          emptyDir: {}
+          hostPath:
+            path: /var/lib/dind-storage
+            type: DirectoryOrCreate
         - name: dshm
           emptyDir:
             medium: Memory
