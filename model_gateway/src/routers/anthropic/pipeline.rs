@@ -59,7 +59,10 @@ impl MessagesPipeline {
         match self.run_stages(&mut ctx, &self.stages).await {
             Some(response) => response,
             None => {
-                error!(function = "execute", "No response produced by pipeline");
+                error!(
+                    function = "execute_streaming",
+                    "No response produced by pipeline"
+                );
                 error::internal_error("no_response_produced", "No response produced")
             }
         }
