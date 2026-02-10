@@ -203,7 +203,7 @@ impl MediaConnector {
 
         let image = task::spawn_blocking(move || reader.decode())
             .await
-            .map_err(|e| MediaConnectorError::Blocking(e))?
+            .map_err(MediaConnectorError::Blocking)?
             .map_err(|e| MediaConnectorError::ImageDecode(e.to_string()))?;
 
         Ok(Arc::new(ImageFrame::new(image, bytes, detail, source)))

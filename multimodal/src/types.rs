@@ -161,6 +161,7 @@ impl ImageFrame {
     }
 }
 
+/// Container for all supported multimodal media objects.
 #[derive(Debug, Clone)]
 pub enum TrackedMedia {
     Image(Arc<ImageFrame>),
