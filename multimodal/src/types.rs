@@ -161,6 +161,38 @@ impl ImageFrame {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum TrackedMedia {
+    Image(Arc<ImageFrame>),
+    /// Placeholder variants for future modalities.
+    Audio,
+    Video,
+    Embeddings,
+}
+
+pub type MultiModalData = HashMap<Modality, Vec<TrackedMedia>>;
+pub type MultiModalUUIDs = HashMap<Modality, Vec<Option<String>>>;
+
+pub type TokenId = i32;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ImageSize {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlaceholderRange {
+    pub offset: usize,
+    pub length: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiModalTensor {
     pub shape: Vec<usize>,
