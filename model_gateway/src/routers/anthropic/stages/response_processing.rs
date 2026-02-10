@@ -17,7 +17,6 @@ use axum::{
     body::Body,
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
 use bytes::Bytes;
 use futures::Stream;
@@ -98,9 +97,14 @@ impl PipelineStage for ResponseProcessingStage {
                 .await;
         }
 
-        // Parse successful JSON response
-        self.handle_success_response(response, model_id, start_time, worker)
-            .await
+        self.handle_success_response(
+            response,
+            model_id,
+            start_time,
+            worker,
+            &mut ctx.state.parsed_message,
+        )
+        .await
     }
 
     fn name(&self) -> &'static str {
@@ -256,13 +260,14 @@ impl ResponseProcessingStage {
         Ok(Some(response))
     }
 
-    /// Handle successful non-streaming response
+    /// Handle successful non-streaming response.
     async fn handle_success_response(
         &self,
         response: reqwest::Response,
         model_id: &str,
         start_time: std::time::Instant,
         worker: Option<Arc<dyn Worker>>,
+        ctx_parsed_message: &mut Option<Message>,
     ) -> StageResult {
         // Parse JSON response
         let result = match response.json::<Message>().await {
@@ -289,7 +294,8 @@ impl ResponseProcessingStage {
                     "Completed non-streaming request"
                 );
 
-                Ok(Some((StatusCode::OK, Json(message)).into_response()))
+                *ctx_parsed_message = Some(message);
+                Ok(None)
             }
             Err(e) => {
                 error!(model = %model_id, error = %e, "Failed to parse response");

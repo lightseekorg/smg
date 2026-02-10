@@ -1,3 +1,3 @@
+pub(crate) mod non_streaming;
+pub(crate) mod streaming;
 pub mod tools;
-
-pub use tools::extract_tool_calls;

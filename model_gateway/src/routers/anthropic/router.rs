@@ -13,12 +13,24 @@
 //! 3. Request Execution - Send request to worker
 //! 4. Response Processing - Parse response and record metrics
 
-use std::{any::Any, fmt, sync::Arc, time::Duration}; // Arc still needed for AppContext, SharedComponents
+use std::{any::Any, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
+use axum::{
+    body::Body,
+    extract::Request,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
+use tracing::info;
 
-use super::{context::SharedComponents, models, pipeline::MessagesPipeline};
+use super::{
+    context::{MessagesContext, SharedComponents},
+    messages::tools::ensure_mcp_connection,
+    models,
+    pipeline::MessagesPipeline,
+};
 use crate::{
     app_context::AppContext,
     protocols::{chat::ChatCompletionRequest, messages::CreateMessageRequest},
@@ -35,29 +47,43 @@ use crate::{
 /// - Citations
 pub struct AnthropicRouter {
     context: Arc<AppContext>,
-    pipeline: MessagesPipeline,
+    messages_ctx: MessagesContext,
 }
 
 impl fmt::Debug for AnthropicRouter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AnthropicRouter")
             .field("context", &"<AppContext>")
-            .field("pipeline", &self.pipeline)
+            .field("pipeline", &self.messages_ctx.pipeline)
             .finish()
     }
 }
 
 impl AnthropicRouter {
-    pub fn new(context: Arc<AppContext>) -> Self {
+    pub fn new(context: Arc<AppContext>) -> Result<Self, String> {
         let request_timeout = Duration::from_secs(context.router_config.request_timeout_secs);
-        let shared_components = Arc::new(SharedComponents::new(
-            context.client.clone(),
-            context.worker_registry.clone(),
-            request_timeout,
-        ));
-        let pipeline = MessagesPipeline::new(shared_components);
+        let mcp_orchestrator = context
+            .mcp_orchestrator
+            .get()
+            .ok_or_else(|| "Anthropic router requires MCP orchestrator".to_string())?
+            .clone();
 
-        Self { context, pipeline }
+        let shared_components = Arc::new(SharedComponents {
+            http_client: context.client.clone(),
+            request_timeout,
+        });
+
+        let pipeline = Arc::new(MessagesPipeline::new(
+            shared_components,
+            context.worker_registry.clone(),
+        ));
+
+        let messages_ctx = MessagesContext::new(pipeline, mcp_orchestrator);
+
+        Ok(Self {
+            context,
+            messages_ctx,
+        })
     }
 
     pub fn context(&self) -> &Arc<AppContext> {
@@ -94,14 +120,53 @@ impl RouterTrait for AnthropicRouter {
         body: &CreateMessageRequest,
         model_id: &str,
     ) -> Response {
-        // Clone body for pipeline (body is borrowed, pipeline needs ownership)
-        let request = body.clone();
+        let mut request = body.clone();
         let headers_owned = headers.cloned();
 
-        // Execute through pipeline
-        self.pipeline
-            .execute(request, headers_owned, model_id)
+        let mcp_active = if request.mcp_servers.is_some() {
+            match ensure_mcp_connection(&mut request, &self.messages_ctx).await {
+                Ok(()) => true,
+                Err(response) => return response,
+            }
+        } else {
+            false
+        };
+
+        let streaming = request.stream.unwrap_or(false);
+        info!(
+            model = %model_id,
+            streaming = %streaming,
+            mcp = %mcp_active,
+            "Processing Messages API request"
+        );
+
+        if streaming {
+            return self
+                .messages_ctx
+                .pipeline
+                .execute(request, headers_owned, model_id)
+                .await;
+        }
+
+        if mcp_active {
+            return super::messages::non_streaming::execute_tool_loop(
+                &self.messages_ctx,
+                request,
+                headers_owned,
+                model_id,
+            )
+            .await;
+        }
+
+        match self
+            .messages_ctx
+            .pipeline
+            .execute_for_messages(request, headers_owned, model_id)
             .await
+        {
+            Ok(message) => (StatusCode::OK, Json(message)).into_response(),
+            Err(response) => response,
+        }
     }
 
     /// Get available models from Anthropic API

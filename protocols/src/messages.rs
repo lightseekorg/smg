@@ -482,6 +482,8 @@ pub struct SearchResultLocationCitation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Tool {
+    /// MCP toolset definition
+    McpToolset(McpToolset),
     /// Custom tool definition
     Custom(CustomTool),
     /// Bash tool (computer use)
@@ -695,6 +697,19 @@ pub enum ContentBlock {
     WebSearchToolResult {
         tool_use_id: String,
         content: WebSearchToolResultContent,
+    },
+    /// MCP tool use (beta) - model requesting tool execution via MCP
+    McpToolUse {
+        id: String,
+        name: String,
+        server_name: String,
+        input: Value,
+    },
+    /// MCP tool result (beta) - result from MCP tool execution
+    McpToolResult {
+        tool_use_id: String,
+        content: Option<ToolResultContent>,
+        is_error: Option<bool>,
     },
 }
 

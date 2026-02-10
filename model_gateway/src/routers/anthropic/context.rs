@@ -5,15 +5,17 @@
 //! accumulated processing state.
 
 use std::{
-    sync::Arc,
+    sync::{Arc, RwLock as StdRwLock},
     time::{Duration, Instant},
 };
 
 use axum::http::HeaderMap;
 
+use super::pipeline::MessagesPipeline;
 use crate::{
-    core::{Worker, WorkerRegistry},
-    protocols::messages::CreateMessageRequest,
+    core::Worker,
+    mcp::McpOrchestrator,
+    protocols::messages::{CreateMessageRequest, Message},
 };
 
 // ============================================================================
@@ -43,32 +45,37 @@ impl RequestInput {
 
 pub(crate) struct SharedComponents {
     pub http_client: reqwest::Client,
-    pub worker_registry: Arc<WorkerRegistry>,
     pub request_timeout: Duration,
-}
-
-impl SharedComponents {
-    /// Create new shared components
-    pub fn new(
-        http_client: reqwest::Client,
-        worker_registry: Arc<WorkerRegistry>,
-        request_timeout: Duration,
-    ) -> Self {
-        Self {
-            http_client,
-            worker_registry,
-            request_timeout,
-        }
-    }
 }
 
 impl std::fmt::Debug for SharedComponents {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SharedComponents")
             .field("http_client", &"<reqwest::Client>")
-            .field("worker_registry", &"<WorkerRegistry>")
             .field("request_timeout", &self.request_timeout)
             .finish()
+    }
+}
+
+// ============================================================================
+// Messages Context
+// ============================================================================
+
+#[derive(Clone)]
+pub(crate) struct MessagesContext {
+    pub pipeline: Arc<MessagesPipeline>,
+    pub mcp_orchestrator: Arc<McpOrchestrator>,
+    /// MCP servers `(label, server_key)` connected for this request.
+    pub requested_servers: Arc<StdRwLock<Vec<(String, String)>>>,
+}
+
+impl MessagesContext {
+    pub fn new(pipeline: Arc<MessagesPipeline>, mcp_orchestrator: Arc<McpOrchestrator>) -> Self {
+        Self {
+            pipeline,
+            mcp_orchestrator,
+            requested_servers: Arc::new(StdRwLock::new(Vec::new())),
+        }
     }
 }
 
@@ -93,6 +100,7 @@ pub(crate) struct ProcessingState {
     pub worker: Option<Arc<dyn Worker>>,
     pub http_request: Option<HttpRequestState>,
     pub response: ResponseState,
+    pub parsed_message: Option<Message>,
 }
 
 // ============================================================================
