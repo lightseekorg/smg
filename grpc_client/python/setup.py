@@ -28,9 +28,14 @@ def compile_grpc_protos():
     try:
         from grpc_tools import protoc
 
+        # Include well-known types (google/protobuf/*.proto) shipped with grpc_tools
+        import grpc_tools
+        well_known_protos = Path(grpc_tools.__file__).parent / "_proto"
+
         args = [
             "grpc_tools.protoc",
             f"--proto_path={proto_dir}",
+            f"--proto_path={well_known_protos}",
             f"--python_out={output_dir}",
             f"--grpc_python_out={output_dir}",
             f"--pyi_out={output_dir}",  # Generate type stubs
