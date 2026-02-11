@@ -16,6 +16,7 @@ internal Bitbucket repo in a controlled and auditable way.
 - Do not force-push to `main`.
 - Every upstream sync must be done on a dedicated branch: `sync/upstream-YYYYMMDD`.
 - Upstream syncs may be **squashed into a single commit** for review simplicity.
+- Always base sync branches on `origin/main`, not a local `main`.
 
 ## Branch Naming
 
@@ -38,47 +39,65 @@ git remote -v
 
 Replace `YYYYMMDD` with today's date.
 
-1) Update internal main
+0) Ensure a clean working tree
 
 ```bash
-git checkout main
-git pull origin main
+git status -sb
 ```
 
-2) Fetch upstream
+If the working tree is not clean, stop and resolve it before continuing.
+
+1) Fetch origin and upstream
 
 ```bash
+git fetch origin --prune --tags
 git fetch upstream --prune --tags
 ```
 
-3) Create a sync branch
+2) Create a sync branch (from origin/main)
 
 ```bash
-git checkout -b sync/upstream-YYYYMMDD
+git checkout -b sync/upstream-YYYYMMDD origin/main
 ```
 
-4) Merge upstream into the sync branch
+3) Merge upstream into the sync branch
 
 ```bash
 git merge --no-ff upstream/main
 ```
 
-5) Resolve conflicts and validate
+4) Resolve conflicts and validate
 
 ```bash
 git status
 ```
 
-Resolve conflicts if any, then run required build/tests
+Resolve conflicts if any, then run required build/tests.
 
 ### Conflict Handling Guidance
 
 When conflicts happen:
 
 1) Identify whether the conflicting file was last changed by a prior upstream sync.
+   - Use `git log -1 origin/main -- <file>` to confirm.
    - If yes, accept **upstream** for that file.
 2) If the file contains downstream customizations, keep **upstream as the baseline** and
    reapply the downstream changes on top (do not overwrite with the old file).
+3) Do not use bulk overwrite commands (`git checkout origin/main -- <file>`, `git apply`, etc.)
+   to reapply downstream changes. Read the context and edit by hand.
+
+#### Special Case: `data_connector/src/oracle.rs`
+
+- Do **not** accept upstream wholesale.
+- Keep the downstream `oracle.rs` as the baseline.
+- Manually integrate upstream changes into the downstream version, step by step, after
+  reading context.
+- Overwrite `data_connector/src/oracle_old.rs` with the latest upstream `oracle.rs` as a
+  reference when doing the manual merge:
+
+```bash
+git show upstream/main:data_connector/src/oracle.rs > data_connector/src/oracle_old.rs
+```
 
 Recommended workflow for downstream customizations:
 
@@ -103,13 +122,13 @@ git commit -m "Sync/upstream YYYYMMDD"
 
 4) Reapply downstream changes as a separate commit.
 
-1) Push the sync branch to origin
+5) Push the sync branch to origin
 
 ```bash
 git push -u origin sync/upstream-YYYYMMDD
 ```
 
-7) Create a Pull Request (Bitbucket)
+6) Create a Pull Request (Bitbucket)
 
 From: `sync/upstream-YYYYMMDD`
 
