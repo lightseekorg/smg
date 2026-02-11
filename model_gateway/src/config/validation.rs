@@ -45,16 +45,25 @@ impl ConfigValidator {
     }
 
     fn validate_oracle(oracle: &OracleConfig) -> ConfigResult<()> {
-        if oracle.username.is_empty() {
-            return Err(ConfigError::MissingRequired {
-                field: "oracle.username".to_string(),
-            });
-        }
+        if oracle.external_auth {
+            if !oracle.username.is_empty() || !oracle.password.is_empty() {
+                return Err(ConfigError::ValidationFailed {
+                    reason: "oracle.username and oracle.password must be empty when oracle.external_auth is true"
+                        .to_string(),
+                });
+            }
+        } else {
+            if oracle.username.is_empty() {
+                return Err(ConfigError::MissingRequired {
+                    field: "oracle.username".to_string(),
+                });
+            }
 
-        if oracle.password.is_empty() {
-            return Err(ConfigError::MissingRequired {
-                field: "oracle.password".to_string(),
-            });
+            if oracle.password.is_empty() {
+                return Err(ConfigError::MissingRequired {
+                    field: "oracle.password".to_string(),
+                });
+            }
         }
 
         if oracle.connect_descriptor.is_empty() {
