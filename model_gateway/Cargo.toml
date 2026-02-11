@@ -111,6 +111,8 @@ arc-swap = "1.7.1"
 bitflags = "2.10.0"
 once_cell = "1.21.3"
 sha2 = "0.10"
+tokio-tungstenite = { workspace = true }
+tokio-util = { workspace = true }
 wasmtime = { workspace = true }
 
 [build-dependencies]
