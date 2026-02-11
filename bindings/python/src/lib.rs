@@ -195,6 +195,8 @@ pub struct PyOracleConfig {
     #[pyo3(get, set)]
     pub connect_descriptor: Option<String>,
     #[pyo3(get, set)]
+    pub external_auth: bool,
+    #[pyo3(get, set)]
     pub username: Option<String>,
     #[pyo3(get, set)]
     pub password: Option<String>,
@@ -211,6 +213,7 @@ impl std::fmt::Debug for PyOracleConfig {
         f.debug_struct("PyOracleConfig")
             .field("wallet_path", &self.wallet_path)
             .field("connect_descriptor", &"<redacted>")
+            .field("external_auth", &self.external_auth)
             .field("username", &self.username)
             .field("password", &"<redacted>")
             .field("pool_min", &self.pool_min)
@@ -222,12 +225,14 @@ impl std::fmt::Debug for PyOracleConfig {
 
 #[pymethods]
 impl PyOracleConfig {
+    #[allow(clippy::too_many_arguments)]
     #[new]
     #[pyo3(signature = (
         password = None,
         username = None,
         connect_descriptor = None,
         wallet_path = None,
+        external_auth = false,
         pool_min = 1,
         pool_max = 16,
         pool_timeout_secs = 30,
@@ -237,6 +242,7 @@ impl PyOracleConfig {
         username: Option<String>,
         connect_descriptor: Option<String>,
         wallet_path: Option<String>,
+        external_auth: bool,
         pool_min: usize,
         pool_max: usize,
         pool_timeout_secs: u64,
@@ -255,6 +261,7 @@ impl PyOracleConfig {
         Ok(PyOracleConfig {
             wallet_path,
             connect_descriptor,
+            external_auth,
             username,
             password,
             pool_min,
@@ -269,6 +276,7 @@ impl PyOracleConfig {
         config::OracleConfig {
             wallet_path: self.wallet_path.clone(),
             connect_descriptor: self.connect_descriptor.clone().unwrap_or_default(),
+            external_auth: self.external_auth,
             username: self.username.clone().unwrap_or_default(),
             password: self.password.clone().unwrap_or_default(),
             pool_min: self.pool_min,

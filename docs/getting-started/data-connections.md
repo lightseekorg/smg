@@ -92,7 +92,7 @@ smg \
 | `none` | none |
 | `postgres` | `--postgres-db-url` |
 | `redis` | `--redis-url` |
-| `oracle` | `--oracle-user`, `--oracle-password`, and one of (`--oracle-dsn`) or (`--oracle-wallet-path` + `--oracle-tns-alias`) |
+| `oracle` | `--oracle-user`, `--oracle-password`, and one of (`--oracle-dsn`) or (`--oracle-wallet-path` + `--oracle-tns-alias`) (omit user/password when `--oracle-external-auth` is set) |
 
 ---
 
@@ -105,6 +105,7 @@ You can provide Oracle credentials via environment variables:
 - `ATP_DSN`
 - `ATP_USER`
 - `ATP_PASSWORD`
+- `ATP_EXTERNAL_AUTH`
 - `ATP_POOL_MIN`
 - `ATP_POOL_MAX`
 - `ATP_POOL_TIMEOUT_SECS`
