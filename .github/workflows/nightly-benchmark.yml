@@ -391,22 +391,22 @@ jobs:
   # Multi-worker (H200): models requiring 8-gpu-h200 runners.
   # ---------------------------------------------------------------------------
 
-  multi-worker-h200:
-    name: "${{ matrix.model.id }} / multi-${{ matrix.variant.id }}"
-    needs: build-wheel
-    if: ${{ !cancelled() }}
-    runs-on: ["8-gpu-h200"]
-    timeout-minutes: 1440
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        model:
-          - { id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8, slug: meta-llama-Llama-4-Maverick-17B-128E-Instruct-FP8, test_class: TestNightlyLlama4MaverickMulti }
-        variant:
-          - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
-          - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
-    # tp=8, keep disabled for nightly
+  # multi-worker-h200:
+  #   name: "${{ matrix.model.id }} / multi-${{ matrix.variant.id }}"
+  #   needs: build-wheel
+  #   if: ${{ !cancelled() }}
+  #   runs-on: ["8-gpu-h200"]
+  #   timeout-minutes: 1440
+  #   strategy:
+  #     fail-fast: false
+  #     max-parallel: 2
+  #     matrix:
+  #       model:
+  #         - { id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8, slug: meta-llama-Llama-4-Maverick-17B-128E-Instruct-FP8, test_class: TestNightlyLlama4MaverickMulti }
+  #       variant:
+  #         - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
+  #         - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
+  #   # tp=8, keep disabled for nightly
 
   # ---------------------------------------------------------------------------
   # Summary
