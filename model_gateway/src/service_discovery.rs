@@ -210,12 +210,11 @@ pub async fn start_service_discovery(
     mesh_port: Option<u16>,
 ) -> Result<task::JoinHandle<()>, kube::Error> {
     if !config.enabled {
-        return Err(kube::Error::Api(kube::error::ErrorResponse {
-            status: "Disabled".to_string(),
-            message: "Service discovery is disabled".to_string(),
-            reason: "ConfigurationError".to_string(),
-            code: 400,
-        }));
+        return Err(kube::Error::Api(
+            kube::core::Status::failure("Service discovery is disabled", "ConfigurationError")
+                .with_code(400)
+                .boxed(),
+        ));
     }
 
     let _ = rustls::crypto::ring::default_provider().install_default();
