@@ -47,21 +47,16 @@ pub(super) fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> 
 }
 
 /// Connect MCP servers, inject tools into the request, and return connected servers.
+///
+/// Request is validated by `ValidatedJson` before reaching the router,
+/// so `mcp_server_configs()` is guaranteed to be `Some` here.
 pub(crate) async fn ensure_mcp_connection(
     request: &mut CreateMessageRequest,
     orchestrator: &Arc<crate::mcp::McpOrchestrator>,
 ) -> Result<Vec<(String, String)>, Response> {
-    let mcp_server_configs = match &request.mcp_servers {
-        Some(servers) if !servers.is_empty() => servers.clone(),
-        _ => {
-            return Err(router_error::bad_request(
-                "invalid_request",
-                "mcp_servers field is empty or missing",
-            ));
-        }
-    };
-
-    let inputs: Vec<mcp_utils::McpServerInput> = mcp_server_configs
+    let inputs: Vec<mcp_utils::McpServerInput> = request
+        .mcp_server_configs()
+        .unwrap_or_default()
         .iter()
         .map(|server| mcp_utils::McpServerInput {
             label: server.name.clone(),

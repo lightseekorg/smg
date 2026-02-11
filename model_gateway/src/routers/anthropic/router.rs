@@ -122,7 +122,7 @@ impl RouterTrait for AnthropicRouter {
         let mut request = body.clone();
         let headers_owned = headers.cloned();
 
-        let mcp_servers = if request.mcp_servers.is_some() {
+        let mcp_servers = if request.has_mcp_toolset() {
             match ensure_mcp_connection(&mut request, &self.messages_ctx.mcp_orchestrator).await {
                 Ok(servers) => Some(servers),
                 Err(response) => {
