@@ -337,7 +337,7 @@ class ModelPool:
         self._startup_timeout = DEFAULT_STARTUP_TIMEOUT
         self._lock = threading.RLock()  # Protects instances dict
         self.log_dir = log_dir
-        self._log_files: list = []  # Track open log file handles
+        self._log_files: dict[str, IO[Any]] = {}  # instance key → open log file handle
 
     def startup(
         self,
@@ -594,7 +594,7 @@ class ModelPool:
                 os.makedirs(self.log_dir, exist_ok=True)
                 safe_key = key.replace("/", "__").replace(":", "_")
                 log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
-                self._log_files.append(log_file)
+                self._log_files[key] = log_file
                 stdout_target = log_file
                 stderr_target = subprocess.STDOUT
             else:
@@ -1057,6 +1057,14 @@ class ModelPool:
         instance = self.instances[key]
         instance.terminate()
 
+        # Close log file handle for this instance
+        log_file = self._log_files.pop(key, None)
+        if log_file is not None:
+            try:
+                log_file.close()
+            except Exception:
+                pass
+
         # Release GPU slot back to allocator
         if instance.gpu_slot:
             self.allocator.release_slot(instance.gpu_slot)
@@ -1254,7 +1262,7 @@ class ModelPool:
                 os.makedirs(self.log_dir, exist_ok=True)
                 safe_key = key.replace("/", "__").replace(":", "_")
                 log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
-                self._log_files.append(log_file)
+                self._log_files[key] = log_file
                 stdout_target = log_file
                 stderr_target = subprocess.STDOUT
             else:
@@ -1583,7 +1591,7 @@ class ModelPool:
             self.instances.clear()
 
             # Close any open log files
-            for f in self._log_files:
+            for f in self._log_files.values():
                 try:
                     f.close()
                 except Exception:
