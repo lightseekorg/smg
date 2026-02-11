@@ -344,8 +344,8 @@ class Gateway:
         self.process = subprocess.Popen(
             cmd,
             env=self._env,  # Use custom env if set (e.g., for cloud mode API keys)
-            stdout=None if show_output else subprocess.PIPE,
-            stderr=None if show_output else subprocess.PIPE,
+            stdout=None if show_output else subprocess.DEVNULL,
+            stderr=None if show_output else subprocess.DEVNULL,
             start_new_session=True,
         )
 

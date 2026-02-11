@@ -586,8 +586,8 @@ class ModelPool:
         proc = subprocess.Popen(
             cmd,
             env=env,
-            stdout=None if show_output else subprocess.PIPE,
-            stderr=None if show_output else subprocess.PIPE,
+            stdout=None if show_output else subprocess.DEVNULL,
+            stderr=None if show_output else subprocess.DEVNULL,
             start_new_session=True,
         )
 
@@ -1230,8 +1230,8 @@ class ModelPool:
         proc = subprocess.Popen(
             cmd,
             env=env,
-            stdout=None if show_output else subprocess.PIPE,
-            stderr=None if show_output else subprocess.PIPE,
+            stdout=None if show_output else subprocess.DEVNULL,
+            stderr=None if show_output else subprocess.DEVNULL,
             start_new_session=True,
         )
 
