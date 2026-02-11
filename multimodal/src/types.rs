@@ -121,10 +121,10 @@ pub enum ImageSource {
 }
 
 /// Concrete image payload captured by the media connector.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ImageFrame {
-    image: DynamicImage,
-    raw_bytes: Arc<Vec<u8>>,
+    pub image: DynamicImage,
+    pub raw_bytes: bytes::Bytes,
     pub detail: ImageDetail,
     pub source: ImageSource,
 }
@@ -132,7 +132,7 @@ pub struct ImageFrame {
 impl ImageFrame {
     pub fn new(
         image: DynamicImage,
-        raw_bytes: Arc<Vec<u8>>,
+        raw_bytes: bytes::Bytes,
         detail: ImageDetail,
         source: ImageSource,
     ) -> Self {
@@ -149,7 +149,7 @@ impl ImageFrame {
     }
 
     pub fn raw_bytes(&self) -> &[u8] {
-        self.raw_bytes.as_slice()
+        &self.raw_bytes
     }
 
     pub fn source(&self) -> &ImageSource {
@@ -198,8 +198,7 @@ pub struct PlaceholderRange {
 pub struct MultiModalTensor {
     pub shape: Vec<usize>,
     pub dtype: String,
-    #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
+    pub data: bytes::Bytes,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -12,6 +12,9 @@ pub enum McpError {
     #[error("Server not found: {0}")]
     ServerNotFound(String),
 
+    #[error("Server disconnected: {0}")]
+    ServerDisconnected(String),
+
     #[error("Tool not found: {0}")]
     ToolNotFound(String),
 

@@ -57,12 +57,6 @@ pub(crate) async fn serve_harmony_responses_stream(
         Err(response) => return response,
     };
 
-    // Set the server keys in the context
-    {
-        let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = mcp_servers;
-    }
-
     // Create SSE channel
     let (tx, rx) = mpsc::unbounded_channel();
 
@@ -96,8 +90,15 @@ pub(crate) async fn serve_harmony_responses_stream(
         }
 
         if has_mcp_tools {
-            execute_mcp_tool_loop_streaming(ctx, current_request, &request, &mut emitter, &tx)
-                .await;
+            execute_mcp_tool_loop_streaming(
+                ctx,
+                current_request,
+                &request,
+                mcp_servers,
+                &mut emitter,
+                &tx,
+            )
+            .await;
         } else {
             execute_without_mcp_streaming(ctx, &current_request, &request, &mut emitter, &tx).await;
         }
@@ -119,6 +120,7 @@ async fn execute_mcp_tool_loop_streaming(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
+    mcp_servers: Vec<(String, String)>,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) {
@@ -128,7 +130,6 @@ async fn execute_mcp_tool_loop_streaming(
     // the original tools. MCP tools are only merged into current_request for model calls.
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
-    let mcp_servers = ctx.requested_servers.read().unwrap().clone();
     let session_request_id = format!("resp_{}", Uuid::new_v4());
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
 
