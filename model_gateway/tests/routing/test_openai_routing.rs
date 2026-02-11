@@ -908,7 +908,7 @@ fn oracle_config_validation_accepts_wallet_alias() {
 }
 
 #[test]
-fn oracle_config_validation_accepts_external_auth_without_password() {
+fn oracle_config_validation_for_external_auth() {
     let config = RouterConfig::builder()
         .openai_mode(vec!["https://api.openai.com".to_string()])
         .oracle_history(OracleConfig {
@@ -926,4 +926,23 @@ fn oracle_config_validation_accepts_external_auth_without_password() {
     config
         .validate()
         .expect("external auth config should validate without password");
+
+    let config_fail = RouterConfig::builder()
+        .openai_mode(vec!["https://api.openai.com".to_string()])
+        .oracle_history(OracleConfig {
+            wallet_path: None,
+            connect_descriptor: "db_high".to_string(),
+            external_auth: true,
+            username: "some_user".to_string(),
+            password: "".to_string(),
+            pool_min: 1,
+            pool_max: 4,
+            pool_timeout_secs: 30,
+        })
+        .build_unchecked();
+
+    assert!(
+        config_fail.validate().is_err(),
+        "validation should fail for external auth with a username"
+    );
 }

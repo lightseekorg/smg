@@ -55,17 +55,12 @@ impl OracleStore {
         configure_oracle_client(config)?;
 
         // Initialize schema using the provided function
-        let conn = if config.external_auth {
-            Connector::new("", "", &config.connect_descriptor)
-                .external_auth(true)
-                .connect()
-        } else {
-            Connection::connect(
-                &config.username,
-                &config.password,
-                &config.connect_descriptor,
-            )
-        }
+        let conn = connect_oracle(
+            config.external_auth,
+            &config.username,
+            &config.password,
+            &config.connect_descriptor,
+        )
         .map_err(map_oracle_error)?;
 
         init_schema(&conn)?;
@@ -214,17 +209,12 @@ impl Manager for OracleConnectionManager {
     ) -> impl std::future::Future<Output = Result<Connection, oracle::Error>> + Send {
         let params = self.params.clone();
         async move {
-            let mut conn = if params.external_auth {
-                Connector::new("", "", &params.connect_descriptor)
-                    .external_auth(true)
-                    .connect()?
-            } else {
-                Connection::connect(
-                    &params.username,
-                    &params.password,
-                    &params.connect_descriptor,
-                )?
-            };
+            let mut conn = connect_oracle(
+                params.external_auth,
+                &params.username,
+                &params.password,
+                &params.connect_descriptor,
+            )?;
             conn.set_autocommit(true);
             Ok(conn)
         }
@@ -237,6 +227,21 @@ impl Manager for OracleConnectionManager {
         _: &Metrics,
     ) -> impl std::future::Future<Output = RecycleResult<Self::Error>> + Send {
         async move { conn.ping().map_err(RecycleError::Backend) }
+    }
+}
+
+fn connect_oracle(
+    external_auth: bool,
+    username: &str,
+    password: &str,
+    connect_descriptor: &str,
+) -> Result<Connection, oracle::Error> {
+    if external_auth {
+        Connector::new("", "", connect_descriptor)
+            .external_auth(true)
+            .connect()
+    } else {
+        Connection::connect(username, password, connect_descriptor)
     }
 }
 
