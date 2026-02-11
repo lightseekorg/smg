@@ -40,8 +40,6 @@ def _build_command(
         "docker",
         "run",
         "--rm",
-        "--user",
-        f"{os.getuid()}:{os.getgid()}",
         "--network",
         "host",
         "-v",
