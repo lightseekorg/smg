@@ -1151,8 +1151,7 @@ fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), Valida
     // background and stream are mutually exclusive
     if req.background && req.stream {
         let mut e = ValidationError::new("background_conflicts_with_stream");
-        e.message =
-            Some("Cannot set both background and stream to true for model interactions.".into());
+        e.message = Some("Cannot set both background and stream to true.".into());
         return Err(e);
     }
     Ok(())
