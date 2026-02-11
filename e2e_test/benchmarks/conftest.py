@@ -31,6 +31,7 @@ def _build_command(
     server_engine: str | None = None,
     gpu_type: str | None = None,
     gpu_count: int | None = None,
+    container_name: str | None = None,
 ) -> list[str]:
     """Build genai-bench command via docker run."""
     image = os.environ.get("GENAI_BENCH_IMAGE", _DEFAULT_IMAGE)
@@ -39,7 +40,8 @@ def _build_command(
     cmd = [
         "docker",
         "run",
-        "--rm",
+        "--name",
+        container_name or experiment_folder,
         "--network",
         "host",
         "-v",
@@ -175,6 +177,9 @@ def genai_bench_runner():
 
         # Build and run command
         max_requests = max_requests_per_run or (num_concurrency or 32) * 5
+        timeout = timeout_sec or int(os.environ.get("GENAI_BENCH_TEST_TIMEOUT", "120"))
+
+        container_name = f"genai-bench-{experiment_folder}"
         cmd = _build_command(
             router_url,
             model_path,
@@ -187,18 +192,19 @@ def genai_bench_runner():
             server_engine=server_engine,
             gpu_type=gpu_type,
             gpu_count=gpu_count,
+            container_name=container_name,
         )
-        timeout = timeout_sec or int(os.environ.get("GENAI_BENCH_TEST_TIMEOUT", "120"))
 
         logger.info("Running genai-bench command: %s", " ".join(cmd))
+
+        # Remove leftover container from a previous run if it exists
+        subprocess.run(["docker", "rm", "-f", container_name],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         try:
             proc = subprocess.Popen(
                 cmd,
                 env=os.environ.copy(),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
             )
         except FileNotFoundError:
             pytest.fail("docker not found — is Docker installed?")
@@ -213,33 +219,22 @@ def genai_bench_runner():
             gpu_monitor.start(target_pid=proc.pid)
 
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
-            stdout, stderr = proc.communicate()
+            proc.wait()
             logger.error("genai-bench timed out after %ds", timeout)
 
-        # Save genai-bench output to log file if configured
-        log_dir = os.environ.get("E2E_LOG_DIR")
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
-            log_path = os.path.join(log_dir, f"bench-{experiment_folder}.log")
-            with open(log_path, "w") as f:
-                f.write(f"=== stdout ===\n{stdout or '(empty)'}\n")
-                f.write(f"=== stderr ===\n{stderr or '(empty)'}\n")
-            logger.info("genai-bench output saved to %s", log_path)
+        # Show container logs in CI output
+        subprocess.run(["docker", "logs", container_name])
+        subprocess.run(["docker", "rm", container_name],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # Fail immediately if genai-bench failed
         if proc.returncode != 0:
-            logger.error(
-                "genai-bench exited with code %d\nstdout:\n%s\nstderr:\n%s",
-                proc.returncode,
-                stdout or "(empty)",
-                stderr or "(empty)",
-            )
             pytest.fail(
                 f"genai-bench failed with exit code {proc.returncode}. "
-                f"Check logs above for details."
+                f"Check CI logs above for details."
             )
 
         try:
@@ -257,13 +252,6 @@ def genai_bench_runner():
                 gpu_monitor.assert_thresholds(thresholds)
 
         except AssertionError:
-            # Log genai-bench output when results not found
-            logger.error(
-                "genai-bench output (returncode=%d):\nstdout:\n%s\nstderr:\n%s",
-                proc.returncode,
-                stdout or "(empty)",
-                stderr or "(empty)",
-            )
             raise
 
         finally:
