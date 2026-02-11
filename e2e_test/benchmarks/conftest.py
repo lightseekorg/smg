@@ -50,13 +50,10 @@ def _build_command(
         base_dir,
     ]
 
-    # Mount HF cache so the container doesn't re-download tokenizers
-    hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
-    cmd.extend(["-v", f"{hf_home}:{hf_home}", "-e", f"HF_HOME={hf_home}"])
-
-    # Pass through other environment variables the container may need
-    if os.environ.get("HF_TOKEN"):
-        cmd.extend(["-e", "HF_TOKEN"])
+    # Pass through environment variables the container may need
+    for var in ("HF_TOKEN", "HF_HOME"):
+        if os.environ.get(var):
+            cmd.extend(["-e", var])
 
     cmd.extend(
         [
