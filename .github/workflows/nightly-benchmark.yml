@@ -15,8 +15,8 @@ on:
         default: 'all'
 
 concurrency:
-  group: nightly-benchmark-temp
-  cancel-in-progress: true
+  group: nightly-benchmark
+  cancel-in-progress: false
 
 permissions:
   contents: read
