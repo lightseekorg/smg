@@ -4,14 +4,6 @@
 //! - Messages API (/v1/messages) with SSE streaming
 //! - Tool use and MCP integration
 //! - Extended thinking and prompt caching
-//!
-//! ## Pipeline Architecture
-//!
-//! The Messages API is processed through a 4-stage pipeline:
-//! 1. Worker Selection - Select appropriate worker for the request
-//! 2. Request Building - Build HTTP request for worker
-//! 3. Request Execution - Send request to worker
-//! 4. Response Processing - Parse response and record metrics
 
 use std::{any::Any, fmt, sync::Arc, time::Duration};
 
@@ -25,12 +17,7 @@ use axum::{
 };
 use tracing::{info, warn};
 
-use super::{
-    context::{MessagesContext, SharedComponents},
-    messages::tools::ensure_mcp_connection,
-    models,
-    pipeline::MessagesPipeline,
-};
+use super::{context::RouterContext, handler, messages::tools::ensure_mcp_connection, models};
 use crate::{
     app_context::AppContext,
     protocols::{chat::ChatCompletionRequest, messages::CreateMessageRequest},
@@ -47,14 +34,13 @@ use crate::{
 /// - Citations
 pub struct AnthropicRouter {
     context: Arc<AppContext>,
-    messages_ctx: MessagesContext,
+    router_ctx: RouterContext,
 }
 
 impl fmt::Debug for AnthropicRouter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AnthropicRouter")
             .field("context", &"<AppContext>")
-            .field("pipeline", &self.messages_ctx.pipeline)
             .finish()
     }
 }
@@ -68,21 +54,16 @@ impl AnthropicRouter {
             .ok_or_else(|| "Anthropic router requires MCP orchestrator".to_string())?
             .clone();
 
-        let shared_components = Arc::new(SharedComponents {
+        let router_ctx = RouterContext {
+            mcp_orchestrator,
             http_client: context.client.clone(),
+            worker_registry: context.worker_registry.clone(),
             request_timeout,
-        });
-
-        let pipeline = Arc::new(MessagesPipeline::new(
-            shared_components,
-            context.worker_registry.clone(),
-        ));
-
-        let messages_ctx = MessagesContext::new(pipeline, mcp_orchestrator);
+        };
 
         Ok(Self {
             context,
-            messages_ctx,
+            router_ctx,
         })
     }
 
@@ -124,7 +105,7 @@ impl RouterTrait for AnthropicRouter {
         let headers_owned = headers.cloned();
 
         let mcp_servers = if request.has_mcp_toolset() {
-            match ensure_mcp_connection(&mut request, &self.messages_ctx.mcp_orchestrator).await {
+            match ensure_mcp_connection(&mut request, &self.router_ctx.mcp_orchestrator).await {
                 Ok(servers) => Some(servers),
                 Err(response) => {
                     warn!(model = %model_id, "MCP connection setup failed");
@@ -144,16 +125,13 @@ impl RouterTrait for AnthropicRouter {
         );
 
         if streaming {
-            return self
-                .messages_ctx
-                .pipeline
-                .execute_streaming(request, headers_owned, model_id)
+            return handler::execute_streaming(&self.router_ctx, request, headers_owned, model_id)
                 .await;
         }
 
         if let Some(mcp_servers) = mcp_servers {
             return super::messages::non_streaming::execute_tool_loop(
-                &self.messages_ctx,
+                &self.router_ctx,
                 request,
                 headers_owned,
                 model_id,
@@ -162,10 +140,7 @@ impl RouterTrait for AnthropicRouter {
             .await;
         }
 
-        match self
-            .messages_ctx
-            .pipeline
-            .execute_for_messages(request, headers_owned, model_id)
+        match handler::execute_for_messages(&self.router_ctx, request, headers_owned, model_id)
             .await
         {
             Ok(message) => (StatusCode::OK, Json(message)).into_response(),

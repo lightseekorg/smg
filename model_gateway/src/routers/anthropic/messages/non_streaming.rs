@@ -12,26 +12,33 @@ use crate::{
     mcp::McpToolSession,
     observability::metrics::Metrics,
     protocols::messages::{CreateMessageRequest, InputContent, InputMessage, Role, StopReason},
-    routers::{anthropic::context::MessagesContext, error, mcp_utils::DEFAULT_MAX_ITERATIONS},
+    routers::{
+        anthropic::{context::RouterContext, handler},
+        error,
+        mcp_utils::DEFAULT_MAX_ITERATIONS,
+    },
 };
 
 /// Execute the MCP tool loop for non-streaming Messages API requests.
 pub(crate) async fn execute_tool_loop(
-    messages_ctx: &MessagesContext,
+    ctx: &RouterContext,
     mut request: CreateMessageRequest,
     headers: Option<HeaderMap>,
     model_id: &str,
     mcp_servers: Vec<(String, String)>,
 ) -> Response {
     let request_id = format!("msg_{}", uuid::Uuid::new_v4());
-    let session = McpToolSession::new(&messages_ctx.mcp_orchestrator, mcp_servers, &request_id);
+    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &request_id);
 
     let mut all_mcp_calls: Vec<McpToolCall> = Vec::new();
 
-    let mut message = match messages_ctx
-        .pipeline
-        .execute_for_messages(request.clone(), headers.clone(), model_id)
-        .await
+    let mut message = match handler::execute_for_messages(
+        ctx,
+        request.clone(),
+        headers.clone(),
+        model_id,
+    )
+    .await
     {
         Ok(m) => m,
         Err(response) => return response,
@@ -84,17 +91,16 @@ pub(crate) async fn execute_tool_loop(
             content: InputContent::Blocks(tool_result_blocks),
         });
 
-        message = match messages_ctx
-            .pipeline
-            .execute_for_messages(request.clone(), headers.clone(), model_id)
-            .await
-        {
-            Ok(m) => m,
-            Err(response) => return response,
-        };
+        message =
+            match handler::execute_for_messages(ctx, request.clone(), headers.clone(), model_id)
+                .await
+            {
+                Ok(m) => m,
+                Err(response) => return response,
+            };
     }
 
-    // The last pipeline call produced a message — check if it completed naturally
+    // The last call produced a message — check if it completed naturally
     let tool_calls = super::tools::extract_tool_calls(&message.content);
     if tool_calls.is_empty() {
         let final_message = rebuild_response_with_mcp_blocks(message, &all_mcp_calls);
