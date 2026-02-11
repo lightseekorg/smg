@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, Any
 
 import httpx
 
@@ -587,20 +587,19 @@ class ModelPool:
         show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
 
         # Determine output targets: terminal, log file, or devnull
-        log_file = None
-        if show_output:
-            stdout_target = None
-            stderr_target = None
-        elif self.log_dir:
-            os.makedirs(self.log_dir, exist_ok=True)
-            safe_key = key.replace("/", "__")
-            log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
-            self._log_files.append(log_file)
-            stdout_target = log_file
-            stderr_target = subprocess.STDOUT
-        else:
-            stdout_target = subprocess.DEVNULL
-            stderr_target = subprocess.DEVNULL
+        stdout_target: int | IO[Any] | None = None
+        stderr_target: int | IO[Any] | None = None
+        if not show_output:
+            if self.log_dir:
+                os.makedirs(self.log_dir, exist_ok=True)
+                safe_key = key.replace("/", "__")
+                log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
+                self._log_files.append(log_file)
+                stdout_target = log_file
+                stderr_target = subprocess.STDOUT
+            else:
+                stdout_target = subprocess.DEVNULL
+                stderr_target = subprocess.DEVNULL
 
         # Start the process
         proc = subprocess.Popen(
@@ -1248,20 +1247,19 @@ class ModelPool:
         show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
 
         # Determine output targets: terminal, log file, or devnull
-        log_file = None
-        if show_output:
-            stdout_target = None
-            stderr_target = None
-        elif self.log_dir:
-            os.makedirs(self.log_dir, exist_ok=True)
-            safe_key = key.replace("/", "__")
-            log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
-            self._log_files.append(log_file)
-            stdout_target = log_file
-            stderr_target = subprocess.STDOUT
-        else:
-            stdout_target = subprocess.DEVNULL
-            stderr_target = subprocess.DEVNULL
+        stdout_target: int | IO[Any] | None = None
+        stderr_target: int | IO[Any] | None = None
+        if not show_output:
+            if self.log_dir:
+                os.makedirs(self.log_dir, exist_ok=True)
+                safe_key = key.replace("/", "__")
+                log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
+                self._log_files.append(log_file)
+                stdout_target = log_file
+                stderr_target = subprocess.STDOUT
+            else:
+                stdout_target = subprocess.DEVNULL
+                stderr_target = subprocess.DEVNULL
 
         proc = subprocess.Popen(
             cmd,

@@ -686,6 +686,7 @@ def _setup_cloud_backend(
 
     api_key = os.environ.get(api_key_env) if api_key_env else "not-used"
 
+    client: openai.OpenAI | anthropic.Anthropic
     if cfg.get("client_type") == "anthropic":
         client = anthropic.Anthropic(
             base_url=gateway.base_url,
