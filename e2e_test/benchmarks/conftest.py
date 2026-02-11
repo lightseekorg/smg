@@ -16,9 +16,10 @@ from .results import BenchmarkResult
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_IMAGE = "ghcr.io/moirai-internal/genai-bench:0.0.3"
+
 
 def _build_command(
-    cli: str,
     router_url: str,
     model_path: str,
     experiment_folder: str,
@@ -31,31 +32,53 @@ def _build_command(
     gpu_type: str | None = None,
     gpu_count: int | None = None,
 ) -> list[str]:
-    """Build genai-bench command."""
+    """Build genai-bench command via docker run."""
+    image = os.environ.get("GENAI_BENCH_IMAGE", _DEFAULT_IMAGE)
+    base_dir = str(Path.cwd())
+
     cmd = [
-        cli,
-        "benchmark",
-        "--api-backend",
-        "openai",
-        "--api-base",
-        router_url,
-        "--api-key",
-        "dummy-token",
-        "--api-model-name",
-        model_path,
-        "--model-tokenizer",
-        model_path,
-        "--task",
-        task,
-        "--max-requests-per-run",
-        str(max_requests),
-        "--max-time-per-run",
-        str(max_time_per_run),
-        "--experiment-folder-name",
-        experiment_folder,
-        "--experiment-base-dir",
-        str(Path.cwd()),
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "host",
+        "-v",
+        f"{base_dir}:{base_dir}",
+        "-w",
+        base_dir,
     ]
+
+    # Pass through environment variables the container may need
+    for var in ("HF_TOKEN", "HF_HOME"):
+        if os.environ.get(var):
+            cmd.extend(["-e", var])
+
+    cmd.extend(
+        [
+            image,
+            "benchmark",
+            "--api-backend",
+            "openai",
+            "--api-base",
+            router_url,
+            "--api-key",
+            "dummy-token",
+            "--api-model-name",
+            model_path,
+            "--model-tokenizer",
+            model_path,
+            "--task",
+            task,
+            "--max-requests-per-run",
+            str(max_requests),
+            "--max-time-per-run",
+            str(max_time_per_run),
+            "--experiment-folder-name",
+            experiment_folder,
+            "--experiment-base-dir",
+            base_dir,
+        ]
+    )
     if num_concurrency is not None:
         cmd.extend(["--num-concurrency", str(num_concurrency)])
     if traffic_scenario is not None:
@@ -66,6 +89,9 @@ def _build_command(
         cmd.extend(["--server-gpu-type", gpu_type])
     if gpu_count:
         cmd.extend(["--server-gpu-count", str(gpu_count)])
+    log_dir = os.environ.get("E2E_LOG_DIR")
+    if log_dir:
+        cmd.extend(["--log-dir", log_dir])
     return cmd
 
 
@@ -147,11 +173,6 @@ def genai_bench_runner():
         kill_procs: list | None = None,
         drain_delay_sec: int = 6,
     ) -> None:
-        cli = shutil.which("genai-bench")
-        if not cli:
-            pytest.fail("genai-bench CLI not found")
-        assert cli is not None  # for mypy (pytest.fail raises)
-
         # Clean previous results
         exp_dir = Path.cwd() / experiment_folder
         if exp_dir.exists():
@@ -159,8 +180,9 @@ def genai_bench_runner():
 
         # Build and run command
         max_requests = max_requests_per_run or (num_concurrency or 32) * 5
+        timeout = timeout_sec or int(os.environ.get("GENAI_BENCH_TEST_TIMEOUT", "240"))
+
         cmd = _build_command(
-            cli,
             router_url,
             model_path,
             experiment_folder,
@@ -173,7 +195,6 @@ def genai_bench_runner():
             gpu_type=gpu_type,
             gpu_count=gpu_count,
         )
-        timeout = timeout_sec or int(os.environ.get("GENAI_BENCH_TEST_TIMEOUT", "120"))
 
         logger.info("Running genai-bench command: %s", " ".join(cmd))
 
@@ -181,16 +202,11 @@ def genai_bench_runner():
             proc = subprocess.Popen(
                 cmd,
                 env=os.environ.copy(),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
             )
         except FileNotFoundError:
-            pytest.fail(f"genai-bench executable not found at {cli}")
-        except PermissionError:
-            pytest.fail(f"Permission denied executing {cli}")
+            pytest.fail("docker not found — is Docker installed?")
         except OSError as e:
-            pytest.fail(f"Failed to start genai-bench: {e}")
+            pytest.fail(f"Failed to start genai-bench container: {e}")
 
         # Start GPU monitor if needed
         gpu_monitor: GPUMonitor | None = None
@@ -200,23 +216,17 @@ def genai_bench_runner():
             gpu_monitor.start(target_pid=proc.pid)
 
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
-            stdout, stderr = proc.communicate()
+            proc.wait()
             logger.error("genai-bench timed out after %ds", timeout)
 
         # Fail immediately if genai-bench failed
         if proc.returncode != 0:
-            logger.error(
-                "genai-bench exited with code %d\nstdout:\n%s\nstderr:\n%s",
-                proc.returncode,
-                stdout or "(empty)",
-                stderr or "(empty)",
-            )
             pytest.fail(
                 f"genai-bench failed with exit code {proc.returncode}. "
-                f"Check logs above for details."
+                f"Check CI logs above for details."
             )
 
         try:
@@ -234,13 +244,6 @@ def genai_bench_runner():
                 gpu_monitor.assert_thresholds(thresholds)
 
         except AssertionError:
-            # Log genai-bench output when results not found
-            logger.error(
-                "genai-bench output (returncode=%d):\nstdout:\n%s\nstderr:\n%s",
-                proc.returncode,
-                stdout or "(empty)",
-                stderr or "(empty)",
-            )
             raise
 
         finally:

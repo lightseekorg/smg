@@ -122,7 +122,11 @@ def pytest_collection_modifyitems(
         from _pytest.mark.expression import Expression
 
         expr = Expression.compile(keyword)
-        items_to_scan = [item for item in items if expr.evaluate(lambda x: x in item.keywords)]
+        items_to_scan = [
+            item
+            for item in items
+            if expr.evaluate(lambda x, **_kw: x in item.keywords)  # type: ignore[arg-type]
+        ]
     else:
         items_to_scan = items
 

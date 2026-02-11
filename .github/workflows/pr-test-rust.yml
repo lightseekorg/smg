@@ -26,6 +26,7 @@ concurrency:
 env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
+  GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.3
 
 jobs:
   check-ci:
@@ -246,7 +247,7 @@ jobs:
           - name: benchmarks
             timeout: 20
             test_dirs: "e2e_test/benchmarks"
-            extra_deps: "genai-bench==0.0.3"
+            extra_deps: ""
             env_vars: ""
             reruns: ""
             upload_benchmarks: true
@@ -366,6 +367,10 @@ jobs:
           pip uninstall -y smg || true
           pip install wheel/*.whl
           bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
+
+      - name: Pull genai-bench image
+        if: matrix.upload_benchmarks
+        run: docker pull ${{ env.GENAI_BENCH_IMAGE }}
 
       - name: Setup Oracle Instant Client
         if: matrix.setup_oracle
@@ -560,7 +565,9 @@ jobs:
       - name: Install test dependencies
         run: |
           python3 -m pip install pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy
-          python3 -m pip --no-cache-dir install --upgrade genai-bench==0.0.3
+
+      - name: Pull genai-bench image
+        run: docker pull ${{ env.GENAI_BENCH_IMAGE }}
 
       - name: Run Go bindings benchmark
         run: |

@@ -24,6 +24,7 @@ permissions:
 env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
+  GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.3
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -88,9 +89,10 @@ jobs:
           - { id: meta-llama/Llama-3.1-8B-Instruct, slug: meta-llama-Llama-3.1-8B-Instruct, test_class: TestNightlyLlama8bSingle }
           - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bSingle }
           - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bSingle }
+          - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bSingle }
         variant:
-          - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
-          - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
+          - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false }
+          - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false }
 
     steps:
       - name: Check filters
@@ -135,7 +137,11 @@ jobs:
         run: |
           pip uninstall -y smg || true
           pip install wheel/*.whl
-          bash scripts/ci_install_e2e_deps.sh ${{ matrix.variant.extra_deps }}
+          bash scripts/ci_install_e2e_deps.sh
+
+      - name: Pull genai-bench image
+        if: steps.filter.outputs.skip != 'true'
+        run: docker pull ${{ env.GENAI_BENCH_IMAGE }}
 
       - name: Run benchmark
         if: steps.filter.outputs.skip != 'true'
@@ -143,7 +149,9 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GPU_TYPE: H100
           E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen3-30B-A3B":1}'
+          E2E_LOG_DIR: nightly_gateway_logs
         run: |
+          mkdir -p nightly_gateway_logs
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
 
           K_FILTER="${{ matrix.model.test_class }}"
@@ -187,6 +195,7 @@ jobs:
           - { id: meta-llama/Llama-3.1-8B-Instruct, slug: meta-llama-Llama-3.1-8B-Instruct, test_class: TestNightlyLlama8bMulti }
           - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bMulti }
           - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bMulti }
+          - { id: openai/gpt-oss-20b, slug: openai-gpt-oss-20b, test_class: TestNightlyGptOss20bMulti }
         variant:
           - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
           - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
@@ -235,6 +244,10 @@ jobs:
           pip uninstall -y smg || true
           pip install wheel/*.whl
           bash scripts/ci_install_e2e_deps.sh ${{ matrix.variant.extra_deps }}
+      
+      - name: Pull genai-bench image
+        if: steps.filter.outputs.skip != 'true'
+        run: docker pull ${{ env.GENAI_BENCH_IMAGE }}
 
       - name: Run benchmark
         if: steps.filter.outputs.skip != 'true'
@@ -339,6 +352,10 @@ jobs:
           pip uninstall -y smg || true
           pip install wheel/*.whl
           bash scripts/ci_install_e2e_deps.sh ${{ matrix.variant.extra_deps }}
+
+      - name: Pull genai-bench image
+        if: steps.filter.outputs.skip != 'true'
+        run: docker pull ${{ env.GENAI_BENCH_IMAGE }}
 
       - name: Run benchmark
         if: steps.filter.outputs.skip != 'true'
