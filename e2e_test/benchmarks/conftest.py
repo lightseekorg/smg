@@ -16,9 +16,10 @@ from .results import BenchmarkResult
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_IMAGE = "ghcr.io/moirai-internal/genai-bench:0.0.3"
+
 
 def _build_command(
-    cli: str,
     router_url: str,
     model_path: str,
     experiment_folder: str,
@@ -31,9 +32,29 @@ def _build_command(
     gpu_type: str | None = None,
     gpu_count: int | None = None,
 ) -> list[str]:
-    """Build genai-bench command."""
+    """Build genai-bench command via docker run."""
+    image = os.environ.get("GENAI_BENCH_IMAGE", _DEFAULT_IMAGE)
+    base_dir = str(Path.cwd())
+
     cmd = [
-        cli,
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "host",
+        "-v",
+        f"{base_dir}:{base_dir}",
+        "-w",
+        base_dir,
+    ]
+
+    # Pass through environment variables the container may need
+    for var in ("HF_TOKEN", "HF_HOME"):
+        if os.environ.get(var):
+            cmd.extend(["-e", var])
+
+    cmd.extend([
+        image,
         "benchmark",
         "--api-backend",
         "openai",
@@ -54,8 +75,8 @@ def _build_command(
         "--experiment-folder-name",
         experiment_folder,
         "--experiment-base-dir",
-        str(Path.cwd()),
-    ]
+        base_dir,
+    ])
     if num_concurrency is not None:
         cmd.extend(["--num-concurrency", str(num_concurrency)])
     if traffic_scenario is not None:
@@ -147,11 +168,6 @@ def genai_bench_runner():
         kill_procs: list | None = None,
         drain_delay_sec: int = 6,
     ) -> None:
-        cli = shutil.which("genai-bench")
-        if not cli:
-            pytest.fail("genai-bench CLI not found")
-        assert cli is not None  # for mypy (pytest.fail raises)
-
         # Clean previous results
         exp_dir = Path.cwd() / experiment_folder
         if exp_dir.exists():
@@ -160,7 +176,6 @@ def genai_bench_runner():
         # Build and run command
         max_requests = max_requests_per_run or (num_concurrency or 32) * 5
         cmd = _build_command(
-            cli,
             router_url,
             model_path,
             experiment_folder,
@@ -186,11 +201,9 @@ def genai_bench_runner():
                 text=True,
             )
         except FileNotFoundError:
-            pytest.fail(f"genai-bench executable not found at {cli}")
-        except PermissionError:
-            pytest.fail(f"Permission denied executing {cli}")
+            pytest.fail("docker not found — is Docker installed?")
         except OSError as e:
-            pytest.fail(f"Failed to start genai-bench: {e}")
+            pytest.fail(f"Failed to start genai-bench container: {e}")
 
         # Start GPU monitor if needed
         gpu_monitor: GPUMonitor | None = None

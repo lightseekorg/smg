@@ -1,18 +1,24 @@
-name: Nightly Benchmark
+name: Nightly Benchmark(temp test)
 
 on:
-  schedule:
-    - cron: '0 0 * * *'
-  workflow_dispatch:
-    inputs:
-      models:
-        description: 'Comma-separated model list (default: all)'
-        required: false
-        default: 'all'
-      runtime:
-        description: 'Runtime: sglang, vllm, or all (default: all)'
-        required: false
-        default: 'all'
+  pull_request:
+    branches: [ main, fix-bench ]
+    paths:
+      - 'e2e_test/benchmarks/test_nightly_perf.py'
+      - 'e2e_test/benchmarks/nightly_summarize.py'
+      - 'e2e_test/benchmarks/test_nightly_perf.py'
+  # schedule:
+  #   - cron: '0 0 * * *'
+  # workflow_dispatch:
+  #   inputs:
+  #     models:
+  #       description: 'Comma-separated model list (default: all)'
+  #       required: false
+  #       default: 'all'
+  #     runtime:
+  #       description: 'Runtime: sglang, vllm, or all (default: all)'
+  #       required: false
+  #       default: 'all'
 
 concurrency:
   group: nightly-benchmark
@@ -24,6 +30,7 @@ permissions:
 env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
+  GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.3
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -85,12 +92,13 @@ jobs:
       max-parallel: 8
       matrix:
         model:
-          - { id: meta-llama/Llama-3.1-8B-Instruct, slug: meta-llama-Llama-3.1-8B-Instruct, test_class: TestNightlyLlama8bSingle }
-          - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bSingle }
-          - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bSingle }
+          # - { id: meta-llama/Llama-3.1-8B-Instruct, slug: meta-llama-Llama-3.1-8B-Instruct, test_class: TestNightlyLlama8bSingle }
+          # - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bSingle }
+          # - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bSingle }
+          - { id: mistralai/Mistral-7B-Instruct-v0.3, slug: mistralai-Mistral-7B-Instruct-v0.3, test_class: TestNightlyMistral7bSingle }
         variant:
-          - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
-          - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
+          - { id: sglang, runtime: sglang, grpc_only: "true", setup_vllm: false, setup_trtllm: false }
+          #- { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false }
 
     steps:
       - name: Check filters
@@ -135,7 +143,11 @@ jobs:
         run: |
           pip uninstall -y smg || true
           pip install wheel/*.whl
-          bash scripts/ci_install_e2e_deps.sh ${{ matrix.variant.extra_deps }}
+          bash scripts/ci_install_e2e_deps.sh
+
+      - name: Pull genai-bench image
+        if: steps.filter.outputs.skip != 'true'
+        run: docker pull ${{ env.GENAI_BENCH_IMAGE }}
 
       - name: Run benchmark
         if: steps.filter.outputs.skip != 'true'
@@ -169,207 +181,207 @@ jobs:
         if: always() && steps.filter.outputs.skip != 'true'
         run: bash scripts/ci_killall_sglang.sh || true
 
-  # ---------------------------------------------------------------------------
-  # Multi-worker (H100): one model per job on k8s H100 runners.
-  # ---------------------------------------------------------------------------
+  # # ---------------------------------------------------------------------------
+  # # Multi-worker (H100): one model per job on k8s H100 runners.
+  # # ---------------------------------------------------------------------------
 
-  multi-worker:
-    name: "${{ matrix.model.id }} / multi-${{ matrix.variant.id }}"
-    needs: build-wheel
-    if: ${{ !cancelled() }}
-    runs-on: ["k8s-runner-gpu", "4-gpu-h100"]
-    timeout-minutes: 1440
-    strategy:
-      fail-fast: false
-      max-parallel: 8
-      matrix:
-        model:
-          - { id: meta-llama/Llama-3.1-8B-Instruct, slug: meta-llama-Llama-3.1-8B-Instruct, test_class: TestNightlyLlama8bMulti }
-          - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bMulti }
-          - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bMulti }
-        variant:
-          - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
-          - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
+  # multi-worker:
+  #   name: "${{ matrix.model.id }} / multi-${{ matrix.variant.id }}"
+  #   needs: build-wheel
+  #   if: ${{ !cancelled() }}
+  #   runs-on: ["k8s-runner-gpu", "4-gpu-h100"]
+  #   timeout-minutes: 1440
+  #   strategy:
+  #     fail-fast: false
+  #     max-parallel: 8
+  #     matrix:
+  #       model:
+  #         - { id: meta-llama/Llama-3.1-8B-Instruct, slug: meta-llama-Llama-3.1-8B-Instruct, test_class: TestNightlyLlama8bMulti }
+  #         - { id: Qwen/Qwen2.5-7B-Instruct, slug: Qwen-Qwen2.5-7B-Instruct, test_class: TestNightlyQwen7bMulti }
+  #         - { id: Qwen/Qwen3-30B-A3B, slug: Qwen-Qwen3-30B-A3B, test_class: TestNightlyQwen30bMulti }
+  #       variant:
+  #         - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
+  #         - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
 
-    steps:
-      - name: Check filters
-        id: filter
-        run: |
-          MODELS="${{ github.event.inputs.models || 'all' }}"
-          RUNTIME="${{ github.event.inputs.runtime || 'all' }}"
-          SKIP="false"
-          if [ "$MODELS" != "all" ] && ! echo ",$MODELS," | grep -Fq ",${{ matrix.model.id }},"; then
-            SKIP="true"
-          fi
-          if [ "$RUNTIME" != "all" ] && [ "$RUNTIME" != "${{ matrix.variant.id }}" ]; then
-            SKIP="true"
-          fi
-          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+  #   steps:
+  #     - name: Check filters
+  #       id: filter
+  #       run: |
+  #         MODELS="${{ github.event.inputs.models || 'all' }}"
+  #         RUNTIME="${{ github.event.inputs.runtime || 'all' }}"
+  #         SKIP="false"
+  #         if [ "$MODELS" != "all" ] && ! echo ",$MODELS," | grep -Fq ",${{ matrix.model.id }},"; then
+  #           SKIP="true"
+  #         fi
+  #         if [ "$RUNTIME" != "all" ] && [ "$RUNTIME" != "${{ matrix.variant.id }}" ]; then
+  #           SKIP="true"
+  #         fi
+  #         echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout code
-        if: steps.filter.outputs.skip != 'true'
-        uses: actions/checkout@v6
+  #     - name: Checkout code
+  #       if: steps.filter.outputs.skip != 'true'
+  #       uses: actions/checkout@v6
 
-      - name: Setup vLLM backend
-        if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_vllm
-        uses: ./.github/actions/setup-vllm
+  #     - name: Setup vLLM backend
+  #       if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_vllm
+  #       uses: ./.github/actions/setup-vllm
 
-      - name: Setup TRT-LLM backend
-        if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_trtllm
-        uses: ./.github/actions/setup-trtllm
+  #     - name: Setup TRT-LLM backend
+  #       if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_trtllm
+  #       uses: ./.github/actions/setup-trtllm
 
-      - name: Setup SGLang backend
-        if: steps.filter.outputs.skip != 'true' && !matrix.variant.setup_vllm && !matrix.variant.setup_trtllm
-        uses: ./.github/actions/setup-sglang
+  #     - name: Setup SGLang backend
+  #       if: steps.filter.outputs.skip != 'true' && !matrix.variant.setup_vllm && !matrix.variant.setup_trtllm
+  #       uses: ./.github/actions/setup-sglang
 
-      - name: Download wheel artifact
-        if: steps.filter.outputs.skip != 'true'
-        uses: actions/download-artifact@v7
-        with:
-          name: smg-wheel
-          path: wheel/
+  #     - name: Download wheel artifact
+  #       if: steps.filter.outputs.skip != 'true'
+  #       uses: actions/download-artifact@v7
+  #       with:
+  #         name: smg-wheel
+  #         path: wheel/
 
-      - name: Install wheel and test dependencies
-        if: steps.filter.outputs.skip != 'true'
-        run: |
-          pip uninstall -y smg || true
-          pip install wheel/*.whl
-          bash scripts/ci_install_e2e_deps.sh ${{ matrix.variant.extra_deps }}
+  #     - name: Install wheel and test dependencies
+  #       if: steps.filter.outputs.skip != 'true'
+  #       run: |
+  #         pip uninstall -y smg || true
+  #         pip install wheel/*.whl
+  #         bash scripts/ci_install_e2e_deps.sh ${{ matrix.variant.extra_deps }}
 
-      - name: Run benchmark
-        if: steps.filter.outputs.skip != 'true'
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          GPU_TYPE: H100
-          E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen3-30B-A3B":1}'
-        run: |
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+  #     - name: Run benchmark
+  #       if: steps.filter.outputs.skip != 'true'
+  #       env:
+  #         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  #         GPU_TYPE: H100
+  #         E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen3-30B-A3B":1}'
+  #       run: |
+  #         bash scripts/ci_killall_sglang.sh "nuk_gpus"
 
-          K_FILTER="${{ matrix.model.test_class }}"
-          if [ "${{ matrix.variant.grpc_only }}" == "true" ]; then
-            K_FILTER="${{ matrix.model.test_class }} and grpc"
-          fi
+  #         K_FILTER="${{ matrix.model.test_class }}"
+  #         if [ "${{ matrix.variant.grpc_only }}" == "true" ]; then
+  #           K_FILTER="${{ matrix.model.test_class }} and grpc"
+  #         fi
 
-          E2E_RUNTIME=${{ matrix.variant.runtime }} \
-          ROUTER_LOCAL_MODEL_PATH="/raid/models" \
-            pytest e2e_test/benchmarks/test_nightly_perf.py \
-              -k "$K_FILTER" \
-              -s -vv -o log_cli=true --log-cli-level=INFO
+  #         E2E_RUNTIME=${{ matrix.variant.runtime }} \
+  #         ROUTER_LOCAL_MODEL_PATH="/raid/models" \
+  #           pytest e2e_test/benchmarks/test_nightly_perf.py \
+  #             -k "$K_FILTER" \
+  #             -s -vv -o log_cli=true --log-cli-level=INFO
 
-      - name: Upload benchmark results
-        if: always() && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v6
-        with:
-          name: nightly-${{ matrix.model.slug }}-multi-${{ matrix.variant.id }}-${{ github.run_id }}
-          path: nightly_*/
-          retention-days: 90
+  #     - name: Upload benchmark results
+  #       if: always() && steps.filter.outputs.skip != 'true'
+  #       uses: actions/upload-artifact@v6
+  #       with:
+  #         name: nightly-${{ matrix.model.slug }}-multi-${{ matrix.variant.id }}-${{ github.run_id }}
+  #         path: nightly_*/
+  #         retention-days: 90
 
-      - name: Cleanup
-        if: always() && steps.filter.outputs.skip != 'true'
-        run: bash scripts/ci_killall_sglang.sh || true
+  #     - name: Cleanup
+  #       if: always() && steps.filter.outputs.skip != 'true'
+  #       run: bash scripts/ci_killall_sglang.sh || true
 
-  # ---------------------------------------------------------------------------
-  # Single-worker (H200): models requiring 8-gpu-h200 runners.
-  # Separate job so H200 pool isn't blocked by H100 max-parallel limits.
-  # ---------------------------------------------------------------------------
+  # # ---------------------------------------------------------------------------
+  # # Single-worker (H200): models requiring 8-gpu-h200 runners.
+  # # Separate job so H200 pool isn't blocked by H100 max-parallel limits.
+  # # ---------------------------------------------------------------------------
 
-  single-worker-h200:
-    name: "${{ matrix.model.id }} / single-${{ matrix.variant.id }}"
-    needs: build-wheel
-    if: ${{ !cancelled() }}
-    runs-on: ["8-gpu-h200"]
-    timeout-minutes: 1440
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        model:
-          - { id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8, slug: meta-llama-Llama-4-Maverick-17B-128E-Instruct-FP8, test_class: TestNightlyLlama4MaverickSingle }
-        variant:
-          - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
-          - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
+  # single-worker-h200:
+  #   name: "${{ matrix.model.id }} / single-${{ matrix.variant.id }}"
+  #   needs: build-wheel
+  #   if: ${{ !cancelled() }}
+  #   runs-on: ["8-gpu-h200"]
+  #   timeout-minutes: 1440
+  #   strategy:
+  #     fail-fast: false
+  #     max-parallel: 2
+  #     matrix:
+  #       model:
+  #         - { id: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8, slug: meta-llama-Llama-4-Maverick-17B-128E-Instruct-FP8, test_class: TestNightlyLlama4MaverickSingle }
+  #       variant:
+  #         - { id: sglang, runtime: sglang, grpc_only: "false", setup_vllm: false, setup_trtllm: false, extra_deps: "genai-bench" }
+  #         - { id: vllm,   runtime: vllm,   grpc_only: "true", setup_vllm: true, setup_trtllm: false, extra_deps: "genai-bench" }
 
-    steps:
-      - name: Check filters
-        id: filter
-        run: |
-          MODELS="${{ github.event.inputs.models || 'all' }}"
-          RUNTIME="${{ github.event.inputs.runtime || 'all' }}"
-          SKIP="false"
-          if [ "$MODELS" != "all" ] && ! echo ",$MODELS," | grep -Fq ",${{ matrix.model.id }},"; then
-            SKIP="true"
-          fi
-          if [ "$RUNTIME" != "all" ] && [ "$RUNTIME" != "${{ matrix.variant.id }}" ]; then
-            SKIP="true"
-          fi
-          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+  #   steps:
+  #     - name: Check filters
+  #       id: filter
+  #       run: |
+  #         MODELS="${{ github.event.inputs.models || 'all' }}"
+  #         RUNTIME="${{ github.event.inputs.runtime || 'all' }}"
+  #         SKIP="false"
+  #         if [ "$MODELS" != "all" ] && ! echo ",$MODELS," | grep -Fq ",${{ matrix.model.id }},"; then
+  #           SKIP="true"
+  #         fi
+  #         if [ "$RUNTIME" != "all" ] && [ "$RUNTIME" != "${{ matrix.variant.id }}" ]; then
+  #           SKIP="true"
+  #         fi
+  #         echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout code
-        if: steps.filter.outputs.skip != 'true'
-        uses: actions/checkout@v6
+  #     - name: Checkout code
+  #       if: steps.filter.outputs.skip != 'true'
+  #       uses: actions/checkout@v6
 
-      - name: Setup Python
-        if: steps.filter.outputs.skip != 'true'
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
+  #     - name: Setup Python
+  #       if: steps.filter.outputs.skip != 'true'
+  #       uses: actions/setup-python@v6
+  #       with:
+  #         python-version: "3.12"
 
-      - name: Setup vLLM backend
-        if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_vllm
-        uses: ./.github/actions/setup-vllm
+  #     - name: Setup vLLM backend
+  #       if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_vllm
+  #       uses: ./.github/actions/setup-vllm
 
-      - name: Setup TRT-LLM backend
-        if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_trtllm
-        uses: ./.github/actions/setup-trtllm
+  #     - name: Setup TRT-LLM backend
+  #       if: steps.filter.outputs.skip != 'true' && matrix.variant.setup_trtllm
+  #       uses: ./.github/actions/setup-trtllm
 
-      - name: Setup SGLang backend
-        if: steps.filter.outputs.skip != 'true' && !matrix.variant.setup_vllm && !matrix.variant.setup_trtllm
-        uses: ./.github/actions/setup-sglang
+  #     - name: Setup SGLang backend
+  #       if: steps.filter.outputs.skip != 'true' && !matrix.variant.setup_vllm && !matrix.variant.setup_trtllm
+  #       uses: ./.github/actions/setup-sglang
 
-      - name: Download wheel artifact
-        if: steps.filter.outputs.skip != 'true'
-        uses: actions/download-artifact@v7
-        with:
-          name: smg-wheel
-          path: wheel/
+  #     - name: Download wheel artifact
+  #       if: steps.filter.outputs.skip != 'true'
+  #       uses: actions/download-artifact@v7
+  #       with:
+  #         name: smg-wheel
+  #         path: wheel/
 
-      - name: Install wheel and test dependencies
-        if: steps.filter.outputs.skip != 'true'
-        run: |
-          pip uninstall -y smg || true
-          pip install wheel/*.whl
-          bash scripts/ci_install_e2e_deps.sh ${{ matrix.variant.extra_deps }}
+  #     - name: Install wheel and test dependencies
+  #       if: steps.filter.outputs.skip != 'true'
+  #       run: |
+  #         pip uninstall -y smg || true
+  #         pip install wheel/*.whl
+  #         bash scripts/ci_install_e2e_deps.sh ${{ matrix.variant.extra_deps }}
 
-      - name: Run benchmark
-        if: steps.filter.outputs.skip != 'true'
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          GPU_TYPE: H200
-        run: |
-          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+  #     - name: Run benchmark
+  #       if: steps.filter.outputs.skip != 'true'
+  #       env:
+  #         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  #         GPU_TYPE: H200
+  #       run: |
+  #         bash scripts/ci_killall_sglang.sh "nuk_gpus"
 
-          K_FILTER="${{ matrix.model.test_class }}"
-          if [ "${{ matrix.variant.grpc_only }}" == "true" ]; then
-            K_FILTER="${{ matrix.model.test_class }} and grpc"
-          fi
+  #         K_FILTER="${{ matrix.model.test_class }}"
+  #         if [ "${{ matrix.variant.grpc_only }}" == "true" ]; then
+  #           K_FILTER="${{ matrix.model.test_class }} and grpc"
+  #         fi
 
-          E2E_RUNTIME=${{ matrix.variant.runtime }} \
-          ROUTER_LOCAL_MODEL_PATH="/raid/models" \
-            pytest e2e_test/benchmarks/test_nightly_perf.py \
-              -k "$K_FILTER" \
-              -s -vv -o log_cli=true --log-cli-level=INFO
+  #         E2E_RUNTIME=${{ matrix.variant.runtime }} \
+  #         ROUTER_LOCAL_MODEL_PATH="/raid/models" \
+  #           pytest e2e_test/benchmarks/test_nightly_perf.py \
+  #             -k "$K_FILTER" \
+  #             -s -vv -o log_cli=true --log-cli-level=INFO
 
-      - name: Upload benchmark results
-        if: always() && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v6
-        with:
-          name: nightly-${{ matrix.model.slug }}-single-${{ matrix.variant.id }}-${{ github.run_id }}
-          path: nightly_*/
-          retention-days: 90
+  #     - name: Upload benchmark results
+  #       if: always() && steps.filter.outputs.skip != 'true'
+  #       uses: actions/upload-artifact@v6
+  #       with:
+  #         name: nightly-${{ matrix.model.slug }}-single-${{ matrix.variant.id }}-${{ github.run_id }}
+  #         path: nightly_*/
+  #         retention-days: 90
 
-      - name: Cleanup
-        if: always() && steps.filter.outputs.skip != 'true'
-        run: bash scripts/ci_killall_sglang.sh || true
+  #     - name: Cleanup
+  #       if: always() && steps.filter.outputs.skip != 'true'
+  #       run: bash scripts/ci_killall_sglang.sh || true
 
   # ---------------------------------------------------------------------------
   # Multi-worker (H200): models requiring 8-gpu-h200 runners.
@@ -397,7 +409,7 @@ jobs:
   # ---------------------------------------------------------------------------
 
   summarize-benchmarks:
-    needs: [single-worker, multi-worker, single-worker-h200]
+    needs: [single-worker]
     runs-on: ubuntu-latest
     if: always()
     permissions:

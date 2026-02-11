@@ -99,6 +99,7 @@ _NIGHTLY_MODELS: list[tuple[str, str, int, list[str], dict]] = [
     ("meta-llama/Llama-3.1-8B-Instruct", "Llama8b", 4, ["http", "grpc"], {}),
     ("Qwen/Qwen2.5-7B-Instruct", "Qwen7b", 4, ["http", "grpc"], {}),
     ("Qwen/Qwen3-30B-A3B", "Qwen30b", 4, ["http", "grpc"], {}),
+    ("mistralai/Mistral-7B-Instruct-v0.3", "Mistral7b", 1, ["http", "grpc"], {}),
     (
         "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
         "Llama4Maverick",
