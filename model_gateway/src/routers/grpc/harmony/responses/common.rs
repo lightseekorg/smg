@@ -183,24 +183,13 @@ pub(super) fn inject_mcp_metadata(
     tracking: &McpCallTracking,
     session: &McpToolSession<'_>,
 ) {
-    let mcp_servers = session.mcp_servers();
-
-    // Collect tool output items (already transformed with correct type)
     let tool_output_items: Vec<ResponseOutputItem> = tracking
         .tool_calls
         .iter()
         .map(|record| record.output_item.clone())
         .collect();
 
-    // Inject into response output:
-    // 1. Prepend mcp_list_tools for each server at the beginning
-    for (label, key) in mcp_servers.iter().rev() {
-        let mcp_list_tools = session.build_mcp_list_tools_item(label, key);
-        response.output.insert(0, mcp_list_tools);
-    }
-
-    // 2. Append all tool output items at the end
-    response.output.extend(tool_output_items);
+    session.inject_mcp_output_items(&mut response.output, tool_output_items);
 }
 
 /// Load previous conversation messages from storage

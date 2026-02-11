@@ -1,0 +1,7 @@
+# Generated stubs (created at build time)
+smg_grpc_proto/generated/
+
+# Build artifacts
+dist/
+*.egg-info/
+build/

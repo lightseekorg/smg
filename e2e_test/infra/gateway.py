@@ -104,6 +104,8 @@ class Gateway:
         self.process: subprocess.Popen | None = None
         self.model_path: str | None = None
         self.policy: str = "round_robin"
+        self.log_level: str = "warn"
+        self.log_dir: str | None = None
         self.pd_mode: bool = False
         self.igw_mode: bool = False
         self.cloud_mode: bool = False
@@ -135,6 +137,8 @@ class Gateway:
         timeout: float = DEFAULT_ROUTER_TIMEOUT,
         show_output: bool | None = None,
         extra_args: list[str] | None = None,
+        log_level: str | None = None,
+        log_dir: str | None = None,
     ) -> None:
         """Start the gateway.
 
@@ -156,6 +160,8 @@ class Gateway:
             timeout: Startup timeout in seconds.
             show_output: Show subprocess output (env var override).
             extra_args: Additional router arguments.
+            log_level: Log level override (debug, info, warn, error).
+            log_dir: Directory to store gateway log files.
 
         Raises:
             RuntimeError: If gateway is already started.
@@ -189,6 +195,10 @@ class Gateway:
             show_output = os.environ.get(ENV_SHOW_ROUTER_LOGS, "0") == "1"
 
         self.policy = policy
+        if log_level:
+            self.log_level = log_level
+        if log_dir:
+            self.log_dir = log_dir
 
         if is_igw_mode:
             # IGW mode: start empty, add workers via API
@@ -368,7 +378,7 @@ class Gateway:
 
     def _build_base_cmd(self) -> list[str]:
         """Build the base command for launching the router."""
-        return [
+        cmd = [
             "python3",
             "-m",
             "smg.launch_router",
@@ -383,8 +393,11 @@ class Gateway:
             "--policy",
             self.policy,
             "--log-level",
-            "warn",
+            self.log_level,
         ]
+        if self.log_dir:
+            cmd.extend(["--log-dir", self.log_dir])
+        return cmd
 
     # -------------------------------------------------------------------------
     # Health & Metrics APIs

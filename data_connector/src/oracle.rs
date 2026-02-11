@@ -11,7 +11,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use deadpool::managed::{Manager, Metrics, Pool, RecycleError, RecycleResult};
-use oracle::{Connection, Row};
+use oracle::{Connection, Connector, Row};
 use serde_json::Value;
 
 use super::{
@@ -52,7 +52,8 @@ impl OracleStore {
         configure_oracle_client(config)?;
 
         // Initialize schema using the provided function
-        let conn = Connection::connect(
+        let conn = connect_oracle(
+            config.external_auth,
             &config.username,
             &config.password,
             &config.connect_descriptor,
@@ -156,6 +157,7 @@ pub(crate) struct OracleConnectParams {
     pub username: String,
     pub password: String,
     pub connect_descriptor: String,
+    pub external_auth: bool,
 }
 
 impl OracleConnectParams {
@@ -164,6 +166,7 @@ impl OracleConnectParams {
             username: config.username.clone(),
             password: config.password.clone(),
             connect_descriptor: config.connect_descriptor.clone(),
+            external_auth: config.external_auth,
         }
     }
 }
@@ -173,6 +176,7 @@ impl std::fmt::Debug for OracleConnectParams {
         f.debug_struct("OracleConnectParams")
             .field("username", &self.username)
             .field("connect_descriptor", &self.connect_descriptor)
+            .field("external_auth", &self.external_auth)
             .finish()
     }
 }
@@ -202,7 +206,8 @@ impl Manager for OracleConnectionManager {
     ) -> impl std::future::Future<Output = Result<Connection, oracle::Error>> + Send {
         let params = self.params.clone();
         async move {
-            let mut conn = Connection::connect(
+            let mut conn = connect_oracle(
+                params.external_auth,
                 &params.username,
                 &params.password,
                 &params.connect_descriptor,
@@ -219,6 +224,21 @@ impl Manager for OracleConnectionManager {
         _: &Metrics,
     ) -> impl std::future::Future<Output = RecycleResult<Self::Error>> + Send {
         async move { conn.ping().map_err(RecycleError::Backend) }
+    }
+}
+
+fn connect_oracle(
+    external_auth: bool,
+    username: &str,
+    password: &str,
+    connect_descriptor: &str,
+) -> Result<Connection, oracle::Error> {
+    if external_auth {
+        Connector::new("", "", connect_descriptor)
+            .external_auth(true)
+            .connect()
+    } else {
+        Connection::connect(username, password, connect_descriptor)
     }
 }
 

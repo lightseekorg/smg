@@ -23,6 +23,8 @@ pub struct OracleConfig {
     pub wallet_path: Option<String>,
     /// DSN (e.g. `tcps://host:port/service`)
     pub connect_descriptor: String,
+    #[serde(default)]
+    pub external_auth: bool,
     pub username: String,
     pub password: String,
     #[serde(default = "default_pool_min")]
@@ -64,6 +66,7 @@ impl std::fmt::Debug for OracleConfig {
         f.debug_struct("OracleConfig")
             .field("wallet_path", &self.wallet_path)
             .field("connect_descriptor", &self.connect_descriptor)
+            .field("external_auth", &self.external_auth)
             .field("username", &self.username)
             .field("pool_min", &self.pool_min)
             .field("pool_max", &self.pool_max)

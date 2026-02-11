@@ -2,7 +2,6 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use bytes::Bytes;
-use image::DynamicImage;
 use reqwest::Client;
 use tokio::{fs, task};
 use url::Url;
@@ -196,11 +195,14 @@ impl MediaConnector {
         detail: ImageDetail,
         source: ImageSource,
     ) -> Result<Arc<ImageFrame>, MediaConnectorError> {
-        let raw: Arc<Vec<u8>> = Arc::new(bytes.to_vec());
-        let raw_clone = raw.clone();
-        let image: DynamicImage =
-            task::spawn_blocking(move || image::load_from_memory(&raw_clone)).await??;
+        // Use bytes directly for decoding
+        let cursor = std::io::Cursor::new(bytes.clone());
+        let reader = image::ImageReader::new(cursor).with_guessed_format()?;
 
-        Ok(Arc::new(ImageFrame::new(image, raw, detail, source)))
+        let image = task::spawn_blocking(move || reader.decode())
+            .await
+            .map_err(MediaConnectorError::Blocking)??;
+
+        Ok(Arc::new(ImageFrame::new(image, bytes, detail, source)))
     }
 }
