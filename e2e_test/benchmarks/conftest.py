@@ -167,7 +167,6 @@ def genai_bench_runner():
         gpu_count: int | None = None,
         kill_procs: list | None = None,
         drain_delay_sec: int = 6,
-        log_dir: str | None = None,
     ) -> None:
         # Clean previous results
         exp_dir = Path.cwd() / experiment_folder
@@ -221,6 +220,7 @@ def genai_bench_runner():
             logger.error("genai-bench timed out after %ds", timeout)
 
         # Save genai-bench output to log file if configured
+        log_dir = os.environ.get("E2E_LOG_DIR")
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(log_dir, f"bench-{experiment_folder}.log")
