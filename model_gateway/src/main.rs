@@ -462,6 +462,15 @@ struct CliArgs {
     #[arg(long, env = "ATP_PASSWORD", help_heading = "Oracle Database")]
     oracle_password: Option<String>,
 
+    /// Enable Oracle external authentication
+    #[arg(
+        long,
+        env = "ATP_EXTERNAL_AUTH",
+        default_value_t = false,
+        help_heading = "Oracle Database"
+    )]
+    oracle_external_auth: bool,
+
     /// Minimum Oracle connection pool size
     #[arg(long, env = "ATP_POOL_MIN", help_heading = "Oracle Database")]
     oracle_pool_min: Option<usize>,
@@ -780,18 +789,21 @@ impl CliArgs {
             OracleConnectSource::Dsn { descriptor } => (None, descriptor),
             OracleConnectSource::Wallet { path, alias } => (Some(path), alias),
         };
-        let username = self
-            .oracle_user
-            .clone()
-            .ok_or(ConfigError::MissingRequired {
-                field: "oracle_user or ATP_USER".to_string(),
-            })?;
-        let password = self
-            .oracle_password
-            .clone()
-            .ok_or(ConfigError::MissingRequired {
-                field: "oracle_password or ATP_PASSWORD".to_string(),
-            })?;
+        let (username, password) = if self.oracle_external_auth {
+            (
+                self.oracle_user.clone().unwrap_or_default(),
+                self.oracle_password.clone().unwrap_or_default(),
+            )
+        } else {
+            (
+                self.oracle_user.clone().ok_or(ConfigError::MissingRequired {
+                    field: "oracle_user or ATP_USER".to_string(),
+                })?,
+                self.oracle_password.clone().ok_or(ConfigError::MissingRequired {
+                    field: "oracle_password or ATP_PASSWORD".to_string(),
+                })?,
+            )
+        };
 
         let pool_min = self
             .oracle_pool_min
@@ -823,6 +835,7 @@ impl CliArgs {
         Ok(OracleConfig {
             wallet_path,
             connect_descriptor,
+            external_auth: self.oracle_external_auth,
             username,
             password,
             pool_min,

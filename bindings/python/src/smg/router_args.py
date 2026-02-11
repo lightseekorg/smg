@@ -113,6 +113,7 @@ class RouterArgs:
     oracle_connect_descriptor: str | None = None
     oracle_username: str | None = None
     oracle_password: str | None = None
+    oracle_external_auth: bool = False
     oracle_pool_min: int = 1
     oracle_pool_max: int = 16
     oracle_pool_timeout_secs: int = 30
@@ -772,6 +773,12 @@ class RouterArgs:
             type=str,
             default=os.getenv("ATP_PASSWORD"),
             help="Oracle database password (env: ATP_PASSWORD)",
+        )
+        oracle_group.add_argument(
+            f"--{prefix}oracle-external-auth",
+            action="store_true",
+            default=os.getenv("ATP_EXTERNAL_AUTH", "").lower() in ("1", "true", "yes"),
+            help="Enable Oracle external authentication (env: ATP_EXTERNAL_AUTH)",
         )
         oracle_group.add_argument(
             f"--{prefix}oracle-pool-min",

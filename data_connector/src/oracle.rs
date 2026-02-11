@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use deadpool::managed::{Manager, Metrics, Pool, RecycleError, RecycleResult};
 use oracle::{
     sql_type::{OracleType, ToSql},
-    Connection, Row,
+    Connection, Connector, Row,
 };
 use serde_json::Value;
 
@@ -55,11 +55,17 @@ impl OracleStore {
         configure_oracle_client(config)?;
 
         // Initialize schema using the provided function
-        let conn = Connection::connect(
-            &config.username,
-            &config.password,
-            &config.connect_descriptor,
-        )
+        let conn = if config.external_auth {
+            Connector::new("", "", &config.connect_descriptor)
+                .external_auth(true)
+                .connect()
+        } else {
+            Connection::connect(
+                &config.username,
+                &config.password,
+                &config.connect_descriptor,
+            )
+        }
         .map_err(map_oracle_error)?;
 
         init_schema(&conn)?;
@@ -159,6 +165,7 @@ pub(crate) struct OracleConnectParams {
     pub username: String,
     pub password: String,
     pub connect_descriptor: String,
+    pub external_auth: bool,
 }
 
 impl OracleConnectParams {
@@ -167,6 +174,7 @@ impl OracleConnectParams {
             username: config.username.clone(),
             password: config.password.clone(),
             connect_descriptor: config.connect_descriptor.clone(),
+            external_auth: config.external_auth,
         }
     }
 }
@@ -176,6 +184,7 @@ impl std::fmt::Debug for OracleConnectParams {
         f.debug_struct("OracleConnectParams")
             .field("username", &self.username)
             .field("connect_descriptor", &self.connect_descriptor)
+            .field("external_auth", &self.external_auth)
             .finish()
     }
 }
@@ -205,11 +214,17 @@ impl Manager for OracleConnectionManager {
     ) -> impl std::future::Future<Output = Result<Connection, oracle::Error>> + Send {
         let params = self.params.clone();
         async move {
-            let mut conn = Connection::connect(
-                &params.username,
-                &params.password,
-                &params.connect_descriptor,
-            )?;
+            let mut conn = if params.external_auth {
+                Connector::new("", "", &params.connect_descriptor)
+                    .external_auth(true)
+                    .connect()?
+            } else {
+                Connection::connect(
+                    &params.username,
+                    &params.password,
+                    &params.connect_descriptor,
+                )?
+            };
             conn.set_autocommit(true);
             Ok(conn)
         }
@@ -224,6 +239,7 @@ impl Manager for OracleConnectionManager {
         async move { conn.ping().map_err(RecycleError::Backend) }
     }
 }
+
 
 // ============================================================================
 // PART 2: OracleConversationStorage
