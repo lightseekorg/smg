@@ -796,12 +796,16 @@ impl CliArgs {
             )
         } else {
             (
-                self.oracle_user.clone().ok_or(ConfigError::MissingRequired {
-                    field: "oracle_user or ATP_USER".to_string(),
-                })?,
-                self.oracle_password.clone().ok_or(ConfigError::MissingRequired {
-                    field: "oracle_password or ATP_PASSWORD".to_string(),
-                })?,
+                self.oracle_user
+                    .clone()
+                    .ok_or(ConfigError::MissingRequired {
+                        field: "oracle_user or ATP_USER".to_string(),
+                    })?,
+                self.oracle_password
+                    .clone()
+                    .ok_or(ConfigError::MissingRequired {
+                        field: "oracle_password or ATP_PASSWORD".to_string(),
+                    })?,
             )
         };
 
