@@ -250,7 +250,7 @@ async fn v1_embeddings(
 async fn v1_messages(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
-    Json(body): Json<CreateMessageRequest>,
+    ValidatedJson(body): ValidatedJson<CreateMessageRequest>,
 ) -> Response {
     state
         .router
