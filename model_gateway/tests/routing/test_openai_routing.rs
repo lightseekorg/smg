@@ -874,6 +874,7 @@ fn oracle_config_validation_accepts_dsn_only() {
         .oracle_history(OracleConfig {
             wallet_path: None,
             connect_descriptor: "tcps://db.example.com:1522/service".to_string(),
+            external_auth: false,
             username: "scott".to_string(),
             password: "tiger".to_string(),
             pool_min: 1,
@@ -892,6 +893,7 @@ fn oracle_config_validation_accepts_wallet_alias() {
         .oracle_history(OracleConfig {
             wallet_path: Some("/etc/sglang/oracle-wallet".to_string()),
             connect_descriptor: "db_low".to_string(),
+            external_auth: false,
             username: "app_user".to_string(),
             password: "secret".to_string(),
             pool_min: 1,
@@ -903,4 +905,44 @@ fn oracle_config_validation_accepts_wallet_alias() {
     config
         .validate()
         .expect("wallet-based config should validate");
+}
+
+#[test]
+fn oracle_config_validation_for_external_auth() {
+    let config = RouterConfig::builder()
+        .openai_mode(vec!["https://api.openai.com".to_string()])
+        .oracle_history(OracleConfig {
+            wallet_path: None,
+            connect_descriptor: "db_high".to_string(),
+            external_auth: true,
+            username: "".to_string(),
+            password: "".to_string(),
+            pool_min: 1,
+            pool_max: 4,
+            pool_timeout_secs: 30,
+        })
+        .build_unchecked();
+
+    config
+        .validate()
+        .expect("external auth config should validate without password");
+
+    let config_fail = RouterConfig::builder()
+        .openai_mode(vec!["https://api.openai.com".to_string()])
+        .oracle_history(OracleConfig {
+            wallet_path: None,
+            connect_descriptor: "db_high".to_string(),
+            external_auth: true,
+            username: "some_user".to_string(),
+            password: "".to_string(),
+            pool_min: 1,
+            pool_max: 4,
+            pool_timeout_secs: 30,
+        })
+        .build_unchecked();
+
+    assert!(
+        config_fail.validate().is_err(),
+        "validation should fail for external auth with a username"
+    );
 }
