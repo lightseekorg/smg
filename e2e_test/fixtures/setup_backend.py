@@ -94,6 +94,11 @@ def _create_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
         },
     )
 
+    # Propagate log_dir to the model pool so worker output goes to the same folder
+    log_dir = gateway_config.get("log_dir")
+    if log_dir:
+        model_pool.log_dir = log_dir
+
     # PD disaggregation backends - explicit connection modes
     if backend_name == "pd_http":
         return _setup_pd_http_backend(request, model_pool, model_id, workers_config, gateway_config)

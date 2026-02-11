@@ -324,16 +324,20 @@ class ModelPool:
         instance = pool.get("meta-llama/Llama-3.1-8B-Instruct", "http")  # Pre-launched or on-demand
     """
 
-    def __init__(self, allocator: GPUAllocator | None = None):
+    def __init__(self, allocator: GPUAllocator | None = None, log_dir: str | None = None):
         """Initialize the model pool.
 
         Args:
             allocator: GPU allocator to use. If None, creates a new one.
+            log_dir: Directory to store worker log files. If None, worker output
+                     is discarded (DEVNULL).
         """
         self.allocator = allocator or GPUAllocator()
         self.instances: dict[str, ModelInstance] = {}  # key = "model_id:mode"
         self._startup_timeout = DEFAULT_STARTUP_TIMEOUT
         self._lock = threading.RLock()  # Protects instances dict
+        self.log_dir = log_dir
+        self._log_files: list = []  # Track open log file handles
 
     def startup(
         self,
@@ -582,12 +586,28 @@ class ModelPool:
 
         show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
 
+        # Determine output targets: terminal, log file, or devnull
+        log_file = None
+        if show_output:
+            stdout_target = None
+            stderr_target = None
+        elif self.log_dir:
+            os.makedirs(self.log_dir, exist_ok=True)
+            safe_key = key.replace("/", "__")
+            log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
+            self._log_files.append(log_file)
+            stdout_target = log_file
+            stderr_target = subprocess.STDOUT
+        else:
+            stdout_target = subprocess.DEVNULL
+            stderr_target = subprocess.DEVNULL
+
         # Start the process
         proc = subprocess.Popen(
             cmd,
             env=env,
-            stdout=None if show_output else subprocess.DEVNULL,
-            stderr=None if show_output else subprocess.DEVNULL,
+            stdout=stdout_target,
+            stderr=stderr_target,
             start_new_session=True,
         )
 
@@ -1227,11 +1247,27 @@ class ModelPool:
 
         show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
 
+        # Determine output targets: terminal, log file, or devnull
+        log_file = None
+        if show_output:
+            stdout_target = None
+            stderr_target = None
+        elif self.log_dir:
+            os.makedirs(self.log_dir, exist_ok=True)
+            safe_key = key.replace("/", "__")
+            log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
+            self._log_files.append(log_file)
+            stdout_target = log_file
+            stderr_target = subprocess.STDOUT
+        else:
+            stdout_target = subprocess.DEVNULL
+            stderr_target = subprocess.DEVNULL
+
         proc = subprocess.Popen(
             cmd,
             env=env,
-            stdout=None if show_output else subprocess.DEVNULL,
-            stderr=None if show_output else subprocess.DEVNULL,
+            stdout=stdout_target,
+            stderr=stderr_target,
             start_new_session=True,
         )
 
@@ -1547,6 +1583,14 @@ class ModelPool:
                 if instance.gpu_slot:
                     self.allocator.release_slot(instance.gpu_slot)
             self.instances.clear()
+
+            # Close any open log files
+            for f in self._log_files:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            self._log_files.clear()
 
     def __enter__(self) -> ModelPool:
         return self

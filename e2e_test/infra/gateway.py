@@ -341,17 +341,11 @@ class Gateway:
         logger.info("Starting %s on port %d", log_msg or "gateway", self.port)
         logger.debug("Gateway command: %s", " ".join(cmd))
 
-        # Redirect subprocess output to a log file when not showing output,
-        # so the pipe buffer never fills up and blocks the router process.
-        self._log_file = None
+        # Discard subprocess output when not showing it, so the pipe buffer
+        # never fills up and blocks the router process.
         if show_output:
             stdout_target = None
             stderr_target = None
-        elif self.log_dir:
-            os.makedirs(self.log_dir, exist_ok=True)
-            self._log_file = open(os.path.join(self.log_dir, f"gateway-{self.port}.log"), "w")
-            stdout_target = self._log_file
-            stderr_target = subprocess.STDOUT
         else:
             stdout_target = subprocess.DEVNULL
             stderr_target = subprocess.DEVNULL

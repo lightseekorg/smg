@@ -70,6 +70,7 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, worker_count=1, **
             server_engine=runtime_display,
             gpu_type=gpu_type,
             gpu_count=gpu_count,
+            log_dir=gateway.log_dir,
             **kwargs,
         )
         return
@@ -86,6 +87,7 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, worker_count=1, **
         server_engine=runtime_display,
         gpu_type=gpu_type,
         gpu_count=gpu_count,
+        log_dir=gateway.log_dir,
         **kwargs,
     )
 
