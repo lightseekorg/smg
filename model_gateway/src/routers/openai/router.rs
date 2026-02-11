@@ -140,7 +140,7 @@ impl OpenAIRouter {
         &self,
         worker: &Arc<dyn Worker>,
         auth_header: Option<&HeaderValue>,
-    ) -> bool {
+    ) -> Vec<ModelCard> {
         let url = format!("{}/v1/models", worker.url());
         let mut backend_req = self.shared_components.client.get(&url);
         if let Some(auth) = auth_header {
@@ -164,15 +164,15 @@ impl OpenAIRouter {
                                     model_cards.len(),
                                     url
                                 );
-                                worker.set_models(model_cards);
-                                return true;
+                                worker.set_models(model_cards.clone());
+                                return model_cards;
                             }
                         }
-                        false
+                        vec![]
                     }
                     Err(e) => {
                         tracing::warn!("Failed to parse models response: {}", e);
-                        false
+                        vec![]
                     }
                 }
             }
@@ -182,16 +182,16 @@ impl OpenAIRouter {
                     response.status(),
                     url
                 );
-                false
+                vec![]
             }
             Err(e) => {
                 tracing::warn!("Failed to fetch models from backend: {}", e);
-                false
+                vec![]
             }
         }
     }
 
-    async fn refresh_external_models(&self, auth_header: Option<&HeaderValue>) {
+    async fn refresh_external_models(&self, auth_header: Option<&HeaderValue>) -> Vec<ModelCard> {
         let external_workers = self.worker_registry.get_workers_filtered(
             None,
             None,
@@ -201,7 +201,7 @@ impl OpenAIRouter {
         );
 
         if external_workers.is_empty() {
-            return;
+            return vec![];
         }
 
         tracing::debug!(
@@ -214,7 +214,7 @@ impl OpenAIRouter {
             .map(|w| self.refresh_worker_models(w, auth_header))
             .collect();
 
-        join_all(futures).await;
+        join_all(futures).await.into_iter().flatten().collect()
     }
 
     /// Find workers that can handle the given model and select the least loaded one
@@ -374,40 +374,38 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         }
 
         let auth_header = extract_auth_header(Some(req.headers()), &None);
-        self.refresh_external_models(auth_header.as_ref()).await;
+        let model_cards = self.refresh_external_models(auth_header.as_ref()).await;
 
         let mut all_models = Vec::new();
         let mut seen_models = HashSet::new();
 
-        for worker in &external_workers {
-            for model_card in worker.models() {
-                let owned_by = model_card
-                    .provider
-                    .as_ref()
-                    .map(|p| format!("{:?}", p).to_lowercase())
-                    .unwrap_or_else(|| "unknown".to_string());
+        for model_card in &model_cards {
+            let owned_by = model_card
+                .provider
+                .as_ref()
+                .map(|p| format!("{:?}", p).to_lowercase())
+                .unwrap_or_else(|| "unknown".to_string());
 
-                if seen_models.insert(model_card.id.clone()) {
+            if seen_models.insert(model_card.id.clone()) {
+                all_models.push(json!({
+                    "id": &model_card.id,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": &owned_by,
+                    "aliases": model_card.aliases,
+                    "model_type": format!("{:?}", model_card.model_type),
+                }));
+            }
+
+            for alias in &model_card.aliases {
+                if seen_models.insert(alias.clone()) {
                     all_models.push(json!({
-                        "id": &model_card.id,
+                        "id": alias,
                         "object": "model",
                         "created": 0,
                         "owned_by": &owned_by,
-                        "aliases": model_card.aliases,
-                        "model_type": format!("{:?}", model_card.model_type),
+                        "primary_model": &model_card.id,
                     }));
-                }
-
-                for alias in &model_card.aliases {
-                    if seen_models.insert(alias.clone()) {
-                        all_models.push(json!({
-                            "id": alias,
-                            "object": "model",
-                            "created": 0,
-                            "owned_by": &owned_by,
-                            "primary_model": &model_card.id,
-                        }));
-                    }
                 }
             }
         }
