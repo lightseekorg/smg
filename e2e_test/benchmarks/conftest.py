@@ -31,7 +31,6 @@ def _build_command(
     server_engine: str | None = None,
     gpu_type: str | None = None,
     gpu_count: int | None = None,
-    container_name: str | None = None,
 ) -> list[str]:
     """Build genai-bench command via docker run."""
     image = os.environ.get("GENAI_BENCH_IMAGE", _DEFAULT_IMAGE)
@@ -40,8 +39,7 @@ def _build_command(
     cmd = [
         "docker",
         "run",
-        "--name",
-        container_name or experiment_folder,
+        "--rm",
         "--network",
         "host",
         "-v",
@@ -89,6 +87,9 @@ def _build_command(
         cmd.extend(["--server-gpu-type", gpu_type])
     if gpu_count:
         cmd.extend(["--server-gpu-count", str(gpu_count)])
+    log_dir = os.environ.get("E2E_LOG_DIR")
+    if log_dir:
+        cmd.extend(["--log-dir", log_dir])
     return cmd
 
 
@@ -179,7 +180,6 @@ def genai_bench_runner():
         max_requests = max_requests_per_run or (num_concurrency or 32) * 5
         timeout = timeout_sec or int(os.environ.get("GENAI_BENCH_TEST_TIMEOUT", "120"))
 
-        container_name = f"genai-bench-{experiment_folder}"
         cmd = _build_command(
             router_url,
             model_path,
@@ -192,14 +192,9 @@ def genai_bench_runner():
             server_engine=server_engine,
             gpu_type=gpu_type,
             gpu_count=gpu_count,
-            container_name=container_name,
         )
 
         logger.info("Running genai-bench command: %s", " ".join(cmd))
-
-        # Remove leftover container from a previous run if it exists
-        subprocess.run(["docker", "rm", "-f", container_name],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         try:
             proc = subprocess.Popen(
@@ -224,11 +219,6 @@ def genai_bench_runner():
             proc.kill()
             proc.wait()
             logger.error("genai-bench timed out after %ds", timeout)
-
-        # Show container logs in CI output
-        subprocess.run(["docker", "logs", container_name])
-        subprocess.run(["docker", "rm", container_name],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         # Fail immediately if genai-bench failed
         if proc.returncode != 0:
