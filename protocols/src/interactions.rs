@@ -9,7 +9,7 @@ use serde_with::skip_serializing_none;
 use validator::{Validate, ValidationError};
 
 use super::{
-    common::{default_true, Function, GenerationRequest},
+    common::{default_model, default_true, Function, GenerationRequest},
     sampling_params::validate_top_p_value,
 };
 
@@ -23,12 +23,10 @@ use super::{
 pub struct InteractionsRequest {
     /// Model identifier (e.g., "gemini-2.5-flash")
     /// Required if agent is not provided
-    #[validate(custom(function = "validate_model"))]
     pub model: Option<String>,
 
     /// Agent name (e.g., "deep-research-pro-preview-12-2025")
     /// Required if model is not provided
-    #[validate(custom(function = "validate_agent"))]
     pub agent: Option<String>,
 
     /// Input content - can be string or array of Content objects
@@ -77,7 +75,7 @@ pub struct InteractionsRequest {
 impl Default for InteractionsRequest {
     fn default() -> Self {
         Self {
-            model: Some("gemini-2.5-flash".to_string()),
+            model: Some(default_model()),
             agent: None,
             agent_config: None,
             input: InteractionsInput::Text(String::new()),
@@ -1073,51 +1071,6 @@ pub enum ResponseModality {
 
 fn is_option_blank(v: &Option<String>) -> bool {
     v.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true)
-}
-
-const VALID_MODELS: &[&str] = &[
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-preview-09-2025",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash-lite-preview-09-2025",
-    "gemini-2.5-flash-preview-native-audio-dialog",
-    "gemini-2.5-flash-image-preview",
-    "gemini-2.5-pro-preview-tts",
-    "gemini-3-pro-preview",
-    "gemini-3-flash-preview",
-];
-
-const VALID_AGENTS: &[&str] = &["deep-research-pro-preview-12-2025"];
-
-fn validate_agent(agent: &str) -> Result<(), ValidationError> {
-    if agent != agent.trim() {
-        let mut e = ValidationError::new("invalid_agent");
-        e.message = Some("Agent identifier must not have leading or trailing whitespace.".into());
-        return Err(e);
-    }
-    if !agent.is_empty() && !VALID_AGENTS.contains(&agent) {
-        let mut e = ValidationError::new("invalid_agent");
-        e.message =
-            Some(format!("Agent: \"{agent}\" is not supported for interactions api.").into());
-        return Err(e);
-    }
-    Ok(())
-}
-
-fn validate_model(model: &str) -> Result<(), ValidationError> {
-    if model != model.trim() {
-        let mut e = ValidationError::new("invalid_model");
-        e.message = Some("Model identifier must not have leading or trailing whitespace.".into());
-        return Err(e);
-    }
-    if !model.is_empty() && !VALID_MODELS.contains(&model) {
-        let mut e = ValidationError::new("invalid_model");
-        e.message =
-            Some(format!("Model: \"{model}\" is not supported for interactions api.").into());
-        return Err(e);
-    }
-    Ok(())
 }
 
 fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), ValidationError> {
