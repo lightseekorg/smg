@@ -602,13 +602,19 @@ class ModelPool:
                 stderr_target = subprocess.DEVNULL
 
         # Start the process
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=stdout_target,
-            stderr=stderr_target,
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=stdout_target,
+                stderr=stderr_target,
+                start_new_session=True,
+            )
+        except Exception:
+            lf = self._log_files.pop(key, None)
+            if lf is not None:
+                lf.close()
+            raise
 
         base_url = f"http://{DEFAULT_HOST}:{port}"
         instance = ModelInstance(
@@ -1269,13 +1275,19 @@ class ModelPool:
                 stdout_target = subprocess.DEVNULL
                 stderr_target = subprocess.DEVNULL
 
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=stdout_target,
-            stderr=stderr_target,
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=stdout_target,
+                stderr=stderr_target,
+                start_new_session=True,
+            )
+        except Exception:
+            lf = self._log_files.pop(key, None)
+            if lf is not None:
+                lf.close()
+            raise
 
         base_url = f"grpc://{DEFAULT_HOST}:{port}"
         instance = ModelInstance(
