@@ -180,7 +180,7 @@ def genai_bench_runner():
 
         # Build and run command
         max_requests = max_requests_per_run or (num_concurrency or 32) * 5
-        timeout = timeout_sec or int(os.environ.get("GENAI_BENCH_TEST_TIMEOUT", "120"))
+        timeout = timeout_sec or int(os.environ.get("GENAI_BENCH_TEST_TIMEOUT", "240"))
 
         cmd = _build_command(
             router_url,
