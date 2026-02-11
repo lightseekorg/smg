@@ -592,7 +592,7 @@ class ModelPool:
         if not show_output:
             if self.log_dir:
                 os.makedirs(self.log_dir, exist_ok=True)
-                safe_key = key.replace("/", "__")
+                safe_key = key.replace("/", "__").replace(":", "_")
                 log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
                 self._log_files.append(log_file)
                 stdout_target = log_file
@@ -1252,7 +1252,7 @@ class ModelPool:
         if not show_output:
             if self.log_dir:
                 os.makedirs(self.log_dir, exist_ok=True)
-                safe_key = key.replace("/", "__")
+                safe_key = key.replace("/", "__").replace(":", "_")
                 log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
                 self._log_files.append(log_file)
                 stdout_target = log_file
