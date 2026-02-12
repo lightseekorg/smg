@@ -114,6 +114,9 @@ async fn run_tool_loop(
     let request_id = format!("msg_{}", uuid::Uuid::new_v4());
     let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &request_id);
 
+    // Ensure stream flag is set (avoids cloning the request per iteration)
+    req_ctx.request.stream = Some(true);
+
     let mut global_index: u32 = 0;
     let mut total_input_tokens: u32 = 0;
     let mut total_output_tokens: u32 = 0;
@@ -223,15 +226,11 @@ async fn stream_one_iteration(
 
     let (url, req_headers) = handler::build_worker_request(&*worker, req_ctx.headers.as_ref());
 
-    // Ensure stream: true on the request sent to worker
-    let mut worker_request = req_ctx.request.clone();
-    worker_request.stream = Some(true);
-
     let response = handler::send_worker_request(
         &router.http_client,
         &url,
         &req_headers,
-        &worker_request,
+        &req_ctx.request,
         router.request_timeout,
         &*worker,
     )
@@ -297,10 +296,11 @@ async fn consume_upstream_stream(
 
         // Process complete SSE frames (delimited by double newline)
         while let Some(frame_end) = buffer.find("\n\n") {
-            let frame = buffer[..frame_end].to_string();
-            buffer = buffer[frame_end + 2..].to_string();
+            // drain the frame + delimiter, leaving the remainder in buffer
+            let frame: String = buffer.drain(..frame_end + 2).collect();
+            let frame = &frame[..frame.len() - 2]; // strip trailing \n\n
 
-            if let Some((event_type, data)) = parse_sse_frame(&frame) {
+            if let Some((event_type, data)) = parse_sse_frame(frame) {
                 process_sse_event(
                     tx,
                     &event_type,
@@ -367,7 +367,7 @@ async fn process_sse_event(
     result: &mut StreamedResponse,
     upstream_blocks: &mut Vec<BlockAccumulator>,
 ) -> Result<(), String> {
-    let parsed: Value =
+    let mut parsed: Value =
         serde_json::from_str(data).map_err(|e| format!("Failed to parse SSE data: {}", e))?;
 
     match event_type {
@@ -446,9 +446,8 @@ async fn process_sse_event(
                 }
                 _ => {
                     // Forward text, thinking, etc. with remapped index
-                    let mut event = parsed.clone();
-                    event["index"] = Value::from(client_index);
-                    send_sse(tx, "content_block_start", &event).await;
+                    parsed["index"] = Value::from(client_index);
+                    send_sse(tx, "content_block_start", &parsed).await;
 
                     upstream_blocks[upstream_index as usize] = match block_type {
                         "thinking" => BlockAccumulator::Thinking {
@@ -467,12 +466,7 @@ async fn process_sse_event(
             let upstream_index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let client_index = index_base + upstream_index;
 
-            // Forward delta with remapped index
-            let mut event = parsed.clone();
-            event["index"] = Value::from(client_index);
-            send_sse(tx, "content_block_delta", &event).await;
-
-            // Accumulate content
+            // Accumulate content BEFORE mutating parsed (we need to read delta)
             if let Some(delta) = parsed.get("delta") {
                 let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -516,6 +510,10 @@ async fn process_sse_event(
                     }
                 }
             }
+
+            // Forward delta with remapped index — mutate in-place, no clone needed
+            parsed["index"] = Value::from(client_index);
+            send_sse(tx, "content_block_delta", &parsed).await;
         }
 
         "content_block_stop" => {
