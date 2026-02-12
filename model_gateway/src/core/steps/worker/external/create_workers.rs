@@ -4,6 +4,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tracing::{debug, info};
+use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::{
     core::{
@@ -13,7 +14,6 @@ use crate::{
         BasicWorkerBuilder, ConnectionMode, Worker,
     },
     protocols::worker::HealthCheckConfig,
-    workflow::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
 };
 
 /// Normalize URL for external APIs (ensure https://).

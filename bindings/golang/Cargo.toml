@@ -24,6 +24,9 @@ async-trait = "0.1"
 path = "../../model_gateway"
 default-features = true
 
+[dependencies.smg-grpc-client]
+workspace = true
+
 [features]
 default = []
 vendored-openssl = ["smg/vendored-openssl"]

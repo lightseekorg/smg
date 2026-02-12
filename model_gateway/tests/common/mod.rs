@@ -26,9 +26,6 @@ use smg::{
         BasicWorkerBuilder, Job, LoadMonitor, ModelCard, RuntimeType, Worker, WorkerRegistry,
         WorkerType,
     },
-    data_connector::{
-        MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
-    },
     middleware::TokenBucket,
     policies::PolicyRegistry,
     protocols::common::{Function, Tool},
@@ -36,6 +33,9 @@ use smg::{
     routers::{RouterFactory, RouterTrait},
     tokenizer::registry::TokenizerRegistry,
     tool_parser::ParserFactory as ToolParserFactory,
+};
+use smg_data_connector::{
+    MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
 };
 #[allow(unused_imports)]
 pub use test_config::{TestRouterConfig, TestWorkerConfig};
@@ -385,7 +385,7 @@ pub async fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
     }
 
     // Initialize MCP orchestrator with empty config
-    use smg::mcp::{McpConfig, McpOrchestrator};
+    use smg_mcp::{McpConfig, McpOrchestrator};
     let empty_config = McpConfig {
         servers: vec![],
         pool: Default::default(),
@@ -510,7 +510,7 @@ pub async fn create_test_context_with_parsers(config: RouterConfig) -> Arc<AppCo
     }
 
     // Initialize MCP orchestrator with empty config
-    use smg::mcp::{McpConfig, McpOrchestrator};
+    use smg_mcp::{McpConfig, McpOrchestrator};
     let empty_config = McpConfig {
         servers: vec![],
         pool: Default::default(),
@@ -536,7 +536,7 @@ pub async fn create_test_context_with_mcp_config(
     config: RouterConfig,
     mcp_config_path: &str,
 ) -> Arc<AppContext> {
-    use smg::mcp::{McpConfig, McpOrchestrator};
+    use smg_mcp::{McpConfig, McpOrchestrator};
 
     let client = reqwest::Client::new();
 

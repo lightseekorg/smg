@@ -2,12 +2,10 @@
 
 use std::sync::Arc;
 
+use smg_mcp::{BuiltinToolType, McpOrchestrator, McpServerConfig, McpTransport, ResponseFormat};
 use tracing::{debug, warn};
 
-use crate::{
-    mcp::{BuiltinToolType, McpOrchestrator, McpServerConfig, McpTransport, ResponseFormat},
-    protocols::responses::{ResponseTool, ResponseToolType},
-};
+use crate::protocols::responses::{ResponseTool, ResponseToolType};
 
 /// Default maximum tool loop iterations (safety limit).
 pub const DEFAULT_MAX_ITERATIONS: usize = 10;
@@ -207,11 +205,10 @@ pub async fn ensure_request_mcp_client(
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
+    use smg_mcp::{McpConfig, ResponseFormatConfig, ToolConfig};
+
     use super::*;
-    use crate::{
-        mcp::{McpConfig, ResponseFormatConfig, ToolConfig},
-        protocols::responses::ResponseTool,
-    };
+    use crate::protocols::responses::ResponseTool;
 
     /// Create a test orchestrator with a built-in server configuration
     async fn create_test_orchestrator_with_builtin() -> Arc<McpOrchestrator> {

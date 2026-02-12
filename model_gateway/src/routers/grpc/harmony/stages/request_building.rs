@@ -247,7 +247,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                 }
                 ProtoGenerateRequest::Trtllm(req) => {
                     // TensorRT-LLM uses stop_words (repeated TokenSequence) instead of stop_token_ids
-                    use crate::grpc_client::trtllm_proto::TokenSequence;
+                    use smg_grpc_client::trtllm_proto::TokenSequence;
                     for &token_id in harmony_stops {
                         req.stop_words.push(TokenSequence {
                             token_ids: vec![token_id],

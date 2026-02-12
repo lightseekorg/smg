@@ -14,6 +14,7 @@ use axum::{
 };
 use futures_util::{future::join_all, StreamExt};
 use serde_json::{json, to_value, Value};
+use smg_data_connector::{ConversationId, ListParams, ResponseId, SortOrder};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -33,7 +34,6 @@ use crate::{
         is_retryable_status, Endpoint, ModelCard, ProviderType, RetryExecutor, RuntimeType, Worker,
         WorkerRegistry,
     },
-    data_connector::{ConversationId, ListParams, ResponseId, SortOrder},
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     protocols::{
         chat::ChatCompletionRequest,

@@ -5,6 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 use axum::response::Response;
 use http::StatusCode;
 use serde_json::{json, Map, Value};
+use smg_grpc_client::trtllm_proto::{GenerateRequest as TrtllmGenerateRequest, TokenSequence};
 use tracing::{error, warn};
 use uuid::Uuid;
 
@@ -16,7 +17,6 @@ use super::{
 };
 use crate::{
     core::Worker,
-    grpc_client::trtllm_proto::{GenerateRequest as TrtllmGenerateRequest, TokenSequence},
     observability::metrics::metrics_labels,
     protocols::{
         chat::{ChatCompletionRequest, ChatMessage},
