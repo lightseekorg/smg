@@ -26,9 +26,9 @@ use crate::{
 pub(crate) async fn execute_tool_loop(
     router: &RouterContext,
     mut req_ctx: RequestContext,
-    mcp_servers: Vec<(String, String)>,
 ) -> Response {
     let request_id = format!("msg_{}", uuid::Uuid::new_v4());
+    let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
     let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &request_id);
 
     let mut all_mcp_calls: Vec<McpToolCall> = Vec::new();

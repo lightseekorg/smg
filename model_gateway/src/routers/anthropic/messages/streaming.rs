@@ -60,14 +60,13 @@ const MAX_BLOCK_ACCUMULATION_SIZE: usize = 10 * 1024 * 1024;
 pub(crate) async fn execute_streaming_tool_loop(
     router: &RouterContext,
     req_ctx: RequestContext,
-    mcp_servers: Vec<(String, String)>,
 ) -> Response {
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(SSE_CHANNEL_SIZE);
 
     let router = router.clone();
 
     tokio::spawn(async move {
-        if let Err(e) = run_tool_loop(tx.clone(), router, req_ctx, mcp_servers).await {
+        if let Err(e) = run_tool_loop(tx.clone(), router, req_ctx).await {
             warn!(error = %e, "Streaming tool loop failed");
             let _ = send_sse_error(&tx, &e).await;
         }
@@ -109,9 +108,9 @@ async fn run_tool_loop(
     tx: mpsc::Sender<Result<Bytes, std::io::Error>>,
     router: RouterContext,
     mut req_ctx: RequestContext,
-    mcp_servers: Vec<(String, String)>,
 ) -> Result<(), String> {
     let request_id = format!("msg_{}", uuid::Uuid::new_v4());
+    let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
     let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &request_id);
 
     // Ensure stream flag is set (avoids cloning the request per iteration)

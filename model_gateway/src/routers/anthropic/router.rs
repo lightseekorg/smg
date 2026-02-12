@@ -133,25 +133,24 @@ impl RouterTrait for AnthropicRouter {
             request,
             headers: headers_owned,
             model_id: model_id.to_string(),
+            mcp_servers,
         };
 
         if streaming {
-            if let Some(mcp_servers) = mcp_servers {
+            if req_ctx.mcp_servers.is_some() {
                 return super::messages::streaming::execute_streaming_tool_loop(
                     &self.router_ctx,
                     req_ctx,
-                    mcp_servers,
                 )
                 .await;
             }
             return handler::execute_streaming(&self.router_ctx, &req_ctx).await;
         }
 
-        if let Some(mcp_servers) = mcp_servers {
+        if req_ctx.mcp_servers.is_some() {
             return super::messages::non_streaming::execute_tool_loop(
                 &self.router_ctx,
                 req_ctx,
-                mcp_servers,
             )
             .await;
         }
