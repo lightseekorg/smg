@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use axum::response::Response;
 use serde_json::json;
+use smg_mcp::{McpToolSession, ToolExecutionInput};
 use tracing::{debug, error, trace, warn};
 
 use super::{
@@ -20,7 +21,6 @@ use super::{
     conversions,
 };
 use crate::{
-    mcp::{McpToolSession, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse},
     routers::{

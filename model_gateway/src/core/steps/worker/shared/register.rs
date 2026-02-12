@@ -4,6 +4,9 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use tracing::debug;
+use wfaas::{
+    StepExecutor, StepResult, WorkflowContext, WorkflowData, WorkflowError, WorkflowResult,
+};
 
 use crate::{
     core::{
@@ -11,9 +14,6 @@ use crate::{
         worker::{ConnectionModeExt, WorkerTypeExt},
     },
     observability::metrics::Metrics,
-    workflow::{
-        StepExecutor, StepResult, WorkflowContext, WorkflowData, WorkflowError, WorkflowResult,
-    },
 };
 
 /// Unified step to register workers in the registry.

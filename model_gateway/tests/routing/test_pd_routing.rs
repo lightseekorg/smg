@@ -212,12 +212,11 @@ mod pd_routing_unit_tests {
 
                 use smg::{
                     core::{LoadMonitor, WorkerRegistry},
-                    data_connector::{
-                        MemoryConversationItemStorage, MemoryConversationStorage,
-                        MemoryResponseStorage,
-                    },
                     middleware::TokenBucket,
                     policies::PolicyRegistry,
+                };
+                use smg_data_connector::{
+                    MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,
                 };
 
                 let client = reqwest::Client::new();

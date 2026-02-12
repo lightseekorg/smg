@@ -19,6 +19,8 @@ use axum::{
 use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
+use smg_mcp::{McpToolSession, ResponseFormat, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, trace, warn};
@@ -32,8 +34,6 @@ use super::{
     conversions,
 };
 use crate::{
-    data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::{McpToolSession, ResponseFormat, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         chat::{

@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
 use tokio::{signal, spawn};
 use tracing::{debug, error, info, warn, Level};
+use wfaas::LoggingSubscriber;
 
 use crate::{
     app_context::AppContext,
@@ -64,7 +65,6 @@ use crate::{
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
     tokenizer::TokenizerRegistry,
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
-    workflow::LoggingSubscriber,
 };
 #[derive(Clone)]
 pub struct AppState {

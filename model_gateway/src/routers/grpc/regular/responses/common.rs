@@ -7,11 +7,11 @@
 //! - Conversation history loading
 
 use axum::{http, response::Response};
+use smg_data_connector::{self as data_connector, ConversationId, ResponseId};
+use smg_mcp::McpToolSession;
 use tracing::{debug, warn};
 
 use crate::{
-    data_connector::{self, ConversationId, ResponseId},
-    mcp::McpToolSession,
     protocols::{
         chat::ChatCompletionRequest,
         common::{Tool, ToolChoice, ToolChoiceValue},

@@ -10,6 +10,7 @@ use std::{
 use axum::response::Response;
 use bytes::Bytes;
 use serde_json::json;
+use smg_mcp::{McpToolSession, ResponseFormat};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
@@ -18,7 +19,6 @@ use super::{
     types::HarmonyChannelDelta, HarmonyParserAdapter,
 };
 use crate::{
-    mcp::{McpToolSession, ResponseFormat},
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
     protocols::{
         chat::{

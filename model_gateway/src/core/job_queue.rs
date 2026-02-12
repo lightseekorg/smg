@@ -9,8 +9,10 @@ use std::{
 };
 
 use dashmap::DashMap;
+use smg_mcp::McpConfig;
 use tokio::sync::{mpsc, Semaphore};
 use tracing::{debug, error, info, warn};
+use wfaas::WorkflowId;
 
 use crate::{
     app_context::AppContext,
@@ -23,9 +25,7 @@ use crate::{
         McpServerConfigRequest, TokenizerConfigRequest, TokenizerRemovalRequest,
         WasmModuleConfigRequest, WasmModuleRemovalRequest,
     },
-    mcp::McpConfig,
     protocols::worker::{JobStatus, RuntimeType, WorkerSpec, WorkerType, WorkerUpdateRequest},
-    workflow::WorkflowId,
 };
 
 /// Job types for control plane operations

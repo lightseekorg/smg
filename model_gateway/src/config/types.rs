@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+// Re-export storage config types from data_connector
+pub use smg_data_connector::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
 
 use super::ConfigResult;
-// Re-export storage config types from data_connector
-pub use crate::data_connector::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
 use crate::{
     core::ConnectionMode, protocols::worker::HealthCheckConfig as ProtocolHealthCheckConfig,
 };
@@ -84,7 +84,7 @@ pub struct RouterConfig {
     pub ca_certificates: Vec<Vec<u8>>,
     /// Loaded from mcp_config_path during config creation
     #[serde(skip)]
-    pub mcp_config: Option<crate::mcp::McpConfig>,
+    pub mcp_config: Option<smg_mcp::McpConfig>,
     /// Enable WASM support
     #[serde(default)]
     pub enable_wasm: bool,

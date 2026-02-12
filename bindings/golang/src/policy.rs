@@ -22,7 +22,6 @@ use smg::{
         worker::{RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad},
         ConnectionMode, ModelType, Worker, WorkerType,
     },
-    grpc_client::sglang_scheduler::SglangSchedulerClient,
     policies::{
         BucketPolicy, CacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
         RoundRobinPolicy, SelectWorkerInfo,
@@ -31,6 +30,7 @@ use smg::{
     routers::grpc::utils::{generate_tool_constraints, process_chat_messages},
     tokenizer::{create_tokenizer_from_file, traits::Tokenizer},
 };
+use smg_grpc_client::sglang_scheduler::SglangSchedulerClient;
 use uuid::Uuid;
 
 use super::{

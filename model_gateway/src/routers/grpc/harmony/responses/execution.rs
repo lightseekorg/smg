@@ -2,11 +2,11 @@
 
 use axum::response::Response;
 use serde_json::{from_str, json, Value};
+use smg_mcp::{McpToolSession, ToolExecutionInput};
 use tracing::{debug, error};
 
 use super::common::McpCallTracking;
 use crate::{
-    mcp::{McpToolSession, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{common::ToolCall, responses::ResponseTool},
 };

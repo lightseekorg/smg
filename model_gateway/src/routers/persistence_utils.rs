@@ -4,16 +4,14 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::{json, Value};
+use smg_data_connector::{
+    ConversationId, ConversationItem, ConversationItemId, ConversationItemStorage,
+    ConversationStorage, NewConversationItem, ResponseId, ResponseStorage, StoredResponse,
+};
 use tracing::{debug, info, warn};
 
-use crate::{
-    data_connector::{
-        ConversationId, ConversationItem, ConversationItemId, ConversationItemStorage,
-        ConversationStorage, NewConversationItem, ResponseId, ResponseStorage, StoredResponse,
-    },
-    protocols::responses::{
-        generate_id, ResponseInput, ResponseInputOutputItem, ResponsesRequest, StringOrContentParts,
-    },
+use crate::protocols::responses::{
+    generate_id, ResponseInput, ResponseInputOutputItem, ResponsesRequest, StringOrContentParts,
 };
 
 // ============================================================================

@@ -4,12 +4,12 @@ use axum::{body::Body, http::StatusCode, response::Response};
 use bytes::Bytes;
 use http::header::{HeaderValue, CONTENT_TYPE};
 use serde_json::json;
+use smg_mcp::{self as mcp, ResponseFormat};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
 use crate::{
-    mcp::{self, ResponseFormat},
     protocols::{
         chat::ChatCompletionStreamResponse,
         common::{Usage, UsageInfo},
