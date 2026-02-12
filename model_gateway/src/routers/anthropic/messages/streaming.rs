@@ -36,6 +36,18 @@ use crate::{
 /// Channel buffer size for SSE events sent to the client.
 const SSE_CHANNEL_SIZE: usize = 128;
 
+/// Maximum SSE buffer size (1 MB) to prevent DoS from upstream workers
+/// that send data without frame delimiters.
+const MAX_SSE_BUFFER_SIZE: usize = 1024 * 1024;
+
+/// Maximum content block index accepted from an upstream worker.
+/// Prevents OOM from a malicious worker sending an extremely large index.
+const MAX_UPSTREAM_BLOCK_INDEX: u32 = 1024;
+
+/// Maximum accumulated size for a single content block's text/JSON (10 MB).
+/// Prevents unbounded memory growth from a stream of deltas.
+const MAX_BLOCK_ACCUMULATION_SIZE: usize = 10 * 1024 * 1024;
+
 // ============================================================================
 // Public entry point
 // ============================================================================
@@ -105,7 +117,6 @@ async fn run_tool_loop(
     let mut global_index: u32 = 0;
     let mut total_input_tokens: u32 = 0;
     let mut total_output_tokens: u32 = 0;
-    let mut all_mcp_calls: Vec<McpToolCall> = Vec::new();
     let mut is_first_iteration = true;
 
     for iteration in 0..DEFAULT_MAX_ITERATIONS {
@@ -162,8 +173,6 @@ async fn run_tool_loop(
                 return Ok(());
             }
         }
-
-        all_mcp_calls.extend(new_calls);
 
         // Append assistant + tool_result messages for next iteration
         req_ctx.request.messages.push(InputMessage {
@@ -278,6 +287,14 @@ async fn consume_upstream_stream(
         let text = String::from_utf8_lossy(&chunk);
         buffer.push_str(&text);
 
+        // Guard against unbounded buffer growth (DoS protection)
+        if buffer.len() > MAX_SSE_BUFFER_SIZE {
+            return Err(format!(
+                "SSE buffer exceeded maximum size ({} bytes) — possible malformed upstream stream",
+                MAX_SSE_BUFFER_SIZE
+            ));
+        }
+
         // Process complete SSE frames (delimited by double newline)
         while let Some(frame_end) = buffer.find("\n\n") {
             let frame = buffer[..frame_end].to_string();
@@ -364,6 +381,14 @@ async fn process_sse_event(
         "content_block_start" => {
             let upstream_index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
+            // Guard against OOM from a malicious upstream index
+            if upstream_index > MAX_UPSTREAM_BLOCK_INDEX {
+                return Err(format!(
+                    "Upstream content block index {} exceeds maximum ({})",
+                    upstream_index, MAX_UPSTREAM_BLOCK_INDEX
+                ));
+            }
+
             let content_block = parsed.get("content_block").cloned().unwrap_or(Value::Null);
 
             let block_type = content_block
@@ -372,6 +397,13 @@ async fn process_sse_event(
                 .unwrap_or("");
 
             let client_index = index_base + upstream_index;
+
+            // Grow upstream_blocks to fit the new index
+            while upstream_blocks.len() <= upstream_index as usize {
+                upstream_blocks.push(BlockAccumulator::Text {
+                    text: String::new(),
+                });
+            }
 
             match block_type {
                 "tool_use" => {
@@ -406,13 +438,6 @@ async fn process_sse_event(
 
                     send_sse(tx, "content_block_start", &transformed_event).await;
 
-                    // Start accumulating tool input
-                    // Ensure upstream_blocks has enough capacity
-                    while upstream_blocks.len() <= upstream_index as usize {
-                        upstream_blocks.push(BlockAccumulator::Text {
-                            text: String::new(),
-                        });
-                    }
                     upstream_blocks[upstream_index as usize] = BlockAccumulator::ToolUse {
                         id,
                         name,
@@ -425,25 +450,15 @@ async fn process_sse_event(
                     event["index"] = Value::from(client_index);
                     send_sse(tx, "content_block_start", &event).await;
 
-                    // Start accumulating for content reconstruction
-                    while upstream_blocks.len() <= upstream_index as usize {
-                        upstream_blocks.push(BlockAccumulator::Text {
+                    upstream_blocks[upstream_index as usize] = match block_type {
+                        "thinking" => BlockAccumulator::Thinking {
+                            thinking: String::new(),
+                            signature: String::new(),
+                        },
+                        _ => BlockAccumulator::Text {
                             text: String::new(),
-                        });
-                    }
-                    match block_type {
-                        "thinking" => {
-                            upstream_blocks[upstream_index as usize] = BlockAccumulator::Thinking {
-                                thinking: String::new(),
-                                signature: String::new(),
-                            };
-                        }
-                        _ => {
-                            upstream_blocks[upstream_index as usize] = BlockAccumulator::Text {
-                                text: String::new(),
-                            };
-                        }
-                    }
+                        },
+                    };
                 }
             }
         }
@@ -465,14 +480,18 @@ async fn process_sse_event(
                     match block {
                         BlockAccumulator::Text { text } if delta_type == "text_delta" => {
                             if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
-                                text.push_str(t);
+                                if text.len() + t.len() <= MAX_BLOCK_ACCUMULATION_SIZE {
+                                    text.push_str(t);
+                                }
                             }
                         }
                         BlockAccumulator::ToolUse { input_json, .. }
                             if delta_type == "input_json_delta" =>
                         {
                             if let Some(json) = delta.get("partial_json").and_then(|v| v.as_str()) {
-                                input_json.push_str(json);
+                                if input_json.len() + json.len() <= MAX_BLOCK_ACCUMULATION_SIZE {
+                                    input_json.push_str(json);
+                                }
                             }
                         }
                         BlockAccumulator::Thinking {
@@ -481,11 +500,15 @@ async fn process_sse_event(
                         } => {
                             if delta_type == "thinking_delta" {
                                 if let Some(t) = delta.get("thinking").and_then(|v| v.as_str()) {
-                                    thinking.push_str(t);
+                                    if thinking.len() + t.len() <= MAX_BLOCK_ACCUMULATION_SIZE {
+                                        thinking.push_str(t);
+                                    }
                                 }
                             } else if delta_type == "signature_delta" {
                                 if let Some(s) = delta.get("signature").and_then(|v| v.as_str()) {
-                                    signature.push_str(s);
+                                    if signature.len() + s.len() <= MAX_BLOCK_ACCUMULATION_SIZE {
+                                        signature.push_str(s);
+                                    }
                                 }
                             }
                         }
@@ -520,8 +543,14 @@ async fn process_sse_event(
                         name,
                         input_json,
                     } => {
-                        let input: Value = serde_json::from_str(input_json)
-                            .unwrap_or(Value::Object(serde_json::Map::new()));
+                        let input: Value = serde_json::from_str(input_json).unwrap_or_else(|e| {
+                            warn!(
+                                error = %e,
+                                json = %input_json,
+                                "Failed to parse tool input JSON, using empty object"
+                            );
+                            Value::Object(serde_json::Map::new())
+                        });
 
                         result.content_blocks.push(ContentBlock::ToolUse {
                             id: id.clone(),
@@ -689,12 +718,16 @@ async fn emit_final_events(
         }
     });
 
-    send_sse(tx, "message_delta", &message_delta).await;
+    if !send_sse(tx, "message_delta", &message_delta).await {
+        debug!("Failed to send final message_delta — channel closed");
+    }
 
     let message_stop = serde_json::json!({
         "type": "message_stop"
     });
-    send_sse(tx, "message_stop", &message_stop).await;
+    if !send_sse(tx, "message_stop", &message_stop).await {
+        debug!("Failed to send message_stop — channel closed");
+    }
 }
 
 // ============================================================================
