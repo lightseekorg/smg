@@ -32,6 +32,7 @@ MODEL_SPECS: dict[str, dict] = {
         "memory_gb": 16,
         "tp": 1,
         "features": ["chat", "streaming", "function_calling"],
+        "vllm_args": ["--attention-backend", "FLASHINFER"],
     },
     # Small model for quick tests
     "meta-llama/Llama-3.2-1B-Instruct": {
@@ -39,6 +40,7 @@ MODEL_SPECS: dict[str, dict] = {
         "memory_gb": 4,
         "tp": 1,
         "features": ["chat", "streaming", "tool_choice"],
+        "vllm_args": ["--attention-backend", "FLASHINFER"],
     },
     # Function calling specialist
     "Qwen/Qwen2.5-7B-Instruct": {
@@ -46,6 +48,7 @@ MODEL_SPECS: dict[str, dict] = {
         "memory_gb": 14,
         "tp": 1,
         "features": ["chat", "streaming", "function_calling", "pythonic_tools"],
+        "vllm_args": ["--attention-backend", "FLASHINFER"],
     },
     # Function calling specialist (larger, for Response API tests)
     "Qwen/Qwen2.5-14B-Instruct": {
@@ -54,6 +57,7 @@ MODEL_SPECS: dict[str, dict] = {
         "tp": 2,
         "features": ["chat", "streaming", "function_calling", "pythonic_tools"],
         "worker_args": ["--context-length=16384"],  # Faster startup, prevents memory issues
+        "vllm_args": ["--attention-backend", "FLASHINFER"],
     },
     # Reasoning model
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B": {
@@ -61,6 +65,7 @@ MODEL_SPECS: dict[str, dict] = {
         "memory_gb": 14,
         "tp": 1,
         "features": ["chat", "streaming", "reasoning"],
+        "vllm_args": ["--attention-backend", "FLASHINFER"],
     },
     # Thinking/reasoning model (larger)
     "Qwen/Qwen3-30B-A3B": {
@@ -68,6 +73,7 @@ MODEL_SPECS: dict[str, dict] = {
         "memory_gb": 60,
         "tp": 4,
         "features": ["chat", "streaming", "thinking", "reasoning"],
+        "vllm_args": ["--attention-backend", "FLASHINFER"],
     },
     # Mistral for function calling
     "mistralai/Mistral-7B-Instruct-v0.3": {
@@ -75,6 +81,7 @@ MODEL_SPECS: dict[str, dict] = {
         "memory_gb": 14,
         "tp": 1,
         "features": ["chat", "streaming", "function_calling"],
+        "vllm_args": ["--attention-backend", "FLASHINFER"],
     },
     # Embedding model
     "embedding": {
@@ -105,6 +112,7 @@ MODEL_SPECS: dict[str, dict] = {
         "vllm_args": [
             "--trust-remote-code",
             "--max-model-len=163840",  # 160K context length (vLLM)
+            "--attention-backend=FLASHINFER",  # fa3 attention backend
         ],
     },
 }

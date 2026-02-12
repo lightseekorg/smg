@@ -1170,9 +1170,6 @@ class ModelPool:
                 "16384",
                 "--gpu-memory-utilization",
                 "0.9",
-                "--attention-backend",
-                "FLASHINFER",
-
             ]
             extra = model_spec.get("vllm_args", [])
         elif runtime == "trtllm":
