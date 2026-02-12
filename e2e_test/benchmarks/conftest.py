@@ -53,9 +53,10 @@ def _build_command(
     if local_model_path:
         cmd.extend(["-v", f"{local_model_path}:{local_model_path}"])
 
-    # Pass through other environment variables the container may need
-    if os.environ.get("HF_TOKEN"):
-        cmd.extend(["-e", "HF_TOKEN"])
+    # Pass through environment variables the container may need
+    for var in ("HF_TOKEN", "HF_HOME"):
+        if os.environ.get(var):
+            cmd.extend(["-e", var])
 
     cmd.extend(
         [
