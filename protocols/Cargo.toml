@@ -19,6 +19,7 @@ axum = ["dep:axum"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
+bitflags.workspace = true
 chrono.workspace = true
 rand.workspace = true
 serde = { workspace = true, features = ["derive"] }

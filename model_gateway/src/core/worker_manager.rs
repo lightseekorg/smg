@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 use crate::{
     core::{metrics_aggregator::MetricPack, ConnectionMode, Worker, WorkerRegistry, WorkerType},
     policies::PolicyRegistry,
-    protocols::worker_spec::{FlushCacheResult, WorkerLoadInfo, WorkerLoadsResult},
+    protocols::worker::{FlushCacheResult, WorkerLoadInfo, WorkerLoadsResult},
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -171,7 +171,7 @@ impl WorkerManager {
                 let api_key = worker.api_key().clone();
                 let worker_type = match worker.worker_type() {
                     WorkerType::Regular => None,
-                    WorkerType::Prefill { .. } => Some("prefill".to_string()),
+                    WorkerType::Prefill => Some("prefill".to_string()),
                     WorkerType::Decode => Some("decode".to_string()),
                 };
                 let is_http = matches!(worker.connection_mode(), ConnectionMode::Http);

@@ -128,12 +128,10 @@ impl RouterManager {
             (ConnectionMode::Http, RoutingMode::PrefillDecode { .. }) => router_ids::HTTP_PD,
             (ConnectionMode::Http, RoutingMode::OpenAI { .. }) => router_ids::HTTP_OPENAI,
             (ConnectionMode::Http, RoutingMode::Anthropic { .. }) => router_ids::HTTP_ANTHROPIC,
-            (ConnectionMode::Grpc { .. }, RoutingMode::Regular { .. }) => router_ids::GRPC_REGULAR,
-            (ConnectionMode::Grpc { .. }, RoutingMode::PrefillDecode { .. }) => router_ids::GRPC_PD,
-            (ConnectionMode::Grpc { .. }, RoutingMode::OpenAI { .. }) => router_ids::GRPC_REGULAR,
-            (ConnectionMode::Grpc { .. }, RoutingMode::Anthropic { .. }) => {
-                router_ids::GRPC_REGULAR
-            }
+            (ConnectionMode::Grpc, RoutingMode::Regular { .. }) => router_ids::GRPC_REGULAR,
+            (ConnectionMode::Grpc, RoutingMode::PrefillDecode { .. }) => router_ids::GRPC_PD,
+            (ConnectionMode::Grpc, RoutingMode::OpenAI { .. }) => router_ids::GRPC_REGULAR,
+            (ConnectionMode::Grpc, RoutingMode::Anthropic { .. }) => router_ids::GRPC_REGULAR,
         }
     }
 
@@ -222,12 +220,9 @@ impl RouterManager {
         let best_router_id = workers
             .iter()
             .map(|w| {
-                let is_pd = matches!(
-                    w.worker_type(),
-                    WorkerType::Prefill { .. } | WorkerType::Decode
-                );
-                let is_grpc = matches!(w.connection_mode(), ConnectionMode::Grpc { .. });
-                let is_external = matches!(w.metadata().runtime_type, RuntimeType::External);
+                let is_pd = matches!(w.worker_type(), WorkerType::Prefill | WorkerType::Decode);
+                let is_grpc = matches!(w.connection_mode(), ConnectionMode::Grpc);
+                let is_external = matches!(w.metadata().spec.runtime_type, RuntimeType::External);
 
                 if is_external {
                     // External workers should be routed via OpenAI-compatible router

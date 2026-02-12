@@ -9,9 +9,10 @@ use crate::{
     core::{
         circuit_breaker::CircuitBreakerConfig,
         steps::workflow_data::{ExternalWorkerWorkflowData, WorkerList},
-        worker::{HealthConfig, RuntimeType, WorkerType},
+        worker::{RuntimeType, WorkerType},
         BasicWorkerBuilder, ConnectionMode, Worker,
     },
+    protocols::worker::HealthCheckConfig,
     workflow::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
 };
 
@@ -52,26 +53,21 @@ impl StepExecutor<ExternalWorkerWorkflowData> for CreateExternalWorkersStep {
             }
         };
 
-        let health_config = {
+        let (health_config, health_endpoint) = {
             let cfg = &app_context.router_config.health_check;
-            HealthConfig {
+            let protocol_config = HealthCheckConfig {
                 timeout_secs: cfg.timeout_secs,
                 check_interval_secs: cfg.check_interval_secs,
-                endpoint: cfg.endpoint.clone(),
-                failure_threshold: cfg.failure_threshold,
                 success_threshold: cfg.success_threshold,
-                disable_health_check: cfg.disable_health_check || config.disable_health_check,
-            }
+                failure_threshold: cfg.failure_threshold,
+                disable_health_check: cfg.disable_health_check
+                    || config.health.disable_health_check,
+            };
+            (protocol_config, cfg.endpoint.clone())
         };
 
         // Build labels from config
-        let mut labels: HashMap<String, String> = config.labels.clone();
-        if let Some(priority) = config.priority {
-            labels.insert("priority".to_string(), priority.to_string());
-        }
-        if let Some(cost) = config.cost {
-            labels.insert("cost".to_string(), cost.to_string());
-        }
+        let labels: HashMap<String, String> = config.labels.clone();
 
         // Normalize URL (ensure https:// for external APIs)
         let normalized_url = normalize_external_url(&config.url);
@@ -83,12 +79,14 @@ impl StepExecutor<ExternalWorkerWorkflowData> for CreateExternalWorkersStep {
             debug!("Creating wildcard worker (no models) for {}", config.url);
 
             let mut builder = BasicWorkerBuilder::new(normalized_url.clone())
-                .models(vec![]) // Empty models = accepts any model
                 .worker_type(WorkerType::Regular)
                 .connection_mode(ConnectionMode::Http)
                 .runtime_type(RuntimeType::External)
                 .circuit_breaker_config(circuit_breaker_config.clone())
-                .health_config(health_config.clone());
+                .health_config(health_config.clone())
+                .health_endpoint(&health_endpoint)
+                .priority(config.priority)
+                .cost(config.cost);
 
             if let Some(ref api_key) = config.api_key {
                 builder = builder.api_key(api_key.clone());
@@ -126,7 +124,10 @@ impl StepExecutor<ExternalWorkerWorkflowData> for CreateExternalWorkersStep {
                     .connection_mode(ConnectionMode::Http)
                     .runtime_type(RuntimeType::External)
                     .circuit_breaker_config(circuit_breaker_config.clone())
-                    .health_config(health_config.clone());
+                    .health_config(health_config.clone())
+                    .health_endpoint(&health_endpoint)
+                    .priority(config.priority)
+                    .cost(config.cost);
 
                 if let Some(ref api_key) = config.api_key {
                     builder = builder.api_key(api_key.clone());
