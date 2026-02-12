@@ -1,14 +1,14 @@
 [build-system]
-requires = ["setuptools>=68.0", "grpcio-tools>=1.62.0"]
+requires = ["setuptools>=68.0", "grpcio-tools>=1.78.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "smg-grpc-proto"
-version = "0.3.2"
+dynamic = ["version"]
 description = "SMG gRPC proto definitions for SGLang, vLLM, and TRT-LLM"
 requires-python = ">=3.10"
 dependencies = [
-    "grpcio>=1.62.0",
+    "grpcio>=1.78.0",
     "protobuf>=5.26.0",
 ]
 readme = "README.md"
@@ -35,6 +35,9 @@ Repository = "https://github.com/lightseekorg/smg"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["smg_grpc_proto*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "smg_grpc_proto.__version__"}
 
 [tool.setuptools.package-data]
 smg_grpc_proto = ["proto/*.proto", "generated/*.py", "generated/*.pyi"]
