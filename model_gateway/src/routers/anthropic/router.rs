@@ -136,6 +136,14 @@ impl RouterTrait for AnthropicRouter {
         };
 
         if streaming {
+            if let Some(mcp_servers) = mcp_servers {
+                return super::messages::streaming::execute_streaming_tool_loop(
+                    &self.router_ctx,
+                    req_ctx,
+                    mcp_servers,
+                )
+                .await;
+            }
             return handler::execute_streaming(&self.router_ctx, &req_ctx).await;
         }
 
