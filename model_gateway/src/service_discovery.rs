@@ -452,9 +452,14 @@ async fn handle_pod_event(
             spec.worker_type = worker_type;
             spec.bootstrap_port = bootstrap_port;
             spec.api_key = app_context.router_config.api_key.clone();
-            spec.health = app_context.router_config.health_check.to_protocol_config();
-            spec.max_connection_attempts =
-                app_context.router_config.health_check.success_threshold * 20;
+            // Health config is resolved at worker build time from router
+            // defaults + per-worker overrides (spec.health).
+            spec.max_connection_attempts = app_context
+                .router_config
+                .health_check
+                .success_threshold
+                .max(1)
+                * 20;
 
             let config = spec;
 

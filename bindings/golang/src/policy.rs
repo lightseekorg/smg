@@ -26,7 +26,10 @@ use smg::{
         BucketPolicy, CacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
         RoundRobinPolicy, SelectWorkerInfo,
     },
-    protocols::{chat::ChatCompletionRequest, worker::WorkerSpec},
+    protocols::{
+        chat::ChatCompletionRequest,
+        worker::{HealthCheckConfig, WorkerSpec},
+    },
     routers::grpc::utils::{generate_tool_constraints, process_chat_messages},
     tokenizer::{create_tokenizer_from_file, traits::Tokenizer},
 };
@@ -63,6 +66,7 @@ impl GrpcWorker {
 
         let metadata = WorkerMetadata {
             spec,
+            health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
             default_model_type: ModelType::LLM,
         };

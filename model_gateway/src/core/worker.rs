@@ -19,7 +19,7 @@ use crate::{
     protocols::{
         model_card::ModelCard,
         model_type::{Endpoint, ModelType},
-        worker::{ProviderType, WorkerInfo, WorkerModels, WorkerSpec},
+        worker::{HealthCheckConfig, ProviderType, WorkerInfo, WorkerModels, WorkerSpec},
     },
     routers::grpc::client::GrpcClient,
 };
@@ -401,6 +401,10 @@ impl WorkerTypeExt for WorkerType {
 pub struct WorkerMetadata {
     /// Protocol-level worker identity and configuration.
     pub spec: WorkerSpec,
+    /// Resolved health check config (router defaults + per-worker overrides).
+    /// This is the concrete config used at runtime; `spec.health` only stores
+    /// the partial overrides from the API layer.
+    pub health_config: HealthCheckConfig,
     /// Health check endpoint path (internal-only, from router config).
     pub health_endpoint: String,
     /// Default model type for unknown models (defaults to LLM capabilities).
@@ -534,7 +538,7 @@ impl Worker for BasicWorker {
     }
 
     async fn check_health_async(&self) -> WorkerResult<()> {
-        if self.metadata.spec.health.disable_health_check {
+        if self.metadata.health_config.disable_health_check {
             if !self.is_healthy() {
                 self.set_healthy(true);
             }
@@ -557,7 +561,7 @@ impl Worker for BasicWorker {
             Metrics::record_worker_health_check(worker_type_str, metrics_labels::CB_SUCCESS);
 
             if !self.is_healthy()
-                && successes >= self.metadata.spec.health.success_threshold as usize
+                && successes >= self.metadata.health_config.success_threshold as usize
             {
                 self.set_healthy(true);
                 self.consecutive_successes.store(0, Ordering::Release);
@@ -570,7 +574,8 @@ impl Worker for BasicWorker {
             // Record health check failure metric
             Metrics::record_worker_health_check(worker_type_str, metrics_labels::CB_FAILURE);
 
-            if self.is_healthy() && failures >= self.metadata.spec.health.failure_threshold as usize
+            if self.is_healthy()
+                && failures >= self.metadata.health_config.failure_threshold as usize
             {
                 self.set_healthy(false);
                 self.consecutive_failures.store(0, Ordering::Release);
@@ -721,7 +726,7 @@ impl Worker for BasicWorker {
     }
 
     async fn grpc_health_check(&self) -> WorkerResult<bool> {
-        let timeout = Duration::from_secs(self.metadata.spec.health.timeout_secs);
+        let timeout = Duration::from_secs(self.metadata.health_config.timeout_secs);
         let maybe = self.get_grpc_client().await?;
         let Some(grpc_client) = maybe else {
             tracing::error!(
@@ -755,7 +760,7 @@ impl Worker for BasicWorker {
     }
 
     async fn http_health_check(&self) -> WorkerResult<bool> {
-        let timeout = Duration::from_secs(self.metadata.spec.health.timeout_secs);
+        let timeout = Duration::from_secs(self.metadata.health_config.timeout_secs);
 
         let url = self.normalised_url()?;
         let health_url = format!("{}{}", url, self.metadata.health_endpoint);
@@ -1172,8 +1177,8 @@ mod tests {
             .health_endpoint("/custom-health")
             .build();
 
-        assert_eq!(worker.metadata().spec.health.timeout_secs, 15);
-        assert_eq!(worker.metadata().spec.health.check_interval_secs, 45);
+        assert_eq!(worker.metadata().health_config.timeout_secs, 15);
+        assert_eq!(worker.metadata().health_config.check_interval_secs, 45);
         assert_eq!(worker.metadata().health_endpoint, "/custom-health");
     }
 
@@ -1681,6 +1686,7 @@ mod tests {
     fn test_worker_metadata_empty_models_accepts_all() {
         let metadata = WorkerMetadata {
             spec: WorkerSpec::new("http://test:8080"),
+            health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
             default_model_type: ModelType::LLM,
         };
@@ -1704,6 +1710,7 @@ mod tests {
         spec.models = WorkerModels::from(vec![model1, model2]);
         let metadata = WorkerMetadata {
             spec,
+            health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
             default_model_type: ModelType::LLM,
         };

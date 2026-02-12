@@ -6,14 +6,11 @@ use async_trait::async_trait;
 use tracing::{debug, info};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::{
-    core::{
-        circuit_breaker::CircuitBreakerConfig,
-        steps::workflow_data::{ExternalWorkerWorkflowData, WorkerList},
-        worker::{RuntimeType, WorkerType},
-        BasicWorkerBuilder, ConnectionMode, Worker,
-    },
-    protocols::worker::HealthCheckConfig,
+use crate::core::{
+    circuit_breaker::CircuitBreakerConfig,
+    steps::workflow_data::{ExternalWorkerWorkflowData, WorkerList},
+    worker::{RuntimeType, WorkerType},
+    BasicWorkerBuilder, ConnectionMode, Worker,
 };
 
 /// Normalize URL for external APIs (ensure https://).
@@ -54,16 +51,12 @@ impl StepExecutor<ExternalWorkerWorkflowData> for CreateExternalWorkersStep {
         };
 
         let (health_config, health_endpoint) = {
-            let cfg = &app_context.router_config.health_check;
-            let protocol_config = HealthCheckConfig {
-                timeout_secs: cfg.timeout_secs,
-                check_interval_secs: cfg.check_interval_secs,
-                success_threshold: cfg.success_threshold,
-                failure_threshold: cfg.failure_threshold,
-                disable_health_check: cfg.disable_health_check
-                    || config.health.disable_health_check,
-            };
-            (protocol_config, cfg.endpoint.clone())
+            let base = app_context.router_config.health_check.to_protocol_config();
+            let merged = config.health.apply_to(&base);
+            (
+                merged,
+                app_context.router_config.health_check.endpoint.clone(),
+            )
         };
 
         // Build labels from config
