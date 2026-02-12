@@ -99,11 +99,8 @@ MODEL_SPECS: dict[str, dict] = {
         "worker_args": [
             "--trust-remote-code",
             "--context-length=163840",  # 160K context length (SGLang)
-            "--prefill-attention-backend=flashinfer",  # MLA attention backend
-            "--decode-attention-backend=flashinfer",  # MLA attention backend
-            "--flashinfer-mla-disable-ragged",  # Disable ragged attention for MLA
-            "--mem-fraction-static=0.9",  # 90% GPU memory for static allocation
-            "--cuda-graph-max-bs=256",  # CUDA graph batch size optimization
+            "--attention-backend=fa3",  # fa3 attention backend
+            "--mem-fraction-static=0.82",  # 90% GPU memory for static allocation
         ],
         "vllm_args": [
             "--trust-remote-code",
