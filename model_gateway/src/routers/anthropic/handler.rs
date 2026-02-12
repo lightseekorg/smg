@@ -97,7 +97,7 @@ pub(crate) async fn execute_streaming(
         Err(resp) => return resp,
     };
 
-    build_streaming_response(response, model_id, start_time, worker)
+    build_streaming_response(response, model_id, start_time, worker).await
 }
 
 // ============================================================================
@@ -310,7 +310,7 @@ async fn handle_error_response(
 }
 
 /// Build a streaming SSE response with load tracking.
-fn build_streaming_response(
+async fn build_streaming_response(
     response: reqwest::Response,
     model_id: &str,
     start_time: Instant,
@@ -319,7 +319,7 @@ fn build_streaming_response(
     let status = response.status();
 
     if !status.is_success() {
-        return build_streaming_error_response(response, model_id, start_time, worker);
+        return build_streaming_error_response(response, model_id, start_time, worker).await;
     }
 
     debug!(model = %model_id, status = %status, "Starting streaming response");
@@ -335,14 +335,14 @@ fn build_streaming_response(
 
     let headers = response.headers().clone();
     let stream = response.bytes_stream();
-    let load_stream = LoadTrackingStream::new(stream, Some(worker));
+    let load_stream = LoadTrackingStream::new(stream, worker);
     let body = Body::from_stream(load_stream);
 
     build_sse_response(status, headers, body)
 }
 
 /// Handle a non-success streaming response.
-fn build_streaming_error_response(
+async fn build_streaming_error_response(
     response: reqwest::Response,
     model_id: &str,
     start_time: Instant,
@@ -381,47 +381,14 @@ fn build_streaming_error_response(
 
         let headers = response.headers().clone();
         let stream = response.bytes_stream();
-        let load_stream = LoadTrackingStream::new_force_failure(stream, Some(worker));
+        let load_stream = LoadTrackingStream::new_force_failure(stream, worker);
         let body = Body::from_stream(load_stream);
 
         return build_sse_response(status, headers, body);
     }
 
-    // Non-SSE error: we need to block on reading the body. Since this is called from
-    // a non-async context (build_streaming_response), we handle it synchronously by
-    // wrapping the error body in a stream that will decrement load on drop.
-    //
-    // For simplicity, return a generic error and let the load-tracking stream handle cleanup.
-    warn!(model = %model_id, status = %status, "Non-SSE error in streaming path");
-
-    Metrics::record_router_duration(
-        metrics_labels::ROUTER_HTTP,
-        metrics_labels::BACKEND_EXTERNAL,
-        metrics_labels::CONNECTION_HTTP,
-        model_id,
-        "messages",
-        start_time.elapsed(),
-    );
-    Metrics::record_router_error(
-        metrics_labels::ROUTER_HTTP,
-        metrics_labels::BACKEND_EXTERNAL,
-        metrics_labels::CONNECTION_HTTP,
-        model_id,
-        "messages",
-        metrics_labels::ERROR_BACKEND,
-    );
-
-    // Use force_failure stream so circuit breaker records failure
-    let stream = response.bytes_stream();
-    let load_stream = LoadTrackingStream::new_force_failure(stream, Some(worker));
-    let body = Body::from_stream(load_stream);
-
-    Response::builder()
-        .status(status)
-        .body(body)
-        .unwrap_or_else(|_| {
-            error::internal_error("response_build_failed", "Failed to build error response")
-        })
+    // Non-SSE error: read the body and return a proper error response
+    handle_error_response(response, model_id, start_time, &*worker).await
 }
 
 // ============================================================================
@@ -507,6 +474,8 @@ fn build_sse_response(status: StatusCode, upstream_headers: HeaderMap, body: Bod
 /// circuit breaker outcome based on whether the stream completed successfully.
 struct LoadTrackingStream<S> {
     inner: Pin<Box<S>>,
+    /// Worker is wrapped in `Option` so `Drop` can `.take()` it exactly once.
+    /// It is always `Some` during the stream's lifetime.
     worker: Option<Arc<dyn Worker>>,
     completed_successfully: bool,
     encountered_error: bool,
@@ -515,20 +484,20 @@ struct LoadTrackingStream<S> {
 }
 
 impl<S> LoadTrackingStream<S> {
-    fn new(inner: S, worker: Option<Arc<dyn Worker>>) -> Self {
+    fn new(inner: S, worker: Arc<dyn Worker>) -> Self {
         Self {
             inner: Box::pin(inner),
-            worker,
+            worker: Some(worker),
             completed_successfully: false,
             encountered_error: false,
             force_failure: false,
         }
     }
 
-    fn new_force_failure(inner: S, worker: Option<Arc<dyn Worker>>) -> Self {
+    fn new_force_failure(inner: S, worker: Arc<dyn Worker>) -> Self {
         Self {
             inner: Box::pin(inner),
-            worker,
+            worker: Some(worker),
             completed_successfully: false,
             encountered_error: false,
             force_failure: true,
