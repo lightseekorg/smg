@@ -48,9 +48,9 @@ pub(crate) async fn execute_for_messages(
 ) -> Result<Message, Response> {
     let model_id = &req_ctx.model_id;
     let start_time = Instant::now();
-    record_router_request(model_id, false);
 
     let worker = select_worker(&router.worker_registry, model_id)?;
+    record_router_request(model_id, false);
     let (url, req_headers) = build_worker_request(&*worker, req_ctx.headers.as_ref());
     let response = send_worker_request(
         &router.http_client,
@@ -76,12 +76,12 @@ pub(crate) async fn execute_streaming(
 ) -> Response {
     let model_id = &req_ctx.model_id;
     let start_time = Instant::now();
-    record_router_request(model_id, true);
 
     let worker = match select_worker(&router.worker_registry, model_id) {
         Ok(w) => w,
         Err(resp) => return resp,
     };
+    record_router_request(model_id, true);
     let (url, req_headers) = build_worker_request(&*worker, req_ctx.headers.as_ref());
     let response = match send_worker_request(
         &router.http_client,
