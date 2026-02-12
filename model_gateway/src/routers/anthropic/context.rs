@@ -1,11 +1,15 @@
-//! Router context for Anthropic router
+//! Context types for Anthropic router
 //!
-//! Holds shared infrastructure (HTTP client, worker registry, MCP orchestrator)
-//! needed by the handler functions.
+//! - `RouterContext`: shared infrastructure (HTTP client, worker registry, MCP orchestrator)
+//! - `RequestContext`: per-request input (request body, headers, model ID)
 
 use std::{sync::Arc, time::Duration};
 
-use crate::{core::WorkerRegistry, mcp::McpOrchestrator};
+use axum::http::HeaderMap;
+
+use crate::{
+    core::WorkerRegistry, mcp::McpOrchestrator, protocols::messages::CreateMessageRequest,
+};
 
 /// Shared context for all Anthropic router request handling.
 #[derive(Clone)]
@@ -14,4 +18,11 @@ pub(crate) struct RouterContext {
     pub http_client: reqwest::Client,
     pub worker_registry: Arc<WorkerRegistry>,
     pub request_timeout: Duration,
+}
+
+/// Per-request input that flows through handler functions.
+pub(crate) struct RequestContext {
+    pub request: CreateMessageRequest,
+    pub headers: Option<HeaderMap>,
+    pub model_id: String,
 }
