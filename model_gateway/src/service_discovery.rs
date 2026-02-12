@@ -859,6 +859,7 @@ mod tests {
                 router_config,
             )),
             inflight_tracker: InFlightRequestTracker::new(),
+            realtime_registry: Arc::new(crate::routers::openai::realtime::RealtimeRegistry::new()),
         })
     }
 

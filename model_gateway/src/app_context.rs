@@ -18,7 +18,7 @@ use crate::{
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
     reasoning_parser::ParserFactory as ReasoningParserFactory,
-    routers::router_manager::RouterManager,
+    routers::{openai::realtime::RealtimeRegistry, router_manager::RouterManager},
     tokenizer::registry::TokenizerRegistry,
     tool_parser::ParserFactory as ToolParserFactory,
     wasm::{config::WasmRuntimeConfig, module_manager::WasmModuleManager},
@@ -59,6 +59,7 @@ pub struct AppContext {
     pub wasm_manager: Option<Arc<WasmModuleManager>>,
     pub worker_service: Arc<WorkerService>,
     pub inflight_tracker: Arc<InFlightRequestTracker>,
+    pub realtime_registry: Arc<RealtimeRegistry>,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -284,6 +285,7 @@ impl AppContextBuilder {
             wasm_manager: self.wasm_manager,
             worker_service,
             inflight_tracker: InFlightRequestTracker::new(),
+            realtime_registry: Arc::new(RealtimeRegistry::new()),
         })
     }
 

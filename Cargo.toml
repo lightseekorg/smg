@@ -42,6 +42,8 @@ uuid = { version = "1.10" }
 wasmtime = { version = "41.0", features = ["component-model", "async"] }
 wasmtime-wasi = "41.0"
 tokio-util = { version = "0.7", features = ["rt"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+multer = "3"
 scopeguard = "1.2"
 
 [workspace.lints.rust]

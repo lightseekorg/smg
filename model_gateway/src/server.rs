@@ -57,6 +57,7 @@ use crate::{
             get_mesh_health, get_policy_state, get_policy_states, get_worker_state,
             get_worker_states, set_global_rate_limit, trigger_graceful_shutdown, update_app_config,
         },
+        openai::realtime::rest as realtime_rest,
         parse,
         router_manager::RouterManager,
         tokenize, RouterTrait,
@@ -613,6 +614,25 @@ pub fn build_app(
             middleware::wasm_middleware,
         ));
 
+    let realtime_routes = Router::new()
+        .route("/v1/realtime/sessions", post(realtime_rest::create_session))
+        .route(
+            "/v1/realtime/client_secrets",
+            post(realtime_rest::create_client_secret),
+        )
+        .route(
+            "/v1/realtime/transcription_sessions",
+            post(realtime_rest::create_transcription_session),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::concurrency_limit_middleware,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            auth_config.clone(),
+            middleware::auth_middleware,
+        ));
+
     let public_routes = Router::new()
         .route("/liveness", get(liveness))
         .route("/readiness", get(readiness))
@@ -692,6 +712,7 @@ pub fn build_app(
 
     Router::new()
         .merge(protected_routes)
+        .merge(realtime_routes)
         .merge(public_routes)
         .merge(admin_routes)
         .merge(worker_routes)
