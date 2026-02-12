@@ -714,7 +714,7 @@ impl PDRouter {
             self.worker_registry
                 .get_by_model(model)
                 .iter()
-                .filter(|w| matches!(w.worker_type(), WorkerType::Prefill { .. }))
+                .filter(|w| matches!(w.worker_type(), WorkerType::Prefill))
                 .cloned()
                 .collect()
         } else {
@@ -1409,20 +1409,10 @@ mod tests {
     async fn test_select_healthy_prefill_worker() {
         let router = create_test_pd_router();
 
-        let healthy_worker = create_test_worker(
-            "http://healthy".to_string(),
-            WorkerType::Prefill {
-                bootstrap_port: None,
-            },
-            true,
-        );
-        let unhealthy_worker = create_test_worker(
-            "http://unhealthy".to_string(),
-            WorkerType::Prefill {
-                bootstrap_port: None,
-            },
-            false,
-        );
+        let healthy_worker =
+            create_test_worker("http://healthy".to_string(), WorkerType::Prefill, true);
+        let unhealthy_worker =
+            create_test_worker("http://unhealthy".to_string(), WorkerType::Prefill, false);
         let decode_worker =
             create_test_worker("http://decode".to_string(), WorkerType::Decode, true);
 
@@ -1453,9 +1443,7 @@ mod tests {
     fn test_worker_load_metrics() {
         let prefill_worker: Arc<dyn Worker> = Arc::from(create_test_worker(
             "http://prefill".to_string(),
-            WorkerType::Prefill {
-                bootstrap_port: None,
-            },
+            WorkerType::Prefill,
             true,
         ));
         let decode_worker: Arc<dyn Worker> = Arc::from(create_test_worker(
@@ -1484,13 +1472,8 @@ mod tests {
 
         let router = create_test_pd_router();
 
-        let prefill_worker = create_test_worker(
-            "http://prefill".to_string(),
-            WorkerType::Prefill {
-                bootstrap_port: None,
-            },
-            true,
-        );
+        let prefill_worker =
+            create_test_worker("http://prefill".to_string(), WorkerType::Prefill, true);
         let decode_worker =
             create_test_worker("http://decode".to_string(), WorkerType::Decode, true);
 

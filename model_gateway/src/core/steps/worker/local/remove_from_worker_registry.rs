@@ -6,7 +6,10 @@ use async_trait::async_trait;
 use tracing::{debug, warn};
 
 use crate::{
-    core::steps::workflow_data::WorkerRemovalWorkflowData,
+    core::{
+        steps::workflow_data::WorkerRemovalWorkflowData,
+        worker::{ConnectionModeExt, WorkerTypeExt},
+    },
     observability::metrics::Metrics,
     workflow::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
 };
@@ -41,8 +44,8 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
             .map(|w| {
                 let meta = w.metadata();
                 (
-                    meta.worker_type.clone(),
-                    meta.connection_mode.clone(),
+                    meta.spec.worker_type,
+                    meta.spec.connection_mode,
                     w.model_id().to_string(),
                 )
             })

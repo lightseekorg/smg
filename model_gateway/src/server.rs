@@ -48,7 +48,7 @@ use crate::{
         responses::{ResponsesGetParams, ResponsesRequest},
         tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
         validated::ValidatedJson,
-        worker_spec::{WorkerConfigRequest, WorkerUpdateRequest},
+        worker::{WorkerSpec, WorkerUpdateRequest},
     },
     routers::{
         conversations,
@@ -108,7 +108,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
             RoutingMode::PrefillDecode { .. } => {
                 let has_prefill = healthy_workers
                     .iter()
-                    .any(|w| matches!(w.worker_type(), WorkerType::Prefill { .. }));
+                    .any(|w| matches!(w.worker_type(), WorkerType::Prefill));
                 let has_decode = healthy_workers
                     .iter()
                     .any(|w| matches!(w.worker_type(), WorkerType::Decode));
@@ -433,7 +433,7 @@ async fn get_loads(State(state): State<Arc<AppState>>, _req: Request) -> Respons
 
 async fn create_worker(
     State(state): State<Arc<AppState>>,
-    Json(config): Json<WorkerConfigRequest>,
+    Json(config): Json<WorkerSpec>,
 ) -> Response {
     match state.context.worker_service.create_worker(config).await {
         Ok(result) => result.into_response(),

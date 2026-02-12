@@ -18,7 +18,7 @@ use super::shared::{ActivateWorkersStep, RegisterWorkersStep, UpdatePoliciesStep
 use crate::{
     app_context::AppContext,
     core::steps::workflow_data::ExternalWorkerWorkflowData,
-    protocols::worker_spec::WorkerConfigRequest,
+    protocols::worker::WorkerSpec,
     workflow::{BackoffStrategy, FailureAction, RetryPolicy, StepDefinition, WorkflowDefinition},
 };
 
@@ -108,7 +108,7 @@ pub fn create_external_worker_workflow() -> WorkflowDefinition<ExternalWorkerWor
 
 /// Helper to create initial workflow data for external worker registration
 pub fn create_external_worker_workflow_data(
-    config: WorkerConfigRequest,
+    config: WorkerSpec,
     app_context: Arc<AppContext>,
 ) -> ExternalWorkerWorkflowData {
     ExternalWorkerWorkflowData {

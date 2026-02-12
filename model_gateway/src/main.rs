@@ -709,7 +709,7 @@ impl CliArgs {
     fn determine_connection_mode(worker_urls: &[String]) -> ConnectionMode {
         for url in worker_urls {
             if url.starts_with("grpc://") || url.starts_with("grpcs://") {
-                return ConnectionMode::Grpc { port: None };
+                return ConnectionMode::Grpc;
             }
         }
         ConnectionMode::Http

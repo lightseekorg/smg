@@ -98,11 +98,12 @@ impl ClassifyResponseProcessingStage {
             None => return HashMap::new(),
         };
 
-        // Get id2label from the first model card
+        // Get id2label from the primary model card
         worker
             .metadata()
+            .spec
             .models
-            .first()
+            .primary()
             .map(|model| model.id2label.clone())
             .unwrap_or_default()
     }

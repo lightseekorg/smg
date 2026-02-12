@@ -16,9 +16,8 @@ use smg::{
 
 fn create_test_worker() -> BasicWorker {
     BasicWorkerBuilder::new("http://test-server:8000")
-        .worker_type(WorkerType::Prefill {
-            bootstrap_port: Some(5678),
-        })
+        .worker_type(WorkerType::Prefill)
+        .bootstrap_port(Some(5678))
         .build()
 }
 

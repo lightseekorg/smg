@@ -43,19 +43,14 @@ mod pd_routing_unit_tests {
 
         let prefill_worker: Box<dyn Worker> = Box::new(
             BasicWorkerBuilder::new("http://prefill:8080")
-                .worker_type(WorkerType::Prefill {
-                    bootstrap_port: Some(9000),
-                })
+                .worker_type(WorkerType::Prefill)
+                .bootstrap_port(Some(9000))
                 .api_key("test_api_key")
                 .build(),
         );
         assert_eq!(prefill_worker.url(), "http://prefill:8080");
-        match prefill_worker.worker_type() {
-            WorkerType::Prefill { bootstrap_port } => {
-                assert_eq!(*bootstrap_port, Some(9000));
-            }
-            _ => panic!("Expected Prefill worker type"),
-        }
+        assert_eq!(prefill_worker.worker_type(), &WorkerType::Prefill);
+        assert_eq!(prefill_worker.bootstrap_port(), Some(9000));
 
         let decode_worker: Box<dyn Worker> = Box::new(
             BasicWorkerBuilder::new("http://decode:8080")
@@ -345,17 +340,13 @@ mod pd_routing_unit_tests {
 
         let prefill_worker: Box<dyn Worker> = Box::new(
             BasicWorkerBuilder::new("http://prefill1:8080")
-                .worker_type(WorkerType::Prefill {
-                    bootstrap_port: Some(9000),
-                })
+                .worker_type(WorkerType::Prefill)
+                .bootstrap_port(Some(9000))
                 .api_key("test_api_key")
                 .build(),
         );
 
-        let bootstrap_port = match prefill_worker.worker_type() {
-            WorkerType::Prefill { bootstrap_port } => bootstrap_port,
-            _ => &None,
-        };
+        let bootstrap_port = prefill_worker.bootstrap_port();
 
         single_json["bootstrap_host"] = json!(prefill_worker.bootstrap_host());
         single_json["bootstrap_port"] = json!(bootstrap_port);
@@ -689,17 +680,13 @@ mod pd_routing_unit_tests {
 
         let prefill_worker: Box<dyn Worker> = Box::new(
             BasicWorkerBuilder::new("http://prefill:8080")
-                .worker_type(WorkerType::Prefill {
-                    bootstrap_port: Some(9000),
-                })
+                .worker_type(WorkerType::Prefill)
+                .bootstrap_port(Some(9000))
                 .api_key("test_api_key")
                 .build(),
         );
 
-        let bootstrap_port = match prefill_worker.worker_type() {
-            WorkerType::Prefill { bootstrap_port } => bootstrap_port,
-            _ => &None,
-        };
+        let bootstrap_port = prefill_worker.bootstrap_port();
         let batch_size = 16;
         let hostname = prefill_worker.bootstrap_host();
 
@@ -815,17 +802,13 @@ mod pd_routing_unit_tests {
 
             let prefill_worker: Box<dyn Worker> = Box::new(
                 BasicWorkerBuilder::new("http://prefill:8080")
-                    .worker_type(WorkerType::Prefill {
-                        bootstrap_port: Some(9000),
-                    })
+                    .worker_type(WorkerType::Prefill)
+                    .bootstrap_port(Some(9000))
                     .api_key("test_api_key")
                     .build(),
             );
 
-            let bootstrap_port = match prefill_worker.worker_type() {
-                WorkerType::Prefill { bootstrap_port } => bootstrap_port,
-                _ => &None,
-            };
+            let bootstrap_port = prefill_worker.bootstrap_port();
             let hostname = prefill_worker.bootstrap_host();
 
             large_batch_request["bootstrap_host"] = json!(vec![hostname; batch_size]);

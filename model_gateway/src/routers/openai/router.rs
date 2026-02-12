@@ -30,8 +30,8 @@ use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
     core::{
-        is_retryable_status, model_type::Endpoint, ModelCard, ProviderType, RetryExecutor,
-        RuntimeType, Worker, WorkerRegistry,
+        is_retryable_status, Endpoint, ModelCard, ProviderType, RetryExecutor, RuntimeType, Worker,
+        WorkerRegistry,
     },
     data_connector::{ConversationId, ListParams, ResponseId, SortOrder},
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
@@ -76,7 +76,7 @@ impl OpenAIRouter {
         self.worker_registry
             .get_all()
             .into_iter()
-            .filter(|w| w.metadata().runtime_type == RuntimeType::External)
+            .filter(|w| w.metadata().spec.runtime_type == RuntimeType::External)
             .collect()
     }
 
