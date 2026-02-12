@@ -48,10 +48,14 @@ def _build_command(
         base_dir,
     ]
 
-    # Pass through environment variables the container may need
-    for var in ("HF_TOKEN", "HF_HOME"):
-        if os.environ.get(var):
-            cmd.extend(["-e", var])
+    # Mount local model directory if configured (e.g. /raid/models)
+    local_model_path = os.environ.get("ROUTER_LOCAL_MODEL_PATH")
+    if local_model_path:
+        cmd.extend(["-v", f"{local_model_path}:{local_model_path}"])
+
+    # Pass through other environment variables the container may need
+    if os.environ.get("HF_TOKEN"):
+        cmd.extend(["-e", "HF_TOKEN"])
 
     cmd.extend(
         [
