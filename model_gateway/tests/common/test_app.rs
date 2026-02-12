@@ -1,6 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
 use axum::Router;
+use llm_tokenizer::registry::TokenizerRegistry;
 use reqwest::Client;
 use smg::{
     app_context::AppContext,
@@ -12,7 +13,6 @@ use smg::{
     policies::PolicyRegistry,
     routers::RouterTrait,
     server::{build_app, AppState},
-    tokenizer::registry::TokenizerRegistry,
 };
 use smg_data_connector::{
     MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage,

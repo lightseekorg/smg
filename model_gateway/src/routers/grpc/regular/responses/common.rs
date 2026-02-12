@@ -7,21 +7,19 @@
 //! - Conversation history loading
 
 use axum::{http, response::Response};
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    common::{Tool, ToolChoice, ToolChoiceValue},
+    responses::{
+        self, ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
+        ResponsesRequest,
+    },
+};
 use smg_data_connector::{self as data_connector, ConversationId, ResponseId};
 use smg_mcp::McpToolSession;
 use tracing::{debug, warn};
 
-use crate::{
-    protocols::{
-        chat::ChatCompletionRequest,
-        common::{Tool, ToolChoice, ToolChoiceValue},
-        responses::{
-            self, ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
-            ResponsesRequest,
-        },
-    },
-    routers::{error, grpc::common::responses::ResponsesContext},
-};
+use crate::routers::{error, grpc::common::responses::ResponsesContext};
 
 // ============================================================================
 // Tool Loop State
@@ -118,7 +116,7 @@ pub(super) struct ExtractedToolCall {
 
 /// Extract all tool calls from chat response (for parallel tool call support)
 pub(super) fn extract_all_tool_calls_from_chat(
-    response: &crate::protocols::chat::ChatCompletionResponse,
+    response: &openai_protocol::chat::ChatCompletionResponse,
 ) -> Vec<ExtractedToolCall> {
     // Check if response has choices with tool calls
     let Some(choice) = response.choices.first() else {

@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::Response;
 use bytes::Bytes;
+use openai_protocol::responses::{ResponseToolType, ResponsesRequest};
 use serde_json::json;
 use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
@@ -19,7 +20,6 @@ use super::{
 };
 use crate::{
     observability::metrics::Metrics,
-    protocols::responses::{ResponseToolType, ResponsesRequest},
     routers::{
         grpc::{
             common::responses::{

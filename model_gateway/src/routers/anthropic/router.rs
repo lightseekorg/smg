@@ -17,11 +17,11 @@ use std::{any::Any, fmt, sync::Arc, time::Duration}; // Arc still needed for App
 
 use async_trait::async_trait;
 use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
+use openai_protocol::{chat::ChatCompletionRequest, messages::CreateMessageRequest};
 
 use super::{context::SharedComponents, models, pipeline::MessagesPipeline};
 use crate::{
     app_context::AppContext,
-    protocols::{chat::ChatCompletionRequest, messages::CreateMessageRequest},
     routers::{error, RouterTrait},
 };
 

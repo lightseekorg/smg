@@ -10,6 +10,12 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use llm_tokenizer::{
+    cache::{CacheConfig, CachedTokenizer},
+    factory,
+    registry::LoadOutcome,
+    traits::Tokenizer,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 use wfaas::{
@@ -18,16 +24,7 @@ use wfaas::{
 };
 
 use super::workflow_data::TokenizerWorkflowData;
-use crate::{
-    app_context::AppContext,
-    config::TokenizerCacheConfig,
-    tokenizer::{
-        cache::{CacheConfig, CachedTokenizer},
-        factory,
-        registry::LoadOutcome,
-        traits::Tokenizer,
-    },
-};
+use crate::{app_context::AppContext, config::TokenizerCacheConfig};
 
 /// Configuration for adding a tokenizer
 #[derive(Debug, Clone, Serialize, Deserialize)]

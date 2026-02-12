@@ -1,5 +1,11 @@
 use std::collections::HashMap;
 
+use openai_protocol::{
+    model_card::ModelCard,
+    model_type::ModelType,
+    worker::{HealthCheckConfig, WorkerModels, WorkerSpec},
+};
+
 use super::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
     worker::{
@@ -7,15 +13,7 @@ use super::{
         WorkerRoutingKeyLoad, WorkerType,
     },
 };
-use crate::{
-    observability::metrics::Metrics,
-    protocols::{
-        model_card::ModelCard,
-        model_type::ModelType,
-        worker::{HealthCheckConfig, WorkerModels, WorkerSpec},
-    },
-    routers::grpc::client::GrpcClient,
-};
+use crate::{observability::metrics::Metrics, routers::grpc::client::GrpcClient};
 
 /// Builder for creating BasicWorker instances with fluent API.
 ///

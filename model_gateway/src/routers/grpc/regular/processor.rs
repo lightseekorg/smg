@@ -5,29 +5,27 @@
 
 use std::{sync::Arc, time::Instant};
 
+use llm_tokenizer::{
+    stop::{SequenceDecoderOutput, StopSequenceDecoder},
+    traits::Tokenizer,
+};
+use openai_protocol::{
+    chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
+    common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue},
+    generate::{GenerateMetaInfo, GenerateRequest, GenerateResponse},
+};
+use reasoning_parser::ParserFactory as ReasoningParserFactory;
+use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::error;
 
-use crate::{
-    protocols::{
-        chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
-        common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue},
-        generate::{GenerateMetaInfo, GenerateRequest, GenerateResponse},
+use crate::routers::{
+    error,
+    grpc::{
+        common::{response_collection, response_formatting},
+        context::{DispatchMetadata, ExecutionResult},
+        proto_wrapper::ProtoGenerateComplete,
+        utils,
     },
-    reasoning_parser::ParserFactory as ReasoningParserFactory,
-    routers::{
-        error,
-        grpc::{
-            common::{response_collection, response_formatting},
-            context::{DispatchMetadata, ExecutionResult},
-            proto_wrapper::ProtoGenerateComplete,
-            utils,
-        },
-    },
-    tokenizer::{
-        stop::{SequenceDecoderOutput, StopSequenceDecoder},
-        traits::Tokenizer,
-    },
-    tool_parser::ParserFactory as ToolParserFactory,
 };
 
 /// Unified response processor for both routers

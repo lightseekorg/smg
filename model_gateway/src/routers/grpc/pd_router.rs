@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::{http::HeaderMap, response::Response};
+use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
 use tracing::debug;
 
 use super::{context::SharedComponents, pipeline::RequestPipeline};
@@ -13,7 +14,6 @@ use crate::{
         UNKNOWN_MODEL_ID,
     },
     observability::metrics::{metrics_labels, Metrics},
-    protocols::{chat::ChatCompletionRequest, generate::GenerateRequest},
     routers::RouterTrait,
 };
 

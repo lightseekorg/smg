@@ -16,6 +16,8 @@ use std::{
 };
 
 use async_trait::async_trait;
+use llm_tokenizer::{create_tokenizer_from_file, traits::Tokenizer};
+use openai_protocol::{chat::ChatCompletionRequest, worker::WorkerSpec};
 use smg::{
     core::{
         circuit_breaker::CircuitBreaker,
@@ -26,9 +28,7 @@ use smg::{
         BucketPolicy, CacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
         RoundRobinPolicy, SelectWorkerInfo,
     },
-    protocols::{chat::ChatCompletionRequest, worker::WorkerSpec},
     routers::grpc::utils::{generate_tool_constraints, process_chat_messages},
-    tokenizer::{create_tokenizer_from_file, traits::Tokenizer},
 };
 use smg_grpc_client::sglang_scheduler::SglangSchedulerClient;
 use uuid::Uuid;

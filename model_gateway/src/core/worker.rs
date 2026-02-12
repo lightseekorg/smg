@@ -9,18 +9,18 @@ use std::{
 
 use async_trait::async_trait;
 use axum::body::Body;
+// Re-export protocol types as the canonical types for the gateway
+pub use openai_protocol::worker::{ConnectionMode, RuntimeType, WorkerType};
+use openai_protocol::{
+    model_card::ModelCard,
+    model_type::{Endpoint, ModelType},
+    worker::{ProviderType, WorkerInfo, WorkerModels, WorkerSpec},
+};
 use tokio::{sync::OnceCell, time};
 
 use super::{CircuitBreaker, WorkerError, WorkerResult, UNKNOWN_MODEL_ID};
-// Re-export protocol types as the canonical types for the gateway
-pub use crate::protocols::worker::{ConnectionMode, RuntimeType, WorkerType};
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    protocols::{
-        model_card::ModelCard,
-        model_type::{Endpoint, ModelType},
-        worker::{ProviderType, WorkerInfo, WorkerModels, WorkerSpec},
-    },
     routers::grpc::client::GrpcClient,
 };
 
@@ -1100,7 +1100,7 @@ mod tests {
 
     #[test]
     fn test_health_config_default() {
-        use crate::protocols::worker::HealthCheckConfig;
+        use openai_protocol::worker::HealthCheckConfig;
         let config = HealthCheckConfig::default();
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.check_interval_secs, 60);
@@ -1111,7 +1111,7 @@ mod tests {
 
     #[test]
     fn test_health_config_custom() {
-        use crate::protocols::worker::HealthCheckConfig;
+        use openai_protocol::worker::HealthCheckConfig;
         let config = HealthCheckConfig {
             timeout_secs: 10,
             check_interval_secs: 60,
@@ -1156,7 +1156,7 @@ mod tests {
 
     #[test]
     fn test_worker_with_health_config() {
-        use crate::protocols::worker::HealthCheckConfig;
+        use openai_protocol::worker::HealthCheckConfig;
         let custom_config = HealthCheckConfig {
             timeout_secs: 15,
             check_interval_secs: 45,

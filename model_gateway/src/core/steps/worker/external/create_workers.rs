@@ -3,17 +3,15 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use openai_protocol::worker::HealthCheckConfig;
 use tracing::{debug, info};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::{
-    core::{
-        circuit_breaker::CircuitBreakerConfig,
-        steps::workflow_data::{ExternalWorkerWorkflowData, WorkerList},
-        worker::{RuntimeType, WorkerType},
-        BasicWorkerBuilder, ConnectionMode, Worker,
-    },
-    protocols::worker::HealthCheckConfig,
+use crate::core::{
+    circuit_breaker::CircuitBreakerConfig,
+    steps::workflow_data::{ExternalWorkerWorkflowData, WorkerList},
+    worker::{RuntimeType, WorkerType},
+    BasicWorkerBuilder, ConnectionMode, Worker,
 };
 
 /// Normalize URL for external APIs (ensure https://).

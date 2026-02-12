@@ -13,6 +13,13 @@ use axum::{
     Json,
 };
 use futures_util::{future::join_all, StreamExt};
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    responses::{
+        generate_id, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
+        ResponsesGetParams, ResponsesRequest,
+    },
+};
 use serde_json::{json, to_value, Value};
 use smg_data_connector::{ConversationId, ListParams, ResponseId, SortOrder};
 use tokio::sync::mpsc;
@@ -35,13 +42,6 @@ use crate::{
         WorkerRegistry,
     },
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
-    protocols::{
-        chat::ChatCompletionRequest,
-        responses::{
-            generate_id, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
-            ResponsesGetParams, ResponsesRequest,
-        },
-    },
     routers::header_utils::{apply_provider_headers, extract_auth_header},
 };
 
@@ -300,7 +300,7 @@ impl OpenAIRouter {
             }
             ResponseInput::Items(current_items) => {
                 for item in current_items {
-                    items.push(crate::protocols::responses::normalize_input_item(item));
+                    items.push(openai_protocol::responses::normalize_input_item(item));
                 }
             }
         }

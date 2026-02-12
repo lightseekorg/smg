@@ -1,15 +1,13 @@
 //! MCP tool execution logic for Harmony Responses
 
 use axum::response::Response;
+use openai_protocol::{common::ToolCall, responses::ResponseTool};
 use serde_json::{from_str, json, Value};
 use smg_mcp::{McpToolSession, ToolExecutionInput};
 use tracing::{debug, error};
 
 use super::common::McpCallTracking;
-use crate::{
-    observability::metrics::{metrics_labels, Metrics},
-    protocols::{common::ToolCall, responses::ResponseTool},
-};
+use crate::observability::metrics::{metrics_labels, Metrics};
 
 /// Tool execution result
 ///

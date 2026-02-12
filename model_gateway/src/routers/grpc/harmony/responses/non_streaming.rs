@@ -6,6 +6,13 @@ use std::{
 };
 
 use axum::response::Response;
+use openai_protocol::{
+    common::{ToolCall, Usage},
+    responses::{
+        OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
+        ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
+    },
+};
 use serde_json::{json, to_string};
 use smg_mcp::McpToolSession;
 use tracing::{debug, error, warn};
@@ -19,13 +26,6 @@ use super::{
 };
 use crate::{
     observability::metrics::Metrics,
-    protocols::{
-        common::{ToolCall, Usage},
-        responses::{
-            OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
-            ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
-        },
-    },
     routers::{
         error,
         grpc::{

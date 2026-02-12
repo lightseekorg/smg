@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use smg::*;
+use smg_auth as auth;
 
 // Define the enums with PyO3 bindings
 #[pyclass(eq)]

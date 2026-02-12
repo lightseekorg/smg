@@ -11,13 +11,13 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use openai_protocol::worker::{WorkerErrorResponse, WorkerInfo, WorkerSpec, WorkerUpdateRequest};
 use serde_json::json;
 use tracing::warn;
 
 use crate::{
     config::RouterConfig,
     core::{worker::worker_to_info, worker_registry::WorkerId, Job, JobQueue, WorkerRegistry},
-    protocols::worker::{WorkerErrorResponse, WorkerInfo, WorkerSpec, WorkerUpdateRequest},
 };
 
 /// Error types for worker service operations

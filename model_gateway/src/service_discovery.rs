@@ -14,6 +14,7 @@ use kube::{
     },
     Client,
 };
+use openai_protocol::worker::{WorkerSpec, WorkerType};
 use rustls;
 use smg_mesh::{
     gossip::{NodeState, NodeStatus},
@@ -26,7 +27,6 @@ use crate::{
     app_context::AppContext,
     core::Job,
     observability::metrics::{metrics_labels, Metrics},
-    protocols::worker::{WorkerSpec, WorkerType},
 };
 
 #[derive(Debug, Clone)]
@@ -834,7 +834,7 @@ mod tests {
             worker_job_queue: worker_job_queue.clone(),
             workflow_engines: Arc::new(std::sync::OnceLock::new()),
             mcp_orchestrator: Arc::new(std::sync::OnceLock::new()),
-            tokenizer_registry: Arc::new(crate::tokenizer::registry::TokenizerRegistry::new()),
+            tokenizer_registry: Arc::new(llm_tokenizer::registry::TokenizerRegistry::new()),
             wasm_manager: None,
             worker_service: Arc::new(WorkerService::new(
                 worker_registry,
