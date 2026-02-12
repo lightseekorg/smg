@@ -15,6 +15,7 @@ use axum::{
     extract::Request,
     http::{header::CONTENT_TYPE, StatusCode},
 };
+use llm_tokenizer::TokenizerRegistry;
 use smg::{
     app_context::AppContext,
     config::RouterConfig,
@@ -22,7 +23,6 @@ use smg::{
     policies::PolicyRegistry,
     routers::RouterFactory,
     server::{build_app, AppState},
-    tokenizer::TokenizerRegistry,
     wasm::{
         module::{
             WasmModuleAddRequest, WasmModuleAddResponse, WasmModuleAttachPoint,

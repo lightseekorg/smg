@@ -4,19 +4,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::response::Response;
+use llm_tokenizer::traits::Tokenizer;
+use openai_protocol::{common::InputIds, generate::GenerateRequest};
 use tracing::error;
 
-use crate::{
-    protocols::{common::InputIds, generate::GenerateRequest},
-    routers::{
-        error,
-        grpc::{
-            common::stages::PipelineStage,
-            context::{PreparationOutput, RequestContext},
-            utils,
-        },
+use crate::routers::{
+    error,
+    grpc::{
+        common::stages::PipelineStage,
+        context::{PreparationOutput, RequestContext},
+        utils,
     },
-    tokenizer::traits::Tokenizer,
 };
 
 /// Generate preparation stage

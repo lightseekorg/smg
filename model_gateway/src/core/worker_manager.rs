@@ -10,6 +10,7 @@ use futures::{
     stream::{self, StreamExt},
 };
 use http::StatusCode;
+use openai_protocol::worker::{FlushCacheResult, WorkerLoadInfo, WorkerLoadsResult};
 use serde_json::Value;
 use tokio::{
     sync::{watch, Mutex},
@@ -20,7 +21,6 @@ use tracing::{debug, info, warn};
 use crate::{
     core::{metrics_aggregator::MetricPack, ConnectionMode, Worker, WorkerRegistry, WorkerType},
     policies::PolicyRegistry,
-    protocols::worker::{FlushCacheResult, WorkerLoadInfo, WorkerLoadsResult},
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);

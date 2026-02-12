@@ -7,11 +7,11 @@ use std::{
     sync::Arc,
 };
 
-use serde_json::Value;
-use smg::tokenizer::{
+use llm_tokenizer::{
     chat_template::ChatTemplateParams, create_tokenizer, huggingface::HuggingFaceTokenizer,
     traits::Tokenizer as TokenizerTrait,
 };
+use serde_json::Value;
 
 use super::error::{clear_error_message, set_error_message, SglErrorCode};
 

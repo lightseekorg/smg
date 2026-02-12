@@ -1,8 +1,7 @@
 //! gRPC router implementations
 
+use openai_protocol::common::StringOrArray;
 use smg_grpc_client::sglang_proto::MultimodalInputs;
-
-use crate::protocols::common::StringOrArray;
 
 pub mod client; // Used by core/
 pub(crate) mod common;

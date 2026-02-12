@@ -3,16 +3,15 @@
 use std::sync::Arc;
 
 use chrono::Utc;
+use openai_protocol::responses::{
+    generate_id, ResponseInput, ResponseInputOutputItem, ResponsesRequest, StringOrContentParts,
+};
 use serde_json::{json, Value};
 use smg_data_connector::{
     ConversationId, ConversationItem, ConversationItemId, ConversationItemStorage,
     ConversationStorage, NewConversationItem, ResponseId, ResponseStorage, StoredResponse,
 };
 use tracing::{debug, info, warn};
-
-use crate::protocols::responses::{
-    generate_id, ResponseInput, ResponseInputOutputItem, ResponsesRequest, StringOrContentParts,
-};
 
 // ============================================================================
 // Constants

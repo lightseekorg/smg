@@ -1,5 +1,4 @@
-use serde_json::json;
-use smg::protocols::{
+use openai_protocol::{
     chat::{ChatCompletionRequest, ChatMessage, MessageContent},
     common::{
         Function, FunctionCall, FunctionChoice, StreamOptions, Tool, ToolChoice, ToolChoiceValue,
@@ -7,6 +6,7 @@ use smg::protocols::{
     },
     validated::Normalizable,
 };
+use serde_json::json;
 use validator::Validate;
 
 // Deprecated fields normalization tests

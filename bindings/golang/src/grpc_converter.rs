@@ -7,15 +7,13 @@ use std::{
     sync::Arc,
 };
 
-use serde_json::Value;
-use smg::{
-    protocols::common::{
-        FunctionCallDelta, StringOrArray, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage,
-    },
-    tokenizer::{stop::StopSequenceDecoder, stream::DecodeStream, traits::Tokenizer},
-    tool_parser::ToolParser,
+use llm_tokenizer::{stop::StopSequenceDecoder, stream::DecodeStream, traits::Tokenizer};
+use openai_protocol::common::{
+    FunctionCallDelta, StringOrArray, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage,
 };
+use serde_json::Value;
 use smg_grpc_client::sglang_proto as proto;
+use tool_parser::ToolParser;
 
 use super::{
     error::{clear_error_message, set_error_message, SglErrorCode},
@@ -296,8 +294,8 @@ pub(crate) async fn convert_proto_chunk_to_openai(
     proto_response: proto::GenerateResponse,
     handle: &mut GrpcResponseConverterHandle,
     tokenizer: &Arc<dyn Tokenizer>,
-) -> Result<Option<smg::protocols::chat::ChatCompletionStreamResponse>, String> {
-    use smg::protocols::chat::{ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice};
+) -> Result<Option<openai_protocol::chat::ChatCompletionStreamResponse>, String> {
+    use openai_protocol::chat::{ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice};
     use smg_grpc_client::sglang_proto::generate_response::Response::*;
 
     match proto_response.response {
@@ -326,19 +324,19 @@ pub(crate) async fn convert_proto_chunk_to_openai(
                 for &token_id in &chunk.token_ids {
                     match decoder_guard
                         .process_token(token_id)
-                        .unwrap_or(smg::tokenizer::stop::SequenceDecoderOutput::Held)
+                        .unwrap_or(llm_tokenizer::stop::SequenceDecoderOutput::Held)
                     {
-                        smg::tokenizer::stop::SequenceDecoderOutput::Text(t) => {
+                        llm_tokenizer::stop::SequenceDecoderOutput::Text(t) => {
                             text.push_str(&t);
                         }
-                        smg::tokenizer::stop::SequenceDecoderOutput::StoppedWithText(t) => {
+                        llm_tokenizer::stop::SequenceDecoderOutput::StoppedWithText(t) => {
                             text.push_str(&t);
                             break;
                         }
-                        smg::tokenizer::stop::SequenceDecoderOutput::Stopped => {
+                        llm_tokenizer::stop::SequenceDecoderOutput::Stopped => {
                             break;
                         }
-                        smg::tokenizer::stop::SequenceDecoderOutput::Held => {}
+                        llm_tokenizer::stop::SequenceDecoderOutput::Held => {}
                     }
                 }
                 text

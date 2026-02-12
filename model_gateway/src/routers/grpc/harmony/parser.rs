@@ -3,10 +3,10 @@
 //! Adapter for openai_harmony::StreamableParser that handles channel-based parsing.
 
 use openai_harmony::{chat::Role, HarmonyEncoding, StreamableParser};
+use openai_protocol::common::{FunctionCallResponse, ToolCall};
 use uuid::Uuid;
 
 use super::types::{HarmonyChannelDelta, HarmonyChannelOutput};
-use crate::protocols::common::{FunctionCallResponse, ToolCall};
 
 /// Get the global Harmony encoding
 ///

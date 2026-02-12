@@ -6,10 +6,9 @@
 
 use std::collections::HashMap;
 
-use crate::{
-    protocols::common::Usage,
-    routers::grpc::proto_wrapper::{ProtoGenerateComplete, ProtoGenerateStreamChunk},
-};
+use openai_protocol::common::Usage;
+
+use crate::routers::grpc::proto_wrapper::{ProtoGenerateComplete, ProtoGenerateStreamChunk};
 
 /// Build usage information from collected gRPC responses
 ///

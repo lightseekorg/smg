@@ -3,26 +3,24 @@
 use axum::{body::Body, http::StatusCode, response::Response};
 use bytes::Bytes;
 use http::header::{HeaderValue, CONTENT_TYPE};
+use openai_protocol::{
+    chat::ChatCompletionStreamResponse,
+    common::{Usage, UsageInfo},
+    event_types::{
+        CodeInterpreterCallEvent, ContentPartEvent, FileSearchCallEvent, FunctionCallEvent,
+        McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent, WebSearchCallEvent,
+    },
+    responses::{
+        ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse, ResponsesUsage,
+    },
+};
 use serde_json::json;
 use smg_mcp::{self as mcp, ResponseFormat};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
-use crate::{
-    protocols::{
-        chat::ChatCompletionStreamResponse,
-        common::{Usage, UsageInfo},
-        event_types::{
-            CodeInterpreterCallEvent, ContentPartEvent, FileSearchCallEvent, FunctionCallEvent,
-            McpEvent, OutputItemEvent, OutputTextEvent, ResponseEvent, WebSearchCallEvent,
-        },
-        responses::{
-            ResponseOutputItem, ResponseStatus, ResponsesRequest, ResponsesResponse, ResponsesUsage,
-        },
-    },
-    routers::grpc::harmony::responses::ToolResult,
-};
+use crate::routers::grpc::harmony::responses::ToolResult;
 
 pub(crate) enum OutputItemType {
     Message,

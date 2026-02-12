@@ -11,19 +11,17 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use axum::response::Response;
+use openai_protocol::{
+    classify::{ClassifyData, ClassifyResponse},
+    common::UsageInfo,
+};
 use tracing::error;
 
-use crate::{
-    protocols::{
-        classify::{ClassifyData, ClassifyResponse},
-        common::UsageInfo,
-    },
-    routers::{
-        error,
-        grpc::{
-            common::stages::PipelineStage,
-            context::{ExecutionResult, FinalResponse, RequestContext, WorkerSelection},
-        },
+use crate::routers::{
+    error,
+    grpc::{
+        common::stages::PipelineStage,
+        context::{ExecutionResult, FinalResponse, RequestContext, WorkerSelection},
     },
 };
 
