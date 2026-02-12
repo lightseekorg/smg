@@ -12,6 +12,11 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+/// Re-export the protocol types for convenience
+pub use openai_protocol::worker::{WorkerSpec, WorkerUpdateRequest as ProtocolUpdateRequest};
+use openai_protocol::{
+    model_card::ModelCard, worker::WorkerUpdateRequest as ProtocolWorkerUpdateRequest,
+};
 use serde::{Deserialize, Serialize};
 use wfaas::{WorkflowData, WorkflowError};
 
@@ -20,15 +25,7 @@ use super::{
     wasm_module_registration::WasmModuleConfigRequest,
     wasm_module_removal::WasmModuleRemovalRequest, worker::local::WorkerRemovalRequest,
 };
-/// Re-export the protocol types for convenience
-pub use crate::protocols::worker::{WorkerSpec, WorkerUpdateRequest as ProtocolUpdateRequest};
-use crate::{
-    app_context::AppContext,
-    core::Worker,
-    protocols::{
-        model_card::ModelCard, worker::WorkerUpdateRequest as ProtocolWorkerUpdateRequest,
-    },
-};
+use crate::{app_context::AppContext, core::Worker};
 
 // ============================================================================
 // Shared trait for worker registration workflows

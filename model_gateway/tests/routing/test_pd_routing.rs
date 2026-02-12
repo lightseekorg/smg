@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod pd_routing_unit_tests {
+    use llm_tokenizer::registry::TokenizerRegistry;
     use serde_json::json;
     use smg::{
         app_context::AppContext,
         config::{PolicyConfig, RouterConfig, RoutingMode},
         core::{BasicWorkerBuilder, Worker, WorkerType},
         routers::{http::pd_types::PDSelectionPolicy, RouterFactory},
-        tokenizer::registry::TokenizerRegistry,
     };
 
     #[derive(Debug)]

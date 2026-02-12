@@ -24,6 +24,15 @@ async-trait = "0.1"
 path = "../../model_gateway"
 default-features = true
 
+[dependencies.openai-protocol]
+workspace = true
+
+[dependencies.llm-tokenizer]
+path = "../../tokenizer"
+
+[dependencies.tool-parser]
+path = "../../tool_parser"
+
 [dependencies.smg-grpc-client]
 workspace = true
 

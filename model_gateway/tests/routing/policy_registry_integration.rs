@@ -2,9 +2,10 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use openai_protocol::worker::WorkerSpec;
 use smg::{
     config::PolicyConfig, core::WorkerRegistry, policies::PolicyRegistry,
-    protocols::worker::WorkerSpec, routers::router_manager::RouterManager,
+    routers::router_manager::RouterManager,
 };
 
 #[tokio::test]

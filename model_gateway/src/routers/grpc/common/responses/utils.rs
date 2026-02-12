@@ -3,6 +3,10 @@
 use std::sync::Arc;
 
 use axum::response::Response;
+use openai_protocol::{
+    common::Tool,
+    responses::{ResponseTool, ResponseToolType, ResponsesRequest, ResponsesResponse},
+};
 use serde_json::to_value;
 use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
 use smg_mcp::McpOrchestrator;
@@ -10,10 +14,6 @@ use tracing::{debug, error, warn};
 
 use crate::{
     core::WorkerRegistry,
-    protocols::{
-        common::Tool,
-        responses::{ResponseTool, ResponseToolType, ResponsesRequest, ResponsesResponse},
-    },
     routers::{
         error, mcp_utils::ensure_request_mcp_client, persistence_utils::persist_conversation_items,
     },

@@ -9,6 +9,13 @@ use axum::{
 };
 use futures_util::StreamExt;
 use memchr::memmem;
+use openai_protocol::{
+    chat::{ChatCompletionRequest, ChatMessage, MessageContent},
+    common::{InputIds, StringOrArray},
+    completion::CompletionRequest,
+    generate::GenerateRequest,
+    rerank::RerankRequest,
+};
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -28,13 +35,6 @@ use crate::{
         otel_trace::inject_trace_context_http,
     },
     policies::{LoadBalancingPolicy, PolicyRegistry, SelectWorkerInfo},
-    protocols::{
-        chat::{ChatCompletionRequest, ChatMessage, MessageContent},
-        common::{InputIds, StringOrArray},
-        completion::CompletionRequest,
-        generate::GenerateRequest,
-        rerank::RerankRequest,
-    },
     routers::{
         error,
         grpc::utils::{error_type_from_status, route_to_endpoint},

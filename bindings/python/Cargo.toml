@@ -16,6 +16,12 @@ once_cell = "1.19"
 path = "../../model_gateway"
 default-features = true
 
+[dependencies.smg-auth]
+path = "../../auth"
+
+[dependencies.tool-parser]
+path = "../../tool_parser"
+
 [features]
 default = ["pyo3/extension-module"]
 vendored-openssl = ["smg/vendored-openssl"]

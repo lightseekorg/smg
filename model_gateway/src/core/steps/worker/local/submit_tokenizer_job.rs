@@ -5,15 +5,13 @@
 //! and caching - this step just submits the job.
 
 use async_trait::async_trait;
+use llm_tokenizer::TokenizerRegistry;
 use tracing::{debug, info, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::{
-    core::{
-        steps::{workflow_data::LocalWorkerWorkflowData, TokenizerConfigRequest},
-        Job,
-    },
-    tokenizer::TokenizerRegistry,
+use crate::core::{
+    steps::{workflow_data::LocalWorkerWorkflowData, TokenizerConfigRequest},
+    Job,
 };
 
 /// Step: Submit tokenizer registration job for the worker's model

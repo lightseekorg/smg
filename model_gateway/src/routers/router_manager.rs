@@ -15,6 +15,16 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use dashmap::DashMap;
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    classify::ClassifyRequest,
+    completion::CompletionRequest,
+    embedding::EmbeddingRequest,
+    generate::GenerateRequest,
+    messages::CreateMessageRequest,
+    rerank::RerankRequest,
+    responses::{ResponsesGetParams, ResponsesRequest},
+};
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
@@ -22,16 +32,6 @@ use crate::{
     app_context::AppContext,
     config::RoutingMode,
     core::{ConnectionMode, RuntimeType, WorkerRegistry, WorkerType},
-    protocols::{
-        chat::ChatCompletionRequest,
-        classify::ClassifyRequest,
-        completion::CompletionRequest,
-        embedding::EmbeddingRequest,
-        generate::GenerateRequest,
-        messages::CreateMessageRequest,
-        rerank::RerankRequest,
-        responses::{ResponsesGetParams, ResponsesRequest},
-    },
     routers::{
         factory::{router_ids, RouterId},
         RouterFactory, RouterTrait,

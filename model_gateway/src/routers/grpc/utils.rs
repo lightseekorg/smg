@@ -4,8 +4,29 @@ use std::{collections::HashMap, sync::Arc};
 
 use axum::response::Response;
 use http::StatusCode;
+use llm_tokenizer::{
+    cache::CachedTokenizer,
+    chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
+    stop::StopSequenceDecoderBuilder,
+    traits::Tokenizer,
+    HuggingFaceTokenizer, StopSequenceDecoder,
+};
+use openai_protocol::{
+    chat::{ChatCompletionRequest, ChatMessage},
+    common::{
+        ChatLogProbs, ChatLogProbsContent, FunctionCallResponse, StringOrArray, Tool, ToolCall,
+        ToolChoice, ToolChoiceValue, TopLogProb,
+    },
+    generate::GenerateFinishReason,
+};
+use reasoning_parser::{
+    ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser, ReasoningParser,
+};
 use serde_json::{json, Map, Value};
 use smg_grpc_client::trtllm_proto::{GenerateRequest as TrtllmGenerateRequest, TokenSequence};
+use tool_parser::{
+    ParserFactory as ToolParserFactory, PooledParser as ToolPooledParser, ToolParser,
+};
 use tracing::{error, warn};
 use uuid::Uuid;
 
@@ -18,29 +39,7 @@ use super::{
 use crate::{
     core::Worker,
     observability::metrics::metrics_labels,
-    protocols::{
-        chat::{ChatCompletionRequest, ChatMessage},
-        common::{
-            ChatLogProbs, ChatLogProbsContent, FunctionCallResponse, StringOrArray, Tool, ToolCall,
-            ToolChoice, ToolChoiceValue, TopLogProb,
-        },
-        generate::GenerateFinishReason,
-    },
-    reasoning_parser::{
-        ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser,
-        ReasoningParser,
-    },
     routers::{error, grpc::proto_wrapper::ProtoResponseVariant},
-    tokenizer::{
-        cache::CachedTokenizer,
-        chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
-        stop::StopSequenceDecoderBuilder,
-        traits::Tokenizer,
-        HuggingFaceTokenizer, StopSequenceDecoder,
-    },
-    tool_parser::{
-        ParserFactory as ToolParserFactory, PooledParser as ToolPooledParser, ToolParser,
-    },
 };
 
 /// Resolve tokenizer from registry and cache it in request context.
@@ -1059,16 +1058,14 @@ pub(crate) fn error_type_from_status(status: StatusCode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use llm_tokenizer::chat_template::ChatTemplateContentFormat;
+    use openai_protocol::{
+        chat::{ChatMessage, MessageContent},
+        common::{ContentPart, ImageUrl},
+    };
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        protocols::{
-            chat::{ChatMessage, MessageContent},
-            common::{ContentPart, ImageUrl},
-        },
-        tokenizer::chat_template::ChatTemplateContentFormat,
-    };
 
     #[test]
     fn test_transform_messages_string_format() {

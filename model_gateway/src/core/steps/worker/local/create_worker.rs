@@ -3,6 +3,10 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use openai_protocol::{
+    model_card::ModelCard,
+    worker::{HealthCheckConfig, WorkerSpec},
+};
 use tracing::debug;
 use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
@@ -13,10 +17,6 @@ use crate::{
         steps::workflow_data::LocalWorkerWorkflowData,
         worker::{RuntimeType, WorkerType},
         BasicWorkerBuilder, ConnectionMode, DPAwareWorkerBuilder, Worker, UNKNOWN_MODEL_ID,
-    },
-    protocols::{
-        model_card::ModelCard,
-        worker::{HealthCheckConfig, WorkerSpec},
     },
 };
 

@@ -10,7 +10,7 @@
 //! - Common utilities
 
 // Re-export UNKNOWN_MODEL_ID from protocols for use throughout core
-pub use crate::protocols::UNKNOWN_MODEL_ID;
+pub use openai_protocol::UNKNOWN_MODEL_ID;
 
 pub mod circuit_breaker;
 pub mod error;
@@ -29,6 +29,11 @@ pub mod worker_service;
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use error::{WorkerError, WorkerResult};
 pub use job_queue::{Job, JobQueue, JobQueueConfig};
+pub use openai_protocol::{
+    model_card::ModelCard,
+    model_type::{Endpoint, ModelType},
+    worker::ProviderType,
+};
 pub use retry::{is_retryable_status, RetryExecutor};
 pub use worker::{
     AttachedBody, BasicWorker, ConnectionMode, RuntimeType, Worker, WorkerLoadGuard, WorkerType,
@@ -38,9 +43,3 @@ pub use worker_builder::{BasicWorkerBuilder, DPAwareWorkerBuilder};
 pub use worker_manager::{LoadMonitor, WorkerManager};
 pub use worker_registry::{HashRing, WorkerRegistry};
 pub use worker_service::WorkerService;
-
-pub use crate::protocols::{
-    model_card::ModelCard,
-    model_type::{Endpoint, ModelType},
-    worker::ProviderType,
-};

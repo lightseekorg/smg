@@ -9,6 +9,9 @@ use std::{
 };
 
 use dashmap::DashMap;
+use openai_protocol::worker::{
+    JobStatus, RuntimeType, WorkerSpec, WorkerType, WorkerUpdateRequest,
+};
 use smg_mcp::McpConfig;
 use tokio::sync::{mpsc, Semaphore};
 use tracing::{debug, error, info, warn};
@@ -25,7 +28,6 @@ use crate::{
         McpServerConfigRequest, TokenizerConfigRequest, TokenizerRemovalRequest,
         WasmModuleConfigRequest, WasmModuleRemovalRequest,
     },
-    protocols::worker::{JobStatus, RuntimeType, WorkerSpec, WorkerType, WorkerUpdateRequest},
 };
 
 /// Job types for control plane operations

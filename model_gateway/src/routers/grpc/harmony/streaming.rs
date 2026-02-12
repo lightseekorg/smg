@@ -9,6 +9,15 @@ use std::{
 
 use axum::response::Response;
 use bytes::Bytes;
+use openai_protocol::{
+    chat::{
+        ChatCompletionRequest, ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice,
+    },
+    common::{ChatLogProbs, FunctionCallDelta, ToolCall, ToolCallDelta, Usage},
+    responses::{
+        OutputTokensDetails, ResponseStatus, ResponseUsage, ResponsesResponse, ResponsesUsage,
+    },
+};
 use serde_json::json;
 use smg_mcp::{McpToolSession, ResponseFormat};
 use tokio::sync::mpsc;
@@ -20,15 +29,6 @@ use super::{
 };
 use crate::{
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
-    protocols::{
-        chat::{
-            ChatCompletionRequest, ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice,
-        },
-        common::{ChatLogProbs, FunctionCallDelta, ToolCall, ToolCallDelta, Usage},
-        responses::{
-            OutputTokensDetails, ResponseStatus, ResponseUsage, ResponsesResponse, ResponsesUsage,
-        },
-    },
     routers::grpc::{
         common::{
             response_formatting::CompletionTokenTracker,

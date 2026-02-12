@@ -12,6 +12,13 @@ use std::io;
 
 use axum::http::HeaderMap;
 use bytes::Bytes;
+use openai_protocol::{
+    event_types::{
+        is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType, McpEvent,
+        OutputItemEvent, WebSearchCallEvent,
+    },
+    responses::{generate_id, ResponseInput, ResponsesRequest},
+};
 use serde_json::{json, to_value, Value};
 use smg_mcp::{McpToolSession, ResponseFormat, ResponseTransformer, ToolExecutionInput};
 use tokio::sync::mpsc;
@@ -19,13 +26,6 @@ use tracing::{debug, info, warn};
 
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    protocols::{
-        event_types::{
-            is_function_call_type, CodeInterpreterCallEvent, FileSearchCallEvent, ItemType,
-            McpEvent, OutputItemEvent, WebSearchCallEvent,
-        },
-        responses::{generate_id, ResponseInput, ResponsesRequest},
-    },
     routers::{header_utils::apply_request_headers, mcp_utils::DEFAULT_MAX_ITERATIONS},
 };
 
