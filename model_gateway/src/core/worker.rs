@@ -14,7 +14,7 @@ pub use openai_protocol::worker::{ConnectionMode, RuntimeType, WorkerType};
 use openai_protocol::{
     model_card::ModelCard,
     model_type::{Endpoint, ModelType},
-    worker::{ProviderType, WorkerInfo, WorkerModels, WorkerSpec},
+    worker::{HealthCheckConfig, ProviderType, WorkerInfo, WorkerModels, WorkerSpec},
 };
 use tokio::{sync::OnceCell, time};
 
@@ -401,6 +401,10 @@ impl WorkerTypeExt for WorkerType {
 pub struct WorkerMetadata {
     /// Protocol-level worker identity and configuration.
     pub spec: WorkerSpec,
+    /// Resolved health check config (router defaults + per-worker overrides).
+    /// This is the concrete config used at runtime; `spec.health` only stores
+    /// the partial overrides from the API layer.
+    pub health_config: HealthCheckConfig,
     /// Health check endpoint path (internal-only, from router config).
     pub health_endpoint: String,
     /// Default model type for unknown models (defaults to LLM capabilities).
@@ -529,7 +533,7 @@ impl Worker for BasicWorker {
     }
 
     async fn check_health_async(&self) -> WorkerResult<()> {
-        if self.metadata.spec.health.disable_health_check {
+        if self.metadata.health_config.disable_health_check {
             if !self.is_healthy() {
                 self.set_healthy(true);
             }
@@ -552,7 +556,7 @@ impl Worker for BasicWorker {
             Metrics::record_worker_health_check(worker_type_str, metrics_labels::CB_SUCCESS);
 
             if !self.is_healthy()
-                && successes >= self.metadata.spec.health.success_threshold as usize
+                && successes >= self.metadata.health_config.success_threshold as usize
             {
                 self.set_healthy(true);
                 self.consecutive_successes.store(0, Ordering::Release);
@@ -565,7 +569,8 @@ impl Worker for BasicWorker {
             // Record health check failure metric
             Metrics::record_worker_health_check(worker_type_str, metrics_labels::CB_FAILURE);
 
-            if self.is_healthy() && failures >= self.metadata.spec.health.failure_threshold as usize
+            if self.is_healthy()
+                && failures >= self.metadata.health_config.failure_threshold as usize
             {
                 self.set_healthy(false);
                 self.consecutive_failures.store(0, Ordering::Release);
@@ -751,7 +756,7 @@ impl Worker for BasicWorker {
     }
 
     async fn grpc_health_check(&self) -> WorkerResult<bool> {
-        let timeout = Duration::from_secs(self.metadata.spec.health.timeout_secs);
+        let timeout = Duration::from_secs(self.metadata.health_config.timeout_secs);
         let maybe = self.get_grpc_client().await?;
         let Some(grpc_client) = maybe else {
             tracing::error!(
@@ -785,7 +790,7 @@ impl Worker for BasicWorker {
     }
 
     async fn http_health_check(&self) -> WorkerResult<bool> {
-        let timeout = Duration::from_secs(self.metadata.spec.health.timeout_secs);
+        let timeout = Duration::from_secs(self.metadata.health_config.timeout_secs);
 
         let health_url = format!("{}{}", self.base_url(), self.metadata.health_endpoint);
 
@@ -905,31 +910,38 @@ impl<T: Send + Unpin + 'static> http_body::Body for AttachedBody<T> {
     }
 }
 
-/// Health checker handle with graceful shutdown
+/// Health checker handle with graceful shutdown.
+///
+/// The checker sleeps until the next worker is due for a health check,
+/// so it wakes only when there is actual work to do.
 pub(crate) struct HealthChecker {
     #[allow(dead_code)]
     handle: tokio::task::JoinHandle<()>,
-    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<tokio::sync::Notify>,
 }
 
 impl fmt::Debug for HealthChecker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HealthChecker")
-            .field("shutdown", &self.shutdown.load(Ordering::Relaxed))
-            .finish()
+        f.debug_struct("HealthChecker").finish()
     }
 }
 
 impl HealthChecker {
-    /// Create a new HealthChecker
-    pub fn new(handle: tokio::task::JoinHandle<()>, shutdown: Arc<AtomicBool>) -> Self {
-        Self { handle, shutdown }
+    pub fn new(
+        handle: tokio::task::JoinHandle<()>,
+        shutdown_notify: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            handle,
+            shutdown_notify,
+        }
     }
 
-    /// Shutdown the health checker gracefully
+    /// Shutdown the health checker gracefully.
+    /// Wakes the sleeping task immediately so it can exit.
     #[allow(dead_code)]
     pub async fn shutdown(self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown_notify.notify_one();
         let _ = self.handle.await;
     }
 }
@@ -1053,8 +1065,8 @@ mod tests {
             .health_endpoint("/custom-health")
             .build();
 
-        assert_eq!(worker.metadata().spec.health.timeout_secs, 15);
-        assert_eq!(worker.metadata().spec.health.check_interval_secs, 45);
+        assert_eq!(worker.metadata().health_config.timeout_secs, 15);
+        assert_eq!(worker.metadata().health_config.check_interval_secs, 45);
         assert_eq!(worker.metadata().health_endpoint, "/custom-health");
     }
 
@@ -1573,6 +1585,7 @@ mod tests {
     fn test_worker_metadata_empty_models_accepts_all() {
         let metadata = WorkerMetadata {
             spec: WorkerSpec::new("http://test:8080"),
+            health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
             default_model_type: ModelType::LLM,
         };
@@ -1596,6 +1609,7 @@ mod tests {
         spec.models = WorkerModels::from(vec![model1, model2]);
         let metadata = WorkerMetadata {
             spec,
+            health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
             default_model_type: ModelType::LLM,
         };

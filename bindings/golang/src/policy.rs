@@ -17,7 +17,10 @@ use std::{
 
 use async_trait::async_trait;
 use llm_tokenizer::{create_tokenizer_from_file, traits::Tokenizer};
-use openai_protocol::{chat::ChatCompletionRequest, worker::WorkerSpec};
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    worker::{HealthCheckConfig, WorkerSpec},
+};
 use smg::{
     core::{
         circuit_breaker::CircuitBreaker,
@@ -63,6 +66,7 @@ impl GrpcWorker {
 
         let metadata = WorkerMetadata {
             spec,
+            health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
             default_model_type: ModelType::LLM,
         };

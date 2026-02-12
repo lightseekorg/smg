@@ -54,8 +54,8 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
             let updated_priority = request.priority.unwrap_or(worker.priority());
             let updated_cost = request.cost.unwrap_or(worker.cost());
 
-            // Build updated health config
-            let existing_health = &worker.metadata().spec.health;
+            // Build updated health config from resolved runtime config
+            let existing_health = &worker.metadata().health_config;
             let updated_health_config = match &request.health {
                 Some(update) => update.apply_to(existing_health),
                 None => existing_health.clone(),

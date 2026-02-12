@@ -115,13 +115,17 @@ impl StepExecutor<LocalWorkerWorkflowData> for DetectConnectionModeStep {
             .ok_or_else(|| WorkflowError::ContextValueNotFound("app_context".to_string()))?;
 
         debug!(
-            "Detecting connection mode for {} (timeout: {}s, max_attempts: {})",
+            "Detecting connection mode for {} (timeout: {:?}s, max_attempts: {})",
             config.url, config.health.timeout_secs, config.max_connection_attempts
         );
 
         // Try both protocols in parallel
         let url = config.url.clone();
-        let timeout = config.health.timeout_secs;
+        // Use per-worker timeout override if set, otherwise fall back to router default
+        let timeout = config
+            .health
+            .timeout_secs
+            .unwrap_or(app_context.router_config.health_check.timeout_secs);
         let client = &app_context.client;
         // Auto-detect runtime unless explicitly set to non-default
         let runtime_type_str = config.runtime_type.to_string();
