@@ -44,7 +44,7 @@ use crate::{
         },
         Worker, WorkerRegistry,
     },
-    protocols::worker_spec::{WorkerConfigRequest, WorkerUpdateRequest},
+    protocols::worker::{WorkerSpec, WorkerUpdateRequest},
     workflow::{BackoffStrategy, FailureAction, RetryPolicy, StepDefinition, WorkflowDefinition},
 };
 
@@ -312,7 +312,7 @@ pub fn create_worker_update_workflow() -> WorkflowDefinition<WorkerUpdateWorkflo
 
 /// Helper to create initial workflow data for local worker registration
 pub fn create_local_worker_workflow_data(
-    config: WorkerConfigRequest,
+    config: WorkerSpec,
     app_context: Arc<AppContext>,
 ) -> LocalWorkerWorkflowData {
     LocalWorkerWorkflowData {

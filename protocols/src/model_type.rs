@@ -1,10 +1,7 @@
 //! Model type definitions using bitflags for endpoint support.
 //!
-//! This module defines [`ModelType`] using bitflags to represent which endpoints
-//! a model can support. This allows combining capabilities like
-//! `ModelType::CHAT | ModelType::COMPLETIONS`.
-//!
-//! Inspired by Dynamo's model_type.rs implementation.
+//! Defines [`ModelType`] using bitflags to represent which endpoints a model
+//! can support, and [`Endpoint`] for routing decisions.
 
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
@@ -68,7 +65,6 @@ bitflags! {
 }
 
 /// Mapping of individual capability flags to their names.
-/// Used by `as_capability_names()` for a data-driven approach.
 const CAPABILITY_NAMES: &[(ModelType, &str)] = &[
     (ModelType::CHAT, "chat"),
     (ModelType::COMPLETIONS, "completions"),
@@ -166,7 +162,7 @@ impl ModelType {
             Endpoint::Embeddings => self.supports_embeddings(),
             Endpoint::Rerank => self.supports_rerank(),
             Endpoint::Generate => self.supports_generate(),
-            Endpoint::Models => true, // Models endpoint is always supported
+            Endpoint::Models => true,
         }
     }
 
@@ -229,13 +225,11 @@ impl std::fmt::Display for ModelType {
     }
 }
 
-// Custom Serialize/Deserialize for ModelType to handle bitflags properly
 impl Serialize for ModelType {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        // Serialize as the underlying u16 bits
         serializer.serialize_u16(self.bits())
     }
 }
@@ -252,8 +246,6 @@ impl<'de> Deserialize<'de> for ModelType {
 }
 
 /// Endpoint types for routing decisions.
-///
-/// This enum represents the different API endpoints that can be routed to workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Endpoint {
@@ -289,7 +281,6 @@ impl Endpoint {
 
     /// Parse an endpoint from a URL path
     pub fn from_path(path: &str) -> Option<Self> {
-        // Normalize: strip trailing slash and match
         let path = path.trim_end_matches('/');
         match path {
             "/v1/chat/completions" => Some(Endpoint::Chat),
@@ -312,7 +303,7 @@ impl Endpoint {
             Endpoint::Embeddings => Some(ModelType::EMBEDDINGS),
             Endpoint::Rerank => Some(ModelType::RERANK),
             Endpoint::Generate => Some(ModelType::GENERATE),
-            Endpoint::Models => None, // No specific capability required
+            Endpoint::Models => None,
         }
     }
 }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
-use crate::core::{model_card::ProviderType, Worker};
+use crate::core::{ProviderType, Worker};
 
 // ============================================================================
 // Header Propagation

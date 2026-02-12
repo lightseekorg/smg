@@ -47,8 +47,13 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverDPInfoStep {
         context: &mut WorkflowContext<LocalWorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
         let config = &context.data.config;
+        let app_context = context
+            .data
+            .app_context
+            .as_ref()
+            .ok_or_else(|| WorkflowError::ContextValueNotFound("app_context".to_string()))?;
 
-        if !config.dp_aware {
+        if !app_context.router_config.dp_aware {
             debug!(
                 "Worker {} is not DP-aware, skipping DP discovery",
                 config.url

@@ -4,7 +4,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use smg::{
     config::PolicyConfig, core::WorkerRegistry, policies::PolicyRegistry,
-    protocols::worker_spec::WorkerConfigRequest, routers::router_manager::RouterManager,
+    protocols::worker::WorkerSpec, routers::router_manager::RouterManager,
 };
 
 #[tokio::test]
@@ -23,28 +23,10 @@ async fn test_policy_registry_with_router_manager() {
     let mut labels1 = HashMap::new();
     labels1.insert("policy".to_string(), "cache_aware".to_string());
 
-    let _worker1_config = WorkerConfigRequest {
-        url: "http://worker1:8000".to_string(),
-        model_id: Some("llama-3".to_string()),
-        api_key: Some("test_api_key".to_string()),
-        worker_type: None,
-        priority: None,
-        cost: None,
-        labels: labels1,
-        bootstrap_port: None,
-        tokenizer_path: None,
-        reasoning_parser: None,
-        tool_parser: None,
-        chat_template: None,
-        runtime: None,
-        health_check_timeout_secs: 30,
-        health_check_interval_secs: 60,
-        health_success_threshold: 2,
-        health_failure_threshold: 3,
-        disable_health_check: false,
-        max_connection_attempts: 20,
-        dp_aware: false,
-    };
+    let mut spec1 = WorkerSpec::new("http://worker1:8000");
+    spec1.api_key = Some("test_api_key".to_string());
+    spec1.labels = labels1;
+    let _worker1_config = spec1;
 
     // This would normally connect to a real worker, but for testing we'll just verify the structure
     // In a real test, we'd need to mock the worker or use a test server
@@ -56,28 +38,10 @@ async fn test_policy_registry_with_router_manager() {
     let mut labels2 = HashMap::new();
     labels2.insert("policy".to_string(), "random".to_string());
 
-    let _worker2_config = WorkerConfigRequest {
-        url: "http://worker2:8000".to_string(),
-        model_id: Some("llama-3".to_string()),
-        api_key: Some("test_api_key".to_string()),
-        worker_type: None,
-        priority: None,
-        cost: None,
-        labels: labels2,
-        bootstrap_port: None,
-        tokenizer_path: None,
-        reasoning_parser: None,
-        tool_parser: None,
-        chat_template: None,
-        runtime: None,
-        health_check_timeout_secs: 30,
-        health_check_interval_secs: 60,
-        health_success_threshold: 2,
-        health_failure_threshold: 3,
-        disable_health_check: false,
-        max_connection_attempts: 20,
-        dp_aware: false,
-    };
+    let mut spec2 = WorkerSpec::new("http://worker2:8000");
+    spec2.api_key = Some("test_api_key".to_string());
+    spec2.labels = labels2;
+    let _worker2_config = spec2;
 
     // The second worker should use the same policy as the first (cache_aware)
 
@@ -85,28 +49,10 @@ async fn test_policy_registry_with_router_manager() {
     let mut labels3 = HashMap::new();
     labels3.insert("policy".to_string(), "random".to_string());
 
-    let _worker3_config = WorkerConfigRequest {
-        url: "http://worker3:8000".to_string(),
-        model_id: Some("gpt-4".to_string()),
-        api_key: Some("test_api_key".to_string()),
-        worker_type: None,
-        priority: None,
-        cost: None,
-        labels: labels3,
-        bootstrap_port: None,
-        tokenizer_path: None,
-        reasoning_parser: None,
-        tool_parser: None,
-        runtime: None,
-        chat_template: None,
-        health_check_timeout_secs: 30,
-        health_check_interval_secs: 60,
-        health_success_threshold: 2,
-        health_failure_threshold: 3,
-        disable_health_check: false,
-        max_connection_attempts: 20,
-        dp_aware: false,
-    };
+    let mut spec3 = WorkerSpec::new("http://worker3:8000");
+    spec3.api_key = Some("test_api_key".to_string());
+    spec3.labels = labels3;
+    let _worker3_config = spec3;
 
     let _gpt_policy = policy_registry.get_policy("gpt-4");
 

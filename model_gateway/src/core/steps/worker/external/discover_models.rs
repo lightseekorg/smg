@@ -10,11 +10,8 @@ use serde::Deserialize;
 use tracing::{debug, info};
 
 use crate::{
-    core::{
-        model_card::{ModelCard, ProviderType},
-        model_type::ModelType,
-        steps::workflow_data::ExternalWorkerWorkflowData,
-    },
+    core::steps::workflow_data::ExternalWorkerWorkflowData,
+    protocols::{model_card::ModelCard, model_type::ModelType, worker::ProviderType},
     workflow::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
 };
 

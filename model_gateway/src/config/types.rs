@@ -3,9 +3,11 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::ConfigResult;
-use crate::core::ConnectionMode;
 // Re-export storage config types from data_connector
 pub use crate::data_connector::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
+use crate::{
+    core::ConnectionMode, protocols::worker::HealthCheckConfig as ProtocolHealthCheckConfig,
+};
 
 /// Main router configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,6 +421,19 @@ impl Default for HealthCheckConfig {
             check_interval_secs: 60,
             endpoint: "/health".to_string(),
             disable_health_check: false,
+        }
+    }
+}
+
+impl HealthCheckConfig {
+    /// Convert to protocol-level health check config (without endpoint).
+    pub fn to_protocol_config(&self) -> ProtocolHealthCheckConfig {
+        ProtocolHealthCheckConfig {
+            timeout_secs: self.timeout_secs,
+            check_interval_secs: self.check_interval_secs,
+            success_threshold: self.success_threshold,
+            failure_threshold: self.failure_threshold,
+            disable_health_check: self.disable_health_check,
         }
     }
 }

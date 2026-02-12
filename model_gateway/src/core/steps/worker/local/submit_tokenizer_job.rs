@@ -50,12 +50,13 @@ impl StepExecutor<LocalWorkerWorkflowData> for SubmitTokenizerJobStep {
             }
         };
 
-        // Get chat_template: worker config > global router config
+        // Get chat_template: first model card in config > global router config
         let chat_template = context
             .data
             .config
-            .chat_template
-            .clone()
+            .models
+            .primary()
+            .and_then(|m| m.chat_template.clone())
             .or_else(|| app_context.router_config.chat_template.clone());
 
         // Get cache config from router config

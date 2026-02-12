@@ -6,7 +6,7 @@ use reqwest::RequestBuilder;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::core::{model_type::Endpoint, ProviderType};
+use crate::core::{Endpoint, ProviderType};
 
 const SGLANG_FIELDS: &[&str] = &[
     "request_id",
