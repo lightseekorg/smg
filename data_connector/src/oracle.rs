@@ -254,10 +254,10 @@ pub(super) struct OracleConversationStorage {
 impl OracleConversationStorage {
     pub fn new(config: OracleConfig) -> Result<Self, ConversationStorageError> {
         let store = OracleStore::new(&config, |conn| {
-            // Check if table exists
+            // Check if table exists in ADMIN schema
             let exists: i64 = conn
                 .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATIONS'",
+                    "SELECT COUNT(*) FROM all_tables WHERE owner = 'ADMIN' AND table_name = 'CONVERSATIONS'",
                     &[],
                 )
                 .map_err(map_oracle_error)?;
@@ -319,7 +319,7 @@ impl ConversationStorage for OracleConversationStorage {
         self.store
             .execute(move |conn| {
                 conn.execute(
-                    "INSERT INTO \"CONVERSATIONS\" (\"CONVERSATION_ID\", \"CONVERSATION_STORE_ID\", \"GENERATIVE_AI_PROJECT_ID\", \"CREATED_AT\", \"METADATA\", \"ITEMS\", \"UPDATED_AT\", \"EXPIRES_AT\", \"VERSION\", \"SHORT_TERM_MEMORY\") VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)",
+                    "INSERT INTO ADMIN.\"CONVERSATIONS\" (\"CONVERSATION_ID\", \"CONVERSATION_STORE_ID\", \"GENERATIVE_AI_PROJECT_ID\", \"CREATED_AT\", \"METADATA\", \"ITEMS\", \"UPDATED_AT\", \"EXPIRES_AT\", \"VERSION\", \"SHORT_TERM_MEMORY\") VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)",
                     &[&id_str, &conversation_store_id, &None::<String>, &created_at, &metadata_json, &"[]", &created_at, &expires_at, &0, &None::<String>],
                 )
                 .map(|_| ())
@@ -339,7 +339,7 @@ impl ConversationStorage for OracleConversationStorage {
         self.store
             .execute(move |conn| {
                 let mut stmt = conn
-                    .statement("SELECT \"CONVERSATION_ID\", \"CREATED_AT\", \"METADATA\", \"GENERATIVE_AI_PROJECT_ID\", \"UPDATED_AT\", \"VERSION\", \"SHORT_TERM_MEMORY\", \"EXPIRES_AT\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1")
+                    .statement("SELECT \"CONVERSATION_ID\", \"CREATED_AT\", \"METADATA\", \"GENERATIVE_AI_PROJECT_ID\", \"UPDATED_AT\", \"VERSION\", \"SHORT_TERM_MEMORY\", \"EXPIRES_AT\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1")
                     .build()
                     .map_err(map_oracle_error)?;
                 let mut rows = stmt.query(&[&lookup]).map_err(map_oracle_error)?;
@@ -382,7 +382,7 @@ impl ConversationStorage for OracleConversationStorage {
         self.store
             .execute(move |conn| {
                 let affected = conn.execute(
-                    "UPDATE \"CONVERSATIONS\" SET \"METADATA\" = :1, \"UPDATED_AT\" = :2, \"GENERATIVE_AI_PROJECT_ID\" = :3, \"SHORT_TERM_MEMORY\" = :4 WHERE \"CONVERSATION_ID\" = :5",
+                    "UPDATE ADMIN.\"CONVERSATIONS\" SET \"METADATA\" = :1, \"UPDATED_AT\" = :2, \"GENERATIVE_AI_PROJECT_ID\" = :3, \"SHORT_TERM_MEMORY\" = :4 WHERE \"CONVERSATION_ID\" = :5",
                     &[&metadata_json, &updated_at, &None::<String>, &None::<String>, &id_str],
                 )
                 .map_err(map_oracle_error)?;
@@ -393,7 +393,7 @@ impl ConversationStorage for OracleConversationStorage {
 
                 // Get the updated conversation
                 let mut stmt = conn
-                    .statement("SELECT \"CREATED_AT\", \"GENERATIVE_AI_PROJECT_ID\", \"UPDATED_AT\", \"VERSION\", \"SHORT_TERM_MEMORY\", \"EXPIRES_AT\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1")
+                    .statement("SELECT \"CREATED_AT\", \"GENERATIVE_AI_PROJECT_ID\", \"UPDATED_AT\", \"VERSION\", \"SHORT_TERM_MEMORY\", \"EXPIRES_AT\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1")
                     .build()
                     .map_err(map_oracle_error)?;
                 let mut rows = stmt.query(&[&id_str]).map_err(map_oracle_error)?;
@@ -429,7 +429,7 @@ impl ConversationStorage for OracleConversationStorage {
             .store
             .execute(move |conn| {
                 conn.execute(
-                    "DELETE FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                    "DELETE FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
                     &[&id_str],
                 )
                 .map_err(map_oracle_error)
@@ -505,7 +505,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                 // First, get the current items and check if conversation exists
                 let current_items_json: Option<String> = conn
                     .query_row_as(
-                        "SELECT \"ITEMS\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        "SELECT \"ITEMS\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
                         &[&cid],
                     )
                     .map_err(map_oracle_error)
@@ -525,7 +525,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                     .map_err(|e| e.to_string())?;
 
                 conn.execute(
-                    "UPDATE \"CONVERSATIONS\" SET \"ITEMS\" = :1, \"UPDATED_AT\" = :2, \"GENERATIVE_AI_PROJECT_ID\" = :3, \"SHORT_TERM_MEMORY\" = :4, \"VERSION\" = :5 WHERE \"CONVERSATION_ID\" = :6",
+                    "UPDATE ADMIN.\"CONVERSATIONS\" SET \"ITEMS\" = :1, \"UPDATED_AT\" = :2, \"GENERATIVE_AI_PROJECT_ID\" = :3, \"SHORT_TERM_MEMORY\" = :4, \"VERSION\" = :5 WHERE \"CONVERSATION_ID\" = :6",
                     &[&updated_items_json, &Utc::now(), &None::<String>, &None::<String>, &0, &cid],
                 )
                 .map_err(map_oracle_error)?;
@@ -559,7 +559,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
             .execute(move |conn| {
                 let items_json: Option<String> = conn
                     .query_row_as(
-                        "SELECT \"ITEMS\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        "SELECT \"ITEMS\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
                         &[&cid],
                     )
                     .map_err(map_oracle_error)
@@ -638,7 +638,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
             .execute(move |conn| {
                 let items_json: Option<String> = conn
                     .query_row_as(
-                        "SELECT \"ITEMS\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        "SELECT \"ITEMS\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
                         &[&cid],
                     )
                     .map_err(map_oracle_error)
@@ -675,7 +675,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
             .execute(move |conn| {
                 let items_json: Option<String> = conn
                     .query_row_as(
-                        "SELECT \"ITEMS\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        "SELECT \"ITEMS\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
                         &[&cid],
                     )
                     .map_err(map_oracle_error)
@@ -713,7 +713,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                 // First, get the current items and check if conversation exists
                 let current_items_json: Option<String> = conn
                     .query_row_as(
-                        "SELECT \"ITEMS\" FROM \"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        "SELECT \"ITEMS\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
                         &[&cid],
                     )
                     .map_err(map_oracle_error)
@@ -739,7 +739,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                     .map_err(|e| e.to_string())?;
 
                 conn.execute(
-                    "UPDATE \"CONVERSATIONS\" SET \"ITEMS\" = :1, \"UPDATED_AT\" = :2, \"GENERATIVE_AI_PROJECT_ID\" = :3, \"SHORT_TERM_MEMORY\" = :4, \"VERSION\" = :5 WHERE \"CONVERSATION_ID\" = :6",
+                    "UPDATE ADMIN.\"CONVERSATIONS\" SET \"ITEMS\" = :1, \"UPDATED_AT\" = :2, \"GENERATIVE_AI_PROJECT_ID\" = :3, \"SHORT_TERM_MEMORY\" = :4, \"VERSION\" = :5 WHERE \"CONVERSATION_ID\" = :6",
                     &[&updated_items_json, &Utc::now(), &None::<String>, &None::<String>, &0, &cid],
                 )
                 .map_err(map_oracle_error)?;
@@ -793,7 +793,7 @@ pub trait OracleResponseStorageExt: ResponseStorage {
 }
 
 const SELECT_BASE: &str = "SELECT \"RESPONSE_ID\", \"CONVERSATION_STORE_ID\", \"CONVERSATION_ID\", \"PREVIOUS_RESPONSE_ID\", \
-    \"INPUT_ITEMS\", \"RESPONSE_OBJECT\", \"MODEL\", \"CREATED_AT\", \"EXPIRES_AT\", \"SUBJECT_ID\", \"INPUT_EMBEDDING\", \"OUTPUT_EMBEDDING\", \"GENERATIVE_AI_PROJECT_ID\" FROM \"RESPONSES\"";
+    \"INPUT_ITEMS\", \"RESPONSE_OBJECT\", \"MODEL\", \"CREATED_AT\", \"EXPIRES_AT\", \"SUBJECT_ID\", \"INPUT_EMBEDDING\", \"OUTPUT_EMBEDDING\", \"GENERATIVE_AI_PROJECT_ID\" FROM ADMIN.\"RESPONSES\"";
 
 #[derive(Clone)]
 pub(super) struct OracleResponseStorage {
@@ -803,10 +803,10 @@ pub(super) struct OracleResponseStorage {
 impl OracleResponseStorage {
     pub fn new(config: OracleConfig) -> Result<Self, ResponseStorageError> {
         let store = OracleStore::new(&config, |conn| {
-            // Check if table exists
+            // Check if table exists in ADMIN schema
             let exists: i64 = conn
                 .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'RESPONSES'",
+                    "SELECT COUNT(*) FROM all_tables WHERE owner = 'ADMIN' AND table_name = 'RESPONSES'",
                     &[],
                 )
                 .map_err(map_oracle_error)?;
@@ -912,7 +912,7 @@ impl ResponseStorage for OracleResponseStorage {
                 tracing::debug!("Oracle binding - conversation_store_id_ref: {:?}", conversation_store_id_ref);
 
                 conn.execute(
-                    "INSERT INTO \"RESPONSES\" (\"RESPONSE_ID\", \"CONVERSATION_STORE_ID\", \"CONVERSATION_ID\", \"PREVIOUS_RESPONSE_ID\", \
+                    "INSERT INTO ADMIN.\"RESPONSES\" (\"RESPONSE_ID\", \"CONVERSATION_STORE_ID\", \"CONVERSATION_ID\", \"PREVIOUS_RESPONSE_ID\", \
                         \"INPUT_ITEMS\", \"RESPONSE_OBJECT\", \"MODEL\", \"CREATED_AT\", \"EXPIRES_AT\", \"SUBJECT_ID\", \"GENERATIVE_AI_PROJECT_ID\") \
                      VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11)",
                     &[
@@ -967,7 +967,7 @@ impl ResponseStorage for OracleResponseStorage {
         self.store
             .execute(move |conn| {
                 conn.execute(
-                    "DELETE FROM \"RESPONSES\" WHERE \"RESPONSE_ID\" = :1",
+                    "DELETE FROM ADMIN.\"RESPONSES\" WHERE \"RESPONSE_ID\" = :1",
                     &[&id],
                 )
                 .map(|_| ())

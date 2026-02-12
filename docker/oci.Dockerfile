@@ -72,6 +72,8 @@ COPY --from=build-image /opt/smg/bindings/python/dist/*.whl dist/
 
 RUN uv pip install --force-reinstall dist/*.whl
 
+RUN uv pip install oci-cli --index-url https://pypi.org/simple
+
 RUN rm -rf /root/.cache dist/
 RUN microdnf install -y procps-ng \
     && microdnf clean all
