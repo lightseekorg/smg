@@ -9,16 +9,13 @@ use axum::{
 };
 use chrono::Utc;
 use serde_json::{json, Value};
+use smg_data_connector::{
+    Conversation, ConversationId, ConversationItem, ConversationItemId, ConversationItemStorage,
+    ConversationStorage, ListParams, NewConversation, NewConversationItem, SortOrder,
+};
 use tracing::{info, warn};
 
-use crate::{
-    data_connector::{
-        Conversation, ConversationId, ConversationItem, ConversationItemId,
-        ConversationItemStorage, ConversationStorage, ListParams, NewConversation,
-        NewConversationItem, SortOrder,
-    },
-    routers::persistence_utils::item_to_json,
-};
+use crate::routers::persistence_utils::item_to_json;
 
 // ============================================================================
 // Constants

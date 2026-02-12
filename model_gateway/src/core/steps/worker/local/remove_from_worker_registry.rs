@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use tracing::{debug, warn};
+use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::{
     core::{
@@ -11,7 +12,6 @@ use crate::{
         worker::{ConnectionModeExt, WorkerTypeExt},
     },
     observability::metrics::Metrics,
-    workflow::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
 };
 
 /// Step to remove workers from the worker registry.

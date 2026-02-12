@@ -17,6 +17,7 @@ use axum::{
 use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use smg_mcp::{McpOrchestrator, McpToolSession, ResponseFormat};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -35,7 +36,6 @@ use super::{
     },
 };
 use crate::{
-    mcp::{McpOrchestrator, McpToolSession, ResponseFormat},
     observability::metrics::Metrics,
     protocols::{
         event_types::{

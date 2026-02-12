@@ -13,11 +13,11 @@ use std::io;
 use axum::http::HeaderMap;
 use bytes::Bytes;
 use serde_json::{json, to_value, Value};
+use smg_mcp::{McpToolSession, ResponseFormat, ResponseTransformer, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::{
-    mcp::{McpToolSession, ResponseFormat, ResponseTransformer, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
     protocols::{
         event_types::{

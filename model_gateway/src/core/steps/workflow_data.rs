@@ -13,6 +13,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
+use wfaas::{WorkflowData, WorkflowError};
 
 use super::{
     mcp_registration::McpServerConfigRequest, tokenizer_registration::TokenizerConfigRequest,
@@ -27,7 +28,6 @@ use crate::{
     protocols::{
         model_card::ModelCard, worker::WorkerUpdateRequest as ProtocolWorkerUpdateRequest,
     },
-    workflow::{WorkflowData, WorkflowError},
 };
 
 // ============================================================================

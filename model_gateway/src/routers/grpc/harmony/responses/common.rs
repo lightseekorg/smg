@@ -2,13 +2,13 @@
 
 use axum::response::Response;
 use serde_json::{from_value, to_string, Value};
+use smg_data_connector::ResponseId;
+use smg_mcp::McpToolSession;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use super::execution::ToolResult;
 use crate::{
-    data_connector::ResponseId,
-    mcp::McpToolSession,
     protocols::{
         common::{ToolCall, ToolChoice, ToolChoiceValue},
         responses::{

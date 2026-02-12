@@ -1,7 +1,7 @@
 //! Shared proto JSON parsing utilities
 
 use serde_json::Value;
-use smg::grpc_client::sglang_proto as proto;
+use smg_grpc_client::sglang_proto as proto;
 
 /// Parse a JSON value into a proto::GenerateResponse
 pub fn parse_proto_response(json_value: &Value) -> Result<proto::GenerateResponse, &'static str> {

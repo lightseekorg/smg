@@ -9,13 +9,13 @@ use std::{
 
 use serde_json::Value;
 use smg::{
-    grpc_client::sglang_proto as proto,
     protocols::common::{
         FunctionCallDelta, StringOrArray, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage,
     },
     tokenizer::{stop::StopSequenceDecoder, stream::DecodeStream, traits::Tokenizer},
     tool_parser::ToolParser,
 };
+use smg_grpc_client::sglang_proto as proto;
 
 use super::{
     error::{clear_error_message, set_error_message, SglErrorCode},
@@ -297,10 +297,8 @@ pub(crate) async fn convert_proto_chunk_to_openai(
     handle: &mut GrpcResponseConverterHandle,
     tokenizer: &Arc<dyn Tokenizer>,
 ) -> Result<Option<smg::protocols::chat::ChatCompletionStreamResponse>, String> {
-    use smg::{
-        grpc_client::sglang_proto::generate_response::Response::*,
-        protocols::chat::{ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice},
-    };
+    use smg::protocols::chat::{ChatCompletionStreamResponse, ChatMessageDelta, ChatStreamChoice};
+    use smg_grpc_client::sglang_proto::generate_response::Response::*;
 
     match proto_response.response {
         Some(Chunk(chunk)) => {

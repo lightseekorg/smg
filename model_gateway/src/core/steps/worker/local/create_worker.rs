@@ -4,6 +4,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tracing::debug;
+use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::{
     app_context::AppContext,
@@ -17,7 +18,6 @@ use crate::{
         model_card::ModelCard,
         worker::{HealthCheckConfig, WorkerSpec},
     },
-    workflow::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
 };
 
 /// Step 3: Create worker object(s) with merged configuration + metadata.
