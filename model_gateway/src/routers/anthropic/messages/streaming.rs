@@ -269,17 +269,7 @@ async fn consume_upstream_stream(
 ) -> Result<StreamedResponse, String> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
-    let mut result = StreamedResponse {
-        content_blocks: Vec::new(),
-        stop_reason: None,
-        usage: None,
-        tool_use_blocks: Vec::new(),
-    };
-
-    // Track the upstream index → content_block mapping for accumulation
-    let mut upstream_blocks: Vec<BlockAccumulator> = Vec::new();
-    // Base global_index at the start of this iteration for remapping
-    let index_base = *global_index;
+    let mut processor = EventProcessor::new(tx, global_index, is_first_iteration, session);
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
@@ -296,23 +286,11 @@ async fn consume_upstream_stream(
 
         // Process complete SSE frames (delimited by double newline)
         while let Some(frame_end) = buffer.find("\n\n") {
-            // drain the frame + delimiter, leaving the remainder in buffer
             let frame: String = buffer.drain(..frame_end + 2).collect();
             let frame = &frame[..frame.len() - 2]; // strip trailing \n\n
 
             if let Some((event_type, data)) = parse_sse_frame(frame) {
-                process_sse_event(
-                    tx,
-                    &event_type,
-                    &data,
-                    global_index,
-                    index_base,
-                    is_first_iteration,
-                    session,
-                    &mut result,
-                    &mut upstream_blocks,
-                )
-                .await?;
+                processor.process(&event_type, &data).await?;
             }
         }
     }
@@ -320,22 +298,11 @@ async fn consume_upstream_stream(
     // Process any remaining data in buffer
     if !buffer.trim().is_empty() {
         if let Some((event_type, data)) = parse_sse_frame(&buffer) {
-            process_sse_event(
-                tx,
-                &event_type,
-                &data,
-                global_index,
-                index_base,
-                is_first_iteration,
-                session,
-                &mut result,
-                &mut upstream_blocks,
-            )
-            .await?;
+            processor.process(&event_type, &data).await?;
         }
     }
 
-    Ok(result)
+    Ok(processor.into_result())
 }
 
 /// Accumulator for a content block being streamed.
@@ -354,265 +321,320 @@ enum BlockAccumulator {
     },
 }
 
-/// Process a single SSE event from the upstream worker.
-#[allow(clippy::too_many_arguments)]
-async fn process_sse_event(
-    tx: &mpsc::Sender<Result<Bytes, std::io::Error>>,
-    event_type: &str,
-    data: &str,
-    global_index: &mut u32,
-    index_base: u32,
-    is_first_iteration: bool,
-    session: &McpToolSession<'_>,
-    result: &mut StreamedResponse,
-    upstream_blocks: &mut Vec<BlockAccumulator>,
-) -> Result<(), String> {
-    let mut parsed: Value =
-        serde_json::from_str(data).map_err(|e| format!("Failed to parse SSE data: {}", e))?;
-
-    match event_type {
-        "message_start" => {
-            if is_first_iteration {
-                // Forward message_start only on first iteration
-                send_sse(tx, "message_start", &parsed).await;
-            }
-        }
-
-        "content_block_start" => {
-            let upstream_index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-
-            // Guard against OOM from a malicious upstream index
-            if upstream_index > MAX_UPSTREAM_BLOCK_INDEX {
-                return Err(format!(
-                    "Upstream content block index {} exceeds maximum ({})",
-                    upstream_index, MAX_UPSTREAM_BLOCK_INDEX
-                ));
-            }
-
-            let content_block = parsed.get("content_block").cloned().unwrap_or(Value::Null);
-
-            let block_type = content_block
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            let client_index = index_base + upstream_index;
-
-            // Grow upstream_blocks to fit the new index
-            while upstream_blocks.len() <= upstream_index as usize {
-                upstream_blocks.push(BlockAccumulator::Text {
-                    text: String::new(),
-                });
-            }
-
-            match block_type {
-                "tool_use" => {
-                    // Transform tool_use → mcp_tool_use
-                    let id = content_block
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = content_block
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let mcp_id = format!("mcptoolu_{}", id.trim_start_matches("toolu_"));
-                    let server_name = session.resolve_tool_server_label(&name);
-
-                    // Build transformed mcp_tool_use content_block_start
-                    let transformed_block = serde_json::json!({
-                        "type": "mcp_tool_use",
-                        "id": mcp_id,
-                        "name": name,
-                        "server_name": server_name,
-                        "input": {}
-                    });
-
-                    let transformed_event = serde_json::json!({
-                        "type": "content_block_start",
-                        "index": client_index,
-                        "content_block": transformed_block
-                    });
-
-                    send_sse(tx, "content_block_start", &transformed_event).await;
-
-                    upstream_blocks[upstream_index as usize] = BlockAccumulator::ToolUse {
-                        id,
-                        name,
-                        input_json: String::new(),
-                    };
-                }
-                _ => {
-                    // Forward text, thinking, etc. with remapped index
-                    parsed["index"] = Value::from(client_index);
-                    send_sse(tx, "content_block_start", &parsed).await;
-
-                    upstream_blocks[upstream_index as usize] = match block_type {
-                        "thinking" => BlockAccumulator::Thinking {
-                            thinking: String::new(),
-                            signature: String::new(),
-                        },
-                        _ => BlockAccumulator::Text {
-                            text: String::new(),
-                        },
-                    };
-                }
-            }
-        }
-
-        "content_block_delta" => {
-            let upstream_index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let client_index = index_base + upstream_index;
-
-            // Accumulate content BEFORE mutating parsed (we need to read delta)
-            if let Some(delta) = parsed.get("delta") {
-                let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-                if let Some(block) = upstream_blocks.get_mut(upstream_index as usize) {
-                    match block {
-                        BlockAccumulator::Text { text } if delta_type == "text_delta" => {
-                            if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
-                                if text.len() + t.len() <= MAX_BLOCK_ACCUMULATION_SIZE {
-                                    text.push_str(t);
-                                }
-                            }
-                        }
-                        BlockAccumulator::ToolUse { input_json, .. }
-                            if delta_type == "input_json_delta" =>
-                        {
-                            if let Some(json) = delta.get("partial_json").and_then(|v| v.as_str()) {
-                                if input_json.len() + json.len() <= MAX_BLOCK_ACCUMULATION_SIZE {
-                                    input_json.push_str(json);
-                                }
-                            }
-                        }
-                        BlockAccumulator::Thinking {
-                            thinking,
-                            signature,
-                        } => {
-                            if delta_type == "thinking_delta" {
-                                if let Some(t) = delta.get("thinking").and_then(|v| v.as_str()) {
-                                    if thinking.len() + t.len() <= MAX_BLOCK_ACCUMULATION_SIZE {
-                                        thinking.push_str(t);
-                                    }
-                                }
-                            } else if delta_type == "signature_delta" {
-                                if let Some(s) = delta.get("signature").and_then(|v| v.as_str()) {
-                                    if signature.len() + s.len() <= MAX_BLOCK_ACCUMULATION_SIZE {
-                                        signature.push_str(s);
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            // Forward delta with remapped index — mutate in-place, no clone needed
-            parsed["index"] = Value::from(client_index);
-            send_sse(tx, "content_block_delta", &parsed).await;
-        }
-
-        "content_block_stop" => {
-            let upstream_index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            let client_index = index_base + upstream_index;
-
-            // Forward stop with remapped index
-            let event = serde_json::json!({
-                "type": "content_block_stop",
-                "index": client_index
-            });
-            send_sse(tx, "content_block_stop", &event).await;
-
-            // Finalize the accumulated block
-            if let Some(block) = upstream_blocks.get(upstream_index as usize) {
-                match block {
-                    BlockAccumulator::Text { text } => {
-                        result.content_blocks.push(ContentBlock::Text {
-                            text: text.clone(),
-                            citations: None,
-                        });
-                    }
-                    BlockAccumulator::ToolUse {
-                        id,
-                        name,
-                        input_json,
-                    } => {
-                        let input: Value = serde_json::from_str(input_json).unwrap_or_else(|e| {
-                            warn!(
-                                error = %e,
-                                json = %input_json,
-                                "Failed to parse tool input JSON, using empty object"
-                            );
-                            Value::Object(serde_json::Map::new())
-                        });
-
-                        result.content_blocks.push(ContentBlock::ToolUse {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: input.clone(),
-                        });
-
-                        result.tool_use_blocks.push(ToolUseBlock {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input,
-                            cache_control: None,
-                        });
-                    }
-                    BlockAccumulator::Thinking {
-                        thinking,
-                        signature,
-                    } => {
-                        result.content_blocks.push(ContentBlock::Thinking {
-                            thinking: thinking.clone(),
-                            signature: signature.clone(),
-                        });
-                    }
-                }
-            }
-
-            // Update global index: the maximum client_index + 1
-            *global_index = (*global_index).max(client_index + 1);
-        }
-
-        "message_delta" => {
-            // Capture stop_reason and usage — DON'T forward yet
-            if let Some(delta) = parsed.get("delta") {
-                if let Some(stop_str) = delta.get("stop_reason").and_then(|v| v.as_str()) {
-                    result.stop_reason =
-                        serde_json::from_value(Value::String(stop_str.to_string())).ok();
-                }
-            }
-            if let Some(usage) = parsed.get("usage") {
-                result.usage = serde_json::from_value(usage.clone()).ok();
-            }
-        }
-
-        "message_stop" => {
-            // DON'T forward — we emit our own at the end
-        }
-
-        "ping" => {
-            send_sse(tx, "ping", &serde_json::json!({"type": "ping"})).await;
-        }
-
-        "error" => {
-            // Forward error events
-            send_sse(tx, "error", &parsed).await;
-        }
-
-        _ => {
-            // Unknown event type — forward as-is
-            debug!(event_type = %event_type, "Forwarding unknown SSE event type");
-            send_sse(tx, event_type, &parsed).await;
+impl BlockAccumulator {
+    /// Create a new accumulator for the given content block type.
+    fn for_type(block_type: &str) -> Self {
+        match block_type {
+            "thinking" => Self::Thinking {
+                thinking: String::new(),
+                signature: String::new(),
+            },
+            _ => Self::Text {
+                text: String::new(),
+            },
         }
     }
 
-    Ok(())
+    /// Accumulate a streaming delta into this block.
+    fn accumulate_delta(&mut self, delta: &Value) {
+        let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match self {
+            Self::Text { text } if delta_type == "text_delta" => {
+                if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
+                    if text.len() + t.len() <= MAX_BLOCK_ACCUMULATION_SIZE {
+                        text.push_str(t);
+                    }
+                }
+            }
+            Self::ToolUse { input_json, .. } if delta_type == "input_json_delta" => {
+                if let Some(json) = delta.get("partial_json").and_then(|v| v.as_str()) {
+                    if input_json.len() + json.len() <= MAX_BLOCK_ACCUMULATION_SIZE {
+                        input_json.push_str(json);
+                    }
+                }
+            }
+            Self::Thinking {
+                thinking,
+                signature,
+            } => {
+                if delta_type == "thinking_delta" {
+                    if let Some(t) = delta.get("thinking").and_then(|v| v.as_str()) {
+                        if thinking.len() + t.len() <= MAX_BLOCK_ACCUMULATION_SIZE {
+                            thinking.push_str(t);
+                        }
+                    }
+                } else if delta_type == "signature_delta" {
+                    if let Some(s) = delta.get("signature").and_then(|v| v.as_str()) {
+                        if signature.len() + s.len() <= MAX_BLOCK_ACCUMULATION_SIZE {
+                            signature.push_str(s);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Finalize this accumulator into a `ContentBlock` and optional `ToolUseBlock`.
+    fn finalize(&self) -> (ContentBlock, Option<ToolUseBlock>) {
+        match self {
+            Self::Text { text } => (
+                ContentBlock::Text {
+                    text: text.clone(),
+                    citations: None,
+                },
+                None,
+            ),
+            Self::ToolUse {
+                id,
+                name,
+                input_json,
+            } => {
+                let input: Value = serde_json::from_str(input_json).unwrap_or_else(|e| {
+                    warn!(
+                        error = %e,
+                        json = %input_json,
+                        "Failed to parse tool input JSON, using empty object"
+                    );
+                    Value::Object(serde_json::Map::new())
+                });
+                let tool_use = ToolUseBlock {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    cache_control: None,
+                };
+                (
+                    ContentBlock::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input,
+                    },
+                    Some(tool_use),
+                )
+            }
+            Self::Thinking {
+                thinking,
+                signature,
+            } => (
+                ContentBlock::Thinking {
+                    thinking: thinking.clone(),
+                    signature: signature.clone(),
+                },
+                None,
+            ),
+        }
+    }
+}
+
+// ============================================================================
+// SSE event processor
+// ============================================================================
+
+/// Processes SSE events from the upstream worker, transforming and forwarding
+/// them to the client with index remapping and tool_use → mcp_tool_use conversion.
+struct EventProcessor<'a, 'b> {
+    tx: &'a mpsc::Sender<Result<Bytes, std::io::Error>>,
+    global_index: &'a mut u32,
+    index_base: u32,
+    is_first_iteration: bool,
+    session: &'a McpToolSession<'b>,
+    result: StreamedResponse,
+    upstream_blocks: Vec<BlockAccumulator>,
+}
+
+impl<'a, 'b> EventProcessor<'a, 'b> {
+    fn new(
+        tx: &'a mpsc::Sender<Result<Bytes, std::io::Error>>,
+        global_index: &'a mut u32,
+        is_first_iteration: bool,
+        session: &'a McpToolSession<'b>,
+    ) -> Self {
+        let index_base = *global_index;
+        Self {
+            tx,
+            global_index,
+            index_base,
+            is_first_iteration,
+            session,
+            result: StreamedResponse {
+                content_blocks: Vec::new(),
+                stop_reason: None,
+                usage: None,
+                tool_use_blocks: Vec::new(),
+            },
+            upstream_blocks: Vec::new(),
+        }
+    }
+
+    /// Consume the accumulated result.
+    fn into_result(self) -> StreamedResponse {
+        self.result
+    }
+
+    /// Process a single SSE event from the upstream worker.
+    async fn process(&mut self, event_type: &str, data: &str) -> Result<(), String> {
+        let mut parsed: Value =
+            serde_json::from_str(data).map_err(|e| format!("Failed to parse SSE data: {}", e))?;
+
+        match event_type {
+            "message_start" => {
+                if self.is_first_iteration {
+                    send_sse(self.tx, "message_start", &parsed).await;
+                }
+            }
+            "content_block_start" => self.handle_block_start(&mut parsed).await?,
+            "content_block_delta" => self.handle_block_delta(&mut parsed).await,
+            "content_block_stop" => self.handle_block_stop(&parsed).await,
+            "message_delta" => self.handle_message_delta(&parsed),
+            "message_stop" => { /* Don't forward — we emit our own at the end */ }
+            "ping" => {
+                send_sse(self.tx, "ping", &serde_json::json!({"type": "ping"})).await;
+            }
+            "error" => {
+                send_sse(self.tx, "error", &parsed).await;
+            }
+            _ => {
+                debug!(event_type = %event_type, "Forwarding unknown SSE event type");
+                send_sse(self.tx, event_type, &parsed).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle a `content_block_start` event: transform tool_use → mcp_tool_use,
+    /// remap index, and initialize the block accumulator.
+    async fn handle_block_start(&mut self, parsed: &mut Value) -> Result<(), String> {
+        let upstream_index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+        if upstream_index > MAX_UPSTREAM_BLOCK_INDEX {
+            return Err(format!(
+                "Upstream content block index {} exceeds maximum ({})",
+                upstream_index, MAX_UPSTREAM_BLOCK_INDEX
+            ));
+        }
+
+        let block_type = parsed
+            .get("content_block")
+            .and_then(|cb| cb.get("type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let client_index = self.index_base + upstream_index;
+
+        while self.upstream_blocks.len() <= upstream_index as usize {
+            self.upstream_blocks.push(BlockAccumulator::Text {
+                text: String::new(),
+            });
+        }
+
+        if block_type == "tool_use" {
+            let content_block = parsed.get("content_block").cloned().unwrap_or(Value::Null);
+            self.emit_mcp_tool_use_start(&content_block, upstream_index, client_index)
+                .await;
+        } else {
+            // Initialize accumulator before mutating parsed (block_type borrows parsed)
+            self.upstream_blocks[upstream_index as usize] = BlockAccumulator::for_type(block_type);
+            parsed["index"] = Value::from(client_index);
+            send_sse(self.tx, "content_block_start", parsed).await;
+        }
+
+        Ok(())
+    }
+
+    /// Transform an upstream `tool_use` block into `mcp_tool_use` and emit it.
+    async fn emit_mcp_tool_use_start(
+        &mut self,
+        content_block: &Value,
+        upstream_index: u32,
+        client_index: u32,
+    ) {
+        let id = content_block
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let name = content_block
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let mcp_id = format!("mcptoolu_{}", id.trim_start_matches("toolu_"));
+        let server_name = self.session.resolve_tool_server_label(&name);
+
+        let event = serde_json::json!({
+            "type": "content_block_start",
+            "index": client_index,
+            "content_block": {
+                "type": "mcp_tool_use",
+                "id": mcp_id,
+                "name": name,
+                "server_name": server_name,
+                "input": {}
+            }
+        });
+        send_sse(self.tx, "content_block_start", &event).await;
+
+        self.upstream_blocks[upstream_index as usize] = BlockAccumulator::ToolUse {
+            id,
+            name,
+            input_json: String::new(),
+        };
+    }
+
+    /// Handle a `content_block_delta` event: accumulate content and forward
+    /// with remapped index.
+    async fn handle_block_delta(&mut self, parsed: &mut Value) {
+        let upstream_index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let client_index = self.index_base + upstream_index;
+
+        // Accumulate before mutating (we need to read delta first)
+        if let Some(delta) = parsed.get("delta") {
+            if let Some(block) = self.upstream_blocks.get_mut(upstream_index as usize) {
+                block.accumulate_delta(delta);
+            }
+        }
+
+        parsed["index"] = Value::from(client_index);
+        send_sse(self.tx, "content_block_delta", parsed).await;
+    }
+
+    /// Handle a `content_block_stop` event: finalize the accumulated block
+    /// and update the global index.
+    async fn handle_block_stop(&mut self, parsed: &Value) {
+        let upstream_index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let client_index = self.index_base + upstream_index;
+
+        let event = serde_json::json!({
+            "type": "content_block_stop",
+            "index": client_index
+        });
+        send_sse(self.tx, "content_block_stop", &event).await;
+
+        if let Some(block) = self.upstream_blocks.get(upstream_index as usize) {
+            let (content_block, tool_use) = block.finalize();
+            self.result.content_blocks.push(content_block);
+            if let Some(tool_use) = tool_use {
+                self.result.tool_use_blocks.push(tool_use);
+            }
+        }
+
+        *self.global_index = (*self.global_index).max(client_index + 1);
+    }
+
+    /// Handle a `message_delta` event: capture stop_reason and usage
+    /// (not forwarded — we emit our own combined delta at the end).
+    fn handle_message_delta(&mut self, parsed: &Value) {
+        if let Some(delta) = parsed.get("delta") {
+            if let Some(stop_str) = delta.get("stop_reason").and_then(|v| v.as_str()) {
+                self.result.stop_reason =
+                    serde_json::from_value(Value::String(stop_str.to_string())).ok();
+            }
+        }
+        if let Some(usage) = parsed.get("usage") {
+            self.result.usage = serde_json::from_value(usage.clone()).ok();
+        }
+    }
 }
 
 // ============================================================================
