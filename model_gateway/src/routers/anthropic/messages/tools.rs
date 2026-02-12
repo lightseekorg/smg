@@ -1,9 +1,6 @@
 //! MCP tool integration for Messages API
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use axum::response::Response;
 use serde_json::Value;
@@ -350,9 +347,9 @@ fn build_assistant_content_blocks(content: &[ContentBlock]) -> Vec<InputContentB
 
 /// Replace tool_use blocks with mcp_tool_use/mcp_tool_result pairs in the response.
 ///
-/// MCP blocks are spliced in-place: each matched ToolUse block is replaced by the
-/// corresponding McpToolUse + McpToolResult pair at the same position. Non-matching
-/// blocks are preserved in their original order. Any unmatched MCP calls are appended.
+/// All MCP blocks are emitted first, then the original content blocks follow (with any
+/// matched ToolUse blocks skipped to avoid duplication). This ensures the final text
+/// block appears after all MCP tool activity.
 pub(super) fn rebuild_response_with_mcp_blocks(
     mut message: Message,
     mcp_calls: &[McpToolCall],
@@ -366,27 +363,20 @@ pub(super) fn rebuild_response_with_mcp_blocks(
         .map(|c| (c.original_id.as_str(), c))
         .collect();
 
-    let original_content = std::mem::take(&mut message.content);
     let mut new_content: Vec<ContentBlock> = Vec::new();
-    let mut matched: HashSet<&str> = HashSet::new();
 
-    for block in original_content {
-        match &block {
-            ContentBlock::ToolUse { id, .. } => {
-                if let Some(call) = call_lookup.get(id.as_str()) {
-                    matched.insert(call.original_id.as_str());
-                    push_mcp_blocks(&mut new_content, call);
-                } else {
-                    new_content.push(block);
-                }
-            }
-            _ => new_content.push(block),
-        }
+    // First: emit all MCP tool_use/tool_result pairs
+    for call in mcp_calls {
+        push_mcp_blocks(&mut new_content, call);
     }
 
-    for call in mcp_calls {
-        if !matched.contains(call.original_id.as_str()) {
-            push_mcp_blocks(&mut new_content, call);
+    // Then: append original content, skipping ToolUse blocks already covered by MCP pairs
+    for block in std::mem::take(&mut message.content) {
+        match &block {
+            ContentBlock::ToolUse { id, .. } if call_lookup.contains_key(id.as_str()) => {
+                continue;
+            }
+            _ => new_content.push(block),
         }
     }
 
