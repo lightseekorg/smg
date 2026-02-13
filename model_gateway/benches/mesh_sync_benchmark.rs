@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use smg::{
+    core::{BasicWorkerBuilder, Worker, WorkerType},
+    policies::{CacheAwareConfig, CacheAwarePolicy, LoadBalancingPolicy, SelectWorkerInfo},
+};
 use smg_mesh::{MeshSyncManager, StateStores};
-use smg::core::{BasicWorkerBuilder, Worker, WorkerType};
-use smg::policies::{CacheAwareConfig, CacheAwarePolicy, LoadBalancingPolicy, SelectWorkerInfo};
 
 fn benchmark_mesh_sync_overhead(c: &mut Criterion) {
     let mut group = c.benchmark_group("mesh_sync_overhead");
-    
+
     // Setup runtime
     let rt = tokio::runtime::Runtime::new().unwrap();
 
@@ -43,12 +45,15 @@ fn benchmark_mesh_sync_overhead(c: &mut Criterion) {
 
     // Create mesh sync manager
     let stores = Arc::new(StateStores::with_self_name("bench_node".to_string()));
-    let mesh_sync = Arc::new(MeshSyncManager::new(stores.clone(), "bench_node".to_string()));
+    let mesh_sync = Arc::new(MeshSyncManager::new(
+        stores.clone(),
+        "bench_node".to_string(),
+    ));
     policy_mesh.set_mesh_sync(Some(mesh_sync));
 
     // Define workload
     let request_text = "benchmark request text that triggers insertion";
-    
+
     group.throughput(Throughput::Elements(1));
 
     // Benchmark No Mesh
@@ -64,7 +69,6 @@ fn benchmark_mesh_sync_overhead(c: &mut Criterion) {
 
     // Benchmark With Mesh (Sync)
     group.bench_function("select_worker_with_mesh_sync", |b| {
-        
         b.iter(|| {
             let info = SelectWorkerInfo {
                 request_text: Some(request_text),
