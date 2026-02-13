@@ -103,12 +103,12 @@ MODEL_SPECS: dict[str, dict] = {
             "--trust-remote-code",
             "--context-length=163840",  # 160K context length (SGLang)
             "--attention-backend=fa3",  # fa3 attention backend
-            "--mem-fraction-static=0.82",  # 90% GPU memory for static allocation
+            "--mem-fraction-static=0.82",  # 82% GPU memory for static allocation
         ],
         "vllm_args": [
             "--trust-remote-code",
             "--max-model-len=163840",  # 160K context length (vLLM)
-            "--attention-backend=FLASHINFER",  # fa3 attention backend
+            "--attention-backend=FLASHINFER",  # FLASHINFER attention backend
         ],
     },
 }
