@@ -1,9 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/images/logos/logomark-white.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/images/logos/logomark-dark.svg">
-    <img alt="SMG Logo" src="docs/assets/images/logos/logomark-dark.svg" width="80">
-  </picture>
+  <img alt="SMG Logo" src="https://raw.githubusercontent.com/lightseekorg/smg/main/docs/assets/images/logos/logomark-dark.svg" width="80">
 </p>
 
 <h1 align="center">Shepherd Model Gateway</h1>
@@ -19,7 +15,7 @@
 High-performance model-routing gateway for large-scale LLM deployments. Centralizes worker lifecycle management, balances traffic across HTTP/gRPC/OpenAI-compatible backends, and provides enterprise-ready control over history storage, MCP tooling, and privacy-sensitive workflows.
 
 <p align="center">
-  <img src="docs/assets/images/architecture-animated.svg" alt="SMG Architecture" width="100%">
+  <img src="https://raw.githubusercontent.com/lightseekorg/smg/main/docs/assets/images/architecture-animated.svg" alt="SMG Architecture" width="100%">
 </p>
 
 ## Why SMG?
