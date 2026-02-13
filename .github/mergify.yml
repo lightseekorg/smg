@@ -1,0 +1,78 @@
+pull_request_rules:
+  - name: Enforce branch naming convention
+    description: Branch must follow <type>/<description> or <username>/<description> format
+    conditions:
+      - head ~!= ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?/[a-z0-9._-]+$
+      - head != main
+    actions:
+      comment:
+        message: |
+          Hi @{{author}}, the branch `{{head}}` does not follow our naming convention.
+
+          Please use one of the following formats:
+          - `<type>/<description>` — e.g. `feat/add-auth`, `fix/null-pointer`
+          - `<username>/<description>` — e.g. `changsu/fix-routing`
+
+          Allowed types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`
+      post_check:
+        title: Branch naming convention
+        summary: |
+          Branch `{{head}}` does not match the required pattern: `<type>/<description>` or `<username>/<description>`.
+      close:
+        message: |
+          Closing this PR because the branch name does not follow the naming convention. Please rename your branch and reopen.
+
+  - name: Comment on DCO check failure
+    description: Post fix instructions when DCO sign-off is missing
+    conditions:
+      - check-failure = dco-check
+      - -closed
+      - -draft
+    actions:
+      comment:
+        message: |
+          Hi @{{author}}, the DCO sign-off check has failed. All commits must include a `Signed-off-by` line.
+
+          **To fix existing commits:**
+          ```bash
+          # Sign off the last N commits (replace N with the number of unsigned commits)
+          git rebase HEAD~N --signoff
+          git push --force-with-lease
+          ```
+
+          **To sign off future commits automatically:**
+          - Use `git commit -s` every time, or
+          - **VSCode**: enable `Git: Always Sign Off` in Settings
+          - **PyCharm**: enable `Sign-off commit` in the Commit tool window
+
+  - name: Notify on merge conflicts
+    description: Comment when a PR has merge conflicts
+    conditions:
+      - conflict
+      - -closed
+      - -draft
+    actions:
+      comment:
+        message: |
+          Hi @{{author}}, this PR has merge conflicts that must be resolved before it can be merged. Please rebase your branch:
+          ```bash
+          git fetch origin main
+          git rebase origin/main
+          # resolve any conflicts, then:
+          git push --force-with-lease
+          ```
+
+  - name: Remind on stale PRs
+    description: Comment and label PRs inactive for 14 days
+    conditions:
+      - updated-at < 14 days ago
+      - -merged
+      - -closed
+      - -draft
+    actions:
+      comment:
+        message: |
+          Hi @{{author}}, this PR has been inactive for 14 days. Please update it or close it if it's no longer needed.
+      label:
+        add:
+          - stale
