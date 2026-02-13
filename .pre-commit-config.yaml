@@ -64,7 +64,7 @@ repos:
       - id: dco-check
         name: DCO sign-off check
         description: Check that the commit message contains a DCO sign-off
-        entry: bash -c 'grep -q "^Signed-off-by: .* <.*>" "$1"' --
+        entry: bash -c 'grep -q "^Signed-off-by: .* <.*>$" "$1"' --
         language: system
         stages: [commit-msg]
         always_run: true
