@@ -73,6 +73,7 @@ pull_request_rules:
     conditions:
       - -conflict
       - -closed
+      - label = needs-rebase
     actions:
       label:
         remove:
