@@ -74,6 +74,9 @@ use super::{
 };
 use crate::core::{Worker, UNKNOWN_MODEL_ID};
 
+/// Maximum number of operations to buffer before forcing a flush
+const MAX_BUFFER_SIZE: usize = 1000;
+
 /// Batcher for tree operations to reduce mesh sync overhead
 #[derive(Debug)]
 struct TreeOperationBatcher {
@@ -90,10 +93,18 @@ impl TreeOperationBatcher {
     }
 
     fn add(&self, model_id: String, op: TreeOperation) {
-        self.buffer.lock().push((model_id, op));
+        let should_flush = {
+            let mut buffer = self.buffer.lock();
+            buffer.push((model_id, op));
+            buffer.len() >= MAX_BUFFER_SIZE
+        };
+
+        if should_flush {
+            self.flush();
+        }
     }
 
-    fn start_background_flush(self: Arc<Self>) {
+    fn start_background_flush(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_millis(500));
             // Set missed tick behavior to skip to avoid burst
@@ -103,7 +114,7 @@ impl TreeOperationBatcher {
                 interval.tick().await;
                 self.flush();
             }
-        });
+        })
     }
 
     fn flush(&self) {
@@ -157,6 +168,7 @@ pub struct CacheAwarePolicy {
     token_trees: Arc<DashMap<String, Arc<TokenTree>>>,
     mesh_sync: OptionalMeshSyncManager,
     batcher: Arc<parking_lot::RwLock<Option<Arc<TreeOperationBatcher>>>>,
+    batcher_task: Arc<parking_lot::RwLock<Option<tokio::task::JoinHandle<()>>>>,
     _eviction_task: Option<PeriodicTask>,
 }
 
@@ -213,6 +225,7 @@ impl CacheAwarePolicy {
             token_trees,
             mesh_sync: None,
             batcher: Arc::new(parking_lot::RwLock::new(None)),
+            batcher_task: Arc::new(parking_lot::RwLock::new(None)),
             _eviction_task: eviction_task,
         }
     }
@@ -220,6 +233,15 @@ impl CacheAwarePolicy {
     /// Set mesh sync manager (can be called after construction)
     pub fn set_mesh_sync(&mut self, mesh_sync: OptionalMeshSyncManager) {
         self.mesh_sync = mesh_sync.clone();
+
+        // Abort any existing background task
+        {
+            let mut task_guard = self.batcher_task.write();
+            if let Some(handle) = task_guard.take() {
+                handle.abort();
+            }
+        }
+
         if let Some(sync_manager) = mesh_sync {
             self.restore_tree_state_from_mesh();
 
@@ -227,11 +249,13 @@ impl CacheAwarePolicy {
             let batcher = Arc::new(TreeOperationBatcher::new(sync_manager));
             // Spawn background flush task
             let batcher_clone = batcher.clone();
-            batcher_clone.start_background_flush();
+            let handle = batcher_clone.start_background_flush();
 
             *self.batcher.write() = Some(batcher);
+            *self.batcher_task.write() = Some(handle);
         } else {
             *self.batcher.write() = None;
+            // batcher_task was already cleared above
         }
     }
 

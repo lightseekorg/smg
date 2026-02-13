@@ -405,14 +405,9 @@ impl MeshSyncManager {
         let serialized = serde_json::to_vec(&tree_state)
             .map_err(|e| format!("Failed to serialize tree state: {}", e))?;
 
-        // Get current version if exists
-        let current_version = self
-            .stores
-            .policy
-            .get_metadata(&key)
-            .map(|(v, _)| v)
-            .unwrap_or(0);
-        let new_version = current_version + 1;
+        // Use actual tree_state version which increments per operation (via TreeState::add_operation)
+        // This ensures PolicyState version matches TreeState version even for batched updates
+        let new_version = tree_state.version;
 
         let state = PolicyState {
             model_id: model_id.clone(),
@@ -1230,5 +1225,53 @@ mod tests {
 
         let all_states = manager.get_all_policy_states();
         assert_eq!(all_states.len(), 2);
+    }
+    #[test]
+    fn test_sync_tree_operations_batch() {
+        let manager = create_test_manager("node1".to_string());
+
+        use crate::tree_ops::{TreeInsertOp, TreeOperation};
+
+        let mut ops = Vec::new();
+        for i in 0..5 {
+            ops.push(TreeOperation::Insert(TreeInsertOp {
+                text: format!("text_{}", i),
+                tenant: "http://localhost:8000".to_string(),
+            }));
+        }
+
+        let result = manager.sync_tree_operations_batch("model1".to_string(), ops);
+        assert!(result.is_ok());
+
+        // Verify tree state was stored with correct version
+        let tree_state = manager.get_tree_state("model1");
+        assert!(tree_state.is_some());
+        let tree = tree_state.unwrap();
+        assert_eq!(tree.model_id, "model1");
+        assert_eq!(tree.operations.len(), 5);
+        assert_eq!(tree.version, 5); // Version should be 5 after 5 ops (starting from 0)
+
+        // Verify policy state version matches tree state version
+        let policy_state = manager.get_policy_state("model1").unwrap();
+        assert_eq!(policy_state.version, 5);
+
+        // Add more operations to verify version increments correctly
+        let mut ops2 = Vec::new();
+        for i in 5..8 {
+            ops2.push(TreeOperation::Insert(TreeInsertOp {
+                text: format!("text_{}", i),
+                tenant: "http://localhost:8000".to_string(),
+            }));
+        }
+        manager
+            .sync_tree_operations_batch("model1".to_string(), ops2)
+            .unwrap();
+
+        let tree_uptodate = manager.get_tree_state("model1").unwrap();
+        assert_eq!(tree_uptodate.version, 8);
+        assert_eq!(tree_uptodate.operations.len(), 8);
+
+        let policy_uptodate = manager.get_policy_state("model1").unwrap();
+        assert_eq!(policy_uptodate.version, 8);
     }
 }
