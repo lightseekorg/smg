@@ -20,6 +20,7 @@ pub mod messages;
 pub mod model_card;
 pub mod model_type;
 pub mod parser;
+pub mod realtime_session;
 pub mod rerank;
 pub mod responses;
 pub mod sampling_params;
