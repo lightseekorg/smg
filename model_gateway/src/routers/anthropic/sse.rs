@@ -1,43 +1,35 @@
-//! Streaming MCP tool loop for Anthropic Messages API
+//! SSE infrastructure for Anthropic streaming responses
 //!
-//! When a streaming request includes MCP tools, we intercept the upstream
-//! worker's SSE stream, detect `tool_use` blocks, execute MCP tools, emit
-//! synthetic `mcp_tool_use`/`mcp_tool_result` events, and continue the tool
-//! loop — all within a single coherent SSE stream to the client.
+//! Provides SSE frame parsing, event formatting, stream wrappers,
+//! and the core stream consumption logic used by the streaming processor.
 
-use std::{io, sync::Arc};
+use std::{
+    io,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 use axum::{
     body::Body,
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::Response,
 };
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use serde_json::Value;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
-use super::tools::{execute_mcp_tool_calls, McpToolCall};
+use super::mcp::{IterationResult, McpToolCall};
 use crate::{
-    mcp::McpToolSession,
-    observability::metrics::Metrics,
-    protocols::messages::{
-        ContentBlock, InputContent, InputMessage, MessageDeltaUsage, Role, StopReason, ToolUseBlock,
-    },
-    routers::{
-        anthropic::{
-            context::{RequestContext, RouterContext},
-            handler,
-        },
-        error as router_error,
-        mcp_utils::DEFAULT_MAX_ITERATIONS,
-    },
     core::Worker,
+    protocols::messages::{ContentBlock, MessageDeltaUsage, StopReason, ToolUseBlock},
 };
 
-/// Channel buffer size for SSE events sent to the client.
-const SSE_CHANNEL_SIZE: usize = 128;
+// ============================================================================
+// Constants
+// ============================================================================
 
 /// Maximum SSE buffer size (1 MB) to prevent DoS from upstream workers
 /// that send data without frame delimiters.
@@ -52,213 +44,274 @@ const MAX_UPSTREAM_BLOCK_INDEX: u32 = 1024;
 const MAX_BLOCK_ACCUMULATION_SIZE: usize = 10 * 1024 * 1024;
 
 // ============================================================================
-// Public entry point
+// Public types
 // ============================================================================
 
-/// Execute the streaming MCP tool loop.
-///
-/// Spawns a background task that drives the tool loop, sending formatted SSE
-/// events through an `mpsc` channel. Returns the receiver as an Axum streaming
-/// response.
-pub(crate) async fn execute_streaming_tool_loop(
-    router: &RouterContext,
-    req_ctx: RequestContext,
+/// Result from consuming an upstream SSE stream.
+pub(crate) struct StreamConsumeResult {
+    pub iteration: IterationResult,
+    pub usage: Option<MessageDeltaUsage>,
+}
+
+// ============================================================================
+// SSE Response Builder
+// ============================================================================
+
+/// Build an SSE response from a status, upstream headers, and body stream.
+pub(crate) fn build_sse_response(
+    status: StatusCode,
+    upstream_headers: HeaderMap,
+    body: Body,
 ) -> Response {
-    let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(SSE_CHANNEL_SIZE);
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::CONNECTION, "keep-alive");
 
-    let router = router.clone();
+    for (key, value) in upstream_headers.iter() {
+        let key_str = key.as_str();
+        if !matches!(
+            key_str,
+            "content-type"
+                | "cache-control"
+                | "connection"
+                | "transfer-encoding"
+                | "content-length"
+        ) {
+            builder = builder.header(key, value);
+        }
+    }
 
-    tokio::spawn(async move {
-        if let Err(e) = run_tool_loop(tx.clone(), router, req_ctx).await {
-            warn!(error = %e, "Streaming tool loop failed");
-            let _ = send_sse_error(&tx, &e).await;
+    builder.body(body).unwrap_or_else(|e| {
+        error!("Failed to build streaming response: {}", e);
+        crate::routers::error::internal_error("response_build_failed", "Failed to build response")
+    })
+}
+
+// ============================================================================
+// Load Tracking Stream Wrapper
+// ============================================================================
+
+/// Stream wrapper that tracks worker load and circuit breaker outcome.
+///
+/// Decrements worker load when the stream completes or is dropped, and records
+/// circuit breaker outcome based on whether the stream completed successfully.
+pub(crate) struct LoadTrackingStream<S> {
+    inner: Pin<Box<S>>,
+    /// Worker is wrapped in `Option` so `Drop` can `.take()` it exactly once.
+    /// It is always `Some` during the stream's lifetime.
+    worker: Option<Arc<dyn Worker>>,
+    completed_successfully: bool,
+    encountered_error: bool,
+    /// If true, always record failure regardless of stream completion
+    force_failure: bool,
+}
+
+impl<S> LoadTrackingStream<S> {
+    pub(crate) fn new(inner: S, worker: Arc<dyn Worker>) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            worker: Some(worker),
+            completed_successfully: false,
+            encountered_error: false,
+            force_failure: false,
+        }
+    }
+
+    pub(crate) fn new_force_failure(inner: S, worker: Arc<dyn Worker>) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            worker: Some(worker),
+            completed_successfully: false,
+            encountered_error: false,
+            force_failure: true,
+        }
+    }
+}
+
+impl<S> Stream for LoadTrackingStream<S>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>>,
+{
+    type Item = Result<Bytes, io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(bytes))),
+            Poll::Ready(Some(Err(e))) => {
+                self.encountered_error = true;
+                Poll::Ready(Some(Err(io::Error::other(e.to_string()))))
+            }
+            Poll::Ready(None) => {
+                self.completed_successfully = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<S> Drop for LoadTrackingStream<S> {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            worker.decrement_load();
+
+            if self.force_failure {
+                worker.record_outcome(false);
+                debug!(
+                    completed = %self.completed_successfully,
+                    "LoadTrackingStream (force_failure) completed, recorded failure"
+                );
+            } else if self.completed_successfully && !self.encountered_error {
+                worker.record_outcome(true);
+                debug!("LoadTrackingStream completed successfully, recorded success");
+            } else {
+                worker.record_outcome(false);
+                debug!(
+                    completed = %self.completed_successfully,
+                    error = %self.encountered_error,
+                    "LoadTrackingStream interrupted or errored, recorded failure"
+                );
+            }
+        }
+    }
+}
+
+// ============================================================================
+// SSE event formatting and sending
+// ============================================================================
+
+/// Format and send an SSE event through the channel.
+///
+/// Returns `true` if the send succeeded, `false` if the receiver was dropped.
+pub(crate) async fn send_event(
+    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+    event_type: &str,
+    data: &Value,
+) -> bool {
+    let bytes = format_sse_event(event_type, data);
+    tx.send(Ok(bytes)).await.is_ok()
+}
+
+/// Format a `MessageStreamEvent` as SSE bytes: `event: <type>\ndata: <json>\n\n`
+fn format_sse_event(event_type: &str, data: &Value) -> Bytes {
+    let json = serde_json::to_string(data).unwrap_or_else(|_| "{}".to_string());
+    Bytes::from(format!("event: {}\ndata: {}\n\n", event_type, json))
+}
+
+/// Send an SSE error event.
+pub(crate) async fn send_error(tx: &mpsc::Sender<Result<Bytes, io::Error>>, message: &str) -> bool {
+    let data = serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": "api_error",
+            "message": message
+        }
+    });
+    send_event(tx, "error", &data).await
+}
+
+/// Emit `content_block_start` + `content_block_stop` events for an
+/// `mcp_tool_result` block.
+pub(crate) async fn emit_mcp_tool_result(
+    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+    call: &McpToolCall,
+    global_index: &mut u32,
+) -> bool {
+    let index = *global_index;
+
+    // content_block_start with mcp_tool_result
+    let block_start = serde_json::json!({
+        "type": "content_block_start",
+        "index": index,
+        "content_block": {
+            "type": "mcp_tool_result",
+            "tool_use_id": call.mcp_id,
+            "is_error": call.is_error,
+            "content": [{
+                "type": "text",
+                "text": call.result_content
+            }]
         }
     });
 
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    let body = Body::from_stream(stream);
+    if !send_event(tx, "content_block_start", &block_start).await {
+        return false;
+    }
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/event-stream")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header(header::CONNECTION, "keep-alive")
-        .body(body)
-        .unwrap_or_else(|e| {
-            error!("Failed to build streaming response: {}", e);
-            router_error::internal_error("response_build_failed", "Failed to build response")
-        })
+    // content_block_stop
+    let block_stop = serde_json::json!({
+        "type": "content_block_stop",
+        "index": index
+    });
+
+    if !send_event(tx, "content_block_stop", &block_stop).await {
+        return false;
+    }
+
+    *global_index += 1;
+    true
+}
+
+/// Emit the final `message_delta` and `message_stop` events.
+pub(crate) async fn emit_final(
+    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+    stop_reason: Option<&StopReason>,
+    total_input_tokens: u32,
+    total_output_tokens: u32,
+) {
+    let stop_reason_val = stop_reason
+        .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null);
+
+    let message_delta = serde_json::json!({
+        "type": "message_delta",
+        "delta": {
+            "stop_reason": stop_reason_val,
+            "stop_sequence": null
+        },
+        "usage": {
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens
+        }
+    });
+
+    if !send_event(tx, "message_delta", &message_delta).await {
+        debug!("Failed to send final message_delta — channel closed");
+    }
+
+    let message_stop = serde_json::json!({
+        "type": "message_stop"
+    });
+    if !send_event(tx, "message_stop", &message_stop).await {
+        debug!("Failed to send message_stop — channel closed");
+    }
 }
 
 // ============================================================================
-// Tool loop driver
+// Stream consumption
 // ============================================================================
 
-/// Accumulated state from parsing one upstream streaming response.
-struct ToolLoopState {
-    /// Content blocks accumulated from the stream.
-    content_blocks: Vec<ContentBlock>,
-    /// Stop reason from message_delta.
-    stop_reason: Option<StopReason>,
-    /// Usage from message_delta.
-    usage: Option<MessageDeltaUsage>,
-    /// Tool use blocks extracted during streaming.
-    tool_use_blocks: Vec<ToolUseBlock>,
-}
-
-/// Run the tool loop, sending SSE events to the client via `tx`.
-async fn run_tool_loop(
-    tx: mpsc::Sender<Result<Bytes, io::Error>>,
-    router: RouterContext,
-    mut req_ctx: RequestContext,
-) -> Result<(), String> {
-    let session_id = format!("msg_{}", uuid::Uuid::new_v4());
-    let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
-    let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &session_id);
-
-    let mut global_index: u32 = 0;
-    let mut total_input_tokens: u32 = 0;
-    let mut total_output_tokens: u32 = 0;
-    let mut is_first_iteration = true;
-
-    for iteration in 0..DEFAULT_MAX_ITERATIONS {
-        Metrics::record_mcp_tool_iteration(&req_ctx.model_id);
-
-        let (response, worker) = send_streaming_request(&router, &req_ctx).await?;
-
-        // Consume the upstream SSE stream
-        let result = consume_upstream_stream(
-            &tx,
-            response,
-            &mut global_index,
-            is_first_iteration,
-            &session,
-        )
-        .await;
-
-        // Worker load management
-        worker.decrement_load();
-        match &result {
-            Ok(_) => worker.record_outcome(true),
-            Err(_) => worker.record_outcome(false),
-        }
-
-        let streamed = result?;
-        is_first_iteration = false;
-
-        // Accumulate usage
-        if let Some(ref usage) = streamed.usage {
-            total_output_tokens += usage.output_tokens;
-            if let Some(input) = usage.input_tokens {
-                total_input_tokens += input;
-            }
-        }
-
-        // Check if we should continue the tool loop
-        let has_tool_calls = !streamed.tool_use_blocks.is_empty();
-        let is_tool_use_stop = streamed.stop_reason == Some(StopReason::ToolUse);
-
-        if !has_tool_calls || !is_tool_use_stop {
-            // Done — emit final message_delta and message_stop
-            emit_final_events(&tx, &streamed, total_input_tokens, total_output_tokens).await;
-            return Ok(());
-        }
-
-        info!(
-            iteration = iteration,
-            tool_count = streamed.tool_use_blocks.len(),
-            "MCP streaming tool loop: executing tool calls"
-        );
-
-        // Execute MCP tools
-        let (new_calls, assistant_blocks, tool_result_blocks) = execute_mcp_tool_calls(
-            &streamed.content_blocks,
-            &streamed.tool_use_blocks,
-            &session,
-            &req_ctx.model_id,
-        )
-        .await;
-
-        // Emit mcp_tool_result events for each completed tool call
-        for call in &new_calls {
-            if !emit_mcp_tool_result_events(&tx, call, &mut global_index).await {
-                return Ok(());
-            }
-        }
-
-        // Append assistant + tool_result messages for next iteration
-        req_ctx.request.messages.push(InputMessage {
-            role: Role::Assistant,
-            content: InputContent::Blocks(assistant_blocks),
-        });
-        req_ctx.request.messages.push(InputMessage {
-            role: Role::User,
-            content: InputContent::Blocks(tool_result_blocks),
-        });
-    }
-
-    // Max iterations exceeded — emit final events with what we have
-    warn!(
-        "Streaming MCP tool loop exceeded max iterations ({})",
-        DEFAULT_MAX_ITERATIONS
-    );
-    let error_msg = format!(
-        "MCP tool loop exceeded maximum iterations ({})",
-        DEFAULT_MAX_ITERATIONS
-    );
-    let _ = send_sse_error(&tx, &error_msg).await;
-    Ok(())
-}
-
-/// Select a worker, send a streaming request, and return the response.
-///
-/// Returns the worker alongside the response for load tracking after
-/// the stream is consumed.
-async fn send_streaming_request(
-    router: &RouterContext,
-    req_ctx: &RequestContext,
-) -> Result<(reqwest::Response, Arc<dyn Worker>), String> {
-    let model_id = &req_ctx.model_id;
-
-    let worker = handler::select_worker(&router.worker_registry, model_id)
-        .map_err(|_| format!("No healthy workers available for model '{}'", model_id))?;
-
-    handler::record_router_request(model_id, true);
-
-    let (url, req_headers) = handler::build_worker_request(&*worker, req_ctx.headers.as_ref());
-    let response = handler::send_worker_request(
-        &router.http_client,
-        &url,
-        &req_headers,
-        &req_ctx.request,
-        router.request_timeout,
-        &*worker,
-    )
-    .await
-    .map_err(|_| "Failed to send request to worker".to_string())?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        worker.decrement_load();
-        worker.record_outcome(false);
-        return Err(format!("Worker returned error status: {}", status));
-    }
-
-    Ok((response, worker))
-}
-
-/// Consume the upstream SSE byte stream, parsing events and forwarding them
+/// Consume an upstream SSE byte stream, parsing events and forwarding them
 /// (with transformations) to the client.
-async fn consume_upstream_stream(
+///
+/// The `resolve_server_name` closure maps a tool name to its MCP server label,
+/// decoupling this function from `McpToolSession`.
+pub(crate) async fn consume_and_forward<F>(
     tx: &mpsc::Sender<Result<Bytes, io::Error>>,
     response: reqwest::Response,
     global_index: &mut u32,
     is_first_iteration: bool,
-    session: &McpToolSession<'_>,
-) -> Result<ToolLoopState, String> {
+    resolve_server_name: F,
+) -> Result<StreamConsumeResult, String>
+where
+    F: Fn(&str) -> String,
+{
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
-    let mut processor = EventProcessor::new(tx, global_index, is_first_iteration, session);
+    let mut processor =
+        EventProcessor::new(tx, global_index, is_first_iteration, resolve_server_name);
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
@@ -293,6 +346,10 @@ async fn consume_upstream_stream(
 
     Ok(processor.into_result())
 }
+
+// ============================================================================
+// Internal: Block accumulator
+// ============================================================================
 
 /// Accumulator for a content block being streamed.
 enum BlockAccumulator {
@@ -417,27 +474,34 @@ impl BlockAccumulator {
 }
 
 // ============================================================================
-// SSE event processor
+// Internal: SSE event processor
 // ============================================================================
 
 /// Processes SSE events from the upstream worker, transforming and forwarding
 /// them to the client with index remapping and tool_use → mcp_tool_use conversion.
-struct EventProcessor<'a, 'b> {
+///
+/// Generic over `F` to decouple from `McpToolSession` — the closure resolves
+/// tool names to MCP server labels.
+struct EventProcessor<'a, F> {
     tx: &'a mpsc::Sender<Result<Bytes, io::Error>>,
     global_index: &'a mut u32,
     index_base: u32,
     is_first_iteration: bool,
-    session: &'a McpToolSession<'b>,
-    result: ToolLoopState,
+    resolve_server_name: F,
+    result: IterationResult,
+    usage: Option<MessageDeltaUsage>,
     upstream_blocks: Vec<BlockAccumulator>,
 }
 
-impl<'a, 'b> EventProcessor<'a, 'b> {
+impl<'a, F> EventProcessor<'a, F>
+where
+    F: Fn(&str) -> String,
+{
     fn new(
         tx: &'a mpsc::Sender<Result<Bytes, io::Error>>,
         global_index: &'a mut u32,
         is_first_iteration: bool,
-        session: &'a McpToolSession<'b>,
+        resolve_server_name: F,
     ) -> Self {
         let index_base = *global_index;
         Self {
@@ -445,20 +509,23 @@ impl<'a, 'b> EventProcessor<'a, 'b> {
             global_index,
             index_base,
             is_first_iteration,
-            session,
-            result: ToolLoopState {
+            resolve_server_name,
+            result: IterationResult {
                 content_blocks: Vec::new(),
-                stop_reason: None,
-                usage: None,
                 tool_use_blocks: Vec::new(),
+                stop_reason: None,
             },
+            usage: None,
             upstream_blocks: Vec::new(),
         }
     }
 
     /// Consume the accumulated result.
-    fn into_result(self) -> ToolLoopState {
-        self.result
+    fn into_result(self) -> StreamConsumeResult {
+        StreamConsumeResult {
+            iteration: self.result,
+            usage: self.usage,
+        }
     }
 
     /// Process a single SSE event from the upstream worker.
@@ -469,7 +536,7 @@ impl<'a, 'b> EventProcessor<'a, 'b> {
         match event_type {
             "message_start" => {
                 if self.is_first_iteration {
-                    send_sse(self.tx, "message_start", &parsed).await;
+                    send_event(self.tx, "message_start", &parsed).await;
                 }
             }
             "content_block_start" => self.handle_block_start(&mut parsed).await?,
@@ -478,14 +545,14 @@ impl<'a, 'b> EventProcessor<'a, 'b> {
             "message_delta" => self.handle_message_delta(&parsed),
             "message_stop" => { /* Don't forward — we emit our own at the end */ }
             "ping" => {
-                send_sse(self.tx, "ping", &serde_json::json!({"type": "ping"})).await;
+                send_event(self.tx, "ping", &serde_json::json!({"type": "ping"})).await;
             }
             "error" => {
-                send_sse(self.tx, "error", &parsed).await;
+                send_event(self.tx, "error", &parsed).await;
             }
             _ => {
                 debug!(event_type = %event_type, "Forwarding unknown SSE event type");
-                send_sse(self.tx, event_type, &parsed).await;
+                send_event(self.tx, event_type, &parsed).await;
             }
         }
 
@@ -525,7 +592,7 @@ impl<'a, 'b> EventProcessor<'a, 'b> {
             // Initialize accumulator before mutating parsed (block_type borrows parsed)
             self.upstream_blocks[upstream_index as usize] = BlockAccumulator::for_type(block_type);
             parsed["index"] = Value::from(client_index);
-            send_sse(self.tx, "content_block_start", parsed).await;
+            send_event(self.tx, "content_block_start", parsed).await;
         }
 
         Ok(())
@@ -549,7 +616,7 @@ impl<'a, 'b> EventProcessor<'a, 'b> {
             .unwrap_or("")
             .to_string();
         let mcp_id = format!("mcptoolu_{}", id.trim_start_matches("toolu_"));
-        let server_name = self.session.resolve_tool_server_label(&name);
+        let server_name = (self.resolve_server_name)(&name);
 
         let event = serde_json::json!({
             "type": "content_block_start",
@@ -562,7 +629,7 @@ impl<'a, 'b> EventProcessor<'a, 'b> {
                 "input": {}
             }
         });
-        send_sse(self.tx, "content_block_start", &event).await;
+        send_event(self.tx, "content_block_start", &event).await;
 
         self.upstream_blocks[upstream_index as usize] = BlockAccumulator::ToolUse {
             id,
@@ -585,7 +652,7 @@ impl<'a, 'b> EventProcessor<'a, 'b> {
         }
 
         parsed["index"] = Value::from(client_index);
-        send_sse(self.tx, "content_block_delta", parsed).await;
+        send_event(self.tx, "content_block_delta", parsed).await;
     }
 
     /// Handle a `content_block_stop` event: finalize the accumulated block
@@ -598,7 +665,7 @@ impl<'a, 'b> EventProcessor<'a, 'b> {
             "type": "content_block_stop",
             "index": client_index
         });
-        send_sse(self.tx, "content_block_stop", &event).await;
+        send_event(self.tx, "content_block_stop", &event).await;
 
         if let Some(block) = self.upstream_blocks.get(upstream_index as usize) {
             let (content_block, tool_use) = block.finalize();
@@ -621,121 +688,8 @@ impl<'a, 'b> EventProcessor<'a, 'b> {
             }
         }
         if let Some(usage) = parsed.get("usage") {
-            self.result.usage = serde_json::from_value(usage.clone()).ok();
+            self.usage = serde_json::from_value(usage.clone()).ok();
         }
-    }
-}
-
-// ============================================================================
-// SSE event formatting and sending
-// ============================================================================
-
-/// Format and send an SSE event through the channel.
-///
-/// Returns `true` if the send succeeded, `false` if the receiver was dropped.
-async fn send_sse(
-    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
-    event_type: &str,
-    data: &Value,
-) -> bool {
-    let bytes = format_sse_event(event_type, data);
-    tx.send(Ok(bytes)).await.is_ok()
-}
-
-/// Format a `MessageStreamEvent` as SSE bytes: `event: <type>\ndata: <json>\n\n`
-fn format_sse_event(event_type: &str, data: &Value) -> Bytes {
-    let json = serde_json::to_string(data).unwrap_or_else(|_| "{}".to_string());
-    Bytes::from(format!("event: {}\ndata: {}\n\n", event_type, json))
-}
-
-/// Send an SSE error event.
-async fn send_sse_error(tx: &mpsc::Sender<Result<Bytes, io::Error>>, message: &str) -> bool {
-    let data = serde_json::json!({
-        "type": "error",
-        "error": {
-            "type": "api_error",
-            "message": message
-        }
-    });
-    send_sse(tx, "error", &data).await
-}
-
-/// Emit `content_block_start` + `content_block_stop` events for an
-/// `mcp_tool_result` block.
-async fn emit_mcp_tool_result_events(
-    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
-    call: &McpToolCall,
-    global_index: &mut u32,
-) -> bool {
-    let index = *global_index;
-
-    // content_block_start with mcp_tool_result
-    let block_start = serde_json::json!({
-        "type": "content_block_start",
-        "index": index,
-        "content_block": {
-            "type": "mcp_tool_result",
-            "tool_use_id": call.mcp_id,
-            "is_error": call.is_error,
-            "content": [{
-                "type": "text",
-                "text": call.result_content
-            }]
-        }
-    });
-
-    if !send_sse(tx, "content_block_start", &block_start).await {
-        return false;
-    }
-
-    // content_block_stop
-    let block_stop = serde_json::json!({
-        "type": "content_block_stop",
-        "index": index
-    });
-
-    if !send_sse(tx, "content_block_stop", &block_stop).await {
-        return false;
-    }
-
-    *global_index += 1;
-    true
-}
-
-/// Emit the final `message_delta` and `message_stop` events.
-async fn emit_final_events(
-    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
-    streamed: &ToolLoopState,
-    total_input_tokens: u32,
-    total_output_tokens: u32,
-) {
-    let stop_reason = streamed
-        .stop_reason
-        .as_ref()
-        .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
-        .unwrap_or(Value::Null);
-
-    let message_delta = serde_json::json!({
-        "type": "message_delta",
-        "delta": {
-            "stop_reason": stop_reason,
-            "stop_sequence": null
-        },
-        "usage": {
-            "input_tokens": total_input_tokens,
-            "output_tokens": total_output_tokens
-        }
-    });
-
-    if !send_sse(tx, "message_delta", &message_delta).await {
-        debug!("Failed to send final message_delta — channel closed");
-    }
-
-    let message_stop = serde_json::json!({
-        "type": "message_stop"
-    });
-    if !send_sse(tx, "message_stop", &message_stop).await {
-        debug!("Failed to send message_stop — channel closed");
     }
 }
 
