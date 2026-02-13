@@ -168,5 +168,10 @@ name = "radix_tree_benchmark"
 harness = false
 path = "benches/radix_tree_benchmark.rs"
 
+[[bench]]
+name = "mesh_sync_benchmark"
+harness = false
+path = "benches/mesh_sync_benchmark.rs"
+
 [lints]
 workspace = true
