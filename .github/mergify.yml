@@ -2,7 +2,7 @@ pull_request_rules:
   - name: Enforce branch naming convention
     description: Branch must follow <type>/<description> or <username>/<description> format
     conditions:
-      - head ~!= ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?/[a-z0-9._-]+$
+      - -head~=^[a-z0-9]([a-z0-9._-]*[a-z0-9])?/[a-z0-9._-]+$
       - head != main
     actions:
       comment:
