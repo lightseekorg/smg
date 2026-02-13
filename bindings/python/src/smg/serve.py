@@ -55,7 +55,7 @@ class WorkerLauncher(ABC):
         """Build env dict with CUDA_VISIBLE_DEVICES for this worker's dp_rank."""
         env = dict(env) if env is not None else os.environ.copy()
         tp_size = self._get_tp_size(args)
-        base_gpu = dp_rank * tp_size
+        base_gpu = dp_rank * 8
         gpu_ids = range(base_gpu, base_gpu + tp_size)
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
         return env
@@ -125,22 +125,65 @@ class TrtllmWorkerLauncher(WorkerLauncher):
     """
 
     def _get_tp_size(self, args: argparse.Namespace) -> int:
-        return getattr(args, "tp_size", 1)
+        """Get tensor parallel size from args or config file.
+        
+        Priority: args.tp_size > args.tensor_parallel_size > config file > default(1)
+        """
+        # Try --tp-size argument first
+        tp_size = getattr(args, "tp_size", None)
+        if tp_size is not None:
+            return tp_size
+        
+        # Try --tensor-parallel-size (vLLM-style naming)
+        tp_size = getattr(args, "tensor_parallel_size", None)
+        if tp_size is not None:
+            return tp_size
+        
+        # Try reading from config YAML file
+        config_path = getattr(args, "config", None)
+        if config_path:
+            try:
+                import yaml
+                with open(config_path, "r") as f:
+                    config = yaml.safe_load(f)
+                    if config and "tensor_parallel_size" in config:
+                        return config["tensor_parallel_size"]
+            except Exception as e:
+                logger.debug("Failed to read tensor_parallel_size from config %s: %s", config_path, e)
+        
+        return 1
 
     def build_command(self, args: argparse.Namespace, host: str, port: int) -> list[str]:
         if getattr(args, "connection_mode", "grpc") != "grpc":
             raise ValueError("TensorRT-LLM backend only supports grpc connection mode")
-        return [
+        
+        cmd = [
             sys.executable,
             "-m",
             "tensorrt_llm.commands.serve",
             getattr(args, "model", ""),
-            "--grpc",
             "--host",
             host,
             "--port",
             str(port),
         ]
+        
+        # Add optional config file
+        config = getattr(args, "config", None)
+        if config:
+            cmd.extend(["--config", config])
+        
+        # Add backend mode (pytorch/tensorrt)
+        backend = getattr(args, "trtllm_backend", None)
+        if backend:
+            cmd.extend(["--backend", backend])
+        
+        # # Add TP size
+        # tp_size = self._get_tp_size(args)
+        # if tp_size > 1:
+        #     cmd.extend(["--tp_size", str(tp_size)])
+        
+        return cmd
 
 
 BACKEND_LAUNCHERS: dict[str, type[WorkerLauncher]] = {
@@ -164,7 +207,7 @@ def _http_health_check(url: str, timeout: float) -> bool:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status == 200
     except Exception as e:
-        logger.debug("HTTP health check for %s failed: %s", url, e)
+        logger.warning("HTTP health check for %s failed: %s", url, e)
         return False
 
 
@@ -174,7 +217,7 @@ def _grpc_health_check(host: str, port: int, timeout: float) -> bool:
         import grpc
         from grpc_health.v1 import health_pb2, health_pb2_grpc
     except ImportError:
-        logger.debug("gRPC libraries not available for health check")
+        logger.warning("gRPC libraries not available for health check")
         return False
 
     try:
@@ -197,17 +240,17 @@ def _grpc_health_check(host: str, port: int, timeout: float) -> bool:
                 finally:
                     channel.close()
             except Exception as fallback_err:
-                logger.debug(
+                logger.warning(
                     "gRPC channel_ready fallback for %s:%d failed: %s",
                     host,
                     port,
                     fallback_err,
                 )
                 return False
-        logger.debug("gRPC health check for %s:%d failed: %s", host, port, e)
+        logger.warning("gRPC health check for %s:%d failed: %s", host, port, e)
         return False
     except Exception as e:
-        logger.debug("gRPC health check error for %s:%d: %s", host, port, e)
+        logger.warning("gRPC health check error for %s:%d: %s", host, port, e)
         return False
 
 
@@ -271,9 +314,23 @@ def _add_vllm_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_trtllm_stub_args(parser: argparse.ArgumentParser) -> None:
-    """Stub for TRT-LLM args until full integration."""
-    group = parser.add_argument_group("TRT-LLM Options (stub)")
-    group.add_argument("--model", type=str, help="Model path")
+    """Add TensorRT-LLM specific arguments.
+    
+    Note: TensorRT-LLM doesn't provide a centralized argument manager like
+    vLLM's EngineArgs. We manually add the most commonly used arguments.
+    TP size is read from the config file, not passed as CLI argument.
+    """
+    group = parser.add_argument_group("TensorRT-LLM Options")
+    group.add_argument("--model", type=str, help="Model path (HuggingFace ID or local path)")
+    group.add_argument("--tp-size", type=str, help="Tensor parallel size (overrides config file)")
+    group.add_argument("--config", type=str, required=True, help="Config file path (YAML, required - must contain tensor_parallel_size)")
+    group.add_argument(
+        "--trtllm-backend",
+        type=str,
+        choices=["pytorch", "tensorrt"],
+        help="Backend mode: pytorch (no compilation) or tensorrt (compiled engine)",
+    )
+    
 
 
 BACKEND_ARG_ADDERS = {
@@ -500,6 +557,10 @@ class ServeOrchestrator:
 
 def serve_main(argv: list[str] | None = None) -> None:
     """Parse serve args, create orchestrator, and run."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
     backend, args = parse_serve_args(argv)
     orchestrator = ServeOrchestrator(backend, args)
     orchestrator.run()
