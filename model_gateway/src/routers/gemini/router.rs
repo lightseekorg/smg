@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
+use openai_protocol::{chat::ChatCompletionRequest, interactions::InteractionsRequest};
 use smg_mcp::McpOrchestrator;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -21,8 +22,6 @@ use super::{
     context::{RequestContext, SharedComponents},
     driver,
 };
-use openai_protocol::{chat::ChatCompletionRequest, interactions::InteractionsRequest};
-
 use crate::{core::WorkerRegistry, routers::RouterTrait};
 
 pub struct GeminiRouter {
@@ -80,8 +79,13 @@ impl GeminiRouter {
             ctx.streaming.sse_tx = Some(tx);
 
             tokio::spawn(async move {
-                // Events are sent via sse_tx; the returned Response is unused.
-                drop(driver::execute(&mut ctx).await);
+                let response = driver::execute(&mut ctx).await;
+                if !response.status().is_success() {
+                    tracing::error!(
+                        "Streaming request processing failed with status: {}",
+                        response.status()
+                    );
+                }
             });
 
             let body_stream = UnboundedReceiverStream::new(rx);

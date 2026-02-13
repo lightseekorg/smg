@@ -1,6 +1,6 @@
 //! StreamRequestExecutionWithTool step (streaming with MCP tool interception).
 //!
-//! Transition: StreamRequestWithTool → ResponseDone
+//! Terminal step: returns `StepResult::Response` when streaming is complete.
 //!
 //! This step combines streaming event forwarding and tool execution into a
 //! single self-contained loop. It replaces the previous two-step approach
@@ -9,10 +9,7 @@
 
 use axum::response::Response;
 
-use crate::routers::gemini::{
-    context::RequestContext,
-    state::{RequestState, StepResult},
-};
+use crate::routers::gemini::{context::RequestContext, state::StepResult};
 
 /// Stream events from the upstream worker with MCP tool call interception.
 ///
@@ -37,9 +34,8 @@ use crate::routers::gemini::{
 /// - `ctx.streaming.next_output_index` — updated across iterations.
 /// - `ctx.streaming.is_first_iteration` — set to `false` after first iteration.
 /// - `ctx.processing.payload` — replaced with resume payload on each tool-loop iteration.
-/// - `ctx.state` → `ResponseDone`.
 pub(crate) async fn stream_request_execution_with_tool(
-    ctx: &mut RequestContext,
+    _ctx: &mut RequestContext,
 ) -> Result<StepResult, Response> {
     // TODO: implement streaming with tool interception
     //
@@ -94,6 +90,5 @@ pub(crate) async fn stream_request_execution_with_tool(
     //     // 15. Continue loop (next iteration makes another streaming request).
     // }
 
-    ctx.state = RequestState::ResponseDone;
-    Ok(StepResult::Continue)
+    Ok(StepResult::Response(Response::default()))
 }
