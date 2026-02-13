@@ -28,10 +28,6 @@ pub(crate) enum RequestState {
     StreamRequestWithTool,
     /// Streaming request without MCP tools (simple passthrough).
     StreamRequest,
-
-    // ── Terminal ────────────────────────────────────────────────
-    /// Processing is complete. The driver breaks out of the loop.
-    ResponseDone,
 }
 
 /// The result of executing a single step.
