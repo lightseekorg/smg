@@ -133,7 +133,10 @@ pub(crate) fn select_worker(
 }
 
 /// Build the target URL and propagated headers for a worker request.
-fn build_worker_request(worker: &dyn Worker, headers: Option<&HeaderMap>) -> (String, HeaderMap) {
+pub(crate) fn build_worker_request(
+    worker: &dyn Worker,
+    headers: Option<&HeaderMap>,
+) -> (String, HeaderMap) {
     let url = format!("{}/v1/messages", worker.url());
     let mut propagated = HeaderMap::new();
     if let Some(input_headers) = headers {
@@ -149,7 +152,7 @@ fn build_worker_request(worker: &dyn Worker, headers: Option<&HeaderMap>) -> (St
 
 /// Send the HTTP request to the worker. Increments load on send; decrements + records
 /// circuit breaker failure on connection/timeout errors.
-async fn send_worker_request(
+pub(crate) async fn send_worker_request(
     http_client: &reqwest::Client,
     url: &str,
     headers: &HeaderMap,
@@ -395,7 +398,7 @@ async fn build_streaming_error_response(
 // Metrics Helpers
 // ============================================================================
 
-fn record_router_request(model_id: &str, streaming: bool) {
+pub(crate) fn record_router_request(model_id: &str, streaming: bool) {
     Metrics::record_router_request(
         metrics_labels::ROUTER_HTTP,
         metrics_labels::BACKEND_EXTERNAL,

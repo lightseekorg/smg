@@ -25,4 +25,6 @@ pub(crate) struct RequestContext {
     pub request: CreateMessageRequest,
     pub headers: Option<HeaderMap>,
     pub model_id: String,
+    /// Connected MCP server keys, present when the request includes `mcp_toolset` tools.
+    pub mcp_servers: Option<Vec<(String, String)>>,
 }
