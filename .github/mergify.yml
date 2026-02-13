@@ -48,13 +48,16 @@ pull_request_rules:
           - **VSCode**: enable `Git: Always Sign Off` in Settings
           - **PyCharm**: enable `Sign-off commit` in the Commit tool window
 
-  - name: Notify on merge conflicts
-    description: Comment when a PR has merge conflicts
+  - name: Add needs-rebase label and comment on merge conflicts
+    description: Label and comment when a PR has merge conflicts
     conditions:
       - conflict
       - -closed
       - -draft
     actions:
+      label:
+        add:
+          - needs-rebase
       comment:
         message: |
           Hi @{{author}}, this PR has merge conflicts that must be resolved before it can be merged. Please rebase your branch:
@@ -64,6 +67,16 @@ pull_request_rules:
           # resolve any conflicts, then:
           git push --force-with-lease
           ```
+
+  - name: Remove needs-rebase label when conflict is resolved
+    description: Remove needs-rebase label when PR no longer has conflicts
+    conditions:
+      - -conflict
+      - -closed
+    actions:
+      label:
+        remove:
+          - needs-rebase
 
   - name: Remind on stale PRs
     description: Comment and label PRs inactive for 14 days
