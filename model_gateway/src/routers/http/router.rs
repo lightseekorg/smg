@@ -8,6 +8,16 @@ use axum::{
     Json,
 };
 use futures_util::{stream, StreamExt};
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    classify::ClassifyRequest,
+    common::GenerationRequest,
+    completion::CompletionRequest,
+    embedding::EmbeddingRequest,
+    generate::GenerateRequest,
+    rerank::{RerankRequest, RerankResponse, RerankResult},
+    responses::{ResponsesGetParams, ResponsesRequest},
+};
 use reqwest::Client;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error};
@@ -25,16 +35,6 @@ use crate::{
         otel_trace::inject_trace_context_http,
     },
     policies::{PolicyRegistry, SelectWorkerInfo},
-    protocols::{
-        chat::ChatCompletionRequest,
-        classify::ClassifyRequest,
-        common::GenerationRequest,
-        completion::CompletionRequest,
-        embedding::EmbeddingRequest,
-        generate::GenerateRequest,
-        rerank::{RerankRequest, RerankResponse, RerankResult},
-        responses::{ResponsesGetParams, ResponsesRequest},
-    },
     routers::{
         error::{self, extract_error_code_from_response},
         grpc::utils::{error_type_from_status, route_to_endpoint},

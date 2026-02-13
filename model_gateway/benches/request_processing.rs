@@ -1,24 +1,23 @@
 use std::{hint::black_box, time::Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use openai_protocol::{
+    chat::{ChatCompletionRequest, ChatMessage, MessageContent},
+    common::StringOrArray,
+    completion::CompletionRequest,
+    generate::GenerateRequest,
+    sampling_params::SamplingParams,
+};
 use serde_json::{from_str, to_string, to_value, to_vec};
 use smg::{
     core::{BasicWorker, BasicWorkerBuilder, Worker, WorkerType},
-    protocols::{
-        chat::{ChatCompletionRequest, ChatMessage, MessageContent},
-        common::StringOrArray,
-        completion::CompletionRequest,
-        generate::GenerateRequest,
-        sampling_params::SamplingParams,
-    },
     routers::http::pd_types::{generate_room_id, RequestWithBootstrap},
 };
 
 fn create_test_worker() -> BasicWorker {
     BasicWorkerBuilder::new("http://test-server:8000")
-        .worker_type(WorkerType::Prefill {
-            bootstrap_port: Some(5678),
-        })
+        .worker_type(WorkerType::Prefill)
+        .bootstrap_port(Some(5678))
         .build()
 }
 

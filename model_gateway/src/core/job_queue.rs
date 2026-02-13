@@ -4,14 +4,18 @@
 //! them asynchronously in background worker tasks.
 
 use std::{
-    collections::HashMap,
     sync::{Arc, Weak},
     time::{Duration, SystemTime},
 };
 
 use dashmap::DashMap;
+use openai_protocol::worker::{
+    JobStatus, RuntimeType, WorkerSpec, WorkerType, WorkerUpdateRequest,
+};
+use smg_mcp::McpConfig;
 use tokio::sync::{mpsc, Semaphore};
 use tracing::{debug, error, info, warn};
+use wfaas::WorkflowId;
 
 use crate::{
     app_context::AppContext,
@@ -24,16 +28,13 @@ use crate::{
         McpServerConfigRequest, TokenizerConfigRequest, TokenizerRemovalRequest,
         WasmModuleConfigRequest, WasmModuleRemovalRequest,
     },
-    mcp::McpConfig,
-    protocols::worker_spec::{JobStatus, WorkerConfigRequest, WorkerUpdateRequest},
-    workflow::WorkflowId,
 };
 
 /// Job types for control plane operations
 #[derive(Debug, Clone)]
 pub enum Job {
     AddWorker {
-        config: Box<WorkerConfigRequest>,
+        config: Box<WorkerSpec>,
     },
     UpdateWorker {
         url: String,
@@ -302,9 +303,9 @@ impl JobQueue {
                 let timeout_duration =
                     Duration::from_secs(context.router_config.worker_startup_timeout_secs + 30);
 
-                // Select workflow based on runtime field
-                match config.runtime.as_deref() {
-                    Some("external") => {
+                // Select workflow based on runtime type
+                match config.runtime_type {
+                    RuntimeType::External => {
                         let workflow_data = create_external_worker_workflow_data(
                             (**config).clone(),
                             Arc::clone(context),
@@ -525,39 +526,8 @@ impl JobQueue {
 
                         for url in worker_urls {
                             let url_for_error = url.clone();
-                            let config = WorkerConfigRequest {
-                                url: url.clone(),
-                                api_key: api_key.clone(),
-                                worker_type: Some("regular".to_string()),
-                                labels: HashMap::new(),
-                                model_id: None,
-                                priority: None,
-                                cost: None,
-                                runtime: Some("external".to_string()),
-                                tokenizer_path: None,
-                                reasoning_parser: None,
-                                tool_parser: None,
-                                chat_template: router_config.chat_template.clone(),
-                                bootstrap_port: None,
-                                health_check_timeout_secs: router_config.health_check.timeout_secs,
-                                health_check_interval_secs: router_config
-                                    .health_check
-                                    .check_interval_secs,
-                                health_success_threshold: router_config
-                                    .health_check
-                                    .success_threshold,
-                                health_failure_threshold: router_config
-                                    .health_check
-                                    .failure_threshold,
-                                disable_health_check: router_config
-                                    .health_check
-                                    .disable_health_check,
-                                max_connection_attempts: router_config
-                                    .health_check
-                                    .success_threshold
-                                    * 10,
-                                dp_aware: false,
-                            };
+                            let config =
+                                build_external_worker_config(url, api_key.clone(), router_config);
 
                             let job = Job::AddWorker {
                                 config: Box::new(config),
@@ -593,39 +563,8 @@ impl JobQueue {
 
                         for url in worker_urls {
                             let url_for_error = url.clone();
-                            let config = WorkerConfigRequest {
-                                url: url.clone(),
-                                api_key: api_key.clone(),
-                                worker_type: Some("regular".to_string()),
-                                labels: HashMap::new(),
-                                model_id: None,
-                                priority: None,
-                                cost: None,
-                                runtime: Some("external".to_string()),
-                                tokenizer_path: None,
-                                reasoning_parser: None,
-                                tool_parser: None,
-                                chat_template: router_config.chat_template.clone(),
-                                bootstrap_port: None,
-                                health_check_timeout_secs: router_config.health_check.timeout_secs,
-                                health_check_interval_secs: router_config
-                                    .health_check
-                                    .check_interval_secs,
-                                health_success_threshold: router_config
-                                    .health_check
-                                    .success_threshold,
-                                health_failure_threshold: router_config
-                                    .health_check
-                                    .failure_threshold,
-                                disable_health_check: router_config
-                                    .health_check
-                                    .disable_health_check,
-                                max_connection_attempts: router_config
-                                    .health_check
-                                    .success_threshold
-                                    * 10,
-                                dp_aware: false,
-                            };
+                            let config =
+                                build_external_worker_config(url, api_key.clone(), router_config);
 
                             let job = Job::AddWorker {
                                 config: Box::new(config),
@@ -664,28 +603,19 @@ impl JobQueue {
                 // Process all workers with unified loop
                 for (url, worker_type, bootstrap_port) in workers {
                     let url_for_error = url.clone(); // Clone for error message
-                    let config = WorkerConfigRequest {
-                        url,
-                        api_key: api_key.clone(),
-                        worker_type: Some(worker_type.to_string()),
-                        labels: HashMap::new(),
-                        model_id: None,
-                        priority: None,
-                        cost: None,
-                        runtime: None,
-                        tokenizer_path: None,
-                        reasoning_parser: None,
-                        tool_parser: None,
-                        chat_template: router_config.chat_template.clone(),
-                        bootstrap_port,
-                        health_check_timeout_secs: router_config.health_check.timeout_secs,
-                        health_check_interval_secs: router_config.health_check.check_interval_secs,
-                        health_success_threshold: router_config.health_check.success_threshold,
-                        health_failure_threshold: router_config.health_check.failure_threshold,
-                        disable_health_check: router_config.health_check.disable_health_check,
-                        max_connection_attempts: router_config.health_check.success_threshold * 10,
-                        dp_aware: router_config.dp_aware,
+                    let proto_worker_type = match worker_type {
+                        "prefill" => WorkerType::Prefill,
+                        "decode" => WorkerType::Decode,
+                        _ => WorkerType::Regular,
                     };
+                    let mut spec = WorkerSpec::new(url);
+                    spec.worker_type = proto_worker_type;
+                    spec.api_key = api_key.clone();
+                    spec.bootstrap_port = bootstrap_port;
+                    spec.health = router_config.health_check.to_protocol_config();
+                    spec.max_connection_attempts =
+                        router_config.health_check.success_threshold * 10;
+                    let config = spec;
 
                     let job = Job::AddWorker {
                         config: Box::new(config),
@@ -863,4 +793,18 @@ impl JobQueue {
             );
         }
     }
+}
+
+/// Build a `WorkerSpec` for an external API endpoint (OpenAI/Anthropic mode).
+fn build_external_worker_config(
+    url: &str,
+    api_key: Option<String>,
+    router_config: &RouterConfig,
+) -> WorkerSpec {
+    let mut spec = WorkerSpec::new(url);
+    spec.runtime_type = RuntimeType::External;
+    spec.api_key = api_key;
+    spec.health = router_config.health_check.to_protocol_config();
+    spec.max_connection_attempts = router_config.health_check.success_threshold * 10;
+    spec
 }

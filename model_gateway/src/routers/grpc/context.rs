@@ -7,25 +7,23 @@
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
+use llm_tokenizer::{stop::StopSequenceDecoder, traits::Tokenizer, TokenizerRegistry};
+use openai_protocol::{
+    chat::{ChatCompletionRequest, ChatCompletionResponse},
+    classify::{ClassifyRequest, ClassifyResponse},
+    embedding::{EmbeddingRequest, EmbeddingResponse},
+    generate::{GenerateRequest, GenerateResponse},
+    responses::ResponsesRequest,
+};
+use reasoning_parser::ParserFactory as ReasoningParserFactory;
+use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::debug;
 
 use super::{
     client::GrpcClient,
     proto_wrapper::{ProtoEmbedComplete, ProtoRequest, ProtoStream},
 };
-use crate::{
-    core::{RuntimeType, Worker, WorkerLoadGuard},
-    protocols::{
-        chat::{ChatCompletionRequest, ChatCompletionResponse},
-        classify::{ClassifyRequest, ClassifyResponse},
-        embedding::{EmbeddingRequest, EmbeddingResponse},
-        generate::{GenerateRequest, GenerateResponse},
-        responses::ResponsesRequest,
-    },
-    reasoning_parser::ParserFactory as ReasoningParserFactory,
-    tokenizer::{stop::StopSequenceDecoder, traits::Tokenizer, TokenizerRegistry},
-    tool_parser::ParserFactory as ToolParserFactory,
-};
+use crate::core::{RuntimeType, Worker, WorkerLoadGuard};
 
 /// Main request processing context
 ///

@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use axum::{http::HeaderMap, response::Response};
+use openai_protocol::messages::CreateMessageRequest;
 use tracing::{debug, error, info};
 
 use super::{
@@ -15,7 +16,7 @@ use super::{
         WorkerSelectionStage,
     },
 };
-use crate::{protocols::messages::CreateMessageRequest, routers::error};
+use crate::routers::error;
 
 // Note: Arc is still used for SharedComponents (shared across stages) but not for
 // CreateMessageRequest (flows through sequential stages without shared ownership)

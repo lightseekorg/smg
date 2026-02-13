@@ -345,10 +345,10 @@ impl RequestExecutionStage {
         let kv_transfer_params: Option<(String, u32)> = workers
             .prefill_worker()
             .map(|w| w.metadata())
-            .filter(|meta| meta.kv_connector.as_deref() == Some(MOONCAKE_CONNECTOR))
+            .filter(|meta| meta.spec.kv_connector.as_deref() == Some(MOONCAKE_CONNECTOR))
             .map(|meta| {
-                let port = meta.bootstrap_port.unwrap_or(DEFAULT_BOOTSTRAP_PORT);
-                (meta.bootstrap_host.clone(), port as u32)
+                let port = meta.spec.bootstrap_port.unwrap_or(DEFAULT_BOOTSTRAP_PORT);
+                (meta.spec.bootstrap_host.clone(), port as u32)
             });
 
         if let Some((ref host, port)) = kv_transfer_params {
@@ -364,7 +364,7 @@ impl RequestExecutionStage {
             // labels: { "kv_connector": "MooncakeConnector" } in worker config
             let has_kv_connector = workers
                 .prefill_worker()
-                .map(|w| w.metadata().kv_connector.is_some())
+                .map(|w| w.metadata().spec.kv_connector.is_some())
                 .unwrap_or(false);
             if has_kv_connector {
                 debug!("vLLM PD (NIXL): using automatic prefix matching for KV transfer");

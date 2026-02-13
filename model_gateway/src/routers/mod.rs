@@ -9,8 +9,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-
-use crate::protocols::{
+use openai_protocol::{
     chat::ChatCompletionRequest,
     classify::ClassifyRequest,
     completion::CompletionRequest,

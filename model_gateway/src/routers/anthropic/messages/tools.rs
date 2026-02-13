@@ -5,7 +5,7 @@
 //! - Executing tool calls via MCP orchestrator
 //! - Assembling tool results
 
-use crate::protocols::messages::{ContentBlock, ToolUseBlock};
+use openai_protocol::messages::{ContentBlock, ToolUseBlock};
 
 pub fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> {
     content

@@ -4,7 +4,29 @@ use std::{collections::HashMap, sync::Arc};
 
 use axum::response::Response;
 use http::StatusCode;
+use llm_tokenizer::{
+    cache::CachedTokenizer,
+    chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
+    stop::StopSequenceDecoderBuilder,
+    traits::Tokenizer,
+    HuggingFaceTokenizer, StopSequenceDecoder,
+};
+use openai_protocol::{
+    chat::{ChatCompletionRequest, ChatMessage},
+    common::{
+        ChatLogProbs, ChatLogProbsContent, FunctionCallResponse, StringOrArray, Tool, ToolCall,
+        ToolChoice, ToolChoiceValue, TopLogProb,
+    },
+    generate::GenerateFinishReason,
+};
+use reasoning_parser::{
+    ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser, ReasoningParser,
+};
 use serde_json::{json, Map, Value};
+use smg_grpc_client::trtllm_proto::{GenerateRequest as TrtllmGenerateRequest, TokenSequence};
+use tool_parser::{
+    ParserFactory as ToolParserFactory, PooledParser as ToolPooledParser, ToolParser,
+};
 use tracing::{error, warn};
 use uuid::Uuid;
 
@@ -17,29 +39,7 @@ use super::{
 use crate::{
     core::Worker,
     observability::metrics::metrics_labels,
-    protocols::{
-        chat::{ChatCompletionRequest, ChatMessage},
-        common::{
-            ChatLogProbs, ChatLogProbsContent, FunctionCallResponse, StringOrArray, Tool, ToolCall,
-            ToolChoice, ToolChoiceValue, TopLogProb,
-        },
-        generate::GenerateFinishReason,
-    },
-    reasoning_parser::{
-        ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser,
-        ReasoningParser,
-    },
     routers::{error, grpc::proto_wrapper::ProtoResponseVariant},
-    tokenizer::{
-        cache::CachedTokenizer,
-        chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
-        stop::StopSequenceDecoderBuilder,
-        traits::Tokenizer,
-        HuggingFaceTokenizer, StopSequenceDecoder,
-    },
-    tool_parser::{
-        ParserFactory as ToolParserFactory, PooledParser as ToolPooledParser, ToolParser,
-    },
 };
 
 /// Resolve tokenizer from registry and cache it in request context.
@@ -793,6 +793,34 @@ pub(crate) fn get_reasoning_parser(
     }
 }
 
+/// Inject tokenized stop sequences into a TRT-LLM request.
+///
+/// TRT-LLM requires stop words as tokenized `TokenSequence` entries, unlike
+/// SGLang/vLLM which handle stop strings at the client level.
+pub(crate) fn inject_trtllm_stop_words(
+    req: &mut TrtllmGenerateRequest,
+    tokenizer: &dyn Tokenizer,
+    stop: &StringOrArray,
+) {
+    for stop_str in stop.iter().filter(|s| !s.is_empty()) {
+        match tokenizer.encode(stop_str, false) {
+            Ok(encoding) => {
+                let token_ids = encoding.token_ids().to_vec();
+                if !token_ids.is_empty() {
+                    req.stop_words.push(TokenSequence { token_ids });
+                }
+            }
+            Err(e) => {
+                warn!(
+                    stop_string = %stop_str,
+                    error = %e,
+                    "Failed to tokenize stop sequence, skipping"
+                );
+            }
+        }
+    }
+}
+
 /// Create a fresh reasoning parser instance (for streaming where state isolation is needed)
 pub(crate) fn create_reasoning_parser(
     reasoning_parser_factory: &ReasoningParserFactory,
@@ -1030,16 +1058,14 @@ pub(crate) fn error_type_from_status(status: StatusCode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use llm_tokenizer::chat_template::ChatTemplateContentFormat;
+    use openai_protocol::{
+        chat::{ChatMessage, MessageContent},
+        common::{ContentPart, ImageUrl},
+    };
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        protocols::{
-            chat::{ChatMessage, MessageContent},
-            common::{ContentPart, ImageUrl},
-        },
-        tokenizer::chat_template::ChatTemplateContentFormat,
-    };
 
     #[test]
     fn test_transform_messages_string_format() {

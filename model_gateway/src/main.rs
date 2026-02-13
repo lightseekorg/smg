@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use rand::{distr::Alphanumeric, Rng};
 use smg::{
-    auth::{ApiKeyEntry, ControlPlaneAuthConfig, JwtConfig, Role},
     config::{
         CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
         HistoryBackend, ManualAssignmentMode, MetricsConfig, OracleConfig, PolicyConfig,
@@ -11,7 +10,6 @@ use smg::{
         TraceConfig,
     },
     core::ConnectionMode,
-    mesh::MeshServerConfig,
     observability::{
         metrics::PrometheusConfig,
         otel_trace::{is_otel_enabled, shutdown_otel},
@@ -20,6 +18,8 @@ use smg::{
     service_discovery::ServiceDiscoveryConfig,
     version,
 };
+use smg_auth::{ApiKeyEntry, ControlPlaneAuthConfig, JwtConfig, Role};
+use smg_mesh::MeshServerConfig;
 fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
     let args: Vec<String> = std::env::args().collect();
     let mut prefill_entries = Vec::new();
@@ -462,6 +462,15 @@ struct CliArgs {
     #[arg(long, env = "ATP_PASSWORD", help_heading = "Oracle Database")]
     oracle_password: Option<String>,
 
+    /// Enable Oracle external authentication
+    #[arg(
+        long,
+        env = "ATP_EXTERNAL_AUTH",
+        default_value_t = false,
+        help_heading = "Oracle Database"
+    )]
+    oracle_external_auth: bool,
+
     /// Minimum Oracle connection pool size
     #[arg(long, env = "ATP_POOL_MIN", help_heading = "Oracle Database")]
     oracle_pool_min: Option<usize>,
@@ -700,7 +709,7 @@ impl CliArgs {
     fn determine_connection_mode(worker_urls: &[String]) -> ConnectionMode {
         for url in worker_urls {
             if url.starts_with("grpc://") || url.starts_with("grpcs://") {
-                return ConnectionMode::Grpc { port: None };
+                return ConnectionMode::Grpc;
             }
         }
         ConnectionMode::Http
@@ -780,18 +789,25 @@ impl CliArgs {
             OracleConnectSource::Dsn { descriptor } => (None, descriptor),
             OracleConnectSource::Wallet { path, alias } => (Some(path), alias),
         };
-        let username = self
-            .oracle_user
-            .clone()
-            .ok_or(ConfigError::MissingRequired {
-                field: "oracle_user or ATP_USER".to_string(),
-            })?;
-        let password = self
-            .oracle_password
-            .clone()
-            .ok_or(ConfigError::MissingRequired {
-                field: "oracle_password or ATP_PASSWORD".to_string(),
-            })?;
+        let (username, password) = if self.oracle_external_auth {
+            (
+                self.oracle_user.clone().unwrap_or_default(),
+                self.oracle_password.clone().unwrap_or_default(),
+            )
+        } else {
+            (
+                self.oracle_user
+                    .clone()
+                    .ok_or(ConfigError::MissingRequired {
+                        field: "oracle_user or ATP_USER".to_string(),
+                    })?,
+                self.oracle_password
+                    .clone()
+                    .ok_or(ConfigError::MissingRequired {
+                        field: "oracle_password or ATP_PASSWORD".to_string(),
+                    })?,
+            )
+        };
 
         let pool_min = self
             .oracle_pool_min
@@ -823,6 +839,7 @@ impl CliArgs {
         Ok(OracleConfig {
             wallet_path,
             connect_descriptor,
+            external_auth: self.oracle_external_auth,
             username,
             password,
             pool_min,

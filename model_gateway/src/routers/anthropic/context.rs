@@ -10,11 +10,9 @@ use std::{
 };
 
 use axum::http::HeaderMap;
+use openai_protocol::messages::CreateMessageRequest;
 
-use crate::{
-    core::{Worker, WorkerRegistry},
-    protocols::messages::CreateMessageRequest,
-};
+use crate::core::{Worker, WorkerRegistry};
 
 // ============================================================================
 // Request Input

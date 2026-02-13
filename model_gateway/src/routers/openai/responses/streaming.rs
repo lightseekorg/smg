@@ -16,7 +16,15 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
+use openai_protocol::{
+    event_types::{
+        is_function_call_type, is_response_event, CodeInterpreterCallEvent, FileSearchCallEvent,
+        FunctionCallEvent, ItemType, McpEvent, OutputItemEvent, ResponseEvent, WebSearchCallEvent,
+    },
+    responses::{ResponseToolType, ResponsesRequest},
+};
 use serde_json::{json, Value};
+use smg_mcp::{McpOrchestrator, McpToolSession, ResponseFormat};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -35,16 +43,7 @@ use super::{
     },
 };
 use crate::{
-    mcp::{McpOrchestrator, McpToolSession, ResponseFormat},
     observability::metrics::Metrics,
-    protocols::{
-        event_types::{
-            is_function_call_type, is_response_event, CodeInterpreterCallEvent,
-            FileSearchCallEvent, FunctionCallEvent, ItemType, McpEvent, OutputItemEvent,
-            ResponseEvent, WebSearchCallEvent,
-        },
-        responses::{ResponseToolType, ResponsesRequest},
-    },
     routers::{
         error,
         header_utils::{apply_request_headers, preserve_response_headers},

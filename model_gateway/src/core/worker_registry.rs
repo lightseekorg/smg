@@ -14,6 +14,7 @@
 use std::sync::{Arc, RwLock};
 
 use dashmap::DashMap;
+use smg_mesh::OptionalMeshSyncManager;
 use uuid::Uuid;
 
 use crate::{
@@ -22,7 +23,6 @@ use crate::{
         worker::{HealthChecker, RuntimeType, WorkerType},
         ConnectionMode, Worker,
     },
-    mesh::OptionalMeshSyncManager,
     observability::metrics::Metrics,
 };
 
@@ -267,13 +267,13 @@ impl WorkerRegistry {
 
         // Update type index (clone needed for DashMap key ownership)
         self.type_workers
-            .entry(worker.worker_type().clone())
+            .entry(*worker.worker_type())
             .or_default()
             .push(worker_id.clone());
 
         // Update connection mode index (clone needed for DashMap key ownership)
         self.connection_workers
-            .entry(worker.connection_mode().clone())
+            .entry(*worker.connection_mode())
             .or_default()
             .push(worker_id.clone());
 
@@ -421,7 +421,7 @@ impl WorkerRegistry {
             .filter_map(|entry| {
                 let worker = entry.value();
                 match worker.worker_type() {
-                    WorkerType::Prefill { .. } => Some(worker.clone()),
+                    WorkerType::Prefill => Some(worker.clone()),
                     _ => None,
                 }
             })
@@ -531,16 +531,16 @@ impl WorkerRegistry {
                     }
                 }
 
-                // Check connection_mode if specified (using matches for flexible gRPC matching)
+                // Check connection_mode if specified
                 if let Some(ref conn) = connection_mode {
-                    if !w.connection_mode().matches(conn) {
+                    if w.connection_mode() != conn {
                         return false;
                     }
                 }
 
                 // Check runtime_type if specified
                 if let Some(ref rt) = runtime_type {
-                    if w.metadata().runtime_type != *rt {
+                    if w.metadata().spec.runtime_type != *rt {
                         return false;
                     }
                 }
@@ -585,13 +585,13 @@ impl WorkerRegistry {
 
             match worker.worker_type() {
                 WorkerType::Regular => regular_count += 1,
-                WorkerType::Prefill { .. } => prefill_count += 1,
+                WorkerType::Prefill => prefill_count += 1,
                 WorkerType::Decode => decode_count += 1,
             }
 
             match worker.connection_mode() {
                 ConnectionMode::Http => http_count += 1,
-                ConnectionMode::Grpc { .. } => grpc_count += 1,
+                ConnectionMode::Grpc => grpc_count += 1,
             }
 
             match worker.circuit_breaker().state() {
@@ -671,7 +671,7 @@ impl WorkerRegistry {
                 // This is especially important when there are many workers
                 let health_futures: Vec<_> = workers
                     .iter()
-                    .filter(|worker| !worker.metadata().health_config.disable_health_check)
+                    .filter(|worker| !worker.metadata().spec.health.disable_health_check)
                     .map(|worker| {
                         let worker = worker.clone();
                         async move {

@@ -6,32 +6,31 @@ use std::{collections::HashMap, io, sync::Arc, time::Instant};
 
 use axum::response::Response;
 use bytes::Bytes;
+use llm_tokenizer::{
+    stop::{SequenceDecoderOutput, StopSequenceDecoder},
+    traits::Tokenizer,
+};
+use openai_protocol::{
+    chat::{ChatCompletionRequest, ChatCompletionStreamResponse},
+    common::{
+        FunctionCallDelta, StringOrArray, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage,
+    },
+    generate::GenerateRequest,
+};
+use reasoning_parser::{ParserFactory as ReasoningParserFactory, ParserResult, ReasoningParser};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, mpsc::UnboundedSender};
+use tool_parser::{ParserFactory as ToolParserFactory, StreamingParseResult, ToolParser};
 use tracing::{debug, error, warn};
 
 use crate::{
     observability::metrics::{metrics_labels, Metrics, StreamingMetricsParams},
-    protocols::{
-        chat::{ChatCompletionRequest, ChatCompletionStreamResponse},
-        common::{
-            FunctionCallDelta, StringOrArray, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue,
-            Usage,
-        },
-        generate::GenerateRequest,
-    },
-    reasoning_parser::{ParserFactory as ReasoningParserFactory, ParserResult, ReasoningParser},
     routers::grpc::{
         common::{response_formatting::CompletionTokenTracker, responses::build_sse_response},
         context,
         proto_wrapper::{ProtoResponseVariant, ProtoStream},
         utils,
     },
-    tokenizer::{
-        stop::{SequenceDecoderOutput, StopSequenceDecoder},
-        traits::Tokenizer,
-    },
-    tool_parser::{ParserFactory as ToolParserFactory, StreamingParseResult, ToolParser},
 };
 
 /// Shared streaming processor for both single and dual dispatch modes

@@ -21,12 +21,12 @@ use axum::{
 };
 use bytes::Bytes;
 use futures::Stream;
+use openai_protocol::messages::Message;
 use tracing::{debug, error, info, warn};
 
 use super::{PipelineStage, StageResult};
 use crate::{
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
-    protocols::messages::Message,
     routers::{
         anthropic::{
             context::RequestContext,

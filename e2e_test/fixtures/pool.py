@@ -145,7 +145,8 @@ def model_pool(request: pytest.FixtureRequest) -> ModelPool:
 
         # Create and start the pool
         allocator = GPUAllocator()
-        _model_pool = ModelPool(allocator)
+        log_dir = os.environ.get("E2E_LOG_DIR")
+        _model_pool = ModelPool(allocator, log_dir=log_dir)
 
         startup_timeout = int(os.environ.get(ENV_STARTUP_TIMEOUT, "300"))
         _model_pool.startup(

@@ -89,6 +89,8 @@ def _create_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
             "policy": "round_robin",
             "timeout": DEFAULT_ROUTER_TIMEOUT,
             "extra_args": None,
+            "log_level": None,
+            "log_dir": None,
         },
     )
 
@@ -429,6 +431,8 @@ def _setup_pd_backend_common(
             policy=gateway_config["policy"],
             timeout=gateway_config["timeout"],
             extra_args=gateway_config["extra_args"],
+            log_level=gateway_config.get("log_level"),
+            log_dir=gateway_config.get("log_dir"),
         )
     except Exception:
         # Release workers if gateway fails to start
@@ -497,6 +501,8 @@ def _setup_grpc_backend(
             policy=gateway_config["policy"],
             timeout=gateway_config["timeout"],
             extra_args=gateway_config["extra_args"],
+            log_level=gateway_config.get("log_level"),
+            log_dir=gateway_config.get("log_dir"),
         )
     except Exception:
         # Release worker if gateway fails to start
@@ -609,6 +615,8 @@ def _setup_local_backend(
             policy=gateway_config["policy"],
             timeout=gateway_config["timeout"],
             extra_args=gateway_config["extra_args"],
+            log_level=gateway_config.get("log_level"),
+            log_dir=gateway_config.get("log_dir"),
         )
     except Exception:
         # Release workers if gateway fails to start
@@ -678,6 +686,7 @@ def _setup_cloud_backend(
 
     api_key = os.environ.get(api_key_env) if api_key_env else "not-used"
 
+    client: openai.OpenAI | anthropic.Anthropic
     if cfg.get("client_type") == "anthropic":
         client = anthropic.Anthropic(
             base_url=gateway.base_url,

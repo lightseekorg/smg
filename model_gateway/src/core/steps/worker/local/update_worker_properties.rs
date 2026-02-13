@@ -4,13 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tracing::{debug, info};
+use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::{
-    core::{
-        steps::workflow_data::WorkerUpdateWorkflowData, BasicWorkerBuilder, HealthConfig, Worker,
-    },
-    workflow::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
-};
+use crate::core::{steps::workflow_data::WorkerUpdateWorkflowData, BasicWorkerBuilder, Worker};
 
 /// Step to update worker properties.
 ///
@@ -47,49 +43,30 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
 
         for worker in workers_to_update.iter() {
             // Build updated labels - merge new labels into existing ones
-            let mut updated_labels = worker.metadata().labels.clone();
+            let mut updated_labels = worker.metadata().spec.labels.clone();
             if let Some(ref new_labels) = request.labels {
                 for (key, value) in new_labels {
                     updated_labels.insert(key.clone(), value.clone());
                 }
             }
 
-            // Update priority if specified (stored in labels)
-            if let Some(priority) = request.priority {
-                updated_labels.insert("priority".to_string(), priority.to_string());
-            }
-
-            // Update cost if specified (stored in labels)
-            if let Some(cost) = request.cost {
-                updated_labels.insert("cost".to_string(), cost.to_string());
-            }
+            // Resolve priority and cost: use update value if specified, otherwise keep existing
+            let updated_priority = request.priority.unwrap_or(worker.priority());
+            let updated_cost = request.cost.unwrap_or(worker.cost());
 
             // Build updated health config
-            let existing_health = &worker.metadata().health_config;
-            let updated_health_config = HealthConfig {
-                timeout_secs: request
-                    .health_check_timeout_secs
-                    .unwrap_or(existing_health.timeout_secs),
-                check_interval_secs: request
-                    .health_check_interval_secs
-                    .unwrap_or(existing_health.check_interval_secs),
-                endpoint: existing_health.endpoint.clone(),
-                failure_threshold: request
-                    .health_failure_threshold
-                    .unwrap_or(existing_health.failure_threshold),
-                success_threshold: request
-                    .health_success_threshold
-                    .unwrap_or(existing_health.success_threshold),
-                disable_health_check: request
-                    .disable_health_check
-                    .unwrap_or(existing_health.disable_health_check),
+            let existing_health = &worker.metadata().spec.health;
+            let updated_health_config = match &request.health {
+                Some(update) => update.apply_to(existing_health),
+                None => existing_health.clone(),
             };
+            let health_endpoint = worker.metadata().health_endpoint.clone();
 
             // Determine API key: use new one if provided, otherwise keep existing
             let updated_api_key = request
                 .api_key
                 .clone()
-                .or_else(|| worker.metadata().api_key.clone());
+                .or_else(|| worker.metadata().spec.api_key.clone());
 
             // Create a new worker with updated properties
             let new_worker: Arc<dyn Worker> = if worker.is_dp_aware() {
@@ -100,12 +77,15 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
 
                 let mut builder =
                     crate::core::DPAwareWorkerBuilder::new(base_url, dp_rank, dp_size)
-                        .worker_type(worker.worker_type().clone())
-                        .connection_mode(worker.connection_mode().clone())
-                        .runtime_type(worker.metadata().runtime_type.clone())
+                        .worker_type(*worker.worker_type())
+                        .connection_mode(*worker.connection_mode())
+                        .runtime_type(worker.metadata().spec.runtime_type)
                         .labels(updated_labels)
                         .health_config(updated_health_config.clone())
-                        .models(worker.metadata().models.clone());
+                        .health_endpoint(&health_endpoint)
+                        .models(worker.metadata().spec.models.clone())
+                        .priority(updated_priority)
+                        .cost(updated_cost);
 
                 if let Some(ref api_key) = updated_api_key {
                     builder = builder.api_key(api_key.clone());
@@ -115,12 +95,15 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
             } else {
                 // For basic workers, rebuild with updated properties
                 let mut builder = BasicWorkerBuilder::new(worker.url())
-                    .worker_type(worker.worker_type().clone())
-                    .connection_mode(worker.connection_mode().clone())
-                    .runtime_type(worker.metadata().runtime_type.clone())
+                    .worker_type(*worker.worker_type())
+                    .connection_mode(*worker.connection_mode())
+                    .runtime_type(worker.metadata().spec.runtime_type)
                     .labels(updated_labels)
                     .health_config(updated_health_config.clone())
-                    .models(worker.metadata().models.clone());
+                    .health_endpoint(&health_endpoint)
+                    .models(worker.metadata().spec.models.clone())
+                    .priority(updated_priority)
+                    .cost(updated_cost);
 
                 if let Some(ref api_key) = updated_api_key {
                     builder = builder.api_key(api_key.clone());

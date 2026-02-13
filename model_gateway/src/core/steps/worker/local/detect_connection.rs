@@ -5,12 +5,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use reqwest::Client;
 use tracing::debug;
+use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use super::strip_protocol;
 use crate::{
     core::{steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode},
     routers::grpc::client::GrpcClient,
-    workflow::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
 };
 
 /// Try HTTP health check.
@@ -116,18 +116,24 @@ impl StepExecutor<LocalWorkerWorkflowData> for DetectConnectionModeStep {
 
         debug!(
             "Detecting connection mode for {} (timeout: {}s, max_attempts: {})",
-            config.url, config.health_check_timeout_secs, config.max_connection_attempts
+            config.url, config.health.timeout_secs, config.max_connection_attempts
         );
 
         // Try both protocols in parallel
         let url = config.url.clone();
-        let timeout = config.health_check_timeout_secs;
+        let timeout = config.health.timeout_secs;
         let client = &app_context.client;
-        let runtime_type = config.runtime.as_deref();
+        // Auto-detect runtime unless explicitly set to non-default
+        let runtime_type_str = config.runtime_type.to_string();
+        let runtime_hint = if runtime_type_str == "sglang" {
+            None
+        } else {
+            Some(runtime_type_str.as_str())
+        };
 
         let (http_result, grpc_result) = tokio::join!(
             try_http_health_check(&url, timeout, client),
-            try_grpc_health_check(&url, timeout, runtime_type)
+            try_grpc_health_check(&url, timeout, runtime_hint)
         );
 
         let (connection_mode, detected_runtime) = match (http_result, grpc_result) {
@@ -137,7 +143,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for DetectConnectionModeStep {
             }
             (_, Ok(runtime)) => {
                 debug!("{} detected as gRPC (runtime: {})", config.url, runtime);
-                (ConnectionMode::Grpc { port: None }, Some(runtime))
+                (ConnectionMode::Grpc, Some(runtime))
             }
             (Err(http_err), Err(grpc_err)) => {
                 return Err(WorkflowError::StepFailed {

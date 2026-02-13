@@ -8,12 +8,12 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, warn};
+use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use super::strip_protocol;
 use crate::{
     core::{steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode},
     routers::grpc::client::GrpcClient,
-    workflow::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
 };
 
 // HTTP client for metadata fetching
@@ -283,15 +283,15 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverMetadataStep {
 
                 Ok((labels, None))
             }
-            ConnectionMode::Grpc { .. } => {
+            ConnectionMode::Grpc => {
                 // Use pre-detected runtime type from connection detection step,
-                // falling back to config.runtime if not available
+                // falling back to config.runtime_type if not available (WorkerSpec field)
+                let config_runtime = config.runtime_type.to_string();
                 let runtime_type = context
                     .data
                     .detected_runtime_type
                     .as_deref()
-                    .or(config.runtime.as_deref())
-                    .unwrap_or("sglang"); // Fallback to sglang if somehow not detected
+                    .unwrap_or(&config_runtime);
                 debug!(
                     "Using runtime type '{}' for gRPC metadata fetch",
                     runtime_type

@@ -2,12 +2,10 @@
 
 use async_trait::async_trait;
 use tracing::debug;
+use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use super::discover_metadata::get_server_info;
-use crate::{
-    core::{steps::workflow_data::LocalWorkerWorkflowData, UNKNOWN_MODEL_ID},
-    workflow::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
-};
+use crate::core::{steps::workflow_data::LocalWorkerWorkflowData, UNKNOWN_MODEL_ID};
 
 /// DP (Data Parallel) information for a worker.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -47,8 +45,13 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverDPInfoStep {
         context: &mut WorkflowContext<LocalWorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
         let config = &context.data.config;
+        let app_context = context
+            .data
+            .app_context
+            .as_ref()
+            .ok_or_else(|| WorkflowError::ContextValueNotFound("app_context".to_string()))?;
 
-        if !config.dp_aware {
+        if !app_context.router_config.dp_aware {
             debug!(
                 "Worker {} is not DP-aware, skipping DP discovery",
                 config.url

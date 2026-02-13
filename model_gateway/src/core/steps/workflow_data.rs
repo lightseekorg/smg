@@ -12,26 +12,20 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+/// Re-export the protocol types for convenience
+pub use openai_protocol::worker::{WorkerSpec, WorkerUpdateRequest as ProtocolUpdateRequest};
+use openai_protocol::{
+    model_card::ModelCard, worker::WorkerUpdateRequest as ProtocolWorkerUpdateRequest,
+};
 use serde::{Deserialize, Serialize};
+use wfaas::{WorkflowData, WorkflowError};
 
 use super::{
     mcp_registration::McpServerConfigRequest, tokenizer_registration::TokenizerConfigRequest,
     wasm_module_registration::WasmModuleConfigRequest,
     wasm_module_removal::WasmModuleRemovalRequest, worker::local::WorkerRemovalRequest,
 };
-/// Re-export the protocol types for convenience
-pub use crate::protocols::worker_spec::{
-    WorkerConfigRequest, WorkerUpdateRequest as ProtocolUpdateRequest,
-};
-use crate::{
-    app_context::AppContext,
-    core::{model_card::ModelCard, Worker},
-    protocols::worker_spec::{
-        WorkerConfigRequest as ProtocolWorkerConfigRequest,
-        WorkerUpdateRequest as ProtocolWorkerUpdateRequest,
-    },
-    workflow::{WorkflowData, WorkflowError},
-};
+use crate::{app_context::AppContext, core::Worker};
 
 // ============================================================================
 // Shared trait for worker registration workflows
@@ -112,7 +106,7 @@ impl TokenizerWorkflowData {
 /// Data for local worker registration workflow
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalWorkerWorkflowData {
-    pub config: ProtocolWorkerConfigRequest,
+    pub config: WorkerSpec,
     pub connection_mode: Option<crate::core::ConnectionMode>,
     pub discovered_labels: HashMap<String, String>,
     pub dp_info: Option<super::worker::local::DpInfo>,
@@ -163,7 +157,7 @@ impl WorkerRegistrationData for LocalWorkerWorkflowData {
 /// Data for external worker registration workflow
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalWorkerWorkflowData {
-    pub config: ProtocolWorkerConfigRequest,
+    pub config: WorkerSpec,
     /// Discovered model cards from /v1/models endpoint
     pub model_cards: Vec<ModelCard>,
     pub workers: Option<WorkerList>,

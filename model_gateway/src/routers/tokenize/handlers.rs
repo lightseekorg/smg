@@ -10,17 +10,17 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use llm_tokenizer::{registry::TokenizerEntry, traits::Tokenizer, TokenizerRegistry};
+use openai_protocol::tokenize::{
+    AddTokenizerRequest, AddTokenizerResponse, CountResult, DetokenizeRequest, DetokenizeResponse,
+    ListTokenizersResponse, RemoveTokenizerResponse, TextResult, TokenizeRequest, TokenizeResponse,
+    TokenizerInfo, TokensResult,
+};
 use tracing::{debug, error, warn};
 
 use crate::{
     app_context::AppContext,
     core::{steps::TokenizerConfigRequest, Job, UNKNOWN_MODEL_ID},
-    protocols::tokenize::{
-        AddTokenizerRequest, AddTokenizerResponse, CountResult, DetokenizeRequest,
-        DetokenizeResponse, ListTokenizersResponse, RemoveTokenizerResponse, TextResult,
-        TokenizeRequest, TokenizeResponse, TokenizerInfo, TokensResult,
-    },
-    tokenizer::{registry::TokenizerEntry, traits::Tokenizer, TokenizerRegistry},
 };
 
 /// Helper to create error responses

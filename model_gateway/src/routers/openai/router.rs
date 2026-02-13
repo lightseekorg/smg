@@ -13,7 +13,15 @@ use axum::{
     Json,
 };
 use futures_util::{future::join_all, StreamExt};
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    responses::{
+        generate_id, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
+        ResponsesGetParams, ResponsesRequest,
+    },
+};
 use serde_json::{json, to_value, Value};
+use smg_data_connector::{ConversationId, ListParams, ResponseId, SortOrder};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -30,18 +38,10 @@ use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
     core::{
-        is_retryable_status, model_type::Endpoint, ModelCard, ProviderType, RetryExecutor,
-        RuntimeType, Worker, WorkerRegistry,
+        is_retryable_status, Endpoint, ModelCard, ProviderType, RetryExecutor, RuntimeType, Worker,
+        WorkerRegistry,
     },
-    data_connector::{ConversationId, ListParams, ResponseId, SortOrder},
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
-    protocols::{
-        chat::ChatCompletionRequest,
-        responses::{
-            generate_id, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
-            ResponsesGetParams, ResponsesRequest,
-        },
-    },
     routers::header_utils::{apply_provider_headers, extract_auth_header},
 };
 
@@ -76,7 +76,7 @@ impl OpenAIRouter {
         self.worker_registry
             .get_all()
             .into_iter()
-            .filter(|w| w.metadata().runtime_type == RuntimeType::External)
+            .filter(|w| w.metadata().spec.runtime_type == RuntimeType::External)
             .collect()
     }
 
@@ -300,7 +300,7 @@ impl OpenAIRouter {
             }
             ResponseInput::Items(current_items) => {
                 for item in current_items {
-                    items.push(crate::protocols::responses::normalize_input_item(item));
+                    items.push(openai_protocol::responses::normalize_input_item(item));
                 }
             }
         }

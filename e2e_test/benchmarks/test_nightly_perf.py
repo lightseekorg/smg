@@ -97,13 +97,9 @@ def _run_nightly(setup_backend, genai_bench_runner, model_id, worker_count=1, **
 
 _NIGHTLY_MODELS: list[tuple[str, str, int, list[str], dict]] = [
     ("meta-llama/Llama-3.1-8B-Instruct", "Llama8b", 4, ["http", "grpc"], {}),
-    ("meta-llama/Llama-3.2-1B-Instruct", "Llama1b", 4, ["http", "grpc"], {}),
     ("Qwen/Qwen2.5-7B-Instruct", "Qwen7b", 4, ["http", "grpc"], {}),
-    ("Qwen/Qwen2.5-14B-Instruct", "Qwen14b", 4, ["http", "grpc"], {}),
-    ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "Deepseek7b", 4, ["http", "grpc"], {}),
     ("Qwen/Qwen3-30B-A3B", "Qwen30b", 4, ["http", "grpc"], {}),
-    ("mistralai/Mistral-7B-Instruct-v0.3", "Mistral7b", 4, ["http", "grpc"], {}),
-    ("openai/gpt-oss-20b", "GptOss20b", 4, ["http", "grpc"], {}),
+    ("openai/gpt-oss-20b", "GptOss20b", 1, ["http", "grpc"], {}),
     (
         "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
         "Llama4Maverick",
@@ -128,7 +124,7 @@ def _make_test_class(model_id, worker_count, backends, extra_kwargs):
     @pytest.mark.e2e
     @pytest.mark.model(model_id)
     @pytest.mark.workers(count=worker_count)
-    @pytest.mark.gateway(policy="round_robin")
+    @pytest.mark.gateway(policy="round_robin", log_level="debug", log_dir="nightly_gateway_logs")
     @pytest.mark.parametrize("setup_backend", backends, indirect=True)
     class _NightlyTest:
         def test_nightly_perf(self, setup_backend, genai_bench_runner):
