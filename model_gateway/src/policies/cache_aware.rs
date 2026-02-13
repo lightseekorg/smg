@@ -879,6 +879,9 @@ mod tests {
             )
             .unwrap();
 
+        // Wait for background flush (interval is 500ms)
+        tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+
         // Verify tree operation was synced to mesh (under UNKNOWN_MODEL_ID since no model was specified)
         let tree_state = mesh_sync.get_tree_state(UNKNOWN_MODEL_ID);
         assert!(tree_state.is_some());
