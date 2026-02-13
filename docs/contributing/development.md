@@ -157,7 +157,21 @@ Python code in `e2e_test/`, `bindings/python/`, and `scripts/` is checked with
 ```bash
 pip install pre-commit
 pre-commit install
+pre-commit install --hook-type commit-msg  # enables DCO sign-off check
 ```
+
+### DCO Sign-Off
+
+All commits must include a `Signed-off-by` line ([Developer Certificate of Origin](https://developercertificate.org/)).
+Use the `-s` flag when committing:
+
+```bash
+git commit -s -m "feat: add new feature"
+```
+
+This adds a line like `Signed-off-by: Your Name <your@email.com>` using your
+`user.name` and `user.email` from git config. The pre-commit `commit-msg` hook
+and CI will both reject commits without it.
 
 To run checks manually:
 
