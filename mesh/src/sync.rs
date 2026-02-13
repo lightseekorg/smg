@@ -374,6 +374,63 @@ impl MeshSyncManager {
         Ok(())
     }
 
+    /// Sync a batch of tree operations to mesh stores
+    /// This is more efficient than syncing one by one as it reduces read/write cycles
+    pub fn sync_tree_operations_batch(
+        &self,
+        model_id: String,
+        operations: Vec<TreeOperation>,
+    ) -> Result<(), String> {
+        if operations.is_empty() {
+            return Ok(());
+        }
+
+        let key = SKey::new(tree_state_key(&model_id));
+
+        // Get current tree state or create new one
+        let mut tree_state = if let Some(policy_state) = self.stores.policy.get(&key) {
+            // Deserialize existing tree state
+            serde_json::from_slice::<TreeState>(&policy_state.config)
+                .unwrap_or_else(|_| TreeState::new(model_id.clone()))
+        } else {
+            TreeState::new(model_id.clone())
+        };
+
+        // Add all operations
+        for operation in operations {
+            tree_state.add_operation(operation);
+        }
+
+        // Serialize and store back
+        let serialized = serde_json::to_vec(&tree_state)
+            .map_err(|e| format!("Failed to serialize tree state: {}", e))?;
+
+        // Get current version if exists
+        let current_version = self
+            .stores
+            .policy
+            .get_metadata(&key)
+            .map(|(v, _)| v)
+            .unwrap_or(0);
+        let new_version = current_version + 1;
+
+        let state = PolicyState {
+            model_id: model_id.clone(),
+            policy_type: "tree_state".to_string(),
+            config: serialized,
+            version: new_version,
+        };
+
+        let actor = self.self_name.clone();
+        self.stores.policy.insert(key, state, actor);
+        debug!(
+            "Synced tree operations batch to mesh: model={} (version: {})",
+            model_id, new_version
+        );
+
+        Ok(())
+    }
+
     /// Get tree state for a model from mesh stores
     pub fn get_tree_state(&self, model_id: &str) -> Option<TreeState> {
         let key = SKey::new(tree_state_key(model_id));

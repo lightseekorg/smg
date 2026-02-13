@@ -64,7 +64,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use kv_index::{TokenTree, Tree};
 use rand::Rng;
-use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeOperation};
+use smg_mesh::{MeshSyncManager, OptionalMeshSyncManager, TreeInsertOp, TreeOperation};
+use tokio::time::{interval, Duration};
 use tracing::{debug, warn};
 
 use super::{
@@ -72,6 +73,69 @@ use super::{
     LoadBalancingPolicy, SelectWorkerInfo,
 };
 use crate::core::{Worker, UNKNOWN_MODEL_ID};
+
+/// Batcher for tree operations to reduce mesh sync overhead
+#[derive(Debug)]
+struct TreeOperationBatcher {
+    buffer: parking_lot::Mutex<Vec<(String, TreeOperation)>>,
+    mesh_sync: Arc<MeshSyncManager>,
+}
+
+impl TreeOperationBatcher {
+    fn new(mesh_sync: Arc<MeshSyncManager>) -> Self {
+        Self {
+            buffer: parking_lot::Mutex::new(Vec::new()),
+            mesh_sync,
+        }
+    }
+
+    fn add(&self, model_id: String, op: TreeOperation) {
+        self.buffer.lock().push((model_id, op));
+    }
+
+    fn start_background_flush(self: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut interval = interval(Duration::from_millis(500));
+            // Set missed tick behavior to skip to avoid burst
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+                self.flush();
+            }
+        });
+    }
+
+    fn flush(&self) {
+        let operations = {
+            let mut buffer = self.buffer.lock();
+            if buffer.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *buffer)
+        };
+
+        // Group by model_id
+        let mut by_model: std::collections::HashMap<String, Vec<TreeOperation>> =
+            std::collections::HashMap::new();
+        for (model_id, op) in operations {
+            by_model.entry(model_id).or_default().push(op);
+        }
+
+        // Sync batches
+        for (model_id, ops) in by_model {
+            if let Err(e) = self
+                .mesh_sync
+                .sync_tree_operations_batch(model_id.clone(), ops)
+            {
+                warn!(
+                    "Failed to sync tree operations batch for model {}: {}",
+                    model_id, e
+                );
+            }
+        }
+    }
+}
 
 /// Cache-aware routing policy
 ///
@@ -92,6 +156,7 @@ pub struct CacheAwarePolicy {
     /// Token-based trees for gRPC connections (pre-tokenized input)
     token_trees: Arc<DashMap<String, Arc<TokenTree>>>,
     mesh_sync: OptionalMeshSyncManager,
+    batcher: Arc<parking_lot::RwLock<Option<Arc<TreeOperationBatcher>>>>,
     _eviction_task: Option<PeriodicTask>,
 }
 
@@ -147,6 +212,7 @@ impl CacheAwarePolicy {
             string_trees,
             token_trees,
             mesh_sync: None,
+            batcher: Arc::new(parking_lot::RwLock::new(None)),
             _eviction_task: eviction_task,
         }
     }
@@ -154,8 +220,18 @@ impl CacheAwarePolicy {
     /// Set mesh sync manager (can be called after construction)
     pub fn set_mesh_sync(&mut self, mesh_sync: OptionalMeshSyncManager) {
         self.mesh_sync = mesh_sync.clone();
-        if mesh_sync.is_some() {
+        if let Some(sync_manager) = mesh_sync {
             self.restore_tree_state_from_mesh();
+            
+            // Initialize and start batcher
+            let batcher = Arc::new(TreeOperationBatcher::new(sync_manager));
+            // Spawn background flush task
+            let batcher_clone = batcher.clone();
+            batcher_clone.start_background_flush();
+            
+            *self.batcher.write() = Some(batcher);
+        } else {
+             *self.batcher.write() = None;
         }
     }
 
@@ -574,15 +650,13 @@ impl CacheAwarePolicy {
                 tree.insert_text(text, workers[idx].url());
 
                 // Sync insert operation to mesh if enabled (only for text operations)
-                if let Some(ref mesh_sync) = self.mesh_sync {
-                    let op = TreeOperation::Insert(TreeInsertOp {
+                if let Some(batcher) = self.batcher.read().as_ref() {
+                     let op = TreeOperation::Insert(TreeInsertOp {
                         text: text.to_string(),
                         tenant: workers[idx].url().to_string(),
                     });
                     let mesh_model_id = Self::normalize_mesh_model_id(model_id);
-                    if let Err(e) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
-                        warn!("Failed to sync tree insert operation to mesh: {}", e);
-                    }
+                    batcher.add(mesh_model_id.to_string(), op);
                 }
 
                 workers[idx].increment_processed();
