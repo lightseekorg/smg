@@ -135,7 +135,7 @@ dev: python-dev ## Quick development setup (build Python bindings in dev mode)
 install: python-install ## Build and install everything
 
 # Release management
-VERSION_FILES := Cargo.toml \
+VERSION_FILES := model_gateway/Cargo.toml \
                  bindings/golang/Cargo.toml \
                  bindings/python/Cargo.toml \
                  bindings/python/pyproject.toml \
@@ -145,7 +145,7 @@ VERSION_FILES := Cargo.toml \
 
 show-version: ## Show current version across all files
 	@echo "Current versions:"
-	@echo "  Cargo.toml:                 $$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
+	@echo "  model_gateway/Cargo.toml:   $$(grep -m1 '^version = ' model_gateway/Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
 	@echo "  bindings/golang/Cargo.toml: $$(grep -m1 '^version = ' bindings/golang/Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
 	@echo "  bindings/python/Cargo.toml: $$(grep -m1 '^version = ' bindings/python/Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
 	@echo "  bindings/python/pyproject.toml: $$(grep -m1 '^version = ' bindings/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')"
@@ -159,12 +159,12 @@ bump-version: ## Bump version across all files (usage: make bump-version VERSION
 		echo "Example: make bump-version VERSION=0.3.3"; \
 		echo ""; \
 		echo "Current version:"; \
-		grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/  \1/'; \
+		grep -m1 '^version = ' model_gateway/Cargo.toml | sed 's/version = "\(.*\)"/  \1/'; \
 		exit 1; \
 	fi
 	@echo "Bumping version to $(VERSION)..."
-	@# Update main Cargo.toml (line 3)
-	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' Cargo.toml && rm -f Cargo.toml.bak
+	@# Update model_gateway Cargo.toml
+	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' model_gateway/Cargo.toml && rm -f model_gateway/Cargo.toml.bak
 	@# Update golang binding Cargo.toml
 	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' bindings/golang/Cargo.toml && rm -f bindings/golang/Cargo.toml.bak
 	@# Update python binding Cargo.toml
@@ -178,7 +178,7 @@ bump-version: ## Bump version across all files (usage: make bump-version VERSION
 	@# Update grpc_client/python/smg_grpc_proto/__init__.py
 	@sed -i.bak 's/__version__ = ".*"/__version__ = "$(VERSION)"/' grpc_client/python/smg_grpc_proto/__init__.py && rm -f grpc_client/python/smg_grpc_proto/__init__.py.bak
 	@echo "Version updated to $(VERSION) in all files:"
-	@echo "  - Cargo.toml"
+	@echo "  - model_gateway/Cargo.toml"
 	@echo "  - bindings/golang/Cargo.toml"
 	@echo "  - bindings/python/Cargo.toml"
 	@echo "  - bindings/python/pyproject.toml"
