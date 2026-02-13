@@ -1254,7 +1254,9 @@ mod tests {
         assert_eq!(tree.version, 5); // Version should be 5 after 5 ops (starting from 0)
 
         // Verify policy state version matches tree state version
-        let policy_state = manager.get_policy_state("model1").unwrap();
+        // Verify policy state version matches tree state version
+        let key = SKey::new(tree_state_key("model1"));
+        let policy_state = manager.stores.policy.get(&key).unwrap();
         assert_eq!(policy_state.version, 5);
 
         // Add more operations to verify version increments correctly
@@ -1273,7 +1275,7 @@ mod tests {
         assert_eq!(tree_uptodate.version, 8);
         assert_eq!(tree_uptodate.operations.len(), 8);
 
-        let policy_uptodate = manager.get_policy_state("model1").unwrap();
+        let policy_uptodate = manager.stores.policy.get(&key).unwrap();
         assert_eq!(policy_uptodate.version, 8);
     }
 }
