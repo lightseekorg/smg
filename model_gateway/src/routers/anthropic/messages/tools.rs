@@ -79,8 +79,8 @@ pub(crate) async fn ensure_mcp_connection(
 
     let allowed_tools = collect_allowed_tools_from_toolsets(&request.tools);
 
-    let request_id = format!("msg_{}", uuid::Uuid::new_v4());
-    let session = McpToolSession::new(orchestrator, mcp_servers.clone(), &request_id);
+    let session_id = format!("msg_{}", uuid::Uuid::new_v4());
+    let session = McpToolSession::new(orchestrator, mcp_servers.clone(), &session_id);
 
     inject_mcp_tools_into_request(request, &session, &allowed_tools);
 

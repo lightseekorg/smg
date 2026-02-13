@@ -5,6 +5,8 @@
 //! synthetic `mcp_tool_use`/`mcp_tool_result` events, and continue the tool
 //! loop — all within a single coherent SSE stream to the client.
 
+use std::{io, sync::Arc};
+
 use axum::{
     body::Body,
     http::{header, StatusCode},
@@ -31,6 +33,7 @@ use crate::{
         error as router_error,
         mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
+    core::Worker,
 };
 
 /// Channel buffer size for SSE events sent to the client.
@@ -61,7 +64,7 @@ pub(crate) async fn execute_streaming_tool_loop(
     router: &RouterContext,
     req_ctx: RequestContext,
 ) -> Response {
-    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(SSE_CHANNEL_SIZE);
+    let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(SSE_CHANNEL_SIZE);
 
     let router = router.clone();
 
@@ -92,7 +95,7 @@ pub(crate) async fn execute_streaming_tool_loop(
 // ============================================================================
 
 /// Accumulated state from parsing one upstream streaming response.
-struct StreamedResponse {
+struct ToolLoopState {
     /// Content blocks accumulated from the stream.
     content_blocks: Vec<ContentBlock>,
     /// Stop reason from message_delta.
@@ -105,16 +108,13 @@ struct StreamedResponse {
 
 /// Run the tool loop, sending SSE events to the client via `tx`.
 async fn run_tool_loop(
-    tx: mpsc::Sender<Result<Bytes, std::io::Error>>,
+    tx: mpsc::Sender<Result<Bytes, io::Error>>,
     router: RouterContext,
     mut req_ctx: RequestContext,
 ) -> Result<(), String> {
-    let request_id = format!("msg_{}", uuid::Uuid::new_v4());
+    let session_id = format!("msg_{}", uuid::Uuid::new_v4());
     let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
-    let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &request_id);
-
-    // Ensure stream flag is set (avoids cloning the request per iteration)
-    req_ctx.request.stream = Some(true);
+    let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &session_id);
 
     let mut global_index: u32 = 0;
     let mut total_input_tokens: u32 = 0;
@@ -124,16 +124,26 @@ async fn run_tool_loop(
     for iteration in 0..DEFAULT_MAX_ITERATIONS {
         Metrics::record_mcp_tool_iteration(&req_ctx.model_id);
 
-        let streamed = stream_one_iteration(
+        let (response, worker) = send_streaming_request(&router, &req_ctx).await?;
+
+        // Consume the upstream SSE stream
+        let result = consume_upstream_stream(
             &tx,
-            &router,
-            &req_ctx,
+            response,
             &mut global_index,
             is_first_iteration,
             &session,
         )
-        .await?;
+        .await;
 
+        // Worker load management
+        worker.decrement_load();
+        match &result {
+            Ok(_) => worker.record_outcome(true),
+            Err(_) => worker.record_outcome(false),
+        }
+
+        let streamed = result?;
         is_first_iteration = false;
 
         // Accumulate usage
@@ -200,31 +210,22 @@ async fn run_tool_loop(
     Ok(())
 }
 
-// ============================================================================
-// Single iteration: stream upstream response and transform events
-// ============================================================================
-
-/// Stream one upstream request, forwarding (and transforming) SSE events.
+/// Select a worker, send a streaming request, and return the response.
 ///
-/// Returns the accumulated state needed for the tool loop decision.
-async fn stream_one_iteration(
-    tx: &mpsc::Sender<Result<Bytes, std::io::Error>>,
+/// Returns the worker alongside the response for load tracking after
+/// the stream is consumed.
+async fn send_streaming_request(
     router: &RouterContext,
     req_ctx: &RequestContext,
-    global_index: &mut u32,
-    is_first_iteration: bool,
-    session: &McpToolSession<'_>,
-) -> Result<StreamedResponse, String> {
+) -> Result<(reqwest::Response, Arc<dyn Worker>), String> {
     let model_id = &req_ctx.model_id;
 
-    // Select worker
     let worker = handler::select_worker(&router.worker_registry, model_id)
         .map_err(|_| format!("No healthy workers available for model '{}'", model_id))?;
 
     handler::record_router_request(model_id, true);
 
     let (url, req_headers) = handler::build_worker_request(&*worker, req_ctx.headers.as_ref());
-
     let response = handler::send_worker_request(
         &router.http_client,
         &url,
@@ -243,29 +244,18 @@ async fn stream_one_iteration(
         return Err(format!("Worker returned error status: {}", status));
     }
 
-    // Parse the SSE stream
-    let result =
-        consume_upstream_stream(tx, response, global_index, is_first_iteration, session).await;
-
-    // Worker load management
-    worker.decrement_load();
-    match &result {
-        Ok(_) => worker.record_outcome(true),
-        Err(_) => worker.record_outcome(false),
-    }
-
-    result
+    Ok((response, worker))
 }
 
 /// Consume the upstream SSE byte stream, parsing events and forwarding them
 /// (with transformations) to the client.
 async fn consume_upstream_stream(
-    tx: &mpsc::Sender<Result<Bytes, std::io::Error>>,
+    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
     response: reqwest::Response,
     global_index: &mut u32,
     is_first_iteration: bool,
     session: &McpToolSession<'_>,
-) -> Result<StreamedResponse, String> {
+) -> Result<ToolLoopState, String> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
     let mut processor = EventProcessor::new(tx, global_index, is_first_iteration, session);
@@ -433,18 +423,18 @@ impl BlockAccumulator {
 /// Processes SSE events from the upstream worker, transforming and forwarding
 /// them to the client with index remapping and tool_use → mcp_tool_use conversion.
 struct EventProcessor<'a, 'b> {
-    tx: &'a mpsc::Sender<Result<Bytes, std::io::Error>>,
+    tx: &'a mpsc::Sender<Result<Bytes, io::Error>>,
     global_index: &'a mut u32,
     index_base: u32,
     is_first_iteration: bool,
     session: &'a McpToolSession<'b>,
-    result: StreamedResponse,
+    result: ToolLoopState,
     upstream_blocks: Vec<BlockAccumulator>,
 }
 
 impl<'a, 'b> EventProcessor<'a, 'b> {
     fn new(
-        tx: &'a mpsc::Sender<Result<Bytes, std::io::Error>>,
+        tx: &'a mpsc::Sender<Result<Bytes, io::Error>>,
         global_index: &'a mut u32,
         is_first_iteration: bool,
         session: &'a McpToolSession<'b>,
@@ -456,7 +446,7 @@ impl<'a, 'b> EventProcessor<'a, 'b> {
             index_base,
             is_first_iteration,
             session,
-            result: StreamedResponse {
+            result: ToolLoopState {
                 content_blocks: Vec::new(),
                 stop_reason: None,
                 usage: None,
@@ -467,7 +457,7 @@ impl<'a, 'b> EventProcessor<'a, 'b> {
     }
 
     /// Consume the accumulated result.
-    fn into_result(self) -> StreamedResponse {
+    fn into_result(self) -> ToolLoopState {
         self.result
     }
 
@@ -644,7 +634,7 @@ impl<'a, 'b> EventProcessor<'a, 'b> {
 ///
 /// Returns `true` if the send succeeded, `false` if the receiver was dropped.
 async fn send_sse(
-    tx: &mpsc::Sender<Result<Bytes, std::io::Error>>,
+    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
     event_type: &str,
     data: &Value,
 ) -> bool {
@@ -659,7 +649,7 @@ fn format_sse_event(event_type: &str, data: &Value) -> Bytes {
 }
 
 /// Send an SSE error event.
-async fn send_sse_error(tx: &mpsc::Sender<Result<Bytes, std::io::Error>>, message: &str) -> bool {
+async fn send_sse_error(tx: &mpsc::Sender<Result<Bytes, io::Error>>, message: &str) -> bool {
     let data = serde_json::json!({
         "type": "error",
         "error": {
@@ -673,7 +663,7 @@ async fn send_sse_error(tx: &mpsc::Sender<Result<Bytes, std::io::Error>>, messag
 /// Emit `content_block_start` + `content_block_stop` events for an
 /// `mcp_tool_result` block.
 async fn emit_mcp_tool_result_events(
-    tx: &mpsc::Sender<Result<Bytes, std::io::Error>>,
+    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
     call: &McpToolCall,
     global_index: &mut u32,
 ) -> bool {
@@ -714,8 +704,8 @@ async fn emit_mcp_tool_result_events(
 
 /// Emit the final `message_delta` and `message_stop` events.
 async fn emit_final_events(
-    tx: &mpsc::Sender<Result<Bytes, std::io::Error>>,
-    streamed: &StreamedResponse,
+    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+    streamed: &ToolLoopState,
     total_input_tokens: u32,
     total_output_tokens: u32,
 ) {

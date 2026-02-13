@@ -27,9 +27,9 @@ pub(crate) async fn execute_tool_loop(
     router: &RouterContext,
     mut req_ctx: RequestContext,
 ) -> Response {
-    let request_id = format!("msg_{}", uuid::Uuid::new_v4());
+    let session_id = format!("msg_{}", uuid::Uuid::new_v4());
     let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
-    let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &request_id);
+    let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &session_id);
 
     let mut all_mcp_calls: Vec<McpToolCall> = Vec::new();
 
