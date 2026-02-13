@@ -7,10 +7,9 @@
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
+use openai_protocol::interactions::InteractionsRequest;
 use serde_json::Value;
 use smg_mcp::McpOrchestrator;
-
-use openai_protocol::interactions::InteractionsRequest;
 
 use super::state::RequestState;
 use crate::core::{Worker, WorkerRegistry};

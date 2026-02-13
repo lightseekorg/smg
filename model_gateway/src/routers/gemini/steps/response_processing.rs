@@ -1,6 +1,6 @@
 //! ResponseProcessing step (non-streaming).
 //!
-//! Transition: ProcessResponse → ResponseDone (returns `Response` directly)
+//! Terminal step: returns `StepResult::Response` directly.
 
 use axum::{
     http::StatusCode,
@@ -8,10 +8,7 @@ use axum::{
     Json,
 };
 
-use crate::routers::gemini::{
-    context::RequestContext,
-    state::{RequestState, StepResult},
-};
+use crate::routers::gemini::{context::RequestContext, state::StepResult};
 
 /// Finalize the non-streaming response and return it to the client.
 ///
@@ -21,9 +18,6 @@ use crate::routers::gemini::{
 /// ## Reads
 /// - `ctx.upstream_response` — the last upstream response JSON.
 /// - `ctx.original_request` — for metadata patching.
-///
-/// ## Writes
-/// - `ctx.state` → `ResponseDone`.
 ///
 /// ## Returns
 /// `Ok(StepResult::Response(response))` — the final HTTP response.
@@ -40,10 +34,7 @@ pub(crate) async fn response_processing(ctx: &mut RequestContext) -> Result<Step
     // 3. Patch response with request metadata:
     //    - Set store, previous_interaction_id, model from the original request.
     // 4. Persist the interaction to ctx.shared.interaction_storage if store is true.
-    // 5. Set ctx.state = ResponseDone.
-    // 6. Return Ok(StepResult::Response((StatusCode::OK, Json(response_json)).into_response())).
-
-    ctx.state = RequestState::ResponseDone;
+    // 5. Return Ok(StepResult::Response((StatusCode::OK, Json(response_json)).into_response())).
 
     // Placeholder: return the upstream response as-is (or an empty 200).
     let response_json = ctx

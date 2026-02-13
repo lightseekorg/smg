@@ -18,7 +18,7 @@ use super::{
 ///
 /// For **streaming** requests the SSE response is built by the router before
 /// spawning this function; the streaming steps send events through
-/// `ctx.streaming.sse_tx` and terminate at `ResponseDone`.
+/// `ctx.streaming.sse_tx` and return `StepResult::Response` when done.
 pub(crate) async fn execute(ctx: &mut RequestContext) -> Response {
     loop {
         let result = match ctx.state {
@@ -37,10 +37,6 @@ pub(crate) async fn execute(ctx: &mut RequestContext) -> Response {
             }
 
             RequestState::StreamRequest => steps::stream_request_execution(ctx).await,
-
-            RequestState::ResponseDone => {
-                unreachable!("driver should not execute for ResponseDone state")
-            }
         };
 
         match result {

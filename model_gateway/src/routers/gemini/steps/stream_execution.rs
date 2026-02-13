@@ -1,13 +1,10 @@
 //! StreamRequestExecution step (no MCP tools — simple passthrough).
 //!
-//! Transition: StreamRequest → ResponseDone
+//! Terminal step: returns `StepResult::Response` when streaming is complete.
 
 use axum::response::Response;
 
-use crate::routers::gemini::{
-    context::RequestContext,
-    state::{RequestState, StepResult},
-};
+use crate::routers::gemini::{context::RequestContext, state::StepResult};
 
 /// Open a streaming connection to the upstream worker and forward SSE events
 /// directly to the client without tool interception.
@@ -22,10 +19,10 @@ use crate::routers::gemini::{
 /// - `ctx.streaming.sse_tx` — the SSE channel sender.
 /// - `ctx.input.headers` — forwarded headers.
 ///
-/// ## Writes
-/// - `ctx.state` → `ResponseDone`.
+/// ## Returns
+/// `Ok(StepResult::Response(Response::default()))` — signals completion.
 pub(crate) async fn stream_request_execution(
-    ctx: &mut RequestContext,
+    _ctx: &mut RequestContext,
 ) -> Result<StepResult, Response> {
     // TODO: implement simple streaming passthrough
     //
@@ -42,9 +39,7 @@ pub(crate) async fn stream_request_execution(
     // 7. After stream completes:
     //    a. Persist interaction if store is true.
     //    b. Send "data: [DONE]\n\n".
-    // 8. Set ctx.state = ResponseDone.
-    // 9. Return Ok(StepResult::Continue).
+    // 8. Return Ok(StepResult::Response(Response::default())).
 
-    ctx.state = RequestState::ResponseDone;
-    Ok(StepResult::Continue)
+    Ok(StepResult::Response(Response::default()))
 }
