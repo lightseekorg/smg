@@ -148,6 +148,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GPU_TYPE: H100
+          E2E_NIGHTLY: "1"
           E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen3-30B-A3B":1}'
           E2E_LOG_DIR: nightly_gateway_logs
         run: |
@@ -254,6 +255,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GPU_TYPE: H100
+          E2E_NIGHTLY: "1"
           E2E_MODEL_TP_OVERRIDES: '{"meta-llama/Llama-3.1-8B-Instruct":1,"Qwen/Qwen2.5-7B-Instruct":1,"Qwen/Qwen3-30B-A3B":1}'
           E2E_LOG_DIR: nightly_gateway_logs
         run: |
@@ -364,6 +366,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           GPU_TYPE: H200
+          E2E_NIGHTLY: "1"
           E2E_LOG_DIR: nightly_gateway_logs
         run: |
           mkdir -p nightly_gateway_logs

@@ -14,6 +14,8 @@ import os
 
 # Environment variable for local model paths (CI uses local copies for speed)
 ROUTER_LOCAL_MODEL_PATH = os.environ.get("ROUTER_LOCAL_MODEL_PATH", "")
+# Nightly benchmarks skip --enforce-eager for performance measurement
+_is_nightly = os.environ.get("E2E_NIGHTLY") == "1"
 
 
 def _resolve_model_path(hf_path: str) -> str:
@@ -68,6 +70,7 @@ MODEL_SPECS: dict[str, dict] = {
         "memory_gb": 60,
         "tp": 4,
         "features": ["chat", "streaming", "thinking", "reasoning"],
+        "vllm_args": [] if _is_nightly else ["--enforce-eager"],
     },
     # Mistral for function calling
     "mistralai/Mistral-7B-Instruct-v0.3": {
