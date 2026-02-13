@@ -54,6 +54,9 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
                 let final_message = mcp::rebuild_response_with_mcp_blocks(message, &all_mcp_calls);
                 return (StatusCode::OK, Json(final_message)).into_response();
             }
+            mcp::ToolLoopAction::Error(msg) => {
+                return error::bad_gateway("mcp_tool_loop_error", msg);
+            }
             mcp::ToolLoopAction::Continue(cont) => {
                 all_mcp_calls.extend(cont.mcp_calls);
                 req_ctx.request.messages.push(InputMessage {

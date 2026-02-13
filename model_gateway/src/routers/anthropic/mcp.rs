@@ -51,10 +51,11 @@ pub(crate) struct ToolLoopContinuation {
     pub tool_result_blocks: Vec<InputContentBlock>,
 }
 
-/// Decision from `process_iteration`: stop or continue the tool loop.
+/// Decision from `process_iteration`: stop, continue, or error.
 pub(crate) enum ToolLoopAction {
     Done,
     Continue(ToolLoopContinuation),
+    Error(String),
 }
 
 // ============================================================================
@@ -90,12 +91,17 @@ pub(crate) async fn process_iteration(
     }
 
     if result.stop_reason != Some(StopReason::ToolUse) {
+        let msg = format!(
+            "Model returned {} tool_use block(s) but stop_reason is {:?}; tool calls will not be executed",
+            result.tool_use_blocks.len(),
+            result.stop_reason
+        );
         warn!(
             tool_count = result.tool_use_blocks.len(),
             stop_reason = ?result.stop_reason,
-            "Tool use blocks present but stop_reason is not tool_use; ending tool loop"
+            "{}", &msg
         );
-        return ToolLoopAction::Done;
+        return ToolLoopAction::Error(msg);
     }
 
     info!(

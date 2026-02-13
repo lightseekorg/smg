@@ -247,6 +247,9 @@ async fn run_tool_loop(
                 .await;
                 return Ok(());
             }
+            mcp::ToolLoopAction::Error(msg) => {
+                return Err(msg);
+            }
             mcp::ToolLoopAction::Continue(cont) => {
                 // Emit mcp_tool_result events for each completed tool call
                 for call in &cont.mcp_calls {
