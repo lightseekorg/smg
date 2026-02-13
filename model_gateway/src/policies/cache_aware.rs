@@ -222,16 +222,16 @@ impl CacheAwarePolicy {
         self.mesh_sync = mesh_sync.clone();
         if let Some(sync_manager) = mesh_sync {
             self.restore_tree_state_from_mesh();
-            
+
             // Initialize and start batcher
             let batcher = Arc::new(TreeOperationBatcher::new(sync_manager));
             // Spawn background flush task
             let batcher_clone = batcher.clone();
             batcher_clone.start_background_flush();
-            
+
             *self.batcher.write() = Some(batcher);
         } else {
-             *self.batcher.write() = None;
+            *self.batcher.write() = None;
         }
     }
 
@@ -651,7 +651,7 @@ impl CacheAwarePolicy {
 
                 // Sync insert operation to mesh if enabled (only for text operations)
                 if let Some(batcher) = self.batcher.read().as_ref() {
-                     let op = TreeOperation::Insert(TreeInsertOp {
+                    let op = TreeOperation::Insert(TreeInsertOp {
                         text: text.to_string(),
                         tenant: workers[idx].url().to_string(),
                     });
