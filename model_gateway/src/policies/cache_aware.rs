@@ -489,12 +489,19 @@ impl CacheAwarePolicy {
                 tree.insert_text(text, worker_url);
 
                 // Sync insert operation to mesh if enabled (only for text operations)
-                if let Some(ref mesh_sync) = self.mesh_sync {
+                let mesh_model_id = Self::normalize_mesh_model_id(model_id);
+
+                if let Some(batcher) = self.batcher.read().as_ref() {
                     let op = TreeOperation::Insert(TreeInsertOp {
                         text: text.to_string(),
                         tenant: worker_url.to_string(),
                     });
-                    let mesh_model_id = Self::normalize_mesh_model_id(model_id);
+                    batcher.add(mesh_model_id.to_string(), op);
+                } else if let Some(ref mesh_sync) = self.mesh_sync {
+                    let op = TreeOperation::Insert(TreeInsertOp {
+                        text: text.to_string(),
+                        tenant: worker_url.to_string(),
+                    });
                     if let Err(e) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
                         warn!("Failed to sync tree insert operation to mesh: {}", e);
                     }
