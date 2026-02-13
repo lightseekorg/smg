@@ -18,9 +18,6 @@ pull_request_rules:
         title: Branch naming convention
         summary: |
           Branch `{{head}}` does not match the required pattern: `<type>/<description>` or `<username>/<description>`.
-      close:
-        message: |
-          Closing this PR because the branch name does not follow the naming convention. Please rename your branch and reopen.
 
   - name: Comment on DCO check failure
     description: Post fix instructions when DCO sign-off is missing

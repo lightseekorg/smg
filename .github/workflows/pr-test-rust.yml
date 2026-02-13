@@ -40,10 +40,10 @@ jobs:
           fetch-depth: 0
       - name: Get PR commits
         id: get-commits
-        uses: tim-actions/get-pr-commits@master
+        uses: tim-actions/get-pr-commits@v1.3.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: tim-actions/dco@master
+      - uses: tim-actions/dco@v1.1.0
         with:
           commits: ${{ steps.get-commits.outputs.commits }}
 
