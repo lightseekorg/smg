@@ -12,6 +12,7 @@ fn benchmark_mesh_sync_overhead(c: &mut Criterion) {
 
     // Setup runtime
     let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
 
     // 1. Setup workers
     let workers: Vec<Arc<dyn Worker>> = vec![
