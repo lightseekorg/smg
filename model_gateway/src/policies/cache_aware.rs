@@ -843,8 +843,8 @@ mod tests {
         assert_eq!(idx, 1);
     }
 
-    #[test]
-    fn test_cache_aware_sync_tree_operation_to_mesh() {
+    #[tokio::test]
+    async fn test_cache_aware_sync_tree_operation_to_mesh() {
         use std::sync::Arc;
 
         use smg_mesh::{MeshSyncManager, StateStores};
@@ -886,8 +886,8 @@ mod tests {
         assert!(!tree.operations.is_empty());
     }
 
-    #[test]
-    fn test_cache_aware_restore_tree_state_from_mesh() {
+    #[tokio::test]
+    async fn test_cache_aware_restore_tree_state_from_mesh() {
         use std::sync::Arc;
 
         use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeOperation};
@@ -941,8 +941,8 @@ mod tests {
         assert_eq!(state.operations.len(), 2);
     }
 
-    #[test]
-    fn test_cache_aware_apply_remote_tree_operation() {
+    #[tokio::test]
+    async fn test_cache_aware_apply_remote_tree_operation() {
         use std::sync::Arc;
 
         use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeOperation};
@@ -970,8 +970,8 @@ mod tests {
         assert!(tree.is_some());
     }
 
-    #[test]
-    fn test_cache_aware_multi_node_consistency() {
+    #[tokio::test]
+    async fn test_cache_aware_multi_node_consistency() {
         use std::sync::Arc;
 
         use smg_mesh::{MeshSyncManager, StateStores, TreeInsertOp, TreeOperation};
