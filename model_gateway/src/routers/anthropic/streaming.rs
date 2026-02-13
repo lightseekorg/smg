@@ -23,7 +23,10 @@ use crate::{
     mcp::McpToolSession,
     observability::metrics::{metrics_labels, Metrics},
     protocols::messages::{InputContent, InputMessage, Role},
-    routers::{error as router_error, mcp_utils::DEFAULT_MAX_ITERATIONS},
+    routers::{
+        error::{self as router_error, extract_error_code_from_response},
+        mcp_utils::DEFAULT_MAX_ITERATIONS,
+    },
 };
 
 /// Channel buffer size for SSE events sent to the client.
@@ -289,7 +292,13 @@ async fn send_streaming_request(
     let model_id = &req_ctx.model_id;
 
     let selected_worker = worker::select_worker(&router.worker_registry, model_id)
-        .map_err(|_| format!("No healthy workers available for model '{}'", model_id))?;
+        .map_err(|e| {
+            format!(
+                "No healthy workers available for model '{}' ({})",
+                model_id,
+                extract_error_code_from_response(&e)
+            )
+        })?;
 
     worker::record_router_request(model_id, true);
 
@@ -303,7 +312,12 @@ async fn send_streaming_request(
         &*selected_worker,
     )
     .await
-    .map_err(|_| "Failed to send request to worker".to_string())?;
+    .map_err(|e| {
+        format!(
+            "Failed to send request to worker ({})",
+            extract_error_code_from_response(&e)
+        )
+    })?;
 
     if !response.status().is_success() {
         let status = response.status();
