@@ -14,13 +14,16 @@ pull_request_rules:
           - `<username>/<description>` — e.g. `changsu/fix-routing`
 
           Allowed types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`
+
+          > **Note:** We will bypass this check for existing PRs during the grace period, but PRs with non-conforming branch names **will be auto-closed** in the future. Please follow the naming convention for all new branches.
       post_check:
         title: Branch naming convention
         summary: |
           Branch `{{head}}` does not match the required pattern: `<type>/<description>` or `<username>/<description>`.
-      close:
-        message: |
-          Closing this PR because the branch name does not follow the naming convention. Please rename your branch and reopen.
+      # TODO: Re-enable auto-close once existing non-conforming PRs are merged
+      # close:
+      #   message: |
+      #     Closing this PR because the branch name does not follow the naming convention. Please rename your branch and reopen.
 
   - name: Comment on DCO check failure
     description: Post fix instructions when DCO sign-off is missing
