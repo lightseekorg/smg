@@ -59,13 +59,16 @@
     during the next eviction cycle.
 */
 
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use dashmap::DashMap;
 use kv_index::{TokenTree, Tree};
 use rand::Rng;
 use smg_mesh::{MeshSyncManager, OptionalMeshSyncManager, TreeInsertOp, TreeOperation};
-use tokio::time::{interval, Duration};
+use tokio::{
+    sync::Notify,
+    time::{interval, Duration},
+};
 use tracing::{debug, warn};
 
 use super::{
@@ -80,27 +83,29 @@ const MAX_BUFFER_SIZE: usize = 1000;
 /// Batcher for tree operations to reduce mesh sync overhead
 #[derive(Debug)]
 struct TreeOperationBatcher {
-    buffer: parking_lot::Mutex<Vec<(String, TreeOperation)>>,
+    buffer: parking_lot::Mutex<VecDeque<(String, TreeOperation)>>,
     mesh_sync: Arc<MeshSyncManager>,
+    notify: Arc<Notify>,
 }
 
 impl TreeOperationBatcher {
     fn new(mesh_sync: Arc<MeshSyncManager>) -> Self {
         Self {
-            buffer: parking_lot::Mutex::new(Vec::new()),
+            buffer: parking_lot::Mutex::new(VecDeque::new()),
             mesh_sync,
+            notify: Arc::new(Notify::new()),
         }
     }
 
     fn add(&self, model_id: String, op: TreeOperation) {
-        let should_flush = {
+        let should_notify = {
             let mut buffer = self.buffer.lock();
-            buffer.push((model_id, op));
+            buffer.push_back((model_id, op));
             buffer.len() >= MAX_BUFFER_SIZE
         };
 
-        if should_flush {
-            self.flush();
+        if should_notify {
+            self.notify.notify_one();
         }
     }
 
@@ -111,19 +116,28 @@ impl TreeOperationBatcher {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
-                interval.tick().await;
-                self.flush();
+                tokio::select! {
+                    _ = interval.tick() => {
+                        self.flush();
+                    }
+                    _ = self.notify.notified() => {
+                        self.flush();
+                    }
+                }
             }
         })
     }
 
     fn flush(&self) {
-        let operations = {
+        let operations: Vec<_> = {
             let mut buffer = self.buffer.lock();
             if buffer.is_empty() {
                 return;
             }
-            std::mem::take(&mut *buffer)
+            // Drain up to MAX_BUFFER_SIZE to avoid blocking for too long
+            // and to respect the batch size limit
+            let count = buffer.len().min(MAX_BUFFER_SIZE);
+            buffer.drain(0..count).collect()
         };
 
         // Group by model_id
@@ -135,14 +149,35 @@ impl TreeOperationBatcher {
 
         // Sync batches
         for (model_id, ops) in by_model {
+            // Clone ops for retry potential
+            // This cloning is unfortunate overhead but necessary since sync consumes the vec
+            // and we might need to re-queue. Optimization: Could change sync signature or use Cow/Rc.
             if let Err(e) = self
                 .mesh_sync
-                .sync_tree_operations_batch(model_id.clone(), ops)
+                .sync_tree_operations_batch(model_id.clone(), ops.clone())
             {
                 warn!(
-                    "Failed to sync tree operations batch for model {}: {}",
+                    "Failed to sync tree operations batch for model {}: {}. Re-queueing...",
                     model_id, e
                 );
+
+                // Re-queue failed operations
+                let mut buffer = self.buffer.lock();
+                let available = MAX_BUFFER_SIZE.saturating_sub(buffer.len());
+                let to_requeue = ops.len().min(available);
+
+                if to_requeue < ops.len() {
+                    warn!(
+                        "Buffer full, dropping {} operations for model {}",
+                        ops.len() - to_requeue,
+                        model_id
+                    );
+                }
+
+                // Push back to front in reverse order to maintain sequence
+                for op in ops.into_iter().take(to_requeue).rev() {
+                    buffer.push_front((model_id.clone(), op));
+                }
             }
         }
     }
@@ -233,6 +268,11 @@ impl CacheAwarePolicy {
     /// Set mesh sync manager (can be called after construction)
     pub fn set_mesh_sync(&mut self, mesh_sync: OptionalMeshSyncManager) {
         self.mesh_sync = mesh_sync.clone();
+
+        // Flush any existing batcher before dropping it to ensure no ops are lost
+        if let Some(batcher) = self.batcher.write().take() {
+            batcher.flush();
+        }
 
         // Abort any existing background task
         {
@@ -491,7 +531,10 @@ impl CacheAwarePolicy {
                 // Sync insert operation to mesh if enabled (only for text operations)
                 let mesh_model_id = Self::normalize_mesh_model_id(model_id);
 
-                if let Some(batcher) = self.batcher.read().as_ref() {
+                // Clone batcher to drop read lock immediately
+                let batcher = self.batcher.read().clone();
+
+                if let Some(batcher) = batcher {
                     let op = TreeOperation::Insert(TreeInsertOp {
                         text: text.to_string(),
                         tenant: worker_url.to_string(),
@@ -681,13 +724,24 @@ impl CacheAwarePolicy {
                 tree.insert_text(text, workers[idx].url());
 
                 // Sync insert operation to mesh if enabled (only for text operations)
-                if let Some(batcher) = self.batcher.read().as_ref() {
+                // Clone batcher to drop read lock immediately
+                let mesh_model_id = Self::normalize_mesh_model_id(model_id);
+                let batcher = self.batcher.read().clone();
+
+                if let Some(batcher) = batcher {
                     let op = TreeOperation::Insert(TreeInsertOp {
                         text: text.to_string(),
                         tenant: workers[idx].url().to_string(),
                     });
-                    let mesh_model_id = Self::normalize_mesh_model_id(model_id);
                     batcher.add(mesh_model_id.to_string(), op);
+                } else if let Some(ref mesh_sync) = self.mesh_sync {
+                    let op = TreeOperation::Insert(TreeInsertOp {
+                        text: text.to_string(),
+                        tenant: workers[idx].url().to_string(),
+                    });
+                    if let Err(e) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
+                        warn!("Failed to sync tree insert operation to mesh: {}", e);
+                    }
                 }
 
                 workers[idx].increment_processed();
@@ -712,6 +766,15 @@ impl CacheAwarePolicy {
 impl Default for CacheAwarePolicy {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for CacheAwarePolicy {
+    fn drop(&mut self) {
+        // Ensure background task is aborted when policy is dropped
+        if let Some(handle) = self.batcher_task.write().take() {
+            handle.abort();
+        }
     }
 }
 
