@@ -1170,7 +1170,6 @@ class ModelPool:
                 "16384",
                 "--gpu-memory-utilization",
                 "0.9",
-                "--enforce-eager",
             ]
             extra = model_spec.get("vllm_args", [])
         elif runtime == "trtllm":
