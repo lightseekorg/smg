@@ -15,7 +15,7 @@ kv-index = { version = "1.0.0", path = "kv_index" }
 smg-data-connector = { version = "1.1.0", path = "data_connector", package = "data-connector" }
 llm-multimodal = { version = "1.1.0", path = "multimodal" }
 smg-wasm = { version = "1.0.0", path = "wasm", package = "smg-wasm" }
-smg-mesh = { version = "1.0.0", path = "mesh", package = "smg-mesh" }
+smg-mesh = { version = "1.1.0", path = "mesh", package = "smg-mesh" }
 smg-grpc-client = { version = "1.1.0", path = "grpc_client" }
 
 # Shared dependencies
