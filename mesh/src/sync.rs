@@ -374,6 +374,60 @@ impl MeshSyncManager {
         Ok(())
     }
 
+    /// Sync a batch of tree operations to mesh stores
+    /// This is more efficient than syncing one by one as it reduces read/write cycles
+    pub fn sync_tree_operations_batch(
+        &self,
+        model_id: String,
+        operations: Vec<TreeOperation>,
+    ) -> Result<(), String> {
+        if operations.is_empty() {
+            return Ok(());
+        }
+
+        let key = SKey::new(tree_state_key(&model_id));
+
+        // Get current tree state or create new one
+        let mut tree_state = if let Some(policy_state) = self.stores.policy.get(&key) {
+            // Deserialize existing tree state
+            serde_json::from_slice::<TreeState>(&policy_state.config).unwrap_or_else(|e| {
+                tracing::warn!("Failed to deserialize tree state for model '{}', creating new state. Error: {}", &model_id, e);
+                TreeState::new(model_id.clone())
+            })
+        } else {
+            TreeState::new(model_id.clone())
+        };
+
+        // Add all operations
+        for operation in operations {
+            tree_state.add_operation(operation);
+        }
+
+        // Serialize and store back
+        let serialized = serde_json::to_vec(&tree_state)
+            .map_err(|e| format!("Failed to serialize tree state: {}", e))?;
+
+        // Use actual tree_state version which increments per operation (via TreeState::add_operation)
+        // This ensures PolicyState version matches TreeState version even for batched updates
+        let new_version = tree_state.version;
+
+        let state = PolicyState {
+            model_id: model_id.clone(),
+            policy_type: "tree_state".to_string(),
+            config: serialized,
+            version: new_version,
+        };
+
+        let actor = self.self_name.clone();
+        self.stores.policy.insert(key, state, actor);
+        debug!(
+            "Synced tree operations batch to mesh: model={} (version: {})",
+            model_id, new_version
+        );
+
+        Ok(())
+    }
+
     /// Get tree state for a model from mesh stores
     pub fn get_tree_state(&self, model_id: &str) -> Option<TreeState> {
         let key = SKey::new(tree_state_key(model_id));
@@ -1173,5 +1227,55 @@ mod tests {
 
         let all_states = manager.get_all_policy_states();
         assert_eq!(all_states.len(), 2);
+    }
+    #[test]
+    fn test_sync_tree_operations_batch() {
+        let manager = create_test_manager("node1".to_string());
+
+        use crate::tree_ops::{TreeInsertOp, TreeOperation};
+
+        let mut ops = Vec::new();
+        for i in 0..5 {
+            ops.push(TreeOperation::Insert(TreeInsertOp {
+                text: format!("text_{}", i),
+                tenant: "http://localhost:8000".to_string(),
+            }));
+        }
+
+        let result = manager.sync_tree_operations_batch("model1".to_string(), ops);
+        assert!(result.is_ok());
+
+        // Verify tree state was stored with correct version
+        let tree_state = manager.get_tree_state("model1");
+        assert!(tree_state.is_some());
+        let tree = tree_state.unwrap();
+        assert_eq!(tree.model_id, "model1");
+        assert_eq!(tree.operations.len(), 5);
+        assert_eq!(tree.version, 5); // Version should be 5 after 5 ops (starting from 0)
+
+        // Verify policy state version matches tree state version
+        // Verify policy state version matches tree state version
+        let key = SKey::new(tree_state_key("model1"));
+        let policy_state = manager.stores.policy.get(&key).unwrap();
+        assert_eq!(policy_state.version, 5);
+
+        // Add more operations to verify version increments correctly
+        let mut ops2 = Vec::new();
+        for i in 5..8 {
+            ops2.push(TreeOperation::Insert(TreeInsertOp {
+                text: format!("text_{}", i),
+                tenant: "http://localhost:8000".to_string(),
+            }));
+        }
+        manager
+            .sync_tree_operations_batch("model1".to_string(), ops2)
+            .unwrap();
+
+        let tree_uptodate = manager.get_tree_state("model1").unwrap();
+        assert_eq!(tree_uptodate.version, 8);
+        assert_eq!(tree_uptodate.operations.len(), 8);
+
+        let policy_uptodate = manager.stores.policy.get(&key).unwrap();
+        assert_eq!(policy_uptodate.version, 8);
     }
 }
