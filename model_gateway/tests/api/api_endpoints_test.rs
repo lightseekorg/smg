@@ -140,6 +140,53 @@ mod health_tests {
 
         ctx.shutdown().await;
     }
+
+    #[tokio::test]
+    async fn test_config_endpoint() {
+        let ctx = AppTestContext::new(vec![MockWorkerConfig {
+            port: 18006,
+            worker_type: WorkerType::Regular,
+            health_status: HealthStatus::Healthy,
+            response_delay_ms: 0,
+            fail_rate: 0.0,
+        }])
+        .await;
+
+        let app = ctx.create_app().await;
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/config")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(body_json.get("policy").is_some());
+        assert!(body_json.get("max_concurrent_requests").is_some());
+        assert!(body_json.get("queue_size").is_some());
+        assert!(body_json.get("queue_timeout_secs").is_some());
+        assert!(body_json.get("circuit_breaker").is_some());
+        assert!(body_json.get("health_check").is_some());
+
+        let cb = &body_json["circuit_breaker"];
+        assert!(cb.get("threshold").is_some());
+        assert!(cb.get("timeout_secs").is_some());
+
+        let hc = &body_json["health_check"];
+        assert!(hc.get("enabled").is_some());
+        assert!(hc.get("interval_secs").is_some());
+        assert!(hc.get("timeout_secs").is_some());
+        assert!(hc.get("path").is_some());
+
+        ctx.shutdown().await;
+    }
 }
 
 #[cfg(test)]
