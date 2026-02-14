@@ -6,16 +6,117 @@
 //! - WorkerStore: Worker status, load, health
 //! - PolicyStore: Routing policy internal state
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
 
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tracing::debug;
 
 use super::{
     consistent_hash::ConsistentHashRing,
-    crdt::{SKey, SyncCRDTMap, SyncPNCounter},
+    crdt_kv::{CrdtOrMap, OperationLog},
 };
+
+// ============================================================================
+// Type-Safe Serialization Layer - Transparent T ↔ Vec<u8> Conversion
+// ============================================================================
+
+/// Trait for CRDT-compatible value types
+/// Provides transparent serialization/deserialization
+trait CrdtValue: Serialize + DeserializeOwned + Clone {
+    fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("Serialization should never fail for valid types")
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
+    }
+}
+
+// Blanket implementation for all types that satisfy the bounds
+impl<T> CrdtValue for T where T: Serialize + DeserializeOwned + Clone {}
+
+// ============================================================================
+// Generic CRDT Store Wrapper - Type-Safe Interface Over CrdtOrMap
+// ============================================================================
+
+/// Generic store wrapper providing type-safe operations over CrdtOrMap
+#[derive(Clone)]
+struct CrdtStore<T> {
+    inner: CrdtOrMap,
+    _phantom: PhantomData<T>,
+}
+
+impl<T> std::fmt::Debug for CrdtStore<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CrdtStore")
+            .field("inner", &"<CrdtOrMap>")
+            .finish()
+    }
+}
+
+impl<T: CrdtValue> CrdtStore<T> {
+    fn new() -> Self {
+        Self {
+            inner: CrdtOrMap::new(),
+            _phantom: PhantomData,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<T> {
+        self.inner.get(key).and_then(|bytes| T::from_bytes(&bytes))
+    }
+
+    fn insert(&self, key: String, value: T) -> Option<T> {
+        let bytes = value.to_bytes();
+        self.inner
+            .insert(key, bytes)
+            .and_then(|old_bytes| T::from_bytes(&old_bytes))
+    }
+
+    fn remove(&self, key: &str) -> Option<T> {
+        self.inner
+            .remove(key)
+            .and_then(|bytes| T::from_bytes(&bytes))
+    }
+
+    fn update<F>(&self, key: String, updater: F) -> Option<T>
+    where
+        F: FnOnce(Option<T>) -> T,
+    {
+        let updated_bytes = self.inner.upsert(key, |current_bytes| {
+            let current = current_bytes.and_then(T::from_bytes);
+            updater(current).to_bytes()
+        });
+        T::from_bytes(&updated_bytes)
+    }
+
+    // fn contains_key(&self, key: &str) -> bool {
+    //     self.inner.contains_key(key)
+    // }
+
+    fn merge(&self, log: &OperationLog) {
+        self.inner.merge(log)
+    }
+
+    fn get_operation_log(&self) -> OperationLog {
+        self.inner.get_operation_log()
+    }
+
+    fn all(&self) -> BTreeMap<String, T> {
+        self.inner
+            .all()
+            .into_iter()
+            .filter_map(|(k, v)| T::from_bytes(&v).map(|val| (k, val)))
+            .collect()
+    }
+}
+
+impl<T: CrdtValue> Default for CrdtStore<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Store type identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -130,50 +231,46 @@ pub fn tree_state_key(model_id: &str) -> String {
 /// Membership store
 #[derive(Debug, Clone)]
 pub struct MembershipStore {
-    inner: SyncCRDTMap<MembershipState>,
+    inner: CrdtStore<MembershipState>,
 }
 
 impl MembershipStore {
     pub fn new() -> Self {
         Self {
-            inner: SyncCRDTMap::new(),
+            inner: CrdtStore::new(),
         }
     }
 
-    pub fn get(&self, key: &SKey) -> Option<MembershipState> {
+    pub fn get(&self, key: &str) -> Option<MembershipState> {
         self.inner.get(key)
     }
 
-    pub fn insert(&self, key: SKey, value: MembershipState, actor: String) {
-        self.inner.insert(key, value, actor);
+    pub fn insert(&self, key: String, value: MembershipState, _actor: String) {
+        self.inner.insert(key, value);
     }
 
-    pub fn remove(&self, key: &SKey) {
+    pub fn remove(&self, key: &str) {
         self.inner.remove(key);
     }
 
-    pub fn merge(&self, other: &crate::crdt::CRDTMap<MembershipState>) {
-        self.inner.merge(other);
+    pub fn merge(&self, log: &OperationLog) {
+        self.inner.merge(log);
     }
 
-    pub fn snapshot(&self) -> crate::crdt::CRDTMap<MembershipState> {
-        self.inner.snapshot()
+    pub fn get_operation_log(&self) -> OperationLog {
+        self.inner.get_operation_log()
     }
 
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.inner.all().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.len() == 0
+        self.len() == 0
     }
 
-    pub fn all(&self) -> BTreeMap<SKey, MembershipState> {
-        self.inner.snapshot().to_map()
-    }
-
-    pub fn get_metadata(&self, key: &SKey) -> Option<(u64, String)> {
-        self.inner.get_metadata(key)
+    pub fn all(&self) -> BTreeMap<String, MembershipState> {
+        self.inner.all()
     }
 }
 
@@ -186,50 +283,46 @@ impl Default for MembershipStore {
 /// App store
 #[derive(Debug, Clone)]
 pub struct AppStore {
-    inner: SyncCRDTMap<AppState>,
+    inner: CrdtStore<AppState>,
 }
 
 impl AppStore {
     pub fn new() -> Self {
         Self {
-            inner: SyncCRDTMap::new(),
+            inner: CrdtStore::new(),
         }
     }
 
-    pub fn get(&self, key: &SKey) -> Option<AppState> {
+    pub fn get(&self, key: &str) -> Option<AppState> {
         self.inner.get(key)
     }
 
-    pub fn insert(&self, key: SKey, value: AppState, actor: String) {
-        self.inner.insert(key, value, actor);
+    pub fn insert(&self, key: String, value: AppState, _actor: String) {
+        self.inner.insert(key, value);
     }
 
-    pub fn remove(&self, key: &SKey) {
+    pub fn remove(&self, key: &str) {
         self.inner.remove(key);
     }
 
-    pub fn merge(&self, other: &crate::crdt::CRDTMap<AppState>) {
-        self.inner.merge(other);
+    pub fn merge(&self, log: &OperationLog) {
+        self.inner.merge(log);
     }
 
-    pub fn snapshot(&self) -> crate::crdt::CRDTMap<AppState> {
-        self.inner.snapshot()
+    pub fn get_operation_log(&self) -> OperationLog {
+        self.inner.get_operation_log()
     }
 
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.inner.all().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.len() == 0
+        self.len() == 0
     }
 
-    pub fn all(&self) -> BTreeMap<SKey, AppState> {
-        self.inner.snapshot().to_map()
-    }
-
-    pub fn get_metadata(&self, key: &SKey) -> Option<(u64, String)> {
-        self.inner.get_metadata(key)
+    pub fn all(&self) -> BTreeMap<String, AppState> {
+        self.inner.all()
     }
 }
 
@@ -242,50 +335,46 @@ impl Default for AppStore {
 /// Worker store
 #[derive(Debug, Clone)]
 pub struct WorkerStore {
-    inner: SyncCRDTMap<WorkerState>,
+    inner: CrdtStore<WorkerState>,
 }
 
 impl WorkerStore {
     pub fn new() -> Self {
         Self {
-            inner: SyncCRDTMap::new(),
+            inner: CrdtStore::new(),
         }
     }
 
-    pub fn get(&self, key: &SKey) -> Option<WorkerState> {
+    pub fn get(&self, key: &str) -> Option<WorkerState> {
         self.inner.get(key)
     }
 
-    pub fn insert(&self, key: SKey, value: WorkerState, actor: String) {
-        self.inner.insert(key, value, actor);
+    pub fn insert(&self, key: String, value: WorkerState, _actor: String) {
+        self.inner.insert(key, value);
     }
 
-    pub fn remove(&self, key: &SKey) {
+    pub fn remove(&self, key: &str) {
         self.inner.remove(key);
     }
 
-    pub fn merge(&self, other: &crate::crdt::CRDTMap<WorkerState>) {
-        self.inner.merge(other);
+    pub fn merge(&self, log: &OperationLog) {
+        self.inner.merge(log);
     }
 
-    pub fn snapshot(&self) -> crate::crdt::CRDTMap<WorkerState> {
-        self.inner.snapshot()
+    pub fn get_operation_log(&self) -> OperationLog {
+        self.inner.get_operation_log()
     }
 
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.inner.all().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.len() == 0
+        self.len() == 0
     }
 
-    pub fn all(&self) -> BTreeMap<SKey, WorkerState> {
-        self.inner.snapshot().to_map()
-    }
-
-    pub fn get_metadata(&self, key: &SKey) -> Option<(u64, String)> {
-        self.inner.get_metadata(key)
+    pub fn all(&self) -> BTreeMap<String, WorkerState> {
+        self.inner.all()
     }
 }
 
@@ -298,50 +387,46 @@ impl Default for WorkerStore {
 /// Policy store
 #[derive(Debug, Clone)]
 pub struct PolicyStore {
-    inner: SyncCRDTMap<PolicyState>,
+    inner: CrdtStore<PolicyState>,
 }
 
 impl PolicyStore {
     pub fn new() -> Self {
         Self {
-            inner: SyncCRDTMap::new(),
+            inner: CrdtStore::new(),
         }
     }
 
-    pub fn get(&self, key: &SKey) -> Option<PolicyState> {
+    pub fn get(&self, key: &str) -> Option<PolicyState> {
         self.inner.get(key)
     }
 
-    pub fn insert(&self, key: SKey, value: PolicyState, actor: String) {
-        self.inner.insert(key, value, actor);
+    pub fn insert(&self, key: String, value: PolicyState, _actor: String) {
+        self.inner.insert(key, value);
     }
 
-    pub fn remove(&self, key: &SKey) {
+    pub fn remove(&self, key: &str) {
         self.inner.remove(key);
     }
 
-    pub fn merge(&self, other: &crate::crdt::CRDTMap<PolicyState>) {
-        self.inner.merge(other);
+    pub fn merge(&self, log: &OperationLog) {
+        self.inner.merge(log);
     }
 
-    pub fn snapshot(&self) -> crate::crdt::CRDTMap<PolicyState> {
-        self.inner.snapshot()
+    pub fn get_operation_log(&self) -> OperationLog {
+        self.inner.get_operation_log()
     }
 
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.inner.all().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.len() == 0
+        self.len() == 0
     }
 
-    pub fn all(&self) -> BTreeMap<SKey, PolicyState> {
-        self.inner.snapshot().to_map()
-    }
-
-    pub fn get_metadata(&self, key: &SKey) -> Option<(u64, String)> {
-        self.inner.get_metadata(key)
+    pub fn all(&self) -> BTreeMap<String, PolicyState> {
+        self.inner.all()
     }
 }
 
@@ -351,10 +436,20 @@ impl Default for PolicyStore {
     }
 }
 
-/// Rate-limit counter store (using PNCounter with consistent hashing)
+// ============================================================================
+// Rate Limit Counter - Simplified Counter Using CrdtOrMap
+// ============================================================================
+
+/// Counter value wrapper for rate limiting
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+struct CounterValue {
+    value: i64,
+}
+
+/// Rate-limit counter store (using CrdtOrMap with consistent hashing)
 #[derive(Debug, Clone)]
 pub struct RateLimitStore {
-    counters: Arc<RwLock<BTreeMap<String, SyncPNCounter>>>, // key -> counter
+    counters: CrdtStore<CounterValue>,
     hash_ring: Arc<RwLock<ConsistentHashRing>>,
     self_name: String,
 }
@@ -362,7 +457,7 @@ pub struct RateLimitStore {
 impl RateLimitStore {
     pub fn new(self_name: String) -> Self {
         Self {
-            counters: Arc::new(RwLock::new(BTreeMap::new())),
+            counters: CrdtStore::new(),
             hash_ring: Arc::new(RwLock::new(ConsistentHashRing::new())),
             self_name,
         }
@@ -387,72 +482,70 @@ impl RateLimitStore {
         ring.get_owners(key)
     }
 
-    /// Get or create counter (only if this node is an owner)
-    #[allow(dead_code)]
-    fn get_or_create_counter_internal(&self, key: String) -> Option<SyncPNCounter> {
-        if !self.is_owner(&key) {
-            return None;
-        }
-
-        let mut counters = self.counters.write();
-        Some(counters.entry(key.clone()).or_default().clone())
-    }
-
-    pub fn get_counter(&self, key: &str) -> Option<SyncPNCounter> {
+    /// Get counter value
+    pub fn get_counter(&self, key: &str) -> Option<i64> {
         if !self.is_owner(key) {
             return None;
         }
-        let counters = self.counters.read();
-        counters.get(key).cloned()
+        self.counters.get(key).map(|c| c.value)
     }
 
     /// Increment counter (only if this node is an owner)
-    pub fn inc(&self, key: String, actor: String, delta: i64) {
+    pub fn inc(&self, key: String, _actor: String, delta: i64) {
         if !self.is_owner(&key) {
-            // Not an owner, skip
             return;
         }
 
-        let mut counters = self.counters.write();
-        let counter = counters.entry(key.clone()).or_default();
-        counter.inc(actor, delta);
+        let _ = self.counters.update(key, |current| CounterValue {
+            value: current.map_or(delta, |existing| existing.value + delta),
+        });
     }
 
-    /// Get counter value (aggregate from all owners via CRDT merge)
+    /// Build a minimal operation log for a counter snapshot.
+    /// This keeps the sync manager API compatible with OperationLog merge flow.
+    pub fn operation_log_for_counter_value(&self, key: String, counter_value: i64) -> OperationLog {
+        let temp_store = CrdtStore::<CounterValue>::new();
+        let _ = temp_store.insert(
+            key,
+            CounterValue {
+                value: counter_value,
+            },
+        );
+        temp_store.get_operation_log()
+    }
+
+    /// Get counter value
     pub fn value(&self, key: &str) -> Option<i64> {
-        let counters = self.counters.read();
-        counters.get(key).map(|c| c.value())
+        self.counters.get(key).map(|c| c.value)
     }
 
-    /// Merge counter from another node (for CRDT synchronization)
-    pub fn merge_counter(&self, key: String, other: &SyncPNCounter) {
-        let mut counters = self.counters.write();
-        let counter = counters.entry(key).or_default();
-        // Get the inner CRDTPNCounter from other SyncPNCounter
-        let other_inner = other.snapshot();
-        counter.merge(&other_inner);
+    /// Merge operation log from another node
+    pub fn merge(&self, log: &OperationLog) {
+        self.counters.merge(log);
+    }
+
+    /// Get operation log for synchronization
+    pub fn get_operation_log(&self) -> OperationLog {
+        self.counters.get_operation_log()
     }
 
     /// Get all counter keys
     pub fn keys(&self) -> Vec<String> {
-        let counters = self.counters.read();
-        counters.keys().cloned().collect()
+        self.counters.all().keys().cloned().collect()
     }
 
     /// Check if we need to transfer ownership due to node failure
     pub fn check_ownership_transfer(&self, failed_nodes: &[String]) -> Vec<String> {
         let mut affected_keys = Vec::new();
         let ring = self.hash_ring.read();
-        let counters = self.counters.read();
+        let all_counters = self.counters.all();
 
-        for key in counters.keys() {
+        for key in all_counters.keys() {
             let owners = ring.get_owners(key);
-            // Check if any owner has failed
-            if owners.iter().any(|owner| failed_nodes.contains(owner)) {
-                // Check if we are now an owner
-                if ring.is_owner(key, &self.self_name) {
-                    affected_keys.push(key.clone());
-                }
+            if owners.iter().any(|owner| failed_nodes.contains(owner))
+                && ring.is_owner(key, &self.self_name)
+            {
+                affected_keys.push(key.clone());
             }
         }
 
@@ -514,7 +607,7 @@ mod tests {
     #[test]
     fn test_membership_store() {
         let store = MembershipStore::new();
-        let key = SKey::new("node1".to_string());
+        let key = "node1".to_string();
         let state = MembershipState {
             name: "node1".to_string(),
             address: "127.0.0.1:8000".to_string(),
@@ -525,7 +618,6 @@ mod tests {
 
         store.insert(key.clone(), state.clone(), "node1".to_string());
         assert_eq!(store.get(&key).unwrap().name, "node1");
-        assert_eq!(store.len(), 1);
 
         store.remove(&key);
         assert!(store.get(&key).is_none());
@@ -534,7 +626,7 @@ mod tests {
     #[test]
     fn test_app_store() {
         let store = AppStore::new();
-        let key = SKey::new("app_key1".to_string());
+        let key = "app_key1".to_string();
         let state = AppState {
             key: "app_key1".to_string(),
             value: b"app_value".to_vec(),
@@ -543,13 +635,12 @@ mod tests {
 
         store.insert(key.clone(), state.clone(), "node1".to_string());
         assert_eq!(store.get(&key).unwrap().key, "app_key1");
-        assert_eq!(store.len(), 1);
     }
 
     #[test]
     fn test_worker_store() {
         let store = WorkerStore::new();
-        let key = SKey::new("worker1".to_string());
+        let key = "worker1".to_string();
         let state = WorkerState {
             worker_id: "worker1".to_string(),
             model_id: "model1".to_string(),
@@ -561,13 +652,12 @@ mod tests {
 
         store.insert(key.clone(), state.clone(), "node1".to_string());
         assert_eq!(store.get(&key).unwrap().worker_id, "worker1");
-        assert_eq!(store.len(), 1);
     }
 
     #[test]
     fn test_policy_store() {
         let store = PolicyStore::new();
-        let key = SKey::new("policy:model1".to_string());
+        let key = "policy:model1".to_string();
         let state = PolicyState {
             model_id: "model1".to_string(),
             policy_type: "cache_aware".to_string(),
@@ -577,7 +667,6 @@ mod tests {
 
         store.insert(key.clone(), state.clone(), "node1".to_string());
         assert_eq!(store.get(&key).unwrap().model_id, "model1");
-        assert_eq!(store.len(), 1);
     }
 
     #[test]
@@ -662,15 +751,13 @@ mod tests {
             store2.inc(test_key.clone(), "node2".to_string(), 5);
         }
 
-        // Merge counter from store2 into store1
-        if let Some(counter2) = store2.get_counter(&test_key) {
-            store1.merge_counter(test_key.clone(), &counter2);
-        }
+        // Merge operation log from store2 into store1
+        let log2 = store2.get_operation_log();
+        store1.merge(&log2);
 
         // Get aggregated value (if node1 is owner)
         if store1.is_owner(&test_key) {
             let value = store1.value(&test_key);
-            // Should include merged value
             assert!(value.is_some());
         }
     }

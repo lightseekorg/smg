@@ -25,7 +25,6 @@ use gossip::{
 
 use crate::{
     controller::MeshController,
-    crdt::SKey,
     mtls::{MTLSConfig, MTLSManager},
     node_state_machine::{ConvergenceConfig, NodeStateMachine},
     partition::PartitionDetector,
@@ -199,7 +198,7 @@ impl MeshServerHandler {
     fn next_version(&self, key: &str) -> u64 {
         self.stores
             .app
-            .get(&SKey(key.to_string()))
+            .get(key)
             .map(|app_state| app_state.version + 1)
             .unwrap_or(1)
     }
@@ -222,7 +221,7 @@ impl MeshServerHandler {
         };
         self.stores
             .app
-            .insert(SKey(key.clone()), app_state, self.self_name.clone());
+            .insert(key.clone(), app_state, self.self_name.clone());
 
         node.metadata.insert(key, value);
         node.version += 1;
@@ -233,21 +232,21 @@ impl MeshServerHandler {
         // Read from the app store
         self.stores
             .app
-            .get(&SKey(key))
+            .get(&key)
             .map(|app_state| app_state.value.clone())
     }
 
-    /// Get a snapshot of the app store for synchronization
-    /// Returns a CRDT snapshot that can be merged into other nodes
-    pub fn snapshot(&self) -> crate::crdt::CRDTMap<AppState> {
-        self.stores.app.snapshot()
+    /// Get operation log of the app store for synchronization
+    /// Returns an operation log that can be merged into other nodes
+    pub fn get_operation_log(&self) -> crate::crdt_kv::OperationLog {
+        self.stores.app.get_operation_log()
     }
 
-    /// Sync app store data from a snapshot (for testing and manual sync)
+    /// Sync app store data from an operation log (for testing and manual sync)
     /// This will be replaced by automatic sync stream in the future
-    pub fn sync_app_from_snapshot(&self, snapshot: &crate::crdt::CRDTMap<AppState>) {
-        // Merge snapshot into our app store using CRDT merge
-        self.stores.app.merge(snapshot);
+    pub fn sync_app_from_log(&self, log: &crate::crdt_kv::OperationLog) {
+        // Merge operation log into our app store using CRDT merge
+        self.stores.app.merge(log);
     }
 }
 

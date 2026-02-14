@@ -373,13 +373,10 @@ mod tests {
         assert!(sm.needs_snapshot());
 
         // Add some data to stores
-        use super::super::{
-            crdt::SKey,
-            stores::{MembershipState, PolicyState, WorkerState},
-        };
+        use super::super::stores::{MembershipState, PolicyState, WorkerState};
 
         stores.membership.insert(
-            SKey::from("node1"),
+            "node1".to_string(),
             MembershipState {
                 name: "node1".to_string(),
                 address: "127.0.0.1:8080".to_string(),
@@ -391,7 +388,7 @@ mod tests {
         );
 
         stores.worker.insert(
-            SKey::from("worker1"),
+            "worker1".to_string(),
             WorkerState {
                 worker_id: "worker1".to_string(),
                 model_id: "model1".to_string(),
@@ -404,7 +401,7 @@ mod tests {
         );
 
         stores.policy.insert(
-            SKey::from("policy1"),
+            "policy1".to_string(),
             PolicyState {
                 model_id: "model1".to_string(),
                 policy_type: "round_robin".to_string(),
@@ -477,9 +474,9 @@ mod tests {
         sm.record_state_update();
 
         // Change state by adding data
-        use super::super::{crdt::SKey, stores::AppState};
+        use super::super::stores::AppState;
         stores.app.insert(
-            SKey::from("app1"),
+            "app1".to_string(),
             AppState {
                 key: "app1".to_string(),
                 value: vec![1, 2, 3],
@@ -528,9 +525,9 @@ mod tests {
         let hash1 = sm.calculate_state_hash();
 
         // Add some data
-        use super::super::{crdt::SKey, stores::AppState};
+        use super::super::stores::AppState;
         stores.app.insert(
-            SKey::from("app1"),
+            "app1".to_string(),
             AppState {
                 key: "app1".to_string(),
                 value: vec![],
