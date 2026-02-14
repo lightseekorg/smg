@@ -64,6 +64,7 @@ use crate::{
     inventory::{
         AliasTarget, ArgMapping, QualifiedToolName, ToolCategory, ToolEntry, ToolInventory,
     },
+    rate_limit::RateLimiter,
     tenant::TenantContext,
     transform::{ResponseFormat, ResponseTransformer},
 };
@@ -300,6 +301,7 @@ pub struct McpOrchestrator {
     connection_pool: Arc<McpConnectionPool>,
     /// Metrics and monitoring.
     metrics: Arc<McpMetrics>,
+    rate_limiter: Arc<RateLimiter>,
     /// Channel for refresh requests from handlers.
     refresh_tx: mpsc::Sender<RefreshRequest>,
     active_executions: Arc<AtomicUsize>,
@@ -321,7 +323,7 @@ impl McpOrchestrator {
 
         let tool_inventory = Arc::new(ToolInventory::new());
         let metrics = Arc::new(McpMetrics::new());
-
+        let rate_limiter = Arc::new(RateLimiter::new(config.rate_limits.unwrap_or_default()));
         // Build approval manager from config
         let audit_log = Arc::new(crate::approval::audit::AuditLog::new());
         let policy_engine = Arc::new(crate::approval::policy::PolicyEngine::from_yaml_config(
@@ -355,6 +357,7 @@ impl McpOrchestrator {
             approval_manager,
             connection_pool,
             metrics,
+            rate_limiter,
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
@@ -386,6 +389,44 @@ impl McpOrchestrator {
         Ok(orchestrator)
     }
 
+    /// Internal helper to enforce rate limits and acquire a concurrency permit.
+    async fn check_and_acquire_permit(
+        &self,
+        tenant_ctx: &TenantContext,
+        qualified: &QualifiedToolName,
+    ) -> McpResult<Option<tokio::sync::OwnedSemaphorePermit>> {
+        // Atomic check and record
+        // We get back the timestamp of the reservation so we can rollback exactly this call if needed
+        let timestamp = self
+            .rate_limiter
+            .acquire_slot(tenant_ctx, qualified)
+            .inspect_err(|_| self.metrics.record_rate_limited())?;
+
+        // Guard against cancellation or errors during semaphore acquisition
+        let guard = scopeguard::guard(timestamp, |ts| {
+            self.rate_limiter.rollback(tenant_ctx, qualified, ts);
+            self.metrics.record_rate_limited();
+        });
+
+        // Acquire concurrency permit
+        let permit = match self
+            .rate_limiter
+            .acquire_concurrent_permit(tenant_ctx)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                // Guard will handle rollback when dropped
+                return Err(e);
+            }
+        };
+
+        // Success - consume the guard so rollback doesn't happen
+        let _ = scopeguard::ScopeGuard::into_inner(guard);
+
+        Ok(permit)
+    }
+
     /// Create a simplified orchestrator for testing.
     #[cfg(test)]
     pub fn new_test() -> Self {
@@ -402,6 +443,7 @@ impl McpOrchestrator {
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
+            rate_limiter: Arc::new(RateLimiter::new(Default::default())),
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
@@ -797,9 +839,10 @@ impl McpOrchestrator {
         let _guard = scopeguard::guard(Arc::clone(&self.active_executions), |count| {
             count.fetch_sub(1, Ordering::SeqCst);
         });
+
         let qualified = QualifiedToolName::new(server_key, tool_name);
 
-        // Get tool entry
+        // Get tool entry first (fail fast if not found, don't consume quota)
         let entry = self
             .tool_inventory
             .get_entry(server_key, tool_name)
@@ -808,6 +851,19 @@ impl McpOrchestrator {
         // Record metrics start
         self.metrics.record_call_start(&qualified);
         let start_time = Instant::now();
+
+        // Enforce rate limits and acquire concurrency permit
+        let _permit = match self
+            .check_and_acquire_permit(&request_ctx.tenant_ctx, &qualified)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                let duration_ms = start_time.elapsed().as_millis() as u64;
+                self.metrics.record_call_end(&qualified, false, duration_ms);
+                return Err(e);
+            }
+        };
 
         // Execute with approval flow
         let result = self
@@ -1004,6 +1060,25 @@ impl McpOrchestrator {
         self.metrics.record_call_start(&qualified);
         let call_start_time = Instant::now();
 
+        // Enforce rate limits and acquire concurrency permit
+        let _permit = match self
+            .check_and_acquire_permit(&request_ctx.tenant_ctx, &qualified)
+            .await
+        {
+            Ok(permit) => permit,
+            Err(e) => {
+                let err = e.to_string();
+                let duration_ms = call_start_time.elapsed().as_millis() as u64;
+                self.metrics.record_call_end(&qualified, false, duration_ms);
+                return (
+                    entry.response_format.clone(),
+                    serde_json::json!({ "error": &err }),
+                    true,
+                    Some(err),
+                );
+            }
+        };
+
         let raw_result = self
             .execute_tool_with_approval_raw(entry, arguments, request_ctx)
             .await;
@@ -1059,7 +1134,18 @@ impl McpOrchestrator {
 
         // Look up tool entry to get server_key, response_format, and entry itself.
         // Keep collision info so callers get a precise error instead of a not-found fallback.
-        let lookup = self.find_tool_by_name_detailed(&input.tool_name, allowed_servers);
+
+        // Check dynamic tools first
+        let lookup = if let Some(d_entry) = request_ctx
+            .dynamic_tools
+            .iter()
+            .find(|e| e.tool_name() == input.tool_name)
+            .map(|e| e.value().clone())
+        {
+            ToolLookupResult::Found(Box::new(d_entry))
+        } else {
+            self.find_tool_by_name_detailed(&input.tool_name, allowed_servers)
+        };
 
         let (server_key, response_format, entry, lookup_error) = match lookup {
             ToolLookupResult::Found(entry) => (
@@ -2009,21 +2095,50 @@ impl<'a> McpRequestContext<'a> {
         arguments: Value,
         server_label: &str,
     ) -> McpResult<ToolCallResult> {
-        self.orchestrator
-            .active_executions
-            .fetch_add(1, Ordering::SeqCst);
-        let _guard = scopeguard::guard(Arc::clone(&self.orchestrator.active_executions), |count| {
-            count.fetch_sub(1, Ordering::SeqCst);
-        });
-        // Check dynamic tools first
         let qualified = QualifiedToolName::new(server_key, tool_name);
+
+        // Check dynamic tools first
         if let Some(entry) = self.dynamic_tools.get(&qualified) {
-            return self
+            // Local tracking only for dynamic tool path to avoid double-counting
+            self.orchestrator
+                .active_executions
+                .fetch_add(1, Ordering::SeqCst);
+            let _guard =
+                scopeguard::guard(Arc::clone(&self.orchestrator.active_executions), |count| {
+                    count.fetch_sub(1, Ordering::SeqCst);
+                });
+
+            self.orchestrator.metrics.record_call_start(&qualified);
+            let start_time = Instant::now();
+
+            let permit_result = self
+                .orchestrator
+                .check_and_acquire_permit(&self.tenant_ctx, &qualified)
+                .await;
+
+            if let Err(e) = permit_result {
+                self.orchestrator.metrics.record_call_end(
+                    &qualified,
+                    false,
+                    start_time.elapsed().as_millis() as u64,
+                );
+                return Err(e);
+            }
+            let _permit = permit_result.unwrap();
+
+            let result = self
                 .execute_dynamic_tool(&entry, arguments, server_label)
                 .await;
+
+            // Record completion metrics
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+            self.orchestrator
+                .metrics
+                .record_call_end(&qualified, result.is_ok(), duration_ms);
+
+            return result;
         }
 
-        // Fall back to orchestrator
         self.orchestrator
             .call_tool(server_key, tool_name, arguments, server_label, self)
             .await
@@ -2514,6 +2629,7 @@ mod tests {
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
+            rate_limiter: Arc::new(RateLimiter::new(Default::default())),
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
@@ -2583,6 +2699,7 @@ mod tests {
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
+            rate_limiter: Arc::new(RateLimiter::new(Default::default())),
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
@@ -2654,6 +2771,7 @@ mod tests {
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
+            rate_limiter: Arc::new(RateLimiter::new(Default::default())),
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
@@ -2731,6 +2849,7 @@ mod tests {
             approval_manager,
             connection_pool: Arc::new(McpConnectionPool::new()),
             metrics: Arc::new(McpMetrics::new()),
+            rate_limiter: Arc::new(RateLimiter::new(Default::default())),
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),

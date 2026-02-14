@@ -21,6 +21,7 @@ pub struct McpMetrics {
     // Connection metrics
     connection_errors: AtomicU64,
     active_connections: AtomicU64,
+    rate_limited_calls: AtomicU64,
 
     // Execution metrics
     active_executions: AtomicU64,
@@ -42,6 +43,7 @@ impl McpMetrics {
             connection_errors: AtomicU64::new(0),
             active_connections: AtomicU64::new(0),
             active_executions: AtomicU64::new(0),
+            rate_limited_calls: AtomicU64::new(0),
             tool_latencies: DashMap::new(),
         }
     }
@@ -99,6 +101,11 @@ impl McpMetrics {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 
+    /// Record a rate limit hit.
+    pub fn record_rate_limited(&self) {
+        self.rate_limited_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Get a snapshot of current metrics.
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -111,6 +118,7 @@ impl McpMetrics {
             connection_errors: self.connection_errors.load(Ordering::Relaxed),
             active_connections: self.active_connections.load(Ordering::Relaxed),
             active_executions: self.active_executions.load(Ordering::Relaxed),
+            rate_limited_calls: self.rate_limited_calls.load(Ordering::Relaxed),
         }
     }
 
@@ -136,6 +144,7 @@ impl McpMetrics {
         self.approvals_granted.store(0, Ordering::Relaxed);
         self.approvals_denied.store(0, Ordering::Relaxed);
         self.connection_errors.store(0, Ordering::Relaxed);
+        self.rate_limited_calls.store(0, Ordering::Relaxed);
         // Don't reset active_connections or active_executions
         self.tool_latencies.clear();
     }
@@ -225,6 +234,7 @@ pub struct MetricsSnapshot {
     pub connection_errors: u64,
     pub active_connections: u64,
     pub active_executions: u64,
+    pub rate_limited_calls: u64,
 }
 
 impl MetricsSnapshot {
