@@ -18,7 +18,12 @@ use axum::{
 use openai_protocol::{chat::ChatCompletionRequest, messages::CreateMessageRequest};
 use tracing::{info, warn};
 
-use super::{context::RouterContext, handler, messages::tools::ensure_mcp_connection, models};
+use super::{
+    context::{RequestContext, RouterContext},
+    handler,
+    messages::tools::ensure_mcp_connection,
+    models,
+};
 use crate::{
     app_context::AppContext,
     routers::{error, RouterTrait},
@@ -124,25 +129,26 @@ impl RouterTrait for AnthropicRouter {
             "Processing Messages API request"
         );
 
+        let req_ctx = RequestContext {
+            request,
+            headers: headers_owned,
+            model_id: model_id.to_string(),
+        };
+
         if streaming {
-            return handler::execute_streaming(&self.router_ctx, request, headers_owned, model_id)
-                .await;
+            return handler::execute_streaming(&self.router_ctx, &req_ctx).await;
         }
 
         if let Some(mcp_servers) = mcp_servers {
             return super::messages::non_streaming::execute_tool_loop(
                 &self.router_ctx,
-                request,
-                headers_owned,
-                model_id,
+                req_ctx,
                 mcp_servers,
             )
             .await;
         }
 
-        match handler::execute_for_messages(&self.router_ctx, request, headers_owned, model_id)
-            .await
-        {
+        match handler::execute_for_messages(&self.router_ctx, &req_ctx).await {
             Ok(message) => (StatusCode::OK, Json(message)).into_response(),
             Err(response) => response,
         }

@@ -24,7 +24,7 @@ use futures::Stream;
 use tracing::{debug, error, info, warn};
 
 use super::{
-    context::RouterContext,
+    context::{RequestContext, RouterContext},
     utils::{find_best_worker_for_model, read_response_body_limited, should_propagate_header},
 };
 use openai_protocol::messages::{CreateMessageRequest, Message};
@@ -44,22 +44,21 @@ const MAX_ERROR_RESPONSE_SIZE: usize = 1024 * 1024;
 
 /// Execute a non-streaming Messages API request end-to-end.
 pub(crate) async fn execute_for_messages(
-    ctx: &RouterContext,
-    request: CreateMessageRequest,
-    headers: Option<HeaderMap>,
-    model_id: &str,
+    router: &RouterContext,
+    req_ctx: &RequestContext,
 ) -> Result<Message, Response> {
+    let model_id = &req_ctx.model_id;
     let start_time = Instant::now();
     record_router_request(model_id, false);
 
-    let worker = select_worker(&ctx.worker_registry, model_id)?;
-    let (url, req_headers) = build_worker_request(&*worker, headers.as_ref());
+    let worker = select_worker(&router.worker_registry, model_id)?;
+    let (url, req_headers) = build_worker_request(&*worker, req_ctx.headers.as_ref());
     let response = send_worker_request(
-        &ctx.http_client,
+        &router.http_client,
         &url,
         &req_headers,
-        &request,
-        ctx.request_timeout,
+        &req_ctx.request,
+        router.request_timeout,
         &*worker,
     )
     .await?;
@@ -73,25 +72,24 @@ pub(crate) async fn execute_for_messages(
 
 /// Execute a streaming Messages API request, returning an SSE `Response`.
 pub(crate) async fn execute_streaming(
-    ctx: &RouterContext,
-    request: CreateMessageRequest,
-    headers: Option<HeaderMap>,
-    model_id: &str,
+    router: &RouterContext,
+    req_ctx: &RequestContext,
 ) -> Response {
+    let model_id = &req_ctx.model_id;
     let start_time = Instant::now();
     record_router_request(model_id, true);
 
-    let worker = match select_worker(&ctx.worker_registry, model_id) {
+    let worker = match select_worker(&router.worker_registry, model_id) {
         Ok(w) => w,
         Err(resp) => return resp,
     };
-    let (url, req_headers) = build_worker_request(&*worker, headers.as_ref());
+    let (url, req_headers) = build_worker_request(&*worker, req_ctx.headers.as_ref());
     let response = match send_worker_request(
-        &ctx.http_client,
+        &router.http_client,
         &url,
         &req_headers,
-        &request,
-        ctx.request_timeout,
+        &req_ctx.request,
+        router.request_timeout,
         &*worker,
     )
     .await

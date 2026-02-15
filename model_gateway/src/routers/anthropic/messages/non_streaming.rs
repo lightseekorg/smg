@@ -1,21 +1,21 @@
 //! Non-streaming MCP tool loop for Anthropic Messages API
 
 use axum::{
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
-use openai_protocol::messages::{
-    CreateMessageRequest, InputContent, InputMessage, Role, StopReason,
-};
+use openai_protocol::messages::{InputContent, InputMessage, Role, StopReason};
 use smg_mcp::McpToolSession;
 use tracing::{info, warn};
-
 use super::tools::{execute_mcp_tool_calls, rebuild_response_with_mcp_blocks, McpToolCall};
 use crate::{
     observability::metrics::Metrics,
     routers::{
-        anthropic::{context::RouterContext, handler},
+        anthropic::{
+            context::{RequestContext, RouterContext},
+            handler,
+        },
         error,
         mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
@@ -23,31 +23,22 @@ use crate::{
 
 /// Execute the MCP tool loop for non-streaming Messages API requests.
 pub(crate) async fn execute_tool_loop(
-    ctx: &RouterContext,
-    mut request: CreateMessageRequest,
-    headers: Option<HeaderMap>,
-    model_id: &str,
+    router: &RouterContext,
+    mut req_ctx: RequestContext,
     mcp_servers: Vec<(String, String)>,
 ) -> Response {
     let request_id = format!("msg_{}", uuid::Uuid::new_v4());
-    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &request_id);
+    let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &request_id);
 
     let mut all_mcp_calls: Vec<McpToolCall> = Vec::new();
 
-    let mut message = match handler::execute_for_messages(
-        ctx,
-        request.clone(),
-        headers.clone(),
-        model_id,
-    )
-    .await
-    {
+    let mut message = match handler::execute_for_messages(router, &req_ctx).await {
         Ok(m) => m,
         Err(response) => return response,
     };
 
     for iteration in 0..DEFAULT_MAX_ITERATIONS {
-        Metrics::record_mcp_tool_iteration(model_id);
+        Metrics::record_mcp_tool_iteration(&req_ctx.model_id);
 
         let tool_calls = super::tools::extract_tool_calls(&message.content);
         if tool_calls.is_empty() {
@@ -80,26 +71,24 @@ pub(crate) async fn execute_tool_loop(
         );
 
         let (new_calls, assistant_blocks, tool_result_blocks) =
-            execute_mcp_tool_calls(&message.content, &tool_calls, &session, model_id).await;
+            execute_mcp_tool_calls(&message.content, &tool_calls, &session, &req_ctx.model_id)
+                .await;
 
         all_mcp_calls.extend(new_calls);
 
-        request.messages.push(InputMessage {
+        req_ctx.request.messages.push(InputMessage {
             role: Role::Assistant,
             content: InputContent::Blocks(assistant_blocks),
         });
-        request.messages.push(InputMessage {
+        req_ctx.request.messages.push(InputMessage {
             role: Role::User,
             content: InputContent::Blocks(tool_result_blocks),
         });
 
-        message =
-            match handler::execute_for_messages(ctx, request.clone(), headers.clone(), model_id)
-                .await
-            {
-                Ok(m) => m,
-                Err(response) => return response,
-            };
+        message = match handler::execute_for_messages(router, &req_ctx).await {
+            Ok(m) => m,
+            Err(response) => return response,
+        };
     }
 
     // The last call produced a message — check if it completed naturally
