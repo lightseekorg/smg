@@ -7,11 +7,12 @@ use axum::{
 };
 use tracing::{info, warn};
 
+use openai_protocol::messages::{CreateMessageRequest, InputContent, InputMessage, Role, StopReason};
+use smg_mcp::McpToolSession;
+
 use super::tools::{execute_mcp_tool_calls, rebuild_response_with_mcp_blocks, McpToolCall};
 use crate::{
-    mcp::McpToolSession,
     observability::metrics::Metrics,
-    protocols::messages::{CreateMessageRequest, InputContent, InputMessage, Role, StopReason},
     routers::{anthropic::context::MessagesContext, error, mcp_utils::DEFAULT_MAX_ITERATIONS},
 };
 

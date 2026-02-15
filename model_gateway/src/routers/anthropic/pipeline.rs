@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use axum::{http::HeaderMap, response::Response};
-use openai_protocol::messages::CreateMessageRequest;
-use tracing::{debug, error, info};
+use openai_protocol::messages::{CreateMessageRequest, Message};
+use tracing::{debug, error};
 
 use super::{
     context::{RequestContext, SharedComponents},
@@ -16,11 +16,7 @@ use super::{
         WorkerSelectionStage,
     },
 };
-use crate::{
-    core::WorkerRegistry,
-    protocols::messages::{CreateMessageRequest, Message},
-    routers::error,
-};
+use crate::{core::WorkerRegistry, routers::error};
 
 /// Messages API pipeline that processes requests through stages
 ///

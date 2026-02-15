@@ -9,14 +9,16 @@ use axum::response::Response;
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
+use openai_protocol::messages::{
+    ContentBlock, CreateMessageRequest, CustomTool, InputContentBlock, InputSchema, Message,
+    RedactedThinkingBlock, ServerToolUseBlock, TextBlock, ThinkingBlock, Tool, ToolChoice,
+    ToolResultBlock, ToolResultContent, ToolResultContentBlock, ToolUseBlock,
+    WebSearchToolResultBlock,
+};
+use smg_mcp::{McpToolSession, ToolEntry, ToolExecutionInput};
+
 use crate::{
-    mcp::{McpToolSession, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
-    protocols::messages::{
-        ContentBlock, CreateMessageRequest, CustomTool, InputContentBlock, InputSchema, Message,
-        RedactedThinkingBlock, ServerToolUseBlock, TextBlock, ThinkingBlock, Tool, ToolChoice,
-        ToolResultBlock, ToolResultContent, ToolUseBlock, WebSearchToolResultBlock,
-    },
     routers::{error as router_error, mcp_utils},
 };
 
@@ -52,7 +54,7 @@ pub(super) fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> 
 /// so `mcp_server_configs()` is guaranteed to be `Some` here.
 pub(crate) async fn ensure_mcp_connection(
     request: &mut CreateMessageRequest,
-    orchestrator: &Arc<crate::mcp::McpOrchestrator>,
+    orchestrator: &Arc<smg_mcp::McpOrchestrator>,
 ) -> Result<Vec<(String, String)>, Response> {
     let inputs: Vec<mcp_utils::McpServerInput> = request
         .mcp_server_configs()
@@ -245,7 +247,7 @@ fn collect_allowed_tools_from_toolsets(tools: &Option<Vec<Tool>>) -> Option<Vec<
 }
 
 /// Convert an MCP `ToolEntry` to an Anthropic `CustomTool`.
-fn convert_tool_entry_to_anthropic_tool(entry: &crate::mcp::ToolEntry) -> CustomTool {
+fn convert_tool_entry_to_anthropic_tool(entry: &ToolEntry) -> CustomTool {
     let schema_map = (*entry.tool.input_schema).clone();
     let schema_type = schema_map
         .get("type")
@@ -404,7 +406,7 @@ fn push_mcp_blocks(content: &mut Vec<ContentBlock>, call: &McpToolCall) {
     content.push(ContentBlock::McpToolResult {
         tool_use_id: call.mcp_id.clone(),
         content: Some(ToolResultContent::Blocks(vec![
-            crate::protocols::messages::ToolResultContentBlock::Text(TextBlock {
+            ToolResultContentBlock::Text(TextBlock {
                 text: call.result_content.clone(),
                 cache_control: None,
                 citations: None,

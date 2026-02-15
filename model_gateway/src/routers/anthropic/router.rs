@@ -31,6 +31,8 @@ use super::{
     models,
     pipeline::MessagesPipeline,
 };
+use openai_protocol::{chat::ChatCompletionRequest, messages::CreateMessageRequest};
+
 use crate::{
     app_context::AppContext,
     routers::{error, RouterTrait},

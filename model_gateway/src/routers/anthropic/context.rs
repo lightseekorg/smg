@@ -10,14 +10,11 @@ use std::{
 };
 
 use axum::http::HeaderMap;
-use openai_protocol::messages::CreateMessageRequest;
+use openai_protocol::messages::{CreateMessageRequest, Message};
+use smg_mcp::McpOrchestrator;
 
 use super::pipeline::MessagesPipeline;
-use crate::{
-    core::{Worker, WorkerRegistry},
-    mcp::McpOrchestrator,
-    protocols::messages::{CreateMessageRequest, Message},
-};
+use crate::core::Worker;
 
 // ============================================================================
 // Request Input
