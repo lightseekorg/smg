@@ -12,6 +12,7 @@ use axum::http::HeaderMap;
 use crate::core::WorkerRegistry;
 
 /// Shared context passed to all Anthropic handler functions.
+#[derive(Clone)]
 pub(crate) struct RouterContext {
     pub mcp_orchestrator: Arc<McpOrchestrator>,
     pub http_client: reqwest::Client,

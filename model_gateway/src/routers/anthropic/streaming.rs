@@ -14,15 +14,16 @@ use bytes::Bytes;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
+use openai_protocol::messages::{InputContent, InputMessage, Role};
+use smg_mcp::McpToolSession;
+
 use super::{
     context::{RequestContext, RouterContext},
     mcp, sse, worker,
 };
 use crate::{
     core::Worker,
-    mcp::McpToolSession,
     observability::metrics::{metrics_labels, Metrics},
-    protocols::messages::{InputContent, InputMessage, Role},
     routers::{
         error::{self as router_error, extract_error_code_from_response},
         mcp_utils::DEFAULT_MAX_ITERATIONS,

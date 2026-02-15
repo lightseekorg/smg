@@ -12,14 +12,15 @@ use axum::{
 };
 use tracing::warn;
 
+use openai_protocol::messages::{InputContent, InputMessage, Message, Role};
+use smg_mcp::McpToolSession;
+
 use super::{
     context::{RequestContext, RouterContext},
     mcp, worker,
 };
 use crate::{
-    mcp::McpToolSession,
     observability::metrics::Metrics,
-    protocols::messages::{InputContent, InputMessage, Message, Role},
     routers::{error, mcp_utils::DEFAULT_MAX_ITERATIONS},
 };
 

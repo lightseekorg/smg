@@ -22,10 +22,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 use super::mcp::{IterationResult, McpToolCall};
-use crate::{
-    core::Worker,
-    protocols::messages::{ContentBlock, MessageDeltaUsage, StopReason, ToolUseBlock},
-};
+use openai_protocol::messages::{ContentBlock, MessageDeltaUsage, StopReason, ToolUseBlock};
+
+use crate::core::Worker;
 
 // ============================================================================
 // Constants
