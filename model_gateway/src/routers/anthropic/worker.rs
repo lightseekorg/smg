@@ -13,11 +13,10 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
+use openai_protocol::messages::{CreateMessageRequest, Message};
 use tracing::{debug, error, info, warn};
 
 use super::utils::{read_response_body_limited, should_propagate_header, ReadBodyResult};
-use openai_protocol::messages::{CreateMessageRequest, Message};
-
 use crate::{
     core::{ProviderType, Worker, WorkerRegistry},
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},

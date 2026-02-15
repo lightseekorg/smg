@@ -5,9 +5,9 @@
 
 use std::{sync::Arc, time::Duration};
 
-use smg_mcp::McpOrchestrator;
-use openai_protocol::messages::CreateMessageRequest;
 use axum::http::HeaderMap;
+use openai_protocol::messages::CreateMessageRequest;
+use smg_mcp::McpOrchestrator;
 
 use crate::core::WorkerRegistry;
 

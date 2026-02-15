@@ -17,13 +17,12 @@ use axum::{
 };
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
+use openai_protocol::messages::{ContentBlock, MessageDeltaUsage, StopReason, ToolUseBlock};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 use super::mcp::{IterationResult, McpToolCall};
-use openai_protocol::messages::{ContentBlock, MessageDeltaUsage, StopReason, ToolUseBlock};
-
 use crate::core::Worker;
 
 // ============================================================================

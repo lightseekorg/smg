@@ -10,10 +10,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use tracing::warn;
-
 use openai_protocol::messages::{InputContent, InputMessage, Message, Role};
 use smg_mcp::McpToolSession;
+use tracing::warn;
 
 use super::{
     context::{RequestContext, RouterContext},

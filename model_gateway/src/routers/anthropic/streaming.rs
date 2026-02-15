@@ -11,11 +11,10 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
-use tokio::sync::mpsc;
-use tracing::{debug, error, warn};
-
 use openai_protocol::messages::{InputContent, InputMessage, Role};
 use smg_mcp::McpToolSession;
+use tokio::sync::mpsc;
+use tracing::{debug, error, warn};
 
 use super::{
     context::{RequestContext, RouterContext},
@@ -295,8 +294,8 @@ async fn send_streaming_request(
 ) -> Result<(reqwest::Response, Arc<dyn Worker>), String> {
     let model_id = &req_ctx.model_id;
 
-    let selected_worker = worker::select_worker(&router.worker_registry, model_id)
-        .map_err(|e| {
+    let selected_worker =
+        worker::select_worker(&router.worker_registry, model_id).map_err(|e| {
             format!(
                 "No healthy workers available for model '{}' ({})",
                 model_id,
