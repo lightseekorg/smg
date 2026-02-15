@@ -8,20 +8,12 @@
 use std::{any::Any, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use axum::{
-    body::Body,
-    extract::Request,
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-    Json,
-};
+use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
 use tracing::{info, warn};
 
 use super::{
     context::{RequestContext, RouterContext},
-    handler,
-    messages::tools::ensure_mcp_connection,
-    models,
+    mcp, models, non_streaming, streaming,
 };
 use crate::{
     app_context::AppContext,
@@ -110,7 +102,7 @@ impl RouterTrait for AnthropicRouter {
         let headers_owned = headers.cloned();
 
         let mcp_servers = if request.has_mcp_toolset() {
-            match ensure_mcp_connection(&mut request, &self.router_ctx.mcp_orchestrator).await {
+            match mcp::ensure_connection(&mut request, &self.router_ctx.mcp_orchestrator).await {
                 Ok(servers) => Some(servers),
                 Err(response) => {
                     warn!(model = %model_id, "MCP connection setup failed");
@@ -121,10 +113,10 @@ impl RouterTrait for AnthropicRouter {
             None
         };
 
-        let streaming = request.stream.unwrap_or(false);
+        let is_streaming = request.stream.unwrap_or(false);
         info!(
             model = %model_id,
-            streaming = %streaming,
+            streaming = %is_streaming,
             mcp = %mcp_servers.is_some(),
             "Processing Messages API request"
         );
@@ -136,28 +128,10 @@ impl RouterTrait for AnthropicRouter {
             mcp_servers,
         };
 
-        if streaming {
-            if req_ctx.mcp_servers.is_some() {
-                return super::messages::streaming::execute_streaming_tool_loop(
-                    &self.router_ctx,
-                    req_ctx,
-                )
-                .await;
-            }
-            return handler::execute_streaming(&self.router_ctx, &req_ctx).await;
-        }
-
-        if req_ctx.mcp_servers.is_some() {
-            return super::messages::non_streaming::execute_tool_loop(
-                &self.router_ctx,
-                req_ctx,
-            )
-            .await;
-        }
-
-        match handler::execute_for_messages(&self.router_ctx, &req_ctx).await {
-            Ok(message) => (StatusCode::OK, Json(message)).into_response(),
-            Err(response) => response,
+        if is_streaming {
+            streaming::execute(&self.router_ctx, req_ctx).await
+        } else {
+            non_streaming::execute(&self.router_ctx, req_ctx).await
         }
     }
 
