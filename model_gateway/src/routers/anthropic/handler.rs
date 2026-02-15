@@ -27,10 +27,11 @@ use super::{
     context::RouterContext,
     utils::{find_best_worker_for_model, read_response_body_limited, should_propagate_header},
 };
+use openai_protocol::messages::{CreateMessageRequest, Message};
+
 use crate::{
     core::{Worker, WorkerRegistry},
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
-    protocols::messages::{CreateMessageRequest, Message},
     routers::error,
 };
 
