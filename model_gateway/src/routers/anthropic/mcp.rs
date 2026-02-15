@@ -1,4 +1,8 @@
-//! MCP tool integration for Messages API
+//! MCP tool processing layer for Anthropic Messages API
+//!
+//! Provides MCP server connection, tool injection, tool execution,
+//! and the standard `process_iteration` interface used by both
+//! streaming and non-streaming processors.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -13,13 +17,56 @@ use serde_json::Value;
 use smg_mcp::{McpToolSession, ToolEntry, ToolExecutionInput};
 use tracing::{debug, error, info, warn};
 
+use openai_protocol::messages::StopReason;
+
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{error as router_error, mcp_utils},
 };
 
-/// Tracked MCP tool call for response reconstruction.
-pub(super) struct McpToolCall {
+// ============================================================================
+// Standard I/O types for processor ↔ MCP layer communication
+// ============================================================================
+
+/// What processors extract from an LLM response (streaming or non-streaming).
+pub(crate) struct IterationResult {
+    pub content_blocks: Vec<ContentBlock>,
+    pub tool_use_blocks: Vec<ToolUseBlock>,
+    pub stop_reason: Option<StopReason>,
+}
+
+impl IterationResult {
+    /// Construct from a non-streaming `Message`.
+    pub(crate) fn from_message(message: &Message) -> Self {
+        let tool_use_blocks = extract_tool_calls(&message.content);
+        Self {
+            content_blocks: message.content.clone(),
+            tool_use_blocks,
+            stop_reason: message.stop_reason.clone(),
+        }
+    }
+}
+
+/// Continuation data when the tool loop should proceed.
+pub(crate) struct ToolLoopContinuation {
+    pub mcp_calls: Vec<McpToolCall>,
+    pub assistant_blocks: Vec<InputContentBlock>,
+    pub tool_result_blocks: Vec<InputContentBlock>,
+}
+
+/// Decision from `process_iteration`: stop, continue, or error.
+pub(crate) enum ToolLoopAction {
+    Done,
+    Continue(ToolLoopContinuation),
+    Error(String),
+}
+
+// ============================================================================
+// Tracked MCP tool call
+// ============================================================================
+
+/// Tracked MCP tool call for response reconstruction and SSE emission.
+pub(crate) struct McpToolCall {
     pub original_id: String,
     pub mcp_id: String,
     pub name: String,
@@ -29,7 +76,62 @@ pub(super) struct McpToolCall {
     pub is_error: bool,
 }
 
-pub(super) fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> {
+// ============================================================================
+// Standard process_iteration interface
+// ============================================================================
+
+/// Evaluate one iteration of the MCP tool loop.
+///
+/// Returns `Done` if there are no tool calls or the stop reason is not `ToolUse`.
+/// Returns `Continue` with executed tool results when the loop should proceed.
+pub(crate) async fn process_iteration(
+    result: &IterationResult,
+    session: &McpToolSession<'_>,
+    model_id: &str,
+) -> ToolLoopAction {
+    if result.tool_use_blocks.is_empty() {
+        return ToolLoopAction::Done;
+    }
+
+    if result.stop_reason != Some(StopReason::ToolUse) {
+        let msg = format!(
+            "Model returned {} tool_use block(s) but stop_reason is {:?}; tool calls will not be executed",
+            result.tool_use_blocks.len(),
+            result.stop_reason
+        );
+        warn!(
+            tool_count = result.tool_use_blocks.len(),
+            stop_reason = ?result.stop_reason,
+            "{}", &msg
+        );
+        return ToolLoopAction::Error(msg);
+    }
+
+    info!(
+        tool_count = result.tool_use_blocks.len(),
+        "Executing MCP tool calls"
+    );
+
+    let (mcp_calls, assistant_blocks, tool_result_blocks) = execute_mcp_tool_calls(
+        &result.content_blocks,
+        &result.tool_use_blocks,
+        session,
+        model_id,
+    )
+    .await;
+
+    ToolLoopAction::Continue(ToolLoopContinuation {
+        mcp_calls,
+        assistant_blocks,
+        tool_result_blocks,
+    })
+}
+
+// ============================================================================
+// MCP connection and tool injection
+// ============================================================================
+
+pub(crate) fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> {
     content
         .iter()
         .filter_map(|block| match block {
@@ -48,7 +150,7 @@ pub(super) fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> 
 ///
 /// Request is validated by `ValidatedJson` before reaching the router,
 /// so `mcp_server_configs()` is guaranteed to be `Some` here.
-pub(crate) async fn ensure_mcp_connection(
+pub(crate) async fn ensure_connection(
     request: &mut CreateMessageRequest,
     orchestrator: &Arc<smg_mcp::McpOrchestrator>,
 ) -> Result<Vec<(String, String)>, Response> {
@@ -80,8 +182,8 @@ pub(crate) async fn ensure_mcp_connection(
 
     let allowed_tools = collect_allowed_tools_from_toolsets(&request.tools);
 
-    let request_id = format!("msg_{}", uuid::Uuid::new_v4());
-    let session = McpToolSession::new(orchestrator, mcp_servers.clone(), &request_id);
+    let session_id = format!("msg_{}", uuid::Uuid::new_v4());
+    let session = McpToolSession::new(orchestrator, mcp_servers.clone(), &session_id);
 
     inject_mcp_tools_into_request(request, &session, &allowed_tools);
 
@@ -126,8 +228,12 @@ fn inject_mcp_tools_into_request(
     }
 }
 
+// ============================================================================
+// Tool execution
+// ============================================================================
+
 /// Execute MCP tool calls and return `(mcp_calls, assistant_blocks, tool_result_blocks)`.
-pub(super) async fn execute_mcp_tool_calls(
+async fn execute_mcp_tool_calls(
     content: &[ContentBlock],
     tool_calls: &[ToolUseBlock],
     session: &McpToolSession<'_>,
@@ -200,6 +306,53 @@ pub(super) async fn execute_mcp_tool_calls(
 
     (mcp_calls, assistant_content_blocks, tool_result_blocks)
 }
+
+// ============================================================================
+// Response reconstruction
+// ============================================================================
+
+/// Replace tool_use blocks with mcp_tool_use/mcp_tool_result pairs in the response.
+///
+/// All MCP blocks are emitted first, then the original content blocks follow (with any
+/// matched ToolUse blocks skipped to avoid duplication). This ensures the final text
+/// block appears after all MCP tool activity.
+pub(crate) fn rebuild_response_with_mcp_blocks(
+    mut message: Message,
+    mcp_calls: &[McpToolCall],
+) -> Message {
+    if mcp_calls.is_empty() {
+        return message;
+    }
+
+    let call_lookup: HashMap<&str, &McpToolCall> = mcp_calls
+        .iter()
+        .map(|c| (c.original_id.as_str(), c))
+        .collect();
+
+    let mut new_content: Vec<ContentBlock> = Vec::new();
+
+    // First: emit all MCP tool_use/tool_result pairs
+    for call in mcp_calls {
+        push_mcp_blocks(&mut new_content, call);
+    }
+
+    // Then: append original content, skipping ToolUse blocks already covered by MCP pairs
+    for block in std::mem::take(&mut message.content) {
+        match &block {
+            ContentBlock::ToolUse { id, .. } if call_lookup.contains_key(id.as_str()) => {
+                continue;
+            }
+            _ => new_content.push(block),
+        }
+    }
+
+    message.content = new_content;
+    message
+}
+
+// ============================================================================
+// Private helpers
+// ============================================================================
 
 /// Collect allowed tools filter from `McpToolset` entries in the tools array.
 ///
@@ -344,45 +497,6 @@ fn build_assistant_content_blocks(content: &[ContentBlock]) -> Vec<InputContentB
         }
     }
     blocks
-}
-
-/// Replace tool_use blocks with mcp_tool_use/mcp_tool_result pairs in the response.
-///
-/// All MCP blocks are emitted first, then the original content blocks follow (with any
-/// matched ToolUse blocks skipped to avoid duplication). This ensures the final text
-/// block appears after all MCP tool activity.
-pub(super) fn rebuild_response_with_mcp_blocks(
-    mut message: Message,
-    mcp_calls: &[McpToolCall],
-) -> Message {
-    if mcp_calls.is_empty() {
-        return message;
-    }
-
-    let call_lookup: HashMap<&str, &McpToolCall> = mcp_calls
-        .iter()
-        .map(|c| (c.original_id.as_str(), c))
-        .collect();
-
-    let mut new_content: Vec<ContentBlock> = Vec::new();
-
-    // First: emit all MCP tool_use/tool_result pairs
-    for call in mcp_calls {
-        push_mcp_blocks(&mut new_content, call);
-    }
-
-    // Then: append original content, skipping ToolUse blocks already covered by MCP pairs
-    for block in std::mem::take(&mut message.content) {
-        match &block {
-            ContentBlock::ToolUse { id, .. } if call_lookup.contains_key(id.as_str()) => {
-                continue;
-            }
-            _ => new_content.push(block),
-        }
-    }
-
-    message.content = new_content;
-    message
 }
 
 fn push_mcp_blocks(content: &mut Vec<ContentBlock>, call: &McpToolCall) {
