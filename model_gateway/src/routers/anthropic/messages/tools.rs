@@ -6,16 +6,15 @@ use std::{
 };
 
 use axum::response::Response;
-use serde_json::Value;
-use tracing::{debug, error, info, warn};
-
 use openai_protocol::messages::{
     ContentBlock, CreateMessageRequest, CustomTool, InputContentBlock, InputSchema, Message,
     RedactedThinkingBlock, ServerToolUseBlock, TextBlock, ThinkingBlock, Tool, ToolChoice,
     ToolResultBlock, ToolResultContent, ToolResultContentBlock, ToolUseBlock,
     WebSearchToolResultBlock,
 };
+use serde_json::Value;
 use smg_mcp::{McpToolSession, ToolEntry, ToolExecutionInput};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     observability::metrics::{metrics_labels, Metrics},

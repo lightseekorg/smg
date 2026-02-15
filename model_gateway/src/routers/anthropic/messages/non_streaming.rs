@@ -5,10 +5,11 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use tracing::{info, warn};
-
-use openai_protocol::messages::{CreateMessageRequest, InputContent, InputMessage, Role, StopReason};
+use openai_protocol::messages::{
+    CreateMessageRequest, InputContent, InputMessage, Role, StopReason,
+};
 use smg_mcp::McpToolSession;
+use tracing::{info, warn};
 
 use super::tools::{execute_mcp_tool_calls, rebuild_response_with_mcp_blocks, McpToolCall};
 use crate::{
