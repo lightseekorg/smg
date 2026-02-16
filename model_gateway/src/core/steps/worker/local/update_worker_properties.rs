@@ -87,8 +87,10 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
 
             // Preserve DP configuration if the worker is DP-aware
             if worker.is_dp_aware() {
-                builder =
-                    builder.dp_config(worker.dp_rank().unwrap_or(0), worker.dp_size().unwrap_or(1));
+                builder = builder.dp_config(
+                    worker.dp_rank().expect("DP-aware worker must have dp_rank"),
+                    worker.dp_size().expect("DP-aware worker must have dp_size"),
+                );
             }
 
             let new_worker: Arc<dyn Worker> = Arc::new(builder.build());
