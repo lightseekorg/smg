@@ -62,7 +62,7 @@ class TestMcpToolNonStream:
         - Final text summary block
         - Correct model and stop_reason
         """
-        _, model, client, gateway = setup_backend
+        _, model, client, _ = setup_backend
 
         response = client.messages.create(
             model=model,
@@ -100,10 +100,16 @@ class TestMcpToolNonStream:
         assert tool_use.server_name == MCP_SERVER_NAME
         assert isinstance(tool_use.input, dict)
 
-        # Validate mcp_tool_result structure
-        tool_result = mcp_tool_result_blocks[0]
-        assert tool_result.tool_use_id == mcp_tool_use_blocks[0].id
-        assert tool_result.content is not None
+        # Validate all mcp_tool_result blocks match their corresponding tool_use
+        assert len(mcp_tool_result_blocks) == len(mcp_tool_use_blocks), (
+            f"Mismatch: {len(mcp_tool_result_blocks)} results vs {len(mcp_tool_use_blocks)} tool uses"
+        )
+        for i, tool_result in enumerate(mcp_tool_result_blocks):
+            assert tool_result.tool_use_id == mcp_tool_use_blocks[i].id, (
+                f"tool_result[{i}].tool_use_id mismatch: "
+                f"{tool_result.tool_use_id} != {mcp_tool_use_blocks[i].id}"
+            )
+            assert tool_result.content is not None, f"tool_result[{i}].content is None"
 
         # Validate usage
         assert response.usage.input_tokens > 0
@@ -137,7 +143,7 @@ class TestMcpToolStream:
         - message_delta with stop_reason
         - message_stop event
         """
-        _, model, client, gateway = setup_backend
+        _, model, client, _ = setup_backend
 
         event_types = set()
         block_types = []
@@ -166,12 +172,12 @@ class TestMcpToolStream:
                         mcp_tool_use_ids.append(event.content_block.id)
 
                 if event.type == "content_block_delta":
-                    if hasattr(event.delta, "partial_json"):
+                    if event.delta.type == "input_json_delta":
                         idx = event.index
                         input_json_deltas_by_index.setdefault(idx, []).append(
                             event.delta.partial_json
                         )
-                    if hasattr(event.delta, "text"):
+                    elif event.delta.type == "text_delta":
                         text_deltas.append(event.delta.text)
 
         # Required SSE event types
@@ -197,7 +203,10 @@ class TestMcpToolStream:
         for idx, fragments in input_json_deltas_by_index.items():
             full_json = "".join(fragments)
             if full_json:
-                parsed = json.loads(full_json)
+                try:
+                    parsed = json.loads(full_json)
+                except json.JSONDecodeError as exc:
+                    pytest.fail(f"Failed to parse tool input at index {idx}: {full_json!r} -> {exc}")
                 assert isinstance(parsed, dict), f"Tool input at index {idx} should be a dict"
 
         # Should have text_delta events
