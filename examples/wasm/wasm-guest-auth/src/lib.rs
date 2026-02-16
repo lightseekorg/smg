@@ -13,9 +13,11 @@ wit_bindgen::generate!({
 
 use exports::smg::gateway::{
     middleware_on_request::Guest as OnRequestGuest,
+    middleware_on_request_headers::Guest as OnRequestHeadersGuest,
     middleware_on_response::Guest as OnResponseGuest,
+    middleware_on_response_headers::Guest as OnResponseHeadersGuest,
 };
-use smg::gateway::middleware_types::{Action, Request, Response};
+use smg::gateway::middleware_types::{Action, Request, RequestHeaders, Response, ResponseHeaders};
 
 /// Expected API Key (in production, this should be passed as configuration)
 const EXPECTED_API_KEY: &str = "secret-api-key-12345";
@@ -62,6 +64,19 @@ impl OnRequestGuest for Middleware {
 // Implement on-response interface (empty - not used for auth)
 impl OnResponseGuest for Middleware {
     fn on_response(_resp: Response) -> Action {
+        Action::Continue
+    }
+}
+
+// Headers-only stubs (required by the WIT world, unused with default body_policy)
+impl OnRequestHeadersGuest for Middleware {
+    fn on_request_headers(_req: RequestHeaders) -> Action {
+        Action::Continue
+    }
+}
+
+impl OnResponseHeadersGuest for Middleware {
+    fn on_response_headers(_resp: ResponseHeaders) -> Action {
         Action::Continue
     }
 }
