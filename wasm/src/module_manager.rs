@@ -133,6 +133,23 @@ impl WasmModuleManager {
         self.runtime.get_config().max_body_size
     }
 
+    /// Check if any modules for the given attach point require body access.
+    ///
+    /// Returns `true` if at least one module has `BodyPolicy::Required`,
+    /// meaning the middleware must buffer the body before WASM execution.
+    /// Returns `false` if all modules at this attach point use `BodyPolicy::HeadersOnly`,
+    /// allowing the body to stream through without buffering.
+    pub fn any_module_requires_body(&self, attach_point: &WasmModuleAttachPoint) -> Result<bool> {
+        let modules = self
+            .modules
+            .read()
+            .map_err(|e| WasmManagerError::LockFailed(e.to_string()))?;
+        Ok(modules.values().any(|module| {
+            module.module_meta.attach_points.contains(attach_point)
+                && module.module_meta.body_policy == crate::module::BodyPolicy::Required
+        }))
+    }
+
     /// Execute WASM module using WebAssembly component model based on attach_point
     pub async fn execute_module_interface(
         &self,

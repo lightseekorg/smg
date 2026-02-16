@@ -19,7 +19,8 @@ use smg::{
     routers::RouterTrait,
     server::AppState,
     wasm::module::{
-        MiddlewareAttachPoint, WasmModule, WasmModuleAttachPoint, WasmModuleMeta, WasmModuleType,
+        BodyPolicy, MiddlewareAttachPoint, WasmModule, WasmModuleAttachPoint, WasmModuleMeta,
+        WasmModuleType,
     },
 };
 use tokio::runtime::Runtime;
@@ -103,6 +104,7 @@ fn bench_wasm_bottleneck(c: &mut Criterion) {
                     WasmModuleAttachPoint::Middleware(MiddlewareAttachPoint::OnRequest),
                     WasmModuleAttachPoint::Middleware(MiddlewareAttachPoint::OnResponse),
                 ],
+                body_policy: BodyPolicy::HeadersOnly,
                 wasm_bytes,
             },
         };

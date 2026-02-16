@@ -214,6 +214,7 @@ async fn test_wasm_api_add_module() {
             attach_points: vec![WasmModuleAttachPoint::Middleware(
                 smg::wasm::module::MiddlewareAttachPoint::OnRequest,
             )],
+            body_policy: Default::default(),
             add_result: None,
         }],
     };
@@ -280,6 +281,7 @@ async fn test_wasm_api_add_module_invalid_file() {
             attach_points: vec![WasmModuleAttachPoint::Middleware(
                 smg::wasm::module::MiddlewareAttachPoint::OnRequest,
             )],
+            body_policy: Default::default(),
             add_result: None,
         }],
     };
@@ -335,6 +337,7 @@ async fn test_wasm_api_add_module_invalid_wasm() {
             attach_points: vec![WasmModuleAttachPoint::Middleware(
                 smg::wasm::module::MiddlewareAttachPoint::OnRequest,
             )],
+            body_policy: Default::default(),
             add_result: None,
         }],
     };
@@ -386,6 +389,7 @@ async fn test_wasm_api_list_modules() {
             attach_points: vec![WasmModuleAttachPoint::Middleware(
                 smg::wasm::module::MiddlewareAttachPoint::OnRequest,
             )],
+            body_policy: Default::default(),
             add_result: None,
         }],
     };
@@ -454,6 +458,7 @@ async fn test_wasm_api_remove_module() {
             attach_points: vec![WasmModuleAttachPoint::Middleware(
                 smg::wasm::module::MiddlewareAttachPoint::OnRequest,
             )],
+            body_policy: Default::default(),
             add_result: None,
         }],
     };
@@ -579,6 +584,7 @@ async fn test_wasm_module_duplicate_sha256() {
             attach_points: vec![WasmModuleAttachPoint::Middleware(
                 smg::wasm::module::MiddlewareAttachPoint::OnRequest,
             )],
+            body_policy: Default::default(),
             add_result: None,
         }],
     };
@@ -610,6 +616,7 @@ async fn test_wasm_module_duplicate_sha256() {
             attach_points: vec![WasmModuleAttachPoint::Middleware(
                 smg::wasm::module::MiddlewareAttachPoint::OnRequest,
             )],
+            body_policy: Default::default(),
             add_result: None,
         }],
     };
@@ -678,6 +685,7 @@ async fn test_wasm_module_execution() {
         attach_points: vec![WasmModuleAttachPoint::Middleware(
             smg::wasm::module::MiddlewareAttachPoint::OnRequest,
         )],
+        body_policy: Default::default(),
         add_result: None,
     };
 

@@ -3,7 +3,7 @@ package smg:gateway;
 interface middleware-types {
   record header { name: string, value: string }
 
-  // onRequest
+  // onRequest (full body variant)
   record request {
     method: string,
     path: string,
@@ -14,11 +14,28 @@ interface middleware-types {
     now-epoch-ms: u64,
   }
 
-  // onResponse
+  // Headers-only request variant for streaming-compatible modules.
+  // Modules that only need to inspect/modify headers use this to avoid body buffering.
+  record request-headers {
+    method: string,
+    path: string,
+    query: string,
+    headers: list<header>,
+    request-id: string,
+    now-epoch-ms: u64,
+  }
+
+  // onResponse (full body variant)
   record response {
     status: u16,
     headers: list<header>,
     body: list<u8>,
+  }
+
+  // Headers-only response variant for streaming-compatible modules.
+  record response-headers {
+    status: u16,
+    headers: list<header>,
   }
 
   // modify action
@@ -48,7 +65,19 @@ interface middleware-on-response {
   on-response: func(resp: response) -> action;
 }
 
+interface middleware-on-request-headers {
+  use middleware-types.{request-headers, action};
+  on-request-headers: func(req: request-headers) -> action;
+}
+
+interface middleware-on-response-headers {
+  use middleware-types.{response-headers, action};
+  on-response-headers: func(resp: response-headers) -> action;
+}
+
 world smg {
   export middleware-on-request;
   export middleware-on-response;
+  export middleware-on-request-headers;
+  export middleware-on-response-headers;
 }

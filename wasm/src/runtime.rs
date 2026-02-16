@@ -420,59 +420,96 @@ impl WasmThreadPool {
 
         let output = match attach_point {
             WasmModuleAttachPoint::Middleware(MiddlewareAttachPoint::OnRequest) => {
-                let request = match input {
-                    WasmComponentInput::MiddlewareRequest(req) => req,
+                match input {
+                    WasmComponentInput::MiddlewareRequest(request) => {
+                        // Full-body path (existing behavior)
+                        let bindings = Smg::instantiate_async(&mut store, &component, linker)
+                            .await
+                            .map_err(|e| {
+                                WasmError::from(WasmRuntimeError::InstanceCreateFailed(
+                                    e.to_string(),
+                                ))
+                            })?;
+
+                        let action_result = bindings
+                            .smg_gateway_middleware_on_request()
+                            .call_on_request(&mut store, &request)
+                            .await
+                            .map_err(|e| map_wasm_error(e, config.max_execution_time_ms))?;
+
+                        WasmComponentOutput::MiddlewareAction(action_result)
+                    }
+                    WasmComponentInput::MiddlewareRequestHeaders(request_headers) => {
+                        // Headers-only path (streaming optimization)
+                        let bindings = Smg::instantiate_async(&mut store, &component, linker)
+                            .await
+                            .map_err(|e| {
+                                WasmError::from(WasmRuntimeError::InstanceCreateFailed(
+                                    e.to_string(),
+                                ))
+                            })?;
+
+                        let action_result = bindings
+                            .smg_gateway_middleware_on_request_headers()
+                            .call_on_request_headers(&mut store, &request_headers)
+                            .await
+                            .map_err(|e| map_wasm_error(e, config.max_execution_time_ms))?;
+
+                        WasmComponentOutput::MiddlewareAction(action_result)
+                    }
                     _ => {
                         return Err(WasmError::from(WasmRuntimeError::CallFailed(
-                            "Expected MiddlewareRequest input for OnRequest attach point"
+                            "Expected MiddlewareRequest or MiddlewareRequestHeaders input for OnRequest attach point"
                                 .to_string(),
                         )));
                     }
-                };
-
-                // Instantiate component (must use async instantiation when async support is enabled)
-                let bindings = Smg::instantiate_async(&mut store, &component, linker)
-                    .await
-                    .map_err(|e| {
-                        WasmError::from(WasmRuntimeError::InstanceCreateFailed(e.to_string()))
-                    })?;
-
-                // Call on-request (async call when async support is enabled)
-                let action_result = bindings
-                    .smg_gateway_middleware_on_request()
-                    .call_on_request(&mut store, &request)
-                    .await
-                    .map_err(|e| map_wasm_error(e, config.max_execution_time_ms))?;
-
-                WasmComponentOutput::MiddlewareAction(action_result)
+                }
             }
             WasmModuleAttachPoint::Middleware(MiddlewareAttachPoint::OnResponse) => {
-                // Extract Response input
-                let response = match input {
-                    WasmComponentInput::MiddlewareResponse(resp) => resp,
+                match input {
+                    WasmComponentInput::MiddlewareResponse(response) => {
+                        // Full-body path (existing behavior)
+                        let bindings = Smg::instantiate_async(&mut store, &component, linker)
+                            .await
+                            .map_err(|e| {
+                                WasmError::from(WasmRuntimeError::InstanceCreateFailed(
+                                    e.to_string(),
+                                ))
+                            })?;
+
+                        let action_result = bindings
+                            .smg_gateway_middleware_on_response()
+                            .call_on_response(&mut store, &response)
+                            .await
+                            .map_err(|e| map_wasm_error(e, config.max_execution_time_ms))?;
+
+                        WasmComponentOutput::MiddlewareAction(action_result)
+                    }
+                    WasmComponentInput::MiddlewareResponseHeaders(response_headers) => {
+                        // Headers-only path (streaming optimization)
+                        let bindings = Smg::instantiate_async(&mut store, &component, linker)
+                            .await
+                            .map_err(|e| {
+                                WasmError::from(WasmRuntimeError::InstanceCreateFailed(
+                                    e.to_string(),
+                                ))
+                            })?;
+
+                        let action_result = bindings
+                            .smg_gateway_middleware_on_response_headers()
+                            .call_on_response_headers(&mut store, &response_headers)
+                            .await
+                            .map_err(|e| map_wasm_error(e, config.max_execution_time_ms))?;
+
+                        WasmComponentOutput::MiddlewareAction(action_result)
+                    }
                     _ => {
                         return Err(WasmError::from(WasmRuntimeError::CallFailed(
-                            "Expected MiddlewareResponse input for OnResponse attach point"
+                            "Expected MiddlewareResponse or MiddlewareResponseHeaders input for OnResponse attach point"
                                 .to_string(),
                         )));
                     }
-                };
-
-                // Instantiate component (must use async instantiation when async support is enabled)
-                let bindings = Smg::instantiate_async(&mut store, &component, linker)
-                    .await
-                    .map_err(|e| {
-                        WasmError::from(WasmRuntimeError::InstanceCreateFailed(e.to_string()))
-                    })?;
-
-                // Call on-response (async call when async support is enabled)
-                let action_result = bindings
-                    .smg_gateway_middleware_on_response()
-                    .call_on_response(&mut store, &response)
-                    .await
-                    .map_err(|e| map_wasm_error(e, config.max_execution_time_ms))?;
-
-                WasmComponentOutput::MiddlewareAction(action_result)
+                }
             }
             WasmModuleAttachPoint::Middleware(MiddlewareAttachPoint::OnError) => {
                 return Err(WasmError::from(WasmRuntimeError::CallFailed(

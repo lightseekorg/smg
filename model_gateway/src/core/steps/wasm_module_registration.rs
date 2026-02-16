@@ -501,6 +501,7 @@ impl StepExecutor<WasmRegistrationWorkflowData> for RegisterModuleStep {
                 last_accessed_at: now,
                 access_count: 0,
                 attach_points: descriptor.attach_points.clone(),
+                body_policy: descriptor.body_policy.clone(),
                 wasm_bytes,
             },
         };

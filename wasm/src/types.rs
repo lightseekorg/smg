@@ -17,10 +17,14 @@ use crate::{
 /// to a WASM component, determined by the attach_point.
 #[derive(Debug, Clone)]
 pub enum WasmComponentInput {
-    /// Middleware OnRequest input
+    /// Middleware OnRequest input (full body — triggers buffering)
     MiddlewareRequest(middleware_types::Request),
-    /// Middleware OnResponse input
+    /// Middleware OnResponse input (full body — triggers buffering)
     MiddlewareResponse(middleware_types::Response),
+    /// Middleware OnRequest input (headers only — no body buffering)
+    MiddlewareRequestHeaders(middleware_types::RequestHeaders),
+    /// Middleware OnResponse input (headers only — no body buffering)
+    MiddlewareResponseHeaders(middleware_types::ResponseHeaders),
 }
 
 /// Generic output type from WASM component execution
@@ -58,10 +62,12 @@ impl WasmComponentInput {
     /// Get the expected attach_point for this input type
     pub fn expected_attach_point(&self) -> WasmModuleAttachPoint {
         match self {
-            WasmComponentInput::MiddlewareRequest(_) => {
+            WasmComponentInput::MiddlewareRequest(_)
+            | WasmComponentInput::MiddlewareRequestHeaders(_) => {
                 WasmModuleAttachPoint::Middleware(MiddlewareAttachPoint::OnRequest)
             }
-            WasmComponentInput::MiddlewareResponse(_) => {
+            WasmComponentInput::MiddlewareResponse(_)
+            | WasmComponentInput::MiddlewareResponseHeaders(_) => {
                 WasmModuleAttachPoint::Middleware(MiddlewareAttachPoint::OnResponse)
             }
         }

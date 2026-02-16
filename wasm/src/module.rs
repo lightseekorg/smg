@@ -107,6 +107,22 @@ where
     }
 }
 
+/// Body processing policy for a WASM middleware module.
+///
+/// Controls whether the middleware buffers the HTTP body before invoking
+/// the WASM module, or passes only headers to allow the body to stream through.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, Eq, PartialEq)]
+pub enum BodyPolicy {
+    /// Module requires the full body (existing buffering behavior).
+    /// The middleware will call `to_bytes` and pass the complete body to the module.
+    #[default]
+    Required,
+    /// Module only inspects/modifies headers; the body streams through untouched.
+    /// The middleware calls the headers-only WIT interface (`on-request-headers` /
+    /// `on-response-headers`) and never buffers the body.
+    HeadersOnly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasmModule {
     // unique identifier for the module
@@ -126,6 +142,8 @@ pub struct WasmModuleDescriptor {
     pub file_path: String,
     pub module_type: WasmModuleType,
     pub attach_points: Vec<WasmModuleAttachPoint>,
+    #[serde(default)]
+    pub body_policy: BodyPolicy,
     pub add_result: Option<WasmModuleAddResult>,
 }
 
@@ -159,6 +177,10 @@ pub struct WasmModuleMeta {
     pub access_count: u64,
     // attach points for the module
     pub attach_points: Vec<WasmModuleAttachPoint>,
+    /// Body processing policy: whether this module needs the full body or only headers.
+    /// Defaults to `Required` for backward compatibility with existing modules.
+    #[serde(default)]
+    pub body_policy: BodyPolicy,
     // Pre-loaded WASM component bytes (loaded into memory for faster execution)
     #[serde(skip)]
     pub wasm_bytes: Vec<u8>,

@@ -15,9 +15,9 @@ pub mod types;
 pub use config::WasmRuntimeConfig;
 pub use errors::{Result, WasmError, WasmManagerError, WasmModuleError, WasmRuntimeError};
 pub use module::{
-    MiddlewareAttachPoint, WasmMetrics, WasmModule, WasmModuleAddRequest, WasmModuleAddResponse,
-    WasmModuleAddResult, WasmModuleAttachPoint, WasmModuleDescriptor, WasmModuleListResponse,
-    WasmModuleMeta, WasmModuleType,
+    BodyPolicy, MiddlewareAttachPoint, WasmMetrics, WasmModule, WasmModuleAddRequest,
+    WasmModuleAddResponse, WasmModuleAddResult, WasmModuleAttachPoint, WasmModuleDescriptor,
+    WasmModuleListResponse, WasmModuleMeta, WasmModuleType,
 };
 pub use module_manager::WasmModuleManager;
 pub use runtime::WasmRuntime;

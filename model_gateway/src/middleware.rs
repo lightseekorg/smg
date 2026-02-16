@@ -39,7 +39,8 @@ use crate::{
         spec::{
             apply_modify_action_to_headers, build_wasm_headers_from_axum_headers,
             smg::gateway::middleware_types::{
-                Action, Request as WasmRequest, Response as WasmResponse,
+                Action, Request as WasmRequest, RequestHeaders as WasmRequestHeaders,
+                Response as WasmResponse, ResponseHeaders as WasmResponseHeaders,
             },
         },
         types::WasmComponentInput,
@@ -796,10 +797,20 @@ pub async fn wasm_middleware(
             }
         };
 
+    // Determine if any OnRequest module needs the full body
+    let request_needs_body = match wasm_manager.any_module_requires_body(&on_request_attach_point) {
+        Ok(needs) => needs,
+        Err(e) => {
+            error!("Failed to check body policy for OnRequest: {}", e);
+            true // Fall back to buffering on error
+        }
+    };
+
     let response = if modules_on_request.is_empty() {
         next.run(request).await
-    } else {
-        // Extract request body once before processing modules
+    } else if request_needs_body {
+        // === Full-body path (existing behavior) ===
+        // At least one module requires the body, so we must buffer.
         let method = request.method().clone();
         let uri = request.uri().clone();
         let mut headers = request.headers().clone();
@@ -877,8 +888,61 @@ pub async fn wasm_middleware(
             .body(Body::from(modified_body))
             .unwrap_or_else(|_| Request::new(Body::empty()));
         *final_request.headers_mut() = headers;
+        next.run(final_request).await
+    } else {
+        // === Headers-only path (streaming optimization) ===
+        // No modules need the body — pass headers only, body streams through untouched.
+        let method = request.method().clone();
+        let uri = request.uri().clone();
+        let mut headers = request.headers().clone();
 
-        // Continue with request processing
+        let method_str = method.to_string();
+        let path_str = uri.path().to_string();
+        let query_str = uri.query().unwrap_or("").to_string();
+
+        for module in modules_on_request {
+            let wasm_headers = build_wasm_headers_from_axum_headers(&headers);
+            let wasm_request_headers = WasmRequestHeaders {
+                method: method_str.clone(),
+                path: path_str.clone(),
+                query: query_str.clone(),
+                headers: wasm_headers,
+                request_id: request_id.clone(),
+                now_epoch_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_else(|_| Duration::from_millis(0))
+                    .as_millis() as u64,
+            };
+
+            let action = match wasm_manager
+                .execute_module_for_attach_point(
+                    &module,
+                    on_request_attach_point.clone(),
+                    WasmComponentInput::MiddlewareRequestHeaders(wasm_request_headers),
+                )
+                .await
+            {
+                Some(action) => action,
+                None => continue,
+            };
+
+            match action {
+                Action::Continue => {}
+                Action::Reject(status) => {
+                    return Err(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST));
+                }
+                Action::Modify(modify) => {
+                    // In headers-only mode, only header modifications apply.
+                    // body_replace is ignored since we never buffered the body.
+                    apply_modify_action_to_headers(&mut headers, &modify);
+                }
+            }
+        }
+
+        // Reconstruct request with modified headers but original body (untouched)
+        let (parts, body) = request.into_parts();
+        let mut final_request = Request::from_parts(parts, body);
+        *final_request.headers_mut() = headers;
         next.run(final_request).await
     };
 
@@ -897,86 +961,140 @@ pub async fn wasm_middleware(
     if modules_on_response.is_empty() {
         return Ok(response);
     }
-    // Extract response data once before processing modules
-    let mut status = response.status();
-    let mut headers = response.headers().clone();
-    let max_body_size = wasm_manager.get_max_body_size();
-    let mut body_bytes = match axum::body::to_bytes(response.into_body(), max_body_size).await {
-        Ok(bytes) => bytes.to_vec(),
+
+    // Determine if any OnResponse module needs the full body
+    let response_needs_body = match wasm_manager.any_module_requires_body(&on_response_attach_point)
+    {
+        Ok(needs) => needs,
         Err(e) => {
-            error!("Failed to read response body: {}", e);
-            // Create a minimal response with empty body for error recovery
-            let error_response = Response::builder()
-                .status(status)
-                .body(Body::empty())
-                .unwrap_or_else(|_| Response::new(Body::empty()));
-            return Ok(error_response);
+            error!("Failed to check body policy for OnResponse: {}", e);
+            true // Fall back to buffering on error
         }
     };
 
-    // Process each OnResponse module
-    for module in modules_on_response {
-        // Build WebAssembly response from collected data
-        let wasm_headers = build_wasm_headers_from_axum_headers(&headers);
-        let wasm_response = WasmResponse {
-            status: status.as_u16(),
-            headers: wasm_headers,
-            body: body_bytes.clone(),
-        };
-
-        // Execute WASM component
-        let action = match wasm_manager
-            .execute_module_for_attach_point(
-                &module,
-                on_response_attach_point.clone(),
-                WasmComponentInput::MiddlewareResponse(wasm_response),
-            )
-            .await
-        {
-            Some(action) => action,
-            None => continue, // Continue to next module on error
-        };
-
-        // Process action - apply modifications incrementally
-        match action {
-            Action::Continue => {
-                // Continue to next module
-            }
-            Action::Reject(status_code) => {
-                // Override response status
-                status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_REQUEST);
-                // Return immediately with current state
-                let final_response = Response::builder()
+    if response_needs_body {
+        // === Full-body path (existing behavior) ===
+        let mut status = response.status();
+        let mut headers = response.headers().clone();
+        let max_body_size = wasm_manager.get_max_body_size();
+        let mut body_bytes = match axum::body::to_bytes(response.into_body(), max_body_size).await {
+            Ok(bytes) => bytes.to_vec(),
+            Err(e) => {
+                error!("Failed to read response body: {}", e);
+                let error_response = Response::builder()
                     .status(status)
-                    .body(Body::from(body_bytes))
+                    .body(Body::empty())
                     .unwrap_or_else(|_| Response::new(Body::empty()));
-                let mut final_response = final_response;
-                *final_response.headers_mut() = headers;
-                return Ok(final_response);
+                return Ok(error_response);
             }
-            Action::Modify(modify) => {
-                // Apply status modification
-                if let Some(new_status) = modify.status {
-                    status = StatusCode::from_u16(new_status).unwrap_or(status);
+        };
+
+        // Process each OnResponse module
+        for module in modules_on_response {
+            let wasm_headers = build_wasm_headers_from_axum_headers(&headers);
+            let wasm_response = WasmResponse {
+                status: status.as_u16(),
+                headers: wasm_headers,
+                body: body_bytes.clone(),
+            };
+
+            let action = match wasm_manager
+                .execute_module_for_attach_point(
+                    &module,
+                    on_response_attach_point.clone(),
+                    WasmComponentInput::MiddlewareResponse(wasm_response),
+                )
+                .await
+            {
+                Some(action) => action,
+                None => continue,
+            };
+
+            match action {
+                Action::Continue => {}
+                Action::Reject(status_code) => {
+                    status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_REQUEST);
+                    let final_response = Response::builder()
+                        .status(status)
+                        .body(Body::from(body_bytes))
+                        .unwrap_or_else(|_| Response::new(Body::empty()));
+                    let mut final_response = final_response;
+                    *final_response.headers_mut() = headers;
+                    return Ok(final_response);
                 }
-                // Apply headers modifications
-                apply_modify_action_to_headers(&mut headers, &modify);
-                // Apply body_replace
-                if let Some(new_body) = modify.body_replace {
-                    body_bytes = new_body;
+                Action::Modify(modify) => {
+                    if let Some(new_status) = modify.status {
+                        status = StatusCode::from_u16(new_status).unwrap_or(status);
+                    }
+                    apply_modify_action_to_headers(&mut headers, &modify);
+                    if let Some(new_body) = modify.body_replace {
+                        body_bytes = new_body;
+                    }
                 }
             }
         }
-    }
 
-    // Reconstruct final response with all modifications
-    let final_response = Response::builder()
-        .status(status)
-        .body(Body::from(body_bytes))
-        .unwrap_or_else(|_| Response::new(Body::empty()));
-    let mut final_response = final_response;
-    *final_response.headers_mut() = headers;
-    Ok(final_response)
+        let final_response = Response::builder()
+            .status(status)
+            .body(Body::from(body_bytes))
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+        let mut final_response = final_response;
+        *final_response.headers_mut() = headers;
+        Ok(final_response)
+    } else {
+        // === Headers-only path (streaming optimization) ===
+        // No modules need the body — pass headers/status only, body streams through.
+        let mut status = response.status();
+        let mut headers = response.headers().clone();
+
+        for module in modules_on_response {
+            let wasm_headers = build_wasm_headers_from_axum_headers(&headers);
+            let wasm_response_headers = WasmResponseHeaders {
+                status: status.as_u16(),
+                headers: wasm_headers,
+            };
+
+            let action = match wasm_manager
+                .execute_module_for_attach_point(
+                    &module,
+                    on_response_attach_point.clone(),
+                    WasmComponentInput::MiddlewareResponseHeaders(wasm_response_headers),
+                )
+                .await
+            {
+                Some(action) => action,
+                None => continue,
+            };
+
+            match action {
+                Action::Continue => {}
+                Action::Reject(status_code) => {
+                    status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_REQUEST);
+                    // Reject in headers-only mode: return immediately with empty body
+                    let final_response = Response::builder()
+                        .status(status)
+                        .body(Body::empty())
+                        .unwrap_or_else(|_| Response::new(Body::empty()));
+                    let mut final_response = final_response;
+                    *final_response.headers_mut() = headers;
+                    return Ok(final_response);
+                }
+                Action::Modify(modify) => {
+                    if let Some(new_status) = modify.status {
+                        status = StatusCode::from_u16(new_status).unwrap_or(status);
+                    }
+                    apply_modify_action_to_headers(&mut headers, &modify);
+                    // body_replace is ignored in headers-only mode
+                }
+            }
+        }
+
+        // Reconstruct response with modified headers/status but original streaming body
+        let (mut parts, body) = response.into_parts();
+        parts.status = status;
+        parts.headers = headers;
+        Ok(Response::from_parts(parts, body))
+    }
 }
 
 #[cfg(test)]
