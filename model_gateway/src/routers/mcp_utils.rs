@@ -1,6 +1,6 @@
 //! Shared MCP utilities for routers.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use openai_protocol::responses::{ResponseTool, ResponseToolType};
 use smg_mcp::{BuiltinToolType, McpOrchestrator, McpServerConfig, McpTransport, ResponseFormat};
@@ -8,6 +8,96 @@ use tracing::{debug, warn};
 
 /// Default maximum tool loop iterations (safety limit).
 pub const DEFAULT_MAX_ITERATIONS: usize = 10;
+
+/// Protocol-agnostic MCP server descriptor for connection setup.
+///
+/// Contains only the fields needed by [`connect_mcp_servers`]. Each router
+/// converts its protocol-specific type into this struct.
+pub struct McpServerInput {
+    pub label: String,
+    pub url: Option<String>,
+    pub authorization: Option<String>,
+    pub headers: HashMap<String, String>,
+}
+
+/// Connect to MCP servers described by protocol-agnostic inputs.
+///
+/// For each input:
+/// - If `url` is present, connects a dynamic MCP server (SSE or Streamable).
+/// - If `url` is absent, registers the label as a static server reference.
+///
+/// Returns a list of `(label, server_key)` pairs for successfully connected servers.
+pub async fn connect_mcp_servers(
+    mcp_orchestrator: &Arc<McpOrchestrator>,
+    inputs: &[McpServerInput],
+) -> Vec<(String, String)> {
+    let mut mcp_servers = Vec::new();
+
+    for input in inputs {
+        // Case A: Dynamic Server (Has URL)
+        if let Some(server_url) = input
+            .url
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            if !(server_url.starts_with("http://") || server_url.starts_with("https://")) {
+                warn!(
+                    "Ignoring MCP server_url with unsupported scheme: {}",
+                    server_url
+                );
+                continue;
+            }
+
+            let token = input.authorization.clone();
+            let headers = input.headers.clone();
+            let server_url = server_url.to_string();
+
+            let transport = if server_url.contains("/sse") {
+                McpTransport::Sse {
+                    url: server_url,
+                    token,
+                    headers,
+                }
+            } else {
+                McpTransport::Streamable {
+                    url: server_url,
+                    token,
+                    headers,
+                }
+            };
+
+            let server_config = McpServerConfig {
+                name: input.label.clone(),
+                transport,
+                proxy: None,
+                required: false,
+                tools: None,
+                builtin_type: None,
+                builtin_tool_name: None,
+            };
+
+            let server_key = McpOrchestrator::server_key(&server_config);
+
+            match mcp_orchestrator.connect_dynamic_server(server_config).await {
+                Ok(_) => {
+                    if !mcp_servers.iter().any(|(_, key)| key == &server_key) {
+                        mcp_servers.push((input.label.clone(), server_key));
+                    }
+                }
+                Err(err) => {
+                    warn!("Failed to connect MCP server {}: {}", server_key, err);
+                }
+            }
+        }
+        // Case B: Static Server (No URL)
+        else if !mcp_servers.iter().any(|(_, key)| key == &input.label) {
+            mcp_servers.push((input.label.clone(), input.label.clone()));
+        }
+    }
+
+    mcp_servers
+}
 
 /// Routing information for a built-in tool type.
 ///
@@ -100,83 +190,22 @@ pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
 ) -> Option<Vec<(String, String)>> {
-    let mut mcp_servers = Vec::new();
+    // 1. Convert MCP-typed ResponseTools into protocol-agnostic McpServerInputs
+    let inputs: Vec<McpServerInput> = tools
+        .iter()
+        .filter(|t| matches!(t.r#type, ResponseToolType::Mcp))
+        .map(|tool| McpServerInput {
+            label: tool
+                .server_label
+                .clone()
+                .unwrap_or_else(|| "mcp".to_string()),
+            url: tool.server_url.clone(),
+            authorization: tool.authorization.clone(),
+            headers: tool.headers.clone().unwrap_or_default(),
+        })
+        .collect();
 
-    // 1. Process explicit MCP tools (dynamic via `server_url`, or static via `server_label`)
-    for tool in tools {
-        if !matches!(tool.r#type, ResponseToolType::Mcp) {
-            continue;
-        }
-
-        let label = tool
-            .server_label
-            .clone()
-            .unwrap_or_else(|| "mcp".to_string());
-
-        // Case A: Dynamic Server (Has `server_url`)
-        if let Some(server_url) = tool
-            .server_url
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-        {
-            if !(server_url.starts_with("http://") || server_url.starts_with("https://")) {
-                warn!(
-                    "Ignoring MCP server_url with unsupported scheme: {}",
-                    server_url
-                );
-                continue;
-            }
-
-            let token = tool.authorization.clone();
-            // Use headers from tool payload instead of HTTP request headers
-            let headers = tool.headers.clone().unwrap_or_default();
-            let server_url = server_url.to_string();
-
-            let transport = if server_url.contains("/sse") {
-                McpTransport::Sse {
-                    url: server_url,
-                    token,
-                    headers,
-                }
-            } else {
-                McpTransport::Streamable {
-                    url: server_url,
-                    token,
-                    headers,
-                }
-            };
-
-            let server_config = McpServerConfig {
-                name: label.clone(),
-                transport,
-                proxy: None,
-                required: false,
-                tools: None,
-                builtin_type: None,
-                builtin_tool_name: None,
-            };
-
-            let server_key = McpOrchestrator::server_key(&server_config);
-
-            match mcp_orchestrator.connect_dynamic_server(server_config).await {
-                Ok(_) => {
-                    if !mcp_servers.iter().any(|(_, key)| key == &server_key) {
-                        mcp_servers.push((label.clone(), server_key));
-                    }
-                }
-                Err(err) => {
-                    warn!("Failed to connect MCP server {}: {}", server_key, err);
-                }
-            }
-        }
-        // Case B: Static Server (No `server_url`, but has `server_label`)
-        else if let Some(label) = &tool.server_label {
-            if !mcp_servers.iter().any(|(_, key)| key == label) {
-                mcp_servers.push((label.clone(), label.clone()));
-            }
-        }
-    }
+    let mut mcp_servers = connect_mcp_servers(mcp_orchestrator, &inputs).await;
 
     // 2. Process built-in tool routing (static servers configured with builtin_type)
     for routing in collect_builtin_routing(mcp_orchestrator, Some(tools)) {

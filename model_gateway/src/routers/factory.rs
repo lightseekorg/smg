@@ -165,7 +165,7 @@ impl RouterFactory {
     pub async fn create_anthropic_router(
         ctx: &Arc<AppContext>,
     ) -> Result<Box<dyn RouterTrait>, String> {
-        let router = AnthropicRouter::new(ctx.clone());
+        let router = AnthropicRouter::new(ctx.clone())?;
         Ok(Box::new(router))
     }
 
