@@ -184,27 +184,42 @@ pub trait Worker: Send + Sync + fmt::Debug {
 
     /// Check if this worker is DP-aware
     fn is_dp_aware(&self) -> bool {
-        false
+        self.metadata().spec.dp_rank.is_some()
     }
 
     /// Get the base URL without any DP rank suffix
     fn base_url(&self) -> &str {
-        self.url()
+        self.metadata()
+            .spec
+            .dp_base_url
+            .as_deref()
+            .unwrap_or(self.url())
     }
 
     /// Get DP rank if this is a DP-aware worker
     fn dp_rank(&self) -> Option<usize> {
-        None
+        self.metadata().spec.dp_rank
     }
 
     /// Get DP size if this worker is part of a DP group
     fn dp_size(&self) -> Option<usize> {
-        None
+        self.metadata().spec.dp_size
     }
 
     /// Transform a request for DP-aware routing
-    async fn prepare_request(&self, req: serde_json::Value) -> WorkerResult<serde_json::Value> {
-        Ok(req)
+    async fn prepare_request(&self, mut req: serde_json::Value) -> WorkerResult<serde_json::Value> {
+        if let Some(rank) = self.metadata().spec.dp_rank {
+            if let Some(map) = req.as_object_mut() {
+                map.insert("data_parallel_rank".to_string(), serde_json::json!(rank));
+                Ok(req)
+            } else {
+                Err(WorkerError::InvalidConfiguration {
+                    message: "Request must be a JSON object for DP-aware routing".to_string(),
+                })
+            }
+        } else {
+            Ok(req)
+        }
     }
 
     /// Get the actual endpoint URL for requests
@@ -407,8 +422,6 @@ pub struct WorkerMetadata {
     pub health_config: HealthCheckConfig,
     /// Health check endpoint path (internal-only, from router config).
     pub health_endpoint: String,
-    /// Default model type for unknown models (defaults to LLM capabilities).
-    pub default_model_type: ModelType,
 }
 
 impl WorkerMetadata {
@@ -424,12 +437,14 @@ impl WorkerMetadata {
     }
 
     /// Check if this worker supports an endpoint for a given model.
-    /// Falls back to default_model_type if model not found.
+    /// Falls back to LLM capabilities if model not found — this is safe because
+    /// non-LLM workers (embeddings, rerank) are always registered with explicit
+    /// models via discovery, never as wildcards.
     pub fn supports_endpoint(&self, model_id: &str, endpoint: Endpoint) -> bool {
         if let Some(model) = self.find_model(model_id) {
             model.supports_endpoint(endpoint)
         } else {
-            self.default_model_type.supports_endpoint(endpoint)
+            ModelType::LLM.supports_endpoint(endpoint)
         }
     }
 
@@ -470,31 +485,16 @@ pub struct BasicWorker {
     /// When set, overrides metadata.models for routing decisions.
     /// Uses std::sync::RwLock for synchronous access in supports_model().
     pub models_override: Arc<StdRwLock<Option<WorkerModels>>>,
-    /// DP rank for this worker (None = not DP-aware)
-    pub dp_rank: Option<usize>,
-    /// Total DP size (None = not DP-aware)
-    pub dp_size: Option<usize>,
-    /// Base URL without DP suffix (None = not DP-aware)
-    pub dp_base_url: Option<String>,
 }
 
 impl fmt::Debug for BasicWorker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut s = f.debug_struct("BasicWorker");
-        s.field("metadata", &self.metadata)
+        f.debug_struct("BasicWorker")
+            .field("metadata", &self.metadata)
             .field("healthy", &self.healthy.load(Ordering::Relaxed))
             .field("circuit_breaker", &self.circuit_breaker)
-            .field("grpc_client", &"<RwLock>");
-        if let Some(rank) = self.dp_rank {
-            s.field("dp_rank", &rank);
-        }
-        if let Some(size) = self.dp_size {
-            s.field("dp_size", &size);
-        }
-        if let Some(ref base_url) = self.dp_base_url {
-            s.field("dp_base_url", base_url);
-        }
-        s.finish()
+            .field("grpc_client", &"<OnceCell>")
+            .finish()
     }
 }
 
@@ -631,41 +631,6 @@ impl Worker for BasicWorker {
 
     fn circuit_breaker(&self) -> &CircuitBreaker {
         &self.circuit_breaker
-    }
-
-    fn is_dp_aware(&self) -> bool {
-        self.dp_rank.is_some()
-    }
-
-    fn base_url(&self) -> &str {
-        self.dp_base_url.as_deref().unwrap_or(self.url())
-    }
-
-    fn dp_rank(&self) -> Option<usize> {
-        self.dp_rank
-    }
-
-    fn dp_size(&self) -> Option<usize> {
-        self.dp_size
-    }
-
-    async fn prepare_request(&self, mut req: serde_json::Value) -> WorkerResult<serde_json::Value> {
-        if let Some(rank) = self.dp_rank {
-            if let Some(map) = req.as_object_mut() {
-                map.insert("data_parallel_rank".to_string(), serde_json::json!(rank));
-                Ok(req)
-            } else {
-                Err(WorkerError::InvalidConfiguration {
-                    message: "Request must be a JSON object for DP-aware routing".to_string(),
-                })
-            }
-        } else {
-            Ok(req)
-        }
-    }
-
-    fn endpoint_url(&self, route: &str) -> String {
-        format!("{}{}", self.base_url(), route)
     }
 
     fn supports_model(&self, model_id: &str) -> bool {
@@ -1587,7 +1552,6 @@ mod tests {
             spec: WorkerSpec::new("http://test:8080"),
             health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
-            default_model_type: ModelType::LLM,
         };
 
         // Empty models list should accept any model
@@ -1611,7 +1575,6 @@ mod tests {
             spec,
             health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
-            default_model_type: ModelType::LLM,
         };
 
         // Find by primary ID

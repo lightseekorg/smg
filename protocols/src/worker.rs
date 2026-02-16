@@ -412,6 +412,19 @@ pub struct WorkerSpec {
     #[serde(default, skip)]
     pub bootstrap_host: String,
 
+    /// Base URL without DP rank suffix (for DP-aware workers).
+    /// When set, `url` contains the rank-suffixed form (`{base}@{rank}`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_base_url: Option<String>,
+
+    /// Data-parallel rank (None = not DP-aware).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_rank: Option<usize>,
+
+    /// Total data-parallel group size (None = not DP-aware).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_size: Option<usize>,
+
     /// KV connector type (e.g. "MooncakeConnector", "NixlConnector").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_connector: Option<String>,
@@ -445,6 +458,9 @@ impl WorkerSpec {
             api_key: None,
             bootstrap_port: None,
             bootstrap_host: String::new(),
+            dp_base_url: None,
+            dp_rank: None,
+            dp_size: None,
             kv_connector: None,
             kv_role: None,
             health: HealthCheckUpdate::default(),

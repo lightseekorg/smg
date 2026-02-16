@@ -25,7 +25,7 @@ use smg::{
     core::{
         circuit_breaker::CircuitBreaker,
         worker::{RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad},
-        ConnectionMode, ModelType, Worker, WorkerType,
+        ConnectionMode, Worker, WorkerType,
     },
     policies::{
         BucketPolicy, CacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
@@ -68,7 +68,6 @@ impl GrpcWorker {
             spec,
             health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
-            default_model_type: ModelType::LLM,
         };
         Self {
             client,
