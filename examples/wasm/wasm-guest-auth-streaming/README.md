@@ -44,7 +44,7 @@ curl -X POST http://localhost:3000/wasm \
 curl -v http://localhost:3000/v1/chat/completions
 
 # Should pass (valid API key)
-curl -v -H "Authorization: Bearer secret-api-key-12345" \
+curl -v -H "Authorization: Bearer <YOUR_API_KEY>" \
   http://localhost:3000/v1/chat/completions
 ```
 
