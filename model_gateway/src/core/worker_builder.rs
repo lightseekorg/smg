@@ -9,8 +9,7 @@ use openai_protocol::{
 use super::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
     worker::{
-        BasicWorker, ConnectionMode, DPAwareWorker, RuntimeType, WorkerMetadata,
-        WorkerRoutingKeyLoad, WorkerType,
+        BasicWorker, ConnectionMode, RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad, WorkerType,
     },
 };
 use crate::{observability::metrics::Metrics, routers::grpc::client::GrpcClient};
@@ -24,6 +23,9 @@ pub struct BasicWorkerBuilder {
     health_endpoint: String,
     circuit_breaker_config: CircuitBreakerConfig,
     grpc_client: Option<GrpcClient>,
+    dp_rank: Option<usize>,
+    dp_size: Option<usize>,
+    dp_base_url: Option<String>,
 }
 
 impl BasicWorkerBuilder {
@@ -34,6 +36,9 @@ impl BasicWorkerBuilder {
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
+            dp_rank: None,
+            dp_size: None,
+            dp_base_url: None,
         }
     }
 
@@ -44,6 +49,9 @@ impl BasicWorkerBuilder {
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
+            dp_rank: None,
+            dp_size: None,
+            dp_base_url: None,
         }
     }
 
@@ -56,6 +64,9 @@ impl BasicWorkerBuilder {
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
+            dp_rank: None,
+            dp_size: None,
+            dp_base_url: None,
         }
     }
 
@@ -161,9 +172,13 @@ impl BasicWorkerBuilder {
         self
     }
 
-    /// Override the URL (used internally by DPAwareWorkerBuilder)
-    fn url(mut self, url: impl Into<String>) -> Self {
-        self.spec.url = url.into();
+    /// Configure data-parallel routing.
+    /// Captures the current URL as the base URL, then formats it as `{base}@{rank}`.
+    pub fn dp_config(mut self, rank: usize, size: usize) -> Self {
+        self.dp_base_url = Some(self.spec.url.clone());
+        self.spec.url = format!("{}@{}", self.dp_base_url.as_ref().unwrap(), rank);
+        self.dp_rank = Some(rank);
+        self.dp_size = Some(size);
         self
     }
 
@@ -213,6 +228,9 @@ impl BasicWorkerBuilder {
             metadata,
             grpc_client,
             models_override: Arc::new(StdRwLock::new(None)),
+            dp_rank: self.dp_rank,
+            dp_size: self.dp_size,
+            dp_base_url: self.dp_base_url,
         }
     }
 }
@@ -232,120 +250,6 @@ fn parse_bootstrap_host(url: &str) -> String {
             tracing::warn!("Failed to parse URL '{}', defaulting to localhost", url);
             "localhost".to_string()
         }
-    }
-}
-
-/// Builder for creating DPAwareWorker instances with fluent API.
-///
-/// Delegates to [`BasicWorkerBuilder`] for all shared configuration,
-/// adding only DP-specific fields (base_url, dp_rank, dp_size).
-pub struct DPAwareWorkerBuilder {
-    inner: BasicWorkerBuilder,
-    base_url: String,
-    dp_rank: usize,
-    dp_size: usize,
-}
-
-impl DPAwareWorkerBuilder {
-    pub fn new(base_url: impl Into<String>, dp_rank: usize, dp_size: usize) -> Self {
-        let base_url = base_url.into();
-        Self {
-            inner: BasicWorkerBuilder::new(&base_url),
-            base_url,
-            dp_rank,
-            dp_size,
-        }
-    }
-
-    pub fn new_with_type(
-        base_url: impl Into<String>,
-        dp_rank: usize,
-        dp_size: usize,
-        worker_type: WorkerType,
-    ) -> Self {
-        let base_url = base_url.into();
-        Self {
-            inner: BasicWorkerBuilder::new_with_type(&base_url, worker_type),
-            base_url,
-            dp_rank,
-            dp_size,
-        }
-    }
-
-    // Delegate all shared setter methods to inner BasicWorkerBuilder
-    pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.inner = self.inner.api_key(api_key);
-        self
-    }
-    pub fn worker_type(mut self, worker_type: WorkerType) -> Self {
-        self.inner = self.inner.worker_type(worker_type);
-        self
-    }
-    pub fn connection_mode(mut self, mode: ConnectionMode) -> Self {
-        self.inner = self.inner.connection_mode(mode);
-        self
-    }
-    pub fn runtime_type(mut self, runtime_type: RuntimeType) -> Self {
-        self.inner = self.inner.runtime_type(runtime_type);
-        self
-    }
-    pub fn labels(mut self, labels: HashMap<String, String>) -> Self {
-        self.inner = self.inner.labels(labels);
-        self
-    }
-    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.inner = self.inner.label(key, value);
-        self
-    }
-    pub fn health_config(mut self, config: HealthCheckConfig) -> Self {
-        self.inner = self.inner.health_config(config);
-        self
-    }
-    pub fn health_endpoint(mut self, endpoint: impl Into<String>) -> Self {
-        self.inner = self.inner.health_endpoint(endpoint);
-        self
-    }
-    pub fn circuit_breaker_config(mut self, config: CircuitBreakerConfig) -> Self {
-        self.inner = self.inner.circuit_breaker_config(config);
-        self
-    }
-    pub fn grpc_client(mut self, client: GrpcClient) -> Self {
-        self.inner = self.inner.grpc_client(client);
-        self
-    }
-    pub fn models(mut self, models: impl Into<WorkerModels>) -> Self {
-        self.inner = self.inner.models(models);
-        self
-    }
-    pub fn model(mut self, model: ModelCard) -> Self {
-        self.inner = self.inner.model(model);
-        self
-    }
-    pub fn kv_connector(mut self, connector: impl Into<String>) -> Self {
-        self.inner = self.inner.kv_connector(connector);
-        self
-    }
-    pub fn kv_role(mut self, role: impl Into<String>) -> Self {
-        self.inner = self.inner.kv_role(role);
-        self
-    }
-    pub fn priority(mut self, priority: u32) -> Self {
-        self.inner = self.inner.priority(priority);
-        self
-    }
-    pub fn cost(mut self, cost: f32) -> Self {
-        self.inner = self.inner.cost(cost);
-        self
-    }
-    pub fn bootstrap_port(mut self, port: Option<u16>) -> Self {
-        self.inner = self.inner.bootstrap_port(port);
-        self
-    }
-
-    pub fn build(self) -> DPAwareWorker {
-        let worker_url = format!("{}@{}", self.base_url, self.dp_rank);
-        let base_worker = self.inner.url(worker_url).build();
-        DPAwareWorker::with_base_worker(base_worker, self.base_url, self.dp_rank, self.dp_size)
     }
 }
 
@@ -451,7 +355,9 @@ mod tests {
 
     #[test]
     fn test_dp_aware_worker_builder_minimal() {
-        let worker = DPAwareWorkerBuilder::new("http://localhost:8080", 2, 8).build();
+        let worker = BasicWorkerBuilder::new("http://localhost:8080")
+            .dp_config(2, 8)
+            .build();
 
         assert_eq!(worker.url(), "http://localhost:8080@2");
         assert_eq!(worker.dp_rank(), Some(2));
@@ -472,7 +378,8 @@ mod tests {
             disable_health_check: false,
         };
 
-        let worker = DPAwareWorkerBuilder::new("http://localhost:8080", 3, 16)
+        let worker = BasicWorkerBuilder::new("http://localhost:8080")
+            .dp_config(3, 16)
             .worker_type(WorkerType::Prefill)
             .bootstrap_port(Some(9090))
             .connection_mode(ConnectionMode::Http)
@@ -507,7 +414,8 @@ mod tests {
 
     #[test]
     fn test_dp_aware_worker_with_grpc() {
-        let worker = DPAwareWorkerBuilder::new("grpc://cluster.local", 1, 4)
+        let worker = BasicWorkerBuilder::new("grpc://cluster.local")
+            .dp_config(1, 4)
             .worker_type(WorkerType::Decode)
             .connection_mode(ConnectionMode::Grpc)
             .label("transport", "grpc")

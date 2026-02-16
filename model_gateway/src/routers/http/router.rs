@@ -20,7 +20,7 @@ use openai_protocol::{
 };
 use reqwest::Client;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug, error};
+use tracing::error;
 
 use crate::{
     app_context::AppContext,
@@ -47,7 +47,6 @@ pub struct Router {
     worker_registry: Arc<WorkerRegistry>,
     policy_registry: Arc<PolicyRegistry>,
     client: Client,
-    dp_aware: bool,
     enable_igw: bool,
     retry_config: RetryConfig,
 }
@@ -58,7 +57,6 @@ impl std::fmt::Debug for Router {
             .field("worker_registry", &self.worker_registry)
             .field("policy_registry", &self.policy_registry)
             .field("client", &self.client)
-            .field("dp_aware", &self.dp_aware)
             .field("enable_igw", &self.enable_igw)
             .field("retry_config", &self.retry_config)
             .finish()
@@ -72,7 +70,6 @@ impl Router {
             worker_registry: ctx.worker_registry.clone(),
             policy_registry: ctx.policy_registry.clone(),
             client: ctx.client.clone(),
-            dp_aware: ctx.router_config.dp_aware,
             enable_igw: ctx.router_config.enable_igw,
             retry_config: ctx.router_config.effective_retry_config(),
         })
@@ -306,7 +303,7 @@ impl Router {
                 headers,
                 typed_req,
                 route,
-                worker.url(),
+                worker.as_ref(),
                 is_stream,
                 load_guard,
             )
@@ -327,16 +324,6 @@ impl Router {
         }
 
         response
-    }
-
-    // Helper: return base worker URL (strips DP suffix when enabled)
-    fn worker_base_url(&self, worker_url: &str) -> String {
-        if self.dp_aware {
-            if let Ok((prefix, _)) = Self::extract_dp_rank(worker_url) {
-                return prefix.to_string();
-            }
-        }
-        worker_url.to_string()
     }
 
     // Generic simple routing for GET/POST without JSON body
@@ -364,9 +351,7 @@ impl Router {
         let futures: Vec<_> = workers
             .into_iter()
             .map(|worker| {
-                let worker_url = worker.url();
-                let base = self.worker_base_url(worker_url);
-                let url = format!("{}/{}", base, endpoint);
+                let url = format!("{}/{}", worker.base_url(), endpoint);
                 let client = self.client.clone();
                 let method = method.clone();
 
@@ -459,87 +444,40 @@ impl Router {
             .await
     }
 
-    // TODO (rui): Better accommodate to the Worker abstraction
-    fn extract_dp_rank(worker_url: &str) -> Result<(&str, usize), String> {
-        let parts: Vec<&str> = worker_url.split('@').collect();
-        if parts.len() != 2 {
-            return Err(format!("invalid worker_url format: {}", worker_url));
-        }
-
-        // Parse the second part (dp_rank) into an integer
-        match parts[1].parse::<usize>() {
-            Ok(dp_rank) => Ok((parts[0], dp_rank)),
-            Err(_) => Err(format!(
-                "failed to parse dp_rank from worker_url: {}",
-                worker_url
-            )),
-        }
-    }
-
     // Send typed request directly without conversion
     async fn send_typed_request<T: serde::Serialize>(
         &self,
         headers: Option<&HeaderMap>,
         typed_req: &T,
         route: &'static str,
-        worker_url: &str,
+        worker: &dyn Worker,
         is_stream: bool,
         load_guard: Option<WorkerLoadGuard>,
     ) -> Response {
-        // Get the worker once and reuse for API key and load tracking
-        let worker = self.worker_registry.get_by_url(worker_url);
-        let api_key = worker.as_ref().and_then(|w| w.api_key().clone());
+        let api_key = worker.api_key().clone();
+        let endpoint_url = worker.endpoint_url(route);
 
-        // Static key string to avoid per-request allocations
-        const DP_RANK_KEY: &str = "data_parallel_rank";
-
-        let mut request_builder = if self.dp_aware {
-            let (worker_url_prefix, dp_rank) = match Self::extract_dp_rank(worker_url) {
-                Ok(tup) => tup,
-                Err(e) => {
-                    error!("Failed to extract dp_rank: {}", e);
-                    return error::internal_error(
-                        "dp_rank_extraction_failed",
-                        format!("Failed to extract dp_rank: {}", e),
-                    );
-                }
-            };
-
-            let mut json_val = match serde_json::to_value(typed_req) {
-                Ok(j) => j,
-                Err(e) => {
-                    return error::bad_request(
-                        "serialization_failed",
-                        format!("Convert into serde_json::Value failed: {}", e),
-                    );
-                }
-            };
-
-            if let Some(map) = json_val.as_object_mut() {
-                // Use static key string to avoid allocation
-                map.insert(DP_RANK_KEY.to_string(), serde_json::json!(dp_rank));
-                // Only serialize if debug logging is enabled to avoid CPU overhead
-                if tracing::enabled!(tracing::Level::DEBUG) {
-                    debug!(
-                        "Modified request body: {}",
-                        serde_json::to_string(&json_val).unwrap_or_else(|_| String::from("ERR"))
-                    );
-                }
-            } else {
+        let json_val = match serde_json::to_value(typed_req) {
+            Ok(j) => j,
+            Err(e) => {
                 return error::bad_request(
-                    "dp_rank_insertion_failed",
-                    "Failed to insert the data_parallel_rank field into the request body",
+                    "serialization_failed",
+                    format!("Convert into serde_json::Value failed: {}", e),
                 );
             }
-
-            self.client
-                .post(format!("{}{}", worker_url_prefix, route))
-                .json(&json_val)
-        } else {
-            self.client
-                .post(format!("{}{}", worker_url, route))
-                .json(typed_req) // Use json() directly with typed request
         };
+
+        let json_val = match worker.prepare_request(json_val).await {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                return error::bad_request(
+                    "request_preparation_failed",
+                    format!("Failed to prepare request: {}", e),
+                );
+            }
+        };
+
+        let mut request_builder = self.client.post(&endpoint_url).json(&json_val);
 
         if let Some(key) = api_key {
             // Pre-allocate string with capacity to avoid reallocation
@@ -562,7 +500,9 @@ impl Router {
             Err(e) => {
                 error!(
                     "Failed to send typed request worker_url={} route={} error={}",
-                    worker_url, route, e
+                    worker.url(),
+                    route,
+                    e
                 );
 
                 return convert_reqwest_error(e);
@@ -860,7 +800,6 @@ mod tests {
         Router {
             worker_registry,
             policy_registry,
-            dp_aware: false,
             client: Client::new(),
             retry_config: RetryConfig::default(),
             enable_igw: false,

@@ -16,7 +16,7 @@ use crate::{
         circuit_breaker::CircuitBreakerConfig,
         steps::workflow_data::LocalWorkerWorkflowData,
         worker::{RuntimeType, WorkerType},
-        BasicWorkerBuilder, ConnectionMode, DPAwareWorkerBuilder, Worker, UNKNOWN_MODEL_ID,
+        BasicWorkerBuilder, ConnectionMode, Worker, UNKNOWN_MODEL_ID,
     },
 };
 
@@ -327,18 +327,18 @@ fn create_dp_aware_workers(
 
     let mut workers = Vec::with_capacity(dp_info.dp_size);
     for rank in 0..dp_info.dp_size {
-        let mut builder =
-            DPAwareWorkerBuilder::new(normalized_url.to_string(), rank, dp_info.dp_size)
-                .model(model_card.clone())
-                .worker_type(worker_type)
-                .connection_mode(*connection_mode)
-                .runtime_type(runtime_type)
-                .circuit_breaker_config(circuit_breaker_config.clone())
-                .health_config(health_config.clone())
-                .health_endpoint(health_endpoint)
-                .bootstrap_port(config.bootstrap_port)
-                .priority(config.priority)
-                .cost(config.cost);
+        let mut builder = BasicWorkerBuilder::new(normalized_url.to_string())
+            .dp_config(rank, dp_info.dp_size)
+            .model(model_card.clone())
+            .worker_type(worker_type)
+            .connection_mode(*connection_mode)
+            .runtime_type(runtime_type)
+            .circuit_breaker_config(circuit_breaker_config.clone())
+            .health_config(health_config.clone())
+            .health_endpoint(health_endpoint)
+            .bootstrap_port(config.bootstrap_port)
+            .priority(config.priority)
+            .cost(config.cost);
 
         if let Some(ref api_key) = config.api_key {
             builder = builder.api_key(api_key.clone());
