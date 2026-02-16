@@ -22,7 +22,7 @@ use smg::{
     core::{
         circuit_breaker::CircuitBreaker,
         worker::{RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad},
-        ConnectionMode, ModelType, Worker, WorkerType,
+        ConnectionMode, Worker, WorkerType,
     },
     policies::{
         BucketPolicy, CacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
@@ -64,7 +64,6 @@ impl GrpcWorker {
         let metadata = WorkerMetadata {
             spec,
             health_endpoint: "/health".to_string(),
-            default_model_type: ModelType::LLM,
         };
         Self {
             client,

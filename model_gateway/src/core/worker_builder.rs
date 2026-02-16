@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use openai_protocol::{
     model_card::ModelCard,
-    model_type::ModelType,
     worker::{HealthCheckConfig, WorkerModels, WorkerSpec},
 };
 
@@ -23,9 +22,6 @@ pub struct BasicWorkerBuilder {
     health_endpoint: String,
     circuit_breaker_config: CircuitBreakerConfig,
     grpc_client: Option<GrpcClient>,
-    dp_rank: Option<usize>,
-    dp_size: Option<usize>,
-    dp_base_url: Option<String>,
 }
 
 impl BasicWorkerBuilder {
@@ -36,9 +32,6 @@ impl BasicWorkerBuilder {
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
-            dp_rank: None,
-            dp_size: None,
-            dp_base_url: None,
         }
     }
 
@@ -49,9 +42,6 @@ impl BasicWorkerBuilder {
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
-            dp_rank: None,
-            dp_size: None,
-            dp_base_url: None,
         }
     }
 
@@ -64,9 +54,6 @@ impl BasicWorkerBuilder {
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
-            dp_rank: None,
-            dp_size: None,
-            dp_base_url: None,
         }
     }
 
@@ -175,10 +162,11 @@ impl BasicWorkerBuilder {
     /// Configure data-parallel routing.
     /// Captures the current URL as the base URL, then formats it as `{base}@{rank}`.
     pub fn dp_config(mut self, rank: usize, size: usize) -> Self {
-        self.dp_base_url = Some(self.spec.url.clone());
-        self.spec.url = format!("{}@{}", self.dp_base_url.as_ref().unwrap(), rank);
-        self.dp_rank = Some(rank);
-        self.dp_size = Some(size);
+        let base_url = self.spec.url.clone();
+        self.spec.url = format!("{}@{}", base_url, rank);
+        self.spec.dp_base_url = Some(base_url);
+        self.spec.dp_rank = Some(rank);
+        self.spec.dp_size = Some(size);
         self
     }
 
@@ -197,7 +185,6 @@ impl BasicWorkerBuilder {
         let metadata = WorkerMetadata {
             spec: self.spec,
             health_endpoint: self.health_endpoint,
-            default_model_type: ModelType::LLM,
         };
 
         // Use OnceCell for lock-free gRPC client access after initialization
@@ -228,9 +215,6 @@ impl BasicWorkerBuilder {
             metadata,
             grpc_client,
             models_override: Arc::new(StdRwLock::new(None)),
-            dp_rank: self.dp_rank,
-            dp_size: self.dp_size,
-            dp_base_url: self.dp_base_url,
         }
     }
 }
