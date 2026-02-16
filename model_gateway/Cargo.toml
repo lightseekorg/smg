@@ -136,6 +136,11 @@ base64 = "0.22"
 kv-index.workspace = true
 
 [[bench]]
+name = "wasm_buffering_bottleneck"
+harness = false
+path = "benches/wasm_buffering_bottleneck.rs"
+
+[[bench]]
 name = "wasm_middleware_latency"
 harness = false
 path = "benches/wasm_middleware_latency.rs"
