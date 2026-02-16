@@ -86,18 +86,22 @@ thread_local! {
     static RATE_LIMIT_STATE: RefCell<RateLimitState> = RefCell::new(RateLimitState::new());
 }
 
-fn get_identifier(req: &Request) -> String {
-    // Helper function to find header value
-    let find_header_value =
-        |headers: &[smg::gateway::middleware_types::Header], name: &str| -> Option<String> {
-            headers
-                .iter()
-                .find(|h| h.name.eq_ignore_ascii_case(name))
-                .map(|h| h.value.clone())
-        };
+fn find_header_value(
+    headers: &[smg::gateway::middleware_types::Header],
+    name: &str,
+) -> Option<String> {
+    headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case(name))
+        .map(|h| h.value.clone())
+}
 
+fn get_identifier_from_headers(
+    headers: &[smg::gateway::middleware_types::Header],
+    request_id: &str,
+) -> String {
     // Prefer API Key as identifier (more stable than IP)
-    if let Some(auth_header) = find_header_value(&req.headers, "authorization") {
+    if let Some(auth_header) = find_header_value(headers, "authorization") {
         if auth_header.starts_with("Bearer ") {
             return format!("api_key:{}", &auth_header[7..]);
         } else if auth_header.starts_with("ApiKey ") {
@@ -105,12 +109,12 @@ fn get_identifier(req: &Request) -> String {
         }
     }
 
-    if let Some(api_key) = find_header_value(&req.headers, "x-api-key") {
+    if let Some(api_key) = find_header_value(headers, "x-api-key") {
         return format!("api_key:{}", api_key);
     }
 
     // Fall back to IP address from forwarded headers
-    if let Some(forwarded_for) = find_header_value(&req.headers, "x-forwarded-for") {
+    if let Some(forwarded_for) = find_header_value(headers, "x-forwarded-for") {
         // Take first IP from comma-separated list
         let ip = forwarded_for.split(',').next().unwrap_or("").trim();
         if !ip.is_empty() {
@@ -118,45 +122,48 @@ fn get_identifier(req: &Request) -> String {
         }
     }
 
-    if let Some(real_ip) = find_header_value(&req.headers, "x-real-ip") {
+    if let Some(real_ip) = find_header_value(headers, "x-real-ip") {
         return format!("ip:{}", real_ip);
     }
 
     // Last resort: use request ID (not ideal, but better than nothing)
-    format!("req_id:{}", req.request_id)
+    format!("req_id:{}", request_id)
 }
 
-// Implement on-request interface
+/// Shared rate-limit check used by both full-body and headers-only handlers.
+fn check_rate_limit(
+    headers: &[smg::gateway::middleware_types::Header],
+    request_id: &str,
+    now_epoch_ms: u64,
+) -> Action {
+    let identifier = get_identifier_from_headers(headers, request_id);
+    RATE_LIMIT_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if !state.check_limit(&identifier, now_epoch_ms) {
+            return Action::Reject(429);
+        }
+        Action::Continue
+    })
+}
+
+// Implement on-request interface (full-body path)
 impl OnRequestGuest for Middleware {
     fn on_request(req: Request) -> Action {
-        let identifier = get_identifier(&req);
-        let current_time_ms = req.now_epoch_ms;
-
-        // Access thread-local state safely without unsafe blocks
-        // Each thread gets its own RateLimitState instance
-        RATE_LIMIT_STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            if !state.check_limit(&identifier, current_time_ms) {
-                // Rate limit exceeded
-                return Action::Reject(429);
-            }
-            // Within rate limit, continue processing
-            Action::Continue
-        })
+        check_rate_limit(&req.headers, &req.request_id, req.now_epoch_ms)
     }
 }
 
-// Implement on-response interface (empty - not used for rate limiting)
+// Implement on-response interface (not used for rate limiting)
 impl OnResponseGuest for Middleware {
     fn on_response(_resp: Response) -> Action {
         Action::Continue
     }
 }
 
-// Headers-only stubs (required by the WIT world, unused with default body_policy)
+// Headers-only interfaces — same rate-limit logic, no body needed
 impl OnRequestHeadersGuest for Middleware {
-    fn on_request_headers(_req: RequestHeaders) -> Action {
-        Action::Continue
+    fn on_request_headers(req: RequestHeaders) -> Action {
+        check_rate_limit(&req.headers, &req.request_id, req.now_epoch_ms)
     }
 }
 
@@ -168,3 +175,4 @@ impl OnResponseHeadersGuest for Middleware {
 
 // Export the component
 export!(Middleware);
+
