@@ -40,6 +40,18 @@ Rate limiting middleware with configurable limits.
 
 **Use case:** Protect against request flooding and abuse.
 
+### [wasm-guest-auth-streaming](./wasm-guest-auth-streaming/)
+
+Headers-only API key authentication — a streaming-optimised variant of `wasm-guest-auth`.
+
+**Features:**
+- Same auth logic as `wasm-guest-auth`, but uses `on-request-headers` / `on-response-headers`
+- Body streams through untouched — no buffering overhead
+- Deploy with `body_policy: "HeadersOnly"` for near-zero TTFB impact
+- Attach point: `OnRequest` only
+
+**Use case:** Auth middleware on streaming/SSE endpoints where TTFB matters.
+
 ## Quick Start
 
 Each example includes its own README with detailed build and deployment instructions. See individual example directories for:
@@ -62,7 +74,7 @@ All examples require:
 
 ```bash
 cd examples/wasm
-for example in wasm-guest-auth wasm-guest-logging wasm-guest-ratelimit; do
+for example in wasm-guest-auth wasm-guest-logging wasm-guest-ratelimit wasm-guest-auth-streaming; do
   echo "Building $example..."
   cd $example && ./build.sh && cd ..
 done
@@ -94,6 +106,13 @@ curl -X POST http://localhost:3000/wasm \
         "file_path": "/path/to/wasm_guest_ratelimit.component.wasm",
         "module_type": "Middleware",
         "attach_points": [{"Middleware": "OnRequest"}]
+      },
+      {
+        "name": "auth-streaming",
+        "file_path": "/path/to/wasm_guest_auth_streaming.component.wasm",
+        "module_type": "Middleware",
+        "attach_points": [{"Middleware": "OnRequest"}],
+        "body_policy": "HeadersOnly"
       }
     ]
   }'

@@ -1,6 +1,6 @@
 use std::{
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -20,7 +20,6 @@ use smg::{
     server::AppState,
     wasm::module::{
         BodyPolicy, MiddlewareAttachPoint, WasmModule, WasmModuleAttachPoint, WasmModuleMeta,
-        WasmModuleType,
     },
 };
 use tokio::runtime::Runtime;
