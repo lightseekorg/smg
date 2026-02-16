@@ -20,6 +20,9 @@ use crate::{observability::metrics::Metrics, routers::grpc::client::GrpcClient};
 /// Callers with a pre-built `WorkerSpec` can use [`from_spec()`](Self::from_spec).
 pub struct BasicWorkerBuilder {
     spec: WorkerSpec,
+    /// Resolved health config (router defaults + per-worker overrides).
+    /// If not set, falls back to `HealthCheckConfig::default()`.
+    health_config: Option<HealthCheckConfig>,
     health_endpoint: String,
     circuit_breaker_config: CircuitBreakerConfig,
     grpc_client: Option<GrpcClient>,
@@ -33,6 +36,7 @@ impl BasicWorkerBuilder {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             spec: WorkerSpec::new(url),
+            health_config: None,
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
@@ -46,6 +50,7 @@ impl BasicWorkerBuilder {
     pub fn from_spec(spec: WorkerSpec) -> Self {
         Self {
             spec,
+            health_config: None,
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
@@ -61,6 +66,7 @@ impl BasicWorkerBuilder {
         spec.worker_type = worker_type;
         Self {
             spec,
+            health_config: None,
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
@@ -112,9 +118,12 @@ impl BasicWorkerBuilder {
         self
     }
 
-    /// Set health check configuration (protocol-level fields).
+    /// Set the resolved health check configuration.
+    ///
+    /// This is the fully-resolved config (router defaults + per-worker overrides)
+    /// stored on `WorkerMetadata` for runtime use.
     pub fn health_config(mut self, config: HealthCheckConfig) -> Self {
-        self.spec.health = config;
+        self.health_config = Some(config);
         self
     }
 
@@ -194,8 +203,15 @@ impl BasicWorkerBuilder {
         // Derive bootstrap_host from URL at construction time
         self.spec.bootstrap_host = parse_bootstrap_host(&self.spec.url);
 
+        // Resolve health config: use explicit config if set, otherwise
+        // apply per-worker overrides from spec.health to defaults.
+        let health_config = self
+            .health_config
+            .unwrap_or_else(|| self.spec.health.apply_to(&HealthCheckConfig::default()));
+
         let metadata = WorkerMetadata {
             spec: self.spec,
+            health_config,
             health_endpoint: self.health_endpoint,
             default_model_type: ModelType::LLM,
         };
@@ -236,20 +252,41 @@ impl BasicWorkerBuilder {
 }
 
 /// Parse bootstrap hostname from a URL, falling back to "localhost".
+///
+/// Handles DP-aware URLs like `http://host:8080@3` by stripping the `@rank`
+/// suffix before parsing, since `@` is otherwise interpreted as a userinfo
+/// delimiter per RFC 3986.
 fn parse_bootstrap_host(url: &str) -> String {
-    match url::Url::parse(url) {
-        Ok(parsed) => parsed.host_str().unwrap_or("localhost").to_string(),
-        Err(_) if !url.contains("://") => match url::Url::parse(&format!("http://{}", url)) {
-            Ok(parsed) => parsed.host_str().unwrap_or("localhost").to_string(),
-            Err(_) => {
-                tracing::warn!("Failed to parse URL '{}', defaulting to localhost", url);
-                "localhost".to_string()
-            }
-        },
-        Err(_) => {
+    // Strip DP rank suffix (e.g., "http://host:8080@3" -> "http://host:8080")
+    let clean_url = match url.rfind('@') {
+        Some(at_pos)
+            if !url[at_pos + 1..].is_empty()
+                && url[at_pos + 1..].chars().all(|c| c.is_ascii_digit()) =>
+        {
+            &url[..at_pos]
+        }
+        _ => url,
+    };
+
+    // Try parsing as-is first. If the URL lacks a scheme (e.g., "worker1:8080"),
+    // Url::parse may treat the host as a scheme — detect this via missing host_str()
+    // and fall back to prefixing "http://".
+    let try_parse = |u: &str| -> Option<String> {
+        url::Url::parse(u)
+            .ok()
+            .and_then(|p| p.host_str().map(|h| h.to_string()))
+    };
+
+    if let Some(host) = try_parse(clean_url) {
+        host
+    } else if !clean_url.contains("://") {
+        try_parse(&format!("http://{}", clean_url)).unwrap_or_else(|| {
             tracing::warn!("Failed to parse URL '{}', defaulting to localhost", url);
             "localhost".to_string()
-        }
+        })
+    } else {
+        tracing::warn!("Failed to parse URL '{}', defaulting to localhost", url);
+        "localhost".to_string()
     }
 }
 
@@ -318,19 +355,19 @@ mod tests {
         assert_eq!(worker.metadata().spec.labels, labels);
         assert_eq!(worker.metadata().health_endpoint, "/health");
         assert_eq!(
-            worker.metadata().spec.health.timeout_secs,
+            worker.metadata().health_config.timeout_secs,
             health_config.timeout_secs
         );
         assert_eq!(
-            worker.metadata().spec.health.check_interval_secs,
+            worker.metadata().health_config.check_interval_secs,
             health_config.check_interval_secs
         );
         assert_eq!(
-            worker.metadata().spec.health.failure_threshold,
+            worker.metadata().health_config.failure_threshold,
             health_config.failure_threshold
         );
         assert_eq!(
-            worker.metadata().spec.health.success_threshold,
+            worker.metadata().health_config.success_threshold,
             health_config.success_threshold
         );
     }
@@ -395,19 +432,19 @@ mod tests {
         assert_eq!(worker.metadata().spec.labels, labels);
         assert_eq!(worker.metadata().health_endpoint, "/status");
         assert_eq!(
-            worker.metadata().spec.health.timeout_secs,
+            worker.metadata().health_config.timeout_secs,
             health_config.timeout_secs
         );
         assert_eq!(
-            worker.metadata().spec.health.check_interval_secs,
+            worker.metadata().health_config.check_interval_secs,
             health_config.check_interval_secs
         );
         assert_eq!(
-            worker.metadata().spec.health.failure_threshold,
+            worker.metadata().health_config.failure_threshold,
             health_config.failure_threshold
         );
         assert_eq!(
-            worker.metadata().spec.health.success_threshold,
+            worker.metadata().health_config.success_threshold,
             health_config.success_threshold
         );
     }
@@ -430,5 +467,43 @@ mod tests {
             worker.metadata().spec.labels.get("transport"),
             Some(&"grpc".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_bootstrap_host_normal_url() {
+        assert_eq!(parse_bootstrap_host("http://worker1:8080"), "worker1");
+        assert_eq!(parse_bootstrap_host("https://10.0.0.5:443"), "10.0.0.5");
+        assert_eq!(
+            parse_bootstrap_host("grpc://cluster.local"),
+            "cluster.local"
+        );
+    }
+
+    #[test]
+    fn test_parse_bootstrap_host_dp_aware_url() {
+        // DP-aware URLs use @rank suffix — must extract host, not rank
+        assert_eq!(parse_bootstrap_host("http://worker1:8080@0"), "worker1");
+        assert_eq!(parse_bootstrap_host("http://worker1:8080@3"), "worker1");
+        assert_eq!(
+            parse_bootstrap_host("grpc://prefill.local@7"),
+            "prefill.local"
+        );
+    }
+
+    #[test]
+    fn test_parse_bootstrap_host_bare_host() {
+        assert_eq!(parse_bootstrap_host("worker1:8080"), "worker1");
+        assert_eq!(parse_bootstrap_host("localhost"), "localhost");
+    }
+
+    #[test]
+    fn test_dp_aware_worker_bootstrap_host() {
+        let worker = BasicWorkerBuilder::new("http://prefill1:8080")
+            .dp_config(3, 8)
+            .worker_type(WorkerType::Prefill)
+            .build();
+
+        // bootstrap_host should be "prefill1", not "3"
+        assert_eq!(worker.metadata().spec.bootstrap_host, "prefill1");
     }
 }
