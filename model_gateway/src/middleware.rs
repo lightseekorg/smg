@@ -809,7 +809,7 @@ pub async fn wasm_middleware(
     let response = if modules_on_request.is_empty() {
         next.run(request).await
     } else if request_needs_body {
-        // === Full-body path (existing behavior) ===
+        // Full-body path (existing behavior)
         // At least one module requires the body, so we must buffer.
         let method = request.method().clone();
         let uri = request.uri().clone();
@@ -890,7 +890,7 @@ pub async fn wasm_middleware(
         *final_request.headers_mut() = headers;
         next.run(final_request).await
     } else {
-        // === Headers-only path (streaming optimization) ===
+        // Headers-only path (streaming optimization)
         // No modules need the body — pass headers only, body streams through untouched.
         let method = request.method().clone();
         let uri = request.uri().clone();
@@ -973,7 +973,7 @@ pub async fn wasm_middleware(
     };
 
     if response_needs_body {
-        // === Full-body path (existing behavior) ===
+        // Full-body path (existing behavior)
         let mut status = response.status();
         let mut headers = response.headers().clone();
         let max_body_size = wasm_manager.get_max_body_size();
@@ -1042,7 +1042,7 @@ pub async fn wasm_middleware(
         *final_response.headers_mut() = headers;
         Ok(final_response)
     } else {
-        // === Headers-only path (streaming optimization) ===
+        // Headers-only path (streaming optimization)
         // No modules need the body — pass headers/status only, body streams through.
         let mut status = response.status();
         let mut headers = response.headers().clone();
