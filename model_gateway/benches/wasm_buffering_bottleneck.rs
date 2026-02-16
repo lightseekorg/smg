@@ -79,8 +79,8 @@ fn bench_wasm_bottleneck(c: &mut Criterion) {
     let config = RouterConfig::builder().enable_wasm(true).build_unchecked();
     let context = rt.block_on(AppContext::from_config(config, 30)).unwrap();
 
-    // REGISTER A DUMMY MODULE
-    // This ensures the middleware doesn't skip buffering
+    // REGISTER A DUMMY MODULE with HeadersOnly policy.
+    // This benchmarks the optimized streaming path where buffering is skipped.
     if let Some(wasm_manager) = context.wasm_manager.as_ref() {
         let wasm_bytes = create_dummy_wasm_bytes();
         let module_uuid = Uuid::new_v4();
@@ -120,7 +120,7 @@ fn bench_wasm_bottleneck(c: &mut Criterion) {
         mesh_handler: None,
     });
 
-    c.bench_function("wasm_middleware_buffering_bottleneck", |b| {
+    c.bench_function("wasm_middleware_headers_only_streaming", |b| {
         b.iter(|| {
             rt.block_on(async {
                 let req = Request::builder()
@@ -137,8 +137,8 @@ fn bench_wasm_bottleneck(c: &mut Criterion) {
                 let response = service.call(req).await.unwrap();
                 let mut body = response.into_body();
 
-                // Measure time to receive the FIRST frame.
-                // With buffering, this will be >500ms.
+                // With HeadersOnly, the first frame arrives immediately (<1ms)
+                // since the body streams through without buffering.
                 let _ = body.frame().await;
             });
         });
@@ -147,7 +147,7 @@ fn bench_wasm_bottleneck(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().sample_size(10); // Low sample size because each iteration is 500ms+
+    config = Criterion::default().sample_size(50);
     targets = bench_wasm_bottleneck
 }
 criterion_main!(benches);

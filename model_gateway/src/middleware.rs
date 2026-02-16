@@ -1070,7 +1070,10 @@ pub async fn wasm_middleware(
                 Action::Continue => {}
                 Action::Reject(status_code) => {
                     status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_REQUEST);
-                    // Reject in headers-only mode: return immediately with empty body
+                    // Reject in headers-only mode: return immediately with empty body.
+                    // Strip body-related headers that would contradict the empty body.
+                    headers.remove(header::CONTENT_LENGTH);
+                    headers.remove(header::TRANSFER_ENCODING);
                     let final_response = Response::builder()
                         .status(status)
                         .body(Body::empty())
