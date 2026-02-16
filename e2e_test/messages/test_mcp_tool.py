@@ -206,7 +206,9 @@ class TestMcpToolStream:
                 try:
                     parsed = json.loads(full_json)
                 except json.JSONDecodeError as exc:
-                    pytest.fail(f"Failed to parse tool input at index {idx}: {full_json!r} -> {exc}")
+                    pytest.fail(
+                        f"Failed to parse tool input at index {idx}: {full_json!r} -> {exc}"
+                    )
                 assert isinstance(parsed, dict), f"Tool input at index {idx} should be a dict"
 
         # Should have text_delta events
