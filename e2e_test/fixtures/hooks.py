@@ -288,7 +288,7 @@ def get_pool_requirements() -> list[WorkerIdentity]:
         for i in range(count):
             requirements.append(WorkerIdentity(model_id, mode, worker_type, i))
 
-    if not requirements:
+    if not requirements and _needs_default_model:
         requirements.append(WorkerIdentity(DEFAULT_MODEL, ConnectionMode.HTTP))
 
     return requirements
