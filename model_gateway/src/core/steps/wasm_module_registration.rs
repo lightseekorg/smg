@@ -367,8 +367,8 @@ impl StepExecutor<WasmRegistrationWorkflowData> for LoadWasmBytesStep {
                     message: format!("Failed to read WASM file {}: {}", file_path, e),
                 })?;
 
-        // Store WASM bytes in typed data
-        context.data.wasm_bytes = Some(wasm_bytes);
+        // Store WASM bytes in typed data (wrapped in Arc for cheap cloning during execution)
+        context.data.wasm_bytes = Some(Arc::new(wasm_bytes));
 
         info!("WASM bytes loaded from: {}", path_for_log);
         Ok(StepResult::Success)
@@ -413,7 +413,7 @@ impl StepExecutor<WasmRegistrationWorkflowData> for ValidateWasmComponentStep {
         })?;
 
         // Attempt to compile the component to validate it
-        Component::new(&engine, wasm_bytes)
+        Component::new(&engine, wasm_bytes.as_ref())
             .map_err(|e| WorkflowError::StepFailed {
                 step_id: StepId::new("validate_wasm_component"),
                 message: format!(
@@ -466,7 +466,7 @@ impl StepExecutor<WasmRegistrationWorkflowData> for RegisterModuleStep {
             .wasm_bytes
             .as_ref()
             .ok_or_else(|| WorkflowError::ContextValueNotFound("wasm_bytes".to_string()))?
-            .clone();
+            .clone(); // Arc clone (cheap)
 
         let descriptor = &context.data.config.descriptor;
 
