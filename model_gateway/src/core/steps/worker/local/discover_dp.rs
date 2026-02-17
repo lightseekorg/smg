@@ -1,11 +1,13 @@
 //! Data Parallel (DP) information discovery step.
 
 use async_trait::async_trait;
-use tracing::debug;
+use tracing::{debug, warn};
 use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use super::discover_metadata::get_server_info;
-use crate::core::{steps::workflow_data::LocalWorkerWorkflowData, UNKNOWN_MODEL_ID};
+use crate::core::{
+    steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode, UNKNOWN_MODEL_ID,
+};
 
 /// DP (Data Parallel) information for a worker.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -57,6 +59,20 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverDPInfoStep {
                 config.url
             );
             return Ok(StepResult::Success);
+        }
+
+        // DP discovery uses SGLang's /server_info which exposes dp_size.
+        // Only proceed for sglang HTTP workers — other runtimes don't expose DP info this way.
+        if matches!(context.data.connection_mode, Some(ConnectionMode::Http)) {
+            let runtime = context.data.detected_runtime_type.as_deref();
+            if runtime != Some("sglang") {
+                warn!(
+                    "DP discovery is not supported for {} HTTP workers ({}), skipping",
+                    runtime.unwrap_or("unknown"),
+                    config.url
+                );
+                return Ok(StepResult::Success);
+            }
         }
 
         debug!("Discovering DP info for {} (DP-aware)", config.url);
