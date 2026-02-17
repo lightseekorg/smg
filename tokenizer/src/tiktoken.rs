@@ -211,10 +211,7 @@ impl TiktokenTokenizer {
     }
 
     /// Core loading logic shared by `from_dir` and `from_file` constructors.
-    fn load_from_path(
-        tiktoken_path: &Path,
-        chat_template_path: Option<&str>,
-    ) -> Result<Self> {
+    fn load_from_path(tiktoken_path: &Path, chat_template_path: Option<&str>) -> Result<Self> {
         // 1. Load BPE encoder from the exact file
         let tiktoken_path_str = tiktoken_path
             .to_str()

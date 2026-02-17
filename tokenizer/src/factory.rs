@@ -75,7 +75,7 @@ pub fn create_tokenizer_with_chat_template(
         }
 
         return Err(Error::msg(format!(
-            "Directory '{}' does not contain a valid tokenizer file (tokenizer.json, tiktoken.model, or vocab.json)",
+            "Directory '{}' does not contain a valid tokenizer file (tokenizer.json, tiktoken.model, *.tiktoken, or vocab.json)",
             file_path
         )));
     }
