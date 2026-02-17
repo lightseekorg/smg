@@ -215,14 +215,16 @@ impl TiktokenTokenizer {
         let (vocab, reverse_vocab) = build_vocab_maps(&encoder, &config.added_tokens);
         let tokenizer = CoreBPE::new(encoder, special_tokens_encoder, CL100K_BASE_PATTERN)?;
 
-        // 5. Load chat template
-        let chat_template = chat_template_path
-            .and_then(|p| load_chat_template_from_file(p).ok().flatten())
-            .or(config.chat_template)
-            .or_else(|| {
+        // 5. Load chat template — propagate errors for explicit paths,
+        //    silently fall back for auto-discovery
+        let chat_template = if let Some(p) = chat_template_path {
+            load_chat_template_from_file(p)?
+        } else {
+            config.chat_template.or_else(|| {
                 discover_chat_template_in_dir(dir)
                     .and_then(|p| load_chat_template_from_file(&p).ok().flatten())
-            });
+            })
+        };
 
         Ok(TiktokenTokenizer {
             tokenizer,
