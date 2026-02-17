@@ -73,6 +73,11 @@ args:
   - "29000"
   - "--prometheus-host"
   - "0.0.0.0"
+  - "--history-backend"
+  - "oracle"
+  - "--oracle-connect-descriptor"
+  - "tcps://adb.us-sanjose-1.oraclecloud.com:1522/g9fe6ef5b169add_eprjahpmqahvuj8j_high.adb.oraclecloud.com?ssl_server_dn_match=true"
+  - "--oracle-external-auth"
 
 # This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
 ingress:
@@ -122,17 +127,70 @@ autoscaling:
   # targetMemoryUtilizationPercentage: 80
 
 # Additional volumes on the output Deployment definition.
-volumes: []
-# - name: foo
-#   secret:
-#     secretName: mysecret
-#     optional: false
+volumes:
+  - name: region
+    hostPath:
+      path: /etc/region
+      type: File
+  - name: tmp
+    hostPath:
+      path: /tmp
+      type: Directory
+  - name: host-class
+    hostPath:
+      path: /etc/hostclass
+      type: File
+  - name: etc-avalability-domain
+    hostPath:
+      path: /etc/availability-domain
+      type: File
+  - name: etc-fault-domain
+    hostPath:
+      path: /etc/fault-domain
+      type: File
+  - name: etc-pki
+    hostPath:
+      path: /etc/pki
+      type: Directory
+  - name: etc-hosts
+    hostPath:
+      path: /etc/hosts
+      type: File
+  - name: etc-ocipki
+    hostPath:
+      path: /etc/oci-pki
+      type: Directory
+  - name: etc-identity-realm
+    hostPath:
+      path: /etc/identity-realm
+      type: File
 
 # Additional volumeMounts on the output Deployment definition.
-volumeMounts: []
-# - name: foo
-#   mountPath: "/etc/foo"
-#   readOnly: true
+volumeMounts:
+  - mountPath: /etc/region
+    name: region
+    readOnly: true
+  - mountPath: /etc/hostclass
+    name: host-class
+    readOnly: true
+  - mountPath: /etc/availability-domain
+    name: etc-avalability-domain
+    readOnly: true
+  - mountPath: /etc/fault-domain
+    name: etc-fault-domain
+    readOnly: true
+  - mountPath: /etc/pki
+    name: etc-pki
+    readOnly: true
+  - mountPath: /etc/hosts
+    name: etc-hosts
+    readOnly: true
+  - mountPath: /etc/oci-pki
+    name: etc-ocipki
+    readOnly: true
+  - mountPath: /etc/identity-realm
+    name: etc-identity-realm
+    readOnly: true
 
 csiSecretsStore:
   enabled: true

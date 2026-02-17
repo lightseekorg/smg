@@ -1,27 +1,48 @@
 #!/bin/bash
-# Initialize environment variables from mounted secrets
-
 set -e
 
-# Function to read secret file and set env var
-set_secret_env() {
-    local secret_file="$1"
-    local env_var="$2"
+# ── 1. Read secrets FIRST ────────────────────────────────────────────────
+echo "Reading OpenAI API key from secret file..."
+if [[ -f "/mnt/openai-secrets/openai-passthrough-api-key" ]]; then
+    OPENAI_API_KEY=$(tr -d '\n\r' < /mnt/openai-secrets/openai-passthrough-api-key)
+    export OPENAI_API_KEY
 
-    if [[ -f "$secret_file" ]]; then
-        local secret_value
-        secret_value=$(cat "$secret_file" | tr -d '\n\r')
-        export "$env_var=$secret_value"
-        echo "Set $env_var from $secret_file"
-    else
-        echo "Warning: Secret file $secret_file not found"
+    if [[ ${#OPENAI_API_KEY} -eq 0 ]]; then
+        echo "ERROR: OPENAI_API_KEY is empty!"
+        exit 1
     fi
-}
 
-# Read secrets from mounted volume
-set_secret_env "/mnt/openai-secrets/openai-passthrough-api-key" "OPENAI_API_KEY"
+    echo "OPENAI_API_KEY exported successfully (length: ${#OPENAI_API_KEY})"
+    echo "export OPENAI_API_KEY=\"$OPENAI_API_KEY\"" >> /etc/environment
+    echo "export OPENAI_API_KEY=\"$OPENAI_API_KEY\"" >> /etc/bash.bashrc
+    echo "export OPENAI_API_KEY=\"$OPENAI_API_KEY\"" >> /root/.bashrc
+    echo "✅ API key made available to all container shells"
+else
+    echo "ERROR: OpenAI API key file not found"
+    exit 1
+fi
 
-echo "Secret initialization complete"
+# ── 2. Oracle configuration ──────────────────────────────────────────────
+cat > /opt/oracle/instantclient/network/admin/sqlnet.ora <<'EOF'
+TOKEN_AUTH=OCI_TOKEN
+SSL_SERVER_DN_MATCH=YES
+EOF
 
-# Execute the main application (python3 -m smg.launch_router) with all arguments
-exec python3 -m smg.launch_router "$@"
+# ── 3. OCI token - get FIRST token synchronously before server starts ────
+echo "Getting initial OCI IAM token..."
+oci iam db-token get --auth instance_principal
+echo "✅ Initial token acquired"
+
+# Start background refresh loop
+( while true; do sleep 3000; oci iam db-token get --auth instance_principal; done ) &
+
+# ── 4. Start server ─────────────────────────────────────────────────────
+echo "Starting SMG application..."
+python3 -m smg.launch_router "$@" &
+APP_PID=$!
+
+# ── 5. Setup worker in background ───────────────────────────────────────
+bash /app/setup-worker.sh &
+
+# ── 6. Keep container alive ─────────────────────────────────────────────
+wait $APP_PID

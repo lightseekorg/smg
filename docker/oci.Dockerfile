@@ -64,6 +64,11 @@ RUN microdnf install -y unzip \
 
 ENV LD_LIBRARY_PATH="/opt/oracle/instantclient:${LD_LIBRARY_PATH}"
 ENV ORACLE_HOME="/opt/oracle/instantclient"
+ENV TNS_ADMIN="/opt/oracle/instantclient/network/admin"
+ENV PATH="/opt/oracle/instantclient:${PATH}"
+
+# Configure Oracle Instant Client for IAM authentication
+RUN mkdir -p /opt/oracle/instantclient/network/admin
 
 # Create directory for Oracle wallet (mount at runtime)
 RUN mkdir -p /opt/oracle/wallet
@@ -72,14 +77,14 @@ COPY --from=build-image /opt/smg/bindings/python/dist/*.whl dist/
 
 RUN uv pip install --force-reinstall dist/*.whl
 
-RUN uv pip install oci-cli --index-url https://pypi.org/simple
+RUN uv pip install oci-cli
 
 RUN rm -rf /root/.cache dist/
 RUN microdnf install -y procps-ng \
     && microdnf clean all
 
 # Copy and setup secrets initialization script
-COPY scripts/startup.sh /app/startup.sh
-RUN chmod +x /app/startup.sh
+COPY scripts/startup.sh scripts/setup-worker.sh /app/
+RUN chmod +x /app/startup.sh /app/setup-worker.sh
 
 ENTRYPOINT ["/app/startup.sh"]
