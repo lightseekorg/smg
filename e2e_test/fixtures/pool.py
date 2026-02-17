@@ -10,6 +10,7 @@ import atexit
 import logging
 import os
 import threading
+from collections.abc import Generator
 from typing import TYPE_CHECKING
 
 import pytest
@@ -22,7 +23,7 @@ from .hooks import get_pool_requirements
 logger = logging.getLogger(__name__)
 
 # Global model pool instance with thread-safe initialization
-_model_pool: "ModelPool | None" = None
+_model_pool: ModelPool | None = None
 _model_pool_lock = threading.Lock()
 _shutdown_registered = False
 
@@ -42,7 +43,7 @@ def _shutdown_model_pool() -> None:
 
 
 @pytest.fixture(scope="session")
-def model_pool(request: pytest.FixtureRequest) -> "ModelPool":
+def model_pool(request: pytest.FixtureRequest) -> ModelPool:
     """Session-scoped fixture that manages SGLang worker processes.
 
     Workers (sglang.launch_server) are expensive to start (~30-60s each due to
@@ -62,7 +63,7 @@ def model_pool(request: pytest.FixtureRequest) -> "ModelPool":
     - @pytest.mark.workers(prefill=N, decode=N) for PD workers
 
     Environment variable overrides:
-    - E2E_MODELS: Comma-separated model IDs (e.g., "llama-8b,qwen-7b")
+    - E2E_MODELS: Comma-separated model IDs (e.g., "meta-llama/Llama-3.1-8B-Instruct,Qwen/Qwen2.5-7B-Instruct")
     - E2E_BACKENDS: Comma-separated backends (e.g., "grpc,http")
     - SKIP_MODEL_POOL: Set to "1" to skip worker startup
     """
@@ -126,31 +127,28 @@ def model_pool(request: pytest.FixtureRequest) -> "ModelPool":
 
             # Create WorkerIdentity objects (regular workers only from env vars)
             requirements = [
-                WorkerIdentity(m, b, WorkerType.REGULAR, 0)
-                for m in models
-                for b in backend_modes
+                WorkerIdentity(m, b, WorkerType.REGULAR, 0) for m in models for b in backend_modes
             ]
-            logger.info(
-                "Using env var requirements: %s", [str(r) for r in requirements]
-            )
+            logger.info("Using env var requirements: %s", [str(r) for r in requirements])
         else:
             # Use scanned requirements from test markers
             requirements = get_pool_requirements()
-            logger.info(
-                "Using scanned requirements: %s", [str(r) for r in requirements]
-            )
+            logger.info("Using scanned requirements: %s", [str(r) for r in requirements])
 
         # Filter to valid models
         requirements = [r for r in requirements if r.model_id in MODEL_SPECS]
 
         if not requirements:
-            logger.warning("No valid requirements, model pool will be empty")
-            _model_pool = ModelPool(GPUAllocator(gpus=[]))
+            logger.info(
+                "No pre-launch requirements, model pool will start empty (on-demand launches still available)"
+            )
+            _model_pool = ModelPool(GPUAllocator())
             return _model_pool
 
         # Create and start the pool
         allocator = GPUAllocator()
-        _model_pool = ModelPool(allocator)
+        log_dir = os.environ.get("E2E_LOG_DIR")
+        _model_pool = ModelPool(allocator, log_dir=log_dir)
 
         startup_timeout = int(os.environ.get(ENV_STARTUP_TIMEOUT, "300"))
         _model_pool.startup(
@@ -173,11 +171,13 @@ def model_pool(request: pytest.FixtureRequest) -> "ModelPool":
 
 
 @pytest.fixture
-def model_client(request: pytest.FixtureRequest, model_pool: "ModelPool"):
+def model_client(
+    request: pytest.FixtureRequest, model_pool: ModelPool
+) -> Generator[object, None, None]:
     """Get OpenAI client for the model specified by @pytest.mark.model().
 
     Usage:
-        @pytest.mark.model("llama-8b")
+        @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
         def test_chat(model_client):
             response = model_client.chat.completions.create(...)
     """
@@ -211,11 +211,13 @@ def model_client(request: pytest.FixtureRequest, model_pool: "ModelPool"):
 
 
 @pytest.fixture
-def model_base_url(request: pytest.FixtureRequest, model_pool: "ModelPool") -> str:
+def model_base_url(
+    request: pytest.FixtureRequest, model_pool: ModelPool
+) -> Generator[str, None, None]:
     """Get the base URL for the model specified by @pytest.mark.model().
 
     Usage:
-        @pytest.mark.model("llama-8b")
+        @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
         def test_direct_http(model_base_url):
             response = httpx.get(f"{model_base_url}/health")
     """

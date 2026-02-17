@@ -49,9 +49,7 @@ class TestStateManagementCloud:
         created_events = [e for e in events if e.type == "response.created"]
         assert len(created_events) > 0
 
-        assert any(
-            e.type in ["response.completed", "response.in_progress"] for e in events
-        )
+        assert any(e.type in ["response.completed", "response.in_progress"] for e in events)
 
     def test_previous_response_id_chaining(self, setup_backend):
         """Test chaining responses using previous_response_id."""
@@ -157,10 +155,8 @@ class TestStateManagementCloud:
 
 
 @pytest.mark.e2e
-@pytest.mark.model("qwen-14b")
-@pytest.mark.gateway(
-    extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"]
-)
+@pytest.mark.model("Qwen/Qwen2.5-14B-Instruct")
+@pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestStateManagementLocal:
     """State management tests against local gRPC backend."""
@@ -201,9 +197,7 @@ class TestStateManagementLocal:
         created_events = [e for e in events if e.type == "response.created"]
         assert len(created_events) > 0
 
-        assert any(
-            e.type in ["response.completed", "response.in_progress"] for e in events
-        )
+        assert any(e.type in ["response.completed", "response.in_progress"] for e in events)
 
     def test_previous_response_id_chaining(self, setup_backend):
         """Test chaining responses using previous_response_id."""
@@ -256,10 +250,8 @@ class TestStateManagementLocal:
 
 
 @pytest.mark.e2e
-@pytest.mark.model("gpt-oss")
-@pytest.mark.gateway(
-    extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"]
-)
+@pytest.mark.model("openai/gpt-oss-20b")
+@pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestStateManagementHarmony:
     """State management tests against local gRPC backend with Harmony model."""
@@ -300,9 +292,7 @@ class TestStateManagementHarmony:
         created_events = [e for e in events if e.type == "response.created"]
         assert len(created_events) > 0
 
-        assert any(
-            e.type in ["response.completed", "response.in_progress"] for e in events
-        )
+        assert any(e.type in ["response.completed", "response.in_progress"] for e in events)
 
     def test_previous_response_id_chaining(self, setup_backend):
         """Test chaining responses using previous_response_id."""

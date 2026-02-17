@@ -26,7 +26,10 @@ pub use l0::{CacheStats, L0Cache};
 pub use l1::{L1Cache, L1CacheStats};
 use rayon::prelude::*;
 
-use crate::traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer};
+use crate::{
+    chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
+    traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer},
+};
 
 /// Configuration for the tokenizer cache
 #[derive(Debug, Clone)]
@@ -271,6 +274,18 @@ impl Tokenizer for CachedTokenizer {
 
     fn backend(&self) -> crate::traits::TokenizerBackend {
         self.inner.backend()
+    }
+
+    fn apply_chat_template(
+        &self,
+        messages: &[serde_json::Value],
+        params: ChatTemplateParams,
+    ) -> Result<String> {
+        self.inner.apply_chat_template(messages, params)
+    }
+
+    fn chat_template_content_format(&self) -> ChatTemplateContentFormat {
+        self.inner.chat_template_content_format()
     }
 }
 

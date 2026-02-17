@@ -2,17 +2,15 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
+use openai_protocol::common::GenerationRequest;
 use tracing::error;
 
-use crate::{
-    protocols::common::GenerationRequest,
-    routers::{
-        error,
-        grpc::{
-            common::stages::PipelineStage,
-            context::{PreparationOutput, RequestContext, RequestType},
-            utils,
-        },
+use crate::routers::{
+    error,
+    grpc::{
+        common::stages::PipelineStage,
+        context::{PreparationOutput, RequestContext, RequestType},
+        utils,
     },
 };
 

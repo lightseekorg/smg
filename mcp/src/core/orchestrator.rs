@@ -28,6 +28,7 @@
 
 use std::{
     borrow::Cow,
+    collections::HashMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -39,7 +40,7 @@ use dashmap::DashMap;
 use openai_protocol::responses::ResponseOutputItem;
 use rmcp::{
     model::{CallToolRequestParam, CallToolResult},
-    service::RunningService,
+    service::{RunningService, ServiceError},
     RoleClient,
 };
 use serde_json::Value;
@@ -52,6 +53,7 @@ use super::{
     handler::{HandlerRequestContext, RefreshRequest, SmgClientHandler},
     metrics::McpMetrics,
     pool::{McpConnectionPool, PoolKey},
+    reconnect::ReconnectionManager,
 };
 use crate::{
     approval::{
@@ -69,7 +71,7 @@ use crate::{
 /// Build request headers from token and custom headers.
 fn build_request_headers(
     token: &Option<String>,
-    custom_headers: &std::collections::HashMap<String, String>,
+    custom_headers: &HashMap<String, String>,
 ) -> McpResult<reqwest::header::HeaderMap> {
     let mut headers = reqwest::header::HeaderMap::new();
 
@@ -99,7 +101,7 @@ fn build_request_headers(
 fn build_http_client(
     proxy_config: Option<&McpProxyConfig>,
     token: &Option<String>,
-    custom_headers: &std::collections::HashMap<String, String>,
+    custom_headers: &HashMap<String, String>,
 ) -> McpResult<reqwest::Client> {
     let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
 
@@ -135,6 +137,17 @@ pub enum ToolCallResult {
     Success(ResponseOutputItem),
     /// Pending approval from user.
     PendingApproval(McpApprovalRequest),
+}
+
+/// Result of looking up a tool by name within allowed servers.
+#[derive(Debug, Clone)]
+enum ToolLookupResult {
+    /// Exactly one matching tool was found.
+    Found(Box<ToolEntry>),
+    /// No matching tool was found.
+    NotFound,
+    /// Multiple tools with the same name were found on different servers.
+    Collision(Vec<String>),
 }
 
 /// Internal result type for approval-checked execution.
@@ -224,7 +237,17 @@ pub struct ToolExecutionOutput {
     /// The call_id from the input (for matching).
     pub call_id: String,
     /// Name of the tool that was executed.
+    ///
+    /// This is the display name used for response transformation/output.
     pub tool_name: String,
+    /// Tool name received from the caller/model before resolution.
+    ///
+    /// When no aliasing is used, this is typically the same as `tool_name`.
+    pub invoked_tool_name: Option<String>,
+    /// Canonical MCP tool name resolved for execution.
+    ///
+    /// When no aliasing is used, this is typically the same as `tool_name`.
+    pub resolved_tool_name: Option<String>,
     /// Server key where the tool was executed (internal identifier, may be URL).
     pub server_key: String,
     /// User-facing server label for API responses.
@@ -281,6 +304,7 @@ pub struct McpOrchestrator {
     refresh_tx: mpsc::Sender<RefreshRequest>,
     active_executions: Arc<AtomicUsize>,
     shutdown_token: CancellationToken,
+    reconnection_locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
     /// Original config for reference.
     config: McpConfig,
 }
@@ -334,6 +358,7 @@ impl McpOrchestrator {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
+            reconnection_locks: DashMap::new(),
             config: config.clone(),
         };
 
@@ -380,6 +405,7 @@ impl McpOrchestrator {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
+            reconnection_locks: DashMap::new(),
             config: McpConfig::default(),
         }
     }
@@ -420,6 +446,7 @@ impl McpOrchestrator {
 
         let client = self.connect_server_impl(config, (*handler).clone()).await?;
         let client = Arc::new(client);
+        self.tool_inventory.clear_server_tools(&config.name);
 
         // Load tools from server
         self.load_server_inventory(&config.name, &client).await;
@@ -795,39 +822,16 @@ impl McpOrchestrator {
         result
     }
 
-    /// Call a tool by name within a set of allowed servers.
-    ///
-    /// This is the recommended entry point for callers who have:
-    /// - A tool name (from LLM response)
-    /// - A list of allowed server keys (from request configuration)
-    ///
-    /// The method handles:
-    /// - Looking up which server has the tool
-    /// - Detecting collisions (same tool name on multiple allowed servers)
-    /// - Returning proper errors for not-found or collision cases
-    ///
-    /// # Arguments
-    /// * `tool_name` - The tool name to call
-    /// * `arguments` - Tool arguments as JSON
-    /// * `allowed_servers` - Server keys to search within (filters scope)
-    /// * `request_ctx` - Request context for approval and tenant isolation
-    ///
-    /// # Errors
-    /// * `ToolNotFound` - Tool doesn't exist on any allowed server
-    /// * `ToolCollision` - Tool exists on multiple allowed servers
-    pub async fn call_tool_by_name(
+    /// Find a tool entry by name within allowed servers with explicit collision reporting.
+    fn find_tool_by_name_detailed(
         &self,
         tool_name: &str,
-        arguments: Value,
         allowed_servers: &[String],
-        server_label: &str,
-        request_ctx: &McpRequestContext<'_>,
-    ) -> McpResult<ToolCallResult> {
+    ) -> ToolLookupResult {
         // For small server lists (typical case: 1-5), linear scan is faster than HashSet
         let is_allowed =
             |server_key: &str| -> bool { allowed_servers.iter().any(|s| s == server_key) };
 
-        // Find all matching tools in allowed servers
         let matching: Vec<_> = self
             .tool_inventory
             .list_tools()
@@ -836,57 +840,18 @@ impl McpOrchestrator {
             .collect();
 
         match matching.len() {
-            0 => Err(McpError::ToolNotFound(tool_name.to_string())),
+            0 => ToolLookupResult::NotFound,
             1 => {
                 let (_, server_key, _) = &matching[0];
-                self.call_tool(server_key, tool_name, arguments, server_label, request_ctx)
-                    .await
+                match self.tool_inventory.get_entry(server_key, tool_name) {
+                    Some(entry) => ToolLookupResult::Found(Box::new(entry)),
+                    None => ToolLookupResult::NotFound,
+                }
             }
             _ => {
-                // Multiple servers have this tool - ambiguous
-                let servers: Vec<String> = matching.iter().map(|(_, s, _)| s.to_string()).collect();
-                warn!(
-                    tool_name = tool_name,
-                    servers = ?servers,
-                    "Tool name collision detected"
-                );
-                Err(McpError::ToolCollision {
-                    tool_name: tool_name.to_string(),
-                    servers,
-                })
+                let servers = matching.into_iter().map(|(_, s, _)| s).collect();
+                ToolLookupResult::Collision(servers)
             }
-        }
-    }
-
-    /// Find a tool entry by name within allowed servers.
-    ///
-    /// Use this when you need tool metadata (especially `response_format`)
-    /// without executing the tool. Useful for streaming paths that execute
-    /// tools individually but need format information for output transformation.
-    ///
-    /// Returns `None` if tool not found or collision detected.
-    pub fn find_tool_by_name(
-        &self,
-        tool_name: &str,
-        allowed_servers: &[String],
-    ) -> Option<ToolEntry> {
-        // For small server lists (typical case: 1-5), linear scan is faster than HashSet
-        let is_allowed =
-            |server_key: &str| -> bool { allowed_servers.iter().any(|s| s == server_key) };
-
-        let matching: Vec<_> = self
-            .tool_inventory
-            .list_tools()
-            .into_iter()
-            .filter(|(name, server_key, _)| name == tool_name && is_allowed(server_key))
-            .collect();
-
-        // Only return if exactly one match (no collision)
-        if matching.len() == 1 {
-            let (_, server_key, _) = &matching[0];
-            self.tool_inventory.get_entry(server_key, tool_name)
-        } else {
-            None
         }
     }
 
@@ -973,102 +938,230 @@ impl McpOrchestrator {
         None
     }
 
+    /// Execute a single tool using an already-resolved qualified binding.
+    ///
+    /// This path does not perform tool-name reverse lookup. Callers must provide
+    /// the exact `server_key` and tool name to execute.
+    pub async fn execute_tool_resolved(
+        &self,
+        input: ToolExecutionInput,
+        server_key: &str,
+        server_label: &str,
+        request_ctx: &McpRequestContext<'_>,
+    ) -> ToolExecutionOutput {
+        let start = Instant::now();
+        let arguments_str = input.arguments.to_string();
+
+        let qualified = QualifiedToolName::new(server_key, &input.tool_name);
+        let entry = self.tool_inventory.get_entry(server_key, &input.tool_name);
+
+        let (response_format, output, is_error, error_message) = match entry {
+            Some(entry) => {
+                self.execute_tool_entry(&entry, qualified, input.arguments, request_ctx)
+                    .await
+            }
+            None => {
+                let err = format!(
+                    "Tool '{}' not found on server '{}'",
+                    input.tool_name, server_key
+                );
+                (
+                    ResponseFormat::Passthrough,
+                    serde_json::json!({ "error": &err }),
+                    true,
+                    Some(err),
+                )
+            }
+        };
+
+        ToolExecutionOutput {
+            call_id: input.call_id,
+            tool_name: input.tool_name,
+            invoked_tool_name: None,
+            resolved_tool_name: None,
+            server_key: server_key.to_string(),
+            server_label: server_label.to_string(),
+            arguments_str,
+            output,
+            is_error,
+            error_message,
+            response_format,
+            duration: start.elapsed(),
+        }
+    }
+
+    async fn execute_tool_entry(
+        &self,
+        entry: &ToolEntry,
+        qualified: QualifiedToolName,
+        arguments: Value,
+        request_ctx: &McpRequestContext<'_>,
+    ) -> (ResponseFormat, Value, bool, Option<String>) {
+        self.active_executions.fetch_add(1, Ordering::SeqCst);
+        let _guard = scopeguard::guard(Arc::clone(&self.active_executions), |count| {
+            count.fetch_sub(1, Ordering::SeqCst);
+        });
+        self.metrics.record_call_start(&qualified);
+        let call_start_time = Instant::now();
+
+        let raw_result = self
+            .execute_tool_with_approval_raw(entry, arguments, request_ctx)
+            .await;
+
+        let duration_ms = call_start_time.elapsed().as_millis() as u64;
+        self.metrics
+            .record_call_end(&qualified, raw_result.is_ok(), duration_ms);
+
+        match raw_result {
+            Ok(Some(raw_result)) => (
+                entry.response_format.clone(),
+                self.call_result_to_json(&raw_result),
+                raw_result.is_error.unwrap_or(false),
+                None,
+            ),
+            Ok(None) => {
+                let err = "Tool requires approval (not supported in this context)".to_string();
+                (
+                    entry.response_format.clone(),
+                    serde_json::json!({ "error": &err }),
+                    true,
+                    Some(err),
+                )
+            }
+            Err(e) => {
+                let err = format!("Tool call failed: {}", e);
+                (
+                    entry.response_format.clone(),
+                    serde_json::json!({ "error": &err }),
+                    true,
+                    Some(err),
+                )
+            }
+        }
+    }
+
+    /// Execute a single tool and return a normalized output structure.
+    ///
+    /// This is the single-call variant of `execute_tools` and is useful for
+    /// streaming routers that process one tool call at a time.
+    async fn execute_tool_with_mapping(
+        &self,
+        input: ToolExecutionInput,
+        allowed_servers: &[String],
+        server_label_map: &HashMap<&str, &str>,
+        fallback_label: &str,
+        request_ctx: &McpRequestContext<'_>,
+    ) -> ToolExecutionOutput {
+        let start = Instant::now();
+
+        // Preserve arguments string for conversation history
+        let arguments_str = input.arguments.to_string();
+
+        // Look up tool entry to get server_key, response_format, and entry itself.
+        // Keep collision info so callers get a precise error instead of a not-found fallback.
+        let lookup = self.find_tool_by_name_detailed(&input.tool_name, allowed_servers);
+
+        let (server_key, response_format, entry, lookup_error) = match lookup {
+            ToolLookupResult::Found(entry) => (
+                entry.server_key().to_string(),
+                entry.response_format.clone(),
+                Some(entry),
+                None,
+            ),
+            ToolLookupResult::NotFound => (
+                "unknown".to_string(),
+                ResponseFormat::Passthrough,
+                None,
+                Some(format!("Tool '{}' not found", input.tool_name)),
+            ),
+            ToolLookupResult::Collision(servers) => (
+                "unknown".to_string(),
+                ResponseFormat::Passthrough,
+                None,
+                Some(format!(
+                    "Tool '{}' matches multiple servers: {}",
+                    input.tool_name,
+                    servers.join(", ")
+                )),
+            ),
+        };
+
+        let server_label = server_label_map
+            .get(server_key.as_str())
+            .copied()
+            .unwrap_or(fallback_label);
+
+        let (output, is_error, error_message) = match entry {
+            None => {
+                let err_msg =
+                    lookup_error.unwrap_or_else(|| format!("Tool '{}' not found", input.tool_name));
+                (
+                    serde_json::json!({ "error": &err_msg }),
+                    true,
+                    Some(err_msg),
+                )
+            }
+            Some(entry) => {
+                let qualified = QualifiedToolName::new(entry.server_key(), entry.tool_name());
+                let (_, output, is_error, error_message) = self
+                    .execute_tool_entry(&entry, qualified, input.arguments, request_ctx)
+                    .await;
+                (output, is_error, error_message)
+            }
+        };
+
+        let duration = start.elapsed();
+
+        ToolExecutionOutput {
+            call_id: input.call_id,
+            tool_name: input.tool_name,
+            invoked_tool_name: None,
+            resolved_tool_name: None,
+            server_key,
+            server_label: server_label.to_string(),
+            arguments_str,
+            output,
+            is_error,
+            error_message,
+            response_format,
+            duration,
+        }
+    }
+
     /// Execute multiple tools with unified error handling.
     ///
     /// This is the recommended entry point for batch tool execution. It:
-    /// - Executes each tool via `call_tool_by_name`
+    /// - Resolves each tool against allowed servers
     /// - Handles result serialization uniformly
     /// - Returns fully-processed results ready for router use
-    ///
-    /// Routers should convert their tool calls to `ToolExecutionInput`,
-    /// call this method, and use `ToolExecutionOutput::to_response_item()`
-    /// to get correctly-typed output items.
-    /// Metrics recording is left to callers (routers) since they have access
-    /// to the model_gateway metrics infrastructure.
-    ///
-    /// # Arguments
-    /// * `inputs` - Tool calls to execute
-    /// * `allowed_servers` - Server keys to search within
-    /// * `server_label` - User-facing label for API responses (from request config)
-    /// * `request_ctx` - Request context for approval and tenant isolation
-    ///
-    /// # Returns
-    /// Vector of outputs in the same order as inputs. Errors are returned
-    /// as outputs with `is_error: true` rather than failing the entire batch.
     pub async fn execute_tools(
         &self,
         inputs: Vec<ToolExecutionInput>,
         allowed_servers: &[String],
-        server_label: &str,
+        mcp_servers: &[(String, String)],
         request_ctx: &McpRequestContext<'_>,
     ) -> Vec<ToolExecutionOutput> {
+        let fallback_label = mcp_servers
+            .first()
+            .map(|(label, _)| label.as_str())
+            .unwrap_or("mcp");
+        let server_label_map: HashMap<_, _> = mcp_servers
+            .iter()
+            .map(|(label, key)| (key.as_str(), label.as_str()))
+            .collect();
         let mut results = Vec::with_capacity(inputs.len());
 
         for input in inputs {
-            let start = Instant::now();
-
-            // Preserve arguments string for conversation history
-            let arguments_str = input.arguments.to_string();
-
-            // Look up tool entry to get server_key, response_format, and entry itself
-            let tool_entry = self.find_tool_by_name(&input.tool_name, allowed_servers);
-
-            let (server_key, response_format, entry) = match tool_entry {
-                Some(entry) => (
-                    entry.server_key().to_string(),
-                    entry.response_format.clone(),
-                    Some(entry),
-                ),
-                None => {
-                    // Tool not found - will error below
-                    ("unknown".to_string(), ResponseFormat::Passthrough, None)
-                }
-            };
-
-            let (output, is_error, error_message) = {
-                let handle_error = |err_msg: String| {
-                    warn!("Tool execution failed: {}", err_msg);
-                    let error_json = serde_json::json!({ "error": &err_msg });
-                    (error_json, true, Some(err_msg))
-                };
-
-                match entry {
-                    None => handle_error(format!("Tool '{}' not found", input.tool_name)),
-                    Some(entry) => {
-                        // Execute with approval, getting raw result
-                        match self
-                            .execute_tool_with_approval_raw(&entry, input.arguments, request_ctx)
-                            .await
-                        {
-                            Ok(Some(raw_result)) => {
-                                // Convert raw CallToolResult to JSON
-                                let output = self.call_result_to_json(&raw_result);
-                                (output, raw_result.is_error.unwrap_or(false), None)
-                            }
-                            Ok(None) => handle_error(
-                                "Tool requires approval (not supported in this context)"
-                                    .to_string(),
-                            ),
-                            Err(e) => handle_error(format!("Tool call failed: {}", e)),
-                        }
-                    }
-                }
-            };
-
-            let duration = start.elapsed();
-
-            results.push(ToolExecutionOutput {
-                call_id: input.call_id,
-                tool_name: input.tool_name,
-                server_key,
-                server_label: server_label.to_string(),
-                arguments_str,
-                output,
-                is_error,
-                error_message,
-                response_format,
-                duration,
-            });
+            results.push(
+                self.execute_tool_with_mapping(
+                    input,
+                    allowed_servers,
+                    &server_label_map,
+                    fallback_label,
+                    request_ctx,
+                )
+                .await,
+            );
         }
 
         results
@@ -1165,7 +1258,7 @@ impl McpOrchestrator {
                     return Err(McpError::ToolDenied(entry.tool_name().to_string()));
                 }
                 self.metrics.record_approval_granted();
-                let result = self.execute_tool_impl(entry, arguments).await?;
+                let result = self.execute_tool_with_reconnect(entry, arguments).await?;
                 Ok(ApprovalExecutionResult::Success(result))
             }
             ApprovalOutcome::Pending {
@@ -1184,7 +1277,7 @@ impl McpOrchestrator {
                 match rx.await {
                     Ok(ApprovalDecision::Approved) => {
                         self.metrics.record_approval_granted();
-                        let result = self.execute_tool_impl(entry, arguments).await?;
+                        let result = self.execute_tool_with_reconnect(entry, arguments).await?;
                         Ok(ApprovalExecutionResult::Success(result))
                     }
                     Ok(ApprovalDecision::Denied { reason }) => {
@@ -1194,6 +1287,76 @@ impl McpOrchestrator {
                     Err(_) => Err(McpError::ToolDenied("Channel closed".to_string())),
                 }
             }
+        }
+    }
+    async fn execute_tool_with_reconnect(
+        &self,
+        entry: &ToolEntry,
+        arguments: Value,
+    ) -> McpResult<CallToolResult> {
+        let server_name = entry.server_key();
+
+        // Capture the client instance we are about to use (to detect if it gets replaced)
+        let initial_client = self
+            .static_servers
+            .get(server_name)
+            .map(|e| Arc::clone(&e.client));
+
+        match self.execute_tool_impl(entry, arguments.clone()).await {
+            Ok(result) => Ok(result),
+            Err(McpError::ServerDisconnected(name)) => {
+                // Acquire/Create the mutex for this server to prevent concurrent reconnects
+                let lock = self
+                    .reconnection_locks
+                    .entry(name.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .value()
+                    .clone();
+
+                let _guard = lock.lock().await;
+
+                // Race condition check:
+                // If the current client in the map is DIFFERENT from the one that failed,
+                // it means another concurrent task already successfully reconnected it.
+                if let Some(current_entry) = self.static_servers.get(&name) {
+                    let already_reconnected = match &initial_client {
+                        Some(initial) => !Arc::ptr_eq(initial, &current_entry.client),
+                        None => true,
+                    };
+
+                    if already_reconnected {
+                        debug!(
+                            "Server '{}' already reconnected by another task, retrying call",
+                            name
+                        );
+                        return self.execute_tool_impl(entry, arguments).await;
+                    }
+                }
+
+                let server_config = self
+                    .config
+                    .servers
+                    .iter()
+                    .find(|s| s.name == name)
+                    .cloned()
+                    .ok_or_else(|| McpError::ServerNotFound(name.clone()))?;
+
+                warn!(
+                    "Server '{}' disconnected, initiating thread-safe recovery",
+                    name
+                );
+
+                ReconnectionManager::default()
+                    .reconnect(&name, || async {
+                        self.static_servers.remove(&name);
+                        self.connect_static_server(&server_config).await
+                    })
+                    .await?;
+
+                // Retry execution after successful reconnection
+                self.execute_tool_impl(entry, arguments).await
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -1329,23 +1492,25 @@ impl McpOrchestrator {
         server_key: &str,
         request: CallToolRequestParam,
     ) -> McpResult<CallToolResult> {
-        // Check static servers first
         if let Some(entry) = self.static_servers.get(server_key) {
-            return entry
-                .client
-                .call_tool(request)
-                .await
-                .map_err(|e| McpError::ToolExecution(format!("MCP call failed: {}", e)));
+            return entry.client.call_tool(request).await.map_err(|e| match e {
+                // Typed detection for transport-level failures
+                ServiceError::TransportClosed | ServiceError::TransportSend(_) => {
+                    McpError::ServerDisconnected(server_key.to_string())
+                }
+                _ => McpError::ToolExecution(format!("MCP call failed: {}", e)),
+            });
         }
 
-        // Check connection pool by URL (pool uses different handler type)
-        // Note: This uses URL-based lookup for backward compatibility.
-        // For full auth/tenant isolation, use PoolKey-based lookup.
         if let Some(client) = self.connection_pool.get_by_url(server_key) {
-            return client
-                .call_tool(request)
-                .await
-                .map_err(|e| McpError::ToolExecution(format!("MCP call failed: {}", e)));
+            return client.call_tool(request).await.map_err(|e| match e {
+                ServiceError::TransportClosed | ServiceError::TransportSend(_) => {
+                    // Note: Pooled connections trigger Disconnected but
+                    // recovery logic is currently scoped to static servers.
+                    McpError::ServerDisconnected(server_key.to_string())
+                }
+                _ => McpError::ToolExecution(format!("MCP call failed: {}", e)),
+            });
         }
 
         Err(McpError::ServerNotFound(server_key.to_string()))
@@ -1730,8 +1895,8 @@ impl McpOrchestrator {
         self.shutdown_token.cancel();
 
         // Wait for active executions (30s timeout)
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(30);
+        let start = Instant::now();
+        let timeout = Duration::from_secs(30);
         while self.active_executions.load(Ordering::SeqCst) > 0 {
             if start.elapsed() >= timeout {
                 tracing::warn!(
@@ -1740,7 +1905,7 @@ impl McpOrchestrator {
                 );
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         // Cancel pending approvals
@@ -1951,7 +2116,44 @@ impl<'a> Drop for McpRequestContext<'a> {
         }
     }
 }
+#[cfg(test)]
+mod integration_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use super::*;
+
+    #[tokio::test]
+    async fn test_reconnection_logic_flow() {
+        let _orchestrator = McpOrchestrator::new_test();
+        let name = "test-server";
+
+        // simulate a server in the registry
+        let manager = ReconnectionManager {
+            base_delay: Duration::from_millis(1),
+            max_retries: 3,
+            ..Default::default()
+        };
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = Arc::clone(&attempts);
+
+        let result = manager
+            .reconnect(name, || {
+                let count = attempts_clone.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if count < 1 {
+                        Err(McpError::Transport("Handshake failed".to_string()))
+                    } else {
+                        Ok(())
+                    }
+                }
+            })
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+}
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -2315,6 +2517,7 @@ mod tests {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
+            reconnection_locks: DashMap::new(),
             config,
         };
 
@@ -2383,6 +2586,7 @@ mod tests {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
+            reconnection_locks: DashMap::new(),
             config,
         };
 
@@ -2453,6 +2657,7 @@ mod tests {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
+            reconnection_locks: DashMap::new(),
             config,
         };
 
@@ -2529,6 +2734,7 @@ mod tests {
             refresh_tx,
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
+            reconnection_locks: DashMap::new(),
             config,
         };
 

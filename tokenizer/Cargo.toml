@@ -1,6 +1,6 @@
 [package]
 name = "llm-tokenizer"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "LLM tokenizer library with caching and chat template support"
 license = "Apache-2.0"
@@ -32,6 +32,8 @@ tracing.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
 # Only used by tokenizer
 aho-corasick = "1.1"
+base64 = "0.22"
+rustc-hash = "1.1"
 hf-hub = { version = "0.4.3", features = ["tokio"] }
 minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins"] }
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }
@@ -40,7 +42,7 @@ tiktoken-rs = "0.9.1"
 tokenizers = "0.22.0"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 openai-protocol.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 tempfile = "3.8"
@@ -48,3 +50,6 @@ tempfile = "3.8"
 [[bench]]
 name = "stop_sequence_search"
 harness = false
+
+[lints]
+workspace = true

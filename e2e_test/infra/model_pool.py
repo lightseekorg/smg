@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, Any
 
 import httpx
 
@@ -45,10 +45,10 @@ class WorkerIdentity:
 
     Each worker is uniquely identified by (model_id, mode, worker_type, index).
     For example:
-    - llama-8b:http (regular worker, index 0)
-    - llama-8b:http:prefill_0 (first prefill worker)
-    - llama-8b:http:prefill_1 (second prefill worker)
-    - llama-8b:http:decode_0 (first decode worker)
+    - meta-llama/Llama-3.1-8B-Instruct:http (regular worker, index 0)
+    - meta-llama/Llama-3.1-8B-Instruct:http:prefill_0 (first prefill worker)
+    - meta-llama/Llama-3.1-8B-Instruct:http:prefill_1 (second prefill worker)
+    - meta-llama/Llama-3.1-8B-Instruct:http:decode_0 (first decode worker)
 
     Frozen/hashable so it can be used in sets and as dict keys for deduplication.
     """
@@ -80,9 +80,7 @@ class WorkerIdentity:
             if self.index == 0:
                 return f"{self.model_id}:{self.mode.value}"
             return f"{self.model_id}:{self.mode.value}:{self.index}"
-        return (
-            f"{self.model_id}:{self.mode.value}:{self.worker_type.value}_{self.index}"
-        )
+        return f"{self.model_id}:{self.mode.value}:{self.worker_type.value}_{self.index}"
 
     def __str__(self) -> str:
         """String representation for logging."""
@@ -104,7 +102,7 @@ class ModelInstance:
     port: int
     process: subprocess.Popen
     gpu_slot: GPUSlot | None
-    key: str  # Unique instance key (e.g., "llama-8b:http:prefill_0")
+    key: str  # Unique instance key (e.g., "meta-llama/Llama-3.1-8B-Instruct:http:prefill_0")
     worker_type: WorkerType = WorkerType.REGULAR
     bootstrap_port: int | None = None  # For prefill workers in PD mode
     last_used: float = 0.0  # Timestamp for MRU eviction
@@ -139,9 +137,7 @@ class ModelInstance:
         with self._ref_lock:
             self._ref_count += 1
             self.last_used = time.time()
-            logger.debug(
-                "Acquired reference to %s (ref_count=%d)", self.key, self._ref_count
-            )
+            logger.debug("Acquired reference to %s (ref_count=%d)", self.key, self._ref_count)
 
     def release(self) -> None:
         """Release a reference to this instance.
@@ -157,9 +153,7 @@ class ModelInstance:
                     self._ref_count,
                 )
             else:
-                logger.warning(
-                    "Attempted to release reference to %s with ref_count=0", self.key
-                )
+                logger.warning("Attempted to release reference to %s with ref_count=0", self.key)
 
     @property
     def worker_url(self) -> str:
@@ -233,16 +227,12 @@ class ModelInstance:
             finally:
                 channel.close()
         except grpc.RpcError as e:
-
             if hasattr(e, "code") and e.code() == grpc.StatusCode.UNIMPLEMENTED:
-
                 try:
                     channel = grpc.insecure_channel(f"{DEFAULT_HOST}:{self.port}")
                     try:
                         grpc.channel_ready_future(channel).result(timeout=timeout)
-                        logger.debug(
-                            "gRPC connection check passed for port %d", self.port
-                        )
+                        logger.debug("gRPC connection check passed for port %d", self.port)
                         return True
                     finally:
                         channel.close()
@@ -320,8 +310,8 @@ class ModelPool:
     - The needed model is then launched on-demand
 
     Instance keys:
-    - Regular workers: "model_id:mode" (e.g., "llama-8b:http")
-    - PD workers: "model_id:mode:worker_type" (e.g., "llama-8b:http:prefill")
+    - Regular workers: "model_id:mode" (e.g., "meta-llama/Llama-3.1-8B-Instruct:http")
+    - PD workers: "model_id:mode:worker_type" (e.g., "meta-llama/Llama-3.1-8B-Instruct:http:prefill")
 
     Limitations:
     - Currently one worker instance per (model_id, mode) combination
@@ -330,20 +320,24 @@ class ModelPool:
 
     Usage:
         pool = ModelPool()
-        pool.startup(requirements=[("llama-8b", ConnectionMode.HTTP)])
-        instance = pool.get("llama-8b", "http")  # Pre-launched or on-demand
+        pool.startup(requirements=[("meta-llama/Llama-3.1-8B-Instruct", ConnectionMode.HTTP)])
+        instance = pool.get("meta-llama/Llama-3.1-8B-Instruct", "http")  # Pre-launched or on-demand
     """
 
-    def __init__(self, allocator: GPUAllocator | None = None):
+    def __init__(self, allocator: GPUAllocator | None = None, log_dir: str | None = None):
         """Initialize the model pool.
 
         Args:
             allocator: GPU allocator to use. If None, creates a new one.
+            log_dir: Directory to store worker log files. If None, worker output
+                     is discarded (DEVNULL).
         """
         self.allocator = allocator or GPUAllocator()
         self.instances: dict[str, ModelInstance] = {}  # key = "model_id:mode"
         self._startup_timeout = DEFAULT_STARTUP_TIMEOUT
         self._lock = threading.RLock()  # Protects instances dict
+        self.log_dir = log_dir
+        self._log_files: dict[str, IO[Any]] = {}  # instance key → open log file handle
 
     def startup(
         self,
@@ -388,9 +382,7 @@ class ModelPool:
                 logger.warning("Unknown model %s, skipping", identity.model_id)
                 continue
             if identity.mode not in LOCAL_MODES:
-                logger.warning(
-                    "Invalid mode %s for %s, skipping", identity.mode, identity.model_id
-                )
+                logger.warning("Invalid mode %s for %s, skipping", identity.mode, identity.model_id)
                 continue
             valid_requirements.append(identity)
 
@@ -461,9 +453,7 @@ class ModelPool:
                 gpu_slot=slots[0],
                 worker_type=identity.worker_type,
                 bootstrap_port=bootstrap_port,
-                ib_device=(
-                    ib_device if (identity.is_prefill or identity.is_decode) else None
-                ),
+                ib_device=(ib_device if (identity.is_prefill or identity.is_decode) else None),
                 instance_key=identity.key,
             )
             launched_count += 1
@@ -514,7 +504,8 @@ class ModelPool:
             )
             if is_vllm() or is_trtllm():
                 spec = get_model_spec(model_id)
-                return self._launch_grpc_worker(
+                assert gpu_slot is not None
+                instance = self._launch_grpc_worker(
                     runtime=get_runtime(),
                     model_id=model_id,
                     model_spec=spec,
@@ -523,6 +514,8 @@ class ModelPool:
                     worker_type=worker_type,
                     instance_key=instance_key,
                 )
+                assert instance is not None
+                return instance
 
         spec = get_model_spec(model_id)
         model_path = spec["model"]
@@ -530,7 +523,7 @@ class ModelPool:
         features = spec.get("features", [])
 
         # Get port - use slot's port if available, otherwise find open port
-        port = gpu_slot.port if gpu_slot else get_open_port()
+        port = gpu_slot.port if gpu_slot and gpu_slot.port is not None else get_open_port()
 
         # Build environment
         env = os.environ.copy()
@@ -593,14 +586,35 @@ class ModelPool:
 
         show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
 
+        # Determine output targets: terminal, log file, or devnull
+        stdout_target: int | IO[Any] | None = None
+        stderr_target: int | IO[Any] | None = None
+        if not show_output:
+            if self.log_dir:
+                os.makedirs(self.log_dir, exist_ok=True)
+                safe_key = key.replace("/", "__").replace(":", "_")
+                log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
+                self._log_files[key] = log_file
+                stdout_target = log_file
+                stderr_target = subprocess.STDOUT
+            else:
+                stdout_target = subprocess.DEVNULL
+                stderr_target = subprocess.DEVNULL
+
         # Start the process
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=None if show_output else subprocess.PIPE,
-            stderr=None if show_output else subprocess.PIPE,
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=stdout_target,
+                stderr=stderr_target,
+                start_new_session=True,
+            )
+        except Exception:
+            lf = self._log_files.pop(key, None)
+            if lf is not None:
+                lf.close()
+            raise
 
         base_url = f"http://{DEFAULT_HOST}:{port}"
         instance = ModelInstance(
@@ -671,9 +685,7 @@ class ModelPool:
 
                             # Use select for non-blocking read with short timeout
                             # to avoid hanging if child processes keep stderr open
-                            ready, _, _ = select.select(
-                                [instance.process.stderr], [], [], 0.5
-                            )
+                            ready, _, _ = select.select([instance.process.stderr], [], [], 0.5)
                             if ready:
                                 # Use os.read with limited size instead of .read()
                                 # which reads until EOF and can block if pipe stays open
@@ -725,21 +737,19 @@ class ModelPool:
             )
             # Log stderr from failed workers for debugging
             for key in pending:
-                instance = self.instances.get(key)
-                if instance and instance.process.stderr:
+                inst = self.instances.get(key)
+                if inst and inst.process.stderr:
                     try:
                         import os
                         import select
 
                         # Use select for non-blocking read with short timeout
                         # to avoid hanging if worker is unresponsive
-                        ready, _, _ = select.select(
-                            [instance.process.stderr], [], [], 0.1
-                        )
+                        ready, _, _ = select.select([inst.process.stderr], [], [], 0.1)
                         if ready:
                             # Use os.read with limited size instead of .read()
                             # which reads until EOF and can block if pipe stays open
-                            fd = instance.process.stderr.fileno()
+                            fd = inst.process.stderr.fileno()
                             stderr = os.read(fd, 65536)  # Read up to 64KB
                             if stderr:
                                 logger.error(
@@ -761,9 +771,7 @@ class ModelPool:
                 check_count,
             )
 
-    def _wait_worker_healthy(
-        self, instance: ModelInstance, timeout: int
-    ) -> None:
+    def _wait_worker_healthy(self, instance: ModelInstance, timeout: int) -> None:
         """Wait for a single worker to become healthy.
 
         Args:
@@ -824,7 +832,7 @@ class ModelPool:
         Caller MUST call release() on the instance when done.
 
         Args:
-            model_id: The model ID (e.g., "llama-8b")
+            model_id: The model ID (e.g., "meta-llama/Llama-3.1-8B-Instruct")
             mode: The mode (ConnectionMode.HTTP or ConnectionMode.GRPC, or string)
             worker_type: The worker type (REGULAR, PREFILL, DECODE). Defaults to REGULAR.
             wait_for_gpus: If True, wait for GPUs to become available when all
@@ -922,9 +930,7 @@ class ModelPool:
             }
             slots = self.allocator.allocate_slots(allocation_specs)
             if not slots:
-                raise RuntimeError(
-                    f"Failed to allocate GPU slot for {model_id} after eviction"
-                )
+                raise RuntimeError(f"Failed to allocate GPU slot for {model_id} after eviction")
             gpu_slot = slots[0]
 
             self._launch_model(model_id, mode, gpu_slot=gpu_slot)
@@ -979,9 +985,7 @@ class ModelPool:
         for dict_key, inst in list(self.instances.items()):
             # Skip instances with active references (tests using them)
             if inst.is_in_use:
-                logger.debug(
-                    "Skipping eviction of %s - has active references", dict_key
-                )
+                logger.debug("Skipping eviction of %s - has active references", dict_key)
                 continue
             if exclude_worker_types is not None:
                 # Precise matching with worker types
@@ -1059,6 +1063,14 @@ class ModelPool:
         instance = self.instances[key]
         instance.terminate()
 
+        # Close log file handle for this instance
+        log_file = self._log_files.pop(key, None)
+        if log_file is not None:
+            try:
+                log_file.close()
+            except Exception:
+                pass
+
         # Release GPU slot back to allocator
         if instance.gpu_slot:
             self.allocator.release_slot(instance.gpu_slot)
@@ -1094,9 +1106,7 @@ class ModelPool:
 
         raise TimeoutError(f"Instance {key} did not become healthy within {timeout}s")
 
-    def get_workers_by_type(
-        self, model_id: str, worker_type: WorkerType
-    ) -> list[ModelInstance]:
+    def get_workers_by_type(self, model_id: str, worker_type: WorkerType) -> list[ModelInstance]:
         """Get all workers of a specific type for a model.
 
         Thread-safe: Protected by internal lock. All returned instances have their
@@ -1160,7 +1170,6 @@ class ModelPool:
                 "16384",
                 "--gpu-memory-utilization",
                 "0.9",
-                "--enforce-eager",
             ]
             extra = model_spec.get("vllm_args", [])
         elif runtime == "trtllm":
@@ -1216,6 +1225,7 @@ class ModelPool:
         model_path = model_spec["model"]
         tp_size = model_spec.get("tp", 1)
         port = gpu_slot.port
+        assert port is not None
 
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu_slot.cuda_visible_devices()
@@ -1232,9 +1242,7 @@ class ModelPool:
             # See: tensorrt_llm/_torch/distributed/ops.py
             env["TLLM_DISABLE_ALLREDUCE_AUTOTUNE"] = "1"
 
-        cmd = self._build_grpc_cmd(
-            runtime, model_path, DEFAULT_HOST, port, tp_size, model_spec
-        )
+        cmd = self._build_grpc_cmd(runtime, model_path, DEFAULT_HOST, port, tp_size, model_spec)
 
         # Use provided instance_key for PD workers, otherwise generate default key
         if instance_key:
@@ -1251,13 +1259,34 @@ class ModelPool:
 
         show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
 
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=None if show_output else subprocess.PIPE,
-            stderr=None if show_output else subprocess.PIPE,
-            start_new_session=True,
-        )
+        # Determine output targets: terminal, log file, or devnull
+        stdout_target: int | IO[Any] | None = None
+        stderr_target: int | IO[Any] | None = None
+        if not show_output:
+            if self.log_dir:
+                os.makedirs(self.log_dir, exist_ok=True)
+                safe_key = key.replace("/", "__").replace(":", "_")
+                log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
+                self._log_files[key] = log_file
+                stdout_target = log_file
+                stderr_target = subprocess.STDOUT
+            else:
+                stdout_target = subprocess.DEVNULL
+                stderr_target = subprocess.DEVNULL
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=stdout_target,
+                stderr=stderr_target,
+                start_new_session=True,
+            )
+        except Exception:
+            lf = self._log_files.pop(key, None)
+            if lf is not None:
+                lf.close()
+            raise
 
         base_url = f"grpc://{DEFAULT_HOST}:{port}"
         instance = ModelInstance(
@@ -1358,9 +1387,7 @@ class ModelPool:
 
             if instance is None:
                 self.allocator.release_slot(gpu_slot)
-                raise RuntimeError(
-                    f"Failed to launch {runtime_label} gRPC worker: {model_id}"
-                )
+                raise RuntimeError(f"Failed to launch {runtime_label} gRPC worker: {model_id}")
 
             instance.acquire()
             return instance
@@ -1399,9 +1426,7 @@ class ModelPool:
 
         while True:
             with self._lock:
-                result = self._launch_workers_unlocked(
-                    workers, startup_timeout, allow_eviction
-                )
+                result = self._launch_workers_unlocked(workers, startup_timeout, allow_eviction)
                 if result is not None:
                     return result
 
@@ -1513,9 +1538,7 @@ class ModelPool:
         slot_map = {s.assigned_model: s for s in slots}
 
         if not slots:
-            raise RuntimeError(
-                f"Failed to allocate GPU slots for {len(valid_workers)} workers"
-            )
+            raise RuntimeError(f"Failed to allocate GPU slots for {len(valid_workers)} workers")
 
         # Detect IB device for PD workers
         has_pd = any(w.is_prefill or w.is_decode for w in valid_workers)
@@ -1542,7 +1565,7 @@ class ModelPool:
 
     def get_client(
         self, model_id: str, mode: ConnectionMode | str = ConnectionMode.HTTP
-    ) -> "openai.OpenAI":
+    ) -> openai.OpenAI:
         """Get OpenAI client for a specific model.
 
         Args:
@@ -1560,9 +1583,7 @@ class ModelPool:
             api_key="not-used",
         )
 
-    def get_base_url(
-        self, model_id: str, mode: ConnectionMode | str = ConnectionMode.HTTP
-    ) -> str:
+    def get_base_url(self, model_id: str, mode: ConnectionMode | str = ConnectionMode.HTTP) -> str:
         """Get the base URL for a specific model."""
         return self.get(model_id, mode).base_url
 
@@ -1580,7 +1601,15 @@ class ModelPool:
                     self.allocator.release_slot(instance.gpu_slot)
             self.instances.clear()
 
-    def __enter__(self) -> "ModelPool":
+            # Close any open log files
+            for f in self._log_files.values():
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            self._log_files.clear()
+
+    def __enter__(self) -> ModelPool:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:

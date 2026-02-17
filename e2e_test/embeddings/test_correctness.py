@@ -58,19 +58,49 @@ RELEVANCE_TEST_DATA: dict[str, Any] = {
     "sample_reference": [
         {
             "docid": 466,
-            "body": "What are some extended benefits of using Oracle Cloud Infrastructure?  \nWhen customers migrate their on-premises Oracle applications to Oracle Cloud Infrastructure, they realize the benefits \nof the cloud without needing to rearchitect those applications. Customers can lower total cost of ownership, improve \nagility and increase workload performance. Additional benefits include:  \nConsistently low global pricing and lack of hidden charges \nAutomated migration support, leveraging cloud managers and tools for key applications \nFlexible universal credits applied towards any IaaS or PaaS service \nBring Your Own License (BYOL) capabilities \nIs Oracle Cloud Lift available for PAYGO customers?  \nOracle Cloud Lift Services are designed for customers who use the UCM credits (Monthly Flex). PAYGO customers can \ncontact their sales representative or cloud engineer to evaluate their eligibility.  \nAre any countries excluded from Oracle Cloud Lift Services? \nAmong the countries that Oracle operates in, only China is excluded from the Oracle Cloud Lift Services program.",
+            "body": (
+                "What are some extended benefits of using Oracle Cloud Infrastructure?  \n"
+                "When customers migrate their on-premises Oracle applications to Oracle Cloud Infrastructure, "
+                "they realize the benefits \nof the cloud without needing to rearchitect those applications. "
+                "Customers can lower total cost of ownership, improve \nagility and increase workload performance. "
+                "Additional benefits include:  \nConsistently low global pricing and lack of hidden charges \n"
+                "Automated migration support, leveraging cloud managers and tools for key applications \n"
+                "Flexible universal credits applied towards any IaaS or PaaS service \n"
+                "Bring Your Own License (BYOL) capabilities \nIs Oracle Cloud Lift available for PAYGO customers?  \n"
+                "Oracle Cloud Lift Services are designed for customers who use the UCM credits (Monthly Flex). "
+                "PAYGO customers can \ncontact their sales representative or cloud engineer to evaluate their "
+                "eligibility.  \nAre any countries excluded from Oracle Cloud Lift Services? \n"
+                "Among the countries that Oracle operates in, only China is excluded from the Oracle Cloud Lift "
+                "Services program."
+            ),
         },
         {
             "docid": 636,
-            "body": "Cloud Lift Services as needed to make our joint customers more successful.  Public Sector accounts and partner \nengagements are not currently eligible to participate in this program. \n          How can I get started with Oracle Cloud?  \nYou can use the Oracle Cloud Free Tier for a free trial and Contact Us for more information.",
+            "body": (
+                "Cloud Lift Services as needed to make our joint customers more successful.  "
+                "Public Sector accounts and partner \nengagements are not currently eligible to participate in "
+                "this program. \n          How can I get started with Oracle Cloud?  \n"
+                "You can use the Oracle Cloud Free Tier for a free trial and Contact Us for more information."
+            ),
         },
         {
             "docid": 545,
-            "body": "Frequently Asked Questions (FAQs) for  \nOracle Cloud Lift Services \n \nWhy is Oracle launching Cloud Lift Services? \n \n \n  \nThis program underscores Oracle's intent to better serve its customer base. Cloud Lift Services provide new and \nexisting customers expanded access to cloud engineering tools and resources to quickly migrate workloads at no \nadditional cost.",
+            "body": (
+                "Frequently Asked Questions (FAQs) for  \nOracle Cloud Lift Services \n \n"
+                "Why is Oracle launching Cloud Lift Services? \n \n \n  \n"
+                "This program underscores Oracle's intent to better serve its customer base. "
+                "Cloud Lift Services provide new and \nexisting customers expanded access to cloud engineering "
+                "tools and resources to quickly migrate workloads at no \nadditional cost."
+            ),
         },
         {
             "docid": 716,
-            "body": "as part of their existing contract. \nWhat happens if I already have a paid services engagement? \nPlease keep proceeding with your existing engagement. Oracle will work with you to identify expansion opportunities \nto leverage Cloud Lift Services for other projects.",
+            "body": (
+                "as part of their existing contract. \n"
+                "What happens if I already have a paid services engagement? \n"
+                "Please keep proceeding with your existing engagement. Oracle will work with you to identify "
+                "expansion opportunities \nto leverage Cloud Lift Services for other projects."
+            ),
         },
     ],
 }
@@ -153,9 +183,7 @@ def hf_reference_embeddings(request):
         if model_path is None:
             pytest.skip("Embedding model not found in MODEL_SPECS")
 
-        logger.info(
-            "Pre-computing HuggingFace reference embeddings (CPU) for %s", model_path
-        )
+        logger.info("Pre-computing HuggingFace reference embeddings (CPU) for %s", model_path)
 
         # Flatten all test texts for semantic similarity
         all_semantic_texts = []
@@ -163,7 +191,10 @@ def hf_reference_embeddings(request):
             all_semantic_texts.extend(text_set)
 
         # Get relevance test texts
-        query = f"Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: {RELEVANCE_TEST_DATA['sample_query']}"
+        query = (
+            f"Instruct: Given a search query, retrieve relevant passages that answer the query\n"
+            f"Query: {RELEVANCE_TEST_DATA['sample_query']}"
+        )
         docs = get_input_texts(RELEVANCE_TEST_DATA)
 
         # Compute all reference embeddings at once
@@ -221,9 +252,9 @@ class TestEmbeddingCorrectness:
 
             # Verify all similarities are close to 1.0
             for j, sim in enumerate(similarities):
-                assert (
-                    abs(sim - 1.0) < tolerance
-                ), f"Set {i+1}, text {j+1}: similarity {sim:.4f} not close to 1.0"
+                assert abs(sim - 1.0) < tolerance, (
+                    f"Set {i + 1}, text {j + 1}: similarity {sim:.4f} not close to 1.0"
+                )
 
             logger.info("Semantic similarity test set %d passed", i + 1)
 
@@ -237,7 +268,10 @@ class TestEmbeddingCorrectness:
         tolerance = 0.05
 
         # Format query with instruction (for e5-mistral)
-        query = f"Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: {RELEVANCE_TEST_DATA['sample_query']}"
+        query = (
+            f"Instruct: Given a search query, retrieve relevant passages that answer the query\n"
+            f"Query: {RELEVANCE_TEST_DATA['sample_query']}"
+        )
         docs = get_input_texts(RELEVANCE_TEST_DATA)
 
         # Get gateway scores
@@ -248,15 +282,13 @@ class TestEmbeddingCorrectness:
         ) * 100
 
         # Use pre-computed HF scores
-        scores_hf = (
-            hf_reference_embeddings["query"] @ hf_reference_embeddings["docs"].T
-        ) * 100
+        scores_hf = (hf_reference_embeddings["query"] @ hf_reference_embeddings["docs"].T) * 100
 
         logger.info("Gateway relevance scores: %s", scores_gateway)
         logger.info("HF relevance scores: %s", scores_hf)
 
-        assert np.allclose(
-            scores_gateway, scores_hf, atol=tolerance
-        ), f"Scores differ beyond tolerance:\nGateway: {scores_gateway}\nHF: {scores_hf}"
+        assert np.allclose(scores_gateway, scores_hf, atol=tolerance), (
+            f"Scores differ beyond tolerance:\nGateway: {scores_gateway}\nHF: {scores_hf}"
+        )
 
         logger.info("Relevance scores comparison passed")

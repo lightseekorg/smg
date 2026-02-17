@@ -90,7 +90,7 @@ class TestIGWMode:
 
     def test_igw_add_worker(self, model_pool: ModelPool):
         """Test adding a worker to IGW gateway."""
-        http_instance = model_pool.get("llama-8b", ConnectionMode.HTTP)
+        http_instance = model_pool.get("meta-llama/Llama-3.1-8B-Instruct", ConnectionMode.HTTP)
 
         gateway = Gateway()
         gateway.start(igw_mode=True)
@@ -115,7 +115,7 @@ class TestIGWMode:
 
     def test_igw_add_and_remove_worker(self, model_pool: ModelPool):
         """Test adding and removing workers dynamically."""
-        http_instance = model_pool.get("llama-8b", ConnectionMode.HTTP)
+        http_instance = model_pool.get("meta-llama/Llama-3.1-8B-Instruct", ConnectionMode.HTTP)
 
         gateway = Gateway()
         gateway.start(igw_mode=True)
@@ -142,8 +142,8 @@ class TestIGWMode:
 
     def test_igw_multiple_workers(self, model_pool: ModelPool):
         """Test adding multiple workers (HTTP + gRPC) to IGW gateway."""
-        http_instance = model_pool.get("llama-8b", ConnectionMode.HTTP)
-        grpc_instance = model_pool.get("llama-8b", ConnectionMode.GRPC)
+        http_instance = model_pool.get("meta-llama/Llama-3.1-8B-Instruct", ConnectionMode.HTTP)
+        grpc_instance = model_pool.get("meta-llama/Llama-3.1-8B-Instruct", ConnectionMode.GRPC)
 
         gateway = Gateway()
         gateway.start(igw_mode=True)
@@ -172,11 +172,9 @@ class TestIGWMode:
 class TestDisableHealthCheck:
     """Tests for --disable-health-check CLI option."""
 
-    def test_disable_health_check_workers_immediately_healthy(
-        self, model_pool: ModelPool
-    ):
+    def test_disable_health_check_workers_immediately_healthy(self, model_pool: ModelPool):
         """Test that workers are immediately healthy when health checks are disabled."""
-        http_instance = model_pool.get("llama-8b", ConnectionMode.HTTP)
+        http_instance = model_pool.get("meta-llama/Llama-3.1-8B-Instruct", ConnectionMode.HTTP)
 
         gateway = Gateway()
         gateway.start(
@@ -206,9 +204,9 @@ class TestDisableHealthCheck:
                     worker.metadata.get("disable_health_check"),
                 )
                 # Worker should be healthy immediately
-                assert (
-                    worker.status == "healthy"
-                ), "Worker should be healthy when health checks disabled"
+                assert worker.status == "healthy", (
+                    "Worker should be healthy when health checks disabled"
+                )
         finally:
             gateway.shutdown()
             http_instance.release()

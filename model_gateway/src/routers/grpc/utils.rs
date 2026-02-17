@@ -4,7 +4,28 @@ use std::{collections::HashMap, sync::Arc};
 
 use axum::response::Response;
 use http::StatusCode;
+use llm_tokenizer::{
+    chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
+    stop::StopSequenceDecoderBuilder,
+    traits::Tokenizer,
+    StopSequenceDecoder,
+};
+use openai_protocol::{
+    chat::{ChatCompletionRequest, ChatMessage},
+    common::{
+        ChatLogProbs, ChatLogProbsContent, FunctionCallResponse, StringOrArray, Tool, ToolCall,
+        ToolChoice, ToolChoiceValue, TopLogProb,
+    },
+    generate::GenerateFinishReason,
+};
+use reasoning_parser::{
+    ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser, ReasoningParser,
+};
 use serde_json::{json, Map, Value};
+use smg_grpc_client::trtllm_proto::{GenerateRequest as TrtllmGenerateRequest, TokenSequence};
+use tool_parser::{
+    ParserFactory as ToolParserFactory, PooledParser as ToolPooledParser, ToolParser,
+};
 use tracing::{error, warn};
 use uuid::Uuid;
 
@@ -17,29 +38,7 @@ use super::{
 use crate::{
     core::Worker,
     observability::metrics::metrics_labels,
-    protocols::{
-        chat::{ChatCompletionRequest, ChatMessage},
-        common::{
-            ChatLogProbs, ChatLogProbsContent, FunctionCallResponse, StringOrArray, Tool, ToolCall,
-            ToolChoice, ToolChoiceValue, TopLogProb,
-        },
-        generate::GenerateFinishReason,
-    },
-    reasoning_parser::{
-        ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser,
-        ReasoningParser,
-    },
     routers::{error, grpc::proto_wrapper::ProtoResponseVariant},
-    tokenizer::{
-        cache::CachedTokenizer,
-        chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
-        stop::StopSequenceDecoderBuilder,
-        traits::Tokenizer,
-        HuggingFaceTokenizer, StopSequenceDecoder,
-    },
-    tool_parser::{
-        ParserFactory as ToolParserFactory, PooledParser as ToolPooledParser, ToolParser,
-    },
 };
 
 /// Resolve tokenizer from registry and cache it in request context.
@@ -399,27 +398,9 @@ pub fn process_chat_messages(
     request: &ChatCompletionRequest,
     tokenizer: &dyn Tokenizer,
 ) -> Result<ProcessedMessages, String> {
-    // Use the tokenizer's chat template - we require HuggingFace tokenizer for gRPC
-    // First try direct downcast, then try via CachedTokenizer wrapper
-    let hf_tokenizer = tokenizer
-        .as_any()
-        .downcast_ref::<HuggingFaceTokenizer>()
-        .or_else(|| {
-            // If direct downcast fails, try to get inner tokenizer from CachedTokenizer
-            tokenizer
-                .as_any()
-                .downcast_ref::<CachedTokenizer>()
-                .and_then(|cached| {
-                    cached
-                        .inner()
-                        .as_any()
-                        .downcast_ref::<HuggingFaceTokenizer>()
-                })
-        });
-
-    let formatted_text = if let Some(hf_tokenizer) = hf_tokenizer {
+    let formatted_text = {
         // Get content format and transform messages accordingly
-        let content_format = hf_tokenizer.chat_template_content_format();
+        let content_format = tokenizer.chat_template_content_format();
         let mut transformed_messages = process_content_format(&request.messages, content_format)?;
 
         // Process tool call arguments in assistant messages
@@ -489,7 +470,7 @@ pub fn process_chat_messages(
         };
 
         // Apply chat template with the (now possibly shorter) list of messages
-        let rendered = hf_tokenizer
+        let rendered = tokenizer
             .apply_chat_template(&transformed_messages, params)
             .map_err(|e| format!("Failed to apply chat template: {}", e))?;
 
@@ -499,10 +480,6 @@ pub fn process_chat_messages(
         } else {
             rendered
         }
-    } else {
-        return Err(
-            "gRPC router requires HuggingFace tokenizer with chat template support".to_string(),
-        );
     };
 
     // Placeholder for multimodal inputs
@@ -793,6 +770,34 @@ pub(crate) fn get_reasoning_parser(
     }
 }
 
+/// Inject tokenized stop sequences into a TRT-LLM request.
+///
+/// TRT-LLM requires stop words as tokenized `TokenSequence` entries, unlike
+/// SGLang/vLLM which handle stop strings at the client level.
+pub(crate) fn inject_trtllm_stop_words(
+    req: &mut TrtllmGenerateRequest,
+    tokenizer: &dyn Tokenizer,
+    stop: &StringOrArray,
+) {
+    for stop_str in stop.iter().filter(|s| !s.is_empty()) {
+        match tokenizer.encode(stop_str, false) {
+            Ok(encoding) => {
+                let token_ids = encoding.token_ids().to_vec();
+                if !token_ids.is_empty() {
+                    req.stop_words.push(TokenSequence { token_ids });
+                }
+            }
+            Err(e) => {
+                warn!(
+                    stop_string = %stop_str,
+                    error = %e,
+                    "Failed to tokenize stop sequence, skipping"
+                );
+            }
+        }
+    }
+}
+
 /// Create a fresh reasoning parser instance (for streaming where state isolation is needed)
 pub(crate) fn create_reasoning_parser(
     reasoning_parser_factory: &ReasoningParserFactory,
@@ -871,64 +876,37 @@ pub(crate) fn create_tool_parser(
 
 /// Convert OutputLogProbs to OpenAI ChatLogProbs format
 ///
-/// This function decodes token IDs using the tokenizer and builds the logprobs structure
-/// expected by the OpenAI API format.
-pub(crate) fn convert_proto_to_openai_logprobs(
+/// Generic over the token decoding strategy. The `decode_token` closure maps a
+/// single token ID to its text representation.
+pub(crate) fn convert_proto_logprobs(
     proto_logprobs: &ProtoOutputLogProbs,
-    tokenizer: &Arc<dyn Tokenizer>,
-) -> Result<ChatLogProbs, String> {
+    decode_token: impl Fn(u32) -> String,
+) -> ChatLogProbs {
     let mut content_items = Vec::with_capacity(proto_logprobs.token_logprobs.len());
 
-    // Decode token IDs to text (always with skip_special_tokens=false for logprobs)
-    let token_texts: Vec<String> = proto_logprobs
-        .token_ids
-        .iter()
-        .map(|&token_id| {
-            tokenizer
-                .decode(&[token_id as u32], false)
-                .unwrap_or_else(|_| format!("<token_{}>", token_id))
-        })
-        .collect();
-
-    // Build ChatLogProbsContent for each token (consume iterator to avoid clones)
-    for (i, (&logprob, token_text)) in proto_logprobs
-        .token_logprobs
-        .iter()
-        .zip(token_texts.into_iter())
-        .enumerate()
-    {
+    for (i, &logprob) in proto_logprobs.token_logprobs.iter().enumerate() {
+        let token_id = proto_logprobs.token_ids.get(i).copied().unwrap_or(0);
+        let token_text = decode_token(token_id);
         let bytes = Some(token_text.as_bytes().to_vec());
 
         // Build top_logprobs for this position
         let top_logprobs = if let Some(top_logprobs_entry) = proto_logprobs.top_logprobs.get(i) {
-            let mut top_logprobs = Vec::with_capacity(top_logprobs_entry.values.len());
-
-            // Decode top token IDs (always with skip_special_tokens=false)
-            let top_token_texts: Vec<String> = top_logprobs_entry
-                .token_ids
-                .iter()
-                .map(|&tid| {
-                    tokenizer
-                        .decode(&[tid as u32], false)
-                        .unwrap_or_else(|_| format!("<token_{}>", tid))
-                })
-                .collect();
-
-            for (j, (&top_logprob, &_top_token_id)) in top_logprobs_entry
+            top_logprobs_entry
                 .values
                 .iter()
-                .zip(top_logprobs_entry.token_ids.iter())
                 .enumerate()
-            {
-                if let Some(top_token_text) = top_token_texts.get(j) {
-                    top_logprobs.push(TopLogProb {
-                        token: top_token_text.clone(),
-                        logprob: top_logprob,
-                        bytes: Some(top_token_text.as_bytes().to_vec()),
-                    });
-                }
-            }
-            top_logprobs
+                .filter_map(|(j, &top_logprob)| {
+                    top_logprobs_entry.token_ids.get(j).map(|&tid| {
+                        let text = decode_token(tid);
+                        let bytes = Some(text.as_bytes().to_vec());
+                        TopLogProb {
+                            token: text,
+                            logprob: top_logprob,
+                            bytes,
+                        }
+                    })
+                })
+                .collect()
         } else {
             Vec::new()
         };
@@ -941,15 +919,27 @@ pub(crate) fn convert_proto_to_openai_logprobs(
         });
     }
 
-    Ok(ChatLogProbs::Detailed {
+    ChatLogProbs::Detailed {
         content: (!content_items.is_empty()).then_some(content_items),
-    })
+    }
+}
+
+/// Convert OutputLogProbs to OpenAI ChatLogProbs format using a Tokenizer
+pub(crate) fn convert_proto_to_openai_logprobs(
+    proto_logprobs: &ProtoOutputLogProbs,
+    tokenizer: &Arc<dyn Tokenizer>,
+) -> Result<ChatLogProbs, String> {
+    Ok(convert_proto_logprobs(proto_logprobs, |token_id| {
+        tokenizer
+            .decode(&[token_id], false)
+            .unwrap_or_else(|_| format!("<token_{}>", token_id))
+    }))
 }
 
 /// Convert OutputLogProbs to Generate format Vec<Vec<Option<f64>>>
 ///
 /// Generate format: [[logprob, token_id, ...], [logprob, token_id, ...], ...]
-/// Each inner vec contains [logprob (f64), token_id (i32), ...]
+/// Each inner vec contains [logprob (f64), token_id (u32), ...]
 pub(crate) fn convert_generate_output_logprobs(
     proto_logprobs: &ProtoOutputLogProbs,
 ) -> Vec<Vec<Option<f64>>> {
@@ -1045,16 +1035,14 @@ pub(crate) fn error_type_from_status(status: StatusCode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use llm_tokenizer::chat_template::ChatTemplateContentFormat;
+    use openai_protocol::{
+        chat::{ChatMessage, MessageContent},
+        common::{ContentPart, ImageUrl},
+    };
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        protocols::{
-            chat::{ChatMessage, MessageContent},
-            common::{ContentPart, ImageUrl},
-        },
-        tokenizer::chat_template::ChatTemplateContentFormat,
-    };
 
     #[test]
     fn test_transform_messages_string_format() {

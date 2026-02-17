@@ -8,27 +8,27 @@
 use std::sync::Arc;
 
 use axum::response::Response;
+use openai_protocol::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse};
 use serde_json::json;
+use smg_mcp::{McpToolSession, ToolExecutionInput};
 use tracing::{debug, error, trace, warn};
 
 use super::{
     common::{
-        build_mcp_list_tools_item, build_next_request, convert_mcp_tools_to_chat_tools,
-        extract_all_tool_calls_from_chat, load_conversation_history, prepare_chat_tools_and_choice,
-        ExtractedToolCall, ToolLoopState,
+        build_next_request, convert_mcp_tools_to_chat_tools, extract_all_tool_calls_from_chat,
+        load_conversation_history, prepare_chat_tools_and_choice, ExtractedToolCall,
+        ResponsesCallContext, ToolLoopState,
     },
     conversions,
 };
 use crate::{
-    mcp::{ApprovalMode, TenantContext, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
-    protocols::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse},
     routers::{
         error,
         grpc::common::responses::{
             ensure_mcp_connection, persist_response_if_needed, ResponsesContext,
         },
-        mcp_utils::{extract_server_label, DEFAULT_MAX_ITERATIONS},
+        mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
 };
 
@@ -42,47 +42,23 @@ use crate::{
 pub(super) async fn route_responses_internal(
     ctx: &ResponsesContext,
     request: Arc<ResponsesRequest>,
-    headers: Option<http::HeaderMap>,
-    model_id: Option<String>,
-    response_id: Option<String>,
+    params: ResponsesCallContext,
 ) -> Result<ResponsesResponse, Response> {
     // 1. Load conversation history and build modified request
     let modified_request = load_conversation_history(ctx, &request).await?;
 
     // 2. Check MCP connection and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) =
+    let (has_mcp_tools, mcp_servers) =
         ensure_mcp_connection(&ctx.mcp_orchestrator, request.tools.as_deref()).await?;
-
-    // Set the server keys in the context
-    {
-        let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = server_keys;
-    }
 
     let responses_response = if has_mcp_tools {
         debug!("MCP tools detected, using tool loop");
 
         // Execute with MCP tool loop
-        execute_tool_loop(
-            ctx,
-            modified_request,
-            &request,
-            headers,
-            model_id,
-            response_id.clone(),
-        )
-        .await?
+        execute_tool_loop(ctx, modified_request, &request, &params, mcp_servers).await?
     } else {
         // No MCP tools - execute without MCP (may have function tools or no tools)
-        execute_without_mcp(
-            ctx,
-            &modified_request,
-            &request,
-            headers,
-            model_id,
-            response_id.clone(),
-        )
-        .await?
+        execute_without_mcp(ctx, &modified_request, &request, params).await?
     };
 
     // 5. Persist response to storage if store=true
@@ -103,9 +79,7 @@ pub(super) async fn execute_without_mcp(
     ctx: &ResponsesContext,
     modified_request: &ResponsesRequest,
     original_request: &ResponsesRequest,
-    headers: Option<http::HeaderMap>,
-    model_id: Option<String>,
-    response_id: Option<String>,
+    params: ResponsesCallContext,
 ) -> Result<ResponsesResponse, Response> {
     // Convert ResponsesRequest → ChatCompletionRequest
     let chat_request = conversions::responses_to_chat(modified_request).map_err(|e| {
@@ -125,24 +99,26 @@ pub(super) async fn execute_without_mcp(
         .pipeline
         .execute_chat_for_responses(
             Arc::new(chat_request),
-            headers,
-            model_id,
+            params.headers,
+            params.model_id,
             ctx.components.clone(),
         )
         .await?; // Preserve the Response error as-is
 
     // Convert ChatCompletionResponse → ResponsesResponse
-    conversions::chat_to_responses(&chat_response, original_request, response_id).map_err(|e| {
-        error!(
-            function = "execute_without_mcp",
-            error = %e,
-            "Failed to convert ChatCompletionResponse to ResponsesResponse"
-        );
-        error::internal_error(
-            "convert_to_responses_format_failed",
-            format!("Failed to convert to responses format: {}", e),
-        )
-    })
+    conversions::chat_to_responses(&chat_response, original_request, params.response_id).map_err(
+        |e| {
+            error!(
+                function = "execute_without_mcp",
+                error = %e,
+                "Failed to convert ChatCompletionResponse to ResponsesResponse"
+            );
+            error::internal_error(
+                "convert_to_responses_format_failed",
+                format!("Failed to convert to responses format: {}", e),
+            )
+        },
+    )
 }
 
 /// Execute the MCP tool calling loop
@@ -156,41 +132,29 @@ pub(super) async fn execute_tool_loop(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
-    headers: Option<http::HeaderMap>,
-    model_id: Option<String>,
-    response_id: Option<String>,
+    params: &ResponsesCallContext,
+    mcp_servers: Vec<(String, String)>,
 ) -> Result<ResponsesResponse, Response> {
-    // Get server label from original request tools
-    let server_label = extract_server_label(original_request.tools.as_deref(), "request-mcp");
-
-    let mut state = ToolLoopState::new(original_request.input.clone(), server_label.clone());
+    let mut state = ToolLoopState::new(original_request.input.clone());
 
     // Configuration: max iterations as safety limit
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
     trace!(
-        "Starting MCP tool loop: server_label={}, max_tool_calls={:?}, max_iterations={}",
-        server_label,
+        "Starting MCP tool loop: max_tool_calls={:?}, max_iterations={}",
         max_tool_calls,
         DEFAULT_MAX_ITERATIONS
     );
 
-    // Create a request context for tool execution (use response_id if available)
-    let request_id = response_id
+    // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
+    let session_request_id = params
+        .response_id
         .clone()
         .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4()));
-    let request_ctx = ctx.mcp_orchestrator.create_request_context(
-        request_id,
-        TenantContext::default(),
-        ApprovalMode::PolicyOnly,
-    );
+    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
 
     // Get MCP tools and convert to chat format (do this once before loop)
-    let mcp_tools = {
-        let servers = ctx.requested_servers.read().unwrap();
-        ctx.mcp_orchestrator.list_tools_for_servers(&servers)
-    };
-    let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&mcp_tools);
+    let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&session);
     trace!(
         "Converted {} MCP tools to chat format",
         mcp_chat_tools.len()
@@ -219,8 +183,8 @@ pub(super) async fn execute_tool_loop(
             .pipeline
             .execute_chat_for_responses(
                 Arc::new(chat_request),
-                headers.clone(),
-                model_id.clone(),
+                params.headers.clone(),
+                params.model_id.clone(),
                 ctx.components.clone(),
             )
             .await?;
@@ -240,13 +204,11 @@ pub(super) async fn execute_tool_loop(
                 tool_calls.len()
             );
 
-            // Separate MCP and function tool calls
-            let mcp_tool_names: std::collections::HashSet<&str> =
-                mcp_tools.iter().map(|t| t.tool.name.as_ref()).collect();
+            // Separate MCP and function tool calls using session-exposed names.
             let (mcp_tool_calls, function_tool_calls): (Vec<ExtractedToolCall>, Vec<_>) =
                 tool_calls
                     .into_iter()
-                    .partition(|tc| mcp_tool_names.contains(tc.name.as_str()));
+                    .partition(|tc| session.has_exposed_tool(tc.name.as_str()));
 
             trace!(
                 "Separated tool calls: {} MCP, {} function",
@@ -260,7 +222,7 @@ pub(super) async fn execute_tool_loop(
                 let responses_response = conversions::chat_to_responses(
                     &chat_response,
                     original_request,
-                    response_id.clone(),
+                    params.response_id.clone(),
                 )
                 .map_err(|e| {
                     error!(
@@ -300,7 +262,7 @@ pub(super) async fn execute_tool_loop(
                 let mut responses_response = conversions::chat_to_responses(
                     &chat_response,
                     original_request,
-                    response_id.clone(),
+                    params.response_id.clone(),
                 )
                 .map_err(|e| {
                     error!(
@@ -323,12 +285,6 @@ pub(super) async fn execute_tool_loop(
                 return Ok(responses_response);
             }
 
-            // Get server_keys for tool execution
-            let server_keys: Vec<String> = {
-                let servers = ctx.requested_servers.read().unwrap();
-                servers.clone()
-            };
-
             // Convert tool calls to execution inputs
             let inputs: Vec<ToolExecutionInput> = mcp_tool_calls
                 .into_iter()
@@ -339,11 +295,8 @@ pub(super) async fn execute_tool_loop(
                 })
                 .collect();
 
-            // Execute all MCP tools via unified API
-            let results = ctx
-                .mcp_orchestrator
-                .execute_tools(inputs, &server_keys, &server_label, &request_ctx)
-                .await;
+            // Execute all MCP tools via session
+            let results = session.execute_tools(inputs).await;
 
             // Process results: record metrics and state
             for result in results {
@@ -403,7 +356,7 @@ pub(super) async fn execute_tool_loop(
             let mut responses_response = conversions::chat_to_responses(
                 &chat_response,
                 original_request,
-                response_id.clone(),
+                params.response_id.clone(),
             )
             .map_err(|e| {
                 error!(
@@ -421,17 +374,12 @@ pub(super) async fn execute_tool_loop(
 
             // Inject MCP metadata into output
             if state.total_calls > 0 {
-                // Prepend mcp_list_tools item
-                let servers = ctx.requested_servers.read().unwrap();
-                let mcp_list_tools =
-                    build_mcp_list_tools_item(&ctx.mcp_orchestrator, &server_label, &servers);
-                responses_response.output.insert(0, mcp_list_tools);
-
-                // Append all mcp_call items at the end
-                responses_response.output.extend(state.mcp_call_items);
+                session
+                    .inject_mcp_output_items(&mut responses_response.output, state.mcp_call_items);
 
                 trace!(
-                    "Injected MCP metadata: 1 mcp_list_tools + {} mcp_call items",
+                    "Injected MCP metadata: {} mcp_list_tools + {} mcp_call items",
+                    session.mcp_servers().len(),
                     state.total_calls
                 );
             }

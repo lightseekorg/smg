@@ -2,23 +2,21 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    common::{Tool, ToolChoice, ToolChoiceValue},
+    responses::ResponsesRequest,
+};
 use serde_json::json;
 use tracing::error;
 
 use super::super::HarmonyBuilder;
-use crate::{
-    protocols::{
-        chat::ChatCompletionRequest,
-        common::{Tool, ToolChoice, ToolChoiceValue},
-        responses::ResponsesRequest,
-    },
-    routers::{
-        error,
-        grpc::{
-            common::{responses::utils::extract_tools_from_response_tools, stages::PipelineStage},
-            context::{PreparationOutput, RequestContext, RequestType},
-            utils,
-        },
+use crate::routers::{
+    error,
+    grpc::{
+        common::{responses::utils::extract_tools_from_response_tools, stages::PipelineStage},
+        context::{PreparationOutput, RequestContext, RequestType},
+        utils,
     },
 };
 
@@ -209,9 +207,9 @@ impl HarmonyPreparationStage {
     /// Converts text.format to structural tag that constrains the final channel.
     /// Returns None if text.format is not specified or is "text".
     fn generate_text_format_constraint(
-        text_config: &crate::protocols::responses::TextConfig,
+        text_config: &openai_protocol::responses::TextConfig,
     ) -> Result<Option<(String, String)>, Box<Response>> {
-        use crate::protocols::responses::TextFormat;
+        use openai_protocol::responses::TextFormat;
 
         let Some(format) = &text_config.format else {
             return Ok(None);

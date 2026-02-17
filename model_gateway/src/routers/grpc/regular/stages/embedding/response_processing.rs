@@ -2,17 +2,15 @@
 
 use async_trait::async_trait;
 use axum::response::Response;
+use openai_protocol::embedding::{EmbeddingObject, EmbeddingResponse};
 use tracing::error;
 
-use crate::{
-    protocols::embedding::{EmbeddingObject, EmbeddingResponse},
-    routers::{
-        error,
-        grpc::{
-            common::stages::PipelineStage,
-            context::{ExecutionResult, FinalResponse, RequestContext},
-            proto_wrapper::ProtoEmbedComplete,
-        },
+use crate::routers::{
+    error,
+    grpc::{
+        common::stages::PipelineStage,
+        context::{ExecutionResult, FinalResponse, RequestContext},
+        proto_wrapper::ProtoEmbedComplete,
     },
 };
 
@@ -100,7 +98,7 @@ impl EmbeddingResponseProcessingStage {
 
         let prompt_tokens = proto.prompt_tokens();
 
-        let usage = crate::protocols::common::UsageInfo {
+        let usage = openai_protocol::common::UsageInfo {
             prompt_tokens,
             total_tokens: prompt_tokens, // Embedding has no completion tokens
             completion_tokens: 0,

@@ -122,9 +122,7 @@ class TestRouterArgs:
         assert result == ["http://decode1:8001"]
 
         # Test multiple decode URLs
-        result = RouterArgs._parse_decode_urls(
-            [["http://decode1:8001"], ["http://decode2:8001"]]
-        )
+        result = RouterArgs._parse_decode_urls([["http://decode1:8001"], ["http://decode2:8001"]])
         assert result == ["http://decode1:8001", "http://decode2:8001"]
 
         # Test empty list

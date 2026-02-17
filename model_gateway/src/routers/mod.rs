@@ -9,8 +9,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-
-use crate::protocols::{
+use openai_protocol::{
     chat::ChatCompletionRequest,
     classify::ClassifyRequest,
     completion::CompletionRequest,
@@ -203,7 +202,7 @@ pub trait RouterTrait: Send + Sync + Debug {
         &self,
         _headers: Option<&HeaderMap>,
         _body: &CreateMessageRequest,
-        _model_id: Option<&str>,
+        _model_id: &str,
     ) -> Response {
         (
             StatusCode::NOT_IMPLEMENTED,

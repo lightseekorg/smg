@@ -13,7 +13,6 @@ Usage:
 import argparse
 import os
 import sys
-from typing import List, Optional
 
 from smg.smg_rs import (
     get_verbose_version_string,
@@ -33,7 +32,7 @@ def create_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # Launch router subcommand
-    launch_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "launch",
         help="Launch router only (requires existing worker URLs)",
         description="Launch the Shepherd router with existing worker instances",
@@ -41,7 +40,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # Launch server + router subcommand
-    server_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "server",
         help="Launch router and server processes together",
         description="Launch both Shepherd router and server processes",
@@ -49,7 +48,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # Serve subcommand (two-pass parsing with lazy backend import)
-    serve_parser = subparsers.add_parser(
+    subparsers.add_parser(
         "serve",
         help="Launch backend worker(s) + gateway router",
         description="Launch inference backend workers and gateway router",
@@ -59,7 +58,7 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[List[str]] = None) -> None:
+def main(argv: list[str] | None = None) -> None:
     """Main CLI entry point."""
     if argv is None:
         argv = sys.argv[1:]

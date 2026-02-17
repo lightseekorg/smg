@@ -5,31 +5,27 @@
 
 use std::{sync::Arc, time::Instant};
 
-use serde_json::Value;
+use llm_tokenizer::{
+    stop::{SequenceDecoderOutput, StopSequenceDecoder},
+    traits::Tokenizer,
+};
+use openai_protocol::{
+    chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
+    common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue},
+    generate::{GenerateMetaInfo, GenerateRequest, GenerateResponse},
+};
+use reasoning_parser::ParserFactory as ReasoningParserFactory;
+use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::error;
 
-use crate::{
-    grpc_client::sglang_proto::generate_complete::MatchedStop,
-    protocols::{
-        chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
-        common::{FunctionCallResponse, ToolCall, ToolChoice, ToolChoiceValue},
-        generate::{GenerateMetaInfo, GenerateRequest, GenerateResponse},
+use crate::routers::{
+    error,
+    grpc::{
+        common::{response_collection, response_formatting},
+        context::{DispatchMetadata, ExecutionResult},
+        proto_wrapper::ProtoGenerateComplete,
+        utils,
     },
-    reasoning_parser::ParserFactory as ReasoningParserFactory,
-    routers::{
-        error,
-        grpc::{
-            common::{response_collection, response_formatting},
-            context::{DispatchMetadata, ExecutionResult},
-            proto_wrapper::ProtoGenerateComplete,
-            utils,
-        },
-    },
-    tokenizer::{
-        stop::{SequenceDecoderOutput, StopSequenceDecoder},
-        traits::Tokenizer,
-    },
-    tool_parser::ParserFactory as ToolParserFactory,
 };
 
 /// Unified response processor for both routers
@@ -163,14 +159,7 @@ impl ResponseProcessor {
             finish_reason_str
         };
 
-        // Extract matched_stop information from proto
-        let matched_stop = match complete.matched_stop() {
-            Some(MatchedStop::MatchedTokenId(token_id)) => {
-                Some(Value::Number(serde_json::Number::from(*token_id)))
-            }
-            Some(MatchedStop::MatchedStopStr(stop_str)) => Some(Value::String(stop_str.clone())),
-            None => None,
-        };
+        let matched_stop = complete.matched_stop_json();
 
         // Step 4: Convert output logprobs if present
         let logprobs = if let Some(ref proto_logprobs) = complete.output_logprobs() {
@@ -413,11 +402,7 @@ impl ResponseProcessor {
             let finish_reason =
                 utils::parse_finish_reason(finish_reason_str, complete.completion_tokens());
 
-            // Handle matched_stop if present
-            let matched_stop = complete.matched_stop().map(|matched| match matched {
-                MatchedStop::MatchedTokenId(id) => serde_json::json!(id),
-                MatchedStop::MatchedStopStr(s) => serde_json::json!(s),
-            });
+            let matched_stop = complete.matched_stop_json();
 
             // Extract logprobs if requested (convert proto types to Generate format)
             let input_token_logprobs = if request_logprobs {

@@ -1,6 +1,6 @@
 [package]
 name = "data-connector"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "Storage backends for conversations and responses"
 license = "Apache-2.0"
@@ -38,3 +38,6 @@ tokio-postgres = { version = "0.7.15", features = ["runtime", "with-chrono-0_4",
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

@@ -4,7 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::Response;
 use bytes::Bytes;
-use serde_json::{json, Value};
+use openai_protocol::responses::{ResponseToolType, ResponsesRequest};
+use serde_json::json;
+use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -18,17 +20,15 @@ use super::{
 };
 use crate::{
     observability::metrics::Metrics,
-    protocols::responses::{ResponseToolType, ResponsesRequest},
     routers::{
         grpc::{
             common::responses::{
                 build_sse_response, ensure_mcp_connection, persist_response_if_needed,
-                streaming::{OutputItemType, ResponseStreamEventEmitter},
-                ResponsesContext,
+                streaming::ResponseStreamEventEmitter, ResponsesContext,
             },
             harmony::{processor::ResponsesIterationResult, streaming::HarmonyStreamingProcessor},
         },
-        mcp_utils::{extract_server_label, DEFAULT_MAX_ITERATIONS},
+        mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
 };
 
@@ -47,7 +47,7 @@ pub(crate) async fn serve_harmony_responses_stream(
     };
 
     // Check MCP connection BEFORE starting stream and get whether MCP tools are present
-    let (has_mcp_tools, server_keys) = match ensure_mcp_connection(
+    let (has_mcp_tools, mcp_servers) = match ensure_mcp_connection(
         &ctx.mcp_orchestrator,
         current_request.tools.as_deref(),
     )
@@ -56,12 +56,6 @@ pub(crate) async fn serve_harmony_responses_stream(
         Ok(result) => result,
         Err(response) => return response,
     };
-
-    // Set the server keys in the context
-    {
-        let mut servers = ctx.requested_servers.write().unwrap();
-        *servers = server_keys;
-    }
 
     // Create SSE channel
     let (tx, rx) = mpsc::unbounded_channel();
@@ -96,8 +90,15 @@ pub(crate) async fn serve_harmony_responses_stream(
         }
 
         if has_mcp_tools {
-            execute_mcp_tool_loop_streaming(ctx, current_request, &request, &mut emitter, &tx)
-                .await;
+            execute_mcp_tool_loop_streaming(
+                ctx,
+                current_request,
+                &request,
+                mcp_servers,
+                &mut emitter,
+                &tx,
+            )
+            .await;
         } else {
             execute_without_mcp_streaming(ctx, &current_request, &request, &mut emitter, &tx).await;
         }
@@ -119,20 +120,23 @@ async fn execute_mcp_tool_loop_streaming(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
+    mcp_servers: Vec<(String, String)>,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) {
-    let server_label = extract_server_label(current_request.tools.as_deref(), "sglang-mcp");
     let max_tool_calls = current_request.max_tool_calls.map(|n| n as usize);
 
     // Note: For streaming, the emitter's original_request (set before spawn) preserves
     // the original tools. MCP tools are only merged into current_request for model calls.
 
+    // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
+    let session_request_id = format!("resp_{}", Uuid::new_v4());
+    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
+
     // Add filtered MCP tools (static + requested dynamic) to the request
-    let server_keys: Vec<String> = ctx.requested_servers.read().unwrap().clone();
-    let mcp_tools = ctx.mcp_orchestrator.list_tools_for_servers(&server_keys);
+    let mcp_tools = session.mcp_tools();
     if !mcp_tools.is_empty() {
-        let mcp_response_tools = convert_mcp_tools_to_response_tools(&mcp_tools);
+        let mcp_response_tools = convert_mcp_tools_to_response_tools(&session);
         let mut all_tools = current_request.tools.clone().unwrap_or_default();
         all_tools.extend(mcp_response_tools);
         current_request.tools = Some(all_tools);
@@ -157,70 +161,18 @@ async fn execute_mcp_tool_loop_streaming(
         })
         .unwrap_or_default();
 
-    // Set server label for MCP tool call events
-    emitter.set_mcp_server_label(server_label.clone());
-
-    let mut mcp_tracking = McpCallTracking::new(server_label.clone());
+    let mut mcp_tracking = McpCallTracking::new();
 
     // Emit mcp_list_tools on first iteration
-    let (output_index, item_id) = emitter.allocate_output_index(OutputItemType::McpListTools);
+    for (label, key) in session.mcp_servers().iter() {
+        let tools_for_server = session.list_tools_for_server(key);
 
-    // Build tools list for item structure
-    let tool_items: Vec<_> = mcp_tools
-        .iter()
-        .map(|entry| {
-            json!({
-                "name": entry.tool.name,
-                "description": entry.tool.description,
-                "input_schema": Value::Object((*entry.tool.input_schema).clone())
-            })
-        })
-        .collect();
-
-    // Build final item with completed status and tools
-    let item_done = json!({
-        "id": item_id,
-        "type": "mcp_list_tools",
-        "server_label": server_label,
-        "status": "completed",
-        "tools": tool_items
-    });
-
-    // Store the completed item data and mark as completed FIRST
-    // This ensures it appears in final response even if event sending fails
-    emitter.emit_output_item_done(output_index, &item_done);
-    emitter.complete_output_item(output_index);
-
-    // Now emit all the events (failures won't affect the stored data)
-    // Emit output_item.added
-    let item = json!({
-        "id": item_id,
-        "type": "mcp_list_tools",
-        "server_label": server_label,
-        "status": "in_progress",
-        "tools": []
-    });
-    let event = emitter.emit_output_item_added(output_index, &item);
-    if emitter.send_event(&event, tx).is_err() {
-        return;
-    }
-
-    // Emit mcp_list_tools.in_progress
-    let event = emitter.emit_mcp_list_tools_in_progress(output_index);
-    if emitter.send_event(&event, tx).is_err() {
-        return;
-    }
-
-    // Emit mcp_list_tools.completed
-    let event = emitter.emit_mcp_list_tools_completed(output_index, &mcp_tools);
-    if emitter.send_event(&event, tx).is_err() {
-        return;
-    }
-
-    // Emit output_item.done
-    let event = emitter.emit_output_item_done(output_index, &item_done);
-    if emitter.send_event(&event, tx).is_err() {
-        return;
+        if emitter
+            .emit_mcp_list_tools_sequence(label, &tools_for_server, tx)
+            .is_err()
+        {
+            return;
+        }
     }
 
     debug!(
@@ -276,8 +228,7 @@ async fn execute_mcp_tool_loop_streaming(
             execution_result,
             emitter,
             tx,
-            Some(&ctx.mcp_orchestrator),
-            Some(&server_keys),
+            Some(&session),
             Some(&mcp_tool_names),
         )
         .await
@@ -296,7 +247,7 @@ async fn execute_mcp_tool_loop_streaming(
                 analysis,
                 partial_text,
                 usage,
-                request_id,
+                request_id: _,
             } => {
                 debug!(
                     tool_call_count = tool_calls.len(),
@@ -352,13 +303,10 @@ async fn execute_mcp_tool_loop_streaming(
                 // Execute MCP tools (if any)
                 let mcp_results = if !mcp_tool_calls.is_empty() {
                     match execute_mcp_tools(
-                        &ctx.mcp_orchestrator,
+                        &session,
                         &mcp_tool_calls,
                         &mut mcp_tracking,
                         &current_request.model,
-                        &request_id,
-                        &server_label,
-                        &mcp_tools,
                     )
                     .await
                     {
@@ -493,7 +441,6 @@ async fn execute_without_mcp_streaming(
         execution_result,
         emitter,
         tx,
-        None,
         None,
         None,
     )

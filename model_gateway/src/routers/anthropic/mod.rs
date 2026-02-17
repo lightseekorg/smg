@@ -1,12 +1,11 @@
-//! Anthropic API implementations
-//!
-//! This module provides Anthropic-specific API routing including:
-//! - Messages API (/v1/messages) with SSE streaming, tool use, and extended thinking
-//! - Models API (/v1/models) for listing available models
-
-pub mod messages;
+pub(crate) mod context;
+pub(crate) mod mcp;
 pub mod models;
+pub(crate) mod non_streaming;
 mod router;
+pub(crate) mod sse;
+pub(crate) mod streaming;
 pub(crate) mod utils;
+pub(crate) mod worker;
 
 pub use router::AnthropicRouter;

@@ -7,12 +7,10 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use openai_protocol::parser::{ParseFunctionCallRequest, SeparateReasoningRequest};
 use tracing::error;
 
-use crate::{
-    app_context::AppContext,
-    protocols::parser::{ParseFunctionCallRequest, SeparateReasoningRequest},
-};
+use crate::app_context::AppContext;
 
 /// Helper to create error responses
 fn error_response(status: StatusCode, message: &str) -> Response {

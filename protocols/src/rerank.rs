@@ -118,20 +118,19 @@ impl RerankRequest {
 }
 
 /// Individual rerank result
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RerankResult {
     /// Relevance score for the document
     pub score: f32,
 
     /// The document text (if return_documents was true)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub document: Option<String>,
 
     /// Original index of the document in the request
     pub index: usize,
 
     /// Additional metadata about the ranking
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub meta_info: Option<HashMap<String, Value>>,
 }
 

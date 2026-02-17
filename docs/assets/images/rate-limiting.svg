@@ -1,0 +1,163 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 380">
+  <defs>
+    <linearGradient id="rl-primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="rl-greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981"/>
+      <stop offset="100%" style="stop-color:#34d399"/>
+    </linearGradient>
+    <linearGradient id="rl-blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="rl-amberGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b"/>
+      <stop offset="100%" style="stop-color:#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="rl-redGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ef4444"/>
+      <stop offset="100%" style="stop-color:#f87171"/>
+    </linearGradient>
+    <linearGradient id="rl-bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <filter id="rl-softGlow">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="rl-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#334155" stroke-width="0.5" opacity="0.3"/>
+    </pattern>
+    <marker id="rl-arrowGreen" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#34d399"/>
+    </marker>
+    <marker id="rl-arrowAmber" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#fbbf24"/>
+    </marker>
+    <marker id="rl-arrowRed" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#f87171"/>
+    </marker>
+    <marker id="rl-arrowBlue" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 Z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+
+  <style>
+    .rl-label { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 600; }
+    .rl-sublabel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-weight: 500; }
+    .rl-feature { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 10px; fill: #94a3b8; }
+    .rl-code { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 9px; }
+
+    @keyframes rl-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    .rl-pulse { animation: rl-pulse 2s ease-in-out infinite; }
+  </style>
+
+  <!-- Background -->
+  <rect width="700" height="380" rx="16" fill="url(#rl-bgGrad)"/>
+  <rect width="700" height="380" fill="url(#rl-grid)" rx="16"/>
+
+  <!-- Glow effects -->
+  <ellipse cx="350" cy="60" rx="60" ry="40" fill="#0ea5e9" opacity="0.08" filter="url(#rl-softGlow)"/>
+  <ellipse cx="350" cy="155" rx="70" ry="40" fill="#6366f1" opacity="0.06" filter="url(#rl-softGlow)"/>
+  <ellipse cx="200" cy="250" rx="60" ry="40" fill="#f59e0b" opacity="0.06" filter="url(#rl-softGlow)"/>
+
+  <!-- Title -->
+  <text x="350" y="28" text-anchor="middle" class="rl-label" font-size="14" fill="#e2e8f0">Token Bucket Rate Limiting</text>
+
+  <!-- Request box (top) -->
+  <rect x="295" y="42" width="110" height="36" rx="10" fill="#1e293b" stroke="#0ea5e9" stroke-width="2"/>
+  <rect x="295" y="42" width="110" height="20" rx="10" fill="url(#rl-blueGrad)"/>
+  <rect x="295" y="56" width="110" height="6" fill="url(#rl-blueGrad)"/>
+  <text x="350" y="58" text-anchor="middle" class="rl-label" font-size="10" fill="white">Request</text>
+  <text x="350" y="73" text-anchor="middle" class="rl-feature">Incoming</text>
+
+  <!-- Arrow: Request → Decision -->
+  <line x1="350" y1="78" x2="350" y2="100" stroke="#6366f1" stroke-width="2" marker-end="url(#rl-arrowBlue)"/>
+
+  <!-- Decision diamond: Tokens available? -->
+  <polygon points="350,105 425,145 350,185 275,145" fill="#1e293b" stroke="#6366f1" stroke-width="2"/>
+  <text x="350" y="140" text-anchor="middle" class="rl-label" font-size="10" fill="#a78bfa">Tokens</text>
+  <text x="350" y="155" text-anchor="middle" class="rl-label" font-size="10" fill="#a78bfa">available?</text>
+
+  <!-- YES path → Take token → Process -->
+  <line x1="425" y1="145" x2="505" y2="145" stroke="#10b981" stroke-width="2" marker-end="url(#rl-arrowGreen)"/>
+  <text x="462" y="137" text-anchor="middle" class="rl-label" font-size="9" fill="#34d399">Yes</text>
+
+  <!-- Take token box -->
+  <rect x="510" y="125" width="100" height="40" rx="8" fill="#1e293b" stroke="#10b981" stroke-width="1.5"/>
+  <rect x="510" y="125" width="100" height="20" rx="8" fill="url(#rl-greenGrad)"/>
+  <rect x="510" y="139" width="100" height="6" fill="url(#rl-greenGrad)"/>
+  <text x="560" y="141" text-anchor="middle" class="rl-label" font-size="9" fill="white">Take Token</text>
+  <text x="560" y="159" text-anchor="middle" class="rl-feature" fill="#34d399">Decrement</text>
+
+  <!-- Arrow: Take token → Process -->
+  <line x1="560" y1="165" x2="560" y2="195" stroke="#10b981" stroke-width="2" marker-end="url(#rl-arrowGreen)"/>
+
+  <!-- Process request box -->
+  <rect x="500" y="200" width="120" height="40" rx="8" fill="#1e293b" stroke="#10b981" stroke-width="2" class="rl-pulse"/>
+  <rect x="500" y="200" width="120" height="20" rx="8" fill="url(#rl-greenGrad)"/>
+  <rect x="500" y="214" width="120" height="6" fill="url(#rl-greenGrad)"/>
+  <text x="560" y="216" text-anchor="middle" class="rl-label" font-size="9" fill="white">Process</text>
+  <text x="560" y="234" text-anchor="middle" class="rl-feature" fill="#34d399">Request handled</text>
+
+  <!-- NO path → Queue enabled? -->
+  <line x1="350" y1="185" x2="350" y2="215" stroke="#f59e0b" stroke-width="2" marker-end="url(#rl-arrowAmber)"/>
+  <text x="362" y="202" class="rl-label" font-size="9" fill="#fbbf24">No</text>
+
+  <!-- Decision diamond: Queue enabled? -->
+  <polygon points="350,220 415,250 350,280 285,250" fill="#1e293b" stroke="#f59e0b" stroke-width="2"/>
+  <text x="350" y="247" text-anchor="middle" class="rl-label" font-size="9" fill="#fbbf24">Queue</text>
+  <text x="350" y="260" text-anchor="middle" class="rl-label" font-size="9" fill="#fbbf24">enabled?</text>
+
+  <!-- YES + space → Wait in queue -->
+  <line x1="285" y1="250" x2="195" y2="250" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#rl-arrowAmber)"/>
+  <text x="240" y="240" text-anchor="middle" class="rl-feature" font-size="8" fill="#fbbf24">Yes, space</text>
+
+  <!-- Wait in queue box -->
+  <rect x="90" y="232" width="100" height="38" rx="8" fill="#1e293b" stroke="#f59e0b" stroke-width="1.5"/>
+  <rect x="90" y="232" width="100" height="18" rx="8" fill="url(#rl-amberGrad)"/>
+  <rect x="90" y="244" width="100" height="6" fill="url(#rl-amberGrad)"/>
+  <text x="140" y="246" text-anchor="middle" class="rl-label" font-size="9" fill="#1e293b">Wait</text>
+  <text x="140" y="264" text-anchor="middle" class="rl-feature" fill="#fbbf24">In queue</text>
+
+  <!-- Wait → Token available → Take token (curve up) -->
+  <path d="M 140 232 L 140 180 L 510 180 L 510 145" fill="none" stroke="#10b981" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#rl-arrowGreen)"/>
+  <text x="90" y="200" class="rl-feature" font-size="8" fill="#34d399">Token available</text>
+
+  <!-- Wait → Timeout → 408 -->
+  <line x1="140" y1="270" x2="140" y2="300" stroke="#ef4444" stroke-width="1.5" marker-end="url(#rl-arrowRed)"/>
+  <text x="155" y="288" class="rl-feature" font-size="8" fill="#f87171">Timeout</text>
+
+  <!-- 408 box -->
+  <rect x="90" y="305" width="100" height="34" rx="8" fill="#1e293b" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="140" y="322" text-anchor="middle" class="rl-code" fill="#f87171" font-weight="600">408 Timeout</text>
+  <text x="140" y="335" text-anchor="middle" class="rl-feature" font-size="8" fill="#f87171">Request expired</text>
+
+  <!-- NO / Full → 429 -->
+  <line x1="415" y1="250" x2="505" y2="250" stroke="#ef4444" stroke-width="2" marker-end="url(#rl-arrowRed)"/>
+  <text x="458" y="240" text-anchor="middle" class="rl-feature" font-size="8" fill="#f87171">No / Full</text>
+
+  <!-- 429 box -->
+  <rect x="510" y="268" width="120" height="34" rx="8" fill="#1e293b" stroke="#ef4444" stroke-width="2"/>
+  <text x="570" y="286" text-anchor="middle" class="rl-code" fill="#f87171" font-weight="600">429 Too Many</text>
+  <text x="570" y="298" text-anchor="middle" class="rl-feature" font-size="8" fill="#f87171">Rate limited</text>
+
+  <!-- Line connecting to 429 box properly -->
+  <line x1="505" y1="250" x2="545" y2="250" stroke="#ef4444" stroke-width="2"/>
+  <line x1="545" y1="250" x2="545" y2="268" stroke="#ef4444" stroke-width="2"/>
+
+  <!-- Refill indicator -->
+  <rect x="20" y="105" width="100" height="50" rx="8" fill="#1e293b" stroke="#0ea5e9" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="70" y="127" text-anchor="middle" class="rl-label" font-size="9" fill="#38bdf8">Refill</text>
+  <text x="70" y="143" text-anchor="middle" class="rl-feature" fill="#38bdf8">Every second</text>
+  <path d="M 120 130 Q 180 100 275 140" fill="none" stroke="#0ea5e9" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#rl-arrowBlue)"/>
+
+  <!-- Bottom tagline -->
+  <text x="350" y="368" text-anchor="middle" class="rl-sublabel" font-size="11" fill="#64748b">Token Bucket  •  Request Queuing  •  Graceful Rejection</text>
+</svg>
