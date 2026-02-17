@@ -343,8 +343,13 @@ pub(crate) fn flat_labels<T: serde::Serialize>(value: &T) -> HashMap<String, Str
                 serde_json::Value::String(s) if !s.is_empty() && s != "null" => {
                     labels.insert(key, s);
                 }
-                serde_json::Value::Number(n) if n.as_i64().unwrap_or(0) > 0 => {
-                    labels.insert(key, n.to_string());
+                serde_json::Value::Number(n) if n.as_f64().is_some_and(|v| v != 0.0) => {
+                    // Format integers without decimal point
+                    let formatted = n
+                        .as_i64()
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| n.to_string());
+                    labels.insert(key, formatted);
                 }
                 serde_json::Value::Bool(b) => {
                     labels.insert(key, b.to_string());
