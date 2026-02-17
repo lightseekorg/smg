@@ -50,15 +50,14 @@ impl HuggingFaceTokenizer {
             .map(|(token, &id)| (id, token.clone()))
             .collect();
 
-        // Load chat template and tokenizer config
-        let (chat_template_str, add_bos_token, add_eos_token) =
-            if let Some(template_path) = chat_template_path {
-                // Load from specified .jinja file
-                (load_chat_template_from_file(template_path)?, None, None)
-            } else {
-                // Try to load from tokenizer_config.json
-                Self::load_chat_template_and_config(file_path)
-            };
+        // Always load tokenizer_config.json for add_bos_token/add_eos_token,
+        // then override only the chat template string when an explicit path is provided.
+        let (mut chat_template_str, add_bos_token, add_eos_token) =
+            Self::load_chat_template_and_config(file_path);
+
+        if let Some(template_path) = chat_template_path {
+            chat_template_str = load_chat_template_from_file(template_path)?;
+        }
 
         // Configure post_processor based on tokenizer_config.json (matches Python transformers)
         // Only modify when at least one setting is explicitly true

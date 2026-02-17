@@ -209,9 +209,10 @@ impl TiktokenTokenizer {
             .map(|(k, &v)| (k.clone(), v))
             .collect();
 
-        // 4. Build vocab maps first (borrows encoder), then pass encoder by value to CoreBPE
+        // 4. Calculate true vocab size (includes non-UTF8 BPE tokens), build string-based
+        //    vocab maps (borrows encoder), then pass encoder by value to CoreBPE
+        let vocab_size = encoder.len() + special_tokens_encoder.len();
         let (vocab, reverse_vocab) = build_vocab_maps(&encoder, &config.added_tokens);
-        let vocab_size = vocab.len();
         let tokenizer = CoreBPE::new(encoder, special_tokens_encoder, CL100K_BASE_PATTERN)?;
 
         // 5. Load chat template
