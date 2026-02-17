@@ -1,7 +1,7 @@
 //! Benchmark: WASM Component Instantiation Overhead
 //!
 //! Measures the per-request cost of creating a Store, WasiCtx, ResourceTable,
-//! StoreLimits and calling `Linker::instantiate_async()` — the exact hot path
+//! StoreLimits and calling `Linker::instantiate_async()`  the exact hot path
 //! in `WasmThreadPool::execute_component_in_worker`.
 //!
 //! Three scenarios:
@@ -9,7 +9,6 @@
 //!   2. `cached_component_instantiate` — cached Component + fresh Store + instantiate (steady state)
 //!   3. `store_creation_only` — just Store + WasiCtx + ResourceTable + StoreLimits (isolation)
 //!
-//! Run: cargo bench --bench wasm_instantiation
 
 use std::time::Duration;
 
@@ -147,7 +146,7 @@ fn bench_cold_compile_and_instantiate(c: &mut Criterion) {
     });
 }
 
-/// Scenario 2: Steady-state — component already compiled/cached, just Store + instantiate.
+/// Scenario 2: Steady-state  component already compiled/cached, just Store + instantiate.
 /// This is what happens on every request after the first (cache hit).
 fn bench_cached_component_instantiate(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -161,13 +160,10 @@ fn bench_cached_component_instantiate(c: &mut Criterion) {
     c.bench_function("wasm_cached_component_instantiate", |b| {
         b.iter(|| {
             rt.block_on(async {
-                // 1. Clone component handle (cheap — just an Arc bump)
                 let comp = component.clone();
 
-                // 2. Create fresh Store (production does this EVERY request)
                 let mut store = make_store(&engine);
 
-                // 3. Instantiate (production does this EVERY request)
                 let _instance = linker
                     .instantiate_async(&mut store, &comp)
                     .await
