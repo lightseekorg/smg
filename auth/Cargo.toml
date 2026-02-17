@@ -29,7 +29,7 @@ subtle.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 # Only used by auth
-jsonwebtoken = { version = "9.3", default-features = false, features = ["use_pem"] }
+jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem"] }
 sha2 = "0.10"
 url = "2.5"
 
