@@ -359,6 +359,7 @@ impl WasmThreadPool {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_component_in_worker(
         engine: &Engine,
         linker: &Linker<WasiState>,
