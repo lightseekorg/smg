@@ -331,7 +331,10 @@ const SGLANG_GRPC_KEYS: &[&str] = &[
 // Label helpers
 // ---------------------------------------------------------------------------
 
-/// Serialize to flat label map, skipping nulls/zeros/empty/false.
+/// Serialize to flat label map, skipping nulls/zeros/empty.
+///
+/// Booleans are emitted as `"true"` / `"false"` so downstream consumers
+/// (e.g. `is_generation == "false"` for embedding detection) work correctly.
 pub(crate) fn flat_labels<T: serde::Serialize>(value: &T) -> HashMap<String, String> {
     let mut labels = HashMap::new();
     if let Ok(serde_json::Value::Object(obj)) = serde_json::to_value(value) {
@@ -343,8 +346,8 @@ pub(crate) fn flat_labels<T: serde::Serialize>(value: &T) -> HashMap<String, Str
                 serde_json::Value::Number(n) if n.as_i64().unwrap_or(0) > 0 => {
                     labels.insert(key, n.to_string());
                 }
-                serde_json::Value::Bool(true) => {
-                    labels.insert(key, "true".to_string());
+                serde_json::Value::Bool(b) => {
+                    labels.insert(key, b.to_string());
                 }
                 serde_json::Value::Array(arr) if !arr.is_empty() => {
                     if let Ok(s) = serde_json::to_string(&arr) {
