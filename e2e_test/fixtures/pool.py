@@ -139,8 +139,10 @@ def model_pool(request: pytest.FixtureRequest) -> ModelPool:
         requirements = [r for r in requirements if r.model_id in MODEL_SPECS]
 
         if not requirements:
-            logger.warning("No valid requirements, model pool will be empty")
-            _model_pool = ModelPool(GPUAllocator(gpus=[]))
+            logger.info(
+                "No pre-launch requirements, model pool will start empty (on-demand launches still available)"
+            )
+            _model_pool = ModelPool(GPUAllocator())
             return _model_pool
 
         # Create and start the pool

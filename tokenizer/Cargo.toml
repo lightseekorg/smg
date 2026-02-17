@@ -31,6 +31,8 @@ tracing.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
 # Only used by tokenizer
 aho-corasick = "1.1"
+base64 = "0.22"
+rustc-hash = "1.1"
 hf-hub = { version = "0.4.3", features = ["tokio"] }
 minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins"] }
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }

@@ -25,8 +25,8 @@ as of `tokenizer/src/*`.
 - `factory.rs` – backend discovery, file/model heuristics, and tokio-aware creation helpers
 - `hub.rs` – Hugging Face Hub downloads via `hf_hub`
 - `huggingface.rs` – wrapper over `tokenizers::Tokenizer`, chat template loading, vocab access
-- `tiktoken.rs` – wrapper over `tiktoken-rs` encoders for OpenAI model families
-- `chat_template.rs` – AST-driven Jinja template inspection and rendering utilities
+- `tiktoken.rs` – wrapper over `tiktoken-rs` encoders for OpenAI model families and hub-loaded tiktoken models (includes `tokenizer_config.json` parsing for the tiktoken path)
+- `chat_template.rs` – AST-driven Jinja template inspection, rendering utilities, shared `ChatTemplateState`, and template file loading
 - `sequence.rs` – stateful incremental decoding helper used by router sequences
 - `stream.rs` – stateless streaming decoder that yields textual chunks from token streams
 - `stop.rs` – stop-sequence detection with "jail" buffering and a builder API
@@ -60,9 +60,11 @@ as of `tokenizer/src/*`.
 - Wraps the `tiktoken-rs` `CoreBPE` builders (`cl100k_base`, `p50k_base`, `p50k_edit`, `r50k_base`).
 - `from_model_name` heuristically maps OpenAI model IDs (e.g. `gpt-4`, `text-davinci-003`) to those
   bases. Unknown model names return an error rather than silently defaulting.
+- `from_dir` loads hub-hosted tiktoken models (e.g. Kimi K2, DeepSeek) from a directory containing
+  `tiktoken.model` and `tokenizer_config.json`, with full vocab maps and chat template support.
 - Implements encode/decode operations; batch encode simply iterates sequentially.
-- Provides approximate vocab sizes and common GPT special tokens. Direct token↔id lookup is not
-  implemented—the underlying library does not expose that mapping.
+- Built-in OpenAI models provide approximate vocab sizes and common GPT special tokens.
+  Hub-loaded models build full `token_to_id`/`id_to_token` mappings from the BPE file.
 
 ### MockTokenizer (`mock.rs`)
 - Purely for tests; hard-codes a tiny vocabulary and simple whitespace tokenization.
@@ -138,8 +140,8 @@ The caching subsystem provides multi-level caching for tokenizer results:
 ## Known Limitations & Future Work
 - SentencePiece (`.model`) and GGUF tokenizers are detected but deliberately unimplemented.
 - `Encoding::Sp` exists for future SentencePiece support but currently behaves as a simple `Vec<u32>`.
-- `TiktokenTokenizer` cannot map individual tokens/IDs; the underlying library would need to expose
-  its vocabulary to implement `token_to_id`/`id_to_token`.
+- Built-in `TiktokenTokenizer` models (via `from_model_name`) have empty vocab maps, so
+  `token_to_id`/`id_to_token` return `None`. Hub-loaded models (via `from_dir`) have full mappings.
 - There is no metrics or batching layer inside this module; the router records metrics elsewhere.
 - Dynamic batching / sequence pooling code that earlier READMEs mentioned never landed in Rust.
 

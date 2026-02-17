@@ -134,6 +134,9 @@ jsonwebtoken = "9.3"
 validator = "0.20.0"
 base64 = "0.22"
 kv-index.workspace = true
+wasmtime-wasi = { workspace = true }
+lru = { workspace = true }
+wat = "1.244"
 
 [[bench]]
 name = "wasm_middleware_latency"
@@ -173,6 +176,12 @@ path = "benches/radix_tree_benchmark.rs"
 name = "mesh_sync_benchmark"
 harness = false
 path = "benches/mesh_sync_benchmark.rs"
+
+[[bench]]
+name = "wasm_instantiation"
+harness = false
+path = "benches/wasm_instantiation.rs"
+
 
 [lints]
 workspace = true

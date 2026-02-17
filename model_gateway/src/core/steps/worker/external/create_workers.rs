@@ -3,7 +3,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use openai_protocol::worker::HealthCheckConfig;
 use tracing::{debug, info};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
@@ -52,16 +51,18 @@ impl StepExecutor<ExternalWorkerWorkflowData> for CreateExternalWorkersStep {
         };
 
         let (health_config, health_endpoint) = {
-            let cfg = &app_context.router_config.health_check;
-            let protocol_config = HealthCheckConfig {
-                timeout_secs: cfg.timeout_secs,
-                check_interval_secs: cfg.check_interval_secs,
-                success_threshold: cfg.success_threshold,
-                failure_threshold: cfg.failure_threshold,
-                disable_health_check: cfg.disable_health_check
-                    || config.health.disable_health_check,
-            };
-            (protocol_config, cfg.endpoint.clone())
+            let base = app_context.router_config.health_check.to_protocol_config();
+            let mut merged = config.health.apply_to(&base);
+            // External workers (OpenAI, Anthropic, etc.) should not be health-checked
+            // by default — they are third-party APIs that don't expose a /health endpoint.
+            // Only apply the default if the user hasn't explicitly overridden it.
+            if config.health.disable_health_check.is_none() {
+                merged.disable_health_check = true;
+            }
+            (
+                merged,
+                app_context.router_config.health_check.endpoint.clone(),
+            )
         };
 
         // Build labels from config

@@ -14,7 +14,7 @@ pub use openai_protocol::worker::{ConnectionMode, RuntimeType, WorkerType};
 use openai_protocol::{
     model_card::ModelCard,
     model_type::{Endpoint, ModelType},
-    worker::{ProviderType, WorkerInfo, WorkerModels, WorkerSpec},
+    worker::{HealthCheckConfig, ProviderType, WorkerInfo, WorkerModels, WorkerSpec},
 };
 use tokio::{sync::OnceCell, time};
 
@@ -184,27 +184,42 @@ pub trait Worker: Send + Sync + fmt::Debug {
 
     /// Check if this worker is DP-aware
     fn is_dp_aware(&self) -> bool {
-        false
+        self.metadata().spec.dp_rank.is_some()
     }
 
     /// Get the base URL without any DP rank suffix
     fn base_url(&self) -> &str {
-        self.url()
+        self.metadata()
+            .spec
+            .dp_base_url
+            .as_deref()
+            .unwrap_or(self.url())
     }
 
     /// Get DP rank if this is a DP-aware worker
     fn dp_rank(&self) -> Option<usize> {
-        None
+        self.metadata().spec.dp_rank
     }
 
     /// Get DP size if this worker is part of a DP group
     fn dp_size(&self) -> Option<usize> {
-        None
+        self.metadata().spec.dp_size
     }
 
     /// Transform a request for DP-aware routing
-    async fn prepare_request(&self, req: serde_json::Value) -> WorkerResult<serde_json::Value> {
-        Ok(req)
+    async fn prepare_request(&self, mut req: serde_json::Value) -> WorkerResult<serde_json::Value> {
+        if let Some(rank) = self.metadata().spec.dp_rank {
+            if let Some(map) = req.as_object_mut() {
+                map.insert("data_parallel_rank".to_string(), serde_json::json!(rank));
+                Ok(req)
+            } else {
+                Err(WorkerError::InvalidConfiguration {
+                    message: "Request must be a JSON object for DP-aware routing".to_string(),
+                })
+            }
+        } else {
+            Ok(req)
+        }
     }
 
     /// Get the actual endpoint URL for requests
@@ -401,10 +416,12 @@ impl WorkerTypeExt for WorkerType {
 pub struct WorkerMetadata {
     /// Protocol-level worker identity and configuration.
     pub spec: WorkerSpec,
+    /// Resolved health check config (router defaults + per-worker overrides).
+    /// This is the concrete config used at runtime; `spec.health` only stores
+    /// the partial overrides from the API layer.
+    pub health_config: HealthCheckConfig,
     /// Health check endpoint path (internal-only, from router config).
     pub health_endpoint: String,
-    /// Default model type for unknown models (defaults to LLM capabilities).
-    pub default_model_type: ModelType,
 }
 
 impl WorkerMetadata {
@@ -420,12 +437,14 @@ impl WorkerMetadata {
     }
 
     /// Check if this worker supports an endpoint for a given model.
-    /// Falls back to default_model_type if model not found.
+    /// Falls back to LLM capabilities if model not found — this is safe because
+    /// non-LLM workers (embeddings, rerank) are always registered with explicit
+    /// models via discovery, never as wildcards.
     pub fn supports_endpoint(&self, model_id: &str, endpoint: Endpoint) -> bool {
         if let Some(model) = self.find_model(model_id) {
             model.supports_endpoint(endpoint)
         } else {
-            self.default_model_type.supports_endpoint(endpoint)
+            ModelType::LLM.supports_endpoint(endpoint)
         }
     }
 
@@ -474,32 +493,12 @@ impl fmt::Debug for BasicWorker {
             .field("metadata", &self.metadata)
             .field("healthy", &self.healthy.load(Ordering::Relaxed))
             .field("circuit_breaker", &self.circuit_breaker)
-            .field("grpc_client", &"<RwLock>")
+            .field("grpc_client", &"<OnceCell>")
             .finish()
     }
 }
 
 impl BasicWorker {
-    pub fn normalised_url(&self) -> WorkerResult<&str> {
-        // Use rfind directly - no need for redundant contains() check
-        // rfind already returns None if '@' is not found
-        // e.g., "http://[::1]:8080@0" -> "http://[::1]:8080" and "0"
-        if let Some(at_pos) = self.url().rfind('@') {
-            let base_url = &self.url()[..at_pos];
-            let rank_str = &self.url()[at_pos + 1..];
-
-            // Validate that the rank part is actually a number
-            if rank_str.parse::<usize>().is_ok() {
-                Ok(base_url)
-            } else {
-                // The '@' is not a DP rank separator, return full URL
-                Ok(self.url())
-            }
-        } else {
-            Ok(self.url())
-        }
-    }
-
     fn update_running_requests_metrics(&self) {
         let load = self.load();
         Metrics::set_worker_requests_active(self.url(), load);
@@ -534,7 +533,7 @@ impl Worker for BasicWorker {
     }
 
     async fn check_health_async(&self) -> WorkerResult<()> {
-        if self.metadata.spec.health.disable_health_check {
+        if self.metadata.health_config.disable_health_check {
             if !self.is_healthy() {
                 self.set_healthy(true);
             }
@@ -557,7 +556,7 @@ impl Worker for BasicWorker {
             Metrics::record_worker_health_check(worker_type_str, metrics_labels::CB_SUCCESS);
 
             if !self.is_healthy()
-                && successes >= self.metadata.spec.health.success_threshold as usize
+                && successes >= self.metadata.health_config.success_threshold as usize
             {
                 self.set_healthy(true);
                 self.consecutive_successes.store(0, Ordering::Release);
@@ -570,7 +569,8 @@ impl Worker for BasicWorker {
             // Record health check failure metric
             Metrics::record_worker_health_check(worker_type_str, metrics_labels::CB_FAILURE);
 
-            if self.is_healthy() && failures >= self.metadata.spec.health.failure_threshold as usize
+            if self.is_healthy()
+                && failures >= self.metadata.health_config.failure_threshold as usize
             {
                 self.set_healthy(false);
                 self.consecutive_failures.store(0, Ordering::Release);
@@ -721,7 +721,7 @@ impl Worker for BasicWorker {
     }
 
     async fn grpc_health_check(&self) -> WorkerResult<bool> {
-        let timeout = Duration::from_secs(self.metadata.spec.health.timeout_secs);
+        let timeout = Duration::from_secs(self.metadata.health_config.timeout_secs);
         let maybe = self.get_grpc_client().await?;
         let Some(grpc_client) = maybe else {
             tracing::error!(
@@ -755,10 +755,9 @@ impl Worker for BasicWorker {
     }
 
     async fn http_health_check(&self) -> WorkerResult<bool> {
-        let timeout = Duration::from_secs(self.metadata.spec.health.timeout_secs);
+        let timeout = Duration::from_secs(self.metadata.health_config.timeout_secs);
 
-        let url = self.normalised_url()?;
-        let health_url = format!("{}{}", url, self.metadata.health_endpoint);
+        let health_url = format!("{}{}", self.base_url(), self.metadata.health_endpoint);
 
         let mut req = WORKER_CLIENT.get(&health_url).timeout(timeout);
         if let Some(api_key) = &self.metadata.spec.api_key {
@@ -784,154 +783,6 @@ impl Worker for BasicWorker {
                 Ok(false)
             }
         }
-    }
-}
-
-/// A DP-aware worker that handles data-parallel routing
-#[derive(Debug, Clone)]
-pub struct DPAwareWorker {
-    /// The underlying basic worker
-    base_worker: BasicWorker,
-    /// DP rank for this worker
-    dp_rank: usize,
-    /// Total DP size
-    dp_size: usize,
-    /// Base URL without DP suffix
-    base_url: String,
-}
-
-impl DPAwareWorker {
-    /// Create a new DP-aware worker with a pre-configured base worker
-    /// This is primarily used by the builder pattern
-    pub fn with_base_worker(
-        base_worker: BasicWorker,
-        base_url: String,
-        dp_rank: usize,
-        dp_size: usize,
-    ) -> Self {
-        Self {
-            base_worker,
-            dp_rank,
-            dp_size,
-            base_url,
-        }
-    }
-}
-
-#[async_trait]
-impl Worker for DPAwareWorker {
-    fn url(&self) -> &str {
-        self.base_worker.url()
-    }
-
-    fn api_key(&self) -> &Option<String> {
-        self.base_worker.api_key()
-    }
-
-    fn worker_type(&self) -> &WorkerType {
-        self.base_worker.worker_type()
-    }
-
-    fn connection_mode(&self) -> &ConnectionMode {
-        self.base_worker.connection_mode()
-    }
-
-    fn is_healthy(&self) -> bool {
-        self.base_worker.is_healthy()
-    }
-
-    fn set_healthy(&self, healthy: bool) {
-        self.base_worker.set_healthy(healthy);
-    }
-
-    async fn check_health_async(&self) -> WorkerResult<()> {
-        self.base_worker.check_health_async().await
-    }
-
-    fn load(&self) -> usize {
-        self.base_worker.load()
-    }
-
-    fn increment_load(&self) {
-        self.base_worker.increment_load();
-    }
-
-    fn decrement_load(&self) {
-        self.base_worker.decrement_load();
-    }
-
-    fn reset_load(&self) {
-        self.base_worker.reset_load();
-    }
-
-    fn worker_routing_key_load(&self) -> &WorkerRoutingKeyLoad {
-        self.base_worker.worker_routing_key_load()
-    }
-
-    fn processed_requests(&self) -> usize {
-        self.base_worker.processed_requests()
-    }
-
-    fn increment_processed(&self) {
-        self.base_worker.increment_processed();
-    }
-
-    fn metadata(&self) -> &WorkerMetadata {
-        self.base_worker.metadata()
-    }
-
-    fn circuit_breaker(&self) -> &CircuitBreaker {
-        self.base_worker.circuit_breaker()
-    }
-
-    fn is_dp_aware(&self) -> bool {
-        true
-    }
-
-    fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    fn dp_rank(&self) -> Option<usize> {
-        Some(self.dp_rank)
-    }
-
-    fn dp_size(&self) -> Option<usize> {
-        Some(self.dp_size)
-    }
-
-    async fn prepare_request(&self, mut req: serde_json::Value) -> WorkerResult<serde_json::Value> {
-        if let Some(map) = req.as_object_mut() {
-            map.insert(
-                "data_parallel_rank".to_string(),
-                serde_json::json!(self.dp_rank),
-            );
-            Ok(req)
-        } else {
-            Err(WorkerError::InvalidConfiguration {
-                message: "Request must be a JSON object for DP-aware routing".to_string(),
-            })
-        }
-    }
-
-    fn endpoint_url(&self, route: &str) -> String {
-        format!("{}{}", self.base_url, route)
-    }
-
-    async fn get_grpc_client(&self) -> WorkerResult<Option<Arc<GrpcClient>>> {
-        self.base_worker.get_grpc_client().await
-    }
-
-    async fn reset_grpc_client(&self) -> WorkerResult<()> {
-        self.base_worker.reset_grpc_client().await
-    }
-
-    async fn grpc_health_check(&self) -> WorkerResult<bool> {
-        self.base_worker.grpc_health_check().await
-    }
-
-    async fn http_health_check(&self) -> WorkerResult<bool> {
-        self.base_worker.http_health_check().await
     }
 }
 
@@ -1024,31 +875,38 @@ impl<T: Send + Unpin + 'static> http_body::Body for AttachedBody<T> {
     }
 }
 
-/// Health checker handle with graceful shutdown
+/// Health checker handle with graceful shutdown.
+///
+/// The checker sleeps until the next worker is due for a health check,
+/// so it wakes only when there is actual work to do.
 pub(crate) struct HealthChecker {
     #[allow(dead_code)]
     handle: tokio::task::JoinHandle<()>,
-    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<tokio::sync::Notify>,
 }
 
 impl fmt::Debug for HealthChecker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HealthChecker")
-            .field("shutdown", &self.shutdown.load(Ordering::Relaxed))
-            .finish()
+        f.debug_struct("HealthChecker").finish()
     }
 }
 
 impl HealthChecker {
-    /// Create a new HealthChecker
-    pub fn new(handle: tokio::task::JoinHandle<()>, shutdown: Arc<AtomicBool>) -> Self {
-        Self { handle, shutdown }
+    pub fn new(
+        handle: tokio::task::JoinHandle<()>,
+        shutdown_notify: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            handle,
+            shutdown_notify,
+        }
     }
 
-    /// Shutdown the health checker gracefully
+    /// Shutdown the health checker gracefully.
+    /// Wakes the sleeping task immediately so it can exit.
     #[allow(dead_code)]
     pub async fn shutdown(self) {
-        self.shutdown.store(true, Ordering::Release);
+        self.shutdown_notify.notify_one();
         let _ = self.handle.await;
     }
 }
@@ -1074,7 +932,7 @@ mod tests {
     use super::*;
     use crate::core::{
         circuit_breaker::{CircuitBreakerConfig, CircuitState},
-        DPAwareWorkerBuilder,
+        BasicWorkerBuilder,
     };
 
     #[test]
@@ -1172,8 +1030,8 @@ mod tests {
             .health_endpoint("/custom-health")
             .build();
 
-        assert_eq!(worker.metadata().spec.health.timeout_secs, 15);
-        assert_eq!(worker.metadata().spec.health.check_interval_secs, 45);
+        assert_eq!(worker.metadata().health_config.timeout_secs, 15);
+        assert_eq!(worker.metadata().health_config.check_interval_secs, 45);
         assert_eq!(worker.metadata().health_endpoint, "/custom-health");
     }
 
@@ -1430,7 +1288,8 @@ mod tests {
 
     #[test]
     fn test_dp_aware_worker_creation() {
-        let dp_worker = DPAwareWorkerBuilder::new("http://worker1:8080", 2, 4)
+        let dp_worker = BasicWorkerBuilder::new("http://worker1:8080")
+            .dp_config(2, 4)
             .worker_type(WorkerType::Regular)
             .build();
 
@@ -1444,7 +1303,8 @@ mod tests {
 
     #[test]
     fn test_dp_aware_worker_creation_prefill() {
-        let dp_worker = DPAwareWorkerBuilder::new("http://worker1:8080", 1, 2)
+        let dp_worker = BasicWorkerBuilder::new("http://worker1:8080")
+            .dp_config(1, 2)
             .worker_type(WorkerType::Prefill)
             .build();
 
@@ -1455,7 +1315,8 @@ mod tests {
 
     #[test]
     fn test_dp_aware_worker_creation_decode() {
-        let dp_worker = DPAwareWorkerBuilder::new("http://worker1:8080", 0, 4)
+        let dp_worker = BasicWorkerBuilder::new("http://worker1:8080")
+            .dp_config(0, 4)
             .worker_type(WorkerType::Decode)
             .build();
 
@@ -1466,7 +1327,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dp_aware_prepare_request() {
-        let dp_worker = DPAwareWorkerBuilder::new("http://worker1:8080", 3, 8)
+        let dp_worker = BasicWorkerBuilder::new("http://worker1:8080")
+            .dp_config(3, 8)
             .worker_type(WorkerType::Regular)
             .build();
 
@@ -1484,7 +1346,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_dp_aware_prepare_request_invalid() {
-        let dp_worker = DPAwareWorkerBuilder::new("http://worker1:8080", 0, 4)
+        let dp_worker = BasicWorkerBuilder::new("http://worker1:8080")
+            .dp_config(0, 4)
             .worker_type(WorkerType::Regular)
             .build();
 
@@ -1503,7 +1366,8 @@ mod tests {
 
     #[test]
     fn test_dp_aware_endpoint_url() {
-        let dp_worker = DPAwareWorkerBuilder::new("http://worker1:8080", 1, 4)
+        let dp_worker = BasicWorkerBuilder::new("http://worker1:8080")
+            .dp_config(1, 4)
             .worker_type(WorkerType::Regular)
             .build();
 
@@ -1519,7 +1383,8 @@ mod tests {
 
     #[test]
     fn test_dp_aware_worker_delegated_methods() {
-        let dp_worker = DPAwareWorkerBuilder::new("http://worker1:8080", 0, 2)
+        let dp_worker = BasicWorkerBuilder::new("http://worker1:8080")
+            .dp_config(0, 2)
             .worker_type(WorkerType::Regular)
             .build();
 
@@ -1593,7 +1458,8 @@ mod tests {
 
     #[test]
     fn test_dp_aware_worker_circuit_breaker() {
-        let dp_worker = DPAwareWorkerBuilder::new("http://worker:8080", 0, 2)
+        let dp_worker = BasicWorkerBuilder::new("http://worker:8080")
+            .dp_config(0, 2)
             .worker_type(WorkerType::Regular)
             .build();
 
@@ -1627,19 +1493,22 @@ mod tests {
                 .build(),
         );
         let dp_aware_regular: Box<dyn Worker> = Box::new(
-            DPAwareWorkerBuilder::new("http://dp:8080", 0, 2)
+            BasicWorkerBuilder::new("http://dp:8080")
+                .dp_config(0, 2)
                 .worker_type(WorkerType::Regular)
                 .api_key("test_api_key")
                 .build(),
         );
         let dp_aware_prefill: Box<dyn Worker> = Box::new(
-            DPAwareWorkerBuilder::new("http://dp-prefill:8080", 1, 2)
+            BasicWorkerBuilder::new("http://dp-prefill:8080")
+                .dp_config(1, 2)
                 .worker_type(WorkerType::Prefill)
                 .api_key("test_api_key")
                 .build(),
         );
         let dp_aware_decode: Box<dyn Worker> = Box::new(
-            DPAwareWorkerBuilder::new("http://dp-decode:8080", 0, 4)
+            BasicWorkerBuilder::new("http://dp-decode:8080")
+                .dp_config(0, 4)
                 .worker_type(WorkerType::Decode)
                 .api_key("test_api_key")
                 .build(),
@@ -1681,8 +1550,8 @@ mod tests {
     fn test_worker_metadata_empty_models_accepts_all() {
         let metadata = WorkerMetadata {
             spec: WorkerSpec::new("http://test:8080"),
+            health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
-            default_model_type: ModelType::LLM,
         };
 
         // Empty models list should accept any model
@@ -1704,8 +1573,8 @@ mod tests {
         spec.models = WorkerModels::from(vec![model1, model2]);
         let metadata = WorkerMetadata {
             spec,
+            health_config: HealthCheckConfig::default(),
             health_endpoint: "/health".to_string(),
-            default_model_type: ModelType::LLM,
         };
 
         // Find by primary ID

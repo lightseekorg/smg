@@ -16,7 +16,7 @@ use crate::{
         circuit_breaker::CircuitBreakerConfig,
         steps::workflow_data::LocalWorkerWorkflowData,
         worker::{RuntimeType, WorkerType},
-        BasicWorkerBuilder, ConnectionMode, DPAwareWorkerBuilder, Worker, UNKNOWN_MODEL_ID,
+        BasicWorkerBuilder, ConnectionMode, Worker, UNKNOWN_MODEL_ID,
     },
 };
 
@@ -101,8 +101,17 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
         // Parse worker type
         let worker_type = parse_worker_type(config);
 
-        // Get runtime type (for gRPC workers)
-        let runtime_type = determine_runtime_type(connection_mode, &context.data, config);
+        // Get runtime type (set by DetectBackendStep)
+        let runtime_type = match context.data.detected_runtime_type.as_deref() {
+            Some(s) => s.parse::<RuntimeType>().unwrap_or_else(|_| {
+                debug!(
+                    "Unrecognized detected runtime '{}', falling back to config: {}",
+                    s, config.runtime_type
+                );
+                config.runtime_type
+            }),
+            None => config.runtime_type,
+        };
 
         // Build circuit breaker config
         let circuit_breaker_config = build_circuit_breaker_config(app_context);
@@ -171,26 +180,14 @@ fn build_model_card(
     config: &WorkerSpec,
     labels: &HashMap<String, String>,
 ) -> ModelCard {
-    let mut card = ModelCard::new(model_id);
-
-    // If the user provided a matching model in config.models, copy its fields
-    if let Some(proto_card) = config.models.find(model_id) {
-        if let Some(ref tokenizer_path) = proto_card.tokenizer_path {
-            card = card.with_tokenizer_path(tokenizer_path.clone());
-        }
-        if let Some(ref reasoning_parser) = proto_card.reasoning_parser {
-            card = card.with_reasoning_parser(reasoning_parser.clone());
-        }
-        if let Some(ref tool_parser) = proto_card.tool_parser {
-            card = card.with_tool_parser(tool_parser.clone());
-        }
-        if let Some(ref chat_template) = proto_card.chat_template {
-            card = card.with_chat_template(chat_template.clone());
-        }
-        if !proto_card.aliases.is_empty() {
-            card = card.with_aliases(proto_card.aliases.clone());
-        }
-    }
+    // Start from the user-provided proto_card if it matches, preserving all
+    // user-supplied fields (display_name, provider, context_length, etc.).
+    // Otherwise start from a blank card with just the model_id.
+    let mut card = config
+        .models
+        .find(model_id)
+        .cloned()
+        .unwrap_or_else(|| ModelCard::new(model_id));
     if let Some(model_type_str) = labels.get("model_type") {
         card = card.with_hf_model_type(model_type_str.clone());
     }
@@ -241,28 +238,6 @@ fn parse_worker_type(config: &WorkerSpec) -> WorkerType {
     config.worker_type
 }
 
-fn determine_runtime_type(
-    connection_mode: &ConnectionMode,
-    data: &LocalWorkerWorkflowData,
-    config: &WorkerSpec,
-) -> RuntimeType {
-    if !matches!(connection_mode, ConnectionMode::Grpc) {
-        return RuntimeType::Sglang;
-    }
-
-    // Prefer runtime type detected during connection probing
-    if let Some(ref detected_runtime) = data.detected_runtime_type {
-        match detected_runtime.as_str() {
-            "vllm" => RuntimeType::Vllm,
-            "trtllm" => RuntimeType::Trtllm,
-            _ => RuntimeType::Sglang,
-        }
-    } else {
-        // Fall back to config's runtime_type
-        config.runtime_type
-    }
-}
-
 fn build_circuit_breaker_config(app_context: &AppContext) -> CircuitBreakerConfig {
     let cfg = app_context.router_config.effective_circuit_breaker_config();
     CircuitBreakerConfig {
@@ -277,15 +252,12 @@ fn build_health_config(
     app_context: &AppContext,
     config: &WorkerSpec,
 ) -> (HealthCheckConfig, String) {
-    let cfg = &app_context.router_config.health_check;
-    let protocol_config = HealthCheckConfig {
-        timeout_secs: cfg.timeout_secs,
-        check_interval_secs: cfg.check_interval_secs,
-        success_threshold: cfg.success_threshold,
-        failure_threshold: cfg.failure_threshold,
-        disable_health_check: cfg.disable_health_check || config.health.disable_health_check,
-    };
-    (protocol_config, cfg.endpoint.clone())
+    let base = app_context.router_config.health_check.to_protocol_config();
+    let merged = config.health.apply_to(&base);
+    (
+        merged,
+        app_context.router_config.health_check.endpoint.clone(),
+    )
 }
 
 fn normalize_url(url: &str, connection_mode: &ConnectionMode) -> String {
@@ -327,18 +299,18 @@ fn create_dp_aware_workers(
 
     let mut workers = Vec::with_capacity(dp_info.dp_size);
     for rank in 0..dp_info.dp_size {
-        let mut builder =
-            DPAwareWorkerBuilder::new(normalized_url.to_string(), rank, dp_info.dp_size)
-                .model(model_card.clone())
-                .worker_type(worker_type)
-                .connection_mode(*connection_mode)
-                .runtime_type(runtime_type)
-                .circuit_breaker_config(circuit_breaker_config.clone())
-                .health_config(health_config.clone())
-                .health_endpoint(health_endpoint)
-                .bootstrap_port(config.bootstrap_port)
-                .priority(config.priority)
-                .cost(config.cost);
+        let mut builder = BasicWorkerBuilder::new(normalized_url.to_string())
+            .dp_config(rank, dp_info.dp_size)
+            .model(model_card.clone())
+            .worker_type(worker_type)
+            .connection_mode(*connection_mode)
+            .runtime_type(runtime_type)
+            .circuit_breaker_config(circuit_breaker_config.clone())
+            .health_config(health_config.clone())
+            .health_endpoint(health_endpoint)
+            .bootstrap_port(config.bootstrap_port)
+            .priority(config.priority)
+            .cost(config.cost);
 
         if let Some(ref api_key) = config.api_key {
             builder = builder.api_key(api_key.clone());

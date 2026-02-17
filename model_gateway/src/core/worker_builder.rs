@@ -2,15 +2,13 @@ use std::collections::HashMap;
 
 use openai_protocol::{
     model_card::ModelCard,
-    model_type::ModelType,
     worker::{HealthCheckConfig, WorkerModels, WorkerSpec},
 };
 
 use super::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
     worker::{
-        BasicWorker, ConnectionMode, DPAwareWorker, RuntimeType, WorkerMetadata,
-        WorkerRoutingKeyLoad, WorkerType,
+        BasicWorker, ConnectionMode, RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad, WorkerType,
     },
 };
 use crate::{observability::metrics::Metrics, routers::grpc::client::GrpcClient};
@@ -21,6 +19,9 @@ use crate::{observability::metrics::Metrics, routers::grpc::client::GrpcClient};
 /// Callers with a pre-built `WorkerSpec` can use [`from_spec()`](Self::from_spec).
 pub struct BasicWorkerBuilder {
     spec: WorkerSpec,
+    /// Resolved health config (router defaults + per-worker overrides).
+    /// If not set, falls back to `HealthCheckConfig::default()`.
+    health_config: Option<HealthCheckConfig>,
     health_endpoint: String,
     circuit_breaker_config: CircuitBreakerConfig,
     grpc_client: Option<GrpcClient>,
@@ -31,6 +32,7 @@ impl BasicWorkerBuilder {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             spec: WorkerSpec::new(url),
+            health_config: None,
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
@@ -41,6 +43,7 @@ impl BasicWorkerBuilder {
     pub fn from_spec(spec: WorkerSpec) -> Self {
         Self {
             spec,
+            health_config: None,
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
@@ -53,6 +56,7 @@ impl BasicWorkerBuilder {
         spec.worker_type = worker_type;
         Self {
             spec,
+            health_config: None,
             health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
@@ -101,9 +105,12 @@ impl BasicWorkerBuilder {
         self
     }
 
-    /// Set health check configuration (protocol-level fields).
+    /// Set the resolved health check configuration.
+    ///
+    /// This is the fully-resolved config (router defaults + per-worker overrides)
+    /// stored on `WorkerMetadata` for runtime use.
     pub fn health_config(mut self, config: HealthCheckConfig) -> Self {
-        self.spec.health = config;
+        self.health_config = Some(config);
         self
     }
 
@@ -161,9 +168,14 @@ impl BasicWorkerBuilder {
         self
     }
 
-    /// Override the URL (used internally by DPAwareWorkerBuilder)
-    fn url(mut self, url: impl Into<String>) -> Self {
-        self.spec.url = url.into();
+    /// Configure data-parallel routing.
+    /// Captures the current URL as the base URL, then formats it as `{base}@{rank}`.
+    pub fn dp_config(mut self, rank: usize, size: usize) -> Self {
+        let base_url = self.spec.url.clone();
+        self.spec.url = format!("{}@{}", base_url, rank);
+        self.spec.dp_base_url = Some(base_url);
+        self.spec.dp_rank = Some(rank);
+        self.spec.dp_size = Some(size);
         self
     }
 
@@ -179,10 +191,16 @@ impl BasicWorkerBuilder {
         // Derive bootstrap_host from URL at construction time
         self.spec.bootstrap_host = parse_bootstrap_host(&self.spec.url);
 
+        // Resolve health config: use explicit config if set, otherwise
+        // apply per-worker overrides from spec.health to defaults.
+        let health_config = self
+            .health_config
+            .unwrap_or_else(|| self.spec.health.apply_to(&HealthCheckConfig::default()));
+
         let metadata = WorkerMetadata {
             spec: self.spec,
+            health_config,
             health_endpoint: self.health_endpoint,
-            default_model_type: ModelType::LLM,
         };
 
         // Use OnceCell for lock-free gRPC client access after initialization
@@ -218,134 +236,41 @@ impl BasicWorkerBuilder {
 }
 
 /// Parse bootstrap hostname from a URL, falling back to "localhost".
+///
+/// Handles DP-aware URLs like `http://host:8080@3` by stripping the `@rank`
+/// suffix before parsing, since `@` is otherwise interpreted as a userinfo
+/// delimiter per RFC 3986.
 fn parse_bootstrap_host(url: &str) -> String {
-    match url::Url::parse(url) {
-        Ok(parsed) => parsed.host_str().unwrap_or("localhost").to_string(),
-        Err(_) if !url.contains("://") => match url::Url::parse(&format!("http://{}", url)) {
-            Ok(parsed) => parsed.host_str().unwrap_or("localhost").to_string(),
-            Err(_) => {
-                tracing::warn!("Failed to parse URL '{}', defaulting to localhost", url);
-                "localhost".to_string()
-            }
-        },
-        Err(_) => {
+    // Strip DP rank suffix (e.g., "http://host:8080@3" -> "http://host:8080")
+    let clean_url = match url.rfind('@') {
+        Some(at_pos)
+            if !url[at_pos + 1..].is_empty()
+                && url[at_pos + 1..].chars().all(|c| c.is_ascii_digit()) =>
+        {
+            &url[..at_pos]
+        }
+        _ => url,
+    };
+
+    // Try parsing as-is first. If the URL lacks a scheme (e.g., "worker1:8080"),
+    // Url::parse may treat the host as a scheme — detect this via missing host_str()
+    // and fall back to prefixing "http://".
+    let try_parse = |u: &str| -> Option<String> {
+        url::Url::parse(u)
+            .ok()
+            .and_then(|p| p.host_str().map(|h| h.to_string()))
+    };
+
+    if let Some(host) = try_parse(clean_url) {
+        host
+    } else if !clean_url.contains("://") {
+        try_parse(&format!("http://{}", clean_url)).unwrap_or_else(|| {
             tracing::warn!("Failed to parse URL '{}', defaulting to localhost", url);
             "localhost".to_string()
-        }
-    }
-}
-
-/// Builder for creating DPAwareWorker instances with fluent API.
-///
-/// Delegates to [`BasicWorkerBuilder`] for all shared configuration,
-/// adding only DP-specific fields (base_url, dp_rank, dp_size).
-pub struct DPAwareWorkerBuilder {
-    inner: BasicWorkerBuilder,
-    base_url: String,
-    dp_rank: usize,
-    dp_size: usize,
-}
-
-impl DPAwareWorkerBuilder {
-    pub fn new(base_url: impl Into<String>, dp_rank: usize, dp_size: usize) -> Self {
-        let base_url = base_url.into();
-        Self {
-            inner: BasicWorkerBuilder::new(&base_url),
-            base_url,
-            dp_rank,
-            dp_size,
-        }
-    }
-
-    pub fn new_with_type(
-        base_url: impl Into<String>,
-        dp_rank: usize,
-        dp_size: usize,
-        worker_type: WorkerType,
-    ) -> Self {
-        let base_url = base_url.into();
-        Self {
-            inner: BasicWorkerBuilder::new_with_type(&base_url, worker_type),
-            base_url,
-            dp_rank,
-            dp_size,
-        }
-    }
-
-    // Delegate all shared setter methods to inner BasicWorkerBuilder
-    pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.inner = self.inner.api_key(api_key);
-        self
-    }
-    pub fn worker_type(mut self, worker_type: WorkerType) -> Self {
-        self.inner = self.inner.worker_type(worker_type);
-        self
-    }
-    pub fn connection_mode(mut self, mode: ConnectionMode) -> Self {
-        self.inner = self.inner.connection_mode(mode);
-        self
-    }
-    pub fn runtime_type(mut self, runtime_type: RuntimeType) -> Self {
-        self.inner = self.inner.runtime_type(runtime_type);
-        self
-    }
-    pub fn labels(mut self, labels: HashMap<String, String>) -> Self {
-        self.inner = self.inner.labels(labels);
-        self
-    }
-    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.inner = self.inner.label(key, value);
-        self
-    }
-    pub fn health_config(mut self, config: HealthCheckConfig) -> Self {
-        self.inner = self.inner.health_config(config);
-        self
-    }
-    pub fn health_endpoint(mut self, endpoint: impl Into<String>) -> Self {
-        self.inner = self.inner.health_endpoint(endpoint);
-        self
-    }
-    pub fn circuit_breaker_config(mut self, config: CircuitBreakerConfig) -> Self {
-        self.inner = self.inner.circuit_breaker_config(config);
-        self
-    }
-    pub fn grpc_client(mut self, client: GrpcClient) -> Self {
-        self.inner = self.inner.grpc_client(client);
-        self
-    }
-    pub fn models(mut self, models: impl Into<WorkerModels>) -> Self {
-        self.inner = self.inner.models(models);
-        self
-    }
-    pub fn model(mut self, model: ModelCard) -> Self {
-        self.inner = self.inner.model(model);
-        self
-    }
-    pub fn kv_connector(mut self, connector: impl Into<String>) -> Self {
-        self.inner = self.inner.kv_connector(connector);
-        self
-    }
-    pub fn kv_role(mut self, role: impl Into<String>) -> Self {
-        self.inner = self.inner.kv_role(role);
-        self
-    }
-    pub fn priority(mut self, priority: u32) -> Self {
-        self.inner = self.inner.priority(priority);
-        self
-    }
-    pub fn cost(mut self, cost: f32) -> Self {
-        self.inner = self.inner.cost(cost);
-        self
-    }
-    pub fn bootstrap_port(mut self, port: Option<u16>) -> Self {
-        self.inner = self.inner.bootstrap_port(port);
-        self
-    }
-
-    pub fn build(self) -> DPAwareWorker {
-        let worker_url = format!("{}@{}", self.base_url, self.dp_rank);
-        let base_worker = self.inner.url(worker_url).build();
-        DPAwareWorker::with_base_worker(base_worker, self.base_url, self.dp_rank, self.dp_size)
+        })
+    } else {
+        tracing::warn!("Failed to parse URL '{}', defaulting to localhost", url);
+        "localhost".to_string()
     }
 }
 
@@ -414,19 +339,19 @@ mod tests {
         assert_eq!(worker.metadata().spec.labels, labels);
         assert_eq!(worker.metadata().health_endpoint, "/health");
         assert_eq!(
-            worker.metadata().spec.health.timeout_secs,
+            worker.metadata().health_config.timeout_secs,
             health_config.timeout_secs
         );
         assert_eq!(
-            worker.metadata().spec.health.check_interval_secs,
+            worker.metadata().health_config.check_interval_secs,
             health_config.check_interval_secs
         );
         assert_eq!(
-            worker.metadata().spec.health.failure_threshold,
+            worker.metadata().health_config.failure_threshold,
             health_config.failure_threshold
         );
         assert_eq!(
-            worker.metadata().spec.health.success_threshold,
+            worker.metadata().health_config.success_threshold,
             health_config.success_threshold
         );
     }
@@ -451,7 +376,9 @@ mod tests {
 
     #[test]
     fn test_dp_aware_worker_builder_minimal() {
-        let worker = DPAwareWorkerBuilder::new("http://localhost:8080", 2, 8).build();
+        let worker = BasicWorkerBuilder::new("http://localhost:8080")
+            .dp_config(2, 8)
+            .build();
 
         assert_eq!(worker.url(), "http://localhost:8080@2");
         assert_eq!(worker.dp_rank(), Some(2));
@@ -472,7 +399,8 @@ mod tests {
             disable_health_check: false,
         };
 
-        let worker = DPAwareWorkerBuilder::new("http://localhost:8080", 3, 16)
+        let worker = BasicWorkerBuilder::new("http://localhost:8080")
+            .dp_config(3, 16)
             .worker_type(WorkerType::Prefill)
             .bootstrap_port(Some(9090))
             .connection_mode(ConnectionMode::Http)
@@ -488,26 +416,27 @@ mod tests {
         assert_eq!(worker.metadata().spec.labels, labels);
         assert_eq!(worker.metadata().health_endpoint, "/status");
         assert_eq!(
-            worker.metadata().spec.health.timeout_secs,
+            worker.metadata().health_config.timeout_secs,
             health_config.timeout_secs
         );
         assert_eq!(
-            worker.metadata().spec.health.check_interval_secs,
+            worker.metadata().health_config.check_interval_secs,
             health_config.check_interval_secs
         );
         assert_eq!(
-            worker.metadata().spec.health.failure_threshold,
+            worker.metadata().health_config.failure_threshold,
             health_config.failure_threshold
         );
         assert_eq!(
-            worker.metadata().spec.health.success_threshold,
+            worker.metadata().health_config.success_threshold,
             health_config.success_threshold
         );
     }
 
     #[test]
     fn test_dp_aware_worker_with_grpc() {
-        let worker = DPAwareWorkerBuilder::new("grpc://cluster.local", 1, 4)
+        let worker = BasicWorkerBuilder::new("grpc://cluster.local")
+            .dp_config(1, 4)
             .worker_type(WorkerType::Decode)
             .connection_mode(ConnectionMode::Grpc)
             .label("transport", "grpc")
@@ -522,5 +451,43 @@ mod tests {
             worker.metadata().spec.labels.get("transport"),
             Some(&"grpc".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_bootstrap_host_normal_url() {
+        assert_eq!(parse_bootstrap_host("http://worker1:8080"), "worker1");
+        assert_eq!(parse_bootstrap_host("https://10.0.0.5:443"), "10.0.0.5");
+        assert_eq!(
+            parse_bootstrap_host("grpc://cluster.local"),
+            "cluster.local"
+        );
+    }
+
+    #[test]
+    fn test_parse_bootstrap_host_dp_aware_url() {
+        // DP-aware URLs use @rank suffix — must extract host, not rank
+        assert_eq!(parse_bootstrap_host("http://worker1:8080@0"), "worker1");
+        assert_eq!(parse_bootstrap_host("http://worker1:8080@3"), "worker1");
+        assert_eq!(
+            parse_bootstrap_host("grpc://prefill.local@7"),
+            "prefill.local"
+        );
+    }
+
+    #[test]
+    fn test_parse_bootstrap_host_bare_host() {
+        assert_eq!(parse_bootstrap_host("worker1:8080"), "worker1");
+        assert_eq!(parse_bootstrap_host("localhost"), "localhost");
+    }
+
+    #[test]
+    fn test_dp_aware_worker_bootstrap_host() {
+        let worker = BasicWorkerBuilder::new("http://prefill1:8080")
+            .dp_config(3, 8)
+            .worker_type(WorkerType::Prefill)
+            .build();
+
+        // bootstrap_host should be "prefill1", not "3"
+        assert_eq!(worker.metadata().spec.bootstrap_host, "prefill1");
     }
 }

@@ -412,6 +412,19 @@ pub struct WorkerSpec {
     #[serde(default, skip)]
     pub bootstrap_host: String,
 
+    /// Base URL without DP rank suffix (for DP-aware workers).
+    /// When set, `url` contains the rank-suffixed form (`{base}@{rank}`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_base_url: Option<String>,
+
+    /// Data-parallel rank (None = not DP-aware).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_rank: Option<usize>,
+
+    /// Total data-parallel group size (None = not DP-aware).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_size: Option<usize>,
+
     /// KV connector type (e.g. "MooncakeConnector", "NixlConnector").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_connector: Option<String>,
@@ -420,9 +433,9 @@ pub struct WorkerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_role: Option<String>,
 
-    /// Health check configuration.
-    #[serde(default)]
-    pub health: HealthCheckConfig,
+    /// Per-worker health check overrides (partial — only `Some` fields override router defaults).
+    #[serde(default, skip_serializing_if = "HealthCheckUpdate::is_empty")]
+    pub health: HealthCheckUpdate,
 
     /// Maximum connection attempts during worker registration (default: 20).
     #[serde(default = "default_max_connection_attempts")]
@@ -445,9 +458,12 @@ impl WorkerSpec {
             api_key: None,
             bootstrap_port: None,
             bootstrap_host: String::new(),
+            dp_base_url: None,
+            dp_rank: None,
+            dp_size: None,
             kv_connector: None,
             kv_role: None,
-            health: HealthCheckConfig::default(),
+            health: HealthCheckUpdate::default(),
             max_connection_attempts: default_max_connection_attempts(),
         }
     }
@@ -577,13 +593,24 @@ pub struct WorkerTypeStats {
 /// where `#[serde(default)]` on [`HealthCheckConfig`] would silently reset
 /// unspecified fields to defaults.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HealthCheckUpdate {
     pub timeout_secs: Option<u64>,
     pub check_interval_secs: Option<u64>,
     pub success_threshold: Option<u32>,
     pub failure_threshold: Option<u32>,
     pub disable_health_check: Option<bool>,
+}
+
+impl HealthCheckUpdate {
+    /// Returns `true` if all fields are `None` (no overrides specified).
+    pub fn is_empty(&self) -> bool {
+        self.timeout_secs.is_none()
+            && self.check_interval_secs.is_none()
+            && self.success_threshold.is_none()
+            && self.failure_threshold.is_none()
+            && self.disable_health_check.is_none()
+    }
 }
 
 impl HealthCheckUpdate {

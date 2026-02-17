@@ -612,9 +612,11 @@ impl JobQueue {
                     spec.worker_type = proto_worker_type;
                     spec.api_key = api_key.clone();
                     spec.bootstrap_port = bootstrap_port;
-                    spec.health = router_config.health_check.to_protocol_config();
+                    // Health config is resolved at worker build time from router
+                    // defaults + per-worker overrides (spec.health). No need to
+                    // set spec.health here since these workers have no overrides.
                     spec.max_connection_attempts =
-                        router_config.health_check.success_threshold * 10;
+                        router_config.health_check.success_threshold.max(1) * 10;
                     let config = spec;
 
                     let job = Job::AddWorker {
@@ -804,7 +806,9 @@ fn build_external_worker_config(
     let mut spec = WorkerSpec::new(url);
     spec.runtime_type = RuntimeType::External;
     spec.api_key = api_key;
-    spec.health = router_config.health_check.to_protocol_config();
-    spec.max_connection_attempts = router_config.health_check.success_threshold * 10;
+    // Health config is resolved at worker build time from router
+    // defaults + per-worker overrides (spec.health). No need to
+    // set spec.health here since these workers have no overrides.
+    spec.max_connection_attempts = router_config.health_check.success_threshold.max(1) * 10;
     spec
 }
