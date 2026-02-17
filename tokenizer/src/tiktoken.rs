@@ -213,9 +213,15 @@ impl TiktokenTokenizer {
             .map(|(k, &v)| (k.clone(), v))
             .collect();
 
-        // 4. Calculate true vocab size (includes non-UTF8 BPE tokens), build string-based
-        //    vocab maps (borrows encoder), then pass encoder by value to CoreBPE
-        let vocab_size = encoder.len() + special_tokens_encoder.len();
+        // 4. Calculate true vocab size from max token ID (handles sparse/reserved IDs),
+        //    build string-based vocab maps (borrows encoder), then pass encoder by value to CoreBPE
+        let vocab_size = encoder
+            .values()
+            .copied()
+            .chain(special_tokens_encoder.values().copied())
+            .max()
+            .map(|id| id as usize + 1)
+            .unwrap_or(0);
         let (vocab, reverse_vocab) = build_vocab_maps(&encoder, &config.added_tokens);
         let tokenizer = CoreBPE::new(encoder, special_tokens_encoder, CL100K_BASE_PATTERN)?;
 

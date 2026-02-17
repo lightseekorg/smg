@@ -65,12 +65,12 @@ pub fn create_tokenizer_with_chat_template(
         }
 
         // Priority 2: tiktoken.model / *.tiktoken
+        // Only forward the user's explicit chat_template_path — tiktoken handles
+        // its own config/discovery (tokenizer_config.json → directory discovery).
         if has_tiktoken_file(path) {
-            let final_chat_template =
-                resolve_and_log_chat_template(chat_template_path, path, file_path);
             return Ok(Arc::new(TiktokenTokenizer::from_dir_with_chat_template(
                 path,
-                final_chat_template.as_deref(),
+                chat_template_path,
             )?));
         }
 
@@ -99,11 +99,9 @@ pub fn create_tokenizer_with_chat_template(
                 let dir = path.parent().ok_or_else(|| {
                     Error::msg("Cannot determine parent directory of .model file")
                 })?;
-                let final_chat_template =
-                    resolve_and_log_chat_template(chat_template_path, dir, file_path);
                 Ok(Arc::new(TiktokenTokenizer::from_dir_with_chat_template(
                     dir,
-                    final_chat_template.as_deref(),
+                    chat_template_path,
                 )?) as Arc<dyn traits::Tokenizer>)
             } else {
                 Err(Error::msg("SentencePiece models not yet supported"))
@@ -327,14 +325,9 @@ pub async fn create_tokenizer_async_with_chat_template(
                     final_chat_template.as_deref(),
                 )
             } else if has_tiktoken_file(&cache_dir) {
-                let final_chat_template = resolve_and_log_chat_template(
-                    chat_template_path,
-                    &cache_dir,
-                    model_name_or_path,
-                );
                 Ok(Arc::new(TiktokenTokenizer::from_dir_with_chat_template(
                     &cache_dir,
-                    final_chat_template.as_deref(),
+                    chat_template_path,
                 )?))
             } else {
                 // Try other common tokenizer file names
