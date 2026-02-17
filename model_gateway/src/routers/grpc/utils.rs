@@ -5,11 +5,10 @@ use std::{collections::HashMap, sync::Arc};
 use axum::response::Response;
 use http::StatusCode;
 use llm_tokenizer::{
-    cache::CachedTokenizer,
     chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
     stop::StopSequenceDecoderBuilder,
     traits::Tokenizer,
-    HuggingFaceTokenizer, StopSequenceDecoder,
+    StopSequenceDecoder,
 };
 use openai_protocol::{
     chat::{ChatCompletionRequest, ChatMessage},
@@ -399,27 +398,9 @@ pub fn process_chat_messages(
     request: &ChatCompletionRequest,
     tokenizer: &dyn Tokenizer,
 ) -> Result<ProcessedMessages, String> {
-    // Use the tokenizer's chat template - we require HuggingFace tokenizer for gRPC
-    // First try direct downcast, then try via CachedTokenizer wrapper
-    let hf_tokenizer = tokenizer
-        .as_any()
-        .downcast_ref::<HuggingFaceTokenizer>()
-        .or_else(|| {
-            // If direct downcast fails, try to get inner tokenizer from CachedTokenizer
-            tokenizer
-                .as_any()
-                .downcast_ref::<CachedTokenizer>()
-                .and_then(|cached| {
-                    cached
-                        .inner()
-                        .as_any()
-                        .downcast_ref::<HuggingFaceTokenizer>()
-                })
-        });
-
-    let formatted_text = if let Some(hf_tokenizer) = hf_tokenizer {
+    let formatted_text = {
         // Get content format and transform messages accordingly
-        let content_format = hf_tokenizer.chat_template_content_format();
+        let content_format = tokenizer.chat_template_content_format();
         let mut transformed_messages = process_content_format(&request.messages, content_format)?;
 
         // Process tool call arguments in assistant messages
@@ -489,7 +470,7 @@ pub fn process_chat_messages(
         };
 
         // Apply chat template with the (now possibly shorter) list of messages
-        let rendered = hf_tokenizer
+        let rendered = tokenizer
             .apply_chat_template(&transformed_messages, params)
             .map_err(|e| format!("Failed to apply chat template: {}", e))?;
 
@@ -499,10 +480,6 @@ pub fn process_chat_messages(
         } else {
             rendered
         }
-    } else {
-        return Err(
-            "gRPC router requires HuggingFace tokenizer with chat template support".to_string(),
-        );
     };
 
     // Placeholder for multimodal inputs

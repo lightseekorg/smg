@@ -4,8 +4,10 @@ use anyhow::{Error, Result};
 use tracing::debug;
 
 use crate::{
-    hub::download_tokenizer_from_hf, huggingface::HuggingFaceTokenizer,
-    tiktoken::TiktokenTokenizer, traits,
+    hub::download_tokenizer_from_hf,
+    huggingface::HuggingFaceTokenizer,
+    tiktoken::{has_tiktoken_file, is_tiktoken_file, TiktokenTokenizer},
+    traits,
 };
 
 /// Represents the type of tokenizer being used
@@ -62,8 +64,18 @@ pub fn create_tokenizer_with_chat_template(
             );
         }
 
+        // Priority 2: tiktoken.model / *.tiktoken
+        if has_tiktoken_file(path) {
+            let final_chat_template =
+                resolve_and_log_chat_template(chat_template_path, path, file_path);
+            return Ok(Arc::new(TiktokenTokenizer::from_dir_with_chat_template(
+                path,
+                final_chat_template.as_deref(),
+            )?));
+        }
+
         return Err(Error::msg(format!(
-            "Directory '{}' does not contain a valid tokenizer file (tokenizer.json, tokenizer_config.json, or vocab.json)",
+            "Directory '{}' does not contain a valid tokenizer file (tokenizer.json, tiktoken.model, or vocab.json)",
             file_path
         )));
     }
@@ -82,8 +94,20 @@ pub fn create_tokenizer_with_chat_template(
             Ok(Arc::new(tokenizer) as Arc<dyn traits::Tokenizer>)
         }
         Some("model") => {
-            // SentencePiece model file
-            Err(Error::msg("SentencePiece models not yet supported"))
+            // Check if it's a tiktoken file (tiktoken.model) before assuming SentencePiece
+            if is_tiktoken_file(path) {
+                let dir = path.parent().ok_or_else(|| {
+                    Error::msg("Cannot determine parent directory of .model file")
+                })?;
+                let final_chat_template =
+                    resolve_and_log_chat_template(chat_template_path, dir, file_path);
+                Ok(Arc::new(TiktokenTokenizer::from_dir_with_chat_template(
+                    dir,
+                    final_chat_template.as_deref(),
+                )?) as Arc<dyn traits::Tokenizer>)
+            } else {
+                Err(Error::msg("SentencePiece models not yet supported"))
+            }
         }
         Some("gguf") => {
             // GGUF format
@@ -302,6 +326,16 @@ pub async fn create_tokenizer_async_with_chat_template(
                     tokenizer_path_str,
                     final_chat_template.as_deref(),
                 )
+            } else if has_tiktoken_file(&cache_dir) {
+                let final_chat_template = resolve_and_log_chat_template(
+                    chat_template_path,
+                    &cache_dir,
+                    model_name_or_path,
+                );
+                Ok(Arc::new(TiktokenTokenizer::from_dir_with_chat_template(
+                    &cache_dir,
+                    final_chat_template.as_deref(),
+                )?))
             } else {
                 // Try other common tokenizer file names
                 let possible_files = ["tokenizer_config.json", "vocab.json"];
