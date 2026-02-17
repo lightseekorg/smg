@@ -378,8 +378,8 @@ fn pick_prost_fields(labels: &mut HashMap<String, String>, s: &prost_types::Stru
                         };
                         labels.insert(key.to_string(), formatted);
                     }
-                    prost_types::value::Kind::BoolValue(true) => {
-                        labels.insert(key.to_string(), "true".to_string());
+                    prost_types::value::Kind::BoolValue(b) => {
+                        labels.insert(key.to_string(), b.to_string());
                     }
                     _ => {}
                 }
