@@ -9,16 +9,13 @@ use axum::{
 };
 use chrono::Utc;
 use serde_json::{json, Value};
+use smg_data_connector::{
+    Conversation, ConversationId, ConversationItem, ConversationItemId, ConversationItemStorage,
+    ConversationStorage, ListParams, NewConversation, NewConversationItem, SortOrder,
+};
 use tracing::{info, warn};
 
-use crate::{
-    data_connector::{
-        Conversation, ConversationId, ConversationItem, ConversationItemId,
-        ConversationItemStorage, ConversationStorage, ListParams, NewConversation,
-        NewConversationItem, SortOrder,
-    },
-    routers::persistence_utils::item_to_json,
-};
+use crate::routers::persistence_utils::item_to_json;
 
 // ============================================================================
 // Constants
@@ -333,7 +330,7 @@ pub async fn create_conversation_items(
     let added_at = Utc::now();
 
     // Set conversation_id in task-local storage for Oracle backend
-    let scope_result = crate::data_connector::CURRENT_CONVERSATION_ID
+    let scope_result = smg_data_connector::CURRENT_CONVERSATION_ID
         .scope(Some(conversation_id.clone()), async move {
             let mut created_items = Vec::new();
             let mut warnings = Vec::new();
@@ -427,7 +424,7 @@ async fn process_item_reference(
 
     let item_id = ConversationItemId::from(ref_id);
 
-    let scoped_result = crate::data_connector::CURRENT_CONVERSATION_ID
+    let scoped_result = smg_data_connector::CURRENT_CONVERSATION_ID
         .scope(Some(conversation_id.clone()), async move {
             item_storage.get_item(&item_id).await
         })
@@ -475,7 +472,7 @@ async fn process_item_with_id(
 
     // Check if item exists globally
     let item_id_clone = item_id.clone();
-    let item_result = crate::data_connector::CURRENT_CONVERSATION_ID
+    let item_result = smg_data_connector::CURRENT_CONVERSATION_ID
         .scope(Some(conversation_id.clone()), async move {
             item_storage.get_item(&item_id_clone).await
         })
@@ -489,7 +486,7 @@ async fn process_item_with_id(
             let (mut new_item, warning) = parse_item_from_value(item_val).map_err(bad_request)?;
             new_item.id = Some(item_id);
 
-            let created = crate::data_connector::CURRENT_CONVERSATION_ID
+            let created = smg_data_connector::CURRENT_CONVERSATION_ID
                 .scope(Some(conversation_id.clone()), async move {
                     item_storage.create_item(new_item).await
                 })
@@ -545,7 +542,7 @@ pub async fn get_conversation_item(
         return not_found("Item not found in this conversation");
     }
 
-    let item_result = crate::data_connector::CURRENT_CONVERSATION_ID
+    let item_result = smg_data_connector::CURRENT_CONVERSATION_ID
         .scope(Some(conversation_id.clone()), async move {
             item_storage.get_item(&item_id).await
         })
