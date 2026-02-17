@@ -3,25 +3,22 @@
 use std::sync::Arc;
 
 use axum::response::Response;
+use openai_protocol::{
+    chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
+    common::{ChatLogProbs, ToolCall, Usage},
+    responses::{
+        OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
+        ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
+    },
+};
 use tracing::error;
 
 use super::{builder::convert_harmony_logprobs, HarmonyParserAdapter};
-use crate::{
-    grpc_client::sglang_proto::generate_complete::MatchedStop::{MatchedStopStr, MatchedTokenId},
-    protocols::{
-        chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
-        common::{ChatLogProbs, CompletionTokensDetails, ToolCall, Usage},
-        responses::{
-            OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
-            ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
-        },
-    },
-    routers::{
-        error,
-        grpc::{
-            common::{response_collection, response_formatting},
-            context::{DispatchMetadata, ExecutionResult},
-        },
+use crate::routers::{
+    error,
+    grpc::{
+        common::{response_collection, response_formatting},
+        context::{DispatchMetadata, ExecutionResult},
     },
 };
 
@@ -61,15 +58,7 @@ impl HarmonyResponseProcessor {
         let mut total_reasoning_tokens = 0u32;
 
         for (index, complete) in all_responses.iter().enumerate() {
-            // Convert matched_stop from proto to JSON
-            let matched_stop = complete.matched_stop().map(|m| match m {
-                MatchedTokenId(id) => {
-                    serde_json::json!(id)
-                }
-                MatchedStopStr(s) => {
-                    serde_json::json!(s)
-                }
-            });
+            let matched_stop = complete.matched_stop_json();
 
             // Parse Harmony channels with HarmonyParserAdapter
             let mut parser = HarmonyParserAdapter::new().map_err(|e| {
@@ -138,14 +127,8 @@ impl HarmonyResponseProcessor {
         }
 
         // Build usage from proto fields
-        let mut usage = response_formatting::build_usage(&all_responses);
-
-        // Add reasoning token count from parsed analysis/commentary channels
-        if total_reasoning_tokens > 0 {
-            usage.completion_tokens_details = Some(CompletionTokensDetails {
-                reasoning_tokens: Some(total_reasoning_tokens),
-            });
-        }
+        let usage = response_formatting::build_usage(&all_responses)
+            .with_reasoning_tokens(total_reasoning_tokens);
 
         // Final ChatCompletionResponse
         Ok(
@@ -237,15 +220,7 @@ impl HarmonyResponseProcessor {
             )
         })?;
 
-        // Convert matched_stop from proto to JSON
-        let matched_stop = complete.matched_stop().map(|m| match m {
-            MatchedTokenId(id) => {
-                serde_json::json!(id)
-            }
-            MatchedStopStr(s) => {
-                serde_json::json!(s)
-            }
-        });
+        let matched_stop = complete.matched_stop_json();
 
         let parsed = parser
             .parse_complete(
@@ -282,14 +257,8 @@ impl HarmonyResponseProcessor {
         }
 
         // Build usage (needed for both ToolCallsFound and Completed)
-        let mut usage = response_formatting::build_usage(std::slice::from_ref(complete));
-
-        // Add reasoning token count from parsed analysis/commentary channels
-        if parsed.reasoning_token_count > 0 {
-            usage.completion_tokens_details = Some(CompletionTokensDetails {
-                reasoning_tokens: Some(parsed.reasoning_token_count),
-            });
-        }
+        let usage = response_formatting::build_usage(std::slice::from_ref(complete))
+            .with_reasoning_tokens(parsed.reasoning_token_count);
 
         // Check for tool calls in commentary channel
         if let Some(tool_calls) = parsed.commentary {

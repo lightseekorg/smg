@@ -14,8 +14,6 @@ runs:
       with:
         path: /tmp/trtllm-wheel
         key: trtllm-wheel-${{ runner.os }}-${{ hashFiles('scripts/ci_install_trtllm.sh') }}
-        restore-keys: |
-          trtllm-wheel-${{ runner.os }}-
 
     - name: Install TRT-LLM
       shell: bash

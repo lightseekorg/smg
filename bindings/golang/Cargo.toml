@@ -1,6 +1,6 @@
 [package]
 name = "smg-golang"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 
 [lib]
@@ -23,6 +23,18 @@ async-trait = "0.1"
 [dependencies.smg]
 path = "../../model_gateway"
 default-features = true
+
+[dependencies.openai-protocol]
+workspace = true
+
+[dependencies.llm-tokenizer]
+path = "../../tokenizer"
+
+[dependencies.tool-parser]
+path = "../../tool_parser"
+
+[dependencies.smg-grpc-client]
+workspace = true
 
 [features]
 default = []
@@ -47,3 +59,6 @@ debug = 1
 split-debuginfo = "unpacked"
 incremental = true
 codegen-units = 256
+
+[lints]
+workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "smg-mesh"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "Mesh gossip protocol and distributed state synchronization for Shepherd Model Gateway"
 license = "Apache-2.0"
@@ -39,11 +39,11 @@ prost-types = "0.14.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2.2"
 tokio-stream = "0.1"
-tonic = { version = "0.14.2", features = ["gzip", "transport"] }
+tonic = { version = "0.14.2", features = ["gzip", "transport", "tls-ring"] }
 tonic-prost = "0.14.2"
 
 # Workspace crates
-kv-index = { version = "1.0.0", path = "../kv_index", package = "kv-index" }
+kv-index.workspace = true
 
 [build-dependencies]
 tonic-prost-build = "0.14.2"
@@ -52,3 +52,6 @@ prost-build = "0.14.1"
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

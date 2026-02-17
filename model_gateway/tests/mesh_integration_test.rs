@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use smg::mesh::{
+use smg_mesh::{
     gossip::NodeStatus, AppState, MembershipState, MeshSyncManager, RateLimitConfig, SKey,
     StateStores, TreeInsertOp, TreeOperation, WorkerState, GLOBAL_RATE_LIMIT_COUNTER_KEY,
     GLOBAL_RATE_LIMIT_KEY,

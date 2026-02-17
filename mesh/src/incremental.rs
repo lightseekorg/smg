@@ -14,7 +14,7 @@ use tracing::{debug, trace};
 use super::{
     crdt::SKey,
     service::gossip::StateUpdate,
-    stores::{MembershipState, PolicyState, StateStores, StoreType, WorkerState},
+    stores::{AppState, MembershipState, PolicyState, StateStores, StoreType, WorkerState},
 };
 
 /// Tracks the last sent version for each key in each store
@@ -55,7 +55,7 @@ impl IncrementalUpdateCollector {
     fn collect_serializable_updates<S>(
         &self,
         all_items: std::collections::BTreeMap<SKey, S>,
-        get_version: impl Fn(&SKey) -> u64,
+        get_metadata: impl Fn(&SKey) -> Option<(u64, String)>,
         last_sent_map: &mut HashMap<String, u64>,
         store_name: &str,
         get_id: impl Fn(&S) -> String,
@@ -68,7 +68,25 @@ impl IncrementalUpdateCollector {
 
         for (key, state) in all_items {
             let key_str = key.as_str().to_string();
-            let current_version = get_version(&key);
+
+            // Get both version and actor from metadata
+            let (current_version, actor) = match get_metadata(&key) {
+                Some((v, a)) => (v, a),
+                None => continue, // Skip if no metadata
+            };
+
+            // Only collect updates where we are the actor (local updates)
+            if actor != self.self_name {
+                debug!(
+                    "Skipping {} update: {} (actor: {}, self: {}, not local)",
+                    store_name,
+                    get_id(&state),
+                    actor,
+                    self.self_name
+                );
+                continue;
+            }
+
             let last_sent_version = last_sent_map.get(&key_str).copied().unwrap_or(0);
 
             if current_version > last_sent_version {
@@ -82,11 +100,12 @@ impl IncrementalUpdateCollector {
                     });
 
                     last_sent_map.insert(key_str, current_version);
-                    trace!(
-                        "Collected {} update: {} (version: {})",
+                    debug!(
+                        "Collected {} update: {} (version: {}, actor: {})",
                         store_name,
                         get_id(&state),
-                        current_version
+                        current_version,
+                        actor
                     );
                 }
             }
@@ -102,16 +121,10 @@ impl IncrementalUpdateCollector {
         match store_type {
             StoreType::Worker => {
                 let all_workers = self.stores.worker.all();
-                let get_version = |key: &SKey| {
-                    self.stores
-                        .worker
-                        .get_metadata(key)
-                        .map(|(v, _)| v)
-                        .unwrap_or(0)
-                };
+                let get_metadata = |key: &SKey| self.stores.worker.get_metadata(key);
                 updates = self.collect_serializable_updates(
                     all_workers,
-                    get_version,
+                    get_metadata,
                     &mut last_sent.worker,
                     "worker",
                     |state: &WorkerState| state.worker_id.clone(),
@@ -119,16 +132,10 @@ impl IncrementalUpdateCollector {
             }
             StoreType::Policy => {
                 let all_policies = self.stores.policy.all();
-                let get_version = |key: &SKey| {
-                    self.stores
-                        .policy
-                        .get_metadata(key)
-                        .map(|(v, _)| v)
-                        .unwrap_or(0)
-                };
+                let get_metadata = |key: &SKey| self.stores.policy.get_metadata(key);
                 updates = self.collect_serializable_updates(
                     all_policies,
-                    get_version,
+                    get_metadata,
                     &mut last_sent.policy,
                     "policy",
                     |state: &PolicyState| state.model_id.clone(),
@@ -136,46 +143,21 @@ impl IncrementalUpdateCollector {
             }
             StoreType::App => {
                 let all_apps = self.stores.app.all();
-                let timestamp = Self::current_timestamp();
-                for (key, state) in all_apps {
-                    let key_str = key.as_str().to_string();
-                    let current_version = self
-                        .stores
-                        .app
-                        .get_metadata(&key)
-                        .map(|(v, _)| v)
-                        .unwrap_or(0);
-                    let last_sent_version = last_sent.app.get(&key_str).copied().unwrap_or(0);
-
-                    if current_version > last_sent_version {
-                        updates.push(StateUpdate {
-                            key: key_str.clone(),
-                            value: state.value.clone(),
-                            version: current_version,
-                            actor: self.self_name.clone(),
-                            timestamp,
-                        });
-                        last_sent.app.insert(key_str, current_version);
-                        trace!(
-                            "Collected app update: {} (version: {})",
-                            state.key,
-                            current_version
-                        );
-                    }
-                }
+                let get_metadata = |key: &SKey| self.stores.app.get_metadata(key);
+                updates = self.collect_serializable_updates(
+                    all_apps,
+                    get_metadata,
+                    &mut last_sent.app,
+                    "app",
+                    |state: &AppState| state.key.clone(),
+                );
             }
             StoreType::Membership => {
                 let all_members = self.stores.membership.all();
-                let get_version = |key: &SKey| {
-                    self.stores
-                        .membership
-                        .get_metadata(key)
-                        .map(|(v, _)| v)
-                        .unwrap_or(0)
-                };
+                let get_metadata = |key: &SKey| self.stores.membership.get_metadata(key);
                 updates = self.collect_serializable_updates(
                     all_members,
-                    get_version,
+                    get_metadata,
                     &mut last_sent.membership,
                     "membership",
                     |state: &MembershipState| state.name.clone(),

@@ -3,15 +3,13 @@
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
+use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
 use serde_json::Value;
+use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
+use smg_mcp::{McpOrchestrator, McpToolSession};
 
 use super::provider::Provider;
-use crate::{
-    core::Worker,
-    data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::McpOrchestrator,
-    protocols::{chat::ChatCompletionRequest, responses::ResponsesRequest},
-};
+use crate::core::Worker;
 
 pub struct RequestContext {
     pub input: RequestInput,
@@ -141,18 +139,18 @@ impl RequestContext {
 }
 
 impl RequestContext {
-    pub fn responses_request(&self) -> &ResponsesRequest {
+    pub fn responses_request(&self) -> Option<&ResponsesRequest> {
         match &self.input.request_type {
-            RequestType::Responses(req) => req.as_ref(),
-            _ => panic!("Expected responses request"),
+            RequestType::Responses(req) => Some(req.as_ref()),
+            _ => None,
         }
     }
 
     #[allow(dead_code)]
-    pub fn responses_request_arc(&self) -> Arc<ResponsesRequest> {
+    pub fn responses_request_arc(&self) -> Option<Arc<ResponsesRequest>> {
         match &self.input.request_type {
-            RequestType::Responses(req) => Arc::clone(req),
-            _ => panic!("Expected responses request"),
+            RequestType::Responses(req) => Some(Arc::clone(req)),
+            _ => None,
         }
     }
 
@@ -205,41 +203,46 @@ pub struct OwnedStreamingContext {
 }
 
 impl RequestContext {
-    pub fn into_streaming_context(mut self) -> OwnedStreamingContext {
-        let payload_state = self.take_payload().expect("Payload not prepared");
+    pub fn into_streaming_context(mut self) -> Result<OwnedStreamingContext, &'static str> {
+        let payload_state = self.take_payload().ok_or("Payload not prepared")?;
+        let original_body = self
+            .responses_request()
+            .ok_or("Expected responses request")?
+            .clone();
+        let response = self
+            .components
+            .response_storage()
+            .ok_or("Response storage required")?
+            .clone();
+        let conversation = self
+            .components
+            .conversation_storage()
+            .ok_or("Conversation storage required")?
+            .clone();
+        let conversation_item = self
+            .components
+            .conversation_item_storage()
+            .ok_or("Conversation item storage required")?
+            .clone();
 
-        OwnedStreamingContext {
+        Ok(OwnedStreamingContext {
             url: payload_state.url,
             payload: payload_state.json,
-            original_body: self.responses_request().clone(),
+            original_body,
             previous_response_id: payload_state.previous_response_id,
             storage: StorageHandles {
-                response: self
-                    .components
-                    .response_storage()
-                    .expect("Response storage required")
-                    .clone(),
-                conversation: self
-                    .components
-                    .conversation_storage()
-                    .expect("Conversation storage required")
-                    .clone(),
-                conversation_item: self
-                    .components
-                    .conversation_item_storage()
-                    .expect("Conversation item storage required")
-                    .clone(),
+                response,
+                conversation,
+                conversation_item,
             },
-        }
+        })
     }
 }
 
 pub struct StreamingEventContext<'a> {
     pub original_request: &'a ResponsesRequest,
     pub previous_response_id: Option<&'a str>,
-    pub server_keys: &'a [String],
-    pub mcp_servers: &'a [(String, String)],
-    pub orchestrator: Option<&'a Arc<McpOrchestrator>>,
+    pub session: Option<&'a McpToolSession<'a>>,
 }
 
 pub type StreamingRequest = OwnedStreamingContext;

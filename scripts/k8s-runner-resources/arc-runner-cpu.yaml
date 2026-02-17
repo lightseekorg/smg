@@ -1,0 +1,26 @@
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: arc-runner-cpu
+  namespace: actions-runner-system
+spec:
+  replicas: 4
+  template:
+    spec:
+      repository: lightseekorg/smg
+      labels:
+        - k8s-runner-cpu
+      serviceAccountName: arc-runner-sa
+
+      containers:
+        - name: runner
+          image: fra.ocir.io/idqj093njucb/action-runner:v0.0.1
+          resources:
+            requests:
+              cpu: "8"
+              memory: "16Gi"
+            limits:
+              cpu: "8"
+              memory: "16Gi"
+        - name: docker
+          image: fra.ocir.io/idqj093njucb/docker:dind

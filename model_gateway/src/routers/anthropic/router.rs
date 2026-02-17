@@ -5,23 +5,20 @@
 //! - Tool use and MCP integration
 //! - Extended thinking and prompt caching
 
-use std::{any::Any, sync::Arc, time::Duration};
+use std::{any::Any, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use axum::{
-    body::Body,
-    extract::Request,
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
-};
-use tracing::debug;
+use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
+use openai_protocol::{chat::ChatCompletionRequest, messages::CreateMessageRequest};
+use tracing::{info, warn};
 
-use super::{messages, models};
+use super::{
+    context::{RequestContext, RouterContext},
+    mcp, models, non_streaming, streaming,
+};
 use crate::{
     app_context::AppContext,
-    core::Worker,
-    protocols::{chat::ChatCompletionRequest, messages::CreateMessageRequest},
-    routers::RouterTrait,
+    routers::{error, RouterTrait},
 };
 
 /// Router for Anthropic-specific APIs
@@ -32,72 +29,47 @@ use crate::{
 /// - Extended thinking
 /// - Prompt caching
 /// - Citations
-#[derive(Debug)]
 pub struct AnthropicRouter {
     context: Arc<AppContext>,
-    http_client: reqwest::Client,
+    router_ctx: RouterContext,
+}
+
+impl fmt::Debug for AnthropicRouter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AnthropicRouter")
+            .field("context", &"<AppContext>")
+            .finish()
+    }
 }
 
 impl AnthropicRouter {
-    /// Create a new Anthropic router
-    pub fn new(context: Arc<AppContext>) -> Self {
-        let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .build()
-            .expect("Failed to create HTTP client");
+    pub fn new(context: Arc<AppContext>) -> Result<Self, String> {
+        let request_timeout = Duration::from_secs(context.router_config.request_timeout_secs);
+        let mcp_orchestrator = context
+            .mcp_orchestrator
+            .get()
+            .ok_or_else(|| "Anthropic router requires MCP orchestrator".to_string())?
+            .clone();
 
-        Self {
+        let router_ctx = RouterContext {
+            mcp_orchestrator,
+            http_client: context.client.clone(),
+            worker_registry: context.worker_registry.clone(),
+            request_timeout,
+        };
+
+        Ok(Self {
             context,
-            http_client,
-        }
+            router_ctx,
+        })
     }
 
-    /// Get reference to app context
     pub fn context(&self) -> &Arc<AppContext> {
         &self.context
     }
 
-    /// Get reference to HTTP client
     pub fn http_client(&self) -> &reqwest::Client {
-        &self.http_client
-    }
-
-    /// Find workers that can handle the given model and select the least loaded one
-    ///
-    /// This method follows the same pattern as OpenAI router to correctly handle
-    /// wildcard workers (workers with empty model lists that accept any model).
-    pub fn find_best_worker_for_model(&self, model_id: &str) -> Option<Arc<dyn Worker>> {
-        self.context
-            .worker_registry
-            .get_workers_filtered(
-                None, // Don't filter by model in get_workers_filtered
-                None, // provider
-                None, // connection_mode
-                None, // runtime_type
-                true, // healthy_only
-            )
-            .into_iter()
-            .filter(|w| w.supports_model(model_id))
-            .min_by_key(|w| w.load())
-    }
-
-    /// Check if any worker supports the model (regardless of health/load)
-    pub fn any_worker_supports_model(&self, model_id: &str) -> bool {
-        self.context
-            .worker_registry
-            .get_workers_filtered(None, None, None, None, false)
-            .into_iter()
-            .any(|w| w.supports_model(model_id))
-    }
-
-    /// Select a worker for the given model
-    ///
-    /// Returns an error string if no suitable worker is found.
-    pub fn select_worker_for_model(&self, model_id: &str) -> Result<Arc<dyn Worker>, String> {
-        debug!("Selecting worker for model: {}", model_id);
-
-        self.find_best_worker_for_model(model_id)
-            .ok_or_else(|| format!("No healthy workers available for model '{}'", model_id))
+        &self.context.client
     }
 }
 
@@ -114,24 +86,52 @@ impl RouterTrait for AnthropicRouter {
         _body: &ChatCompletionRequest,
         _model_id: Option<&str>,
     ) -> Response {
-        (
-            StatusCode::NOT_FOUND,
+        error::not_found(
+            "unsupported_endpoint",
             "Chat completions not supported on Anthropic router. Use /v1/messages instead.",
         )
-            .into_response()
     }
 
-    /// Route Anthropic Messages API requests (/v1/messages)
     async fn route_messages(
         &self,
         headers: Option<&HeaderMap>,
         body: &CreateMessageRequest,
-        model_id: Option<&str>,
+        model_id: &str,
     ) -> Response {
-        if body.stream.unwrap_or(false) {
-            messages::handle_streaming(self, headers, body, model_id).await
+        let mut request = body.clone();
+        let headers_owned = headers.cloned();
+
+        let mcp_servers = if request.has_mcp_toolset() {
+            match mcp::ensure_connection(&mut request, &self.router_ctx.mcp_orchestrator).await {
+                Ok(servers) => Some(servers),
+                Err(response) => {
+                    warn!(model = %model_id, "MCP connection setup failed");
+                    return response;
+                }
+            }
         } else {
-            messages::handle_non_streaming(self, headers, body, model_id).await
+            None
+        };
+
+        let is_streaming = request.stream.unwrap_or(false);
+        info!(
+            model = %model_id,
+            streaming = %is_streaming,
+            mcp = %mcp_servers.is_some(),
+            "Processing Messages API request"
+        );
+
+        let req_ctx = RequestContext {
+            request,
+            headers: headers_owned,
+            model_id: model_id.to_string(),
+            mcp_servers,
+        };
+
+        if is_streaming {
+            streaming::execute(&self.router_ctx, req_ctx).await
+        } else {
+            non_streaming::execute(&self.router_ctx, req_ctx).await
         }
     }
 
@@ -142,27 +142,5 @@ impl RouterTrait for AnthropicRouter {
 
     fn router_type(&self) -> &'static str {
         "anthropic"
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::RouterConfig;
-
-    #[tokio::test]
-    async fn test_router_creation() {
-        let config = RouterConfig::default();
-        let context = Arc::new(AppContext::from_config(config, 120).await.unwrap());
-        let router = AnthropicRouter::new(context);
-        assert_eq!(router.router_type(), "anthropic");
-    }
-
-    #[tokio::test]
-    async fn test_router_type() {
-        let config = RouterConfig::default();
-        let context = Arc::new(AppContext::from_config(config, 120).await.unwrap());
-        let router = AnthropicRouter::new(context);
-        assert_eq!(router.router_type(), "anthropic");
     }
 }

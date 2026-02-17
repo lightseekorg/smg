@@ -44,7 +44,7 @@ class Gateway:
     1. Regular mode: Start with worker URLs
     2. PD mode: Start with prefill/decode workers
     3. IGW mode: Start empty, add workers via API
-    4. Cloud mode: Start with cloud backend (OpenAI, xAI)
+    4. Cloud mode: Start with cloud backend (OpenAI, xAI, Anthropic)
 
     Example (regular mode):
         gateway = Gateway()
@@ -75,8 +75,8 @@ class Gateway:
 
     Example (cloud mode):
         gateway = Gateway()
-        gateway.start(cloud_backend="openai")  # or "xai"
-        # Requires OPENAI_API_KEY or XAI_API_KEY env var
+        gateway.start(cloud_backend="openai")  # or "xai", "anthropic"
+        # Requires OPENAI_API_KEY, XAI_API_KEY, or ANTHROPIC_API_KEY env var
     """
 
     def __init__(
@@ -104,6 +104,8 @@ class Gateway:
         self.process: subprocess.Popen | None = None
         self.model_path: str | None = None
         self.policy: str = "round_robin"
+        self.log_level: str = "warn"
+        self.log_dir: str | None = None
         self.pd_mode: bool = False
         self.igw_mode: bool = False
         self.cloud_mode: bool = False
@@ -123,8 +125,8 @@ class Gateway:
         worker_urls: list[str] | None = None,
         model_path: str | None = None,
         # PD mode arguments
-        prefill_workers: list["ModelInstance"] | None = None,
-        decode_workers: list["ModelInstance"] | None = None,
+        prefill_workers: list[ModelInstance] | None = None,
+        decode_workers: list[ModelInstance] | None = None,
         # IGW mode arguments
         igw_mode: bool = False,
         # Cloud mode arguments
@@ -135,6 +137,8 @@ class Gateway:
         timeout: float = DEFAULT_ROUTER_TIMEOUT,
         show_output: bool | None = None,
         extra_args: list[str] | None = None,
+        log_level: str | None = None,
+        log_dir: str | None = None,
     ) -> None:
         """Start the gateway.
 
@@ -150,12 +154,14 @@ class Gateway:
             prefill_workers: List of prefill ModelInstance objects for PD mode.
             decode_workers: List of decode ModelInstance objects for PD mode.
             igw_mode: Start in IGW mode (no workers, add via API).
-            cloud_backend: Cloud backend type ("openai" or "xai").
+            cloud_backend: Cloud backend type ("openai", "xai", or "anthropic").
             history_backend: History backend for cloud mode ("memory" or "oracle").
             policy: Routing policy (round_robin, random, etc.)
             timeout: Startup timeout in seconds.
             show_output: Show subprocess output (env var override).
             extra_args: Additional router arguments.
+            log_level: Log level override (debug, info, warn, error).
+            log_dir: Directory to store gateway log files.
 
         Raises:
             RuntimeError: If gateway is already started.
@@ -189,6 +195,10 @@ class Gateway:
             show_output = os.environ.get(ENV_SHOW_ROUTER_LOGS, "0") == "1"
 
         self.policy = policy
+        if log_level:
+            self.log_level = log_level
+        if log_dir:
+            self.log_dir = log_dir
 
         if is_igw_mode:
             # IGW mode: start empty, add workers via API
@@ -234,6 +244,13 @@ class Gateway:
             self.cloud_mode = True
             self.cloud_backend = cloud_backend
 
+            # Mapping from cloud backend name to gateway --backend arg
+            cloud_backend_type = {
+                "openai": "openai",
+                "xai": "openai",
+                "anthropic": "anthropic",
+            }
+
             # Get worker URL and API key based on backend
             if cloud_backend == "openai":
                 worker_url = "https://api.openai.com"
@@ -249,12 +266,20 @@ class Gateway:
                     raise ValueError("XAI_API_KEY environment variable required")
                 self._env = os.environ.copy()
                 self._env["XAI_API_KEY"] = api_key
+            elif cloud_backend == "anthropic":
+                worker_url = "https://api.anthropic.com"
+                api_key = os.environ.get("ANTHROPIC_API_KEY")
+                if not api_key:
+                    raise ValueError("ANTHROPIC_API_KEY environment variable required")
+                self._env = os.environ.copy()
+                self._env["ANTHROPIC_API_KEY"] = api_key
             else:
                 raise ValueError(f"Unsupported cloud backend: {cloud_backend}")
 
+            backend_type = cloud_backend_type.get(cloud_backend, "openai")
             mode_args = [
                 "--backend",
-                "openai",  # Both OpenAI and xAI use openai backend type
+                backend_type,
                 "--worker-urls",
                 worker_url,
                 "--history-backend",
@@ -272,6 +297,8 @@ class Gateway:
             # Regular mode: worker URLs
             if model_path is None:
                 raise ValueError("model_path is required for regular mode")
+            if not worker_urls:
+                raise ValueError("worker_urls is required and must be non-empty for regular mode")
             self.model_path = model_path
             self.pd_mode = False
             self.igw_mode = False
@@ -314,11 +341,20 @@ class Gateway:
         logger.info("Starting %s on port %d", log_msg or "gateway", self.port)
         logger.debug("Gateway command: %s", " ".join(cmd))
 
+        # Discard subprocess output when not showing it, so the pipe buffer
+        # never fills up and blocks the router process.
+        if show_output:
+            stdout_target = None
+            stderr_target = None
+        else:
+            stdout_target = subprocess.DEVNULL
+            stderr_target = subprocess.DEVNULL
+
         self.process = subprocess.Popen(
             cmd,
             env=self._env,  # Use custom env if set (e.g., for cloud mode API keys)
-            stdout=None if show_output else subprocess.PIPE,
-            stderr=None if show_output else subprocess.PIPE,
+            stdout=stdout_target,
+            stderr=stderr_target,
             start_new_session=True,
         )
 
@@ -351,7 +387,7 @@ class Gateway:
 
     def _build_base_cmd(self) -> list[str]:
         """Build the base command for launching the router."""
-        return [
+        cmd = [
             "python3",
             "-m",
             "smg.launch_router",
@@ -366,8 +402,11 @@ class Gateway:
             "--policy",
             self.policy,
             "--log-level",
-            "warn",
+            self.log_level,
         ]
+        if self.log_dir:
+            cmd.extend(["--log-dir", self.log_dir])
+        return cmd
 
     # -------------------------------------------------------------------------
     # Health & Metrics APIs
@@ -437,9 +476,7 @@ class Gateway:
             resp = httpx.get(f"{self.base_url}/workers", timeout=timeout)
             if resp.status_code == 200:
                 data = resp.json()
-                return [
-                    self._worker_from_api_response(w) for w in data.get("workers", [])
-                ]
+                return [self._worker_from_api_response(w) for w in data.get("workers", [])]
             return []
         except (httpx.RequestError, httpx.TimeoutException):
             return []
@@ -565,7 +602,7 @@ class Gateway:
     # Context manager support
     # -------------------------------------------------------------------------
 
-    def __enter__(self) -> "Gateway":
+    def __enter__(self) -> Gateway:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -596,8 +633,7 @@ def launch_cloud_gateway(
 
     if runtime not in THIRD_PARTY_MODELS:
         raise ValueError(
-            f"Unknown cloud runtime: {runtime}. "
-            f"Available: {list(THIRD_PARTY_MODELS.keys())}"
+            f"Unknown cloud runtime: {runtime}. Available: {list(THIRD_PARTY_MODELS.keys())}"
         )
 
     gateway = Gateway()

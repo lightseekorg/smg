@@ -1,24 +1,22 @@
 //! Shared helpers and state tracking for Harmony Responses
 
 use axum::response::Response;
-use serde_json::{from_value, json, to_string, Value};
+use openai_protocol::{
+    common::{ToolCall, ToolChoice, ToolChoiceValue},
+    responses::{
+        ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
+        ResponseReasoningContent, ResponseTool, ResponseToolType, ResponsesRequest,
+        ResponsesResponse, StringOrContentParts,
+    },
+};
+use serde_json::{from_value, to_string, Value};
+use smg_data_connector::ResponseId;
+use smg_mcp::McpToolSession;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use super::execution::ToolResult;
-use crate::{
-    data_connector::ResponseId,
-    mcp,
-    protocols::{
-        common::{ToolCall, ToolChoice, ToolChoiceValue},
-        responses::{
-            McpToolInfo, ResponseContentPart, ResponseInput, ResponseInputOutputItem,
-            ResponseOutputItem, ResponseReasoningContent, ResponseTool, ResponseToolType,
-            ResponsesRequest, ResponsesResponse, StringOrContentParts,
-        },
-    },
-    routers::{error, grpc::common::responses::ResponsesContext},
-};
+use crate::routers::{error, grpc::common::responses::ResponsesContext};
 
 /// Record of a single MCP tool call execution
 ///
@@ -36,16 +34,13 @@ pub(super) struct McpCallRecord {
 /// so we can build proper mcp_list_tools and mcp_call output items.
 #[derive(Debug, Clone)]
 pub(super) struct McpCallTracking {
-    /// MCP server label (e.g., "sglang-mcp")
-    pub server_label: String,
     /// All tool call records across all iterations
     pub tool_calls: Vec<McpCallRecord>,
 }
 
 impl McpCallTracking {
-    pub fn new(server_label: String) -> Self {
+    pub fn new() -> Self {
         Self {
-            server_label,
             tool_calls: Vec::new(),
         }
     }
@@ -181,52 +176,18 @@ pub(super) fn build_next_request_with_tools(
     Ok(request)
 }
 
-/// Inject MCP metadata into final response
-///
-/// Adds mcp_list_tools and tool output items to the response output array.
-/// The output items respect the tool's response_format configuration
-/// (McpCall, WebSearchCall, CodeInterpreterCall, FileSearchCall).
-///
-/// Following non-Harmony pipeline pattern:
-/// 1. Prepend mcp_list_tools at the beginning
-/// 2. Append all tool output items at the end
 pub(super) fn inject_mcp_metadata(
     response: &mut ResponsesResponse,
     tracking: &McpCallTracking,
-    mcp_tools: &[mcp::ToolEntry],
+    session: &McpToolSession<'_>,
 ) {
-    // Build mcp_list_tools item
-    let tools_info: Vec<McpToolInfo> = mcp_tools
-        .iter()
-        .map(|entry| McpToolInfo {
-            name: entry.tool.name.to_string(),
-            description: entry.tool.description.as_ref().map(|d| d.to_string()),
-            input_schema: Value::Object((*entry.tool.input_schema).clone()),
-            annotations: Some(json!({
-                "read_only": false
-            })),
-        })
-        .collect();
-
-    let mcp_list_tools = ResponseOutputItem::McpListTools {
-        id: format!("mcpl_{}", Uuid::new_v4()),
-        server_label: tracking.server_label.clone(),
-        tools: tools_info,
-    };
-
-    // Collect tool output items (already transformed with correct type)
     let tool_output_items: Vec<ResponseOutputItem> = tracking
         .tool_calls
         .iter()
         .map(|record| record.output_item.clone())
         .collect();
 
-    // Inject into response output:
-    // 1. Prepend mcp_list_tools at the beginning
-    response.output.insert(0, mcp_list_tools);
-
-    // 2. Append all tool output items at the end
-    response.output.extend(tool_output_items);
+    session.inject_mcp_output_items(&mut response.output, tool_output_items);
 }
 
 /// Load previous conversation messages from storage

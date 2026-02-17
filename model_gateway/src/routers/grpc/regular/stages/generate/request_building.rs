@@ -10,6 +10,8 @@ use crate::routers::{
     grpc::{
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, RequestContext},
+        proto_wrapper::ProtoGenerateRequest,
+        utils,
     },
 };
 
@@ -74,6 +76,19 @@ impl PipelineStage for GenerateRequestBuildingStage {
                 error!(function = "GenerateRequestBuildingStage::execute", error = %e, "Failed to build generate request");
                 error::bad_request("build_request_failed", e)
             })?;
+
+        // Inject tokenized stop sequences for TRT-LLM requests
+        if let ProtoGenerateRequest::Trtllm(ref mut req) = proto_request {
+            let stop = generate_request
+                .sampling_params
+                .as_ref()
+                .and_then(|p| p.stop.as_ref());
+            if let Some(stop) = stop {
+                if let Some(tokenizer) = ctx.state.tokenizer.as_ref() {
+                    utils::inject_trtllm_stop_words(req, tokenizer.as_ref(), stop);
+                }
+            }
+        }
 
         if self.inject_pd_metadata {
             if let Some(workers) = ctx.state.workers.as_ref() {

@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use rand::Rng;
+use smg_grpc_client::sglang_proto::DisaggregatedParams;
 use tracing::debug;
 
 use crate::{
     core::{RuntimeType, Worker, DEFAULT_BOOTSTRAP_PORT},
-    grpc_client::sglang_proto::DisaggregatedParams,
     routers::grpc::{context::WorkerSelection, proto_wrapper::ProtoGenerateRequest},
 };
 

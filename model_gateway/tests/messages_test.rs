@@ -6,8 +6,8 @@
 //! - Request deserialization works
 //! - No breaking changes to existing functionality
 
+use openai_protocol::messages::{CreateMessageRequest, InputContent, Role, SystemContent};
 use serde_json::json;
-use smg::protocols::messages::{CreateMessageRequest, InputContent, Role, SystemContent};
 
 #[test]
 fn test_create_message_request_deserialization() {

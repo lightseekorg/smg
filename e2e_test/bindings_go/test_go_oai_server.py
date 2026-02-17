@@ -19,7 +19,7 @@ import pytest
 logger = logging.getLogger(__name__)
 
 
-@pytest.mark.model("llama-1b")
+@pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 class TestGoOAIServerBasic:
     """Basic tests for Go OAI server functionality."""
 
@@ -29,9 +29,7 @@ class TestGoOAIServerBasic:
 
         response = go_openai_client.chat.completions.create(
             model=model_path,
-            messages=[
-                {"role": "user", "content": "Say hello in one word."}
-            ],
+            messages=[{"role": "user", "content": "Say hello in one word."}],
             max_tokens=10,
             stream=False,
         )
@@ -49,9 +47,7 @@ class TestGoOAIServerBasic:
 
         response_stream = go_openai_client.chat.completions.create(
             model=model_path,
-            messages=[
-                {"role": "user", "content": "Count from 1 to 5."}
-            ],
+            messages=[{"role": "user", "content": "Count from 1 to 5."}],
             max_tokens=50,
             stream=True,
         )
@@ -102,7 +98,7 @@ class TestGoOAIServerBasic:
         logger.info(f"Response to follow-up: {full_content}")
 
 
-@pytest.mark.model("llama-1b")
+@pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.xfail(
     reason="Llama-3.2-1B-Instruct doesn't reliably support tool calling with tool_choice=required",
     strict=False,  # Allow tests to pass if model happens to work
@@ -111,7 +107,7 @@ class TestGoOAIServerFunctionCalling:
     """Tests for function calling through Go OAI server.
 
     Note: Function calling requires the model to support tool use.
-    The llama-1b model may not reliably support tool_choice='required'.
+    The meta-llama/Llama-3.2-1B-Instruct model may not reliably support tool_choice='required'.
     These tests are marked as xfail to allow CI to pass while still
     testing the Go OAI server's tool calling proxy functionality.
     """
@@ -244,7 +240,7 @@ class TestGoOAIServerFunctionCalling:
         assert tool_calls is None or len(tool_calls) == 0
 
 
-@pytest.mark.model("llama-1b")
+@pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 class TestGoOAIServerParameters:
     """Tests for various generation parameters through Go OAI server."""
 
@@ -280,9 +276,7 @@ class TestGoOAIServerParameters:
 
         response = go_openai_client.chat.completions.create(
             model=model_path,
-            messages=[
-                {"role": "user", "content": "Write a very long story about a dragon."}
-            ],
+            messages=[{"role": "user", "content": "Write a very long story about a dragon."}],
             max_tokens=5,
             stream=False,
         )
@@ -310,7 +304,7 @@ class TestGoOAIServerParameters:
         assert response.choices[0].message.content is not None
 
 
-@pytest.mark.model("llama-1b")
+@pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 class TestGoOAIServerResponseValidation:
     """Tests for response field validation."""
 
@@ -399,7 +393,10 @@ class TestGoOAIServerResponseValidation:
         assert response.usage.prompt_tokens > 0, "prompt_tokens should be > 0"
         assert response.usage.completion_tokens > 0, "completion_tokens should be > 0"
         assert response.usage.total_tokens > 0, "total_tokens should be > 0"
-        assert response.usage.total_tokens == response.usage.prompt_tokens + response.usage.completion_tokens
+        assert (
+            response.usage.total_tokens
+            == response.usage.prompt_tokens + response.usage.completion_tokens
+        )
 
         logger.info(
             f"Usage - prompt: {response.usage.prompt_tokens}, "
@@ -468,7 +465,7 @@ class TestGoOAIServerResponseValidation:
         logger.info(f"Finish reason: {response.choices[0].finish_reason}")
 
 
-@pytest.mark.model("llama-1b")
+@pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 class TestGoOAIServerConcurrency:
     """Tests for concurrent request handling."""
 
@@ -512,7 +509,7 @@ class TestGoOAIServerConcurrency:
         def make_streaming_request(i: int):
             response_stream = go_openai_client.chat.completions.create(
                 model=model_path,
-                messages=[{"role": "user", "content": f"Count from {i} to {i+2}."}],
+                messages=[{"role": "user", "content": f"Count from {i} to {i + 2}."}],
                 max_tokens=30,
                 stream=True,
             )
@@ -539,7 +536,7 @@ class TestGoOAIServerConcurrency:
             logger.info(f"Stream {i}: {content[:30]}...")
 
 
-@pytest.mark.model("llama-1b")
+@pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 class TestGoOAIServerEdgeCases:
     """Tests for edge cases and error handling."""
 
@@ -567,9 +564,7 @@ class TestGoOAIServerEdgeCases:
 
         response = go_openai_client.chat.completions.create(
             model=model_path,
-            messages=[
-                {"role": "user", "content": long_message + " Summarize in one word."}
-            ],
+            messages=[{"role": "user", "content": long_message + " Summarize in one word."}],
             max_tokens=10,
             stream=False,
         )
@@ -604,7 +599,10 @@ class TestGoOAIServerEdgeCases:
         response = go_openai_client.chat.completions.create(
             model=model_path,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that speaks like a pirate."},
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that speaks like a pirate.",
+                },
                 {"role": "user", "content": "Hi"},
             ],
             max_tokens=20,
@@ -616,7 +614,7 @@ class TestGoOAIServerEdgeCases:
         logger.info(f"Pirate response: {response.choices[0].message.content}")
 
 
-@pytest.mark.model("llama-1b")
+@pytest.mark.model("meta-llama/Llama-3.2-1B-Instruct")
 @pytest.mark.xfail(
     reason="Go OAI server does not currently support n > 1 (multiple choices)",
     strict=False,
@@ -684,5 +682,7 @@ class TestGoOAIServerMultipleChoices:
         # Both choices should have content and finish reasons
         for idx in [0, 1]:
             content = "".join(choice_content[idx])
-            assert len(content) > 0 or choice_finish_reasons[idx] is not None, f"Choice {idx} should have content or finish"
+            assert len(content) > 0 or choice_finish_reasons[idx] is not None, (
+                f"Choice {idx} should have content or finish"
+            )
             logger.info(f"Streaming choice {idx}: {content}, finish: {choice_finish_reasons[idx]}")

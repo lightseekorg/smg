@@ -8,12 +8,12 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, warn};
+use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use super::strip_protocol;
 use crate::{
     core::{steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode},
     routers::grpc::client::GrpcClient,
-    workflow::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
 };
 
 // HTTP client for metadata fetching
@@ -41,6 +41,25 @@ pub struct ServerInfo {
     pub max_prefill_tokens: Option<usize>,
     pub max_running_requests: Option<usize>,
     pub max_num_reqs: Option<usize>,
+}
+
+/// Single entry from the `/v1/models` endpoint response.
+///
+/// Shared struct used by both backend detection (`detect_backend`) and metadata
+/// discovery (`discover_metadata`). Fields are a superset: `owned_by` is used for
+/// runtime detection, while `id`, `root`, and `max_model_len` are used for metadata.
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct ModelsResponseEntry {
+    pub owned_by: Option<String>,
+    pub id: Option<String>,
+    pub root: Option<String>,
+    pub max_model_len: Option<usize>,
+}
+
+/// Response shape for the `/v1/models` endpoint (shared by sglang and vllm).
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct ModelsResponse {
+    pub data: Vec<ModelsResponseEntry>,
 }
 
 /// Model information returned from /model_info endpoint.
@@ -217,6 +236,97 @@ async fn fetch_grpc_metadata(
     Ok((labels, runtime_type.to_string()))
 }
 
+/// Fetch metadata from an SGLang HTTP worker using /server_info and /model_info.
+async fn fetch_sglang_http_metadata(url: &str, api_key: Option<&str>) -> HashMap<String, String> {
+    let mut labels = HashMap::new();
+
+    // Fetch from /server_info for server-related metadata
+    if let Ok(server_info) = get_server_info(url, api_key).await {
+        if let Some(model_path) = server_info.model_path.filter(|s| !s.is_empty()) {
+            labels.insert("model_path".to_string(), model_path);
+        }
+        if let Some(served_model_name) = server_info.served_model_name.filter(|s| !s.is_empty()) {
+            labels.insert("served_model_name".to_string(), served_model_name);
+        }
+        if let Some(tp_size) = server_info.tp_size {
+            labels.insert("tp_size".to_string(), tp_size.to_string());
+        }
+        if let Some(dp_size) = server_info.dp_size {
+            labels.insert("dp_size".to_string(), dp_size.to_string());
+        }
+        if let Some(load_balance_method) = server_info.load_balance_method {
+            labels.insert("load_balance_method".to_string(), load_balance_method);
+        }
+        if let Some(disaggregation_mode) = server_info.disaggregation_mode {
+            labels.insert("disaggregation_mode".to_string(), disaggregation_mode);
+        }
+    }
+
+    // Fetch from /model_info for model-related metadata
+    if let Ok(model_info) = get_model_info(url, api_key).await {
+        if let Some(model_type) = model_info.model_type.filter(|s| !s.is_empty()) {
+            labels.insert("model_type".to_string(), model_type);
+        }
+        if let Some(architectures) = model_info.architectures.filter(|a| !a.is_empty()) {
+            if let Ok(json_str) = serde_json::to_string(&architectures) {
+                labels.insert("architectures".to_string(), json_str);
+            }
+        }
+    }
+
+    labels
+}
+
+/// Fetch metadata from a vLLM HTTP worker using /v1/models.
+async fn fetch_vllm_http_metadata(url: &str, api_key: Option<&str>) -> HashMap<String, String> {
+    let mut labels = HashMap::new();
+
+    let is_https = url.starts_with("https://");
+    let protocol = if is_https { "https" } else { "http" };
+    let clean_url = strip_protocol(url).trim_end_matches('/').to_string();
+    let models_url = format!("{}://{}/v1/models", protocol, clean_url);
+
+    let mut req = HTTP_CLIENT.get(&models_url);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let response = match req.send().await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            warn!("vLLM /v1/models returned status {}", r.status());
+            return labels;
+        }
+        Err(e) => {
+            warn!("Failed to fetch vLLM /v1/models: {}", e);
+            return labels;
+        }
+    };
+
+    match response.json::<ModelsResponse>().await {
+        Ok(models) => {
+            if let Some(model) = models.data.first() {
+                // vLLM uses `root` as the model path (equivalent to sglang's model_path)
+                if let Some(root) = model.root.as_deref().filter(|s| !s.is_empty()) {
+                    labels.insert("model_path".to_string(), root.to_string());
+                }
+                // vLLM uses `id` as the served model name
+                if let Some(id) = model.id.as_deref().filter(|s| !s.is_empty()) {
+                    labels.insert("served_model_name".to_string(), id.to_string());
+                }
+                if let Some(max_model_len) = model.max_model_len {
+                    labels.insert("max_model_len".to_string(), max_model_len.to_string());
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Failed to parse vLLM /v1/models response: {}", e);
+        }
+    }
+
+    labels
+}
+
 /// Step 2a: Discover metadata from worker.
 pub struct DiscoverMetadataStep;
 
@@ -239,59 +349,36 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverMetadataStep {
 
         let (discovered_labels, detected_runtime) = match connection_mode {
             ConnectionMode::Http => {
-                let mut labels = HashMap::new();
+                let runtime = match context.data.detected_runtime_type.as_deref() {
+                    Some(rt) => rt,
+                    None => {
+                        warn!(
+                            "No detected_runtime_type for HTTP worker {}, falling back to sglang metadata",
+                            config.url
+                        );
+                        "sglang"
+                    }
+                };
+                debug!("Fetching HTTP metadata using runtime: {}", runtime);
 
-                // Fetch from /server_info for server-related metadata
-                if let Ok(server_info) =
-                    get_server_info(&config.url, config.api_key.as_deref()).await
-                {
-                    if let Some(model_path) = server_info.model_path.filter(|s| !s.is_empty()) {
-                        labels.insert("model_path".to_string(), model_path);
+                let labels = match runtime {
+                    "vllm" => {
+                        fetch_vllm_http_metadata(&config.url, config.api_key.as_deref()).await
                     }
-                    if let Some(served_model_name) =
-                        server_info.served_model_name.filter(|s| !s.is_empty())
-                    {
-                        labels.insert("served_model_name".to_string(), served_model_name);
-                    }
-                    if let Some(tp_size) = server_info.tp_size {
-                        labels.insert("tp_size".to_string(), tp_size.to_string());
-                    }
-                    if let Some(dp_size) = server_info.dp_size {
-                        labels.insert("dp_size".to_string(), dp_size.to_string());
-                    }
-                    if let Some(load_balance_method) = server_info.load_balance_method {
-                        labels.insert("load_balance_method".to_string(), load_balance_method);
-                    }
-                    if let Some(disaggregation_mode) = server_info.disaggregation_mode {
-                        labels.insert("disaggregation_mode".to_string(), disaggregation_mode);
-                    }
-                }
-
-                // Fetch from /model_info for model-related metadata
-                if let Ok(model_info) = get_model_info(&config.url, config.api_key.as_deref()).await
-                {
-                    if let Some(model_type) = model_info.model_type.filter(|s| !s.is_empty()) {
-                        labels.insert("model_type".to_string(), model_type);
-                    }
-                    if let Some(architectures) = model_info.architectures.filter(|a| !a.is_empty())
-                    {
-                        if let Ok(json_str) = serde_json::to_string(&architectures) {
-                            labels.insert("architectures".to_string(), json_str);
-                        }
-                    }
-                }
+                    _ => fetch_sglang_http_metadata(&config.url, config.api_key.as_deref()).await,
+                };
 
                 Ok((labels, None))
             }
-            ConnectionMode::Grpc { .. } => {
+            ConnectionMode::Grpc => {
                 // Use pre-detected runtime type from connection detection step,
-                // falling back to config.runtime if not available
+                // falling back to config.runtime_type if not available (WorkerSpec field)
+                let config_runtime = config.runtime_type.to_string();
                 let runtime_type = context
                     .data
                     .detected_runtime_type
                     .as_deref()
-                    .or(config.runtime.as_deref())
-                    .unwrap_or("sglang"); // Fallback to sglang if somehow not detected
+                    .unwrap_or(&config_runtime);
                 debug!(
                     "Using runtime type '{}' for gRPC metadata fetch",
                     runtime_type

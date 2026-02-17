@@ -40,7 +40,7 @@ def get_tokenizer(model_path: str):
 
 
 @pytest.mark.skip_for_runtime("trtllm", reason="TRT-LLM does not support ignore_eos parameter")
-@pytest.mark.model("llama-8b")
+@pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestIgnoreEOS:
@@ -81,20 +81,16 @@ class TestIgnoreEOS:
             extra_body={"ignore_eos": True},
         )
 
-        default_tokens = len(
-            tokenizer.encode(response_default.choices[0].message.content)
-        )
-        ignore_eos_tokens = len(
-            tokenizer.encode(response_ignore_eos.choices[0].message.content)
-        )
+        default_tokens = len(tokenizer.encode(response_default.choices[0].message.content))
+        ignore_eos_tokens = len(tokenizer.encode(response_ignore_eos.choices[0].message.content))
 
         # Check if ignore_eos resulted in more tokens or exactly max_tokens
         # The ignore_eos response should either:
         # 1. Have more tokens than the default response (if default stopped at EOS before max_tokens)
         # 2. Have exactly max_tokens (if it reached the max_tokens limit)
-        assert (
-            ignore_eos_tokens > default_tokens or ignore_eos_tokens >= max_tokens
-        ), f"ignore_eos did not generate more tokens: {ignore_eos_tokens} vs {default_tokens}"
+        assert ignore_eos_tokens > default_tokens or ignore_eos_tokens >= max_tokens, (
+            f"ignore_eos did not generate more tokens: {ignore_eos_tokens} vs {default_tokens}"
+        )
 
         assert response_ignore_eos.choices[0].finish_reason == "length", (
             f"Expected finish_reason='length' for ignore_eos=True, "
@@ -112,7 +108,7 @@ class TestIgnoreEOS:
 # =============================================================================
 
 
-@pytest.mark.model("llama-8b")
+@pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestLargeMaxNewTokens:
@@ -159,10 +155,7 @@ class TestLargeMaxNewTokens:
         # Verify all requests completed successfully
         assert len(responses) == num_requests
         for i, response in enumerate(responses):
-            assert response.choices[
-                0
-            ].message.content, f"Request {i} returned empty content"
+            assert response.choices[0].message.content, f"Request {i} returned empty content"
             assert response.choices[0].finish_reason in ("stop", "length"), (
-                f"Request {i} had unexpected finish_reason: "
-                f"{response.choices[0].finish_reason}"
+                f"Request {i} had unexpected finish_reason: {response.choices[0].finish_reason}"
             )

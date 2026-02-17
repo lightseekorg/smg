@@ -10,7 +10,7 @@ if [ -f ".venv/bin/activate" ]; then
 fi
 
 echo "Installing e2e test dependencies..."
-python3 -m pip install pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy pandas
+python3 -m pip install pytest pytest-rerunfailures httpx openai anthropic grpcio grpcio-health-checking numpy pandas
 
 # Install any extra dependencies passed as arguments
 if [ $# -gt 0 ]; then

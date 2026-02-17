@@ -20,7 +20,7 @@ class TestPDPerf:
             # accurate GPU utilization sampling (at least 30+ seconds)
             max_requests_per_run=200,
             thresholds={
-                "ttft_mean_max": 13,
+                "ttft_mean_max": 5,
                 "e2e_latency_mean_max": 16,
                 "input_throughput_mean_min": 350,
                 "output_throughput_mean_min": 18,

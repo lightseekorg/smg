@@ -4,21 +4,20 @@ build-backend = "maturin"
 
 [project]
 name = "smg"
-version = "0.3.2"
+version = "1.0.1"
 description = "High-performance Rust-based inference gateway for large-scale LLM deployments"
 authors = [
     {name = "Simo Lin", email = "linsimo.mark@gmail.com"},
     {name = "Chang Su", email = "mckvtl@gmail.com"},
     {name = "Keyang Ru", email = "rukeyang@gmail.com"}
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 readme = "../../README.md"
 license = { text = "Apache-2.0" }
 classifiers = [
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -29,15 +28,15 @@ classifiers = [
 
 dependencies = [
     "setproctitle",
-    "aiohttp",
-    "orjson",
-    "uvicorn",
-    "fastapi",
+    "grpcio",
+    "grpcio-health-checking",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "mypy",
     "requests>=2.25.0",
+    "ruff",
     "pytest>=7.0.0",
 ]
 

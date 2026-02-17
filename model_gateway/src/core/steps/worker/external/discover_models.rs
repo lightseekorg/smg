@@ -4,19 +4,14 @@ use std::{collections::HashMap, time::Duration};
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
+use openai_protocol::{model_card::ModelCard, model_type::ModelType, worker::ProviderType};
 use regex::Regex;
 use reqwest::Client;
 use serde::Deserialize;
 use tracing::{debug, info};
+use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::{
-    core::{
-        model_card::{ModelCard, ProviderType},
-        model_type::ModelType,
-        steps::workflow_data::ExternalWorkerWorkflowData,
-    },
-    workflow::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
-};
+use crate::core::steps::workflow_data::ExternalWorkerWorkflowData;
 
 // HTTP client for API calls
 static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {

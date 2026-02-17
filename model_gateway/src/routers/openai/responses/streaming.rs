@@ -7,7 +7,7 @@
 //! - MCP tool execution loops within streaming responses
 //! - Event transformation and output index remapping
 
-use std::{borrow::Cow, io, slice, sync::Arc};
+use std::{borrow::Cow, io, sync::Arc};
 
 use axum::{
     body::Body,
@@ -16,7 +16,15 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
-use serde_json::{json, Map, Value};
+use openai_protocol::{
+    event_types::{
+        is_function_call_type, is_response_event, CodeInterpreterCallEvent, FileSearchCallEvent,
+        FunctionCallEvent, ItemType, McpEvent, OutputItemEvent, ResponseEvent, WebSearchCallEvent,
+    },
+    responses::{ResponseToolType, ResponsesRequest},
+};
+use serde_json::{json, Value};
+use smg_mcp::{McpOrchestrator, McpToolSession, ResponseFormat};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -30,23 +38,16 @@ use super::{
     },
     tool_handler::{StreamAction, StreamingToolHandler},
     utils::{
-        insert_optional_string, patch_response_with_request_metadata, restore_original_tools,
+        patch_response_with_request_metadata, response_tool_to_value, restore_original_tools,
         rewrite_streaming_block,
     },
 };
 use crate::{
-    mcp::{McpOrchestrator, ResponseFormat},
-    protocols::{
-        event_types::{
-            is_function_call_type, is_response_event, CodeInterpreterCallEvent,
-            FileSearchCallEvent, FunctionCallEvent, ItemType, McpEvent, OutputItemEvent,
-            ResponseEvent, WebSearchCallEvent,
-        },
-        responses::{ResponseToolType, ResponsesRequest},
-    },
+    observability::metrics::Metrics,
     routers::{
+        error,
         header_utils::{apply_request_headers, preserve_response_headers},
-        mcp_utils::{resolve_tool_server_label, McpLoopConfig},
+        mcp_utils::DEFAULT_MAX_ITERATIONS,
         openai::context::{RequestContext, StreamingEventContext, StreamingRequest},
         persistence_utils::persist_conversation_items,
     },
@@ -139,38 +140,35 @@ pub(super) fn apply_event_transformations_inplace(
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let response_format = ctx
-                            .orchestrator
-                            .and_then(|orch| orch.find_tool_by_name(&tool_name, ctx.server_keys))
-                            .map(|entry| entry.response_format)
-                            .unwrap_or(ResponseFormat::Passthrough);
 
-                        // Determine item type and ID prefix based on response_format
-                        let (new_type, id_prefix) = match response_format {
-                            ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
-                            _ => (ItemType::MCP_CALL, "mcp_"),
-                        };
+                        // Only transform if this is an MCP tool; keep function_call unchanged
+                        if let Some(session) =
+                            ctx.session.filter(|s| s.has_exposed_tool(&tool_name))
+                        {
+                            let response_format = session.tool_response_format(&tool_name);
 
-                        item["type"] = json!(new_type);
-                        if new_type == ItemType::MCP_CALL {
-                            let label = resolve_tool_server_label(
-                                ctx.orchestrator.map(|v| v.as_ref()),
-                                &tool_name,
-                                ctx.mcp_servers,
-                                ctx.server_keys,
-                            );
-                            item["server_label"] = json!(label);
-                        }
+                            // Determine item type and ID prefix based on response_format
+                            let (new_type, id_prefix) = match response_format {
+                                ResponseFormat::WebSearchCall => (ItemType::WEB_SEARCH_CALL, "ws_"),
+                                _ => (ItemType::MCP_CALL, "mcp_"),
+                            };
 
-                        // Transform ID from fc_* to appropriate prefix
-                        if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                            if let Some(stripped) = id.strip_prefix("fc_") {
-                                let new_id = format!("{}{}", id_prefix, stripped);
-                                item["id"] = json!(new_id);
+                            item["type"] = json!(new_type);
+                            if new_type == ItemType::MCP_CALL {
+                                let label = session.resolve_tool_server_label(&tool_name);
+                                item["server_label"] = json!(label);
                             }
-                        }
 
-                        changed = true;
+                            // Transform ID from fc_* to appropriate prefix
+                            if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                                if let Some(stripped) = id.strip_prefix("fc_") {
+                                    let new_id = format!("{}{}", id_prefix, stripped);
+                                    item["id"] = json!(new_id);
+                                }
+                            }
+
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -199,23 +197,8 @@ fn build_mcp_tools_value(original_body: &ResponsesRequest) -> Option<Value> {
     let tools = original_body.tools.as_ref()?;
     let mcp_tools: Vec<Value> = tools
         .iter()
-        .filter(|t| matches!(t.r#type, ResponseToolType::Mcp) && t.server_url.is_some())
-        .map(|t| {
-            let mut m = Map::new();
-            m.insert("type".to_string(), json!("mcp"));
-            insert_optional_string(&mut m, "server_label", &t.server_label);
-            insert_optional_string(&mut m, "server_url", &t.server_url);
-            insert_optional_string(&mut m, "server_description", &t.server_description);
-            insert_optional_string(&mut m, "require_approval", &t.require_approval);
-
-            if let Some(allowed) = &t.allowed_tools {
-                m.insert(
-                    "allowed_tools".to_string(),
-                    Value::Array(allowed.iter().map(|s| json!(s)).collect()),
-                );
-            }
-            Value::Object(m)
-        })
+        .filter(|t| matches!(t.r#type, ResponseToolType::Mcp))
+        .filter_map(response_tool_to_value)
         .collect();
 
     if mcp_tools.is_empty() {
@@ -478,7 +461,6 @@ pub(super) fn send_final_response_event(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     sequence_number: &mut u64,
     state: &ToolLoopState,
-    orchestrator: Option<&Arc<McpOrchestrator>>,
     ctx: &StreamingEventContext<'_>,
 ) -> bool {
     let mut final_response = match handler.snapshot_final_response() {
@@ -495,8 +477,8 @@ pub(super) fn send_final_response_event(
         }
     }
 
-    if let Some(orch) = orchestrator {
-        inject_mcp_metadata_streaming(&mut final_response, state, orch, ctx.mcp_servers);
+    if let Some(session) = ctx.session {
+        inject_mcp_metadata_streaming(&mut final_response, state, session);
     }
 
     restore_original_tools(&mut final_response, ctx.original_request);
@@ -686,16 +668,9 @@ pub(super) async fn handle_streaming_with_tool_interception(
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
     orchestrator: &Arc<McpOrchestrator>,
-    loop_config: McpLoopConfig,
+    mcp_servers: Vec<(String, String)>,
 ) -> Response {
-    let server_keys: Vec<String> = loop_config
-        .mcp_servers
-        .iter()
-        .map(|(_, key)| key.clone())
-        .collect();
-    // Transform MCP tools to function tools in payload
-    let mut payload = req.payload;
-    prepare_mcp_tools_as_functions(&mut payload, orchestrator, &server_keys);
+    let payload = req.payload;
 
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
     let should_store = req.original_body.store.unwrap_or(false);
@@ -710,15 +685,23 @@ pub(super) async fn handle_streaming_with_tool_interception(
     let headers_opt = headers.cloned();
     let payload_clone = payload.clone();
     let orchestrator_clone = Arc::clone(orchestrator);
-    let server_keys_clone = server_keys.clone();
 
     // Spawn the streaming loop task
     tokio::spawn(async move {
         let mut state = ToolLoopState::new(original_request.input.clone());
         let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
-        let tools_json = payload_clone.get("tools").cloned().unwrap_or(json!([]));
-        let base_payload = payload_clone.clone();
+
+        // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)
+        let session_request_id = format!("resp_{}", uuid::Uuid::new_v4());
+        let session = McpToolSession::new(
+            &orchestrator_clone,
+            mcp_servers.clone(),
+            &session_request_id,
+        );
         let mut current_payload = payload_clone;
+        prepare_mcp_tools_as_functions(&mut current_payload, &session);
+        let tools_json = current_payload.get("tools").cloned().unwrap_or(json!([]));
+        let base_payload = current_payload.clone();
         let mut mcp_list_tools_sent = false;
         let mut is_first_iteration = true;
         let mut sequence_number: u64 = 0;
@@ -728,9 +711,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
         let streaming_ctx = StreamingEventContext {
             original_request: &original_request,
             previous_response_id: previous_response_id.as_deref(),
-            server_keys: &server_keys_clone,
-            mcp_servers: &loop_config.mcp_servers,
-            orchestrator: Some(&orchestrator_clone),
+            session: Some(&session),
         };
 
         loop {
@@ -744,11 +725,8 @@ pub(super) async fn handle_streaming_with_tool_interception(
             let response = match request_builder.send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    let error_event = format!(
-                        "event: error\ndata: {{\"error\": {{\"message\": \"{}\"}}}}\n\n",
-                        e
-                    );
-                    let _ = tx.send(Ok(Bytes::from(error_event)));
+                    let _ =
+                        send_sse_event(&tx, "error", &json!({"error": {"message": e.to_string()}}));
                     return;
                 }
             };
@@ -756,8 +734,11 @@ pub(super) async fn handle_streaming_with_tool_interception(
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                let error_event = format!("event: error\ndata: {{\"error\": {{\"message\": \"Upstream error {}: {}\"}}}}\n\n", status, body);
-                let _ = tx.send(Ok(Bytes::from(error_event)));
+                let _ = send_sse_event(
+                    &tx,
+                    "error",
+                    &json!({"error": {"message": format!("Upstream error {}: {}", status, body)}}),
+                );
                 return;
             }
 
@@ -832,18 +813,17 @@ pub(super) async fn handle_streaming_with_tool_interception(
                                             {
                                                 seen_in_progress = true;
                                                 if !mcp_list_tools_sent {
-                                                    for (label, key) in
-                                                        loop_config.mcp_servers.iter()
+                                                    for (label, key) in session.mcp_servers().iter()
                                                     {
                                                         let list_tools_index = handler
                                                             .allocate_synthetic_output_index();
                                                         if !send_mcp_list_tools_events(
                                                             &tx,
-                                                            &orchestrator_clone,
+                                                            &session,
                                                             label,
                                                             list_tools_index,
                                                             &mut sequence_number,
-                                                            slice::from_ref(key),
+                                                            key,
                                                         ) {
                                                             // Client disconnected
                                                             return;
@@ -882,8 +862,11 @@ pub(super) async fn handle_streaming_with_tool_interception(
                         }
                     }
                     Err(e) => {
-                        let error_event = format!("event: error\ndata: {{\"error\": {{\"message\": \"Stream error: {}\"}}}}\n\n", e);
-                        let _ = tx.send(Ok(Bytes::from(error_event)));
+                        let _ = send_sse_event(
+                            &tx,
+                            "error",
+                            &json!({"error": {"message": format!("Stream error: {}", e)}}),
+                        );
                         return;
                     }
                 }
@@ -901,7 +884,6 @@ pub(super) async fn handle_streaming_with_tool_interception(
                     &tx,
                     &mut sequence_number,
                     &state,
-                    Some(&orchestrator_clone),
                     &streaming_ctx,
                 ) {
                     return;
@@ -919,12 +901,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                             obj.insert("id".to_string(), Value::String(id.clone()));
                         }
                     }
-                    inject_mcp_metadata_streaming(
-                        &mut response_json,
-                        &state,
-                        &orchestrator_clone,
-                        &loop_config.mcp_servers,
-                    );
+                    inject_mcp_metadata_streaming(&mut response_json, &state, &session);
 
                     restore_original_tools(&mut response_json, &original_request);
                     patch_response_with_request_metadata(
@@ -961,9 +938,12 @@ pub(super) async fn handle_streaming_with_tool_interception(
             state.iteration += 1;
             state.total_calls += pending_calls.len();
 
+            // Record tool loop iteration metric
+            Metrics::record_mcp_tool_iteration(&original_request.model);
+
             let effective_limit = match max_tool_calls {
-                Some(user_max) => user_max.min(loop_config.max_iterations),
-                None => loop_config.max_iterations,
+                Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
+                None => DEFAULT_MAX_ITERATIONS,
             };
 
             if state.total_calls > effective_limit {
@@ -971,25 +951,23 @@ pub(super) async fn handle_streaming_with_tool_interception(
                     "Reached tool call limit during streaming: {}",
                     effective_limit
                 );
-                let error_event = "event: error\ndata: {\"error\": {\"message\": \"Exceeded max_tool_calls limit\"}}\n\n".to_string();
-                let _ = tx.send(Ok(Bytes::from(error_event)));
+                send_sse_event(
+                    &tx,
+                    "error",
+                    &json!({"error": {"message": "Exceeded max_tool_calls limit"}}),
+                );
                 let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
                 return;
             }
 
             // Execute all pending tool calls
-            let request_id = preserved_response_id
-                .as_deref()
-                .unwrap_or("streaming-request");
             if !execute_streaming_tool_calls(
                 pending_calls,
-                &orchestrator_clone,
+                &session,
                 &tx,
                 &mut state,
                 &mut sequence_number,
-                request_id,
-                &loop_config.mcp_servers,
-                &server_keys_clone,
+                &original_request.model,
             )
             .await
             {
@@ -1012,8 +990,11 @@ pub(super) async fn handle_streaming_with_tool_interception(
                     // Continue loop to make next streaming request
                 }
                 Err(e) => {
-                    let error_event = format!("event: error\ndata: {{\"error\": {{\"message\": \"Failed to build resume payload: {}\"}}}}\n\n", e);
-                    let _ = tx.send(Ok(Bytes::from(error_event)));
+                    send_sse_event(
+                        &tx,
+                        "error",
+                        &json!({"error": {"message": format!("Failed to build resume payload: {}", e)}}),
+                    );
                     let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
                     return;
                 }
@@ -1034,27 +1015,44 @@ pub(super) async fn handle_streaming_with_tool_interception(
 pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     use crate::routers::mcp_utils::ensure_request_mcp_client;
 
-    let worker = ctx.worker().expect("Worker not selected").clone();
+    let worker = match ctx.worker() {
+        Some(w) => w.clone(),
+        None => {
+            return error::internal_error("internal_error", "Worker not selected");
+        }
+    };
     let circuit_breaker = worker.circuit_breaker();
     let headers = ctx.headers().cloned();
-    let original_body = ctx.responses_request();
-    let mcp_orchestrator = ctx
-        .components
-        .mcp_orchestrator()
-        .expect("MCP orchestrator required");
+    let original_body = match ctx.responses_request() {
+        Some(r) => r,
+        None => {
+            return error::internal_error("internal_error", "Expected responses request");
+        }
+    };
+    let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
+        Some(m) => m.clone(),
+        None => {
+            return error::internal_error("internal_error", "MCP orchestrator required");
+        }
+    };
 
     // Check for MCP tools and create request context if needed
-    let mcp_result = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(mcp_orchestrator, tools).await
+    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
+        ensure_request_mcp_client(&mcp_orchestrator, tools).await
     } else {
         None
     };
 
     let client = ctx.components.client().clone();
-    let req = ctx.into_streaming_context();
+    let req = match ctx.into_streaming_context() {
+        Ok(r) => r,
+        Err(msg) => {
+            return error::internal_error("internal_error", msg);
+        }
+    };
 
     // If no MCP tools, use simple passthrough
-    let Some((orchestrator, mcp_servers)) = mcp_result else {
+    let Some(mcp_servers) = mcp_servers else {
         return handle_simple_streaming_passthrough(
             &client,
             circuit_breaker,
@@ -1069,11 +1067,8 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         &client,
         headers.as_ref(),
         req,
-        &orchestrator,
-        McpLoopConfig {
-            mcp_servers,
-            ..McpLoopConfig::default()
-        },
+        &mcp_orchestrator,
+        mcp_servers,
     )
     .await
 }

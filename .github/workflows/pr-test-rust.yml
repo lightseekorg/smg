@@ -5,12 +5,14 @@ on:
     branches: [ main ]
     paths-ignore:
       - "docs/**"
+      - "mkdocs.yml"
       - "*.md"
   pull_request:
     branches: [ main ]
     types: [opened, synchronize, reopened, labeled]
     paths-ignore:
       - "docs/**"
+      - "mkdocs.yml"
       - "*.md"
   workflow_dispatch:
 
@@ -24,6 +26,7 @@ concurrency:
 env:
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
+  GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.3
 
 jobs:
   check-ci:
@@ -38,6 +41,63 @@ jobs:
           sparse-checkout: .github/actions/check-ci
       - id: check
         uses: ./.github/actions/check-ci
+
+  python-lint:
+    needs: check-ci
+    if: needs.check-ci.outputs.should_run == 'true'
+    runs-on: k8s-runner-cpu
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install linting tools
+        run: pip install ruff mypy
+
+      - name: Ruff check
+        run: ruff check e2e_test/ bindings/python/ scripts/
+
+      - name: Ruff format check
+        run: ruff format --check e2e_test/ bindings/python/ scripts/
+
+      - name: Mypy (e2e_test)
+        run: mypy e2e_test/ --config-file mypy.ini
+
+      - name: Mypy (bindings/python)
+        run: mypy bindings/python/ --config-file mypy.ini
+
+  grpc-proto-build-check:
+    needs: check-ci
+    if: needs.check-ci.outputs.should_run == 'true'
+    runs-on: k8s-runner-cpu
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Copy protos and build
+        run: |
+          rm -f grpc_client/python/smg_grpc_proto/proto
+          mkdir -p grpc_client/python/smg_grpc_proto/proto
+          cp grpc_client/proto/*.proto grpc_client/python/smg_grpc_proto/proto/
+          pip install build grpcio-tools
+          rm -rf grpc_client/python/dist/
+          cd grpc_client/python && python -m build
+
+      - name: Test import
+        run: |
+          pip install grpc_client/python/dist/*.whl
+          python -c "from smg_grpc_proto import sglang_scheduler_pb2; print('OK')"
 
   build-wheel:
     needs: check-ci
@@ -66,6 +126,7 @@ jobs:
       - name: Build Python wheel and Go FFI library
         if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: |
+          rm -rf bindings/python/dist/
           bash scripts/ci_setup_python_venv.sh
           bash scripts/ci_build_wheel.sh
 
@@ -185,17 +246,18 @@ jobs:
       matrix:
         include:
           - name: benchmarks
-            timeout: 32
+            timeout: 20
             test_dirs: "e2e_test/benchmarks"
-            extra_deps: "genai-bench==0.0.3"
+            extra_deps: ""
             env_vars: ""
             reruns: ""
             upload_benchmarks: true
             parallel_opts: ""  # No parallel for benchmarks (performance measurement)
             ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py --ignore=e2e_test/benchmarks/test_nightly_perf.py"  # Go and nightly benchmarks run in dedicated jobs
-          - name: responses
-            timeout: 45
-            test_dirs: "e2e_test/responses"
+            runner: 4-gpu-h100
+          - name: agentic-apis
+            timeout: 30
+            test_dirs: "e2e_test/responses e2e_test/messages"
             extra_deps: ""
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
@@ -204,15 +266,16 @@ jobs:
             parallel_opts: ""  # Cloud backend tests not compatible with parallel execution
             ignore_opts: ""
           - name: e2e
-            timeout: 45
+            timeout: 20
             test_dirs: "e2e_test/router e2e_test/embeddings"
-            extra_deps: "pytest-parallel py"  # py is required for pytest-parallel with newer pytest
+            # py is needed for pytest-parallel; sentence-transformers provides HuggingFace reference embeddings
+            extra_deps: "pytest-parallel py sentence-transformers"
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"  # Thread-based parallelism
             ignore_opts: ""
           - name: chat-completions-sglang
-            timeout: 45
+            timeout: 20
             test_dirs: "e2e_test/chat_completions"
             extra_deps: "pytest-parallel py"
             env_vars: "E2E_RUNTIME=sglang SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
@@ -221,7 +284,7 @@ jobs:
             test_filter: ""
             ignore_opts: ""
           - name: chat-completions-vllm
-            timeout: 45
+            timeout: 20
             test_dirs: "e2e_test/chat_completions"
             extra_deps: "pytest-parallel py"
             env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
@@ -233,7 +296,7 @@ jobs:
             setup_vllm: true
             ignore_opts: ""
           - name: vllm-pd
-            timeout: 45
+            timeout: 15
             test_dirs: "e2e_test/router/test_pd_mmlu.py"
             extra_deps: ""
             env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
@@ -243,7 +306,7 @@ jobs:
             setup_vllm: true
             ignore_opts: ""
           - name: chat-completions-trtllm
-            timeout: 90
+            timeout: 60
             test_dirs: "e2e_test/chat_completions"
             extra_deps: "pytest-parallel py"
             env_vars: "E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1"
@@ -252,8 +315,32 @@ jobs:
             test_filter: ""
             setup_trtllm: true
             ignore_opts: ""
-    runs-on: k8s-runner-gpu
+            runner: 4-gpu-h100
+    runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
     timeout-minutes: ${{ matrix.timeout }}
+    services:
+      oracle-db:
+        image: ${{ matrix.setup_oracle && 'gvenzl/oracle-free:23-slim-faststart' || '' }}
+        ports:
+          - 1521:1521
+        env:
+          ORACLE_PASSWORD: oracle
+        options: >-
+          --health-cmd "healthcheck.sh"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      brave-search-server:
+        image: ${{ matrix.setup_brave && 'shoofio/brave-search-mcp-sse:1.0.10' || '' }}
+        ports:
+          - 8001:8080
+        env:
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+        options: >-
+          --health-cmd "nc -z localhost 8080"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 3
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -270,51 +357,6 @@ jobs:
         if: ${{ !matrix.setup_vllm && !matrix.setup_trtllm }}
         uses: ./.github/actions/setup-sglang
 
-      - name: Setup Oracle Instant Client
-        if: matrix.setup_oracle
-        run: |
-          sudo apt-get install -y unzip
-          INSTANT_CLIENT_DIR="$HOME/instant-client"
-          INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.9.0.25.07.zip"
-
-          if [ ! -d "$INSTANT_CLIENT_DIR/instantclient_23_9" ]; then
-            echo "Downloading Oracle Instant Client..."
-            mkdir -p "$INSTANT_CLIENT_DIR"
-            cd "$INSTANT_CLIENT_DIR"
-            wget https://download.oracle.com/otn_software/linux/instantclient/2390000/$INSTANT_CLIENT_ZIP
-            unzip $INSTANT_CLIENT_ZIP
-            rm $INSTANT_CLIENT_ZIP
-          else
-            echo "Oracle Instant Client already exists, skipping download"
-          fi
-
-          echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_9:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-
-      - name: Start Oracle Database
-        if: matrix.setup_oracle
-        run: |
-          docker run -d -p 1521:1521 -e ORACLE_PASSWORD=oracle --name oracle-db gvenzl/oracle-xe:21-slim
-          echo "Starting Oracle DB..."
-
-          # Export Oracle connection environment variables
-          echo "ATP_USER=system" >> $GITHUB_ENV
-          echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
-          echo "ATP_DSN=localhost:1521/XEPDB1" >> $GITHUB_ENV
-
-      - name: Start Brave MCP Server
-        if: matrix.setup_brave
-        env:
-          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
-        run: |
-          docker run -d --rm \
-            -p 8001:8080 \
-            -e BRAVE_API_KEY \
-            --name brave-search-server \
-            shoofio/brave-search-mcp-sse:1.0.10
-          echo "Starting Brave MCP Server..."
-          sleep 2
-          curl -f --max-time 1 http://localhost:8001/sse > /dev/null 2>&1 && echo "Brave MCP Server is healthy!" || echo "Brave MCP Server responded"
-
       - name: Download wheel artifact
         uses: actions/download-artifact@v7
         with:
@@ -327,9 +369,53 @@ jobs:
           pip install wheel/*.whl
           bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
 
+      - name: Pull genai-bench image
+        if: matrix.upload_benchmarks
+        run: docker pull ${{ env.GENAI_BENCH_IMAGE }}
+
+      - name: Setup Oracle Instant Client
+        if: matrix.setup_oracle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip wget
+          sudo apt-get install -y libaio1t64 || sudo apt-get install -y libaio1
+          # Copy libaio into Instant Client dir so it's on LD_LIBRARY_PATH
+          LIBAIO_PATH=$(find /usr/lib -name "libaio.so*" -type f 2>/dev/null | head -1)
+          INSTANT_CLIENT_DIR="$HOME/instant-client"
+          INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.26.1.0.0.zip"
+
+          if [ ! -d "$INSTANT_CLIENT_DIR/instantclient_23_26" ]; then
+            echo "Downloading Oracle Instant Client..."
+            mkdir -p "$INSTANT_CLIENT_DIR"
+            cd "$INSTANT_CLIENT_DIR"
+            wget https://download.oracle.com/otn_software/linux/instantclient/2326100/$INSTANT_CLIENT_ZIP
+            unzip $INSTANT_CLIENT_ZIP
+            rm $INSTANT_CLIENT_ZIP
+          else
+            echo "Oracle Instant Client already exists, skipping download"
+          fi
+
+          # Ensure libaio.so.1 is findable via LD_LIBRARY_PATH
+          if [ -n "$LIBAIO_PATH" ]; then
+            cp "$LIBAIO_PATH" "$INSTANT_CLIENT_DIR/instantclient_23_26/"
+            ln -sf "$INSTANT_CLIENT_DIR/instantclient_23_26/$(basename $LIBAIO_PATH)" "$INSTANT_CLIENT_DIR/instantclient_23_26/libaio.so.1"
+          fi
+
+          echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_26:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: Set Oracle connection environment
+        if: matrix.setup_oracle
+        run: |
+          echo "ATP_USER=system" >> $GITHUB_ENV
+          echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
+          echo "ATP_DSN=localhost:1521/FREEPDB1" >> $GITHUB_ENV
+
       - name: Run E2E tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
@@ -340,14 +426,6 @@ jobs:
         with:
           name: genai-bench-results-all-policies
           path: benchmark_**/
-
-      - name: Cleanup Brave MCP Server
-        if: always() && matrix.setup_brave
-        run: docker rm -f brave-search-server || true
-
-      - name: Cleanup Oracle Database
-        if: always() && matrix.setup_oracle
-        run: docker rm -f oracle-db || true
 
   go-unit-tests:
     name: go-unit-tests
@@ -395,7 +473,7 @@ jobs:
     needs: [check-ci, build-wheel]
     if: needs.check-ci.outputs.should_run == 'true'
     runs-on: k8s-runner-gpu
-    timeout-minutes: 45
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -488,7 +566,9 @@ jobs:
       - name: Install test dependencies
         run: |
           python3 -m pip install pytest pytest-rerunfailures httpx openai grpcio grpcio-health-checking numpy
-          python3 -m pip --no-cache-dir install --upgrade genai-bench==0.0.3
+
+      - name: Pull genai-bench image
+        run: docker pull ${{ env.GENAI_BENCH_IMAGE }}
 
       - name: Run Go bindings benchmark
         run: |
@@ -506,7 +586,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [check-ci, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
+    needs: [check-ci, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -516,7 +596,7 @@ jobs:
           if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
             echo "CI was skipped (external contributor without run-ci label)"
             exit 0
-          elif [[ "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
+          elif [[ "${{ needs.python-lint.result }}" == "failure" || "${{ needs.grpc-proto-build-check.result }}" == "failure" || "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.python-unit-tests.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else

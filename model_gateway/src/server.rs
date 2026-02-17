@@ -13,14 +13,28 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use llm_tokenizer::TokenizerRegistry;
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    classify::ClassifyRequest,
+    completion::CompletionRequest,
+    embedding::EmbeddingRequest,
+    generate::GenerateRequest,
+    messages::CreateMessageRequest,
+    parser::{ParseFunctionCallRequest, SeparateReasoningRequest},
+    rerank::{RerankRequest, V1RerankReqInput},
+    responses::{ResponsesGetParams, ResponsesRequest},
+    tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
+    validated::ValidatedJson,
+    worker::{WorkerSpec, WorkerUpdateRequest},
+};
 use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use smg_mesh::{
-    MeshServerBuilder, MeshServerConfig, MeshServerHandler, PartitionDetector, RateLimitWindow,
-};
+use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
 use tokio::{signal, spawn};
 use tracing::{debug, error, info, warn, Level};
+use wfaas::LoggingSubscriber;
 
 use crate::{
     app_context::AppContext,
@@ -38,20 +52,6 @@ use crate::{
         metrics::{self, PrometheusConfig},
         otel_trace,
     },
-    protocols::{
-        chat::ChatCompletionRequest,
-        classify::ClassifyRequest,
-        completion::CompletionRequest,
-        embedding::EmbeddingRequest,
-        generate::GenerateRequest,
-        messages::CreateMessageRequest,
-        parser::{ParseFunctionCallRequest, SeparateReasoningRequest},
-        rerank::{RerankRequest, V1RerankReqInput},
-        responses::{ResponsesGetParams, ResponsesRequest},
-        tokenize::{AddTokenizerRequest, DetokenizeRequest, TokenizeRequest},
-        validated::ValidatedJson,
-        worker_spec::{WorkerConfigRequest, WorkerUpdateRequest},
-    },
     routers::{
         conversations,
         mesh::{
@@ -64,9 +64,7 @@ use crate::{
         tokenize, RouterTrait,
     },
     service_discovery::{start_service_discovery, ServiceDiscoveryConfig},
-    tokenizer::TokenizerRegistry,
     wasm::route::{add_wasm_module, list_wasm_modules, remove_wasm_module},
-    workflow::LoggingSubscriber,
 };
 #[derive(Clone)]
 pub struct AppState {
@@ -110,7 +108,7 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
             RoutingMode::PrefillDecode { .. } => {
                 let has_prefill = healthy_workers
                     .iter()
-                    .any(|w| matches!(w.worker_type(), WorkerType::Prefill { .. }));
+                    .any(|w| matches!(w.worker_type(), WorkerType::Prefill));
                 let has_decode = healthy_workers
                     .iter()
                     .any(|w| matches!(w.worker_type(), WorkerType::Decode));
@@ -252,11 +250,11 @@ async fn v1_embeddings(
 async fn v1_messages(
     State(state): State<Arc<AppState>>,
     headers: http::HeaderMap,
-    Json(body): Json<CreateMessageRequest>,
+    ValidatedJson(body): ValidatedJson<CreateMessageRequest>,
 ) -> Response {
     state
         .router
-        .route_messages(Some(&headers), &body, Some(body.model.as_str()))
+        .route_messages(Some(&headers), &body, &body.model)
         .await
 }
 
@@ -435,7 +433,7 @@ async fn get_loads(State(state): State<Arc<AppState>>, _req: Request) -> Respons
 
 async fn create_worker(
     State(state): State<Arc<AppState>>,
-    Json(config): Json<WorkerConfigRequest>,
+    Json(config): Json<WorkerSpec>,
 ) -> Response {
     match state.context.worker_service.create_worker(config).await {
         Ok(result) => result.into_response(),
@@ -552,14 +550,14 @@ pub struct ServerConfig {
     pub request_id_headers: Option<Vec<String>>,
     pub shutdown_grace_period_secs: u64,
     /// Control plane authentication configuration
-    pub control_plane_auth: Option<crate::auth::ControlPlaneAuthConfig>,
+    pub control_plane_auth: Option<smg_auth::ControlPlaneAuthConfig>,
     pub mesh_server_config: Option<MeshServerConfig>,
 }
 
 pub fn build_app(
     app_state: Arc<AppState>,
     auth_config: AuthConfig,
-    control_plane_auth_state: Option<crate::auth::ControlPlaneAuthState>,
+    control_plane_auth_state: Option<smg_auth::ControlPlaneAuthState>,
     max_payload_size: usize,
     request_id_headers: Vec<String>,
     cors_allowed_origins: Vec<String>,
@@ -661,7 +659,7 @@ pub fn build_app(
         if let Some(ref cp_state) = control_plane_auth_state {
             routes.route_layer(axum::middleware::from_fn_with_state(
                 cp_state.clone(),
-                crate::auth::control_plane_auth_middleware,
+                smg_auth::control_plane_auth_middleware,
             ))
         } else {
             routes.route_layer(axum::middleware::from_fn_with_state(
@@ -752,33 +750,16 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         metrics::start_prometheus(prometheus_config.clone());
     }
 
+    // Initialize mesh server if configured, it will return a handler for mesh management
     let mesh_handler = if let Some(mesh_server_config) = &config.mesh_server_config {
-        // Create partition detector
-        let partition_detector = Arc::new(PartitionDetector::default());
-
         // Create mesh server builder and build with stores
-        let builder = MeshServerBuilder::new(
-            mesh_server_config.self_name.clone(),
-            mesh_server_config.self_addr,
-            mesh_server_config.init_peer,
-        );
-        let (mesh_server, handler) = builder.build();
+        let (mesh_server, handler) = MeshServerBuilder::from(mesh_server_config).build();
 
-        // Initialize rate-limit hash ring with current membership
-        handler.sync_manager.update_rate_limit_membership();
+        // Start rate limit window reset task (managed by handler)
+        handler.start_rate_limit_task(1); // Reset every 1 second
 
-        // Start rate limit window reset task
-        let window_manager = RateLimitWindow::new(handler.sync_manager.clone(), 1); // Reset every 1 second
         spawn(async move {
-            window_manager.start_reset_task().await;
-        });
-
-        let partition_detector_for_server = partition_detector.clone();
-        spawn(async move {
-            if let Err(e) = mesh_server
-                .start_serve_with_stores(Some(partition_detector_for_server))
-                .await
-            {
+            if let Err(e) = mesh_server.start().await {
                 tracing::error!("Mesh server failed: {}", e);
             }
         });
@@ -1029,7 +1010,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
     // Initialize control plane authentication if configured
     let control_plane_auth_state =
-        crate::auth::ControlPlaneAuthState::try_init(config.control_plane_auth.as_ref()).await;
+        smg_auth::ControlPlaneAuthState::try_init(config.control_plane_auth.as_ref()).await;
 
     let app = build_app(
         app_state,

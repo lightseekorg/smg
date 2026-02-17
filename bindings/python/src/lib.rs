@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use smg::*;
+use smg_auth as auth;
 
 // Define the enums with PyO3 bindings
 #[pyclass(eq)]
@@ -23,6 +24,7 @@ pub enum PolicyType {
 pub enum BackendType {
     Sglang,
     Openai,
+    Anthropic,
 }
 
 #[pyclass(eq)]
@@ -194,6 +196,8 @@ pub struct PyOracleConfig {
     #[pyo3(get, set)]
     pub connect_descriptor: Option<String>,
     #[pyo3(get, set)]
+    pub external_auth: bool,
+    #[pyo3(get, set)]
     pub username: Option<String>,
     #[pyo3(get, set)]
     pub password: Option<String>,
@@ -210,6 +214,7 @@ impl std::fmt::Debug for PyOracleConfig {
         f.debug_struct("PyOracleConfig")
             .field("wallet_path", &self.wallet_path)
             .field("connect_descriptor", &"<redacted>")
+            .field("external_auth", &self.external_auth)
             .field("username", &self.username)
             .field("password", &"<redacted>")
             .field("pool_min", &self.pool_min)
@@ -221,12 +226,14 @@ impl std::fmt::Debug for PyOracleConfig {
 
 #[pymethods]
 impl PyOracleConfig {
+    #[allow(clippy::too_many_arguments)]
     #[new]
     #[pyo3(signature = (
         password = None,
         username = None,
         connect_descriptor = None,
         wallet_path = None,
+        external_auth = false,
         pool_min = 1,
         pool_max = 16,
         pool_timeout_secs = 30,
@@ -236,6 +243,7 @@ impl PyOracleConfig {
         username: Option<String>,
         connect_descriptor: Option<String>,
         wallet_path: Option<String>,
+        external_auth: bool,
         pool_min: usize,
         pool_max: usize,
         pool_timeout_secs: u64,
@@ -254,6 +262,7 @@ impl PyOracleConfig {
         Ok(PyOracleConfig {
             wallet_path,
             connect_descriptor,
+            external_auth,
             username,
             password,
             pool_min,
@@ -268,6 +277,7 @@ impl PyOracleConfig {
         config::OracleConfig {
             wallet_path: self.wallet_path.clone(),
             connect_descriptor: self.connect_descriptor.clone().unwrap_or_default(),
+            external_auth: self.external_auth,
             username: self.username.clone().unwrap_or_default(),
             password: self.password.clone().unwrap_or_default(),
             pool_min: self.pool_min,
@@ -433,7 +443,7 @@ impl Router {
     fn determine_connection_mode(worker_urls: &[String]) -> core::ConnectionMode {
         for url in worker_urls {
             if url.starts_with("grpc://") || url.starts_with("grpcs://") {
-                return core::ConnectionMode::Grpc { port: None };
+                return core::ConnectionMode::Grpc;
             }
         }
         core::ConnectionMode::Http
@@ -493,6 +503,10 @@ impl Router {
             }
         } else if matches!(self.backend, BackendType::Openai) {
             RoutingMode::OpenAI {
+                worker_urls: self.worker_urls.clone(),
+            }
+        } else if matches!(self.backend, BackendType::Anthropic) {
+            RoutingMode::Anthropic {
                 worker_urls: self.worker_urls.clone(),
             }
         } else if self.pd_disaggregation {
@@ -583,7 +597,7 @@ impl Router {
             .policy(policy)
             .host(&self.host)
             .port(self.port)
-            .connection_mode(self.connection_mode.clone())
+            .connection_mode(self.connection_mode)
             .max_payload_size(self.max_payload_size)
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
