@@ -99,7 +99,7 @@ fn make_store(engine: &Engine) -> Store<BenchWasiState> {
 
     store.limiter(|state| &mut state.limits);
 
-    let deadline_epochs = (1000u64 / 100).max(1); // 1s timeout, 100ms epoch interval
+    let deadline_epochs = 1000u64 / 100; // 1s timeout, 100ms epoch interval
     store.set_epoch_deadline(deadline_epochs);
     store.epoch_deadline_callback(|_store| {
         Err(wasmtime::Error::msg("execution time limit exceeded"))
