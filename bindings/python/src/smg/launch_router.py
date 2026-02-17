@@ -5,6 +5,7 @@ import sys
 import setproctitle
 
 from smg.router_args import RouterArgs
+from smg.smg_rs import print_banner
 
 logger = logging.getLogger("router")
 
@@ -37,6 +38,16 @@ def launch_router(args: argparse.Namespace | RouterArgs) -> None:
         if Router is None:
             raise RuntimeError("Rust Router is not installed")
         router_args._validate_router_args()
+
+        # Determine mode for banner
+        if getattr(router_args, "pd_disaggregation", False):
+            mode = "PD Disaggregated"
+        elif getattr(router_args, "enable_igw", False):
+            mode = "IGW"
+        else:
+            mode = "Regular"
+        print_banner(router_args.host, router_args.port, mode)
+
         router = Router.from_args(router_args)
         router.start()
 

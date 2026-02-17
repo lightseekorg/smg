@@ -1215,8 +1215,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli_args.enable_igw = true;
     }
 
-    println!("Shepherd Model Gateway starting...");
-    println!("Host: {}:{}", cli_args.host, cli_args.port);
     let mode_str = if cli_args.enable_igw {
         "IGW (Inference Gateway)".to_string()
     } else if matches!(cli_args.backend, Some(Backend::Openai)) {
@@ -1230,7 +1228,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         "Regular".to_string()
     };
-    println!("Mode: {}", mode_str);
+
+    version::print_banner(&cli_args.host, cli_args.port, &mode_str);
 
     if !cli_args.enable_igw {
         println!("Policy: {}", cli_args.policy);
