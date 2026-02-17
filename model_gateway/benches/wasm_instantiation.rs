@@ -125,7 +125,7 @@ fn bench_cold_compile_and_instantiate(c: &mut Criterion) {
     let linker = make_linker(&engine);
 
     // Pre-encode WAT to binary once (wasm text → binary is NOT part of production path)
-    let wasm_bytes = wasmtime::wat::parse_str(MINIMAL_COMPONENT_WAT).expect("Failed to parse WAT");
+    let wasm_bytes = wat::parse_str(MINIMAL_COMPONENT_WAT).expect("Failed to parse WAT");
 
     c.bench_function("wasm_cold_compile_and_instantiate", |b| {
         b.iter(|| {
@@ -155,7 +155,7 @@ fn bench_cached_component_instantiate(c: &mut Criterion) {
     let linker = make_linker(&engine);
 
     // Pre-compile component (this is the cached state)
-    let wasm_bytes = wasmtime::wat::parse_str(MINIMAL_COMPONENT_WAT).expect("Failed to parse WAT");
+    let wasm_bytes = wat::parse_str(MINIMAL_COMPONENT_WAT).expect("Failed to parse WAT");
     let component = Component::new(&engine, &wasm_bytes).expect("Failed to compile component");
 
     c.bench_function("wasm_cached_component_instantiate", |b| {
@@ -197,7 +197,7 @@ fn bench_standard_vs_pooling(c: &mut Criterion) {
     // Standard engine (no pooling)
     let std_engine = make_standard_engine();
     let std_linker = make_linker(&std_engine);
-    let wasm_bytes = wasmtime::wat::parse_str(MINIMAL_COMPONENT_WAT).expect("Failed to parse WAT");
+    let wasm_bytes = wat::parse_str(MINIMAL_COMPONENT_WAT).expect("Failed to parse WAT");
     let std_component =
         Component::new(&std_engine, &wasm_bytes).expect("Failed to compile component");
 
@@ -244,7 +244,7 @@ fn bench_lru_cache_lookup_overhead(c: &mut Criterion) {
     use lru::LruCache;
 
     let engine = make_pooling_engine();
-    let wasm_bytes = wasmtime::wat::parse_str(MINIMAL_COMPONENT_WAT).expect("Failed to parse WAT");
+    let wasm_bytes = wat::parse_str(MINIMAL_COMPONENT_WAT).expect("Failed to parse WAT");
     let component = Component::new(&engine, &wasm_bytes).expect("Failed to compile component");
 
     let cache_capacity = NonZeroUsize::new(10).unwrap();

@@ -136,6 +136,7 @@ base64 = "0.22"
 kv-index.workspace = true
 wasmtime-wasi = { workspace = true }
 lru = { workspace = true }
+wat = "1.244"
 
 [[bench]]
 name = "wasm_middleware_latency"
