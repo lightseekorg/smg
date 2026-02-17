@@ -1215,7 +1215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli_args.enable_igw = true;
     }
 
-    println!("SGLang Router starting...");
+    println!("Shepherd Model Gateway starting...");
     println!("Host: {}:{}", cli_args.host, cli_args.port);
     let mode_str = if cli_args.enable_igw {
         "IGW (Inference Gateway)".to_string()
