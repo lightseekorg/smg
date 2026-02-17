@@ -267,10 +267,10 @@ impl<'de> Deserialize<'de> for ModelType {
             // New format: array of capability name strings
             fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<ModelType, A::Error> {
                 let mut model_type = ModelType::empty();
-                while let Some(name) = seq.next_element::<&str>()? {
+                while let Some(name) = seq.next_element::<String>()? {
                     let flag = CAPABILITY_NAMES
                         .iter()
-                        .find(|(_, n)| *n == name)
+                        .find(|(_, n)| *n == name.as_str())
                         .map(|(f, _)| *f)
                         .ok_or_else(|| {
                             de::Error::custom(format!("unknown ModelType capability: {}", name))

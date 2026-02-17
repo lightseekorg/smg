@@ -226,8 +226,8 @@ fn build_model_card(
         .unwrap_or(false);
 
     if !user_provided {
-        let is_embedding = labels.get("is_embedding").map(|s| s == "true") == Some(true);
-        let is_non_generation = labels.get("is_generation").map(|s| s == "true") == Some(false);
+        let is_embedding = labels.get("is_embedding").is_some_and(|s| s == "true");
+        let is_non_generation = labels.get("is_generation").is_some_and(|s| s == "false");
 
         if is_embedding || is_non_generation {
             card.model_type = infer_non_generation_type(labels);

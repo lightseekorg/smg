@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use super::{http_base_url, strip_protocol};
+use super::{grpc_base_url, http_base_url};
 use crate::{
     core::{steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode},
     routers::grpc::client::{flat_labels, GrpcClient},
@@ -112,6 +112,9 @@ async fn get_json_with_fallback<T: serde::de::DeserializeOwned>(
             .send()
             .await
             .map_err(|e| format!("Failed to connect to {}: {}", old_url, e))?;
+        if !resp.status().is_success() {
+            return Err(format!("status {} from {}", resp.status(), old_url));
+        }
         return resp
             .json::<T>()
             .await
@@ -137,11 +140,16 @@ async fn http_get_json<T: serde::de::DeserializeOwned>(
     if let Some(key) = api_key {
         req = req.bearer_auth(key);
     }
-    let resp = req.send().await.map_err(|e| format!("{}", e))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("Failed to connect to {}: {}", url, e))?;
     if !resp.status().is_success() {
-        return Err(format!("status {}", resp.status()));
+        return Err(format!("status {} from {}", resp.status(), url));
     }
-    resp.json::<T>().await.map_err(|e| format!("{}", e))
+    resp.json::<T>()
+        .await
+        .map_err(|e| format!("Failed to parse {}: {}", url, e))
 }
 
 pub async fn get_server_info(url: &str, api_key: Option<&str>) -> Result<ServerInfo, String> {
@@ -218,11 +226,7 @@ async fn fetch_grpc_metadata(
     url: &str,
     runtime_type: &str,
 ) -> Result<(HashMap<String, String>, String), String> {
-    let grpc_url = if url.starts_with("grpc://") {
-        url.to_string()
-    } else {
-        format!("grpc://{}", strip_protocol(url))
-    };
+    let grpc_url = grpc_base_url(url);
 
     let client = GrpcClient::connect(&grpc_url, runtime_type)
         .await

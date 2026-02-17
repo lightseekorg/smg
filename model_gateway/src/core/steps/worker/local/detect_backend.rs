@@ -12,8 +12,8 @@ use tracing::debug;
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use super::{
-    detect_connection::do_grpc_health_check, discover_metadata::ModelsResponse, http_base_url,
-    strip_protocol,
+    detect_connection::do_grpc_health_check, discover_metadata::ModelsResponse, grpc_base_url,
+    http_base_url,
 };
 use crate::core::{steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode};
 
@@ -28,11 +28,7 @@ async fn detect_grpc_backend(
     timeout_secs: u64,
     runtime_hint: Option<&str>,
 ) -> Result<String, String> {
-    let grpc_url = if url.starts_with("grpc://") {
-        url.to_string()
-    } else {
-        format!("grpc://{}", strip_protocol(url))
-    };
+    let grpc_url = grpc_base_url(url);
 
     // If we have a hint, try it first
     if let Some(hint) = runtime_hint {

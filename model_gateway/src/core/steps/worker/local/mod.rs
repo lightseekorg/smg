@@ -31,6 +31,15 @@ pub(super) fn http_base_url(url: &str) -> String {
     }
 }
 
+/// Ensure URL has a gRPC scheme — handles bare `host:port` and `http://` inputs.
+pub(super) fn grpc_base_url(url: &str) -> String {
+    if url.starts_with("grpc://") {
+        url.to_string()
+    } else {
+        format!("grpc://{}", strip_protocol(url))
+    }
+}
+
 pub use create_worker::CreateLocalWorkerStep;
 pub use detect_backend::DetectBackendStep;
 pub use detect_connection::DetectConnectionModeStep;
