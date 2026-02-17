@@ -101,8 +101,17 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
         // Parse worker type
         let worker_type = parse_worker_type(config);
 
-        // Get runtime type (for gRPC workers)
-        let runtime_type = determine_runtime_type(connection_mode, &context.data, config);
+        // Get runtime type (set by DetectBackendStep)
+        let runtime_type = match context.data.detected_runtime_type.as_deref() {
+            Some(s) => s.parse::<RuntimeType>().unwrap_or_else(|_| {
+                debug!(
+                    "Unrecognized detected runtime '{}', falling back to config: {}",
+                    s, config.runtime_type
+                );
+                config.runtime_type
+            }),
+            None => config.runtime_type,
+        };
 
         // Build circuit breaker config
         let circuit_breaker_config = build_circuit_breaker_config(app_context);
@@ -227,28 +236,6 @@ fn build_model_card(
 
 fn parse_worker_type(config: &WorkerSpec) -> WorkerType {
     config.worker_type
-}
-
-fn determine_runtime_type(
-    connection_mode: &ConnectionMode,
-    data: &LocalWorkerWorkflowData,
-    config: &WorkerSpec,
-) -> RuntimeType {
-    if !matches!(connection_mode, ConnectionMode::Grpc) {
-        return RuntimeType::Sglang;
-    }
-
-    // Prefer runtime type detected during connection probing
-    if let Some(ref detected_runtime) = data.detected_runtime_type {
-        match detected_runtime.as_str() {
-            "vllm" => RuntimeType::Vllm,
-            "trtllm" => RuntimeType::Trtllm,
-            _ => RuntimeType::Sglang,
-        }
-    } else {
-        // Fall back to config's runtime_type
-        config.runtime_type
-    }
 }
 
 fn build_circuit_breaker_config(app_context: &AppContext) -> CircuitBreakerConfig {
