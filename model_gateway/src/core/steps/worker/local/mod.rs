@@ -34,9 +34,9 @@ pub(super) fn http_base_url(url: &str) -> String {
 /// Ensure URL has a gRPC scheme — handles bare `host:port` and `http://` inputs.
 pub(super) fn grpc_base_url(url: &str) -> String {
     if url.starts_with("grpc://") {
-        url.to_string()
+        url.trim_end_matches('/').to_string()
     } else {
-        format!("grpc://{}", strip_protocol(url))
+        format!("grpc://{}", strip_protocol(url).trim_end_matches('/'))
     }
 }
 
