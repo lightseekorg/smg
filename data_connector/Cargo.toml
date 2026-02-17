@@ -28,7 +28,7 @@ ulid = "1.2.1"
 url = "2.5"
 
 # Database backends
-deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"] }
+deadpool = { version = "0.13", features = ["managed", "rt_tokio_1"] }
 deadpool-postgres = "0.14.1"
 deadpool-redis = "0.18.0"
 futures = "0.3"
