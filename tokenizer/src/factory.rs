@@ -93,8 +93,8 @@ pub fn create_tokenizer_with_chat_template(
 
             Ok(Arc::new(tokenizer) as Arc<dyn traits::Tokenizer>)
         }
-        Some("model") => {
-            // Check if it's a tiktoken file (tiktoken.model) before assuming SentencePiece
+        Some("model") | Some("tiktoken") => {
+            // Check if it's a tiktoken file (tiktoken.model / *.tiktoken) before assuming SentencePiece
             if is_tiktoken_file(path) {
                 let dir = path.parent().ok_or_else(|| {
                     Error::msg("Cannot determine parent directory of .model file")

@@ -101,7 +101,11 @@ fn parse_special_tokens(config: &serde_json::Value) -> SpecialTokens {
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
+                .filter_map(|v| {
+                    v.as_str()
+                        .map(String::from)
+                        .or_else(|| v.get("content").and_then(|c| c.as_str()).map(String::from))
+                })
                 .collect()
         })
         .unwrap_or_default();
