@@ -13,7 +13,6 @@ use tracing as log;
 use tracing::instrument;
 
 use super::{
-    crdt::SKey,
     flow_control::MessageSizeValidator,
     incremental::IncrementalUpdateCollector,
     metrics::{
@@ -74,7 +73,7 @@ impl GossipService {
         };
 
         // Get all entries from the store
-        let entries: Vec<(SKey, Vec<u8>)> = match store_type {
+        let entries: Vec<(String, Vec<u8>)> = match store_type {
             LocalStoreType::Membership => stores
                 .membership
                 .all()
@@ -131,16 +130,16 @@ impl GossipService {
                     .into_iter()
                     .filter_map(|key| {
                         if stores.rate_limit.is_owner(&key) {
-                            stores.rate_limit.get_counter(&key).map(|counter| {
-                                let serialized = serde_json::to_vec(&counter.snapshot())
-                                    .unwrap_or_else(|e| {
+                            stores.rate_limit.get_counter(&key).map(|counter_value| {
+                                let serialized =
+                                    serde_json::to_vec(&counter_value).unwrap_or_else(|e| {
                                         log::error!(
                                             "Failed to serialize rate limit counter: {}",
                                             e
                                         );
                                         vec![]
                                     });
-                                (SKey::new(key.clone()), serialized)
+                                (key.clone(), serialized)
                             })
                         } else {
                             None
@@ -164,19 +163,15 @@ impl GossipService {
                 .map(|(key, value)| {
                     // Get actual version from CRDT metadata
                     let version = match store_type {
-                        LocalStoreType::Membership => stores
-                            .membership
-                            .get_metadata(key)
-                            .map(|(v, _)| v)
-                            .unwrap_or(1),
-                        LocalStoreType::App => {
-                            stores.app.get_metadata(key).map(|(v, _)| v).unwrap_or(1)
+                        LocalStoreType::Membership => {
+                            stores.membership.get(key).map(|s| s.version).unwrap_or(1)
                         }
+                        LocalStoreType::App => stores.app.get(key).map(|s| s.version).unwrap_or(1),
                         LocalStoreType::Worker => {
-                            stores.worker.get_metadata(key).map(|(v, _)| v).unwrap_or(1)
+                            stores.worker.get(key).map(|s| s.version).unwrap_or(1)
                         }
                         LocalStoreType::Policy => {
-                            stores.policy.get_metadata(key).map(|(v, _)| v).unwrap_or(1)
+                            stores.policy.get(key).map(|s| s.version).unwrap_or(1)
                         }
                         LocalStoreType::RateLimit => {
                             // For rate limit, use timestamp as version
@@ -188,7 +183,7 @@ impl GossipService {
                     };
 
                     StateUpdate {
-                        key: key.as_str().to_string(),
+                        key: key.clone(),
                         value: value.clone(),
                         version,
                         actor: self.self_name.clone(),
@@ -646,7 +641,7 @@ impl Gossip for GossipService {
                                                         // Apply app state directly to the store
                                                         if let Some(ref stores) = stores {
                                                             stores.app.insert(
-                                                                SKey(app_state.key.clone()),
+                                                                app_state.key.clone(),
                                                                 app_state,
                                                                 state_update.actor.clone(),
                                                             );
@@ -665,7 +660,7 @@ impl Gossip for GossipService {
                                                         // Apply membership state directly to the store
                                                         if let Some(ref stores) = stores {
                                                             stores.membership.insert(
-                                                                SKey(membership_state.name.clone()),
+                                                                membership_state.name.clone(),
                                                                 membership_state,
                                                                 state_update.actor.clone(),
                                                             );
@@ -673,20 +668,16 @@ impl Gossip for GossipService {
                                                     }
                                                 }
                                                 LocalStoreType::RateLimit => {
-                                                    // Deserialize and apply rate limit counter
-                                                    if let Ok(counter) = serde_json::from_slice::<
-                                                        super::crdt::CRDTPNCounter,
-                                                    >(
-                                                        &state_update.value
-                                                    ) {
-                                                        // Convert CRDTPNCounter to SyncPNCounter for merging
-                                                        let sync_counter =
-                                                            super::crdt::SyncPNCounter::new();
-                                                        sync_counter.merge(&counter);
+                                                    // Deserialize and apply rate limit counter value
+                                                    if let Ok(counter_value) =
+                                                        serde_json::from_slice::<i64>(
+                                                            &state_update.value,
+                                                        )
+                                                    {
                                                         sync_manager
-                                                            .apply_remote_rate_limit_counter(
+                                                            .apply_remote_rate_limit_counter_value(
                                                                 state_update.key.clone(),
-                                                                &sync_counter,
+                                                                counter_value,
                                                             );
                                                     }
                                                 }
@@ -869,7 +860,7 @@ impl Gossip for GossipService {
                                                 // Apply all entries from chunks
                                                 for chunk in &sorted_chunks {
                                                     for entry in &chunk.entries {
-                                                        let key = SKey::new(entry.key.clone());
+                                                        let key = entry.key.clone();
 
                                                         match store_type {
                                                             LocalStoreType::Membership => {
@@ -917,12 +908,14 @@ impl Gossip for GossipService {
                                                                 }
                                                             }
                                                             LocalStoreType::RateLimit => {
-                                                                // For rate limit counters, deserialize and merge
-                                                                if let Ok(counter) = serde_json::from_slice::<super::crdt::CRDTPNCounter>(&entry.value) {
+                                                                // For rate limit counters, deserialize and apply
+                                                                if let Ok(counter_value) = serde_json::from_slice::<i64>(&entry.value) {
                                                                     if let Some(ref sync_manager) = sync_manager {
-                                                                        let sync_counter = super::crdt::SyncPNCounter::new();
-                                                                        sync_counter.merge(&counter);
-                                                                        sync_manager.apply_remote_rate_limit_counter(entry.key.clone(), &sync_counter);
+                                                                        sync_manager
+                                                                            .apply_remote_rate_limit_counter_value(
+                                                                                entry.key.clone(),
+                                                                                counter_value,
+                                                                            );
                                                                     }
                                                                 }
                                                             }
