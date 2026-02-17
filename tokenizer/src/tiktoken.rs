@@ -186,19 +186,45 @@ impl TiktokenTokenizer {
         Self::from_dir_with_chat_template(dir, None)
     }
 
-    /// Create from a directory with an optional chat template file path
+    /// Create from a directory with an optional chat template file path.
+    /// Discovers the tiktoken model file automatically via `find_tiktoken_file`.
     pub fn from_dir_with_chat_template(
         dir: &Path,
         chat_template_path: Option<&str>,
     ) -> Result<Self> {
-        // 1. Find and parse tiktoken model file
         let tiktoken_path = find_tiktoken_file(dir)?;
+        Self::load_from_path(&tiktoken_path, chat_template_path)
+    }
+
+    /// Create from an exact tiktoken file path (`.tiktoken` or `tiktoken.model`).
+    /// Looks for `tokenizer_config.json` in the same directory.
+    pub fn from_file(tiktoken_path: &Path) -> Result<Self> {
+        Self::from_file_with_chat_template(tiktoken_path, None)
+    }
+
+    /// Create from an exact tiktoken file path with an optional chat template.
+    pub fn from_file_with_chat_template(
+        tiktoken_path: &Path,
+        chat_template_path: Option<&str>,
+    ) -> Result<Self> {
+        Self::load_from_path(tiktoken_path, chat_template_path)
+    }
+
+    /// Core loading logic shared by `from_dir` and `from_file` constructors.
+    fn load_from_path(
+        tiktoken_path: &Path,
+        chat_template_path: Option<&str>,
+    ) -> Result<Self> {
+        // 1. Load BPE encoder from the exact file
         let tiktoken_path_str = tiktoken_path
             .to_str()
             .ok_or_else(|| Error::msg("Tiktoken file path is not valid UTF-8"))?;
         let encoder = load_tiktoken_bpe(tiktoken_path_str)?;
 
-        // 2. Parse tokenizer_config.json
+        // 2. Parse tokenizer_config.json from the same directory
+        let dir = tiktoken_path
+            .parent()
+            .ok_or_else(|| Error::msg("Cannot determine parent directory of tiktoken file"))?;
         let config_path = dir.join("tokenizer_config.json");
         let config = if config_path.exists() {
             load_tiktoken_config(&config_path)?
