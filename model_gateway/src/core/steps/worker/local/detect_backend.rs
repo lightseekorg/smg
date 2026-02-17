@@ -12,7 +12,8 @@ use tracing::debug;
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use super::{
-    detect_connection::do_grpc_health_check, discover_metadata::ModelsResponse, strip_protocol,
+    detect_connection::do_grpc_health_check, discover_metadata::ModelsResponse, http_base_url,
+    strip_protocol,
 };
 use crate::core::{steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode};
 
@@ -71,10 +72,7 @@ async fn detect_via_models_endpoint(
     client: &Client,
     api_key: Option<&str>,
 ) -> Result<String, String> {
-    let is_https = url.starts_with("https://");
-    let protocol = if is_https { "https" } else { "http" };
-    let clean_url = strip_protocol(url).trim_end_matches('/').to_string();
-    let models_url = format!("{}://{}/v1/models", protocol, clean_url);
+    let models_url = format!("{}/v1/models", http_base_url(url));
 
     let mut req = client
         .get(&models_url)
@@ -120,10 +118,7 @@ async fn try_vllm_version(
     client: &Client,
     api_key: Option<&str>,
 ) -> Result<(), String> {
-    let is_https = url.starts_with("https://");
-    let protocol = if is_https { "https" } else { "http" };
-    let clean_url = strip_protocol(url).trim_end_matches('/').to_string();
-    let version_url = format!("{}://{}/version", protocol, clean_url);
+    let version_url = format!("{}/version", http_base_url(url));
 
     let mut req = client
         .get(&version_url)
@@ -151,10 +146,7 @@ async fn try_sglang_server_info(
     client: &Client,
     api_key: Option<&str>,
 ) -> Result<(), String> {
-    let is_https = url.starts_with("https://");
-    let protocol = if is_https { "https" } else { "http" };
-    let clean_url = strip_protocol(url).trim_end_matches('/').to_string();
-    let info_url = format!("{}://{}/server_info", protocol, clean_url);
+    let info_url = format!("{}/server_info", http_base_url(url));
 
     let mut req = client
         .get(&info_url)

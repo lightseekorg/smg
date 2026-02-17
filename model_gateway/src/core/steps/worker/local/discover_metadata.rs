@@ -6,17 +6,15 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tracing::{debug, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use super::strip_protocol;
+use super::{http_base_url, strip_protocol};
 use crate::{
     core::{steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode},
-    routers::grpc::client::GrpcClient,
+    routers::grpc::client::{flat_labels, GrpcClient},
 };
 
-// HTTP client for metadata fetching
 static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
         .timeout(Duration::from_secs(10))
@@ -24,7 +22,12 @@ static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
         .expect("Failed to create HTTP client")
 });
 
-/// Server information returned from /server_info endpoint.
+// ---------------------------------------------------------------------------
+// HTTP response structs (sglang /server_info, /model_info; vllm /v1/models)
+// ---------------------------------------------------------------------------
+
+/// SGLang `/server_info` response — curated subset of the full response (~800 fields).
+/// Uses `deny_unknown_fields = false` (the default) so extra fields are silently ignored.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerInfo {
     #[serde(alias = "model")]
@@ -33,21 +36,29 @@ pub struct ServerInfo {
     pub served_model_name: Option<String>,
     pub tp_size: Option<usize>,
     pub dp_size: Option<usize>,
+    pub pp_size: Option<usize>,
     pub load_balance_method: Option<String>,
     pub disaggregation_mode: Option<String>,
     pub version: Option<String>,
-    pub max_batch_size: Option<usize>,
+    pub is_embedding: Option<bool>,
+    pub context_length: Option<usize>,
     pub max_total_tokens: Option<usize>,
-    pub max_prefill_tokens: Option<usize>,
-    pub max_running_requests: Option<usize>,
-    pub max_num_reqs: Option<usize>,
+    pub weight_version: Option<String>,
 }
 
-/// Single entry from the `/v1/models` endpoint response.
-///
-/// Shared struct used by both backend detection (`detect_backend`) and metadata
-/// discovery (`discover_metadata`). Fields are a superset: `owned_by` is used for
-/// runtime detection, while `id`, `root`, and `max_model_len` are used for metadata.
+/// SGLang `/model_info` response.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ModelInfo {
+    pub model_path: Option<String>,
+    pub tokenizer_path: Option<String>,
+    pub is_generation: Option<bool>,
+    pub has_image_understanding: Option<bool>,
+    pub has_audio_understanding: Option<bool>,
+    pub model_type: Option<String>,
+    pub architectures: Option<Vec<String>>,
+}
+
+/// Single entry from `/v1/models` (shared by sglang and vllm).
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct ModelsResponseEntry {
     pub owned_by: Option<String>,
@@ -56,41 +67,30 @@ pub(super) struct ModelsResponseEntry {
     pub max_model_len: Option<usize>,
 }
 
-/// Response shape for the `/v1/models` endpoint (shared by sglang and vllm).
+/// `/v1/models` response wrapper.
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct ModelsResponse {
     pub data: Vec<ModelsResponseEntry>,
 }
 
-/// Model information returned from /model_info endpoint.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ModelInfo {
-    pub model_path: Option<String>,
-    pub tokenizer_path: Option<String>,
-    pub is_generation: Option<bool>,
-    pub model_type: Option<String>,
-    pub architectures: Option<Vec<String>>,
+/// vLLM `/version` response.
+#[derive(Debug, Deserialize)]
+struct VersionResponse {
+    version: String,
 }
 
-/// Fallback function to GET JSON from old endpoint (with "get_" prefix) for backward compatibility.
-async fn get_json_fallback(
+// ---------------------------------------------------------------------------
+// HTTP fetchers
+// ---------------------------------------------------------------------------
+
+/// GET JSON with optional bearer auth, with 404 fallback to `/get_<endpoint>`.
+async fn get_json_with_fallback<T: serde::de::DeserializeOwned>(
     base_url: &str,
     endpoint: &str,
     api_key: Option<&str>,
-) -> Result<Value, String> {
-    // FIXME: This fallback logic should be removed together with /get_server_info
-    // and /get_model_info endpoints in http_server.py
-    warn!(
-        concat!(
-            "Endpoint '/{}' returned 404, falling back to '/get_{}' for backward compatibility. ",
-            "The '/get_{}' endpoint is deprecated and will be removed in a future version. ",
-            "Please use '/{}' instead."
-        ),
-        endpoint, endpoint, endpoint, endpoint
-    );
-
-    let old_url = format!("{}/get_{}", base_url, endpoint);
-    let mut req = HTTP_CLIENT.get(&old_url);
+) -> Result<T, String> {
+    let url = format!("{}/{}", base_url, endpoint);
+    let mut req = HTTP_CLIENT.get(&url);
     if let Some(key) = api_key {
         req = req.bearer_auth(key);
     }
@@ -98,98 +98,122 @@ async fn get_json_fallback(
     let response = req
         .send()
         .await
-        .map_err(|e| format!("Failed to connect to {}: {}", old_url, e))?;
+        .map_err(|e| format!("Failed to connect to {}: {}", url, e))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        // Fallback to deprecated /get_<endpoint> prefix
+        warn!("'/{endpoint}' returned 404, falling back to deprecated '/get_{endpoint}'");
+        let old_url = format!("{}/get_{}", base_url, endpoint);
+        let mut req = HTTP_CLIENT.get(&old_url);
+        if let Some(key) = api_key {
+            req = req.bearer_auth(key);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("Failed to connect to {}: {}", old_url, e))?;
+        return resp
+            .json::<T>()
+            .await
+            .map_err(|e| format!("Failed to parse {}: {}", old_url, e));
+    }
 
     if !response.status().is_success() {
-        return Err(format!(
-            "Server returned status {} from {}",
-            response.status(),
-            old_url
-        ));
+        return Err(format!("status {} from {}", response.status(), url));
     }
 
     response
-        .json::<Value>()
+        .json::<T>()
         .await
-        .map_err(|e| format!("Failed to parse response from {}: {}", old_url, e))
+        .map_err(|e| format!("Failed to parse {}: {}", url, e))
 }
 
-/// Get server info from /server_info endpoint.
+/// GET JSON (no fallback).
+async fn http_get_json<T: serde::de::DeserializeOwned>(
+    url: &str,
+    api_key: Option<&str>,
+) -> Result<T, String> {
+    let mut req = HTTP_CLIENT.get(url);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+    let resp = req.send().await.map_err(|e| format!("{}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("status {}", resp.status()));
+    }
+    resp.json::<T>().await.map_err(|e| format!("{}", e))
+}
+
 pub async fn get_server_info(url: &str, api_key: Option<&str>) -> Result<ServerInfo, String> {
-    let base_url = url.trim_end_matches('/');
-    let server_info_url = format!("{}/server_info", base_url);
-
-    let mut req = HTTP_CLIENT.get(&server_info_url);
-    if let Some(key) = api_key {
-        req = req.bearer_auth(key);
-    }
-
-    let response = req
-        .send()
-        .await
-        .map_err(|e| format!("Failed to connect to {}: {}", server_info_url, e))?;
-
-    // If /server_info returns 404, fallback to /get_server_info for backward compatibility
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        let json = get_json_fallback(base_url, "server_info", api_key).await?;
-        return serde_json::from_value(json)
-            .map_err(|e| format!("Failed to parse server info: {}", e));
-    }
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "Server returned status {} from {}",
-            response.status(),
-            server_info_url
-        ));
-    }
-
-    let json = response
-        .json::<Value>()
-        .await
-        .map_err(|e| format!("Failed to parse response from {}: {}", server_info_url, e))?;
-
-    serde_json::from_value(json).map_err(|e| format!("Failed to parse server info: {}", e))
+    get_json_with_fallback(&http_base_url(url), "server_info", api_key).await
 }
 
-/// Get model info from /model_info endpoint.
 pub async fn get_model_info(url: &str, api_key: Option<&str>) -> Result<ModelInfo, String> {
-    let base_url = url.trim_end_matches('/');
-    let model_info_url = format!("{}/model_info", base_url);
-
-    let mut req = HTTP_CLIENT.get(&model_info_url);
-    if let Some(key) = api_key {
-        req = req.bearer_auth(key);
-    }
-
-    let response = req
-        .send()
-        .await
-        .map_err(|e| format!("Failed to connect to {}: {}", model_info_url, e))?;
-
-    // If /model_info returns 404, fallback to /get_model_info for backward compatibility
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        let json = get_json_fallback(base_url, "model_info", api_key).await?;
-        return serde_json::from_value(json)
-            .map_err(|e| format!("Failed to parse model info: {}", e));
-    }
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "Server returned status {} from {}",
-            response.status(),
-            model_info_url
-        ));
-    }
-
-    response
-        .json::<ModelInfo>()
-        .await
-        .map_err(|e| format!("Failed to parse response from {}: {}", model_info_url, e))
+    get_json_with_fallback(&http_base_url(url), "model_info", api_key).await
 }
 
-/// Fetch gRPC metadata (returns labels and runtime type).
-/// The runtime_type should be pre-detected by the connection detection step.
+// ---------------------------------------------------------------------------
+// Per-backend metadata fetchers
+// ---------------------------------------------------------------------------
+
+async fn fetch_sglang_http_metadata(url: &str, api_key: Option<&str>) -> HashMap<String, String> {
+    let base = http_base_url(url);
+    let mut labels = HashMap::new();
+
+    if let Ok(info) = get_server_info(&base, api_key).await {
+        labels.extend(flat_labels(&info));
+    }
+    if let Ok(info) = get_model_info(&base, api_key).await {
+        labels.extend(flat_labels(&info));
+    }
+
+    // /v1/models gives us max_model_len (fills context_length when /server_info returns null)
+    if let Ok(models) =
+        http_get_json::<ModelsResponse>(&format!("{}/v1/models", base), api_key).await
+    {
+        if let Some(m) = models.data.first() {
+            if let Some(len) = m.max_model_len.filter(|&n| n > 0) {
+                labels
+                    .entry("max_model_len".to_string())
+                    .or_insert_with(|| len.to_string());
+            }
+        }
+    }
+
+    labels
+}
+
+async fn fetch_vllm_http_metadata(url: &str, api_key: Option<&str>) -> HashMap<String, String> {
+    let base = http_base_url(url);
+    let mut labels = HashMap::new();
+
+    // /v1/models — vLLM uses `root` as model_path, `id` as served_model_name
+    if let Ok(models) =
+        http_get_json::<ModelsResponse>(&format!("{}/v1/models", base), api_key).await
+    {
+        if let Some(m) = models.data.first() {
+            if let Some(ref root) = m.root {
+                labels.insert("model_path".to_string(), root.clone());
+            }
+            if let Some(ref id) = m.id {
+                labels.insert("served_model_name".to_string(), id.clone());
+            }
+            if let Some(len) = m.max_model_len.filter(|&n| n > 0) {
+                labels.insert("max_model_len".to_string(), len.to_string());
+            }
+        }
+    }
+
+    // /version
+    if let Ok(v) = http_get_json::<VersionResponse>(&format!("{}/version", base), api_key).await {
+        if !v.version.is_empty() {
+            labels.insert("version".to_string(), v.version);
+        }
+    }
+
+    labels
+}
+
 async fn fetch_grpc_metadata(
     url: &str,
     runtime_type: &str,
@@ -204,130 +228,47 @@ async fn fetch_grpc_metadata(
         .await
         .map_err(|e| format!("Failed to connect to gRPC: {}", e))?;
 
-    // Fetch model info for labels
-    let model_info = client
+    let mut labels = client
         .get_model_info()
         .await
-        .map_err(|e| format!("Failed to fetch gRPC model info: {}", e))?;
+        .map_err(|e| format!("Failed to fetch gRPC model info: {}", e))?
+        .to_labels();
 
-    let mut labels = model_info.to_labels();
-
-    // Fetch server info for KV transfer config (PD disaggregation)
     match client.get_server_info().await {
-        Ok(server_info) => {
-            if let Some(kv_connector) = server_info.kv_connector() {
-                debug!("Discovered kv_connector: {}", kv_connector);
-                labels.insert("kv_connector".to_string(), kv_connector);
-            }
-            if let Some(kv_role) = server_info.kv_role() {
-                debug!("Discovered kv_role: {}", kv_role);
-                labels.insert("kv_role".to_string(), kv_role);
-            }
-        }
-        Err(e) => {
-            // Server info is optional - log warning but don't fail
-            warn!(
-                "Failed to fetch gRPC server info (KV config may not be available): {}",
-                e
-            );
-        }
+        Ok(info) => labels.extend(info.to_labels()),
+        Err(e) => warn!("Failed to fetch gRPC server info: {}", e),
     }
 
+    normalize_grpc_keys(&mut labels);
     Ok((labels, runtime_type.to_string()))
 }
 
-/// Fetch metadata from an SGLang HTTP worker using /server_info and /model_info.
-async fn fetch_sglang_http_metadata(url: &str, api_key: Option<&str>) -> HashMap<String, String> {
-    let mut labels = HashMap::new();
-
-    // Fetch from /server_info for server-related metadata
-    if let Ok(server_info) = get_server_info(url, api_key).await {
-        if let Some(model_path) = server_info.model_path.filter(|s| !s.is_empty()) {
-            labels.insert("model_path".to_string(), model_path);
-        }
-        if let Some(served_model_name) = server_info.served_model_name.filter(|s| !s.is_empty()) {
-            labels.insert("served_model_name".to_string(), served_model_name);
-        }
-        if let Some(tp_size) = server_info.tp_size {
-            labels.insert("tp_size".to_string(), tp_size.to_string());
-        }
-        if let Some(dp_size) = server_info.dp_size {
-            labels.insert("dp_size".to_string(), dp_size.to_string());
-        }
-        if let Some(load_balance_method) = server_info.load_balance_method {
-            labels.insert("load_balance_method".to_string(), load_balance_method);
-        }
-        if let Some(disaggregation_mode) = server_info.disaggregation_mode {
-            labels.insert("disaggregation_mode".to_string(), disaggregation_mode);
+/// Rename gRPC-specific keys to canonical names and strip transient state.
+fn normalize_grpc_keys(labels: &mut HashMap<String, String>) {
+    for &(from, to) in &[
+        ("tensor_parallel_size", "tp_size"),
+        ("pipeline_parallel_size", "pp_size"),
+        ("context_parallel_size", "cp_size"),
+    ] {
+        if let Some(val) = labels.remove(from) {
+            labels.entry(to.to_string()).or_insert(val);
         }
     }
-
-    // Fetch from /model_info for model-related metadata
-    if let Ok(model_info) = get_model_info(url, api_key).await {
-        if let Some(model_type) = model_info.model_type.filter(|s| !s.is_empty()) {
-            labels.insert("model_type".to_string(), model_type);
-        }
-        if let Some(architectures) = model_info.architectures.filter(|a| !a.is_empty()) {
-            if let Ok(json_str) = serde_json::to_string(&architectures) {
-                labels.insert("architectures".to_string(), json_str);
-            }
-        }
+    for key in [
+        "active_requests",
+        "is_paused",
+        "last_receive_timestamp",
+        "uptime_seconds",
+        "server_type",
+    ] {
+        labels.remove(key);
     }
-
-    labels
 }
 
-/// Fetch metadata from a vLLM HTTP worker using /v1/models.
-async fn fetch_vllm_http_metadata(url: &str, api_key: Option<&str>) -> HashMap<String, String> {
-    let mut labels = HashMap::new();
+// ---------------------------------------------------------------------------
+// Step executor
+// ---------------------------------------------------------------------------
 
-    let is_https = url.starts_with("https://");
-    let protocol = if is_https { "https" } else { "http" };
-    let clean_url = strip_protocol(url).trim_end_matches('/').to_string();
-    let models_url = format!("{}://{}/v1/models", protocol, clean_url);
-
-    let mut req = HTTP_CLIENT.get(&models_url);
-    if let Some(key) = api_key {
-        req = req.bearer_auth(key);
-    }
-
-    let response = match req.send().await {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r) => {
-            warn!("vLLM /v1/models returned status {}", r.status());
-            return labels;
-        }
-        Err(e) => {
-            warn!("Failed to fetch vLLM /v1/models: {}", e);
-            return labels;
-        }
-    };
-
-    match response.json::<ModelsResponse>().await {
-        Ok(models) => {
-            if let Some(model) = models.data.first() {
-                // vLLM uses `root` as the model path (equivalent to sglang's model_path)
-                if let Some(root) = model.root.as_deref().filter(|s| !s.is_empty()) {
-                    labels.insert("model_path".to_string(), root.to_string());
-                }
-                // vLLM uses `id` as the served model name
-                if let Some(id) = model.id.as_deref().filter(|s| !s.is_empty()) {
-                    labels.insert("served_model_name".to_string(), id.to_string());
-                }
-                if let Some(max_model_len) = model.max_model_len {
-                    labels.insert("max_model_len".to_string(), max_model_len.to_string());
-                }
-            }
-        }
-        Err(e) => {
-            warn!("Failed to parse vLLM /v1/models response: {}", e);
-        }
-    }
-
-    labels
-}
-
-/// Step 2a: Discover metadata from worker.
 pub struct DiscoverMetadataStep;
 
 #[async_trait]
@@ -349,43 +290,35 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverMetadataStep {
 
         let (discovered_labels, detected_runtime) = match connection_mode {
             ConnectionMode::Http => {
-                let runtime = match context.data.detected_runtime_type.as_deref() {
-                    Some(rt) => rt,
-                    None => {
+                let runtime = context
+                    .data
+                    .detected_runtime_type
+                    .as_deref()
+                    .unwrap_or_else(|| {
                         warn!(
-                            "No detected_runtime_type for HTTP worker {}, falling back to sglang metadata",
+                            "No detected_runtime_type for {}, defaulting to sglang",
                             config.url
                         );
                         "sglang"
-                    }
-                };
-                debug!("Fetching HTTP metadata using runtime: {}", runtime);
-
+                    });
                 let labels = match runtime {
                     "vllm" => {
                         fetch_vllm_http_metadata(&config.url, config.api_key.as_deref()).await
                     }
                     _ => fetch_sglang_http_metadata(&config.url, config.api_key.as_deref()).await,
                 };
-
                 Ok((labels, None))
             }
             ConnectionMode::Grpc => {
-                // Use pre-detected runtime type from connection detection step,
-                // falling back to config.runtime_type if not available (WorkerSpec field)
                 let config_runtime = config.runtime_type.to_string();
                 let runtime_type = context
                     .data
                     .detected_runtime_type
                     .as_deref()
                     .unwrap_or(&config_runtime);
-                debug!(
-                    "Using runtime type '{}' for gRPC metadata fetch",
-                    runtime_type
-                );
                 fetch_grpc_metadata(&config.url, runtime_type)
                     .await
-                    .map(|(labels, runtime)| (labels, Some(runtime)))
+                    .map(|(labels, rt)| (labels, Some(rt)))
             }
         }
         .unwrap_or_else(|e| {
@@ -393,17 +326,13 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverMetadataStep {
             (HashMap::new(), None)
         });
 
-        let url = config.url.clone();
         debug!(
-            "Discovered {} metadata labels for {}",
+            "Discovered {} labels for {}",
             discovered_labels.len(),
-            url
+            config.url
         );
-
-        // Update workflow data
         context.data.discovered_labels = discovered_labels;
         if let Some(runtime) = detected_runtime {
-            debug!("Detected runtime type: {}", runtime);
             context.data.detected_runtime_type = Some(runtime);
         }
 
@@ -412,5 +341,57 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverMetadataStep {
 
     fn is_retryable(&self, _error: &WorkflowError) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dump_labels(title: &str, labels: &HashMap<String, String>) {
+        println!("\n=== {} ({} labels) ===", title, labels.len());
+        let mut keys: Vec<_> = labels.keys().collect();
+        keys.sort();
+        for key in keys {
+            println!("  {}: {}", key, labels[key]);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_sglang_http_metadata() {
+        let labels = fetch_sglang_http_metadata("http://0.0.0.0:30000", None).await;
+        dump_labels("SGLang HTTP combined", &labels);
+        assert!(labels.contains_key("model_path"));
+        assert!(labels.contains_key("tokenizer_path"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_vllm_http_metadata() {
+        let labels = fetch_vllm_http_metadata("http://0.0.0.0:20000", None).await;
+        dump_labels("vLLM HTTP", &labels);
+        assert!(labels.contains_key("model_path"));
+        assert!(labels.contains_key("version"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_sglang_grpc_metadata() {
+        let (labels, _) = fetch_grpc_metadata("grpc://0.0.0.0:30001", "sglang")
+            .await
+            .expect("grpc metadata");
+        dump_labels("SGLang gRPC", &labels);
+        assert!(labels.contains_key("model_path"));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_vllm_grpc_metadata() {
+        let (labels, _) = fetch_grpc_metadata("grpc://0.0.0.0:20001", "vllm")
+            .await
+            .expect("grpc metadata");
+        dump_labels("vLLM gRPC", &labels);
+        assert!(!labels.is_empty());
     }
 }

@@ -22,6 +22,15 @@ pub(crate) fn strip_protocol(url: &str) -> String {
         .to_string()
 }
 
+/// Ensure URL has an HTTP(S) scheme — handles bare `host:port` and `grpc://` inputs.
+pub(super) fn http_base_url(url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.trim_end_matches('/').to_string()
+    } else {
+        format!("http://{}", strip_protocol(url).trim_end_matches('/'))
+    }
+}
+
 pub use create_worker::CreateLocalWorkerStep;
 pub use detect_backend::DetectBackendStep;
 pub use detect_connection::DetectConnectionModeStep;
