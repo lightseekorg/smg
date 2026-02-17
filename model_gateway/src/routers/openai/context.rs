@@ -3,15 +3,13 @@
 use std::sync::Arc;
 
 use axum::http::HeaderMap;
+use openai_protocol::{chat::ChatCompletionRequest, responses::ResponsesRequest};
 use serde_json::Value;
+use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
+use smg_mcp::{McpOrchestrator, McpToolSession};
 
 use super::provider::Provider;
-use crate::{
-    core::Worker,
-    data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::{McpOrchestrator, McpToolSession},
-    protocols::{chat::ChatCompletionRequest, responses::ResponsesRequest},
-};
+use crate::core::Worker;
 
 pub struct RequestContext {
     pub input: RequestInput,

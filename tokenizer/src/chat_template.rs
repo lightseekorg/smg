@@ -524,3 +524,98 @@ pub fn load_chat_template_from_config(config_path: &str) -> Result<Option<String
 
     Ok(None)
 }
+
+/// Load chat template from a file (.jinja or .json containing Jinja).
+/// Shared between all tokenizer backends.
+pub fn load_chat_template_from_file(template_path: &str) -> Result<Option<String>> {
+    let content = fs::read_to_string(template_path)
+        .map_err(|e| anyhow!("Failed to read chat template file: {}", e))?;
+
+    if template_path.ends_with(".json") {
+        let json_value: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| anyhow!("Failed to parse chat_template.json: {}", e))?;
+
+        if let Some(template_str) = json_value.as_str() {
+            return Ok(Some(template_str.to_string()));
+        } else if let Some(obj) = json_value.as_object() {
+            if let Some(template_value) = obj.get("chat_template") {
+                if let Some(template_str) = template_value.as_str() {
+                    return Ok(Some(template_str.to_string()));
+                }
+            }
+        }
+
+        return Err(anyhow!(
+            "chat_template.json does not contain a valid template",
+        ));
+    }
+
+    // Plain .jinja file
+    let template = content.trim().replace("\\n", "\n");
+    Ok(Some(template))
+}
+
+/// Chat template state that can be embedded in any tokenizer struct.
+/// Eliminates duplicated apply/set/format methods across tokenizer backends.
+pub struct ChatTemplateState {
+    template: Option<String>,
+    content_format: ChatTemplateContentFormat,
+}
+
+impl ChatTemplateState {
+    pub fn new(template: Option<String>) -> Self {
+        let content_format = template
+            .as_ref()
+            .map(|t| detect_chat_template_content_format(t))
+            .unwrap_or_default();
+        Self {
+            template,
+            content_format,
+        }
+    }
+
+    pub fn apply(
+        &self,
+        messages: &[serde_json::Value],
+        params: ChatTemplateParams,
+    ) -> Result<String> {
+        let template = self.template.as_ref().ok_or_else(|| {
+            anyhow!(
+                "Cannot use chat template functions because tokenizer.chat_template is not set \
+                 and no template argument was passed! For information about writing templates and \
+                 setting the tokenizer.chat_template attribute, please see the documentation at \
+                 https://huggingface.co/docs/transformers/main/en/chat_templating",
+            )
+        })?;
+        ChatTemplateProcessor::new(template.clone()).apply_chat_template(messages, params)
+    }
+
+    pub fn set(&mut self, template: String) {
+        self.content_format = detect_chat_template_content_format(&template);
+        self.template = Some(template);
+    }
+
+    pub fn content_format(&self) -> ChatTemplateContentFormat {
+        self.content_format
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chat_template_state_no_template() {
+        let state = ChatTemplateState::new(None);
+        assert_eq!(state.content_format(), ChatTemplateContentFormat::String);
+        let result = state.apply(&[], ChatTemplateParams::default());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_chat_template_state_set() {
+        let mut state = ChatTemplateState::new(None);
+        state.set("{{ messages }}".to_string());
+        assert_eq!(state.content_format(), ChatTemplateContentFormat::String);
+    }
+}

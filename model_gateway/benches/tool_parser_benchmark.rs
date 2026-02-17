@@ -19,12 +19,10 @@ use std::{
 };
 
 use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
+use openai_protocol::common::{Function, Tool};
 use serde_json::json;
-use smg::{
-    protocols::common::{Function, Tool},
-    tool_parser::{JsonParser, ParserFactory as ToolParserFactory, ToolParser},
-};
 use tokio::runtime::Runtime;
+use tool_parser::{JsonParser, ParserFactory as ToolParserFactory, ToolParser};
 
 // Test data for different parser formats - realistic complex examples
 const JSON_SIMPLE: &str = r#"{"name": "code_interpreter", "arguments": "{\"language\": \"python\", \"code\": \"import numpy as np\\nimport matplotlib.pyplot as plt\\n\\n# Generate sample data\\nx = np.linspace(0, 10, 100)\\ny = np.sin(x) * np.exp(-x/10)\\n\\n# Create the plot\\nplt.figure(figsize=(10, 6))\\nplt.plot(x, y, 'b-', linewidth=2)\\nplt.grid(True)\\nplt.xlabel('Time (s)')\\nplt.ylabel('Amplitude')\\nplt.title('Damped Oscillation')\\nplt.show()\"}"}"#;

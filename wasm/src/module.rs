@@ -10,6 +10,8 @@
 //! - SHA256 hashes (hex string representation)
 //! - Timestamps (ISO 8601 format for JSON output)
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
 
@@ -160,8 +162,9 @@ pub struct WasmModuleMeta {
     // attach points for the module
     pub attach_points: Vec<WasmModuleAttachPoint>,
     // Pre-loaded WASM component bytes (loaded into memory for faster execution)
+    // Wrapped in Arc to avoid cloning full bytes on every execution request.
     #[serde(skip)]
-    pub wasm_bytes: Vec<u8>,
+    pub wasm_bytes: Arc<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]

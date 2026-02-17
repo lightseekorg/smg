@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use smg::*;
+use smg_auth as auth;
 
 // Define the enums with PyO3 bindings
 #[pyclass(eq)]
@@ -442,7 +443,7 @@ impl Router {
     fn determine_connection_mode(worker_urls: &[String]) -> core::ConnectionMode {
         for url in worker_urls {
             if url.starts_with("grpc://") || url.starts_with("grpcs://") {
-                return core::ConnectionMode::Grpc { port: None };
+                return core::ConnectionMode::Grpc;
             }
         }
         core::ConnectionMode::Http
@@ -596,7 +597,7 @@ impl Router {
             .policy(policy)
             .host(&self.host)
             .port(self.port)
-            .connection_mode(self.connection_mode.clone())
+            .connection_mode(self.connection_mode)
             .max_payload_size(self.max_payload_size)
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)

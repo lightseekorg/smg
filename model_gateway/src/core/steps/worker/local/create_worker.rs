@@ -3,19 +3,21 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use openai_protocol::{
+    model_card::ModelCard,
+    worker::{HealthCheckConfig, WorkerSpec},
+};
 use tracing::debug;
+use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::{
     app_context::AppContext,
     core::{
         circuit_breaker::CircuitBreakerConfig,
-        model_card::ModelCard,
         steps::workflow_data::LocalWorkerWorkflowData,
-        worker::{HealthConfig, RuntimeType, WorkerType},
-        BasicWorkerBuilder, ConnectionMode, DPAwareWorkerBuilder, Worker, UNKNOWN_MODEL_ID,
+        worker::{RuntimeType, WorkerType},
+        BasicWorkerBuilder, ConnectionMode, Worker, UNKNOWN_MODEL_ID,
     },
-    protocols::worker_spec::WorkerConfigRequest,
-    workflow::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
 };
 
 /// Step 3: Create worker object(s) with merged configuration + metadata.
@@ -59,13 +61,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
         }
 
         // Build labels from config
-        let mut config_labels = config.labels.clone();
-        if let Some(priority) = config.priority {
-            config_labels.insert("priority".to_string(), priority.to_string());
-        }
-        if let Some(cost) = config.cost {
-            config_labels.insert("cost".to_string(), cost.to_string());
-        }
+        let config_labels = config.labels.clone();
 
         // Merge: discovered labels first, then config labels (config takes precedence)
         let mut final_labels = discovered_labels.clone();
@@ -77,13 +73,11 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
         let kv_connector = final_labels.remove("kv_connector");
         let kv_role = final_labels.remove("kv_role");
 
-        // Determine model_id: config > served_model_name > model_id > model_path > UNKNOWN_MODEL_ID
-        // TODO: Normalize field names in ModelInfo::to_labels() so all backends use consistent
-        // names (e.g., always "model_id"). This would eliminate the need for backend-specific
-        // fallback chains here.
+        // Determine model_id: config.models > discovered labels > UNKNOWN_MODEL_ID
         let model_id = config
-            .model_id
-            .clone()
+            .models
+            .primary()
+            .map(|m| m.id.clone())
             .or_else(|| final_labels.get("served_model_name").cloned()) // SGLang
             .or_else(|| final_labels.get("model_id").cloned()) // TensorRT-LLM
             .or_else(|| final_labels.get("model_path").cloned()) // vLLM
@@ -93,7 +87,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
             debug!("Using model_id: {}", model_id);
         }
 
-        // Create ModelCard
+        // Create ModelCard — use config.models if provided, otherwise build from labels
         let model_card = build_model_card(&model_id, config, &final_labels);
 
         debug!(
@@ -107,14 +101,23 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
         // Parse worker type
         let worker_type = parse_worker_type(config);
 
-        // Get runtime type (for gRPC workers)
-        let runtime_type = determine_runtime_type(connection_mode, &context.data, config);
+        // Get runtime type (set by DetectBackendStep)
+        let runtime_type = match context.data.detected_runtime_type.as_deref() {
+            Some(s) => s.parse::<RuntimeType>().unwrap_or_else(|_| {
+                debug!(
+                    "Unrecognized detected runtime '{}', falling back to config: {}",
+                    s, config.runtime_type
+                );
+                config.runtime_type
+            }),
+            None => config.runtime_type,
+        };
 
         // Build circuit breaker config
         let circuit_breaker_config = build_circuit_breaker_config(app_context);
 
         // Build health config
-        let health_config = build_health_config(app_context, config);
+        let (health_config, health_endpoint) = build_health_config(app_context, config);
 
         // Normalize URL
         let normalized_url = normalize_url(&config.url, connection_mode);
@@ -127,7 +130,8 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
         }
 
         // Create workers - always output as Vec for unified downstream handling
-        let workers = if config.dp_aware {
+        let dp_aware = app_context.router_config.dp_aware;
+        let workers = if dp_aware {
             create_dp_aware_workers(
                 &context.data,
                 &normalized_url,
@@ -137,6 +141,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
                 runtime_type,
                 circuit_breaker_config,
                 health_config,
+                &health_endpoint,
                 config,
                 &final_labels,
                 kv_connector.as_deref(),
@@ -151,6 +156,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
                 runtime_type,
                 circuit_breaker_config,
                 health_config,
+                &health_endpoint,
                 config,
                 &final_labels,
                 kv_connector.as_deref(),
@@ -171,23 +177,17 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
 
 fn build_model_card(
     model_id: &str,
-    config: &WorkerConfigRequest,
+    config: &WorkerSpec,
     labels: &HashMap<String, String>,
 ) -> ModelCard {
-    let mut card = ModelCard::new(model_id);
-
-    if let Some(ref tokenizer_path) = config.tokenizer_path {
-        card = card.with_tokenizer_path(tokenizer_path.clone());
-    }
-    if let Some(ref reasoning_parser) = config.reasoning_parser {
-        card = card.with_reasoning_parser(reasoning_parser.clone());
-    }
-    if let Some(ref tool_parser) = config.tool_parser {
-        card = card.with_tool_parser(tool_parser.clone());
-    }
-    if let Some(ref chat_template) = config.chat_template {
-        card = card.with_chat_template(chat_template.clone());
-    }
+    // Start from the user-provided proto_card if it matches, preserving all
+    // user-supplied fields (display_name, provider, context_length, etc.).
+    // Otherwise start from a blank card with just the model_id.
+    let mut card = config
+        .models
+        .find(model_id)
+        .cloned()
+        .unwrap_or_else(|| ModelCard::new(model_id));
     if let Some(model_type_str) = labels.get("model_type") {
         card = card.with_hf_model_type(model_type_str.clone());
     }
@@ -234,44 +234,8 @@ fn build_model_card(
     card
 }
 
-fn parse_worker_type(config: &WorkerConfigRequest) -> WorkerType {
-    config
-        .worker_type
-        .as_ref()
-        .map(|t| match t.as_str() {
-            "prefill" => WorkerType::Prefill {
-                bootstrap_port: config.bootstrap_port,
-            },
-            "decode" => WorkerType::Decode,
-            _ => WorkerType::Regular,
-        })
-        .unwrap_or(WorkerType::Regular)
-}
-
-fn determine_runtime_type(
-    connection_mode: &ConnectionMode,
-    data: &LocalWorkerWorkflowData,
-    config: &WorkerConfigRequest,
-) -> RuntimeType {
-    if !matches!(connection_mode, ConnectionMode::Grpc { .. }) {
-        return RuntimeType::Sglang;
-    }
-
-    if let Some(ref detected_runtime) = data.detected_runtime_type {
-        match detected_runtime.as_str() {
-            "vllm" => RuntimeType::Vllm,
-            "trtllm" => RuntimeType::Trtllm,
-            _ => RuntimeType::Sglang,
-        }
-    } else if let Some(ref runtime) = config.runtime {
-        match runtime.as_str() {
-            "vllm" => RuntimeType::Vllm,
-            "trtllm" => RuntimeType::Trtllm,
-            _ => RuntimeType::Sglang,
-        }
-    } else {
-        RuntimeType::Sglang
-    }
+fn parse_worker_type(config: &WorkerSpec) -> WorkerType {
+    config.worker_type
 }
 
 fn build_circuit_breaker_config(app_context: &AppContext) -> CircuitBreakerConfig {
@@ -284,16 +248,16 @@ fn build_circuit_breaker_config(app_context: &AppContext) -> CircuitBreakerConfi
     }
 }
 
-fn build_health_config(app_context: &AppContext, config: &WorkerConfigRequest) -> HealthConfig {
-    let cfg = &app_context.router_config.health_check;
-    HealthConfig {
-        timeout_secs: cfg.timeout_secs,
-        check_interval_secs: cfg.check_interval_secs,
-        endpoint: cfg.endpoint.clone(),
-        failure_threshold: cfg.failure_threshold,
-        success_threshold: cfg.success_threshold,
-        disable_health_check: cfg.disable_health_check || config.disable_health_check,
-    }
+fn build_health_config(
+    app_context: &AppContext,
+    config: &WorkerSpec,
+) -> (HealthCheckConfig, String) {
+    let base = app_context.router_config.health_check.to_protocol_config();
+    let merged = config.health.apply_to(&base);
+    (
+        merged,
+        app_context.router_config.health_check.endpoint.clone(),
+    )
 }
 
 fn normalize_url(url: &str, connection_mode: &ConnectionMode) -> String {
@@ -302,7 +266,7 @@ fn normalize_url(url: &str, connection_mode: &ConnectionMode) -> String {
     } else {
         match connection_mode {
             ConnectionMode::Http => format!("http://{}", url),
-            ConnectionMode::Grpc { .. } => format!("grpc://{}", url),
+            ConnectionMode::Grpc => format!("grpc://{}", url),
         }
     }
 }
@@ -316,8 +280,9 @@ fn create_dp_aware_workers(
     connection_mode: &ConnectionMode,
     runtime_type: RuntimeType,
     circuit_breaker_config: CircuitBreakerConfig,
-    health_config: HealthConfig,
-    config: &WorkerConfigRequest,
+    health_config: HealthCheckConfig,
+    health_endpoint: &str,
+    config: &WorkerSpec,
     labels: &HashMap<String, String>,
     kv_connector: Option<&str>,
     kv_role: Option<&str>,
@@ -334,14 +299,18 @@ fn create_dp_aware_workers(
 
     let mut workers = Vec::with_capacity(dp_info.dp_size);
     for rank in 0..dp_info.dp_size {
-        let mut builder =
-            DPAwareWorkerBuilder::new(normalized_url.to_string(), rank, dp_info.dp_size)
-                .model(model_card.clone())
-                .worker_type(worker_type.clone())
-                .connection_mode(connection_mode.clone())
-                .runtime_type(runtime_type.clone())
-                .circuit_breaker_config(circuit_breaker_config.clone())
-                .health_config(health_config.clone());
+        let mut builder = BasicWorkerBuilder::new(normalized_url.to_string())
+            .dp_config(rank, dp_info.dp_size)
+            .model(model_card.clone())
+            .worker_type(worker_type)
+            .connection_mode(*connection_mode)
+            .runtime_type(runtime_type)
+            .circuit_breaker_config(circuit_breaker_config.clone())
+            .health_config(health_config.clone())
+            .health_endpoint(health_endpoint)
+            .bootstrap_port(config.bootstrap_port)
+            .priority(config.priority)
+            .cost(config.cost);
 
         if let Some(ref api_key) = config.api_key {
             builder = builder.api_key(api_key.clone());
@@ -381,8 +350,9 @@ fn create_single_worker(
     connection_mode: &ConnectionMode,
     runtime_type: RuntimeType,
     circuit_breaker_config: CircuitBreakerConfig,
-    health_config: HealthConfig,
-    config: &WorkerConfigRequest,
+    health_config: HealthCheckConfig,
+    health_endpoint: &str,
+    config: &WorkerSpec,
     labels: &HashMap<String, String>,
     kv_connector: Option<&str>,
     kv_role: Option<&str>,
@@ -392,10 +362,14 @@ fn create_single_worker(
     let mut builder = BasicWorkerBuilder::new(normalized_url.to_string())
         .model(model_card)
         .worker_type(worker_type)
-        .connection_mode(connection_mode.clone())
+        .connection_mode(*connection_mode)
         .runtime_type(runtime_type)
         .circuit_breaker_config(circuit_breaker_config)
-        .health_config(health_config);
+        .health_config(health_config)
+        .health_endpoint(health_endpoint)
+        .bootstrap_port(config.bootstrap_port)
+        .priority(config.priority)
+        .cost(config.cost);
 
     if let Some(ref api_key) = config.api_key {
         builder = builder.api_key(api_key.clone());

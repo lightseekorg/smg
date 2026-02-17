@@ -13,14 +13,11 @@ pub use discover_models::{
     group_models_into_cards, infer_model_type_from_id, DiscoverModelsStep, ModelInfo,
     ModelsResponse,
 };
+use openai_protocol::worker::WorkerSpec;
+use wfaas::{BackoffStrategy, FailureAction, RetryPolicy, StepDefinition, WorkflowDefinition};
 
 use super::shared::{ActivateWorkersStep, RegisterWorkersStep, UpdatePoliciesStep};
-use crate::{
-    app_context::AppContext,
-    core::steps::workflow_data::ExternalWorkerWorkflowData,
-    protocols::worker_spec::WorkerConfigRequest,
-    workflow::{BackoffStrategy, FailureAction, RetryPolicy, StepDefinition, WorkflowDefinition},
-};
+use crate::{app_context::AppContext, core::steps::workflow_data::ExternalWorkerWorkflowData};
 
 /// Create external worker registration workflow definition.
 ///
@@ -108,7 +105,7 @@ pub fn create_external_worker_workflow() -> WorkflowDefinition<ExternalWorkerWor
 
 /// Helper to create initial workflow data for external worker registration
 pub fn create_external_worker_workflow_data(
-    config: WorkerConfigRequest,
+    config: WorkerSpec,
     app_context: Arc<AppContext>,
 ) -> ExternalWorkerWorkflowData {
     ExternalWorkerWorkflowData {

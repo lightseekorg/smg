@@ -1,12 +1,11 @@
 //! Response patching and transformation utilities for OpenAI responses
 
-use serde_json::{json, Map, Value};
-use tracing::warn;
-
-use crate::protocols::{
+use openai_protocol::{
     event_types::is_response_event,
     responses::{ResponseTool, ResponseToolType, ResponsesRequest},
 };
+use serde_json::{json, Map, Value};
+use tracing::warn;
 
 /// Check if a JSON value is missing, null, or an empty string
 fn is_missing_or_empty(value: Option<&Value>) -> bool {

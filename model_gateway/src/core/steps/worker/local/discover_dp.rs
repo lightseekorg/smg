@@ -1,12 +1,12 @@
 //! Data Parallel (DP) information discovery step.
 
 use async_trait::async_trait;
-use tracing::debug;
+use tracing::{debug, warn};
+use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use super::discover_metadata::get_server_info;
-use crate::{
-    core::{steps::workflow_data::LocalWorkerWorkflowData, UNKNOWN_MODEL_ID},
-    workflow::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
+use crate::core::{
+    steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode, UNKNOWN_MODEL_ID,
 };
 
 /// DP (Data Parallel) information for a worker.
@@ -47,13 +47,32 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverDPInfoStep {
         context: &mut WorkflowContext<LocalWorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
         let config = &context.data.config;
+        let app_context = context
+            .data
+            .app_context
+            .as_ref()
+            .ok_or_else(|| WorkflowError::ContextValueNotFound("app_context".to_string()))?;
 
-        if !config.dp_aware {
+        if !app_context.router_config.dp_aware {
             debug!(
                 "Worker {} is not DP-aware, skipping DP discovery",
                 config.url
             );
             return Ok(StepResult::Success);
+        }
+
+        // DP discovery uses SGLang's /server_info which exposes dp_size.
+        // Only proceed for sglang HTTP workers — other runtimes don't expose DP info this way.
+        if matches!(context.data.connection_mode, Some(ConnectionMode::Http)) {
+            let runtime = context.data.detected_runtime_type.as_deref();
+            if runtime != Some("sglang") {
+                warn!(
+                    "DP discovery is not supported for {} HTTP workers ({}), skipping",
+                    runtime.unwrap_or("unknown"),
+                    config.url
+                );
+                return Ok(StepResult::Success);
+            }
         }
 
         debug!("Discovering DP info for {} (DP-aware)", config.url);

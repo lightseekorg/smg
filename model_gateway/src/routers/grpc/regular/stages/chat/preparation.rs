@@ -4,17 +4,15 @@ use std::borrow::Cow;
 
 use async_trait::async_trait;
 use axum::response::Response;
+use openai_protocol::chat::ChatCompletionRequest;
 use tracing::error;
 
-use crate::{
-    protocols::chat::ChatCompletionRequest,
-    routers::{
-        error,
-        grpc::{
-            common::stages::PipelineStage,
-            context::{PreparationOutput, RequestContext},
-            utils,
-        },
+use crate::routers::{
+    error,
+    grpc::{
+        common::stages::PipelineStage,
+        context::{PreparationOutput, RequestContext},
+        utils,
     },
 };
 

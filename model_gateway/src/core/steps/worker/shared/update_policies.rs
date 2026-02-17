@@ -4,13 +4,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tracing::{debug, warn};
-
-use crate::{
-    core::{steps::workflow_data::WorkerRegistrationData, Worker},
-    workflow::{
-        StepExecutor, StepResult, WorkflowContext, WorkflowData, WorkflowError, WorkflowResult,
-    },
+use wfaas::{
+    StepExecutor, StepResult, WorkflowContext, WorkflowData, WorkflowError, WorkflowResult,
 };
+
+use crate::core::{steps::workflow_data::WorkerRegistrationData, Worker};
 
 /// Unified step to update policy registry for registered workers.
 ///
@@ -25,6 +23,7 @@ impl UpdatePoliciesStep {
             .iter()
             .filter(|w| {
                 w.metadata()
+                    .spec
                     .labels
                     .get("disaggregation_mode")
                     .map(|s| s.as_str())
@@ -36,6 +35,7 @@ impl UpdatePoliciesStep {
             .iter()
             .filter(|w| {
                 w.metadata()
+                    .spec
                     .labels
                     .get("disaggregation_mode")
                     .map(|s| s.as_str())
@@ -49,8 +49,8 @@ impl UpdatePoliciesStep {
 
         // Compare configurations of prefill vs decode workers
         if let (Some(pw), Some(dw)) = (prefill_workers.first(), decode_workers.first()) {
-            let pl = &pw.metadata().labels;
-            let dl = &dw.metadata().labels;
+            let pl = &pw.metadata().spec.labels;
+            let dl = &dw.metadata().spec.labels;
 
             // Define keys to check for equality
             let keys_to_check = ["tp_size", "dp_size", "load_balance_method"];

@@ -77,8 +77,8 @@ pub use worker::{
 pub use workflow_data::{
     ExternalWorkerWorkflowData, LocalWorkerWorkflowData, McpWorkflowData, ProtocolUpdateRequest,
     TokenizerWorkflowData, WasmRegistrationWorkflowData, WasmRemovalWorkflowData,
-    WorkerConfigRequest, WorkerList as WorkflowWorkerList, WorkerRegistrationData,
-    WorkerRemovalWorkflowData, WorkerUpdateWorkflowData,
+    WorkerList as WorkflowWorkerList, WorkerRegistrationData, WorkerRemovalWorkflowData,
+    WorkerSpec, WorkerUpdateWorkflowData,
 };
 // Typed workflow engines
 pub use workflow_engines::WorkflowEngines;

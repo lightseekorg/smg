@@ -1,6 +1,6 @@
 """SMG gRPC Proto - Protocol definitions for SGLang, vLLM, and TRT-LLM."""
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 # Re-export generated modules for convenient access
 # These imports will work after the package is built (stubs generated at build time)

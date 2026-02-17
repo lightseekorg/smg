@@ -4,8 +4,10 @@ use anyhow::{Error, Result};
 use tracing::debug;
 
 use crate::{
-    hub::download_tokenizer_from_hf, huggingface::HuggingFaceTokenizer,
-    tiktoken::TiktokenTokenizer, traits,
+    hub::download_tokenizer_from_hf,
+    huggingface::HuggingFaceTokenizer,
+    tiktoken::{has_tiktoken_file, is_tiktoken_file, TiktokenTokenizer},
+    traits,
 };
 
 /// Represents the type of tokenizer being used
@@ -62,8 +64,18 @@ pub fn create_tokenizer_with_chat_template(
             );
         }
 
+        // Priority 2: tiktoken.model / *.tiktoken
+        // Only forward the user's explicit chat_template_path — tiktoken handles
+        // its own config/discovery (tokenizer_config.json → directory discovery).
+        if has_tiktoken_file(path) {
+            return Ok(Arc::new(TiktokenTokenizer::from_dir_with_chat_template(
+                path,
+                chat_template_path,
+            )?));
+        }
+
         return Err(Error::msg(format!(
-            "Directory '{}' does not contain a valid tokenizer file (tokenizer.json, tokenizer_config.json, or vocab.json)",
+            "Directory '{}' does not contain a valid tokenizer file (tokenizer.json, tiktoken.model, *.tiktoken, or vocab.json)",
             file_path
         )));
     }
@@ -81,9 +93,16 @@ pub fn create_tokenizer_with_chat_template(
 
             Ok(Arc::new(tokenizer) as Arc<dyn traits::Tokenizer>)
         }
-        Some("model") => {
-            // SentencePiece model file
-            Err(Error::msg("SentencePiece models not yet supported"))
+        Some("model") | Some("tiktoken") => {
+            // Check if it's a tiktoken file (tiktoken.model / *.tiktoken) before assuming SentencePiece
+            if is_tiktoken_file(path) {
+                Ok(Arc::new(TiktokenTokenizer::from_file_with_chat_template(
+                    path,
+                    chat_template_path,
+                )?) as Arc<dyn traits::Tokenizer>)
+            } else {
+                Err(Error::msg("SentencePiece models not yet supported"))
+            }
         }
         Some("gguf") => {
             // GGUF format
@@ -302,6 +321,11 @@ pub async fn create_tokenizer_async_with_chat_template(
                     tokenizer_path_str,
                     final_chat_template.as_deref(),
                 )
+            } else if has_tiktoken_file(&cache_dir) {
+                Ok(Arc::new(TiktokenTokenizer::from_dir_with_chat_template(
+                    &cache_dir,
+                    chat_template_path,
+                )?))
             } else {
                 // Try other common tokenizer file names
                 let possible_files = ["tokenizer_config.json", "vocab.json"];

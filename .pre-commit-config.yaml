@@ -52,6 +52,31 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: branch-name-check
+        name: Branch naming convention
+        description: Ensure branch name follows <type>/<desc> or <username>/<desc> format
+        entry: |
+          bash -c '
+            branch=$(git rev-parse --abbrev-ref HEAD)
+            if [[ "$branch" != "main" && ! "$branch" =~ ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?/[a-z0-9._-]+$ ]]; then
+              echo "Branch \"$branch\" does not follow naming convention: <type>/<description> or <username>/<description>"
+              exit 1
+            fi
+          '
+        language: system
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
+
+      - id: dco-check
+        name: DCO sign-off check
+        description: Check that the commit message contains a DCO sign-off
+        entry: |
+          bash -c 'grep -q "^Signed-off-by: .* <.*>$" "$1"' --
+        language: system
+        stages: [commit-msg]
+        always_run: true
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.0
     hooks:

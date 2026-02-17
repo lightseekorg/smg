@@ -4,13 +4,16 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use tracing::debug;
+use wfaas::{
+    StepExecutor, StepResult, WorkflowContext, WorkflowData, WorkflowError, WorkflowResult,
+};
 
 use crate::{
-    core::steps::workflow_data::WorkerRegistrationData,
-    observability::metrics::Metrics,
-    workflow::{
-        StepExecutor, StepResult, WorkflowContext, WorkflowData, WorkflowError, WorkflowResult,
+    core::{
+        steps::workflow_data::WorkerRegistrationData,
+        worker::{ConnectionModeExt, WorkerTypeExt},
     },
+    observability::metrics::Metrics,
 };
 
 /// Unified step to register workers in the registry.
@@ -53,8 +56,8 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for RegisterWorke
             .map(|w| {
                 let meta = w.metadata();
                 (
-                    meta.worker_type.clone(),
-                    meta.connection_mode.clone(),
+                    meta.spec.worker_type,
+                    meta.spec.connection_mode,
                     w.model_id().to_string(),
                 )
             })

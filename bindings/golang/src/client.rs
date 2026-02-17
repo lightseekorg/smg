@@ -7,12 +7,10 @@ use std::{
     sync::Arc,
 };
 
-use smg::{
-    grpc_client::sglang_scheduler::SglangSchedulerClient,
-    protocols::chat::ChatCompletionRequest,
-    routers::grpc::utils::{generate_tool_constraints, process_chat_messages},
-    tokenizer::{create_tokenizer_from_file, traits::Tokenizer},
-};
+use llm_tokenizer::{create_tokenizer_from_file, traits::Tokenizer};
+use openai_protocol::chat::ChatCompletionRequest;
+use smg::routers::grpc::utils::{generate_tool_constraints, process_chat_messages};
+use smg_grpc_client::sglang_scheduler::SglangSchedulerClient;
 use uuid::Uuid;
 
 use super::{

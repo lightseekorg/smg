@@ -5,6 +5,8 @@
 # so we build from source (main branch) which compiles the C++
 # extensions properly and includes the gRPC serve command.
 #
+# Cache version: 2 — rebuild to pick up gRPC stop_words fix (#11292)
+#
 # Prerequisites (expected on k8s-runner-gpu nodes):
 #   - NVIDIA driver 580+ (CUDA 13)
 #   - CUDA 13.0 toolkit at /usr/local/cuda-13.0

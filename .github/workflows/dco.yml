@@ -1,0 +1,28 @@
+name: DCO Check
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  dco-check:
+    runs-on: k8s-runner-cpu
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Get PR commits
+        id: get-commits
+        uses: tim-actions/get-pr-commits@v1.3.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check DCO sign-off
+        uses: tim-actions/dco@v1.1.0
+        with:
+          commits: ${{ steps.get-commits.outputs.commits }}

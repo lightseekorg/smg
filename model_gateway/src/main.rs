@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use rand::{distr::Alphanumeric, Rng};
 use smg::{
-    auth::{ApiKeyEntry, ControlPlaneAuthConfig, JwtConfig, Role},
     config::{
         CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
         HistoryBackend, ManualAssignmentMode, MetricsConfig, OracleConfig, PolicyConfig,
@@ -11,7 +10,6 @@ use smg::{
         TraceConfig,
     },
     core::ConnectionMode,
-    mesh::MeshServerConfig,
     observability::{
         metrics::PrometheusConfig,
         otel_trace::{is_otel_enabled, shutdown_otel},
@@ -20,6 +18,8 @@ use smg::{
     service_discovery::ServiceDiscoveryConfig,
     version,
 };
+use smg_auth::{ApiKeyEntry, ControlPlaneAuthConfig, JwtConfig, Role};
+use smg_mesh::MeshServerConfig;
 fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
     let args: Vec<String> = std::env::args().collect();
     let mut prefill_entries = Vec::new();
@@ -709,7 +709,7 @@ impl CliArgs {
     fn determine_connection_mode(worker_urls: &[String]) -> ConnectionMode {
         for url in worker_urls {
             if url.starts_with("grpc://") || url.starts_with("grpcs://") {
-                return ConnectionMode::Grpc { port: None };
+                return ConnectionMode::Grpc;
             }
         }
         ConnectionMode::Http
@@ -1215,7 +1215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli_args.enable_igw = true;
     }
 
-    println!("SGLang Router starting...");
+    println!("Shepherd Model Gateway starting...");
     println!("Host: {}:{}", cli_args.host, cli_args.port);
     let mode_str = if cli_args.enable_igw {
         "IGW (Inference Gateway)".to_string()

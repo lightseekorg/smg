@@ -1,10 +1,9 @@
 //! Shared types for Harmony pipeline
 
 use openai_harmony::chat::Content;
+use openai_protocol::common::ToolCall;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use crate::protocols::common::ToolCall;
 
 /// Harmony message format
 ///

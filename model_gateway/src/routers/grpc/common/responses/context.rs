@@ -4,11 +4,10 @@
 
 use std::sync::Arc;
 
-use crate::{
-    data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::McpOrchestrator,
-    routers::grpc::{context::SharedComponents, pipeline::RequestPipeline},
-};
+use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
+use smg_mcp::McpOrchestrator;
+
+use crate::routers::grpc::{context::SharedComponents, pipeline::RequestPipeline};
 
 /// Context for /v1/responses endpoint
 ///

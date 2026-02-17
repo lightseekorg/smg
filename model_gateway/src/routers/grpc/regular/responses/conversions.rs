@@ -7,22 +7,20 @@
 //! This allows the gRPC router to reuse the existing chat pipeline infrastructure
 //! without requiring Python backend changes.
 
-use crate::{
-    protocols::{
-        chat::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage, MessageContent},
-        common::{
-            FunctionCallResponse, JsonSchemaFormat, ResponseFormat, StreamOptions, ToolCall,
-            UsageInfo,
-        },
-        responses::{
-            ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
-            ResponseReasoningContent::ReasoningText, ResponseStatus, ResponsesRequest,
-            ResponsesResponse, ResponsesUsage, StringOrContentParts, TextConfig, TextFormat,
-        },
-        UNKNOWN_MODEL_ID,
+use openai_protocol::{
+    chat::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage, MessageContent},
+    common::{
+        FunctionCallResponse, JsonSchemaFormat, ResponseFormat, StreamOptions, ToolCall, UsageInfo,
     },
-    routers::grpc::common::responses::utils::extract_tools_from_response_tools,
+    responses::{
+        ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
+        ResponseReasoningContent::ReasoningText, ResponseStatus, ResponsesRequest,
+        ResponsesResponse, ResponsesUsage, StringOrContentParts, TextConfig, TextFormat,
+    },
+    UNKNOWN_MODEL_ID,
 };
+
+use crate::routers::grpc::common::responses::utils::extract_tools_from_response_tools;
 
 /// Convert a ResponsesRequest to ChatCompletionRequest for processing through the chat pipeline
 ///

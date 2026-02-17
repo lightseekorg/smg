@@ -8,10 +8,8 @@ use axum::{
 use tracing::{debug, warn};
 
 use super::{
-    utils::{
-        get_healthy_anthropic_workers, read_response_body_limited, should_propagate_header,
-        ReadBodyResult,
-    },
+    utils::{read_response_body_limited, should_propagate_header, ReadBodyResult},
+    worker::get_healthy_anthropic_workers,
     AnthropicRouter,
 };
 use crate::routers::error;

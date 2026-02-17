@@ -31,6 +31,7 @@ use axum::{
     http,
     response::{IntoResponse, Response},
 };
+use openai_protocol::responses::ResponsesRequest;
 use tracing::debug;
 use uuid::Uuid;
 
@@ -38,12 +39,9 @@ use super::{
     common::{load_conversation_history, ResponsesCallContext},
     conversions, non_streaming, streaming,
 };
-use crate::{
-    protocols::responses::ResponsesRequest,
-    routers::{
-        error,
-        grpc::common::responses::{ensure_mcp_connection, ResponsesContext},
-    },
+use crate::routers::{
+    error,
+    grpc::common::responses::{ensure_mcp_connection, ResponsesContext},
 };
 
 /// Main handler for POST /v1/responses

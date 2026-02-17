@@ -16,19 +16,19 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use openai_protocol::{
+    chat::{ChatCompletionRequest, ChatMessage, MessageContent},
+    common::StringOrArray,
+    completion::CompletionRequest,
+    generate::GenerateRequest,
+    responses::{ResponseInput, ResponsesGetParams, ResponsesRequest},
+};
 use serde_json::json;
 use smg::{
     config::{ConfigError, HistoryBackend, OracleConfig, RouterConfig, RoutingMode},
-    data_connector::{ResponseId, StoredResponse},
-    protocols::{
-        chat::{ChatCompletionRequest, ChatMessage, MessageContent},
-        common::StringOrArray,
-        completion::CompletionRequest,
-        generate::GenerateRequest,
-        responses::{ResponseInput, ResponsesGetParams, ResponsesRequest},
-    },
     routers::{openai::OpenAIRouter, RouterTrait},
 };
+use smg_data_connector::{ResponseId, StoredResponse};
 use tokio::{
     net::TcpListener,
     time::{sleep, Duration},

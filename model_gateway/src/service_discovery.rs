@@ -14,19 +14,19 @@ use kube::{
     },
     Client,
 };
+use openai_protocol::worker::{WorkerSpec, WorkerType};
 use rustls;
+use smg_mesh::{
+    gossip::{NodeState, NodeStatus},
+    ClusterState,
+};
 use tokio::{task, time};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     app_context::AppContext,
     core::Job,
-    mesh::{
-        gossip::{NodeState, NodeStatus},
-        ClusterState,
-    },
     observability::metrics::{metrics_labels, Metrics},
-    protocols::worker_spec::WorkerConfigRequest,
 };
 
 #[derive(Debug, Clone)]
@@ -210,12 +210,11 @@ pub async fn start_service_discovery(
     mesh_port: Option<u16>,
 ) -> Result<task::JoinHandle<()>, kube::Error> {
     if !config.enabled {
-        return Err(kube::Error::Api(kube::error::ErrorResponse {
-            status: "Disabled".to_string(),
-            message: "Service discovery is disabled".to_string(),
-            reason: "ConfigurationError".to_string(),
-            code: 400,
-        }));
+        return Err(kube::Error::Api(
+            kube::core::Status::failure("Service discovery is disabled", "ConfigurationError")
+                .with_code(400)
+                .boxed(),
+        ));
     }
 
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -432,12 +431,12 @@ async fn handle_pod_event(
 
             let worker_type = if pd_mode {
                 match &pod_info.pod_type {
-                    Some(PodType::Prefill) => Some("prefill".to_string()),
-                    Some(PodType::Decode) => Some("decode".to_string()),
-                    Some(PodType::Regular) | None => None,
+                    Some(PodType::Prefill) => WorkerType::Prefill,
+                    Some(PodType::Decode) => WorkerType::Decode,
+                    _ => WorkerType::Regular,
                 }
             } else {
-                None
+                WorkerType::Regular
             };
 
             let bootstrap_port = if pd_mode {
@@ -449,32 +448,20 @@ async fn handle_pod_event(
                 None
             };
 
-            let config = WorkerConfigRequest {
-                url: worker_url.clone(),
-                model_id: None,
-                worker_type,
-                priority: None,
-                cost: None,
-                runtime: None,
-                labels: HashMap::new(),
-                bootstrap_port,
-                tokenizer_path: None,
-                reasoning_parser: None,
-                tool_parser: None,
-                chat_template: None,
-                api_key: app_context.router_config.api_key.clone(),
-                health_check_timeout_secs: app_context.router_config.health_check.timeout_secs,
-                health_check_interval_secs: app_context
-                    .router_config
-                    .health_check
-                    .check_interval_secs,
-                health_success_threshold: app_context.router_config.health_check.success_threshold,
-                health_failure_threshold: app_context.router_config.health_check.failure_threshold,
-                disable_health_check: app_context.router_config.health_check.disable_health_check,
-                max_connection_attempts: app_context.router_config.health_check.success_threshold
-                    * 20,
-                dp_aware: app_context.router_config.dp_aware,
-            };
+            let mut spec = WorkerSpec::new(worker_url.clone());
+            spec.worker_type = worker_type;
+            spec.bootstrap_port = bootstrap_port;
+            spec.api_key = app_context.router_config.api_key.clone();
+            // Health config is resolved at worker build time from router
+            // defaults + per-worker overrides (spec.health).
+            spec.max_connection_attempts = app_context
+                .router_config
+                .health_check
+                .success_threshold
+                .max(1)
+                * 20;
+
+            let config = spec;
 
             let job = Job::AddWorker {
                 config: Box::new(config.clone()),
@@ -841,10 +828,10 @@ mod tests {
             reasoning_parser_factory: None,
             tool_parser_factory: None,
             router_manager: None,
-            response_storage: Arc::new(crate::data_connector::MemoryResponseStorage::new()),
-            conversation_storage: Arc::new(crate::data_connector::MemoryConversationStorage::new()),
+            response_storage: Arc::new(smg_data_connector::MemoryResponseStorage::new()),
+            conversation_storage: Arc::new(smg_data_connector::MemoryConversationStorage::new()),
             conversation_item_storage: Arc::new(
-                crate::data_connector::MemoryConversationItemStorage::new(),
+                smg_data_connector::MemoryConversationItemStorage::new(),
             ),
             load_monitor: None,
             configured_reasoning_parser: None,
@@ -852,7 +839,7 @@ mod tests {
             worker_job_queue: worker_job_queue.clone(),
             workflow_engines: Arc::new(std::sync::OnceLock::new()),
             mcp_orchestrator: Arc::new(std::sync::OnceLock::new()),
-            tokenizer_registry: Arc::new(crate::tokenizer::registry::TokenizerRegistry::new()),
+            tokenizer_registry: Arc::new(llm_tokenizer::registry::TokenizerRegistry::new()),
             wasm_manager: None,
             worker_service: Arc::new(WorkerService::new(
                 worker_registry,
