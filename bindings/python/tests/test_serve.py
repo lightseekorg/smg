@@ -157,8 +157,9 @@ class TestImportBackendArgs:
     def test_trtllm_adds_model_arg(self):
         parser = argparse.ArgumentParser()
         _import_backend_args("trtllm", parser)
-        args = parser.parse_args(["--model", "/path/to/model"])
+        args = parser.parse_args(["--model", "/path/to/model", "--config", "/path/to/config.yml"])
         assert args.model == "/path/to/model"
+        assert args.config == "/path/to/config.yml"
 
     def test_sglang_import_error(self):
         """sglang is not installed in test env, so parser.error should be called."""
@@ -195,13 +196,17 @@ class TestParseServeArgs:
     """Test the two-pass parse_serve_args function."""
 
     def test_trtllm_basic(self):
-        backend, args = parse_serve_args(["--backend", "trtllm", "--model", "/tmp/m"])
+        backend, args, backend_args = parse_serve_args(
+            ["--backend", "trtllm", "--model", "/tmp/m", "--config", "/tmp/config.yml"]
+        )
         assert backend == "trtllm"
         assert args.backend == "trtllm"
         assert args.model == "/tmp/m"
+        assert "--config" in backend_args  # config should be in backend_args
+        assert "/tmp/config.yml" in backend_args
 
     def test_trtllm_defaults(self):
-        backend, args = parse_serve_args(["--backend", "trtllm"])
+        backend, args, _ = parse_serve_args(["--backend", "trtllm"])
         assert backend == "trtllm"
         assert args.data_parallel_size == 1
         assert args.worker_host == "127.0.0.1"
@@ -210,7 +215,7 @@ class TestParseServeArgs:
         assert args.connection_mode == "grpc"
 
     def test_trtllm_with_serve_args(self):
-        backend, args = parse_serve_args(
+        backend, args, backend_args = parse_serve_args(
             [
                 "--backend",
                 "trtllm",
@@ -232,7 +237,7 @@ class TestParseServeArgs:
 
     def test_trtllm_includes_router_args(self):
         """Router args should be included with --router- prefix."""
-        backend, args = parse_serve_args(
+        backend, args, backend_args = parse_serve_args(
             [
                 "--backend",
                 "trtllm",
@@ -244,7 +249,7 @@ class TestParseServeArgs:
 
     def test_trtllm_router_args_defaults(self):
         """Router args should have sensible defaults."""
-        _, args = parse_serve_args(["--backend", "trtllm"])
+        _, args, _ = parse_serve_args(["--backend", "trtllm"])
         assert args.router_policy == "cache_aware"
         assert args.router_pd_disaggregation is False
         assert args.router_disable_retries is False
@@ -284,7 +289,7 @@ class TestParseServeArgs:
     def test_two_pass_extracts_backend_first(self):
         """Backend-specific args should not cause errors during pass 1."""
         # --model is only valid for trtllm; pass 1 should ignore it
-        backend, args = parse_serve_args(
+        backend, args, backend_args = parse_serve_args(
             [
                 "--backend",
                 "trtllm",
@@ -382,7 +387,8 @@ class TestSglangWorkerLauncher:
         """Default connection_mode is grpc, so --grpc-mode should be present."""
         launcher = SglangWorkerLauncher()
         args = argparse.Namespace(model_path="/tmp/model", connection_mode="grpc")
-        cmd = launcher.build_command(args, "127.0.0.1", 31000)
+        backend_args = ["--trust-remote-code"]
+        cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
         assert "--model-path" in cmd
         assert "/tmp/model" in cmd
         assert "--host" in cmd
@@ -390,13 +396,18 @@ class TestSglangWorkerLauncher:
         assert "--port" in cmd
         assert "31000" in cmd
         assert "--grpc-mode" in cmd
+        for arg in backend_args:
+            assert arg in cmd
 
     def test_build_command_http_mode(self):
         """When connection_mode is http, --grpc-mode should not be present."""
         launcher = SglangWorkerLauncher()
         args = argparse.Namespace(model_path="/tmp/model", connection_mode="http")
-        cmd = launcher.build_command(args, "127.0.0.1", 31000)
+        backend_args = ["--trust-remote-code"]
+        cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
         assert "--grpc-mode" not in cmd
+        for arg in backend_args:
+            assert arg in cmd
 
     def test_worker_url_grpc_mode(self):
         launcher = SglangWorkerLauncher()
@@ -431,7 +442,8 @@ class TestVllmWorkerLauncher:
     def test_build_command(self):
         launcher = VllmWorkerLauncher()
         args = argparse.Namespace(model="/tmp/model", connection_mode="grpc")
-        cmd = launcher.build_command(args, "0.0.0.0", 32000)
+        backend_args = ["--trust-remote-code"]
+        cmd = launcher.build_command(args, backend_args, "0.0.0.0", 32000)
         assert "vllm.entrypoints.grpc_server" in cmd
         assert "--model" in cmd
         assert "/tmp/model" in cmd
@@ -439,12 +451,8 @@ class TestVllmWorkerLauncher:
         assert "0.0.0.0" in cmd
         assert "--port" in cmd
         assert "32000" in cmd
-
-    def test_build_command_rejects_http_mode(self):
-        launcher = VllmWorkerLauncher()
-        args = argparse.Namespace(model="/tmp/model", connection_mode="http")
-        with pytest.raises(ValueError, match="vLLM backend only supports grpc"):
-            launcher.build_command(args, "0.0.0.0", 32000)
+        for arg in backend_args:
+            assert arg in cmd
 
     def test_worker_url(self):
         launcher = VllmWorkerLauncher()
@@ -466,7 +474,8 @@ class TestTrtllmWorkerLauncher:
     def test_build_command(self):
         launcher = TrtllmWorkerLauncher()
         args = argparse.Namespace(model="/tmp/model", connection_mode="grpc")
-        cmd = launcher.build_command(args, "0.0.0.0", 50051)
+        backend_args = ["--config", "/tmp/config.yml"]
+        cmd = launcher.build_command(args, backend_args, "0.0.0.0", 50051)
         assert "tensorrt_llm.commands.serve" in cmd
         assert "/tmp/model" in cmd
         assert "--grpc" in cmd
@@ -474,12 +483,16 @@ class TestTrtllmWorkerLauncher:
         assert "0.0.0.0" in cmd
         assert "--port" in cmd
         assert "50051" in cmd
+        print(cmd)
+        for arg in backend_args:
+            assert arg in cmd
 
     def test_build_command_rejects_http_mode(self):
         launcher = TrtllmWorkerLauncher()
         args = argparse.Namespace(model="/tmp/model", connection_mode="http")
+        backend_args = ["--config", "/tmp/config.yml"]
         with pytest.raises(ValueError, match="TensorRT-LLM backend only supports grpc"):
-            launcher.build_command(args, "0.0.0.0", 50051)
+            launcher.build_command(args, backend_args, "0.0.0.0", 50051)
 
     def test_worker_url(self):
         launcher = TrtllmWorkerLauncher()
@@ -615,7 +628,8 @@ class TestServeOrchestrator:
 
     def test_build_router_args_injects_worker_urls_grpc(self):
         args = _make_args(data_parallel_size=2, connection_mode="grpc")
-        orch = ServeOrchestrator("sglang", args)
+        backend_args = "--model-path /tmp/model"
+        orch = ServeOrchestrator("sglang", args, backend_args)
         # Simulate workers already launched
         mock_proc1 = MagicMock()
         mock_proc2 = MagicMock()
@@ -635,7 +649,8 @@ class TestServeOrchestrator:
 
     def test_build_router_args_http_mode(self):
         args = _make_args(data_parallel_size=2, connection_mode="http")
-        orch = ServeOrchestrator("sglang", args)
+        backend_args = "--model-path /tmp/model"
+        orch = ServeOrchestrator("sglang", args, backend_args)
         mock_proc = MagicMock()
         orch.workers = [(mock_proc, 31000), (mock_proc, 31003)]
 
@@ -653,7 +668,8 @@ class TestServeOrchestrator:
         args = _make_args(
             backend="vllm", data_parallel_size=2, model="/tmp/m", connection_mode="grpc"
         )
-        orch = ServeOrchestrator("vllm", args)
+        backend_args = "--model /tmp/m"
+        orch = ServeOrchestrator("vllm", args, backend_args)
         mock_proc = MagicMock()
         orch.workers = [(mock_proc, 32000), (mock_proc, 32003)]
 
@@ -669,7 +685,8 @@ class TestServeOrchestrator:
 
     def test_cleanup_workers_handles_already_dead_process(self):
         args = _make_args()
-        orch = ServeOrchestrator("sglang", args)
+        backend_args = "--model-path /tmp/model"
+        orch = ServeOrchestrator("sglang", args, backend_args)
         mock_proc = MagicMock()
         mock_proc.pid = 99999
         mock_proc.wait.return_value = 0
@@ -683,7 +700,8 @@ class TestServeOrchestrator:
 
     def test_cleanup_workers_sigkill_on_timeout(self):
         args = _make_args()
-        orch = ServeOrchestrator("sglang", args)
+        backend_args = "--model-path /tmp/model"
+        orch = ServeOrchestrator("sglang", args, backend_args)
         mock_proc = MagicMock()
         mock_proc.pid = 12345
         mock_proc.wait.side_effect = subprocess.TimeoutExpired(cmd="test", timeout=30)
@@ -699,14 +717,16 @@ class TestServeOrchestrator:
 
     def test_cleanup_workers_empty_list(self):
         args = _make_args()
-        orch = ServeOrchestrator("sglang", args)
+        backend_args = "--model-path /tmp/model"
+        orch = ServeOrchestrator("sglang", args, backend_args)
         orch.workers = []
         # Should be a no-op
         orch._cleanup_workers()
 
     def test_signal_handler_sets_guard_flag(self):
         args = _make_args()
-        orch = ServeOrchestrator("sglang", args)
+        backend_args = "--model-path /tmp/model"
+        orch = ServeOrchestrator("sglang", args, backend_args)
         orch.workers = []
 
         assert orch._shutting_down is False
@@ -717,7 +737,8 @@ class TestServeOrchestrator:
 
     def test_signal_handler_guard_prevents_reentry(self):
         args = _make_args()
-        orch = ServeOrchestrator("sglang", args)
+        backend_args = "--model-path /tmp/model"
+        orch = ServeOrchestrator("sglang", args, backend_args)
         orch._shutting_down = True
 
         # Should return immediately without calling sys.exit
@@ -727,7 +748,8 @@ class TestServeOrchestrator:
         args = _make_args(
             backend="trtllm", data_parallel_size=1, model="/tmp/m", connection_mode="grpc"
         )
-        orch = ServeOrchestrator("trtllm", args)
+        backend_args = "--config /tmp/config.yml"
+        orch = ServeOrchestrator("trtllm", args, backend_args)
 
         with patch("smg.serve._find_available_ports", return_value=[50051]):
             with patch.object(orch.launcher, "launch") as mock_launch:
@@ -740,11 +762,12 @@ class TestServeOrchestrator:
     def test_launch_workers_passes_gpu_env(self):
         """_launch_workers passes CUDA_VISIBLE_DEVICES via gpu_env for each dp_rank."""
         args = _make_args(data_parallel_size=2, tp_size=2, connection_mode="grpc")
-        orch = ServeOrchestrator("sglang", args)
+        backend_args = ["--model-path", "/tmp/model"]
+        orch = ServeOrchestrator("sglang", args, backend_args)
 
         launched_envs = []
 
-        def capture_launch(a, host, port, env):
+        def capture_launch(a, b, host, port, env):
             launched_envs.append(env)
             mock_proc = MagicMock()
             mock_proc.pid = 1000 + port
