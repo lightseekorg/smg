@@ -28,7 +28,7 @@
 
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -389,6 +389,12 @@ impl McpOrchestrator {
     /// Create a simplified orchestrator for testing.
     #[cfg(test)]
     pub fn new_test() -> Self {
+        Self::new_test_with_config(McpConfig::default())
+    }
+
+    /// Create a simplified orchestrator with a specific config for testing.
+    #[cfg(test)]
+    pub fn new_test_with_config(config: McpConfig) -> Self {
         use crate::approval::{audit::AuditLog, policy::PolicyEngine};
 
         let (refresh_tx, _) = mpsc::channel(10);
@@ -406,7 +412,7 @@ impl McpOrchestrator {
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
             reconnection_locks: DashMap::new(),
-            config: McpConfig::default(),
+            config,
         }
     }
 
@@ -936,6 +942,32 @@ impl McpOrchestrator {
         }
 
         None
+    }
+
+    /// Returns the set of server names that have `builtin_type` configured.
+    ///
+    /// Used by [`McpToolSession`] to detect servers that should be hidden from
+    /// `mcp_list_tools` output — their tools are exposed to the model as
+    /// function tools (so the model can call them), but the client-facing
+    /// response should not include MCP metadata for built-in tool servers.
+    pub fn builtin_server_names(&self) -> HashSet<String> {
+        let mut names = HashSet::new();
+
+        // Check connected static servers first
+        for entry in self.static_servers.iter() {
+            if entry.config.builtin_type.is_some() {
+                names.insert(entry.config.name.clone());
+            }
+        }
+
+        // Also check initial config (covers not-yet-connected servers and tests)
+        for server_config in &self.config.servers {
+            if server_config.builtin_type.is_some() {
+                names.insert(server_config.name.clone());
+            }
+        }
+
+        names
     }
 
     /// Execute a single tool using an already-resolved qualified binding.
@@ -2756,5 +2788,55 @@ mod tests {
             ResponseFormat::Passthrough,
             "Explicit override should be preserved"
         );
+    }
+
+    #[test]
+    fn test_builtin_server_names_empty() {
+        let orchestrator = McpOrchestrator::new_test();
+        assert!(orchestrator.builtin_server_names().is_empty());
+    }
+
+    #[test]
+    fn test_builtin_server_names_with_config() {
+        use std::collections::HashMap;
+
+        let config = McpConfig {
+            servers: vec![
+                McpServerConfig {
+                    name: "brave".to_string(),
+                    transport: McpTransport::Sse {
+                        url: "https://mcp.brave.com/sse".to_string(),
+                        token: None,
+                        headers: HashMap::new(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: None,
+                    builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                    builtin_tool_name: Some("brave_web_search".to_string()),
+                },
+                McpServerConfig {
+                    name: "regular".to_string(),
+                    transport: McpTransport::Sse {
+                        url: "http://localhost:3000/sse".to_string(),
+                        token: None,
+                        headers: HashMap::new(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: None,
+                    builtin_type: None,
+                    builtin_tool_name: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let orchestrator = McpOrchestrator::new_test_with_config(config);
+        let names = orchestrator.builtin_server_names();
+
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("brave"));
+        assert!(!names.contains("regular"));
     }
 }

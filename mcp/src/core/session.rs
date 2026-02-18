@@ -39,7 +39,12 @@ struct ExposedToolBinding {
 pub struct McpToolSession<'a> {
     orchestrator: &'a McpOrchestrator,
     request_ctx: McpRequestContext<'a>,
+    /// All MCP servers in this session (including builtin).
     mcp_servers: Vec<(String, String)>,
+    /// Non-builtin MCP servers only — used for `mcp_list_tools` output.
+    /// Servers configured with `builtin_type` are filtered out to avoid
+    /// exposing internal MCP details in client-facing responses.
+    visible_mcp_servers: Vec<(String, String)>,
     mcp_tools: Vec<ToolEntry>,
     exposed_name_map: HashMap<String, ExposedToolBinding>,
     exposed_name_by_qualified: HashMap<QualifiedToolName, String>,
@@ -65,10 +70,21 @@ impl<'a> McpToolSession<'a> {
         let (exposed_name_map, exposed_name_by_qualified) =
             Self::build_exposed_function_tools(&mcp_tools, &mcp_servers);
 
+        // Filter out servers configured with builtin_type from the visible list.
+        // These servers' tools are exposed to the model as function tools internally,
+        // but should not appear in client-facing mcp_list_tools output.
+        let builtin_names = orchestrator.builtin_server_names();
+        let visible_mcp_servers: Vec<(String, String)> = mcp_servers
+            .iter()
+            .filter(|(_, key)| !builtin_names.contains(key))
+            .cloned()
+            .collect();
+
         Self {
             orchestrator,
             request_ctx,
             mcp_servers,
+            visible_mcp_servers,
             mcp_tools,
             exposed_name_map,
             exposed_name_by_qualified,
@@ -85,7 +101,18 @@ impl<'a> McpToolSession<'a> {
         &self.request_ctx
     }
 
+    /// Returns only non-builtin MCP servers (for `mcp_list_tools` output).
+    ///
+    /// Servers configured with `builtin_type` are filtered out because their
+    /// tools are exposed to the model as function tools internally, but should
+    /// not appear in client-facing `mcp_list_tools` items.
+    #[allow(clippy::misnamed_getters)]
     pub fn mcp_servers(&self) -> &[(String, String)] {
+        &self.visible_mcp_servers
+    }
+
+    /// Returns all MCP servers including builtin ones.
+    pub fn all_mcp_servers(&self) -> &[(String, String)] {
         &self.mcp_servers
     }
 
@@ -249,10 +276,10 @@ impl<'a> McpToolSession<'a> {
         output: &mut Vec<openai_protocol::responses::ResponseOutputItem>,
         tool_call_items: Vec<openai_protocol::responses::ResponseOutputItem>,
     ) {
-        let num_servers = self.mcp_servers.len();
+        let num_servers = self.visible_mcp_servers.len();
 
-        // 1. Prepend mcp_list_tools for each server
-        for (label, key) in self.mcp_servers.iter().rev() {
+        // 1. Prepend mcp_list_tools for each non-builtin server
+        for (label, key) in self.visible_mcp_servers.iter().rev() {
             output.insert(0, self.build_mcp_list_tools_item(label, key));
         }
 
@@ -535,5 +562,94 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(exposed_names.len(), 3);
+    }
+
+    // --- Builtin server filtering tests ---
+
+    fn create_builtin_orchestrator() -> McpOrchestrator {
+        use crate::core::config::{BuiltinToolType, McpConfig, McpServerConfig, McpTransport};
+
+        let config = McpConfig {
+            servers: vec![
+                McpServerConfig {
+                    name: "brave-builtin".to_string(),
+                    transport: McpTransport::Sse {
+                        url: "http://localhost:8001/sse".to_string(),
+                        token: None,
+                        headers: HashMap::new(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: None,
+                    builtin_type: Some(BuiltinToolType::WebSearchPreview),
+                    builtin_tool_name: Some("brave_web_search".to_string()),
+                },
+                McpServerConfig {
+                    name: "regular-server".to_string(),
+                    transport: McpTransport::Sse {
+                        url: "http://localhost:3000/sse".to_string(),
+                        token: None,
+                        headers: HashMap::new(),
+                    },
+                    proxy: None,
+                    required: false,
+                    tools: None,
+                    builtin_type: None,
+                    builtin_tool_name: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        McpOrchestrator::new_test_with_config(config)
+    }
+
+    #[test]
+    fn test_mcp_servers_filters_builtin() {
+        let orchestrator = create_builtin_orchestrator();
+        let mcp_servers = vec![
+            ("brave".to_string(), "brave-builtin".to_string()),
+            ("regular".to_string(), "regular-server".to_string()),
+        ];
+
+        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
+
+        // mcp_servers() should only return non-builtin servers
+        let visible = session.mcp_servers();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].0, "regular");
+        assert_eq!(visible[0].1, "regular-server");
+
+        // all_mcp_servers() should return everything
+        assert_eq!(session.all_mcp_servers().len(), 2);
+    }
+
+    #[test]
+    fn test_mcp_servers_no_builtin_servers() {
+        // With default orchestrator (no builtin config), all servers are visible
+        let orchestrator = McpOrchestrator::new_test();
+        let mcp_servers = vec![
+            ("a".to_string(), "key1".to_string()),
+            ("b".to_string(), "key2".to_string()),
+        ];
+
+        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
+
+        assert_eq!(session.mcp_servers().len(), 2);
+        assert_eq!(session.all_mcp_servers().len(), 2);
+    }
+
+    #[test]
+    fn test_mcp_servers_only_builtin() {
+        let orchestrator = create_builtin_orchestrator();
+        // Session only has the builtin server
+        let mcp_servers = vec![("brave".to_string(), "brave-builtin".to_string())];
+
+        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
+
+        // No visible servers
+        assert!(session.mcp_servers().is_empty());
+        // But all_mcp_servers still has it
+        assert_eq!(session.all_mcp_servers().len(), 1);
     }
 }
