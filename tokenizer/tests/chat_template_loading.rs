@@ -2,7 +2,9 @@
 mod tests {
     use std::fs;
 
-    use llm_tokenizer::{chat_template::ChatTemplateParams, huggingface::HuggingFaceTokenizer};
+    use llm_tokenizer::{
+        chat_template::ChatTemplateParams, huggingface::HuggingFaceTokenizer, TokenizerTrait,
+    };
     use openai_protocol::chat::{ChatMessage, MessageContent};
     use tempfile::TempDir;
 

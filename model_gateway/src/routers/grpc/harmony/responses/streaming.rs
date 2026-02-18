@@ -4,7 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::Response;
 use bytes::Bytes;
+use openai_protocol::responses::{ResponseToolType, ResponsesRequest};
 use serde_json::json;
+use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -17,9 +19,7 @@ use super::{
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools},
 };
 use crate::{
-    mcp::McpToolSession,
     observability::metrics::Metrics,
-    protocols::responses::{ResponseToolType, ResponsesRequest},
     routers::{
         grpc::{
             common::responses::{

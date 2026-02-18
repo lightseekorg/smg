@@ -2,6 +2,9 @@
 
 use std::collections::HashMap;
 
+use openai_protocol::event_types::{
+    is_function_call_type, FunctionCallEvent, OutputItemEvent, ResponseEvent,
+};
 use serde_json::Value;
 use tracing::warn;
 
@@ -9,9 +12,6 @@ use super::{
     accumulator::StreamingResponseAccumulator,
     common::{extract_output_index, get_event_type},
     mcp::FunctionCallInProgress,
-};
-use crate::protocols::event_types::{
-    is_function_call_type, FunctionCallEvent, OutputItemEvent, ResponseEvent,
 };
 
 // ============================================================================

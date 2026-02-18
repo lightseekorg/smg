@@ -1,11 +1,7 @@
 //! Model card definitions for worker model configuration.
 //!
-//! This module defines [`ModelCard`] which consolidates model-related configuration
-//! that was previously scattered in `WorkerMetadata.labels` HashMap.
-//!
-//! Also defines [`ProviderType`] for vendor-specific API transformations.
-//!
-//! Inspired by Dynamo's ModelDeploymentCard but simplified for router needs.
+//! Defines [`ModelCard`] which consolidates model-related configuration:
+//! identity, capabilities, tokenization, and classification support.
 
 use std::collections::HashMap;
 
@@ -13,89 +9,23 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     model_type::{Endpoint, ModelType},
-    UNKNOWN_MODEL_ID,
+    worker::ProviderType,
 };
 
-/// Provider type for external API transformations.
-///
-/// Different providers have different API formats and requirements.
-/// This enum identifies which vendor's API format to use for transformations.
-///
-/// Note: `None` (when used as `Option<ProviderType>`) means native/passthrough -
-/// no transformation needed. This is the case for local SGLang backends.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ProviderType {
-    /// OpenAI API - strip SGLang-specific fields
-    #[serde(alias = "openai")]
-    OpenAI,
-    /// xAI/Grok - special handling for input items
-    #[serde(alias = "xai", alias = "grok")]
-    XAI,
-    /// Anthropic Claude - different API format
-    #[serde(alias = "anthropic", alias = "claude")]
-    Anthropic,
-    /// Google Gemini - special logprobs handling
-    #[serde(alias = "gemini", alias = "google")]
-    Gemini,
-    /// Custom provider with string identifier
-    #[serde(untagged)]
-    Custom(String),
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
-impl ProviderType {
-    /// Get provider name as string
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::OpenAI => "openai",
-            Self::XAI => "xai",
-            Self::Anthropic => "anthropic",
-            Self::Gemini => "gemini",
-            Self::Custom(s) => s.as_str(),
-        }
-    }
-
-    /// Detect provider from model name (heuristic fallback).
-    /// Returns `None` for models that don't match known external providers
-    /// (i.e., models served by local/native backends).
-    pub fn from_model_name(model: &str) -> Option<Self> {
-        let model_lower = model.to_lowercase();
-        if model_lower.starts_with("grok") {
-            Some(Self::XAI)
-        } else if model_lower.starts_with("gemini") {
-            Some(Self::Gemini)
-        } else if model_lower.starts_with("claude") {
-            Some(Self::Anthropic)
-        } else if model_lower.starts_with("gpt")
-            || model_lower.starts_with("o1")
-            || model_lower.starts_with("o3")
-        {
-            Some(Self::OpenAI)
-        } else {
-            None // Native/local model, no provider transformation needed
-        }
-    }
-}
-
-impl std::fmt::Display for ProviderType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
+fn default_model_type() -> ModelType {
+    ModelType::LLM
 }
 
 /// Model card containing model configuration and capabilities.
 ///
-/// Consolidates fields previously scattered in `WorkerMetadata.labels`:
-/// - `model_id` -> `id`
-/// - `tokenizer_path` -> `tokenizer_path`
-/// - `chat_template` -> `chat_template`
-/// - `reasoning_parser` -> `reasoning_parser`
-/// - `tool_parser` -> `tool_parser`
-///
 /// # Example
 ///
 /// ```
-/// use smg::core::{model_type::ModelType, ModelCard, ProviderType};
+/// use openai_protocol::{model_type::ModelType, model_card::ModelCard, worker::ProviderType};
 ///
 /// let card = ModelCard::new("meta-llama/Llama-3.1-8B-Instruct")
 ///     .with_display_name("Llama 3.1 8B Instruct")
@@ -112,7 +42,6 @@ impl std::fmt::Display for ProviderType {
 pub struct ModelCard {
     // === Identity ===
     /// Primary model ID (e.g., "meta-llama/Llama-3.1-8B-Instruct")
-    /// Previously: labels.get("model_id")
     pub id: String,
 
     /// Optional display name (e.g., "Llama 3.1 8B Instruct")
@@ -129,7 +58,6 @@ pub struct ModelCard {
     pub model_type: ModelType,
 
     /// HuggingFace model type string (e.g., "llama", "qwen2", "gpt-oss")
-    /// This is different from `model_type` which is capability bitflags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hf_model_type: Option<String>,
 
@@ -146,24 +74,20 @@ pub struct ModelCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u32>,
 
-    // === Tokenization & Parsing (previously in labels) ===
+    // === Tokenization & Parsing ===
     /// Path to tokenizer (e.g., HuggingFace model ID or local path)
-    /// Previously: labels.get("tokenizer_path")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer_path: Option<String>,
 
     /// Chat template (Jinja2 template string or path)
-    /// Previously: labels.get("chat_template")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template: Option<String>,
 
     /// Reasoning parser type (e.g., "deepseek", "qwen")
-    /// Previously: labels.get("reasoning_parser")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_parser: Option<String>,
 
     /// Tool/function calling parser type (e.g., "llama", "mistral")
-    /// Previously: labels.get("tool_parser")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_parser: Option<String>,
 
@@ -174,21 +98,12 @@ pub struct ModelCard {
     // === Classification Support ===
     /// Classification label mapping (class index -> label name).
     /// Empty if not a classification model.
-    /// Example: {0: "negative", 1: "positive"}
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub id2label: HashMap<u32, String>,
 
     /// Number of classification labels (0 if not a classifier).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub num_labels: u32,
-}
-
-fn is_zero(n: &u32) -> bool {
-    *n == 0
-}
-
-fn default_model_type() -> ModelType {
-    ModelType::LLM
 }
 
 impl ModelCard {
@@ -384,7 +299,7 @@ impl ModelCard {
 
 impl Default for ModelCard {
     fn default() -> Self {
-        Self::new(UNKNOWN_MODEL_ID)
+        Self::new(super::UNKNOWN_MODEL_ID)
     }
 }
 

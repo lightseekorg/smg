@@ -13,11 +13,9 @@ use std::{
     ptr,
 };
 
-use smg::{
-    protocols::chat::ChatCompletionRequest,
-    routers::grpc::utils::{generate_tool_constraints, process_chat_messages},
-    tokenizer::{create_tokenizer_from_file, traits::Tokenizer},
-};
+use llm_tokenizer::{create_tokenizer_from_file, traits::Tokenizer};
+use openai_protocol::chat::ChatCompletionRequest;
+use smg::routers::grpc::utils::{generate_tool_constraints, process_chat_messages};
 
 use super::{
     error::{set_error_message, SglErrorCode},

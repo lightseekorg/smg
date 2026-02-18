@@ -16,21 +16,24 @@ use std::{
 };
 
 use async_trait::async_trait;
+use llm_tokenizer::{create_tokenizer_from_file, traits::Tokenizer};
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    worker::{HealthCheckConfig, WorkerSpec},
+};
 use smg::{
     core::{
         circuit_breaker::CircuitBreaker,
-        worker::{WorkerMetadata, WorkerRoutingKeyLoad},
-        ConnectionMode, HealthConfig, Worker, WorkerType,
+        worker::{RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad},
+        ConnectionMode, Worker, WorkerType,
     },
-    grpc_client::sglang_scheduler::SglangSchedulerClient,
     policies::{
         BucketPolicy, CacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
         RoundRobinPolicy, SelectWorkerInfo,
     },
-    protocols::chat::ChatCompletionRequest,
     routers::grpc::utils::{generate_tool_constraints, process_chat_messages},
-    tokenizer::{create_tokenizer_from_file, traits::Tokenizer},
 };
+use smg_grpc_client::sglang_scheduler::SglangSchedulerClient;
 use uuid::Uuid;
 
 use super::{
@@ -57,21 +60,14 @@ pub struct GrpcWorker {
 
 impl GrpcWorker {
     pub fn new(client: Arc<SglangSchedulerClient>, endpoint: String) -> Self {
+        let mut spec = WorkerSpec::new(endpoint.clone());
+        spec.connection_mode = ConnectionMode::Grpc;
+        spec.runtime_type = RuntimeType::Sglang;
+
         let metadata = WorkerMetadata {
-            url: endpoint.clone(),
-            worker_type: WorkerType::Regular,
-            connection_mode: ConnectionMode::Grpc { port: None },
-            runtime_type: smg::core::worker::RuntimeType::Sglang,
-            labels: std::collections::HashMap::new(),
-            health_config: HealthConfig::default(),
-            api_key: None,
-            bootstrap_host: String::new(),
-            bootstrap_port: None,
-            kv_connector: None,
-            kv_role: None,
-            models: Vec::new(),
-            default_provider: None,
-            default_model_type: smg::core::model_type::ModelType::LLM,
+            spec,
+            health_config: HealthCheckConfig::default(),
+            health_endpoint: "/health".to_string(),
         };
         Self {
             client,
@@ -107,11 +103,11 @@ impl Worker for GrpcWorker {
     }
 
     fn worker_type(&self) -> &WorkerType {
-        &self.metadata.worker_type
+        &self.metadata.spec.worker_type
     }
 
     fn connection_mode(&self) -> &ConnectionMode {
-        &self.metadata.connection_mode
+        &self.metadata.spec.connection_mode
     }
 
     fn is_healthy(&self) -> bool {

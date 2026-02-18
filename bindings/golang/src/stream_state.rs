@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use smg::tokenizer::stream::DecodeStream;
+use llm_tokenizer::stream::DecodeStream;
 
 /// Per-index state for streaming responses
 pub struct StreamIndexState {

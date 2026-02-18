@@ -12,21 +12,19 @@ use openai_harmony::{
     },
     HarmonyEncoding, HarmonyEncodingName,
 };
+use openai_protocol::{
+    chat::{ChatCompletionRequest, ChatMessage, MessageContent},
+    common::{ChatLogProbs, ContentPart, Tool},
+    responses::{
+        ReasoningEffort as ResponsesReasoningEffort, ResponseContentPart, ResponseInput,
+        ResponseInputOutputItem, ResponseReasoningContent, ResponseTool, ResponseToolType,
+        ResponsesRequest, StringOrContentParts,
+    },
+};
 use tracing::{debug, trace};
 
 use super::types::HarmonyBuildOutput;
-use crate::{
-    protocols::{
-        chat::{ChatCompletionRequest, ChatMessage, MessageContent},
-        common::{ChatLogProbs, ContentPart, Tool},
-        responses::{
-            ReasoningEffort as ResponsesReasoningEffort, ResponseContentPart, ResponseInput,
-            ResponseInputOutputItem, ResponseReasoningContent, ResponseTool, ResponseToolType,
-            ResponsesRequest, StringOrContentParts,
-        },
-    },
-    routers::grpc::{proto_wrapper::ProtoOutputLogProbs, utils},
-};
+use crate::routers::grpc::{proto_wrapper::ProtoOutputLogProbs, utils};
 
 /// Global Harmony encoding (lazy-initialized)
 static HARMONY_ENCODING: OnceLock<HarmonyEncoding> = OnceLock::new();

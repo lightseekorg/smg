@@ -996,7 +996,7 @@ mod tests {
             PolicyConfig::Random,
         );
 
-        config.connection_mode = ConnectionMode::Grpc { port: None };
+        config.connection_mode = ConnectionMode::Grpc;
         config.model_path = Some("meta-llama/Llama-3-8B".to_string());
 
         let result = ConfigValidator::validate(&config);
@@ -1012,7 +1012,7 @@ mod tests {
             PolicyConfig::Random,
         );
 
-        config.connection_mode = ConnectionMode::Grpc { port: None };
+        config.connection_mode = ConnectionMode::Grpc;
         config.tokenizer_path = Some("/path/to/tokenizer.json".to_string());
 
         let result = ConfigValidator::validate(&config);

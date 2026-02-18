@@ -3,24 +3,22 @@
 use std::sync::Arc;
 
 use axum::response::Response;
+use openai_protocol::{
+    chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
+    common::{ChatLogProbs, ToolCall, Usage},
+    responses::{
+        OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
+        ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
+    },
+};
 use tracing::error;
 
 use super::{builder::convert_harmony_logprobs, HarmonyParserAdapter};
-use crate::{
-    protocols::{
-        chat::{ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse},
-        common::{ChatLogProbs, ToolCall, Usage},
-        responses::{
-            OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
-            ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
-        },
-    },
-    routers::{
-        error,
-        grpc::{
-            common::{response_collection, response_formatting},
-            context::{DispatchMetadata, ExecutionResult},
-        },
+use crate::routers::{
+    error,
+    grpc::{
+        common::{response_collection, response_formatting},
+        context::{DispatchMetadata, ExecutionResult},
     },
 };
 

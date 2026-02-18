@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use serde_json::{from_str, to_string, Number, Value};
-use smg::protocols::{
+use openai_protocol::{
     common::{GenerationRequest, StringOrArray, UsageInfo},
     rerank::{RerankRequest, RerankResponse, RerankResult, V1RerankReqInput},
 };
+use serde_json::{from_str, to_string, Number, Value};
 use validator::Validate;
 
 #[test]

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use common::mock_mcp_server::MockMCPServer;
 use openai_protocol::responses::ResponseOutputItem;
 use serde_json::json;
-use smg::mcp::{
+use smg_mcp::{
     error::McpError, ApprovalMode, McpConfig, McpOrchestrator, McpServerConfig, McpTransport,
     TenantContext, ToolCallResult,
 };

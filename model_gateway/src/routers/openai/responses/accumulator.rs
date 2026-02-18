@@ -1,10 +1,10 @@
 //! Streaming response accumulator for persisting responses.
 
+use openai_protocol::event_types::{OutputItemEvent, ResponseEvent};
 use serde_json::Value;
 use tracing::warn;
 
 use super::common::{extract_output_index, get_event_type};
-use crate::protocols::event_types::{OutputItemEvent, ResponseEvent};
 
 // ============================================================================
 // Streaming Response Accumulator

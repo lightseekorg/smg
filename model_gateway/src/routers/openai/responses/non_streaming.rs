@@ -8,21 +8,19 @@ use axum::{
     Json,
 };
 use serde_json::Value;
+use smg_mcp::McpToolSession;
 use tracing::warn;
 
 use super::{
     mcp::{execute_tool_loop, prepare_mcp_tools_as_functions},
     utils::{patch_response_with_request_metadata, restore_original_tools},
 };
-use crate::{
-    mcp::McpToolSession,
-    routers::{
-        error,
-        header_utils::{apply_provider_headers, extract_auth_header},
-        mcp_utils::ensure_request_mcp_client,
-        openai::context::{PayloadState, RequestContext},
-        persistence_utils::persist_conversation_items,
-    },
+use crate::routers::{
+    error,
+    header_utils::{apply_provider_headers, extract_auth_header},
+    mcp_utils::ensure_request_mcp_client,
+    openai::context::{PayloadState, RequestContext},
+    persistence_utils::persist_conversation_items,
 };
 
 /// Handle a non-streaming responses request
@@ -142,7 +140,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         previous_response_id.as_deref(),
     );
 
-    // Read conversation_store_id from task-local storage in async context
+    // Read conversation_store_id from task-local storage
     let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
         .try_with(|id| id.clone())
         .ok()

@@ -267,8 +267,9 @@ impl TrtllmServiceClient {
         // Build guided decoding params if needed
         let guided_decoding = self.build_guided_decoding_from_chat(body, tool_call_constraint)?;
 
-        // Extract stop words
-        let stop_words = self.extract_stop_words(body);
+        // Stop words are injected by the router after building (via tokenization),
+        // since TRT-LLM requires tokenized stop sequences (Vec<TokenSequence>).
+        let stop_words = vec![];
 
         let max_tokens = body.max_completion_tokens.unwrap_or(2048);
 
@@ -476,14 +477,6 @@ impl TrtllmServiceClient {
             return_encoder_output: false,
             return_perf_metrics: false,
         }
-    }
-
-    /// Extract stop words from request
-    fn extract_stop_words(&self, request: &ChatCompletionRequest) -> Vec<proto::TokenSequence> {
-        // Note: This returns empty because stop words need to be tokenized
-        // The router should handle tokenization of stop strings
-        let _ = request; // suppress unused warning
-        vec![]
     }
 
     /// Build GuidedDecodingParams from ChatCompletionRequest

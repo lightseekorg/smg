@@ -148,7 +148,7 @@ impl WorkerSelectionStage {
         let workers = self.worker_registry.get_workers_filtered(
             model_id,
             Some(WorkerType::Regular),
-            Some(ConnectionMode::Grpc { port: None }),
+            Some(ConnectionMode::Grpc),
             None,  // any runtime type
             false, // get all workers, we'll filter by is_available() next
         );
@@ -205,8 +205,8 @@ impl WorkerSelectionStage {
         let all_workers = self.worker_registry.get_workers_filtered(
             model_id,
             None,
-            Some(ConnectionMode::Grpc { port: None }), // Match any gRPC worker
-            None,                                      // any runtime type
+            Some(ConnectionMode::Grpc), // Match any gRPC worker
+            None,                       // any runtime type
             false,
         );
 
@@ -215,8 +215,8 @@ impl WorkerSelectionStage {
                 .into_iter()
                 .fold((Vec::new(), Vec::new()), |mut acc, w| {
                     if w.is_available() {
-                        match w.metadata().worker_type {
-                            WorkerType::Prefill { .. } => acc.0.push(w),
+                        match w.metadata().spec.worker_type {
+                            WorkerType::Prefill => acc.0.push(w),
                             WorkerType::Decode => acc.1.push(w),
                             _ => {}
                         }
@@ -236,16 +236,16 @@ impl WorkerSelectionStage {
 
         // Determine the runtime type from prefill workers.
         // All workers in a PD pair must use the same runtime.
-        let first_runtime = all_prefill.first()?.metadata().runtime_type.clone();
+        let first_runtime = all_prefill.first()?.metadata().spec.runtime_type;
 
         // Check for mixed runtimes in both prefill and decode pools
         let prefill_mixed = all_prefill
             .iter()
             .skip(1)
-            .any(|w| w.metadata().runtime_type != first_runtime);
+            .any(|w| w.metadata().spec.runtime_type != first_runtime);
         let decode_mixed = all_decode
             .iter()
-            .any(|w| w.metadata().runtime_type != first_runtime);
+            .any(|w| w.metadata().spec.runtime_type != first_runtime);
 
         if prefill_mixed || decode_mixed {
             warn!(
@@ -261,11 +261,11 @@ impl WorkerSelectionStage {
         // Filter both pools to the target runtime
         let available_prefill: Vec<_> = all_prefill
             .into_iter()
-            .filter(|w| w.metadata().runtime_type == target_runtime)
+            .filter(|w| w.metadata().spec.runtime_type == target_runtime)
             .collect();
         let available_decode: Vec<_> = all_decode
             .into_iter()
-            .filter(|w| w.metadata().runtime_type == target_runtime)
+            .filter(|w| w.metadata().spec.runtime_type == target_runtime)
             .collect();
 
         if available_prefill.is_empty() || available_decode.is_empty() {

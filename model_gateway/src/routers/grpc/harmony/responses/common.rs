@@ -1,24 +1,22 @@
 //! Shared helpers and state tracking for Harmony Responses
 
 use axum::response::Response;
+use openai_protocol::{
+    common::{ToolCall, ToolChoice, ToolChoiceValue},
+    responses::{
+        ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
+        ResponseReasoningContent, ResponseTool, ResponseToolType, ResponsesRequest,
+        ResponsesResponse, StringOrContentParts,
+    },
+};
 use serde_json::{from_value, to_string, Value};
+use smg_data_connector::ResponseId;
+use smg_mcp::McpToolSession;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
 use super::execution::ToolResult;
-use crate::{
-    data_connector::ResponseId,
-    mcp::McpToolSession,
-    protocols::{
-        common::{ToolCall, ToolChoice, ToolChoiceValue},
-        responses::{
-            ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
-            ResponseReasoningContent, ResponseTool, ResponseToolType, ResponsesRequest,
-            ResponsesResponse, StringOrContentParts,
-        },
-    },
-    routers::{error, grpc::common::responses::ResponsesContext},
-};
+use crate::routers::{error, grpc::common::responses::ResponsesContext};
 
 /// Record of a single MCP tool call execution
 ///

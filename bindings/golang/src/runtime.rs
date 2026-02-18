@@ -1,8 +1,8 @@
 //! Shared runtime and global resources for FFI
 
 use once_cell::sync::Lazy;
-use smg::tool_parser::ParserFactory;
 use tokio::runtime::Runtime;
+use tool_parser::ParserFactory;
 
 /// Global tokio runtime for all async FFI operations
 pub static RUNTIME: Lazy<Runtime> =

@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
+use openai_protocol::worker::HealthCheckConfig as ProtocolHealthCheckConfig;
 use serde::{Deserialize, Serialize};
+// Re-export storage config types from data_connector
+pub use smg_data_connector::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
 
 use super::ConfigResult;
 use crate::core::ConnectionMode;
-// Re-export storage config types from data_connector
-pub use crate::data_connector::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
 
 /// Main router configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +83,7 @@ pub struct RouterConfig {
     pub ca_certificates: Vec<Vec<u8>>,
     /// Loaded from mcp_config_path during config creation
     #[serde(skip)]
-    pub mcp_config: Option<crate::mcp::McpConfig>,
+    pub mcp_config: Option<smg_mcp::McpConfig>,
     /// Enable WASM support
     #[serde(default)]
     pub enable_wasm: bool,
@@ -419,6 +420,19 @@ impl Default for HealthCheckConfig {
             check_interval_secs: 60,
             endpoint: "/health".to_string(),
             disable_health_check: false,
+        }
+    }
+}
+
+impl HealthCheckConfig {
+    /// Convert to protocol-level health check config (without endpoint).
+    pub fn to_protocol_config(&self) -> ProtocolHealthCheckConfig {
+        ProtocolHealthCheckConfig {
+            timeout_secs: self.timeout_secs,
+            check_interval_secs: self.check_interval_secs,
+            success_threshold: self.success_threshold,
+            failure_threshold: self.failure_threshold,
+            disable_health_check: self.disable_health_check,
         }
     }
 }

@@ -1,108 +1,122 @@
 use std::collections::HashMap;
 
+use openai_protocol::{
+    model_card::ModelCard,
+    worker::{HealthCheckConfig, WorkerModels, WorkerSpec},
+};
+
 use super::{
     circuit_breaker::{CircuitBreaker, CircuitBreakerConfig},
-    model_card::ModelCard,
-    model_type::ModelType,
     worker::{
-        BasicWorker, ConnectionMode, DPAwareWorker, HealthConfig, RuntimeType, WorkerMetadata,
-        WorkerRoutingKeyLoad, WorkerType,
+        BasicWorker, ConnectionMode, RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad, WorkerType,
     },
 };
 use crate::{observability::metrics::Metrics, routers::grpc::client::GrpcClient};
 
-/// Builder for creating BasicWorker instances with fluent API
+/// Builder for creating BasicWorker instances with fluent API.
+///
+/// Internally stores a [`WorkerSpec`] for identity/config fields.
+/// Callers with a pre-built `WorkerSpec` can use [`from_spec()`](Self::from_spec).
 pub struct BasicWorkerBuilder {
-    url: String,
-    api_key: Option<String>,
-    worker_type: WorkerType,
-    connection_mode: ConnectionMode,
-    runtime_type: RuntimeType,
-    labels: HashMap<String, String>,
-    models: Vec<ModelCard>,
-    health_config: HealthConfig,
+    spec: WorkerSpec,
+    /// Resolved health config (router defaults + per-worker overrides).
+    /// If not set, falls back to `HealthCheckConfig::default()`.
+    health_config: Option<HealthCheckConfig>,
+    health_endpoint: String,
     circuit_breaker_config: CircuitBreakerConfig,
     grpc_client: Option<GrpcClient>,
-    kv_connector: Option<String>,
-    kv_role: Option<String>,
 }
 
 impl BasicWorkerBuilder {
-    /// Create a new builder with only the URL
+    /// Create a new builder with only the URL (uses default WorkerSpec)
     pub fn new(url: impl Into<String>) -> Self {
         Self {
-            url: url.into(),
-            api_key: None,
-            worker_type: WorkerType::Regular,
-            connection_mode: ConnectionMode::Http,
-            runtime_type: RuntimeType::default(),
-            labels: HashMap::new(),
-            models: Vec::new(),
-            health_config: HealthConfig::default(),
+            spec: WorkerSpec::new(url),
+            health_config: None,
+            health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
-            kv_connector: None,
-            kv_role: None,
+        }
+    }
+
+    /// Create a builder from an existing WorkerSpec.
+    pub fn from_spec(spec: WorkerSpec) -> Self {
+        Self {
+            spec,
+            health_config: None,
+            health_endpoint: "/health".to_string(),
+            circuit_breaker_config: CircuitBreakerConfig::default(),
+            grpc_client: None,
         }
     }
 
     /// Create a new builder with URL and worker type (for backwards compatibility)
     pub fn new_with_type(url: impl Into<String>, worker_type: WorkerType) -> Self {
+        let mut spec = WorkerSpec::new(url);
+        spec.worker_type = worker_type;
         Self {
-            url: url.into(),
-            api_key: None,
-            worker_type,
-            connection_mode: ConnectionMode::Http,
-            runtime_type: RuntimeType::default(),
-            labels: HashMap::new(),
-            models: Vec::new(),
-            health_config: HealthConfig::default(),
+            spec,
+            health_config: None,
+            health_endpoint: "/health".to_string(),
             circuit_breaker_config: CircuitBreakerConfig::default(),
             grpc_client: None,
-            kv_connector: None,
-            kv_role: None,
         }
+    }
+
+    /// Set the bootstrap port (for prefill workers in PD disaggregation)
+    pub fn bootstrap_port(mut self, port: Option<u16>) -> Self {
+        self.spec.bootstrap_port = port;
+        self
     }
 
     /// Set the API key
     pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.api_key = Some(api_key.into());
+        self.spec.api_key = Some(api_key.into());
         self
     }
 
     /// Set the worker type (Regular, Prefill, or Decode)
     pub fn worker_type(mut self, worker_type: WorkerType) -> Self {
-        self.worker_type = worker_type;
+        self.spec.worker_type = worker_type;
         self
     }
 
     /// Set the connection mode (HTTP or gRPC)
     pub fn connection_mode(mut self, mode: ConnectionMode) -> Self {
-        self.connection_mode = mode;
+        self.spec.connection_mode = mode;
         self
     }
 
     /// Set the runtime type (SGLang or vLLM)
     pub fn runtime_type(mut self, runtime_type: RuntimeType) -> Self {
-        self.runtime_type = runtime_type;
+        self.spec.runtime_type = runtime_type;
         self
     }
 
     /// Set labels for worker identification
     pub fn labels(mut self, labels: HashMap<String, String>) -> Self {
-        self.labels = labels;
+        self.spec.labels = labels;
         self
     }
 
     /// Add a single label
     pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.labels.insert(key.into(), value.into());
+        self.spec.labels.insert(key.into(), value.into());
         self
     }
 
-    /// Set health check configuration
-    pub fn health_config(mut self, config: HealthConfig) -> Self {
-        self.health_config = config;
+    /// Set the resolved health check configuration.
+    ///
+    /// This is the fully-resolved config (router defaults + per-worker overrides)
+    /// stored on `WorkerMetadata` for runtime use.
+    pub fn health_config(mut self, config: HealthCheckConfig) -> Self {
+        self.health_config = Some(config);
+        self
+    }
+
+    /// Set health check endpoint path (internal-only, from router config).
+    pub fn health_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.health_endpoint = endpoint.into();
         self
     }
 
@@ -120,30 +134,53 @@ impl BasicWorkerBuilder {
 
     /// Set KV connector type (e.g., "MooncakeConnector", "NixlConnector")
     pub fn kv_connector(mut self, connector: impl Into<String>) -> Self {
-        self.kv_connector = Some(connector.into());
+        self.spec.kv_connector = Some(connector.into());
         self
     }
 
     /// Set KV role (e.g., "kv_producer", "kv_consumer", "kv_both")
     pub fn kv_role(mut self, role: impl Into<String>) -> Self {
-        self.kv_role = Some(role.into());
+        self.spec.kv_role = Some(role.into());
+        self
+    }
+
+    /// Set worker priority (higher value = higher priority)
+    pub fn priority(mut self, priority: u32) -> Self {
+        self.spec.priority = priority;
+        self
+    }
+
+    /// Set worker cost factor (baseline = 1.0)
+    pub fn cost(mut self, cost: f32) -> Self {
+        self.spec.cost = cost;
         self
     }
 
     /// Set models this worker can serve
-    pub fn models(mut self, models: Vec<ModelCard>) -> Self {
-        self.models = models;
+    pub fn models(mut self, models: impl Into<WorkerModels>) -> Self {
+        self.spec.models = models.into();
         self
     }
 
-    /// Add a single model this worker can serve
+    /// Set a single model this worker can serve
     pub fn model(mut self, model: ModelCard) -> Self {
-        self.models.push(model);
+        self.spec.models = WorkerModels::Single(Box::new(model));
+        self
+    }
+
+    /// Configure data-parallel routing.
+    /// Captures the current URL as the base URL, then formats it as `{base}@{rank}`.
+    pub fn dp_config(mut self, rank: usize, size: usize) -> Self {
+        let base_url = self.spec.url.clone();
+        self.spec.url = format!("{}@{}", base_url, rank);
+        self.spec.dp_base_url = Some(base_url);
+        self.spec.dp_rank = Some(rank);
+        self.spec.dp_size = Some(size);
         self
     }
 
     /// Build the BasicWorker instance
-    pub fn build(self) -> BasicWorker {
+    pub fn build(mut self) -> BasicWorker {
         use std::sync::{
             atomic::{AtomicBool, AtomicUsize},
             Arc, RwLock as StdRwLock,
@@ -151,49 +188,19 @@ impl BasicWorkerBuilder {
 
         use tokio::sync::OnceCell;
 
-        let bootstrap_host = match url::Url::parse(&self.url) {
-            Ok(parsed) => parsed.host_str().unwrap_or("localhost").to_string(),
-            Err(_) if !self.url.contains("://") => {
-                match url::Url::parse(&format!("http://{}", self.url)) {
-                    Ok(parsed) => parsed.host_str().unwrap_or("localhost").to_string(),
-                    Err(_) => {
-                        tracing::warn!(
-                            "Failed to parse URL '{}', defaulting to localhost",
-                            self.url
-                        );
-                        "localhost".to_string()
-                    }
-                }
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "Failed to parse URL '{}', defaulting to localhost",
-                    self.url
-                );
-                "localhost".to_string()
-            }
-        };
+        // Derive bootstrap_host from URL at construction time
+        self.spec.bootstrap_host = parse_bootstrap_host(&self.spec.url);
 
-        let bootstrap_port = match self.worker_type {
-            WorkerType::Prefill { bootstrap_port } => bootstrap_port,
-            _ => None,
-        };
+        // Resolve health config: use explicit config if set, otherwise
+        // apply per-worker overrides from spec.health to defaults.
+        let health_config = self
+            .health_config
+            .unwrap_or_else(|| self.spec.health.apply_to(&HealthCheckConfig::default()));
 
         let metadata = WorkerMetadata {
-            url: self.url.clone(),
-            api_key: self.api_key,
-            worker_type: self.worker_type,
-            connection_mode: self.connection_mode,
-            runtime_type: self.runtime_type,
-            labels: self.labels,
-            health_config: self.health_config,
-            bootstrap_host,
-            bootstrap_port,
-            kv_connector: self.kv_connector,
-            kv_role: self.kv_role,
-            models: self.models,                // Empty = accepts any model
-            default_provider: None,             // Native/passthrough
-            default_model_type: ModelType::LLM, // Standard LLM capabilities
+            spec: self.spec,
+            health_config,
+            health_endpoint: self.health_endpoint,
         };
 
         // Use OnceCell for lock-free gRPC client access after initialization
@@ -208,195 +215,62 @@ impl BasicWorkerBuilder {
         });
 
         let healthy = true;
-        Metrics::set_worker_health(&self.url, healthy);
+        Metrics::set_worker_health(&metadata.spec.url, healthy);
 
         BasicWorker {
-            metadata,
             load_counter: Arc::new(AtomicUsize::new(0)),
-            worker_routing_key_load: Arc::new(WorkerRoutingKeyLoad::new(&self.url)),
+            worker_routing_key_load: Arc::new(WorkerRoutingKeyLoad::new(&metadata.spec.url)),
             processed_counter: Arc::new(AtomicUsize::new(0)),
             healthy: Arc::new(AtomicBool::new(healthy)),
             consecutive_failures: Arc::new(AtomicUsize::new(0)),
             consecutive_successes: Arc::new(AtomicUsize::new(0)),
             circuit_breaker: CircuitBreaker::with_config_and_label(
                 self.circuit_breaker_config,
-                self.url.clone(),
+                metadata.spec.url.clone(),
             ),
+            metadata,
             grpc_client,
             models_override: Arc::new(StdRwLock::new(None)),
         }
     }
 }
 
-/// Builder for creating DPAwareWorker instances with fluent API
-pub struct DPAwareWorkerBuilder {
-    base_url: String,
-    api_key: Option<String>,
-    dp_rank: usize,
-    dp_size: usize,
-    worker_type: WorkerType,
-    connection_mode: ConnectionMode,
-    runtime_type: RuntimeType,
-    labels: HashMap<String, String>,
-    models: Vec<ModelCard>,
-    health_config: HealthConfig,
-    circuit_breaker_config: CircuitBreakerConfig,
-    grpc_client: Option<GrpcClient>,
-    kv_connector: Option<String>,
-    kv_role: Option<String>,
-}
-
-impl DPAwareWorkerBuilder {
-    /// Create a new DP-aware worker builder
-    pub fn new(base_url: impl Into<String>, dp_rank: usize, dp_size: usize) -> Self {
-        Self {
-            base_url: base_url.into(),
-            api_key: None,
-            dp_rank,
-            dp_size,
-            worker_type: WorkerType::Regular,
-            connection_mode: ConnectionMode::Http,
-            runtime_type: RuntimeType::default(),
-            labels: HashMap::new(),
-            models: Vec::new(),
-            health_config: HealthConfig::default(),
-            circuit_breaker_config: CircuitBreakerConfig::default(),
-            grpc_client: None,
-            kv_connector: None,
-            kv_role: None,
+/// Parse bootstrap hostname from a URL, falling back to "localhost".
+///
+/// Handles DP-aware URLs like `http://host:8080@3` by stripping the `@rank`
+/// suffix before parsing, since `@` is otherwise interpreted as a userinfo
+/// delimiter per RFC 3986.
+fn parse_bootstrap_host(url: &str) -> String {
+    // Strip DP rank suffix (e.g., "http://host:8080@3" -> "http://host:8080")
+    let clean_url = match url.rfind('@') {
+        Some(at_pos)
+            if !url[at_pos + 1..].is_empty()
+                && url[at_pos + 1..].chars().all(|c| c.is_ascii_digit()) =>
+        {
+            &url[..at_pos]
         }
-    }
+        _ => url,
+    };
 
-    /// Create a new DP-aware worker builder with worker type (for backwards compatibility)
-    pub fn new_with_type(
-        base_url: impl Into<String>,
-        dp_rank: usize,
-        dp_size: usize,
-        worker_type: WorkerType,
-    ) -> Self {
-        Self {
-            base_url: base_url.into(),
-            api_key: None,
-            dp_rank,
-            dp_size,
-            worker_type,
-            connection_mode: ConnectionMode::Http,
-            runtime_type: RuntimeType::default(),
-            labels: HashMap::new(),
-            models: Vec::new(),
-            health_config: HealthConfig::default(),
-            circuit_breaker_config: CircuitBreakerConfig::default(),
-            grpc_client: None,
-            kv_connector: None,
-            kv_role: None,
-        }
-    }
+    // Try parsing as-is first. If the URL lacks a scheme (e.g., "worker1:8080"),
+    // Url::parse may treat the host as a scheme — detect this via missing host_str()
+    // and fall back to prefixing "http://".
+    let try_parse = |u: &str| -> Option<String> {
+        url::Url::parse(u)
+            .ok()
+            .and_then(|p| p.host_str().map(|h| h.to_string()))
+    };
 
-    /// Set the API key
-    pub fn api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.api_key = Some(api_key.into());
-        self
-    }
-
-    /// Set the worker type (Regular, Prefill, or Decode)
-    pub fn worker_type(mut self, worker_type: WorkerType) -> Self {
-        self.worker_type = worker_type;
-        self
-    }
-
-    /// Set the connection mode (HTTP or gRPC)
-    pub fn connection_mode(mut self, mode: ConnectionMode) -> Self {
-        self.connection_mode = mode;
-        self
-    }
-
-    /// Set the runtime type (SGLang or vLLM)
-    pub fn runtime_type(mut self, runtime_type: RuntimeType) -> Self {
-        self.runtime_type = runtime_type;
-        self
-    }
-
-    /// Set labels for worker identification
-    pub fn labels(mut self, labels: HashMap<String, String>) -> Self {
-        self.labels = labels;
-        self
-    }
-
-    /// Add a single label
-    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.labels.insert(key.into(), value.into());
-        self
-    }
-
-    /// Set health check configuration
-    pub fn health_config(mut self, config: HealthConfig) -> Self {
-        self.health_config = config;
-        self
-    }
-
-    /// Set circuit breaker configuration
-    pub fn circuit_breaker_config(mut self, config: CircuitBreakerConfig) -> Self {
-        self.circuit_breaker_config = config;
-        self
-    }
-
-    /// Set gRPC client for gRPC workers
-    pub fn grpc_client(mut self, client: GrpcClient) -> Self {
-        self.grpc_client = Some(client);
-        self
-    }
-
-    /// Set models this worker can serve
-    pub fn models(mut self, models: Vec<ModelCard>) -> Self {
-        self.models = models;
-        self
-    }
-
-    /// Add a single model this worker can serve
-    pub fn model(mut self, model: ModelCard) -> Self {
-        self.models.push(model);
-        self
-    }
-
-    /// Set the KV connector type (for PD disaggregation)
-    pub fn kv_connector(mut self, connector: impl Into<String>) -> Self {
-        self.kv_connector = Some(connector.into());
-        self
-    }
-
-    /// Set the KV role (for PD disaggregation)
-    pub fn kv_role(mut self, role: impl Into<String>) -> Self {
-        self.kv_role = Some(role.into());
-        self
-    }
-
-    /// Build the DPAwareWorker instance
-    pub fn build(self) -> DPAwareWorker {
-        let worker_url = format!("{}@{}", self.base_url, self.dp_rank);
-        let mut builder = BasicWorkerBuilder::new(worker_url)
-            .models(self.models)
-            .worker_type(self.worker_type)
-            .connection_mode(self.connection_mode)
-            .runtime_type(self.runtime_type)
-            .labels(self.labels)
-            .health_config(self.health_config)
-            .circuit_breaker_config(self.circuit_breaker_config);
-
-        if let Some(client) = self.grpc_client {
-            builder = builder.grpc_client(client);
-        }
-        if let Some(api_key) = self.api_key {
-            builder = builder.api_key(api_key);
-        }
-        if let Some(kv_connector) = self.kv_connector {
-            builder = builder.kv_connector(kv_connector);
-        }
-        if let Some(kv_role) = self.kv_role {
-            builder = builder.kv_role(kv_role);
-        }
-
-        let base_worker = builder.build();
-        DPAwareWorker::with_base_worker(base_worker, self.base_url, self.dp_rank, self.dp_size)
+    if let Some(host) = try_parse(clean_url) {
+        host
+    } else if !clean_url.contains("://") {
+        try_parse(&format!("http://{}", clean_url)).unwrap_or_else(|| {
+            tracing::warn!("Failed to parse URL '{}', defaulting to localhost", url);
+            "localhost".to_string()
+        })
+    } else {
+        tracing::warn!("Failed to parse URL '{}', defaulting to localhost", url);
+        "localhost".to_string()
     }
 }
 
@@ -435,8 +309,7 @@ mod tests {
         labels.insert("env".to_string(), "prod".to_string());
         labels.insert("region".to_string(), "us-east".to_string());
 
-        let health_config = HealthConfig {
-            endpoint: "/health".to_string(),
+        let health_config = HealthCheckConfig {
             timeout_secs: 30,
             check_interval_secs: 60,
             failure_threshold: 3,
@@ -452,31 +325,19 @@ mod tests {
         };
 
         let worker = BasicWorkerBuilder::new("http://localhost:8080")
-            .worker_type(WorkerType::Prefill {
-                bootstrap_port: None,
-            })
-            .connection_mode(ConnectionMode::Grpc { port: Some(50051) })
+            .worker_type(WorkerType::Prefill)
+            .connection_mode(ConnectionMode::Grpc)
             .labels(labels.clone())
             .health_config(health_config.clone())
+            .health_endpoint("/health")
             .circuit_breaker_config(cb_config)
             .build();
 
         assert_eq!(worker.url(), "http://localhost:8080");
-        assert_eq!(
-            worker.worker_type(),
-            &WorkerType::Prefill {
-                bootstrap_port: None
-            }
-        );
-        assert_eq!(
-            worker.connection_mode(),
-            &ConnectionMode::Grpc { port: Some(50051) }
-        );
-        assert_eq!(worker.metadata().labels, labels);
-        assert_eq!(
-            worker.metadata().health_config.endpoint,
-            health_config.endpoint
-        );
+        assert_eq!(worker.worker_type(), &WorkerType::Prefill);
+        assert_eq!(worker.connection_mode(), &ConnectionMode::Grpc);
+        assert_eq!(worker.metadata().spec.labels, labels);
+        assert_eq!(worker.metadata().health_endpoint, "/health");
         assert_eq!(
             worker.metadata().health_config.timeout_secs,
             health_config.timeout_secs
@@ -504,18 +365,20 @@ mod tests {
             .build();
 
         assert_eq!(
-            worker.metadata().labels.get("env"),
+            worker.metadata().spec.labels.get("env"),
             Some(&"staging".to_string())
         );
         assert_eq!(
-            worker.metadata().labels.get("version"),
+            worker.metadata().spec.labels.get("version"),
             Some(&"v1.2.3".to_string())
         );
     }
 
     #[test]
     fn test_dp_aware_worker_builder_minimal() {
-        let worker = DPAwareWorkerBuilder::new("http://localhost:8080", 2, 8).build();
+        let worker = BasicWorkerBuilder::new("http://localhost:8080")
+            .dp_config(2, 8)
+            .build();
 
         assert_eq!(worker.url(), "http://localhost:8080@2");
         assert_eq!(worker.dp_rank(), Some(2));
@@ -528,8 +391,7 @@ mod tests {
         let mut labels = HashMap::new();
         labels.insert("cluster".to_string(), "main".to_string());
 
-        let health_config = HealthConfig {
-            endpoint: "/status".to_string(),
+        let health_config = HealthCheckConfig {
             timeout_secs: 20,
             check_interval_secs: 45,
             failure_threshold: 5,
@@ -537,24 +399,22 @@ mod tests {
             disable_health_check: false,
         };
 
-        let worker = DPAwareWorkerBuilder::new("http://localhost:8080", 3, 16)
-            .worker_type(WorkerType::Prefill {
-                bootstrap_port: Some(9090),
-            })
+        let worker = BasicWorkerBuilder::new("http://localhost:8080")
+            .dp_config(3, 16)
+            .worker_type(WorkerType::Prefill)
+            .bootstrap_port(Some(9090))
             .connection_mode(ConnectionMode::Http)
             .labels(labels.clone())
             .health_config(health_config.clone())
+            .health_endpoint("/status")
             .api_key("test_api_key")
             .build();
 
         assert_eq!(worker.url(), "http://localhost:8080@3");
         assert_eq!(worker.dp_rank(), Some(3));
         assert_eq!(worker.dp_size(), Some(16));
-        assert_eq!(worker.metadata().labels, labels);
-        assert_eq!(
-            worker.metadata().health_config.endpoint,
-            health_config.endpoint
-        );
+        assert_eq!(worker.metadata().spec.labels, labels);
+        assert_eq!(worker.metadata().health_endpoint, "/status");
         assert_eq!(
             worker.metadata().health_config.timeout_secs,
             health_config.timeout_secs
@@ -575,9 +435,10 @@ mod tests {
 
     #[test]
     fn test_dp_aware_worker_with_grpc() {
-        let worker = DPAwareWorkerBuilder::new("grpc://cluster.local", 1, 4)
+        let worker = BasicWorkerBuilder::new("grpc://cluster.local")
+            .dp_config(1, 4)
             .worker_type(WorkerType::Decode)
-            .connection_mode(ConnectionMode::Grpc { port: Some(50051) })
+            .connection_mode(ConnectionMode::Grpc)
             .label("transport", "grpc")
             .build();
 
@@ -585,13 +446,48 @@ mod tests {
         assert_eq!(worker.dp_rank(), Some(1));
         assert_eq!(worker.dp_size(), Some(4));
         assert_eq!(worker.worker_type(), &WorkerType::Decode);
+        assert_eq!(worker.connection_mode(), &ConnectionMode::Grpc);
         assert_eq!(
-            worker.connection_mode(),
-            &ConnectionMode::Grpc { port: Some(50051) }
-        );
-        assert_eq!(
-            worker.metadata().labels.get("transport"),
+            worker.metadata().spec.labels.get("transport"),
             Some(&"grpc".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_bootstrap_host_normal_url() {
+        assert_eq!(parse_bootstrap_host("http://worker1:8080"), "worker1");
+        assert_eq!(parse_bootstrap_host("https://10.0.0.5:443"), "10.0.0.5");
+        assert_eq!(
+            parse_bootstrap_host("grpc://cluster.local"),
+            "cluster.local"
+        );
+    }
+
+    #[test]
+    fn test_parse_bootstrap_host_dp_aware_url() {
+        // DP-aware URLs use @rank suffix — must extract host, not rank
+        assert_eq!(parse_bootstrap_host("http://worker1:8080@0"), "worker1");
+        assert_eq!(parse_bootstrap_host("http://worker1:8080@3"), "worker1");
+        assert_eq!(
+            parse_bootstrap_host("grpc://prefill.local@7"),
+            "prefill.local"
+        );
+    }
+
+    #[test]
+    fn test_parse_bootstrap_host_bare_host() {
+        assert_eq!(parse_bootstrap_host("worker1:8080"), "worker1");
+        assert_eq!(parse_bootstrap_host("localhost"), "localhost");
+    }
+
+    #[test]
+    fn test_dp_aware_worker_bootstrap_host() {
+        let worker = BasicWorkerBuilder::new("http://prefill1:8080")
+            .dp_config(3, 8)
+            .worker_type(WorkerType::Prefill)
+            .build();
+
+        // bootstrap_host should be "prefill1", not "3"
+        assert_eq!(worker.metadata().spec.bootstrap_host, "prefill1");
     }
 }

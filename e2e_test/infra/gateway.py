@@ -341,11 +341,20 @@ class Gateway:
         logger.info("Starting %s on port %d", log_msg or "gateway", self.port)
         logger.debug("Gateway command: %s", " ".join(cmd))
 
+        # Discard subprocess output when not showing it, so the pipe buffer
+        # never fills up and blocks the router process.
+        if show_output:
+            stdout_target = None
+            stderr_target = None
+        else:
+            stdout_target = subprocess.DEVNULL
+            stderr_target = subprocess.DEVNULL
+
         self.process = subprocess.Popen(
             cmd,
             env=self._env,  # Use custom env if set (e.g., for cloud mode API keys)
-            stdout=None if show_output else subprocess.PIPE,
-            stderr=None if show_output else subprocess.PIPE,
+            stdout=stdout_target,
+            stderr=stderr_target,
             start_new_session=True,
         )
 

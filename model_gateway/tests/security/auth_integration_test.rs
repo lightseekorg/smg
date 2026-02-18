@@ -18,7 +18,7 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use rsa::{traits::PublicKeyParts, RsaPrivateKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use smg::auth::{ApiKeyEntry, ControlPlaneAuthConfig, ControlPlaneAuthState, JwtConfig, Role};
+use smg_auth::{ApiKeyEntry, ControlPlaneAuthConfig, ControlPlaneAuthState, JwtConfig, Role};
 use tokio::net::TcpListener;
 
 const TEST_KEY_ID: &str = "test-key-1";
@@ -570,7 +570,7 @@ async fn test_audit_logging_disabled() {
 
 #[tokio::test]
 async fn test_jwt_jti_replay_protection() {
-    use smg::auth::JwtValidator;
+    use smg_auth::JwtValidator;
 
     let (addr, _server) = start_mock_jwks_server().await;
 
@@ -610,7 +610,7 @@ async fn test_jwt_jti_replay_protection() {
 
 #[tokio::test]
 async fn test_jwt_different_tokens_no_replay() {
-    use smg::auth::JwtValidator;
+    use smg_auth::JwtValidator;
 
     let (addr, _server) = start_mock_jwks_server().await;
 

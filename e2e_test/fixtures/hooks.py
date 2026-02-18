@@ -122,7 +122,11 @@ def pytest_collection_modifyitems(
         from _pytest.mark.expression import Expression
 
         expr = Expression.compile(keyword)
-        items_to_scan = [item for item in items if expr.evaluate(lambda x: x in item.keywords)]
+        items_to_scan = [
+            item
+            for item in items
+            if expr.evaluate(lambda x, **_kw: x in item.keywords)  # type: ignore[arg-type]
+        ]
     else:
         items_to_scan = items
 
@@ -284,7 +288,7 @@ def get_pool_requirements() -> list[WorkerIdentity]:
         for i in range(count):
             requirements.append(WorkerIdentity(model_id, mode, worker_type, i))
 
-    if not requirements:
+    if not requirements and _needs_default_model:
         requirements.append(WorkerIdentity(DEFAULT_MODEL, ConnectionMode.HTTP))
 
     return requirements

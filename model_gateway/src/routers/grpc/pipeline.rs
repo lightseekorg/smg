@@ -6,6 +6,14 @@
 use std::{sync::Arc, time::Instant};
 
 use axum::response::{IntoResponse, Response};
+use openai_protocol::{
+    chat::{ChatCompletionRequest, ChatCompletionResponse},
+    classify::ClassifyRequest,
+    embedding::EmbeddingRequest,
+    generate::GenerateRequest,
+};
+use reasoning_parser::ParserFactory as ReasoningParserFactory;
+use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::{debug, error};
 
 // Import embedding-specific and classify-specific stages
@@ -32,15 +40,7 @@ use crate::{
     core::{WorkerRegistry, UNKNOWN_MODEL_ID},
     observability::metrics::{bool_to_static_str, metrics_labels, Metrics},
     policies::PolicyRegistry,
-    protocols::{
-        chat::{ChatCompletionRequest, ChatCompletionResponse},
-        classify::ClassifyRequest,
-        embedding::EmbeddingRequest,
-        generate::GenerateRequest,
-    },
-    reasoning_parser::ParserFactory as ReasoningParserFactory,
     routers::error,
-    tool_parser::ParserFactory as ToolParserFactory,
 };
 
 /// Generic request pipeline for all request types
@@ -752,7 +752,7 @@ impl RequestPipeline {
     /// ResponsesIterationResult indicating whether to continue iteration or return
     pub async fn execute_harmony_responses(
         &self,
-        request: &crate::protocols::responses::ResponsesRequest,
+        request: &openai_protocol::responses::ResponsesRequest,
         harmony_ctx: &ResponsesContext,
     ) -> Result<harmony::ResponsesIterationResult, Response> {
         // Create RequestContext for this Responses request
@@ -815,7 +815,7 @@ impl RequestPipeline {
     /// The caller is responsible for keeping load_guards alive until stream processing completes.
     pub async fn execute_harmony_responses_streaming(
         &self,
-        request: &crate::protocols::responses::ResponsesRequest,
+        request: &openai_protocol::responses::ResponsesRequest,
         harmony_ctx: &ResponsesContext,
     ) -> Result<(ExecutionResult, Option<LoadGuards>), Response> {
         // Create RequestContext for this Responses request

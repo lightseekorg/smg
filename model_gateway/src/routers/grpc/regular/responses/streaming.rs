@@ -18,7 +18,20 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
+use openai_protocol::{
+    chat::{
+        ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse,
+        ChatCompletionStreamResponse,
+    },
+    common::{FunctionCallResponse, ToolCall, Usage, UsageInfo},
+    responses::{
+        ResponseContentPart, ResponseOutputItem, ResponseReasoningContent, ResponseStatus,
+        ResponsesRequest, ResponsesResponse, ResponsesUsage,
+    },
+};
 use serde_json::{json, Value};
+use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
+use smg_mcp::{McpToolSession, ResponseFormat, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, trace, warn};
@@ -32,20 +45,7 @@ use super::{
     conversions,
 };
 use crate::{
-    data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::{McpToolSession, ResponseFormat, ToolExecutionInput},
     observability::metrics::{metrics_labels, Metrics},
-    protocols::{
-        chat::{
-            ChatChoice, ChatCompletionMessage, ChatCompletionRequest, ChatCompletionResponse,
-            ChatCompletionStreamResponse,
-        },
-        common::{FunctionCallResponse, ToolCall, Usage, UsageInfo},
-        responses::{
-            ResponseContentPart, ResponseOutputItem, ResponseReasoningContent, ResponseStatus,
-            ResponsesRequest, ResponsesResponse, ResponsesUsage,
-        },
-    },
     routers::{
         grpc::common::responses::{
             build_sse_response, persist_response_if_needed,

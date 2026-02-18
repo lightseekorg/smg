@@ -6,8 +6,8 @@ use tracing::debug;
 
 use crate::{
     chat_template::{
-        detect_chat_template_content_format, ChatTemplateContentFormat, ChatTemplateParams,
-        ChatTemplateProcessor,
+        load_chat_template_from_file, ChatTemplateContentFormat, ChatTemplateParams,
+        ChatTemplateState,
     },
     traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait},
 };
@@ -18,9 +18,7 @@ pub struct HuggingFaceTokenizer {
     special_tokens: SpecialTokens,
     vocab: HashMap<String, TokenIdType>,
     reverse_vocab: HashMap<TokenIdType, String>,
-    chat_template: Option<String>,
-    /// Detected chat template content format (computed once at initialization)
-    content_format: ChatTemplateContentFormat,
+    chat_template: ChatTemplateState,
 }
 
 impl HuggingFaceTokenizer {
@@ -52,26 +50,14 @@ impl HuggingFaceTokenizer {
             .map(|(token, &id)| (id, token.clone()))
             .collect();
 
-        // Load chat template and tokenizer config
-        let (chat_template, add_bos_token, add_eos_token) =
-            if let Some(template_path) = chat_template_path {
-                // Load from specified .jinja file
-                (
-                    Self::load_chat_template_from_file(template_path)?,
-                    None,
-                    None,
-                )
-            } else {
-                // Try to load from tokenizer_config.json
-                Self::load_chat_template_and_config(file_path)
-            };
+        // Always load tokenizer_config.json for add_bos_token/add_eos_token,
+        // then override only the chat template string when an explicit path is provided.
+        let (mut chat_template_str, add_bos_token, add_eos_token) =
+            Self::load_chat_template_and_config(file_path);
 
-        // Detect content format once at initialization
-        let content_format = if let Some(ref template) = chat_template {
-            detect_chat_template_content_format(template)
-        } else {
-            ChatTemplateContentFormat::String // Default if no template
-        };
+        if let Some(template_path) = chat_template_path {
+            chat_template_str = load_chat_template_from_file(template_path)?;
+        }
 
         // Configure post_processor based on tokenizer_config.json (matches Python transformers)
         // Only modify when at least one setting is explicitly true
@@ -97,8 +83,7 @@ impl HuggingFaceTokenizer {
             special_tokens,
             vocab,
             reverse_vocab,
-            chat_template,
-            content_format,
+            chat_template: ChatTemplateState::new(chat_template_str),
         })
     }
 
@@ -164,8 +149,7 @@ impl HuggingFaceTokenizer {
             special_tokens,
             vocab,
             reverse_vocab,
-            chat_template: None,
-            content_format: ChatTemplateContentFormat::String, // Default
+            chat_template: ChatTemplateState::new(None),
         }
     }
 
@@ -231,74 +215,6 @@ impl HuggingFaceTokenizer {
         })()
         .unwrap_or((None, None, None))
     }
-
-    /// Load chat template from a file (.jinja or .json containing Jinja)
-    fn load_chat_template_from_file(template_path: &str) -> Result<Option<String>> {
-        use std::fs;
-
-        let content = fs::read_to_string(template_path)
-            .map_err(|e| Error::msg(format!("Failed to read chat template file: {}", e)))?;
-
-        // Check if it's a JSON file containing a Jinja template
-        if template_path.ends_with(".json") {
-            // Parse JSON and extract the template string
-            let json_value: serde_json::Value = serde_json::from_str(&content)
-                .map_err(|e| Error::msg(format!("Failed to parse chat_template.json: {}", e)))?;
-
-            if let Some(template_str) = json_value.as_str() {
-                return Ok(Some(template_str.to_string()));
-            } else if let Some(obj) = json_value.as_object() {
-                if let Some(template_value) = obj.get("chat_template") {
-                    if let Some(template_str) = template_value.as_str() {
-                        return Ok(Some(template_str.to_string()));
-                    }
-                }
-            }
-
-            return Err(Error::msg(
-                "chat_template.json does not contain a valid template",
-            ));
-        }
-
-        // Otherwise it's a plain .jinja file
-        // Clean up the template (similar to Python implementation)
-        let template = content.trim().replace("\\n", "\n");
-
-        Ok(Some(template))
-    }
-
-    /// Set or override the chat template
-    pub fn set_chat_template(&mut self, template: String) {
-        // Detect format for the new template
-        self.content_format = detect_chat_template_content_format(&template);
-        self.chat_template = Some(template);
-    }
-
-    /// Get the content format expected by the chat template
-    pub fn chat_template_content_format(&self) -> ChatTemplateContentFormat {
-        self.content_format
-    }
-
-    /// Apply chat template if available
-    ///
-    /// Takes transformed JSON Values (already transformed based on content format)
-    pub fn apply_chat_template(
-        &self,
-        messages: &[serde_json::Value],
-        params: ChatTemplateParams,
-    ) -> Result<String> {
-        if let Some(ref template) = self.chat_template {
-            let processor = ChatTemplateProcessor::new(template.clone());
-            processor.apply_chat_template(messages, params)
-        } else {
-            Err(Error::msg(
-                "Cannot use chat template functions because tokenizer.chat_template is not set and no template \
-                argument was passed! For information about writing templates and setting the \
-                tokenizer.chat_template attribute, please see the documentation at \
-                https://huggingface.co/docs/transformers/main/en/chat_templating"
-            ))
-        }
-    }
 }
 
 impl Encoder for HuggingFaceTokenizer {
@@ -350,10 +266,20 @@ impl TokenizerTrait for HuggingFaceTokenizer {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-}
 
-#[cfg(test)]
-mod tests {
-    // Note: Actual tokenizer tests would require a real tokenizer file
-    // These would be integration tests rather than unit tests
+    fn apply_chat_template(
+        &self,
+        messages: &[serde_json::Value],
+        params: ChatTemplateParams,
+    ) -> Result<String> {
+        self.chat_template.apply(messages, params)
+    }
+
+    fn chat_template_content_format(&self) -> ChatTemplateContentFormat {
+        self.chat_template.content_format()
+    }
+
+    fn set_chat_template(&mut self, template: String) {
+        self.chat_template.set(template);
+    }
 }

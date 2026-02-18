@@ -1,15 +1,12 @@
 //! Unified gRPC client wrapper for SGLang, vLLM, and TensorRT-LLM backends
 
 use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
+use smg_grpc_client::{
+    sglang_proto::MultimodalInputs, SglangSchedulerClient, TrtllmServiceClient, VllmEngineClient,
+};
 
-use crate::{
-    grpc_client::{
-        sglang_proto::MultimodalInputs, SglangSchedulerClient, TrtllmServiceClient,
-        VllmEngineClient,
-    },
-    routers::grpc::proto_wrapper::{
-        ProtoEmbedRequest, ProtoEmbedResponse, ProtoGenerateRequest, ProtoStream,
-    },
+use crate::routers::grpc::proto_wrapper::{
+    ProtoEmbedRequest, ProtoEmbedResponse, ProtoGenerateRequest, ProtoStream,
 };
 
 /// Health check response (common across backends)
@@ -306,16 +303,16 @@ impl GrpcClient {
 
 /// Unified ModelInfo wrapper
 pub enum ModelInfo {
-    Sglang(Box<crate::grpc_client::sglang_proto::GetModelInfoResponse>),
-    Vllm(crate::grpc_client::vllm_proto::GetModelInfoResponse),
-    Trtllm(crate::grpc_client::trtllm_proto::GetModelInfoResponse),
+    Sglang(Box<smg_grpc_client::sglang_proto::GetModelInfoResponse>),
+    Vllm(smg_grpc_client::vllm_proto::GetModelInfoResponse),
+    Trtllm(smg_grpc_client::trtllm_proto::GetModelInfoResponse),
 }
 
 /// Unified ServerInfo wrapper
 pub enum ServerInfo {
-    Sglang(Box<crate::grpc_client::sglang_proto::GetServerInfoResponse>),
-    Vllm(crate::grpc_client::vllm_proto::GetServerInfoResponse),
-    Trtllm(crate::grpc_client::trtllm_proto::GetServerInfoResponse),
+    Sglang(Box<smg_grpc_client::sglang_proto::GetServerInfoResponse>),
+    Vllm(smg_grpc_client::vllm_proto::GetServerInfoResponse),
+    Trtllm(smg_grpc_client::trtllm_proto::GetServerInfoResponse),
 }
 
 impl ServerInfo {

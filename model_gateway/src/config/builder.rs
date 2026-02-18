@@ -1,9 +1,11 @@
+use smg_mcp::McpConfig;
+
 use super::{
     CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
     HistoryBackend, MetricsConfig, OracleConfig, PolicyConfig, PostgresConfig, RedisConfig,
     RetryConfig, RouterConfig, RoutingMode, TokenizerCacheConfig, TraceConfig,
 };
-use crate::{core::ConnectionMode, mcp::McpConfig};
+use crate::core::ConnectionMode;
 
 /// Builder for RouterConfig that wraps the config itself
 /// This eliminates field duplication and stays in sync automatically
@@ -143,13 +145,8 @@ impl RouterConfigBuilder {
         self
     }
 
-    pub fn grpc_connection(mut self, port: Option<u16>) -> Self {
-        self.config.connection_mode = ConnectionMode::Grpc { port };
-        self
-    }
-
-    pub fn grpc_connection_default(mut self) -> Self {
-        self.config.connection_mode = ConnectionMode::Grpc { port: None };
+    pub fn grpc_connection(mut self) -> Self {
+        self.config.connection_mode = ConnectionMode::Grpc;
         self
     }
 

@@ -8,9 +8,10 @@ use axum::{
 };
 use criterion::{criterion_group, criterion_main, Criterion};
 use http_body_util::BodyExt;
+use openai_protocol::chat::ChatCompletionRequest;
 use smg::{
     app_context::AppContext, config::RouterConfig, middleware::wasm_middleware,
-    protocols::chat::ChatCompletionRequest, routers::RouterTrait, server::AppState,
+    routers::RouterTrait, server::AppState,
 };
 use tokio::runtime::Runtime;
 use tower::{Layer, Service};

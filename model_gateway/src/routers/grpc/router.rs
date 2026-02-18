@@ -5,6 +5,13 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
+use openai_protocol::{
+    chat::ChatCompletionRequest,
+    classify::ClassifyRequest,
+    embedding::EmbeddingRequest,
+    generate::GenerateRequest,
+    responses::{ResponsesGetParams, ResponsesRequest},
+};
 use tracing::debug;
 
 use super::{
@@ -23,13 +30,6 @@ use crate::{
     config::types::RetryConfig,
     core::{is_retryable_status, RetryExecutor, WorkerRegistry, UNKNOWN_MODEL_ID},
     observability::metrics::{metrics_labels, Metrics},
-    protocols::{
-        chat::ChatCompletionRequest,
-        classify::ClassifyRequest,
-        embedding::EmbeddingRequest,
-        generate::GenerateRequest,
-        responses::{ResponsesGetParams, ResponsesRequest},
-    },
     routers::RouterTrait,
 };
 

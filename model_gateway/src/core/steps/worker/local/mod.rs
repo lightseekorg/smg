@@ -1,4 +1,5 @@
 mod create_worker;
+mod detect_backend;
 mod detect_connection;
 mod discover_dp;
 mod discover_metadata;
@@ -22,17 +23,20 @@ pub(crate) fn strip_protocol(url: &str) -> String {
 }
 
 pub use create_worker::CreateLocalWorkerStep;
+pub use detect_backend::DetectBackendStep;
 pub use detect_connection::DetectConnectionModeStep;
 pub use discover_dp::{get_dp_info, DiscoverDPInfoStep, DpInfo};
 pub use discover_metadata::DiscoverMetadataStep;
 pub use find_worker_to_update::FindWorkerToUpdateStep;
 pub use find_workers_to_remove::{FindWorkersToRemoveStep, WorkerRemovalRequest};
+use openai_protocol::worker::{WorkerSpec, WorkerUpdateRequest};
 pub use remove_from_policy_registry::RemoveFromPolicyRegistryStep;
 pub use remove_from_worker_registry::RemoveFromWorkerRegistryStep;
 pub use submit_tokenizer_job::SubmitTokenizerJobStep;
 pub use update_policies_for_worker::UpdatePoliciesForWorkerStep;
 pub use update_remaining_policies::UpdateRemainingPoliciesStep;
 pub use update_worker_properties::UpdateWorkerPropertiesStep;
+use wfaas::{BackoffStrategy, FailureAction, RetryPolicy, StepDefinition, WorkflowDefinition};
 
 use super::shared::{ActivateWorkersStep, RegisterWorkersStep, UpdatePoliciesStep};
 use crate::{
@@ -44,8 +48,6 @@ use crate::{
         },
         Worker, WorkerRegistry,
     },
-    protocols::worker_spec::{WorkerConfigRequest, WorkerUpdateRequest},
-    workflow::{BackoffStrategy, FailureAction, RetryPolicy, StepDefinition, WorkflowDefinition},
 };
 
 /// Find workers by URL, supporting both DP-aware (prefix match) and regular (exact match) modes.
@@ -105,6 +107,21 @@ pub fn create_local_worker_workflow(
             .with_timeout(detect_timeout)
             .with_failure_action(FailureAction::FailWorkflow),
         )
+        // Step 1.5: Detect backend runtime (sglang, vllm, trtllm)
+        .add_step(
+            StepDefinition::new(
+                "detect_backend",
+                "Detect Backend",
+                Arc::new(DetectBackendStep),
+            )
+            .with_retry(RetryPolicy {
+                max_attempts: 2,
+                backoff: BackoffStrategy::Fixed(Duration::from_secs(1)),
+            })
+            .with_timeout(Duration::from_secs(10))
+            .with_failure_action(FailureAction::ContinueNextStep)
+            .depends_on(&["detect_connection_mode"]),
+        )
         // Step 2a: Discover metadata (parallel with DP discovery)
         .add_step(
             StepDefinition::new(
@@ -118,7 +135,7 @@ pub fn create_local_worker_workflow(
             })
             .with_timeout(Duration::from_secs(10))
             .with_failure_action(FailureAction::ContinueNextStep)
-            .depends_on(&["detect_connection_mode"]),
+            .depends_on(&["detect_backend"]),
         )
         // Step 2b: Discover DP info (after metadata to avoid concurrent /server_info calls)
         .add_step(
@@ -312,7 +329,7 @@ pub fn create_worker_update_workflow() -> WorkflowDefinition<WorkerUpdateWorkflo
 
 /// Helper to create initial workflow data for local worker registration
 pub fn create_local_worker_workflow_data(
-    config: WorkerConfigRequest,
+    config: WorkerSpec,
     app_context: Arc<AppContext>,
 ) -> LocalWorkerWorkflowData {
     LocalWorkerWorkflowData {
