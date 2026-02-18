@@ -1123,30 +1123,24 @@ fn validate_tools(tools: &[InteractionsTool]) -> Result<(), ValidationError> {
 
 fn validate_input(input: &InteractionsInput) -> Result<(), ValidationError> {
     // Reject empty input
-    match input {
-        InteractionsInput::Text(s) if s.trim().is_empty() => {
-            let mut e = ValidationError::new("input_cannot_be_empty");
-            e.message = Some("Input text cannot be empty".into());
-            return Err(e);
-        }
+    if let Some(message) = match input {
+        InteractionsInput::Text(s) if s.trim().is_empty() => Some("Input text cannot be empty"),
         InteractionsInput::Content(content) if is_content_empty(content) => {
-            let mut e = ValidationError::new("input_cannot_be_empty");
-            e.message = Some("Input content cannot be empty".into());
-            return Err(e);
+            Some("Input content cannot be empty")
         }
         InteractionsInput::Contents(contents)
-            if contents.is_empty() || contents.iter().any(is_content_empty) =>
+            if contents.is_empty() || contents.iter().all(is_content_empty) =>
         {
-            let mut e = ValidationError::new("input_cannot_be_empty");
-            e.message = Some("Input content array cannot be empty".into());
-            return Err(e);
+            Some("Input content array cannot be empty")
         }
-        InteractionsInput::Turns(turns) if turns.is_empty() || turns.iter().any(is_turn_empty) => {
-            let mut e = ValidationError::new("input_cannot_be_empty");
-            e.message = Some("Input turns array cannot be empty".into());
-            return Err(e);
+        InteractionsInput::Turns(turns) if turns.is_empty() || turns.iter().all(is_turn_empty) => {
+            Some("Input turns array cannot be empty")
         }
-        _ => {}
+        _ => None,
+    } {
+        let mut e = ValidationError::new("input_cannot_be_empty");
+        e.message = Some(message.into());
+        return Err(e);
     }
 
     // Reject unsupported file search content
