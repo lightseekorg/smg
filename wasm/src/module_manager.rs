@@ -142,8 +142,9 @@ impl WasmModuleManager {
     ) -> Result<WasmComponentOutput> {
         let start_time = std::time::Instant::now();
 
-        // First, get the WASM bytes with a read lock (faster)
-        let wasm_bytes = {
+        // Get the SHA256 hash and Arc-wrapped WASM bytes with a read lock.
+        // The Arc clone is ~1ns (atomic increment) instead of cloning the full bytes.
+        let (sha256_hash, wasm_bytes) = {
             let modules = self
                 .modules
                 .read()
@@ -152,8 +153,10 @@ impl WasmModuleManager {
                 .get(&module_uuid)
                 .ok_or_else(|| WasmError::from(WasmManagerError::ModuleNotFound(module_uuid)))?;
 
-            // Clone the pre-loaded WASM bytes (already in memory, no file I/O)
-            module.module_meta.wasm_bytes.clone()
+            (
+                module.module_meta.sha256_hash,
+                module.module_meta.wasm_bytes.clone(), // Arc clone (cheap)
+            )
         };
 
         {
@@ -179,7 +182,7 @@ impl WasmModuleManager {
 
         let result = self
             .runtime
-            .execute_component_async(wasm_bytes, attach_point, input)
+            .execute_component_async(sha256_hash, wasm_bytes, attach_point, input)
             .await;
 
         // Record metrics
