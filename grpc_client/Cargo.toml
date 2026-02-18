@@ -32,6 +32,11 @@ prost-types.workspace = true
 # Async/concurrency
 futures.workspace = true
 
+# Archive validation
+sha2 = "0.10"
+zip = "8.1"
+tempfile = "3.8"
+
 [build-dependencies]
 tonic-prost-build = "0.14.2"
 prost-build = "0.14.1"

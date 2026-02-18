@@ -3,7 +3,9 @@
 //! This crate provides gRPC client implementations for communicating with
 //! SGLang scheduler, vLLM engine, and TensorRT-LLM engine backends.
 
+pub mod archive_ops;
 pub mod sglang_scheduler;
+pub mod stream_bundle;
 pub mod trtllm_service;
 pub mod vllm_engine;
 
