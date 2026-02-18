@@ -14,6 +14,10 @@ use super::orchestrator::{
 use crate::{
     approval::ApprovalMode,
     inventory::{QualifiedToolName, ToolEntry},
+    responses_bridge::{
+        build_chat_function_tools_with_names, build_function_tools_json_with_names,
+        build_mcp_list_tools_item, build_mcp_list_tools_json, build_response_tools_with_names,
+    },
     tenant::TenantContext,
     transform::ResponseFormat,
 };
@@ -197,6 +201,67 @@ impl<'a> McpToolSession<'a> {
             .get(tool_name)
             .map(|binding| binding.response_format.clone())
             .unwrap_or(ResponseFormat::Passthrough)
+    }
+
+    /// Build function-tool JSON payloads for upstream model calls.
+    pub fn build_function_tools_json(&self) -> Vec<serde_json::Value> {
+        build_function_tools_json_with_names(&self.mcp_tools, Some(&self.exposed_name_by_qualified))
+    }
+
+    /// Build Chat API `Tool` structs for chat completions.
+    pub fn build_chat_function_tools(&self) -> Vec<openai_protocol::common::Tool> {
+        build_chat_function_tools_with_names(&self.mcp_tools, Some(&self.exposed_name_by_qualified))
+    }
+
+    /// Build Responses API `ResponseTool` structs.
+    pub fn build_response_tools(&self) -> Vec<openai_protocol::responses::ResponseTool> {
+        build_response_tools_with_names(&self.mcp_tools, Some(&self.exposed_name_by_qualified))
+    }
+
+    /// Build `mcp_list_tools` JSON for a specific server.
+    pub fn build_mcp_list_tools_json(
+        &self,
+        server_label: &str,
+        server_key: &str,
+    ) -> serde_json::Value {
+        let tools = self.list_tools_for_server(server_key);
+        build_mcp_list_tools_json(server_label, &tools)
+    }
+
+    /// Build typed `mcp_list_tools` output item for a specific server.
+    pub fn build_mcp_list_tools_item(
+        &self,
+        server_label: &str,
+        server_key: &str,
+    ) -> openai_protocol::responses::ResponseOutputItem {
+        let tools = self.list_tools_for_server(server_key);
+        build_mcp_list_tools_item(server_label, &tools)
+    }
+
+    /// Inject MCP metadata into a response output array.
+    ///
+    /// Standardized ordering:
+    /// 1. `mcp_list_tools` items (one per server) — prepended
+    /// 2. `tool_call_items` (mcp_call / web_search_call / etc.) — after list_tools
+    /// 3. Existing items (messages, etc.) — remain at end
+    pub fn inject_mcp_output_items(
+        &self,
+        output: &mut Vec<openai_protocol::responses::ResponseOutputItem>,
+        tool_call_items: Vec<openai_protocol::responses::ResponseOutputItem>,
+    ) {
+        let num_servers = self.mcp_servers.len();
+
+        // 1. Prepend mcp_list_tools for each server
+        for (label, key) in self.mcp_servers.iter().rev() {
+            output.insert(0, self.build_mcp_list_tools_item(label, key));
+        }
+
+        // 2. Insert tool call items right after mcp_list_tools
+        let mut insert_pos = num_servers;
+        for item in tool_call_items {
+            output.insert(insert_pos, item);
+            insert_pos += 1;
+        }
     }
 
     fn build_exposed_function_tools(

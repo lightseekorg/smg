@@ -53,7 +53,7 @@ impl PipelineStage for DispatchMetadataStage {
                 WorkerSelection::Single { worker } => worker,
                 WorkerSelection::Dual { decode, .. } => decode,
             })
-            .and_then(|w| w.metadata().labels.get("weight_version").cloned())
+            .and_then(|w| w.metadata().spec.labels.get("weight_version").cloned())
             .unwrap_or_else(|| "default".to_string());
 
         let created = SystemTime::now()

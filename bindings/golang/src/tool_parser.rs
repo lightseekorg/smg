@@ -8,8 +8,9 @@ use std::{
     sync::Arc,
 };
 
+use openai_protocol::common::Tool;
 use serde_json::{json, Value};
-use smg::{protocols::common::Tool, tool_parser::ToolParser};
+use tool_parser::ToolParser;
 
 use super::{
     error::{clear_error_message, set_error_message, SglErrorCode},

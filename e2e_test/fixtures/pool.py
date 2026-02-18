@@ -63,7 +63,7 @@ def model_pool(request: pytest.FixtureRequest) -> ModelPool:
     - @pytest.mark.workers(prefill=N, decode=N) for PD workers
 
     Environment variable overrides:
-    - E2E_MODELS: Comma-separated model IDs (e.g., "llama-8b,qwen-7b")
+    - E2E_MODELS: Comma-separated model IDs (e.g., "meta-llama/Llama-3.1-8B-Instruct,Qwen/Qwen2.5-7B-Instruct")
     - E2E_BACKENDS: Comma-separated backends (e.g., "grpc,http")
     - SKIP_MODEL_POOL: Set to "1" to skip worker startup
     """
@@ -139,13 +139,16 @@ def model_pool(request: pytest.FixtureRequest) -> ModelPool:
         requirements = [r for r in requirements if r.model_id in MODEL_SPECS]
 
         if not requirements:
-            logger.warning("No valid requirements, model pool will be empty")
-            _model_pool = ModelPool(GPUAllocator(gpus=[]))
+            logger.info(
+                "No pre-launch requirements, model pool will start empty (on-demand launches still available)"
+            )
+            _model_pool = ModelPool(GPUAllocator())
             return _model_pool
 
         # Create and start the pool
         allocator = GPUAllocator()
-        _model_pool = ModelPool(allocator)
+        log_dir = os.environ.get("E2E_LOG_DIR")
+        _model_pool = ModelPool(allocator, log_dir=log_dir)
 
         startup_timeout = int(os.environ.get(ENV_STARTUP_TIMEOUT, "300"))
         _model_pool.startup(
@@ -174,7 +177,7 @@ def model_client(
     """Get OpenAI client for the model specified by @pytest.mark.model().
 
     Usage:
-        @pytest.mark.model("llama-8b")
+        @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
         def test_chat(model_client):
             response = model_client.chat.completions.create(...)
     """
@@ -214,7 +217,7 @@ def model_base_url(
     """Get the base URL for the model specified by @pytest.mark.model().
 
     Usage:
-        @pytest.mark.model("llama-8b")
+        @pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
         def test_direct_http(model_base_url):
             response = httpx.get(f"{model_base_url}/health")
     """

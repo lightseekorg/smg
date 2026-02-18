@@ -1,24 +1,24 @@
 //! Connection mode detection step.
+//!
+//! Determines whether a worker communicates via HTTP or gRPC.
+//! This step only answers "HTTP or gRPC?" — backend runtime detection
+//! (sglang vs vllm vs trtllm) is handled by the separate DetectBackendStep.
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Client;
 use tracing::debug;
+use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use super::strip_protocol;
 use crate::{
     core::{steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode},
     routers::grpc::client::GrpcClient,
-    workflow::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
 };
 
 /// Try HTTP health check.
-async fn try_http_health_check(
-    url: &str,
-    timeout_secs: u64,
-    client: &Client,
-) -> Result<(), String> {
+async fn try_http_reachable(url: &str, timeout_secs: u64, client: &Client) -> Result<(), String> {
     let is_https = url.starts_with("https://");
     let protocol = if is_https { "https" } else { "http" };
     let clean_url = strip_protocol(url);
@@ -35,8 +35,10 @@ async fn try_http_health_check(
     Ok(())
 }
 
-/// Perform gRPC health check with runtime type.
-async fn do_grpc_health_check(
+/// Perform a single gRPC health check with a specific runtime type.
+///
+/// Shared with `detect_backend` which uses this for runtime identification.
+pub(super) async fn do_grpc_health_check(
     grpc_url: &str,
     timeout_secs: u64,
     runtime_type: &str,
@@ -56,49 +58,36 @@ async fn do_grpc_health_check(
     Ok(())
 }
 
-/// Try gRPC health check (tries SGLang first, then vLLM, then TensorRT-LLM if not specified).
-/// Returns the detected runtime type on success.
-async fn try_grpc_health_check(
-    url: &str,
-    timeout_secs: u64,
-    runtime_type: Option<&str>,
-) -> Result<String, String> {
+/// Check if gRPC is reachable by trying all known runtime types in parallel.
+///
+/// We don't care which runtime it is here — that's detect_backend's job.
+/// We just need to know: does this endpoint speak gRPC at all?
+async fn try_grpc_reachable(url: &str, timeout_secs: u64) -> Result<(), String> {
     let grpc_url = if url.starts_with("grpc://") {
         url.to_string()
     } else {
         format!("grpc://{}", strip_protocol(url))
     };
 
-    match runtime_type {
-        Some(runtime) => {
-            do_grpc_health_check(&grpc_url, timeout_secs, runtime).await?;
-            Ok(runtime.to_string())
-        }
-        None => {
-            // Try SGLang first, then vLLM, then TensorRT-LLM as fallback
-            if do_grpc_health_check(&grpc_url, timeout_secs, "sglang")
-                .await
-                .is_ok()
-            {
-                return Ok("sglang".to_string());
-            }
-            if do_grpc_health_check(&grpc_url, timeout_secs, "vllm")
-                .await
-                .is_ok()
-            {
-                return Ok("vllm".to_string());
-            }
-            do_grpc_health_check(&grpc_url, timeout_secs, "trtllm")
-                .await
-                .map_err(|e| {
-                    format!("gRPC failed (tried SGLang, vLLM, and TensorRT-LLM): {}", e)
-                })?;
-            Ok("trtllm".to_string())
-        }
+    let (sglang, vllm, trtllm) = tokio::join!(
+        do_grpc_health_check(&grpc_url, timeout_secs, "sglang"),
+        do_grpc_health_check(&grpc_url, timeout_secs, "vllm"),
+        do_grpc_health_check(&grpc_url, timeout_secs, "trtllm"),
+    );
+
+    match (sglang, vllm, trtllm) {
+        (Ok(_), _, _) | (_, Ok(_), _) | (_, _, Ok(_)) => Ok(()),
+        (Err(e1), Err(e2), Err(e3)) => Err(format!(
+            "gRPC not reachable (tried sglang, vllm, trtllm): sglang={}, vllm={}, trtllm={}",
+            e1, e2, e3,
+        )),
     }
 }
 
-/// Step 1: Detect connection mode by probing HTTP and gRPC.
+/// Step 1: Detect connection mode (HTTP vs gRPC).
+///
+/// Probes both protocols in parallel. HTTP takes priority if both succeed.
+/// Does NOT detect backend runtime — that's handled by DetectBackendStep.
 pub struct DetectConnectionModeStep;
 
 #[async_trait]
@@ -115,29 +104,30 @@ impl StepExecutor<LocalWorkerWorkflowData> for DetectConnectionModeStep {
             .ok_or_else(|| WorkflowError::ContextValueNotFound("app_context".to_string()))?;
 
         debug!(
-            "Detecting connection mode for {} (timeout: {}s, max_attempts: {})",
-            config.url, config.health_check_timeout_secs, config.max_connection_attempts
+            "Detecting connection mode for {} (timeout: {:?}s, max_attempts: {})",
+            config.url, config.health.timeout_secs, config.max_connection_attempts
         );
 
-        // Try both protocols in parallel
         let url = config.url.clone();
-        let timeout = config.health_check_timeout_secs;
+        let timeout = config
+            .health
+            .timeout_secs
+            .unwrap_or(app_context.router_config.health_check.timeout_secs);
         let client = &app_context.client;
-        let runtime_type = config.runtime.as_deref();
 
         let (http_result, grpc_result) = tokio::join!(
-            try_http_health_check(&url, timeout, client),
-            try_grpc_health_check(&url, timeout, runtime_type)
+            try_http_reachable(&url, timeout, client),
+            try_grpc_reachable(&url, timeout)
         );
 
-        let (connection_mode, detected_runtime) = match (http_result, grpc_result) {
+        let connection_mode = match (http_result, grpc_result) {
             (Ok(_), _) => {
                 debug!("{} detected as HTTP", config.url);
-                (ConnectionMode::Http, None)
+                ConnectionMode::Http
             }
-            (_, Ok(runtime)) => {
-                debug!("{} detected as gRPC (runtime: {})", config.url, runtime);
-                (ConnectionMode::Grpc { port: None }, Some(runtime))
+            (_, Ok(_)) => {
+                debug!("{} detected as gRPC", config.url);
+                ConnectionMode::Grpc
             }
             (Err(http_err), Err(grpc_err)) => {
                 return Err(WorkflowError::StepFailed {
@@ -151,10 +141,6 @@ impl StepExecutor<LocalWorkerWorkflowData> for DetectConnectionModeStep {
         };
 
         context.data.connection_mode = Some(connection_mode);
-        // Save detected runtime type from health check for use in metadata discovery
-        if let Some(runtime) = detected_runtime {
-            context.data.detected_runtime_type = Some(runtime);
-        }
         Ok(StepResult::Success)
     }
 

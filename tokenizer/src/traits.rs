@@ -5,6 +5,8 @@ use std::{
 
 use anyhow::Result;
 
+use crate::chat_template::{ChatTemplateContentFormat, ChatTemplateParams};
+
 /// Type alias for token IDs
 pub type TokenIdType = u32;
 
@@ -28,6 +30,27 @@ pub trait Tokenizer: Encoder + Decoder {
 
     /// Enable downcasting to concrete types
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Apply chat template to messages. Default returns an error for tokenizers without template support.
+    fn apply_chat_template(
+        &self,
+        _messages: &[serde_json::Value],
+        _params: ChatTemplateParams,
+    ) -> Result<String> {
+        Err(anyhow::anyhow!(
+            "Chat template not supported by this tokenizer"
+        ))
+    }
+
+    /// Get the content format expected by the chat template.
+    fn chat_template_content_format(&self) -> ChatTemplateContentFormat {
+        ChatTemplateContentFormat::default()
+    }
+
+    /// Set or override the chat template.
+    fn set_chat_template(&mut self, _template: String) {
+        // no-op by default
+    }
 }
 
 /// Contains the results of tokenizing text: token IDs, string tokens, and their spans
@@ -77,7 +100,7 @@ impl Hash for Encoding {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SpecialTokens {
     pub bos_token: Option<String>,
     pub eos_token: Option<String>,

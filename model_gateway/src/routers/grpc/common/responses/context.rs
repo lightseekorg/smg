@@ -2,13 +2,12 @@
 //!
 //! This context is used by both regular and harmony response implementations.
 
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::Arc;
 
-use crate::{
-    data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage},
-    mcp::McpOrchestrator,
-    routers::grpc::{context::SharedComponents, pipeline::RequestPipeline},
-};
+use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
+use smg_mcp::McpOrchestrator;
+
+use crate::routers::grpc::{context::SharedComponents, pipeline::RequestPipeline};
 
 /// Context for /v1/responses endpoint
 ///
@@ -33,9 +32,6 @@ pub(crate) struct ResponsesContext {
 
     /// MCP orchestrator for tool support
     pub mcp_orchestrator: Arc<McpOrchestrator>,
-
-    /// MCP servers (label, server_key) requested in this context
-    pub requested_servers: Arc<StdRwLock<Vec<(String, String)>>>,
 }
 
 impl ResponsesContext {
@@ -55,7 +51,6 @@ impl ResponsesContext {
             conversation_storage,
             conversation_item_storage,
             mcp_orchestrator,
-            requested_servers: Arc::new(StdRwLock::new(Vec::new())),
         }
     }
 }

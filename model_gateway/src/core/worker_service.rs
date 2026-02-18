@@ -11,15 +11,13 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use openai_protocol::worker::{WorkerErrorResponse, WorkerInfo, WorkerSpec, WorkerUpdateRequest};
 use serde_json::json;
 use tracing::warn;
 
 use crate::{
     config::RouterConfig,
     core::{worker::worker_to_info, worker_registry::WorkerId, Job, JobQueue, WorkerRegistry},
-    protocols::worker_spec::{
-        WorkerConfigRequest, WorkerErrorResponse, WorkerInfo, WorkerUpdateRequest,
-    },
 };
 
 /// Error types for worker service operations
@@ -224,7 +222,7 @@ impl WorkerService {
 
     pub async fn create_worker(
         &self,
-        mut config: WorkerConfigRequest,
+        config: WorkerSpec,
     ) -> Result<CreateWorkerResult, WorkerServiceError> {
         if self.router_config.api_key.is_some() && config.api_key.is_none() {
             warn!(
@@ -234,8 +232,6 @@ impl WorkerService {
                 config.url
             );
         }
-
-        config.dp_aware = self.router_config.dp_aware;
 
         let worker_url = config.url.clone();
         let worker_id = self.worker_registry.reserve_id_for_url(&worker_url);

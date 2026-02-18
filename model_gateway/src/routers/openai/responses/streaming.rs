@@ -7,7 +7,7 @@
 //! - MCP tool execution loops within streaming responses
 //! - Event transformation and output index remapping
 
-use std::{borrow::Cow, io, slice, sync::Arc};
+use std::{borrow::Cow, io, sync::Arc};
 
 use axum::{
     body::Body,
@@ -16,7 +16,15 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::StreamExt;
-use serde_json::{json, Map, Value};
+use openai_protocol::{
+    event_types::{
+        is_function_call_type, is_response_event, CodeInterpreterCallEvent, FileSearchCallEvent,
+        FunctionCallEvent, ItemType, McpEvent, OutputItemEvent, ResponseEvent, WebSearchCallEvent,
+    },
+    responses::{ResponseToolType, ResponsesRequest},
+};
+use serde_json::{json, Value};
+use smg_mcp::{McpOrchestrator, McpToolSession, ResponseFormat};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -30,21 +38,14 @@ use super::{
     },
     tool_handler::{StreamAction, StreamingToolHandler},
     utils::{
-        insert_optional_string, patch_response_with_request_metadata, restore_original_tools,
+        patch_response_with_request_metadata, response_tool_to_value, restore_original_tools,
         rewrite_streaming_block,
     },
 };
 use crate::{
-    mcp::{McpOrchestrator, McpToolSession, ResponseFormat},
-    protocols::{
-        event_types::{
-            is_function_call_type, is_response_event, CodeInterpreterCallEvent,
-            FileSearchCallEvent, FunctionCallEvent, ItemType, McpEvent, OutputItemEvent,
-            ResponseEvent, WebSearchCallEvent,
-        },
-        responses::{ResponseToolType, ResponsesRequest},
-    },
+    observability::metrics::Metrics,
     routers::{
+        error,
         header_utils::{apply_request_headers, preserve_response_headers},
         mcp_utils::DEFAULT_MAX_ITERATIONS,
         openai::context::{RequestContext, StreamingEventContext, StreamingRequest},
@@ -196,23 +197,8 @@ fn build_mcp_tools_value(original_body: &ResponsesRequest) -> Option<Value> {
     let tools = original_body.tools.as_ref()?;
     let mcp_tools: Vec<Value> = tools
         .iter()
-        .filter(|t| matches!(t.r#type, ResponseToolType::Mcp) && t.server_url.is_some())
-        .map(|t| {
-            let mut m = Map::new();
-            m.insert("type".to_string(), json!("mcp"));
-            insert_optional_string(&mut m, "server_label", &t.server_label);
-            insert_optional_string(&mut m, "server_url", &t.server_url);
-            insert_optional_string(&mut m, "server_description", &t.server_description);
-            insert_optional_string(&mut m, "require_approval", &t.require_approval);
-
-            if let Some(allowed) = &t.allowed_tools {
-                m.insert(
-                    "allowed_tools".to_string(),
-                    Value::Array(allowed.iter().map(|s| json!(s)).collect()),
-                );
-            }
-            Value::Object(m)
-        })
+        .filter(|t| matches!(t.r#type, ResponseToolType::Mcp))
+        .filter_map(response_tool_to_value)
         .collect();
 
     if mcp_tools.is_empty() {
@@ -739,11 +725,8 @@ pub(super) async fn handle_streaming_with_tool_interception(
             let response = match request_builder.send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    let error_event = format!(
-                        "event: error\ndata: {{\"error\": {{\"message\": \"{}\"}}}}\n\n",
-                        e
-                    );
-                    let _ = tx.send(Ok(Bytes::from(error_event)));
+                    let _ =
+                        send_sse_event(&tx, "error", &json!({"error": {"message": e.to_string()}}));
                     return;
                 }
             };
@@ -751,8 +734,11 @@ pub(super) async fn handle_streaming_with_tool_interception(
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                let error_event = format!("event: error\ndata: {{\"error\": {{\"message\": \"Upstream error {}: {}\"}}}}\n\n", status, body);
-                let _ = tx.send(Ok(Bytes::from(error_event)));
+                let _ = send_sse_event(
+                    &tx,
+                    "error",
+                    &json!({"error": {"message": format!("Upstream error {}: {}", status, body)}}),
+                );
                 return;
             }
 
@@ -837,7 +823,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                                                             label,
                                                             list_tools_index,
                                                             &mut sequence_number,
-                                                            slice::from_ref(key),
+                                                            key,
                                                         ) {
                                                             // Client disconnected
                                                             return;
@@ -876,8 +862,11 @@ pub(super) async fn handle_streaming_with_tool_interception(
                         }
                     }
                     Err(e) => {
-                        let error_event = format!("event: error\ndata: {{\"error\": {{\"message\": \"Stream error: {}\"}}}}\n\n", e);
-                        let _ = tx.send(Ok(Bytes::from(error_event)));
+                        let _ = send_sse_event(
+                            &tx,
+                            "error",
+                            &json!({"error": {"message": format!("Stream error: {}", e)}}),
+                        );
                         return;
                     }
                 }
@@ -949,6 +938,9 @@ pub(super) async fn handle_streaming_with_tool_interception(
             state.iteration += 1;
             state.total_calls += pending_calls.len();
 
+            // Record tool loop iteration metric
+            Metrics::record_mcp_tool_iteration(&original_request.model);
+
             let effective_limit = match max_tool_calls {
                 Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
                 None => DEFAULT_MAX_ITERATIONS,
@@ -959,8 +951,11 @@ pub(super) async fn handle_streaming_with_tool_interception(
                     "Reached tool call limit during streaming: {}",
                     effective_limit
                 );
-                let error_event = "event: error\ndata: {\"error\": {\"message\": \"Exceeded max_tool_calls limit\"}}\n\n".to_string();
-                let _ = tx.send(Ok(Bytes::from(error_event)));
+                send_sse_event(
+                    &tx,
+                    "error",
+                    &json!({"error": {"message": "Exceeded max_tool_calls limit"}}),
+                );
                 let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
                 return;
             }
@@ -972,6 +967,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                 &tx,
                 &mut state,
                 &mut sequence_number,
+                &original_request.model,
             )
             .await
             {
@@ -994,8 +990,11 @@ pub(super) async fn handle_streaming_with_tool_interception(
                     // Continue loop to make next streaming request
                 }
                 Err(e) => {
-                    let error_event = format!("event: error\ndata: {{\"error\": {{\"message\": \"Failed to build resume payload: {}\"}}}}\n\n", e);
-                    let _ = tx.send(Ok(Bytes::from(error_event)));
+                    send_sse_event(
+                        &tx,
+                        "error",
+                        &json!({"error": {"message": format!("Failed to build resume payload: {}", e)}}),
+                    );
                     let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
                     return;
                 }
@@ -1016,15 +1015,26 @@ pub(super) async fn handle_streaming_with_tool_interception(
 pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     use crate::routers::mcp_utils::ensure_request_mcp_client;
 
-    let worker = ctx.worker().expect("Worker not selected").clone();
+    let worker = match ctx.worker() {
+        Some(w) => w.clone(),
+        None => {
+            return error::internal_error("internal_error", "Worker not selected");
+        }
+    };
     let circuit_breaker = worker.circuit_breaker();
     let headers = ctx.headers().cloned();
-    let original_body = ctx.responses_request();
-    let mcp_orchestrator = ctx
-        .components
-        .mcp_orchestrator()
-        .expect("MCP orchestrator required")
-        .clone();
+    let original_body = match ctx.responses_request() {
+        Some(r) => r,
+        None => {
+            return error::internal_error("internal_error", "Expected responses request");
+        }
+    };
+    let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
+        Some(m) => m.clone(),
+        None => {
+            return error::internal_error("internal_error", "MCP orchestrator required");
+        }
+    };
 
     // Check for MCP tools and create request context if needed
     let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
@@ -1034,7 +1044,12 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
     };
 
     let client = ctx.components.client().clone();
-    let req = ctx.into_streaming_context();
+    let req = match ctx.into_streaming_context() {
+        Ok(r) => r,
+        Err(msg) => {
+            return error::internal_error("internal_error", msg);
+        }
+    };
 
     // If no MCP tools, use simple passthrough
     let Some(mcp_servers) = mcp_servers else {

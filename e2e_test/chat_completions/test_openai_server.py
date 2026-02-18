@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 
-@pytest.mark.model("llama-8b")
+@pytest.mark.model("meta-llama/Llama-3.1-8B-Instruct")
 @pytest.mark.gateway(extra_args=["--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestChatCompletion:
@@ -201,6 +201,56 @@ convenient hands-free control to your smart devices.
         with pytest.raises(openai.NotFoundError):
             client.models.retrieve("non-existent-model")
 
+    def test_stop_sequences(self, setup_backend):
+        """Test that stop sequences cause the model to stop generating."""
+        _, model, client, gateway = setup_backend
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"},
+            ],
+            temperature=0,
+            max_tokens=50,
+            stop=[","],
+        )
+
+        assert response.choices[0].finish_reason == "stop"
+        content = response.choices[0].message.content
+        assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
+
+    def test_stop_sequences_stream(self, setup_backend):
+        """Test that stop sequences work in streaming mode."""
+        _, model, client, gateway = setup_backend
+
+        chunks = list(
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
+                    },
+                ],
+                temperature=0,
+                max_tokens=50,
+                stop=[","],
+                stream=True,
+            )
+        )
+
+        # Find the chunk with finish_reason
+        finish_reasons = [
+            c.choices[0].finish_reason for c in chunks if c.choices and c.choices[0].finish_reason
+        ]
+        assert "stop" in finish_reasons
+
+        # Collect all content
+        content = "".join(
+            c.choices[0].delta.content for c in chunks if c.choices and c.choices[0].delta.content
+        )
+        assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
+
     # -------------------------------------------------------------------------
     # Helper methods
     # -------------------------------------------------------------------------
@@ -318,7 +368,7 @@ convenient hands-free control to your smart devices.
 # =============================================================================
 
 
-@pytest.mark.model("gpt-oss")
+@pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
 class TestChatCompletionGptOss(TestChatCompletion):
     """Tests for chat completions API with GPT-OSS model (Harmony).

@@ -5,15 +5,13 @@
 //! and caching - this step just submits the job.
 
 use async_trait::async_trait;
+use llm_tokenizer::TokenizerRegistry;
 use tracing::{debug, info, warn};
+use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::{
-    core::{
-        steps::{workflow_data::LocalWorkerWorkflowData, TokenizerConfigRequest},
-        Job,
-    },
-    tokenizer::TokenizerRegistry,
-    workflow::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
+use crate::core::{
+    steps::{workflow_data::LocalWorkerWorkflowData, TokenizerConfigRequest},
+    Job,
 };
 
 /// Step: Submit tokenizer registration job for the worker's model
@@ -50,12 +48,13 @@ impl StepExecutor<LocalWorkerWorkflowData> for SubmitTokenizerJobStep {
             }
         };
 
-        // Get chat_template: worker config > global router config
+        // Get chat_template: first model card in config > global router config
         let chat_template = context
             .data
             .config
-            .chat_template
-            .clone()
+            .models
+            .primary()
+            .and_then(|m| m.chat_template.clone())
             .or_else(|| app_context.router_config.chat_template.clone());
 
         // Get cache config from router config

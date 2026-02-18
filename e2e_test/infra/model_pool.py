@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, Any
 
 import httpx
 
@@ -45,10 +45,10 @@ class WorkerIdentity:
 
     Each worker is uniquely identified by (model_id, mode, worker_type, index).
     For example:
-    - llama-8b:http (regular worker, index 0)
-    - llama-8b:http:prefill_0 (first prefill worker)
-    - llama-8b:http:prefill_1 (second prefill worker)
-    - llama-8b:http:decode_0 (first decode worker)
+    - meta-llama/Llama-3.1-8B-Instruct:http (regular worker, index 0)
+    - meta-llama/Llama-3.1-8B-Instruct:http:prefill_0 (first prefill worker)
+    - meta-llama/Llama-3.1-8B-Instruct:http:prefill_1 (second prefill worker)
+    - meta-llama/Llama-3.1-8B-Instruct:http:decode_0 (first decode worker)
 
     Frozen/hashable so it can be used in sets and as dict keys for deduplication.
     """
@@ -102,7 +102,7 @@ class ModelInstance:
     port: int
     process: subprocess.Popen
     gpu_slot: GPUSlot | None
-    key: str  # Unique instance key (e.g., "llama-8b:http:prefill_0")
+    key: str  # Unique instance key (e.g., "meta-llama/Llama-3.1-8B-Instruct:http:prefill_0")
     worker_type: WorkerType = WorkerType.REGULAR
     bootstrap_port: int | None = None  # For prefill workers in PD mode
     last_used: float = 0.0  # Timestamp for MRU eviction
@@ -310,8 +310,8 @@ class ModelPool:
     - The needed model is then launched on-demand
 
     Instance keys:
-    - Regular workers: "model_id:mode" (e.g., "llama-8b:http")
-    - PD workers: "model_id:mode:worker_type" (e.g., "llama-8b:http:prefill")
+    - Regular workers: "model_id:mode" (e.g., "meta-llama/Llama-3.1-8B-Instruct:http")
+    - PD workers: "model_id:mode:worker_type" (e.g., "meta-llama/Llama-3.1-8B-Instruct:http:prefill")
 
     Limitations:
     - Currently one worker instance per (model_id, mode) combination
@@ -320,20 +320,24 @@ class ModelPool:
 
     Usage:
         pool = ModelPool()
-        pool.startup(requirements=[("llama-8b", ConnectionMode.HTTP)])
-        instance = pool.get("llama-8b", "http")  # Pre-launched or on-demand
+        pool.startup(requirements=[("meta-llama/Llama-3.1-8B-Instruct", ConnectionMode.HTTP)])
+        instance = pool.get("meta-llama/Llama-3.1-8B-Instruct", "http")  # Pre-launched or on-demand
     """
 
-    def __init__(self, allocator: GPUAllocator | None = None):
+    def __init__(self, allocator: GPUAllocator | None = None, log_dir: str | None = None):
         """Initialize the model pool.
 
         Args:
             allocator: GPU allocator to use. If None, creates a new one.
+            log_dir: Directory to store worker log files. If None, worker output
+                     is discarded (DEVNULL).
         """
         self.allocator = allocator or GPUAllocator()
         self.instances: dict[str, ModelInstance] = {}  # key = "model_id:mode"
         self._startup_timeout = DEFAULT_STARTUP_TIMEOUT
         self._lock = threading.RLock()  # Protects instances dict
+        self.log_dir = log_dir
+        self._log_files: dict[str, IO[Any]] = {}  # instance key → open log file handle
 
     def startup(
         self,
@@ -582,14 +586,35 @@ class ModelPool:
 
         show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
 
+        # Determine output targets: terminal, log file, or devnull
+        stdout_target: int | IO[Any] | None = None
+        stderr_target: int | IO[Any] | None = None
+        if not show_output:
+            if self.log_dir:
+                os.makedirs(self.log_dir, exist_ok=True)
+                safe_key = key.replace("/", "__").replace(":", "_")
+                log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
+                self._log_files[key] = log_file
+                stdout_target = log_file
+                stderr_target = subprocess.STDOUT
+            else:
+                stdout_target = subprocess.DEVNULL
+                stderr_target = subprocess.DEVNULL
+
         # Start the process
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=None if show_output else subprocess.PIPE,
-            stderr=None if show_output else subprocess.PIPE,
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=stdout_target,
+                stderr=stderr_target,
+                start_new_session=True,
+            )
+        except Exception:
+            lf = self._log_files.pop(key, None)
+            if lf is not None:
+                lf.close()
+            raise
 
         base_url = f"http://{DEFAULT_HOST}:{port}"
         instance = ModelInstance(
@@ -807,7 +832,7 @@ class ModelPool:
         Caller MUST call release() on the instance when done.
 
         Args:
-            model_id: The model ID (e.g., "llama-8b")
+            model_id: The model ID (e.g., "meta-llama/Llama-3.1-8B-Instruct")
             mode: The mode (ConnectionMode.HTTP or ConnectionMode.GRPC, or string)
             worker_type: The worker type (REGULAR, PREFILL, DECODE). Defaults to REGULAR.
             wait_for_gpus: If True, wait for GPUs to become available when all
@@ -1038,6 +1063,14 @@ class ModelPool:
         instance = self.instances[key]
         instance.terminate()
 
+        # Close log file handle for this instance
+        log_file = self._log_files.pop(key, None)
+        if log_file is not None:
+            try:
+                log_file.close()
+            except Exception:
+                pass
+
         # Release GPU slot back to allocator
         if instance.gpu_slot:
             self.allocator.release_slot(instance.gpu_slot)
@@ -1137,7 +1170,6 @@ class ModelPool:
                 "16384",
                 "--gpu-memory-utilization",
                 "0.9",
-                "--enforce-eager",
             ]
             extra = model_spec.get("vllm_args", [])
         elif runtime == "trtllm":
@@ -1227,13 +1259,34 @@ class ModelPool:
 
         show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
 
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=None if show_output else subprocess.PIPE,
-            stderr=None if show_output else subprocess.PIPE,
-            start_new_session=True,
-        )
+        # Determine output targets: terminal, log file, or devnull
+        stdout_target: int | IO[Any] | None = None
+        stderr_target: int | IO[Any] | None = None
+        if not show_output:
+            if self.log_dir:
+                os.makedirs(self.log_dir, exist_ok=True)
+                safe_key = key.replace("/", "__").replace(":", "_")
+                log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
+                self._log_files[key] = log_file
+                stdout_target = log_file
+                stderr_target = subprocess.STDOUT
+            else:
+                stdout_target = subprocess.DEVNULL
+                stderr_target = subprocess.DEVNULL
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=stdout_target,
+                stderr=stderr_target,
+                start_new_session=True,
+            )
+        except Exception:
+            lf = self._log_files.pop(key, None)
+            if lf is not None:
+                lf.close()
+            raise
 
         base_url = f"grpc://{DEFAULT_HOST}:{port}"
         instance = ModelInstance(
@@ -1547,6 +1600,14 @@ class ModelPool:
                 if instance.gpu_slot:
                     self.allocator.release_slot(instance.gpu_slot)
             self.instances.clear()
+
+            # Close any open log files
+            for f in self._log_files.values():
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            self._log_files.clear()
 
     def __enter__(self) -> ModelPool:
         return self

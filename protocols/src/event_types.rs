@@ -319,6 +319,280 @@ impl fmt::Display for ItemType {
     }
 }
 
+// ============================================================================
+// Realtime Client Events
+// ============================================================================
+
+/// Realtime API client events sent over WebSocket/WebRTC/SIP connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RealtimeClientEvent {
+    ConversationItemCreate,
+    ConversationItemDelete,
+    ConversationItemRetrieve,
+    ConversationItemTruncate,
+    InputAudioBufferAppend,
+    InputAudioBufferClear,
+    InputAudioBufferCommit,
+    OutputAudioBufferClear,
+    ResponseCancel,
+    ResponseCreate,
+    SessionUpdate,
+    TranscriptionSessionUpdate,
+}
+
+impl RealtimeClientEvent {
+    pub const CONVERSATION_ITEM_CREATE: &'static str = "conversation.item.create";
+    pub const CONVERSATION_ITEM_DELETE: &'static str = "conversation.item.delete";
+    pub const CONVERSATION_ITEM_RETRIEVE: &'static str = "conversation.item.retrieve";
+    pub const CONVERSATION_ITEM_TRUNCATE: &'static str = "conversation.item.truncate";
+    pub const INPUT_AUDIO_BUFFER_APPEND: &'static str = "input_audio_buffer.append";
+    pub const INPUT_AUDIO_BUFFER_CLEAR: &'static str = "input_audio_buffer.clear";
+    pub const INPUT_AUDIO_BUFFER_COMMIT: &'static str = "input_audio_buffer.commit";
+    pub const OUTPUT_AUDIO_BUFFER_CLEAR: &'static str = "output_audio_buffer.clear";
+    pub const RESPONSE_CANCEL: &'static str = "response.cancel";
+    pub const RESPONSE_CREATE: &'static str = "response.create";
+    pub const SESSION_UPDATE: &'static str = "session.update";
+    pub const TRANSCRIPTION_SESSION_UPDATE: &'static str = "transcription_session.update";
+
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::ConversationItemCreate => Self::CONVERSATION_ITEM_CREATE,
+            Self::ConversationItemDelete => Self::CONVERSATION_ITEM_DELETE,
+            Self::ConversationItemRetrieve => Self::CONVERSATION_ITEM_RETRIEVE,
+            Self::ConversationItemTruncate => Self::CONVERSATION_ITEM_TRUNCATE,
+            Self::InputAudioBufferAppend => Self::INPUT_AUDIO_BUFFER_APPEND,
+            Self::InputAudioBufferClear => Self::INPUT_AUDIO_BUFFER_CLEAR,
+            Self::InputAudioBufferCommit => Self::INPUT_AUDIO_BUFFER_COMMIT,
+            Self::OutputAudioBufferClear => Self::OUTPUT_AUDIO_BUFFER_CLEAR,
+            Self::ResponseCancel => Self::RESPONSE_CANCEL,
+            Self::ResponseCreate => Self::RESPONSE_CREATE,
+            Self::SessionUpdate => Self::SESSION_UPDATE,
+            Self::TranscriptionSessionUpdate => Self::TRANSCRIPTION_SESSION_UPDATE,
+        }
+    }
+}
+
+impl fmt::Display for RealtimeClientEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ============================================================================
+// Realtime Server Events
+// ============================================================================
+
+/// Realtime API server events received over WebSocket/WebRTC/SIP connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RealtimeServerEvent {
+    // Session events
+    SessionCreated,
+    SessionUpdated,
+    // Conversation events
+    ConversationCreated,
+    ConversationItemCreated,
+    ConversationItemAdded,
+    ConversationItemDone,
+    ConversationItemDeleted,
+    ConversationItemRetrieved,
+    ConversationItemTruncated,
+    // Input audio transcription events
+    ConversationItemInputAudioTranscriptionCompleted,
+    ConversationItemInputAudioTranscriptionDelta,
+    ConversationItemInputAudioTranscriptionFailed,
+    ConversationItemInputAudioTranscriptionSegment,
+    // Input audio buffer events
+    InputAudioBufferCleared,
+    InputAudioBufferCommitted,
+    InputAudioBufferSpeechStarted,
+    InputAudioBufferSpeechStopped,
+    InputAudioBufferTimeoutTriggered,
+    InputAudioBufferDtmfEventReceived,
+    // Output audio buffer events (WebRTC/SIP only)
+    OutputAudioBufferStarted,
+    OutputAudioBufferStopped,
+    OutputAudioBufferCleared,
+    // Response lifecycle events
+    ResponseCreated,
+    ResponseDone,
+    // Response output item events
+    ResponseOutputItemAdded,
+    ResponseOutputItemDone,
+    // Response content part events
+    ResponseContentPartAdded,
+    ResponseContentPartDone,
+    // Response text events
+    ResponseOutputTextDelta,
+    ResponseOutputTextDone,
+    // Response audio events
+    ResponseOutputAudioDelta,
+    ResponseOutputAudioDone,
+    // Response audio transcript events
+    ResponseOutputAudioTranscriptDelta,
+    ResponseOutputAudioTranscriptDone,
+    // Response function call events
+    ResponseFunctionCallArgumentsDelta,
+    ResponseFunctionCallArgumentsDone,
+    // Response MCP call events
+    ResponseMcpCallArgumentsDelta,
+    ResponseMcpCallArgumentsDone,
+    ResponseMcpCallInProgress,
+    ResponseMcpCallCompleted,
+    ResponseMcpCallFailed,
+    // MCP list tools events
+    McpListToolsInProgress,
+    McpListToolsCompleted,
+    McpListToolsFailed,
+    // Rate limits
+    RateLimitsUpdated,
+    // Error
+    Error,
+}
+
+impl RealtimeServerEvent {
+    // Session events
+    pub const SESSION_CREATED: &'static str = "session.created";
+    pub const SESSION_UPDATED: &'static str = "session.updated";
+    // Conversation events
+    pub const CONVERSATION_CREATED: &'static str = "conversation.created";
+    pub const CONVERSATION_ITEM_CREATED: &'static str = "conversation.item.created";
+    pub const CONVERSATION_ITEM_ADDED: &'static str = "conversation.item.added";
+    pub const CONVERSATION_ITEM_DONE: &'static str = "conversation.item.done";
+    pub const CONVERSATION_ITEM_DELETED: &'static str = "conversation.item.deleted";
+    pub const CONVERSATION_ITEM_RETRIEVED: &'static str = "conversation.item.retrieved";
+    pub const CONVERSATION_ITEM_TRUNCATED: &'static str = "conversation.item.truncated";
+    // Input audio transcription events
+    pub const CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_COMPLETED: &'static str =
+        "conversation.item.input_audio_transcription.completed";
+    pub const CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_DELTA: &'static str =
+        "conversation.item.input_audio_transcription.delta";
+    pub const CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_FAILED: &'static str =
+        "conversation.item.input_audio_transcription.failed";
+    pub const CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_SEGMENT: &'static str =
+        "conversation.item.input_audio_transcription.segment";
+    // Input audio buffer events
+    pub const INPUT_AUDIO_BUFFER_CLEARED: &'static str = "input_audio_buffer.cleared";
+    pub const INPUT_AUDIO_BUFFER_COMMITTED: &'static str = "input_audio_buffer.committed";
+    pub const INPUT_AUDIO_BUFFER_SPEECH_STARTED: &'static str = "input_audio_buffer.speech_started";
+    pub const INPUT_AUDIO_BUFFER_SPEECH_STOPPED: &'static str = "input_audio_buffer.speech_stopped";
+    pub const INPUT_AUDIO_BUFFER_TIMEOUT_TRIGGERED: &'static str =
+        "input_audio_buffer.timeout_triggered";
+    pub const INPUT_AUDIO_BUFFER_DTMF_EVENT_RECEIVED: &'static str =
+        "input_audio_buffer.dtmf_event_received";
+    // Output audio buffer events
+    pub const OUTPUT_AUDIO_BUFFER_STARTED: &'static str = "output_audio_buffer.started";
+    pub const OUTPUT_AUDIO_BUFFER_STOPPED: &'static str = "output_audio_buffer.stopped";
+    pub const OUTPUT_AUDIO_BUFFER_CLEARED: &'static str = "output_audio_buffer.cleared";
+    // Response lifecycle events
+    pub const RESPONSE_CREATED: &'static str = "response.created";
+    pub const RESPONSE_DONE: &'static str = "response.done";
+    // Response output item events
+    pub const RESPONSE_OUTPUT_ITEM_ADDED: &'static str = "response.output_item.added";
+    pub const RESPONSE_OUTPUT_ITEM_DONE: &'static str = "response.output_item.done";
+    // Response content part events
+    pub const RESPONSE_CONTENT_PART_ADDED: &'static str = "response.content_part.added";
+    pub const RESPONSE_CONTENT_PART_DONE: &'static str = "response.content_part.done";
+    // Response text events
+    pub const RESPONSE_OUTPUT_TEXT_DELTA: &'static str = "response.output_text.delta";
+    pub const RESPONSE_OUTPUT_TEXT_DONE: &'static str = "response.output_text.done";
+    // Response audio events
+    pub const RESPONSE_OUTPUT_AUDIO_DELTA: &'static str = "response.output_audio.delta";
+    pub const RESPONSE_OUTPUT_AUDIO_DONE: &'static str = "response.output_audio.done";
+    // Response audio transcript events
+    pub const RESPONSE_OUTPUT_AUDIO_TRANSCRIPT_DELTA: &'static str =
+        "response.output_audio_transcript.delta";
+    pub const RESPONSE_OUTPUT_AUDIO_TRANSCRIPT_DONE: &'static str =
+        "response.output_audio_transcript.done";
+    // Response function call events
+    pub const RESPONSE_FUNCTION_CALL_ARGUMENTS_DELTA: &'static str =
+        "response.function_call_arguments.delta";
+    pub const RESPONSE_FUNCTION_CALL_ARGUMENTS_DONE: &'static str =
+        "response.function_call_arguments.done";
+    // Response MCP call events
+    pub const RESPONSE_MCP_CALL_ARGUMENTS_DELTA: &'static str = "response.mcp_call_arguments.delta";
+    pub const RESPONSE_MCP_CALL_ARGUMENTS_DONE: &'static str = "response.mcp_call_arguments.done";
+    pub const RESPONSE_MCP_CALL_IN_PROGRESS: &'static str = "response.mcp_call.in_progress";
+    pub const RESPONSE_MCP_CALL_COMPLETED: &'static str = "response.mcp_call.completed";
+    pub const RESPONSE_MCP_CALL_FAILED: &'static str = "response.mcp_call.failed";
+    // MCP list tools events
+    pub const MCP_LIST_TOOLS_IN_PROGRESS: &'static str = "mcp_list_tools.in_progress";
+    pub const MCP_LIST_TOOLS_COMPLETED: &'static str = "mcp_list_tools.completed";
+    pub const MCP_LIST_TOOLS_FAILED: &'static str = "mcp_list_tools.failed";
+    // Rate limits
+    pub const RATE_LIMITS_UPDATED: &'static str = "rate_limits.updated";
+    // Error
+    pub const ERROR: &'static str = "error";
+
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::SessionCreated => Self::SESSION_CREATED,
+            Self::SessionUpdated => Self::SESSION_UPDATED,
+            Self::ConversationCreated => Self::CONVERSATION_CREATED,
+            Self::ConversationItemCreated => Self::CONVERSATION_ITEM_CREATED,
+            Self::ConversationItemAdded => Self::CONVERSATION_ITEM_ADDED,
+            Self::ConversationItemDone => Self::CONVERSATION_ITEM_DONE,
+            Self::ConversationItemDeleted => Self::CONVERSATION_ITEM_DELETED,
+            Self::ConversationItemRetrieved => Self::CONVERSATION_ITEM_RETRIEVED,
+            Self::ConversationItemTruncated => Self::CONVERSATION_ITEM_TRUNCATED,
+            Self::ConversationItemInputAudioTranscriptionCompleted => {
+                Self::CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_COMPLETED
+            }
+            Self::ConversationItemInputAudioTranscriptionDelta => {
+                Self::CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_DELTA
+            }
+            Self::ConversationItemInputAudioTranscriptionFailed => {
+                Self::CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_FAILED
+            }
+            Self::ConversationItemInputAudioTranscriptionSegment => {
+                Self::CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_SEGMENT
+            }
+            Self::InputAudioBufferCleared => Self::INPUT_AUDIO_BUFFER_CLEARED,
+            Self::InputAudioBufferCommitted => Self::INPUT_AUDIO_BUFFER_COMMITTED,
+            Self::InputAudioBufferSpeechStarted => Self::INPUT_AUDIO_BUFFER_SPEECH_STARTED,
+            Self::InputAudioBufferSpeechStopped => Self::INPUT_AUDIO_BUFFER_SPEECH_STOPPED,
+            Self::InputAudioBufferTimeoutTriggered => Self::INPUT_AUDIO_BUFFER_TIMEOUT_TRIGGERED,
+            Self::InputAudioBufferDtmfEventReceived => Self::INPUT_AUDIO_BUFFER_DTMF_EVENT_RECEIVED,
+            Self::OutputAudioBufferStarted => Self::OUTPUT_AUDIO_BUFFER_STARTED,
+            Self::OutputAudioBufferStopped => Self::OUTPUT_AUDIO_BUFFER_STOPPED,
+            Self::OutputAudioBufferCleared => Self::OUTPUT_AUDIO_BUFFER_CLEARED,
+            Self::ResponseCreated => Self::RESPONSE_CREATED,
+            Self::ResponseDone => Self::RESPONSE_DONE,
+            Self::ResponseOutputItemAdded => Self::RESPONSE_OUTPUT_ITEM_ADDED,
+            Self::ResponseOutputItemDone => Self::RESPONSE_OUTPUT_ITEM_DONE,
+            Self::ResponseContentPartAdded => Self::RESPONSE_CONTENT_PART_ADDED,
+            Self::ResponseContentPartDone => Self::RESPONSE_CONTENT_PART_DONE,
+            Self::ResponseOutputTextDelta => Self::RESPONSE_OUTPUT_TEXT_DELTA,
+            Self::ResponseOutputTextDone => Self::RESPONSE_OUTPUT_TEXT_DONE,
+            Self::ResponseOutputAudioDelta => Self::RESPONSE_OUTPUT_AUDIO_DELTA,
+            Self::ResponseOutputAudioDone => Self::RESPONSE_OUTPUT_AUDIO_DONE,
+            Self::ResponseOutputAudioTranscriptDelta => {
+                Self::RESPONSE_OUTPUT_AUDIO_TRANSCRIPT_DELTA
+            }
+            Self::ResponseOutputAudioTranscriptDone => Self::RESPONSE_OUTPUT_AUDIO_TRANSCRIPT_DONE,
+            Self::ResponseFunctionCallArgumentsDelta => {
+                Self::RESPONSE_FUNCTION_CALL_ARGUMENTS_DELTA
+            }
+            Self::ResponseFunctionCallArgumentsDone => Self::RESPONSE_FUNCTION_CALL_ARGUMENTS_DONE,
+            Self::ResponseMcpCallArgumentsDelta => Self::RESPONSE_MCP_CALL_ARGUMENTS_DELTA,
+            Self::ResponseMcpCallArgumentsDone => Self::RESPONSE_MCP_CALL_ARGUMENTS_DONE,
+            Self::ResponseMcpCallInProgress => Self::RESPONSE_MCP_CALL_IN_PROGRESS,
+            Self::ResponseMcpCallCompleted => Self::RESPONSE_MCP_CALL_COMPLETED,
+            Self::ResponseMcpCallFailed => Self::RESPONSE_MCP_CALL_FAILED,
+            Self::McpListToolsInProgress => Self::MCP_LIST_TOOLS_IN_PROGRESS,
+            Self::McpListToolsCompleted => Self::MCP_LIST_TOOLS_COMPLETED,
+            Self::McpListToolsFailed => Self::MCP_LIST_TOOLS_FAILED,
+            Self::RateLimitsUpdated => Self::RATE_LIMITS_UPDATED,
+            Self::Error => Self::ERROR,
+        }
+    }
+}
+
+impl fmt::Display for RealtimeServerEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Check if an event type string matches any response lifecycle event
 pub fn is_response_event(event_type: &str) -> bool {
     matches!(

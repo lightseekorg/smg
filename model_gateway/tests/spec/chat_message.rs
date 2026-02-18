@@ -1,5 +1,5 @@
+use openai_protocol::chat::{ChatMessage, MessageContent};
 use serde_json::json;
-use smg::protocols::chat::{ChatMessage, MessageContent};
 
 #[test]
 fn test_chat_message_tagged_by_role_system() {

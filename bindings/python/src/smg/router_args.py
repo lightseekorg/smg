@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import dataclasses
 import logging
@@ -113,6 +115,7 @@ class RouterArgs:
     oracle_connect_descriptor: str | None = None
     oracle_username: str | None = None
     oracle_password: str | None = None
+    oracle_external_auth: bool = False
     oracle_pool_min: int = 1
     oracle_pool_max: int = 16
     oracle_pool_timeout_secs: int = 30
@@ -774,6 +777,12 @@ class RouterArgs:
             help="Oracle database password (env: ATP_PASSWORD)",
         )
         oracle_group.add_argument(
+            f"--{prefix}oracle-external-auth",
+            action="store_true",
+            default=os.getenv("ATP_EXTERNAL_AUTH", "").lower() in ("1", "true", "yes"),
+            help="Enable Oracle external authentication (env: ATP_EXTERNAL_AUTH)",
+        )
+        oracle_group.add_argument(
             f"--{prefix}oracle-pool-min",
             type=int,
             default=int(os.getenv("ATP_POOL_MIN", RouterArgs.oracle_pool_min)),
@@ -945,9 +954,7 @@ class RouterArgs:
         )
 
     @classmethod
-    def from_cli_args(
-        cls, args: argparse.Namespace, use_router_prefix: bool = False
-    ) -> "RouterArgs":
+    def from_cli_args(cls, args: argparse.Namespace, use_router_prefix: bool = False) -> RouterArgs:
         """
         Create RouterArgs instance from parsed command line arguments.
 

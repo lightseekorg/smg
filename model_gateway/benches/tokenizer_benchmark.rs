@@ -14,7 +14,7 @@ use std::{
 };
 
 use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
-use smg::tokenizer::{
+use llm_tokenizer::{
     cache::{CacheConfig, CachedTokenizer},
     huggingface::HuggingFaceTokenizer,
     sequence::Sequence,
@@ -32,7 +32,7 @@ fn get_tokenizer_path() -> &'static PathBuf {
         // with special: true, normalized: false - perfect for demonstrating L1 cache
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         let tokenizer_dir = rt.block_on(async {
-            smg::tokenizer::hub::download_tokenizer_from_hf("Qwen/Qwen3-4B-Instruct-2507")
+            llm_tokenizer::hub::download_tokenizer_from_hf("Qwen/Qwen3-4B-Instruct-2507")
                 .await
                 .expect("Failed to download Qwen3-4B-Instruct tokenizer from HuggingFace")
         });

@@ -7,11 +7,10 @@ use std::{
     sync::Arc,
 };
 
-use serde_json::Value;
-use smg::tokenizer::{
-    chat_template::ChatTemplateParams, create_tokenizer, huggingface::HuggingFaceTokenizer,
-    traits::Tokenizer as TokenizerTrait,
+use llm_tokenizer::{
+    chat_template::ChatTemplateParams, create_tokenizer, traits::Tokenizer as TokenizerTrait,
 };
+use serde_json::Value;
 
 use super::error::{clear_error_message, set_error_message, SglErrorCode};
 
@@ -32,16 +31,6 @@ fn apply_chat_template_impl(
     messages: Vec<Value>,
     tools: Option<&[Value]>,
 ) -> Result<String, (SglErrorCode, &'static str)> {
-    // Try to downcast to HuggingFaceTokenizer
-    let hf_tokenizer = tokenizer
-        .as_any()
-        .downcast_ref::<HuggingFaceTokenizer>()
-        .ok_or((
-            SglErrorCode::TokenizationError,
-            "Chat template is only supported for HuggingFace tokenizers",
-        ))?;
-
-    // Use empty arrays for missing optional fields
     let empty_tools: [Value; 0] = [];
     let empty_docs: [Value; 0] = [];
 
@@ -52,7 +41,7 @@ fn apply_chat_template_impl(
         template_kwargs: None,
     };
 
-    hf_tokenizer
+    tokenizer
         .apply_chat_template(&messages, params)
         .map_err(|_| {
             (

@@ -3,24 +3,24 @@ use std::{
     time::Duration,
 };
 
+use llm_tokenizer::registry::TokenizerRegistry;
+use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use reqwest::Client;
+use smg_data_connector::{
+    create_storage, ConversationItemStorage, ConversationStorage, ResponseStorage,
+    StorageFactoryConfig,
+};
+use smg_mcp::McpOrchestrator;
+use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::debug;
 
 use crate::{
     config::RouterConfig,
     core::{steps::WorkflowEngines, JobQueue, LoadMonitor, WorkerRegistry, WorkerService},
-    data_connector::{
-        create_storage, ConversationItemStorage, ConversationStorage, ResponseStorage,
-        StorageFactoryConfig,
-    },
-    mcp::McpOrchestrator,
     middleware::TokenBucket,
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
-    reasoning_parser::ParserFactory as ReasoningParserFactory,
     routers::router_manager::RouterManager,
-    tokenizer::registry::TokenizerRegistry,
-    tool_parser::ParserFactory as ToolParserFactory,
     wasm::{config::WasmRuntimeConfig, module_manager::WasmModuleManager},
 };
 
@@ -496,7 +496,7 @@ impl AppContextBuilder {
         // Always create with empty config and defaults
         debug!("Initializing MCP orchestrator with empty config and default settings (5 min TTL, 100 max connections)");
 
-        let empty_config = crate::mcp::McpConfig {
+        let empty_config = smg_mcp::McpConfig {
             servers: Vec::new(),
             pool: Default::default(),
             proxy: None,

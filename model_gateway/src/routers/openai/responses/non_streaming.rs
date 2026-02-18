@@ -7,21 +7,20 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::{json, Value};
+use serde_json::Value;
+use smg_mcp::McpToolSession;
 use tracing::warn;
 
 use super::{
     mcp::{execute_tool_loop, prepare_mcp_tools_as_functions},
     utils::{patch_response_with_request_metadata, restore_original_tools},
 };
-use crate::{
-    mcp::McpToolSession,
-    routers::{
-        header_utils::{apply_provider_headers, extract_auth_header},
-        mcp_utils::ensure_request_mcp_client,
-        openai::context::{PayloadState, RequestContext},
-        persistence_utils::persist_conversation_items,
-    },
+use crate::routers::{
+    error,
+    header_utils::{apply_provider_headers, extract_auth_header},
+    mcp_utils::ensure_request_mcp_client,
+    openai::context::{PayloadState, RequestContext},
+    persistence_utils::persist_conversation_items,
 };
 
 /// Handle a non-streaming responses request
@@ -29,7 +28,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     let payload_state = match ctx.state.payload.take() {
         Some(ps) => ps,
         None => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Payload not prepared").into_response();
+            return error::internal_error("internal_error", "Payload not prepared");
         }
     };
 
@@ -39,21 +38,22 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         previous_response_id,
     } = payload_state;
 
-    let original_body = ctx.responses_request();
+    let original_body = match ctx.responses_request() {
+        Some(r) => r,
+        None => {
+            return error::internal_error("internal_error", "Expected responses request");
+        }
+    };
     let worker = match ctx.worker() {
         Some(w) => w.clone(),
         None => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Worker not selected").into_response();
+            return error::internal_error("internal_error", "Worker not selected");
         }
     };
     let mcp_orchestrator = match ctx.components.mcp_orchestrator() {
         Some(m) => m,
         None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "MCP orchestrator required",
-            )
-                .into_response();
+            return error::internal_error("internal_error", "MCP orchestrator required");
         }
     };
 
@@ -87,11 +87,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             Ok(resp) => response_json = resp,
             Err(err) => {
                 worker.circuit_breaker().record_failure();
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": {"message": err}})),
-                )
-                    .into_response();
+                return error::internal_error("upstream_error", err);
             }
         }
     } else {
@@ -108,11 +104,10 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
                     error = %e,
                     "Failed to forward request to OpenAI"
                 );
-                return (
-                    StatusCode::BAD_GATEWAY,
+                return error::bad_gateway(
+                    "upstream_error",
                     format!("Failed to forward request to OpenAI: {}", e),
-                )
-                    .into_response();
+                );
             }
         };
 
@@ -128,11 +123,10 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             Ok(r) => r,
             Err(e) => {
                 worker.circuit_breaker().record_failure();
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                return error::internal_error(
+                    "parse_error",
                     format!("Failed to parse upstream response: {}", e),
-                )
-                    .into_response();
+                );
             }
         };
 

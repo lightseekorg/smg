@@ -16,6 +16,7 @@ struct ErrorDetail<'a> {
     error_type: &'static str,
     code: &'a str,
     message: &'a str,
+    param: Option<String>,
 }
 
 pub const HEADER_X_SMG_ERROR_CODE: &str = "X-SMG-Error-Code";
@@ -77,6 +78,7 @@ pub fn create_error(
                 error_type: status_code_to_str(status),
                 code: &code_str,
                 message: &message_str,
+                param: None,
             },
         }),
     )
@@ -87,6 +89,14 @@ fn status_code_to_str(status_code: StatusCode) -> &'static str {
     status_code
         .canonical_reason()
         .unwrap_or("Unknown Status Code")
+}
+
+pub fn model_not_found(model: &str) -> Response {
+    create_error(
+        StatusCode::NOT_FOUND,
+        "model_not_found",
+        format!("No worker available for model '{}'", model),
+    )
 }
 
 pub fn extract_error_code_from_response<B>(response: &Response<B>) -> &str {

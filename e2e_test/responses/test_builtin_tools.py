@@ -130,7 +130,7 @@ def gateway_with_mcp_config_grpc(require_brave_server, mcp_config_file, model_po
 
     # Get a gRPC worker from the pool
     try:
-        instance = model_pool.get("gpt-oss", ConnectionMode.GRPC)
+        instance = model_pool.get("openai/gpt-oss-20b", ConnectionMode.GRPC)
     except (KeyError, RuntimeError) as e:
         pytest.skip(f"gRPC worker not available: {e}")
 
@@ -251,7 +251,7 @@ class TestBuiltinToolsCloudBackend:
 
 
 @pytest.mark.e2e
-@pytest.mark.model("gpt-oss")
+@pytest.mark.model("openai/gpt-oss-20b")
 @pytest.mark.gateway(extra_args=["--reasoning-parser=gpt-oss", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
 class TestBuiltinToolsLocalBackend:
