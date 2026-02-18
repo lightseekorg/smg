@@ -40,11 +40,11 @@ pub struct McpToolSession<'a> {
     orchestrator: &'a McpOrchestrator,
     request_ctx: McpRequestContext<'a>,
     /// All MCP servers in this session (including builtin).
-    mcp_servers: Vec<(String, String)>,
+    all_mcp_servers: Vec<(String, String)>,
     /// Non-builtin MCP servers only — used for `mcp_list_tools` output.
     /// Servers configured with `builtin_type` are filtered out to avoid
     /// exposing internal MCP details in client-facing responses.
-    visible_mcp_servers: Vec<(String, String)>,
+    mcp_servers: Vec<(String, String)>,
     mcp_tools: Vec<ToolEntry>,
     exposed_name_map: HashMap<String, ExposedToolBinding>,
     exposed_name_by_qualified: HashMap<QualifiedToolName, String>,
@@ -83,8 +83,8 @@ impl<'a> McpToolSession<'a> {
         Self {
             orchestrator,
             request_ctx,
-            mcp_servers,
-            visible_mcp_servers,
+            all_mcp_servers: mcp_servers,
+            mcp_servers: visible_mcp_servers,
             mcp_tools,
             exposed_name_map,
             exposed_name_by_qualified,
@@ -106,14 +106,13 @@ impl<'a> McpToolSession<'a> {
     /// Servers configured with `builtin_type` are filtered out because their
     /// tools are exposed to the model as function tools internally, but should
     /// not appear in client-facing `mcp_list_tools` items.
-    #[allow(clippy::misnamed_getters)]
     pub fn mcp_servers(&self) -> &[(String, String)] {
-        &self.visible_mcp_servers
+        &self.mcp_servers
     }
 
     /// Returns all MCP servers including builtin ones.
     pub fn all_mcp_servers(&self) -> &[(String, String)] {
-        &self.mcp_servers
+        &self.all_mcp_servers
     }
 
     pub fn mcp_tools(&self) -> &[ToolEntry] {
@@ -169,7 +168,7 @@ impl<'a> McpToolSession<'a> {
             output
         } else {
             let fallback_label = self
-                .mcp_servers
+                .all_mcp_servers
                 .first()
                 .map(|(label, _)| label.clone())
                 .unwrap_or_else(|| "mcp".to_string());
@@ -201,7 +200,7 @@ impl<'a> McpToolSession<'a> {
     /// label (or "mcp").
     pub fn resolve_tool_server_label(&self, tool_name: &str) -> String {
         let fallback_label = self
-            .mcp_servers
+            .all_mcp_servers
             .first()
             .map(|(label, _)| label.as_str())
             .unwrap_or("mcp");
@@ -276,10 +275,10 @@ impl<'a> McpToolSession<'a> {
         output: &mut Vec<openai_protocol::responses::ResponseOutputItem>,
         tool_call_items: Vec<openai_protocol::responses::ResponseOutputItem>,
     ) {
-        let num_servers = self.visible_mcp_servers.len();
+        let num_servers = self.mcp_servers.len();
 
         // 1. Prepend mcp_list_tools for each non-builtin server
-        for (label, key) in self.visible_mcp_servers.iter().rev() {
+        for (label, key) in self.mcp_servers.iter().rev() {
             output.insert(0, self.build_mcp_list_tools_item(label, key));
         }
 
