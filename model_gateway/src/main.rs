@@ -218,6 +218,26 @@ struct CliArgs {
     #[arg(long, default_value_t = 30, help_heading = "PD Disaggregation")]
     worker_startup_check_interval: u64,
 
+    /// URL for the pre-prefill worker (cold request warming)
+    #[arg(long, help_heading = "PD Disaggregation")]
+    pre_prefill_url: Option<String>,
+
+    /// Decode URL paired with the pre-prefill worker
+    #[arg(long, help_heading = "PD Disaggregation")]
+    pre_prefill_decode_url: Option<String>,
+
+    /// Cache match ratio threshold below which a request is considered "cold" (default: 0.1)
+    #[arg(long, default_value_t = 0.1, help_heading = "PD Disaggregation")]
+    pre_prefill_match_threshold: f32,
+
+    /// Minimum unmatched characters to trigger pre-prefill routing (default: 10000)
+    #[arg(long, default_value_t = 10000, help_heading = "PD Disaggregation")]
+    pre_prefill_unmatched_chars_threshold: usize,
+
+    /// Minimum total tokens (chars as proxy) for pre-prefill eligibility (default: 10000)
+    #[arg(long, default_value_t = 10000, help_heading = "PD Disaggregation")]
+    pre_prefill_min_tokens: usize,
+
     // ==================== Service Discovery (Kubernetes) ====================
     /// Enable Kubernetes service discovery
     #[arg(
@@ -901,6 +921,11 @@ impl CliArgs {
                 decode_urls: self.decode.clone(),
                 prefill_policy: self.prefill_policy.as_ref().map(|p| self.parse_policy(p)),
                 decode_policy: self.decode_policy.as_ref().map(|p| self.parse_policy(p)),
+                pre_prefill_url: self.pre_prefill_url.clone(),
+                pre_prefill_decode_url: self.pre_prefill_decode_url.clone(),
+                pre_prefill_match_threshold: self.pre_prefill_match_threshold,
+                pre_prefill_unmatched_chars_threshold: self.pre_prefill_unmatched_chars_threshold,
+                pre_prefill_min_tokens: self.pre_prefill_min_tokens,
             }
         } else {
             RoutingMode::Regular {

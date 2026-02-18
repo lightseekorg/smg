@@ -437,6 +437,11 @@ struct Router {
     enable_trace: bool,
     otlp_traces_endpoint: String,
     control_plane_auth: Option<PyControlPlaneAuthConfig>,
+    pre_prefill_url: Option<String>,
+    pre_prefill_decode_url: Option<String>,
+    pre_prefill_match_threshold: f32,
+    pre_prefill_unmatched_chars_threshold: usize,
+    pre_prefill_min_tokens: usize,
 }
 
 impl Router {
@@ -523,6 +528,11 @@ impl Router {
                     .as_ref()
                     .map(convert_policy)
                     .transpose()?,
+                pre_prefill_url: self.pre_prefill_url.clone(),
+                pre_prefill_decode_url: self.pre_prefill_decode_url.clone(),
+                pre_prefill_match_threshold: self.pre_prefill_match_threshold,
+                pre_prefill_unmatched_chars_threshold: self.pre_prefill_unmatched_chars_threshold,
+                pre_prefill_min_tokens: self.pre_prefill_min_tokens,
             }
         } else {
             RoutingMode::Regular {
@@ -756,6 +766,11 @@ impl Router {
         enable_trace = false,
         otlp_traces_endpoint = String::from("localhost:4317"),
         control_plane_auth = None,
+        pre_prefill_url = None,
+        pre_prefill_decode_url = None,
+        pre_prefill_match_threshold = 0.1,
+        pre_prefill_unmatched_chars_threshold = 10000,
+        pre_prefill_min_tokens = 10000,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -843,6 +858,11 @@ impl Router {
         enable_trace: bool,
         otlp_traces_endpoint: String,
         control_plane_auth: Option<PyControlPlaneAuthConfig>,
+        pre_prefill_url: Option<String>,
+        pre_prefill_decode_url: Option<String>,
+        pre_prefill_match_threshold: f32,
+        pre_prefill_unmatched_chars_threshold: usize,
+        pre_prefill_min_tokens: usize,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -944,6 +964,11 @@ impl Router {
             enable_trace,
             otlp_traces_endpoint,
             control_plane_auth,
+            pre_prefill_url,
+            pre_prefill_decode_url,
+            pre_prefill_match_threshold,
+            pre_prefill_unmatched_chars_threshold,
+            pre_prefill_min_tokens,
         })
     }
 

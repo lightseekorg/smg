@@ -604,6 +604,73 @@ impl CacheAwarePolicy {
     }
 }
 
+/// Pre-prefill routing support methods
+impl CacheAwarePolicy {
+    /// Estimate cache match statistics for the given text across all workers.
+    ///
+    /// Returns `Some((matched_chars, total_chars))` if a tree exists for the workers' model,
+    /// or `None` if no tree is available.
+    pub fn estimate_match_stats(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        text: &str,
+    ) -> Option<(usize, usize)> {
+        if workers.is_empty() || text.is_empty() {
+            return None;
+        }
+
+        let model_id = normalize_model_key(workers[0].model_id());
+        let tree = self
+            .string_trees
+            .get(model_id)
+            .map(|entry| entry.value().clone());
+
+        match tree {
+            Some(tree) => {
+                let result = tree.match_prefix_with_counts(text);
+                Some((result.matched_char_count, result.input_char_count))
+            }
+            // No tree yet = no cache at all = fully cold
+            None => Some((0, text.len())),
+        }
+    }
+
+    /// Record a pre-prefill assignment in the cache tree and sync via mesh.
+    ///
+    /// This updates the string tree so future requests with overlapping prefixes
+    /// will be routed to the same worker (cache hit).
+    pub fn record_assignment(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        text: &str,
+        worker_url: &str,
+    ) {
+        if workers.is_empty() || text.is_empty() {
+            return;
+        }
+
+        let model_id = normalize_model_key(workers[0].model_id());
+        let tree = self
+            .string_trees
+            .entry(model_id.to_string())
+            .or_insert_with(|| Arc::new(Tree::new()));
+
+        tree.insert_text(text, worker_url);
+
+        // Sync insert operation to mesh if enabled
+        if let Some(ref mesh_sync) = self.mesh_sync {
+            let op = TreeOperation::Insert(TreeInsertOp {
+                text: text.to_string(),
+                tenant: worker_url.to_string(),
+            });
+            let mesh_model_id = Self::normalize_mesh_model_id(model_id);
+            if let Err(e) = mesh_sync.sync_tree_operation(mesh_model_id.to_string(), op) {
+                warn!("Failed to sync pre-prefill tree insert to mesh: {}", e);
+            }
+        }
+    }
+}
+
 impl Default for CacheAwarePolicy {
     fn default() -> Self {
         Self::new()
@@ -934,6 +1001,140 @@ mod tests {
         // For unit test, we verify the sync mechanism works
         // Tree state may or may not exist depending on sync timing
         let _ = tree_state;
+    }
+
+    #[test]
+    fn test_estimate_match_stats_no_tree() {
+        let config = CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        };
+        let policy = CacheAwarePolicy::with_config(config);
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
+            BasicWorkerBuilder::new("http://w1:8000")
+                .worker_type(WorkerType::Regular)
+                .build(),
+        )];
+
+        // No init_workers called -> no tree -> fully cold (0 matched, N total)
+        let result = policy.estimate_match_stats(&workers, "hello world");
+        assert!(result.is_some());
+        let (matched, total) = result.unwrap();
+        assert_eq!(matched, 0);
+        assert_eq!(total, 11); // "hello world".len()
+    }
+
+    #[test]
+    fn test_estimate_match_stats_no_match() {
+        let config = CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        };
+        let policy = CacheAwarePolicy::with_config(config);
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
+            BasicWorkerBuilder::new("http://w1:8000")
+                .worker_type(WorkerType::Regular)
+                .build(),
+        )];
+        policy.init_workers(&workers);
+
+        // Tree exists but has no content -> matched=0
+        let result = policy.estimate_match_stats(&workers, "new text never seen before");
+        assert!(result.is_some());
+        let (matched, total) = result.unwrap();
+        assert_eq!(matched, 0);
+        assert!(total > 0);
+    }
+
+    #[test]
+    fn test_estimate_match_stats_with_match() {
+        let config = CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        };
+        let policy = CacheAwarePolicy::with_config(config);
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
+            BasicWorkerBuilder::new("http://w1:8000")
+                .worker_type(WorkerType::Regular)
+                .build(),
+        )];
+        policy.init_workers(&workers);
+
+        // Insert text, then check match
+        policy.record_assignment(&workers, "hello world this is a test", "http://w1:8000");
+
+        let result = policy.estimate_match_stats(&workers, "hello world this is a test");
+        assert!(result.is_some());
+        let (matched, total) = result.unwrap();
+        assert_eq!(matched, total); // exact match
+    }
+
+    #[test]
+    fn test_estimate_match_stats_partial_match() {
+        let config = CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        };
+        let policy = CacheAwarePolicy::with_config(config);
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
+            BasicWorkerBuilder::new("http://w1:8000")
+                .worker_type(WorkerType::Regular)
+                .build(),
+        )];
+        policy.init_workers(&workers);
+
+        // Insert a prefix, then query with longer text
+        policy.record_assignment(&workers, "hello world", "http://w1:8000");
+
+        let result = policy.estimate_match_stats(&workers, "hello world plus extra content");
+        assert!(result.is_some());
+        let (matched, total) = result.unwrap();
+        assert!(matched > 0);
+        assert!(matched < total); // partial match
+    }
+
+    #[test]
+    fn test_record_assignment_creates_tree() {
+        let config = CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        };
+        let policy = CacheAwarePolicy::with_config(config);
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
+            BasicWorkerBuilder::new("http://w1:8000")
+                .worker_type(WorkerType::Regular)
+                .build(),
+        )];
+        // Don't call init_workers — record_assignment should create tree on demand
+
+        policy.record_assignment(&workers, "some text", "http://w1:8000");
+
+        // Now estimate should work
+        let result = policy.estimate_match_stats(&workers, "some text");
+        assert!(result.is_some());
+        let (matched, total) = result.unwrap();
+        assert_eq!(matched, total);
+    }
+
+    #[test]
+    fn test_estimate_match_stats_empty_inputs() {
+        let config = CacheAwareConfig {
+            eviction_interval_secs: 0,
+            ..Default::default()
+        };
+        let policy = CacheAwarePolicy::with_config(config);
+        let workers: Vec<Arc<dyn Worker>> = vec![];
+
+        // Empty workers
+        assert!(policy.estimate_match_stats(&workers, "text").is_none());
+
+        // Empty text
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
+            BasicWorkerBuilder::new("http://w1:8000")
+                .worker_type(WorkerType::Regular)
+                .build(),
+        )];
+        assert!(policy.estimate_match_stats(&workers, "").is_none());
     }
 
     #[test]

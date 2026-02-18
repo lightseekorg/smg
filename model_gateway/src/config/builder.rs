@@ -60,6 +60,11 @@ impl RouterConfigBuilder {
             decode_urls,
             prefill_policy: None,
             decode_policy: None,
+            pre_prefill_url: None,
+            pre_prefill_decode_url: None,
+            pre_prefill_match_threshold: super::types::default_pre_prefill_match_threshold(),
+            pre_prefill_unmatched_chars_threshold: super::types::default_pre_prefill_unmatched_chars_threshold(),
+            pre_prefill_min_tokens: super::types::default_pre_prefill_min_tokens(),
         };
         self
     }
@@ -77,6 +82,11 @@ impl RouterConfigBuilder {
             decode_urls,
             prefill_policy,
             decode_policy,
+            pre_prefill_url: None,
+            pre_prefill_decode_url: None,
+            pre_prefill_match_threshold: super::types::default_pre_prefill_match_threshold(),
+            pre_prefill_unmatched_chars_threshold: super::types::default_pre_prefill_unmatched_chars_threshold(),
+            pre_prefill_min_tokens: super::types::default_pre_prefill_min_tokens(),
         };
         self
     }
