@@ -2,9 +2,6 @@
 //!
 //! Measures throughput and latency of concurrent streaming gRPC requests
 //! through a single tonic::Channel to quantify the bottleneck.
-//!
-//! Run: cargo bench --package smg --bench grpc_channel_bench
-//!
 //! This benchmark:
 //! 1. Spins up an in-process mock SglangScheduler gRPC server
 //! 2. Connects a single SglangSchedulerClient (one channel = one TCP connection)
