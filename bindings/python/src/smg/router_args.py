@@ -23,6 +23,12 @@ class RouterArgs:
         default_factory=list
     )  # List of (url, bootstrap_port)
     decode_urls: list[str] = dataclasses.field(default_factory=list)
+    # Pre-prefill routing configuration
+    pre_prefill_url: str | None = None  # URL for pre-prefill worker
+    pre_prefill_decode_url: str | None = None  # Decode URL paired with pre-prefill worker
+    pre_prefill_match_threshold: float = 0.1  # Cache match threshold for cold detection
+    pre_prefill_unmatched_chars_threshold: int = 10000  # Min unmatched chars to trigger
+    pre_prefill_min_tokens: int = 10000  # Min total tokens for eligibility
 
     # Routing policy
     policy: str = "cache_aware"
@@ -397,6 +403,36 @@ class RouterArgs:
             type=int,
             default=RouterArgs.worker_startup_check_interval,
             help="Interval in seconds between checks for worker startup",
+        )
+        pd_group.add_argument(
+            f"--{prefix}pre-prefill-url",
+            type=str,
+            default=None,
+            help="URL for the pre-prefill worker (cold request warming)",
+        )
+        pd_group.add_argument(
+            f"--{prefix}pre-prefill-decode-url",
+            type=str,
+            default=None,
+            help="Decode URL paired with the pre-prefill worker",
+        )
+        pd_group.add_argument(
+            f"--{prefix}pre-prefill-match-threshold",
+            type=float,
+            default=RouterArgs.pre_prefill_match_threshold,
+            help="Cache match ratio threshold below which a request is considered 'cold' (default: 0.1)",
+        )
+        pd_group.add_argument(
+            f"--{prefix}pre-prefill-unmatched-chars-threshold",
+            type=int,
+            default=RouterArgs.pre_prefill_unmatched_chars_threshold,
+            help="Minimum unmatched characters to trigger pre-prefill routing (default: 10000)",
+        )
+        pd_group.add_argument(
+            f"--{prefix}pre-prefill-min-tokens",
+            type=int,
+            default=RouterArgs.pre_prefill_min_tokens,
+            help="Minimum total tokens (chars as proxy) for pre-prefill eligibility (default: 10000)",
         )
 
         # Logging configuration
