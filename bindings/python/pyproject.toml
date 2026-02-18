@@ -30,6 +30,7 @@ dependencies = [
     "setproctitle",
     "grpcio",
     "grpcio-health-checking",
+    "PyYAML",
 ]
 
 [project.optional-dependencies]

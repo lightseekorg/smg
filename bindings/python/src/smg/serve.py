@@ -31,7 +31,9 @@ class WorkerLauncher(ABC):
     """Abstract base class for backend worker launchers."""
 
     @abstractmethod
-    def build_command(self, args: argparse.Namespace, backend_args: list[str], host: str, port: int) -> list[str]:
+    def build_command(
+        self, args: argparse.Namespace, backend_args: list[str], host: str, port: int
+    ) -> list[str]:
         """Build the CLI command list to launch a worker."""
         ...
 
@@ -77,12 +79,7 @@ class WorkerLauncher(ABC):
         return filtered_backend_args
 
     def launch(
-        self,
-        args: argparse.Namespace,
-        backend_args: list[str],
-        host: str,
-        port: int,
-        env: dict
+        self, args: argparse.Namespace, backend_args: list[str], host: str, port: int, env: dict
     ) -> subprocess.Popen:
         """Launch the worker subprocess."""
         cmd = self.build_command(args, backend_args, host, port)

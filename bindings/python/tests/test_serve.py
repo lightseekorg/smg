@@ -583,6 +583,7 @@ class TestHttpHealthCheck:
         with patch("urllib.request.urlopen", return_value=mock_resp):
             assert _http_health_check("http://localhost:31000/health", 5.0) is False
 
+
 class TestGrpcHealthCheck:
     """Test _grpc_health_check with mocked grpc and health stub."""
 
