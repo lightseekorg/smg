@@ -15,15 +15,20 @@ pull_request_rules:
 
           Allowed types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`
 
-          > **Note:** We will bypass this check for existing PRs during the grace period, but PRs with non-conforming branch names **will be auto-closed** in the future. Please follow the naming convention for all new branches.
+          > **Note:** PRs with non-conforming branch names **will be auto-closed**. Please follow the naming convention for all branches.
       post_check:
         title: Branch naming convention
         summary: |
           Branch `{{head}}` does not match the required pattern: `<type>/<description>` or `<username>/<description>`.
-      # TODO: Re-enable auto-close once existing non-conforming PRs are merged
-      # close:
-      #   message: |
-      #     Closing this PR because the branch name does not follow the naming convention. Please rename your branch and reopen.
+      close:
+        message: |
+          Closing this PR because the branch name `{{head}}` does not follow the naming convention.
+
+          To fix this, please rename your branch locally, push the new branch, and open a new PR:
+          ```bash
+          git branch -m <new-branch-name>
+          git push origin -u <new-branch-name>
+          ```
 
   - name: Comment on DCO check failure
     description: Post fix instructions when DCO sign-off is missing
