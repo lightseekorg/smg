@@ -84,7 +84,10 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         )
         .await
         {
-            Ok(resp) => response_json = resp,
+            Ok(resp) => {
+                worker.circuit_breaker().record_success();
+                response_json = resp;
+            }
             Err(err) => {
                 worker.circuit_breaker().record_failure();
                 return error::internal_error("upstream_error", err);
@@ -156,6 +159,8 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         {
             warn!("Failed to persist conversation items: {}", err);
         }
+    } else {
+        warn!("Storage not configured, skipping conversation persistence");
     }
 
     (StatusCode::OK, Json(response_json)).into_response()

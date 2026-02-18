@@ -24,14 +24,11 @@ use smg_mcp::{McpToolSession, ResponseFormat, ResponseTransformer, ToolExecution
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use super::tool_handler::FunctionCallInProgress;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{header_utils::apply_request_headers, mcp_utils::DEFAULT_MAX_ITERATIONS},
 };
-
-// ============================================================================
-// Configuration and State Types
-// ============================================================================
 
 /// State for tracking multi-turn tool calling loop
 pub(super) struct ToolLoopState {
@@ -70,7 +67,6 @@ impl ToolLoopState {
         output_str: String,
         transformed_item: Value,
     ) {
-        // Add function_call item to history (for resume payloads)
         let func_item = json!({
             "type": ItemType::FUNCTION_CALL,
             "call_id": call_id,
@@ -79,7 +75,6 @@ impl ToolLoopState {
         });
         self.conversation_history.push(func_item);
 
-        // Add function_call_output item to history (for resume payloads)
         let output_item = json!({
             "type": "function_call_output",
             "call_id": call_id,
@@ -87,47 +82,9 @@ impl ToolLoopState {
         });
         self.conversation_history.push(output_item);
 
-        // Store transformed item (for final response output)
         self.mcp_call_items.push(transformed_item);
     }
 }
-
-/// Represents a function call being accumulated across delta events
-#[derive(Debug, Clone)]
-pub(super) struct FunctionCallInProgress {
-    pub call_id: String,
-    pub name: String,
-    pub arguments_buffer: String,
-    pub output_index: usize,
-    pub last_obfuscation: Option<String>,
-    pub assigned_output_index: Option<usize>,
-}
-
-impl FunctionCallInProgress {
-    pub fn new(call_id: String, output_index: usize) -> Self {
-        Self {
-            call_id,
-            name: String::new(),
-            arguments_buffer: String::new(),
-            output_index,
-            last_obfuscation: None,
-            assigned_output_index: None,
-        }
-    }
-
-    pub fn is_complete(&self) -> bool {
-        // A tool call is complete if it has a name
-        !self.name.is_empty()
-    }
-
-    pub fn effective_output_index(&self) -> usize {
-        self.assigned_output_index.unwrap_or(self.output_index)
-    }
-}
-
-// ============================================================================
-// Tool Execution
-// ============================================================================
 
 /// Execute detected tool calls and send completion events to client
 /// Returns false if client disconnected during execution
@@ -139,9 +96,7 @@ pub(super) async fn execute_streaming_tool_calls(
     sequence_number: &mut u64,
     model_id: &str,
 ) -> bool {
-    // Execute all pending tool calls (sequential, as PR3 is skipped)
     for call in pending_calls {
-        // Skip if name is empty (invalid call)
         if call.name.is_empty() {
             warn!(
                 "Skipping incomplete tool call: name is empty, args_len={}",
@@ -155,24 +110,20 @@ pub(super) async fn execute_streaming_tool_calls(
             call.name, call.call_id
         );
 
-        // Use empty JSON object if arguments_buffer is empty
         let args_str = if call.arguments_buffer.is_empty() {
             "{}"
         } else {
             &call.arguments_buffer
         };
 
-        // Look up tool entry to get response_format and server label
         let response_format = session.tool_response_format(&call.name);
         let server_label = session.resolve_tool_server_label(&call.name);
 
-        // Parse arguments to Value
         let arguments: Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
             Err(e) => {
                 let err_str = format!("Failed to parse tool arguments: {}", e);
                 warn!("{}", err_str);
-                // Build error mcp_call item with transformer
                 let error_output = json!({ "error": &err_str });
                 let mcp_call_item = build_transformed_mcp_call_item(
                     &error_output,
@@ -182,7 +133,6 @@ pub(super) async fn execute_streaming_tool_calls(
                     &call.name,
                     &call.arguments_buffer,
                 );
-                // Send error event and continue
                 if !send_tool_call_completion_events(
                     tx,
                     &call,
@@ -202,7 +152,6 @@ pub(super) async fn execute_streaming_tool_calls(
             }
         };
 
-        // Emit the intermediate event before tool execution (searching/interpreting)
         if !send_tool_call_intermediate_event(tx, &call, &response_format, sequence_number) {
             return false;
         }
@@ -216,7 +165,6 @@ pub(super) async fn execute_streaming_tool_calls(
             })
             .await;
 
-        // Record MCP tool metrics
         Metrics::record_mcp_tool_duration(model_id, &tool_output.tool_name, tool_output.duration);
         Metrics::record_mcp_tool_call(
             model_id,
@@ -234,13 +182,10 @@ pub(super) async fn execute_streaming_tool_calls(
             json!({})
         });
 
-        // Send mcp_call completion event to client
         if !send_tool_call_completion_events(tx, &call, mcp_call_item.clone(), sequence_number) {
-            // Client disconnected, no point continuing tool execution
             return false;
         }
 
-        // Record the call with transformed item (avoids re-transformation later)
         state.record_call(
             call.call_id,
             call.name,
@@ -251,10 +196,6 @@ pub(super) async fn execute_streaming_tool_calls(
     }
     true
 }
-
-// ============================================================================
-// Payload Transformation
-// ============================================================================
 
 /// Transform payload to replace MCP/builtin tools with function tools.
 ///
@@ -299,19 +240,14 @@ pub(super) fn build_resume_payload(
     tools_json: &Value,
     is_streaming: bool,
 ) -> Result<Value, String> {
-    // Clone the base payload which already has cleaned fields
     let mut payload = base_payload.clone();
 
     let obj = payload
         .as_object_mut()
         .ok_or_else(|| "payload not an object".to_string())?;
 
-    // Build input array: start with original user input
-    // Pre-allocate: 1 for user message + conversation history
     let mut input_array = Vec::with_capacity(1 + conversation_history.len());
 
-    // Add original user message
-    // For structured input, serialize the original input items
     match original_input {
         ResponseInput::Text(text) => {
             let user_item = json!({
@@ -322,40 +258,28 @@ pub(super) fn build_resume_payload(
             input_array.push(user_item);
         }
         ResponseInput::Items(items) => {
-            // Items are ResponseInputOutputItem (including SimpleInputMessage), convert to JSON
-            let items_value = to_value(items)
-                .map_err(|e| format!("Failed to serialize input items: {}", e))?;
+            let items_value =
+                to_value(items).map_err(|e| format!("Failed to serialize input items: {}", e))?;
             if let Some(items_arr) = items_value.as_array() {
                 input_array.extend_from_slice(items_arr);
             }
         }
     }
 
-    // Add all conversation history (function calls and outputs)
     input_array.extend_from_slice(conversation_history);
-
     obj.insert("input".to_string(), Value::Array(input_array));
 
-    // Use the transformed tools (function tools, not MCP tools)
     if let Some(tools_arr) = tools_json.as_array() {
         if !tools_arr.is_empty() {
             obj.insert("tools".to_string(), tools_json.clone());
         }
     }
 
-    // Set streaming mode based on caller's context
     obj.insert("stream".to_string(), Value::Bool(is_streaming));
     obj.insert("store".to_string(), Value::Bool(false));
 
-    // Note: SGLang-specific fields were already removed from base_payload
-    // before it was passed to execute_tool_loop (see route_responses lines 1935-1946)
-
     Ok(payload)
 }
-
-// ============================================================================
-// SSE Event Senders
-// ============================================================================
 
 /// Send mcp_list_tools events to client at the start of streaming
 /// Returns false if client disconnected
@@ -494,7 +418,6 @@ pub(super) fn send_tool_call_completion_events(
 ) -> bool {
     let effective_output_index = call.effective_output_index();
 
-    // Get the item_id
     let item_id = tool_call_item
         .get("id")
         .and_then(|v| v.as_str())
@@ -547,10 +470,6 @@ pub(super) fn send_tool_call_completion_events(
     tx.send(Ok(Bytes::from(done_event))).is_ok()
 }
 
-// ============================================================================
-// Metadata Injection
-// ============================================================================
-
 /// Inject MCP metadata into a streaming response
 pub(super) fn inject_mcp_metadata_streaming(
     response: &mut Value,
@@ -586,10 +505,6 @@ pub(super) fn inject_mcp_metadata_streaming(
     }
 }
 
-// ============================================================================
-// Tool Loop Execution
-// ============================================================================
-
 /// Execute the tool calling loop
 pub(super) async fn execute_tool_loop(
     client: &reqwest::Client,
@@ -600,11 +515,7 @@ pub(super) async fn execute_tool_loop(
     session: &McpToolSession<'_>,
 ) -> Result<Value, String> {
     let mut state = ToolLoopState::new(original_body.input.clone());
-
-    // Get max_tool_calls from request (None means no user-specified limit)
     let max_tool_calls = original_body.max_tool_calls.map(|n| n as usize);
-
-    // Keep initial_payload as base template (already has fields cleaned)
     let base_payload = initial_payload.clone();
     let tools_json = base_payload.get("tools").cloned().unwrap_or(json!([]));
     let mut current_payload = initial_payload;
@@ -615,7 +526,6 @@ pub(super) async fn execute_tool_loop(
     );
 
     loop {
-        // Make request to upstream
         let request_builder = client.post(url).json(&current_payload);
         let request_builder = if let Some(headers) = headers {
             apply_request_headers(headers, request_builder, true)
@@ -639,110 +549,94 @@ pub(super) async fn execute_tool_loop(
             .await
             .map_err(|e| format!("parse response: {}", e))?;
 
-        // Check for function call
-        if let Some((call_id, tool_name, args_json_str)) = extract_function_call(&response_json) {
-            state.iteration += 1;
-            state.total_calls += 1;
-
-            // Record tool loop iteration metric
-            Metrics::record_mcp_tool_iteration(&original_body.model);
-
+        let function_calls = extract_function_calls(&response_json);
+        if function_calls.is_empty() {
             info!(
-                "Tool loop iteration {}: calling {} (call_id: {})",
-                state.iteration, tool_name, call_id
+                "Tool loop completed: {} iterations, {} total calls",
+                state.iteration, state.total_calls
             );
-
-            // Check combined limit: use minimum of user's max_tool_calls (if set) and safety max_iterations
-            let effective_limit = match max_tool_calls {
-                Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
-                None => DEFAULT_MAX_ITERATIONS,
-            };
-
-            if state.total_calls > effective_limit {
-                if let Some(user_max) = max_tool_calls {
-                    if state.total_calls > user_max {
-                        warn!("Reached user-specified max_tool_calls limit: {}", user_max);
-                    } else {
-                        warn!(
-                            "Reached safety max_iterations limit: {}",
-                            DEFAULT_MAX_ITERATIONS
-                        );
-                    }
-                } else {
-                    warn!(
-                        "Reached safety max_iterations limit: {}",
-                        DEFAULT_MAX_ITERATIONS
-                    );
-                }
-
-                return build_incomplete_response(
-                    response_json,
-                    state,
-                    "max_tool_calls",
-                    session,
-                    original_body,
-                );
+            if state.total_calls > 0 {
+                inject_mcp_metadata_streaming(&mut response_json, &state, session);
             }
+            return Ok(response_json);
+        }
 
-            // Parse arguments to Value
-            let arguments: Value = match serde_json::from_str(&args_json_str) {
+        state.iteration += 1;
+        state.total_calls += function_calls.len();
+        Metrics::record_mcp_tool_iteration(&original_body.model);
+
+        info!(
+            "Tool loop iteration {}: {} function call(s) detected",
+            state.iteration,
+            function_calls.len()
+        );
+
+        let effective_limit = match max_tool_calls {
+            Some(user_max) => user_max.min(DEFAULT_MAX_ITERATIONS),
+            None => DEFAULT_MAX_ITERATIONS,
+        };
+
+        if state.total_calls > effective_limit {
+            warn!(
+                "Reached tool call limit ({}) after {} calls",
+                effective_limit, state.total_calls
+            );
+            return build_incomplete_response(
+                response_json,
+                state,
+                "max_tool_calls",
+                session,
+                original_body,
+            );
+        }
+
+        for call in function_calls {
+            let arguments: Value = match serde_json::from_str(&call.arguments) {
                 Ok(v) => v,
                 Err(e) => {
-                    warn!(tool = %tool_name, error = %e, "Failed to parse tool arguments as JSON");
-                    // Record error output and continue loop instead of executing with bad args
+                    warn!(tool = %call.name, error = %e, "Failed to parse tool arguments as JSON");
                     let error_output = format!("Invalid tool arguments: {}", e);
-                    let response_format = session.tool_response_format(&tool_name);
-                    let server_label = session.resolve_tool_server_label(&tool_name);
+                    let response_format = session.tool_response_format(&call.name);
+                    let server_label = session.resolve_tool_server_label(&call.name);
                     let error_json = json!({ "error": &error_output });
                     let transformed_item = build_transformed_mcp_call_item(
                         &error_json,
                         &response_format,
-                        &call_id,
+                        &call.call_id,
                         &server_label,
-                        &tool_name,
-                        &args_json_str,
+                        &call.name,
+                        &call.arguments,
                     );
 
                     Metrics::record_mcp_tool_call(
                         &original_body.model,
-                        &tool_name,
+                        &call.name,
                         metrics_labels::RESULT_ERROR,
                     );
 
                     state.record_call(
-                        call_id,
-                        tool_name,
-                        args_json_str,
+                        call.call_id,
+                        call.name,
+                        call.arguments,
                         error_output,
                         transformed_item,
                     );
-
-                    // Build resume payload so LLM sees the error
-                    current_payload = build_resume_payload(
-                        &base_payload,
-                        &state.conversation_history,
-                        &state.original_input,
-                        &tools_json,
-                        false,
-                    )?;
                     continue;
                 }
             };
 
-            // Execute tool via session
             debug!(
                 "Calling MCP tool '{}' with args: {}",
-                tool_name, args_json_str
+                call.name, call.arguments
             );
             let tool_output = session
                 .execute_tool(ToolExecutionInput {
-                    call_id: call_id.clone(),
-                    tool_name: tool_name.clone(),
+                    call_id: call.call_id.clone(),
+                    tool_name: call.name.clone(),
                     arguments,
                 })
                 .await;
 
-            // Record MCP tool metrics
             Metrics::record_mcp_tool_duration(
                 &original_body.model,
                 &tool_output.tool_name,
@@ -760,41 +654,26 @@ pub(super) async fn execute_tool_loop(
 
             let output_str = tool_output.output.to_string();
             let transformed_item = to_value(tool_output.to_response_item()).unwrap_or_else(|e| {
-                warn!(tool = %tool_name, error = %e, "Failed to convert item to Value");
+                warn!(tool = %call.name, error = %e, "Failed to convert item to Value");
                 json!({})
             });
 
-            // Record the call with transformed item
             state.record_call(
-                call_id,
-                tool_name,
-                args_json_str,
+                call.call_id,
+                call.name,
+                call.arguments,
                 output_str,
                 transformed_item,
             );
-
-            // Build resume payload
-            current_payload = build_resume_payload(
-                &base_payload,
-                &state.conversation_history,
-                &state.original_input,
-                &tools_json,
-                false, // is_streaming = false (non-streaming tool loop)
-            )?;
-        } else {
-            // No more tool calls, we're done
-            info!(
-                "Tool loop completed: {} iterations, {} total calls",
-                state.iteration, state.total_calls
-            );
-
-            // Inject MCP output items if we executed any tools
-            if state.total_calls > 0 {
-                inject_mcp_metadata_streaming(&mut response_json, &state, session);
-            }
-
-            return Ok(response_json);
         }
+
+        current_payload = build_resume_payload(
+            &base_payload,
+            &state.conversation_history,
+            &state.original_input,
+            &tools_json,
+            false,
+        )?;
     }
 }
 
@@ -813,7 +692,6 @@ pub(super) fn build_incomplete_response(
     // Set status to completed (not failed - partial success)
     obj.insert("status".to_string(), Value::String("completed".to_string()));
 
-    // Set incomplete_details
     obj.insert(
         "incomplete_details".to_string(),
         json!({ "reason": reason }),
@@ -870,7 +748,6 @@ pub(super) fn build_incomplete_response(
         }
     }
 
-    // Add warning to metadata
     if let Some(metadata_val) = obj.get_mut("metadata") {
         if let Some(metadata_obj) = metadata_val.as_object_mut() {
             if let Some(mcp_val) = metadata_obj.get_mut("mcp") {
@@ -889,10 +766,6 @@ pub(super) fn build_incomplete_response(
 
     Ok(response)
 }
-
-// ============================================================================
-// Output Item Builders
-// ============================================================================
 
 /// Build a mcp_call output item
 pub(super) fn build_mcp_call_item(
@@ -943,30 +816,46 @@ pub(super) fn build_transformed_mcp_call_item(
     })
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
+/// A function call extracted from a non-streaming response
+pub(super) struct ExtractedFunctionCall {
+    pub call_id: String,
+    pub name: String,
+    pub arguments: String,
+}
 
-/// Extract function call from a response
-pub(super) fn extract_function_call(resp: &Value) -> Option<(String, String, String)> {
-    let output = resp.get("output")?.as_array()?;
+/// Extract all function calls from a response
+pub(super) fn extract_function_calls(resp: &Value) -> Vec<ExtractedFunctionCall> {
+    let Some(output) = resp.get("output").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+
+    let mut calls = Vec::new();
     for item in output {
-        let obj = item.as_object()?;
-        let t = obj.get("type")?.as_str()?;
-        if is_function_call_type(t) {
-            let call_id = obj
-                .get("call_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    obj.get("id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                })?;
-            let name = obj.get("name")?.as_str()?.to_string();
-            let arguments = obj.get("arguments")?.as_str()?.to_string();
-            return Some((call_id, name, arguments));
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let Some(t) = obj.get("type").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !is_function_call_type(t) {
+            continue;
+        }
+
+        let call_id = obj
+            .get("call_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| obj.get("id").and_then(|v| v.as_str()));
+        let name = obj.get("name").and_then(|v| v.as_str());
+        let arguments = obj.get("arguments").and_then(|v| v.as_str());
+
+        if let (Some(call_id), Some(name), Some(arguments)) = (call_id, name, arguments) {
+            calls.push(ExtractedFunctionCall {
+                call_id: call_id.to_string(),
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            });
         }
     }
-    None
+
+    calls
 }

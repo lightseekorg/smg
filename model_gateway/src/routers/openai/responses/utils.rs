@@ -7,6 +7,8 @@ use openai_protocol::{
 use serde_json::{json, Map, Value};
 use tracing::warn;
 
+use super::common::parse_sse_block;
+
 /// Check if a JSON value is missing, null, or an empty string
 fn is_missing_or_empty(value: Option<&Value>) -> bool {
     match value {
@@ -96,21 +98,6 @@ pub(super) fn patch_response_with_request_metadata(
     }
 }
 
-/// Extract data payload from SSE block lines
-fn extract_sse_data(block: &str) -> Option<String> {
-    let data_lines: Vec<_> = block
-        .lines()
-        .filter(|line| line.starts_with("data:"))
-        .map(|line| line.trim_start_matches("data:").trim_start())
-        .collect();
-
-    if data_lines.is_empty() {
-        None
-    } else {
-        Some(data_lines.join("\n"))
-    }
-}
-
 /// Rebuild SSE block with new data payload
 fn rebuild_sse_block(block: &str, new_payload: &str) -> String {
     let mut rebuilt_lines = Vec::new();
@@ -145,8 +132,11 @@ pub(super) fn rewrite_streaming_block(
         return None;
     }
 
-    let payload = extract_sse_data(trimmed)?;
-    let mut parsed: Value = serde_json::from_str(&payload)
+    let (_, data) = parse_sse_block(trimmed);
+    if data.is_empty() {
+        return None;
+    }
+    let mut parsed: Value = serde_json::from_str(&data)
         .map_err(|e| warn!("Failed to parse streaming JSON payload: {}", e))
         .ok()?;
 

@@ -6,10 +6,6 @@ use std::borrow::Cow;
 
 use serde_json::Value;
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
 /// Extract output_index from a JSON value
 #[inline]
 pub(super) fn extract_output_index(value: &Value) -> Option<usize> {
@@ -23,10 +19,6 @@ pub(super) fn get_event_type<'a>(event_name: Option<&'a str>, parsed: &'a Value)
         .or_else(|| parsed.get("type").and_then(|v| v.as_str()))
         .unwrap_or("")
 }
-
-// ============================================================================
-// Chunk Processor
-// ============================================================================
 
 /// Processes incoming byte chunks into complete SSE blocks.
 /// Handles buffering of partial chunks and CRLF normalization.
@@ -47,7 +39,6 @@ impl ChunkProcessor {
             Ok(s) => Cow::Borrowed(s),
             Err(_) => Cow::Owned(String::from_utf8_lossy(chunk).into_owned()),
         };
-        // Normalize CRLF to LF without extra allocation
         let mut chars = chunk_str.chars().peekable();
         while let Some(c) = chars.next() {
             if c == '\r' && chars.peek() == Some(&'\n') {
@@ -68,7 +59,6 @@ impl ChunkProcessor {
             if !block.trim().is_empty() {
                 return Some(block);
             }
-            // If block is empty, loop again to find the next one
         }
     }
 
@@ -82,10 +72,6 @@ impl ChunkProcessor {
         std::mem::take(&mut self.pending)
     }
 }
-
-// ============================================================================
-// SSE Parsing
-// ============================================================================
 
 /// Parse an SSE block into event name and data
 ///
