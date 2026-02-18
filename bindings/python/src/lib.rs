@@ -1029,6 +1029,12 @@ fn get_verbose_version_string() -> String {
     version::get_verbose_version_string()
 }
 
+/// Print the startup banner with braille art and key configuration info.
+#[pyfunction]
+fn print_banner(host: &str, port: u16, mode: &str) {
+    version::print_banner(host, port, mode);
+}
+
 /// Get the list of available tool call parsers from the Rust factory.
 #[pyfunction]
 fn get_available_tool_call_parsers() -> Vec<String> {
@@ -1056,6 +1062,7 @@ fn smg_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Router>()?;
     m.add_function(wrap_pyfunction!(get_version_string, m)?)?;
     m.add_function(wrap_pyfunction!(get_verbose_version_string, m)?)?;
+    m.add_function(wrap_pyfunction!(print_banner, m)?)?;
     m.add_function(wrap_pyfunction!(get_available_tool_call_parsers, m)?)?;
     Ok(())
 }
