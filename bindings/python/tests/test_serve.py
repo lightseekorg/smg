@@ -22,6 +22,7 @@ from smg.serve import (
     VllmWorkerLauncher,
     _add_trtllm_stub_args,
     _find_available_ports,
+    _grpc_health_check,
     _http_health_check,
     _import_backend_args,
     _is_port_available,
@@ -322,6 +323,7 @@ class TestWorkerLauncherGpuEnv:
             (VllmWorkerLauncher, argparse.Namespace(tensor_parallel_size=2), 2),
             (VllmWorkerLauncher, argparse.Namespace(), 1),
             (TrtllmWorkerLauncher, argparse.Namespace(tp_size=8), 8),
+            (TrtllmWorkerLauncher, argparse.Namespace(tensor_parallel_size=8), 8),
             (TrtllmWorkerLauncher, argparse.Namespace(), 1),
         ],
     )
@@ -387,7 +389,7 @@ class TestSglangWorkerLauncher:
         """Default connection_mode is grpc, so --grpc-mode should be present."""
         launcher = SglangWorkerLauncher()
         args = argparse.Namespace(model_path="/tmp/model", connection_mode="grpc")
-        backend_args = ["--trust-remote-code"]
+        backend_args = ["--model-path", "/tmp/model", "--trust-remote-code"]
         cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
         assert "--model-path" in cmd
         assert "/tmp/model" in cmd
@@ -507,6 +509,51 @@ class TestTrtllmWorkerLauncher:
         assert result is True
         mock.assert_called_once_with("127.0.0.1", 50051, 5.0)
 
+    def test_get_tp_size_from_config_tensor_parallel_size(self, tmp_path):
+        """_get_tp_size reads tensor_parallel_size from config YAML when no args set."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("tensor_parallel_size: 4\n")
+        launcher = TrtllmWorkerLauncher()
+        args = argparse.Namespace(config=str(config_file))
+        assert launcher._get_tp_size(args) == 4
+
+    def test_get_tp_size_from_config_tp_size(self, tmp_path):
+        """_get_tp_size reads tp_size from config YAML when tensor_parallel_size not present."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("tp_size: 2\n")
+        launcher = TrtllmWorkerLauncher()
+        args = argparse.Namespace(config=str(config_file))
+        assert launcher._get_tp_size(args) == 2
+
+    def test_get_tp_size_from_config_tensor_parallel_size_takes_precedence(self, tmp_path):
+        """When both keys exist in config, tensor_parallel_size is used."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("tensor_parallel_size: 8\ntp_size: 2\n")
+        launcher = TrtllmWorkerLauncher()
+        args = argparse.Namespace(config=str(config_file))
+        assert launcher._get_tp_size(args) == 8
+
+    def test_get_tp_size_from_config_read_fails_returns_default(self):
+        """When config file read fails, log warning and return default 1."""
+        launcher = TrtllmWorkerLauncher()
+        args = argparse.Namespace(config="/nonexistent/config.yaml")
+        with patch("smg.serve.logger") as mock_logger:
+            result = launcher._get_tp_size(args)
+        assert result == 1
+        mock_logger.warning.assert_called_once()
+        call_args = mock_logger.warning.call_args[0]
+        assert "Failed to read tensor_parallel_size from config" in call_args[0]
+        assert "/nonexistent/config.yaml" in call_args[1]
+        assert call_args[2] is not None  # exception message or object
+
+    def test_get_tp_size_from_config_empty_or_no_keys_returns_default(self, tmp_path):
+        """When config has no tp keys or is empty, return default 1."""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("other_key: 42\n")
+        launcher = TrtllmWorkerLauncher()
+        args = argparse.Namespace(config=str(config_file))
+        assert launcher._get_tp_size(args) == 1
+
 
 # ---------------------------------------------------------------------------
 # Health check utility tests
@@ -535,6 +582,86 @@ class TestHttpHealthCheck:
         mock_resp.__exit__ = MagicMock(return_value=False)
         with patch("urllib.request.urlopen", return_value=mock_resp):
             assert _http_health_check("http://localhost:31000/health", 5.0) is False
+
+class TestGrpcHealthCheck:
+    """Test _grpc_health_check with mocked grpc and health stub."""
+
+    def test_returns_true_on_serving(self):
+        from grpc_health.v1 import health_pb2, health_pb2_grpc
+
+        mock_channel = MagicMock()
+        mock_stub = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status = health_pb2.HealthCheckResponse.SERVING
+        mock_stub.Check.return_value = mock_response
+
+        with (
+            patch("grpc.insecure_channel", return_value=mock_channel),
+            patch.object(health_pb2_grpc, "HealthStub", return_value=mock_stub),
+        ):
+            assert _grpc_health_check("127.0.0.1", 31000, 5.0) is True
+        mock_stub.Check.assert_called_once()
+
+    def test_returns_false_on_error(self):
+        with patch("grpc.insecure_channel", side_effect=ConnectionError):
+            assert _grpc_health_check("127.0.0.1", 31000, 5.0) is False
+
+    def test_returns_false_on_non_serving(self):
+        from grpc_health.v1 import health_pb2, health_pb2_grpc
+
+        mock_channel = MagicMock()
+        mock_stub = MagicMock()
+        mock_response = MagicMock()
+        mock_response.status = health_pb2.HealthCheckResponse.NOT_SERVING
+        mock_stub.Check.return_value = mock_response
+
+        with (
+            patch("grpc.insecure_channel", return_value=mock_channel),
+            patch.object(health_pb2_grpc, "HealthStub", return_value=mock_stub),
+        ):
+            assert _grpc_health_check("127.0.0.1", 31000, 5.0) is False
+
+    def test_returns_true_when_unimplemented_then_channel_ready(self):
+        import grpc
+        from grpc_health.v1 import health_pb2_grpc
+
+        class UnimplementedRpcError(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.UNIMPLEMENTED
+
+        mock_channel = MagicMock()
+        mock_stub = MagicMock()
+        mock_stub.Check.side_effect = UnimplementedRpcError()
+        mock_ready_future = MagicMock()
+
+        with (
+            patch("grpc.insecure_channel", return_value=mock_channel),
+            patch.object(health_pb2_grpc, "HealthStub", return_value=mock_stub),
+            patch("grpc.channel_ready_future", return_value=mock_ready_future),
+        ):
+            assert _grpc_health_check("127.0.0.1", 31000, 5.0) is True
+        mock_ready_future.result.assert_called_once_with(timeout=5.0)
+
+    def test_returns_false_when_unimplemented_and_channel_ready_fails(self):
+        import grpc
+        from grpc_health.v1 import health_pb2_grpc
+
+        class UnimplementedRpcError(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.UNIMPLEMENTED
+
+        mock_channel = MagicMock()
+        mock_stub = MagicMock()
+        mock_stub.Check.side_effect = UnimplementedRpcError()
+        mock_ready_future = MagicMock()
+        mock_ready_future.result.side_effect = OSError("connection refused")
+
+        with (
+            patch("grpc.insecure_channel", return_value=mock_channel),
+            patch.object(health_pb2_grpc, "HealthStub", return_value=mock_stub),
+            patch("grpc.channel_ready_future", return_value=mock_ready_future),
+        ):
+            assert _grpc_health_check("127.0.0.1", 31000, 5.0) is False
 
 
 # ---------------------------------------------------------------------------
@@ -780,3 +907,5 @@ class TestServeOrchestrator:
         assert len(launched_envs) == 2
         assert launched_envs[0]["CUDA_VISIBLE_DEVICES"] == "0,1"
         assert launched_envs[1]["CUDA_VISIBLE_DEVICES"] == "2,3"
+        assert launched_envs[0]["PYTHONUNBUFFERED"] == "1"
+        assert launched_envs[1]["PYTHONUNBUFFERED"] == "1"

@@ -31,7 +31,7 @@ class WorkerLauncher(ABC):
     """Abstract base class for backend worker launchers."""
 
     @abstractmethod
-    def build_command(self, args: argparse.Namespace, host: str, port: int) -> list[str]:
+    def build_command(self, args: argparse.Namespace, backend_args: list[str], host: str, port: int) -> list[str]:
         """Build the CLI command list to launch a worker."""
         ...
 
@@ -58,6 +58,7 @@ class WorkerLauncher(ABC):
         base_gpu = dp_rank * tp_size
         gpu_ids = range(base_gpu, base_gpu + tp_size)
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
+        env["PYTHONUNBUFFERED"] = "1"
         return env
 
     def _filter_backend_args(self, backend_args: list[str], filter_args: list[str]) -> list[str]:
@@ -81,16 +82,16 @@ class WorkerLauncher(ABC):
         backend_args: list[str],
         host: str,
         port: int,
-        env: dict | None = None,
+        env: dict
     ) -> subprocess.Popen:
         """Launch the worker subprocess."""
         cmd = self.build_command(args, backend_args, host, port)
         logger.info("Launching worker with command: %s", " ".join(cmd))
-        env["PYTHONUNBUFFERED"] = "1"
+
         return subprocess.Popen(
             cmd,
             start_new_session=True,
-            env=env or os.environ.copy(),
+            env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
@@ -186,6 +187,8 @@ class TrtllmWorkerLauncher(WorkerLauncher):
                     config = yaml.safe_load(f)
                     if config and "tensor_parallel_size" in config:
                         return config["tensor_parallel_size"]
+                    if config and "tp_size" in config:
+                        return config["tp_size"]
             except Exception as e:
                 logger.warning(
                     "Failed to read tensor_parallel_size from config %s: %s", config_path, e
@@ -390,7 +393,7 @@ def add_serve_args(parser: argparse.ArgumentParser) -> None:
         "--connection-mode",
         default="grpc",
         choices=["grpc", "http"],
-        help="Connection mode for workers (default: grpc). Note: vllm and trtllm only support grpc",
+        help="Connection mode for workers (default: grpc). Note: trtllm only support grpc",
     )
     # Router host/port - may be overridden by backend (e.g. sglang)
     group.add_argument(
@@ -439,27 +442,31 @@ def _import_backend_args(backend: str, parser: argparse.ArgumentParser) -> None:
 
 def parse_serve_args(
     argv: list[str] | None = None,
-) -> tuple[str, argparse.Namespace]:
+) -> tuple[str, argparse.Namespace, list[str]]:
     """Two-pass argument parsing for serve command.
 
-    Pass 1: Extract --backend with parse_known_args (no backend imports).
-    Pass 2: Build full parser with backend-specific + router args.
+    Pass 1: Parse with only serve + router args (parse_known_args). We get
+    --backend and known flags; any remaining argv tokens are left as
+    backend_args (no backend-specific parser loaded yet).
+    Pass 2: Build full parser with serve + backend-specific + router args,
+    then parse_args(argv) to get the full namespace. backend_args from pass 1
+    are returned unchanged for the launcher to pass through to worker commands.
 
     Returns:
-        Tuple of (backend_name, parsed_namespace).
+        Tuple of (backend_name, parsed_namespace, backend_args).
+        backend_args: argv tokens not recognized in pass 1 (e.g. --config path).
     """
     if argv is None:
         argv = []
 
-    # Pass 1: extract --backend (lightweight, no backend imports)
+    # Pass 1: serve + router args only; unknown tokens become backend_args
     pre_parser = argparse.ArgumentParser(add_help=False)
     add_serve_args(pre_parser)
     RouterArgs.add_cli_args(pre_parser, use_router_prefix=True, exclude_host_port=True)
     serve_router_args, backend_args = pre_parser.parse_known_args(argv)
     backend = serve_router_args.backend
 
-    # Pass 2: build full parser with backend-specific args
-    # Use conflict_handler='resolve' to let backend args override serve defaults
+    # Pass 2: full parser with backend-specific args; resolve so backend can override
     parser = argparse.ArgumentParser(
         description=f"Launch {backend} worker(s) + gateway router",
         conflict_handler="resolve",
