@@ -1129,11 +1129,11 @@ fn validate_input(input: &InteractionsInput) -> Result<(), ValidationError> {
             Some("Input content cannot be empty")
         }
         InteractionsInput::Contents(contents)
-            if contents.is_empty() || contents.iter().all(is_content_empty) =>
+            if contents.is_empty() || contents.iter().any(is_content_empty) =>
         {
             Some("Input content array cannot be empty")
         }
-        InteractionsInput::Turns(turns) if turns.is_empty() || turns.iter().all(is_turn_empty) => {
+        InteractionsInput::Turns(turns) if turns.is_empty() || turns.iter().any(is_turn_empty) => {
             Some("Input turns array cannot be empty")
         }
         _ => None,
