@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import dataclasses
 import logging
@@ -952,9 +954,7 @@ class RouterArgs:
         )
 
     @classmethod
-    def from_cli_args(
-        cls, args: argparse.Namespace, use_router_prefix: bool = False
-    ) -> "RouterArgs":
+    def from_cli_args(cls, args: argparse.Namespace, use_router_prefix: bool = False) -> RouterArgs:
         """
         Create RouterArgs instance from parsed command line arguments.
 

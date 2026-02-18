@@ -9,6 +9,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         .type_attribute("GetModelInfoResponse", "#[derive(serde::Serialize)]")
+        // vllm + trtllm ServerInfo have only primitive fields.
+        // sglang's contains prost_types::{Struct,Timestamp} so it's handled separately.
+        .type_attribute(
+            "vllm.grpc.engine.GetServerInfoResponse",
+            "#[derive(serde::Serialize)]",
+        )
+        .type_attribute(
+            "trtllm.GetServerInfoResponse",
+            "#[derive(serde::Serialize)]",
+        )
         .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(
             &[
