@@ -323,10 +323,10 @@ pub(super) fn build_resume_payload(
         }
         ResponseInput::Items(items) => {
             // Items are ResponseInputOutputItem (including SimpleInputMessage), convert to JSON
-            if let Ok(items_value) = to_value(items) {
-                if let Some(items_arr) = items_value.as_array() {
-                    input_array.extend_from_slice(items_arr);
-                }
+            let items_value = to_value(items)
+                .map_err(|e| format!("Failed to serialize input items: {}", e))?;
+            if let Some(items_arr) = items_value.as_array() {
+                input_array.extend_from_slice(items_arr);
             }
         }
     }
@@ -685,10 +685,49 @@ pub(super) async fn execute_tool_loop(
             }
 
             // Parse arguments to Value
-            let arguments: Value = serde_json::from_str(&args_json_str).unwrap_or_else(|e| {
-                warn!(tool = %tool_name, error = %e, "Failed to parse tool arguments as JSON");
-                json!({})
-            });
+            let arguments: Value = match serde_json::from_str(&args_json_str) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(tool = %tool_name, error = %e, "Failed to parse tool arguments as JSON");
+                    // Record error output and continue loop instead of executing with bad args
+                    let error_output = format!("Invalid tool arguments: {}", e);
+                    let response_format = session.tool_response_format(&tool_name);
+                    let server_label = session.resolve_tool_server_label(&tool_name);
+                    let error_json = json!({ "error": &error_output });
+                    let transformed_item = build_transformed_mcp_call_item(
+                        &error_json,
+                        &response_format,
+                        &call_id,
+                        &server_label,
+                        &tool_name,
+                        &args_json_str,
+                    );
+
+                    Metrics::record_mcp_tool_call(
+                        &original_body.model,
+                        &tool_name,
+                        metrics_labels::RESULT_ERROR,
+                    );
+
+                    state.record_call(
+                        call_id,
+                        tool_name,
+                        args_json_str,
+                        error_output,
+                        transformed_item,
+                    );
+
+                    // Build resume payload so LLM sees the error
+                    current_payload = build_resume_payload(
+                        &base_payload,
+                        &state.conversation_history,
+                        &state.original_input,
+                        &tools_json,
+                        false,
+                    )?;
+                    continue;
+                }
+            };
 
             // Execute tool via session
             debug!(

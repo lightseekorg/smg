@@ -311,29 +311,41 @@ fn send_buffered_arguments(
     true
 }
 
-/// Forward and transform a streaming event to the client
-/// Returns false if client disconnected
+/// An SSE event to be forwarded to the client, with optional pre-parsed JSON.
+pub(super) struct SseEventData<'a> {
+    pub raw_block: &'a str,
+    pub event_name: Option<&'a str>,
+    pub data: &'a str,
+    /// Pre-parsed JSON value. When `Some`, avoids re-parsing `data`.
+    pub pre_parsed: Option<Value>,
+}
+
+/// Forward and transform a streaming event to the client.
+/// Returns false if client disconnected.
 pub(super) fn forward_streaming_event(
-    raw_block: &str,
-    event_name: Option<&str>,
-    data: &str,
+    event: SseEventData<'_>,
     handler: &mut StreamingToolHandler,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     ctx: &StreamingEventContext<'_>,
     sequence_number: &mut u64,
 ) -> bool {
+    let SseEventData { raw_block, event_name, data, pre_parsed } = event;
+
     // Skip individual function_call_arguments.delta events - we'll send them as one
     if event_name == Some(FunctionCallEvent::ARGUMENTS_DELTA) {
         return true;
     }
 
-    // Parse JSON data once
-    let mut parsed_data: Value = match serde_json::from_str(data) {
-        Ok(v) => v,
-        Err(_) => {
-            let chunk = format!("{}\n\n", raw_block);
-            return tx.send(Ok(Bytes::from(chunk))).is_ok();
-        }
+    // Use pre-parsed value or parse JSON data
+    let mut parsed_data: Value = match pre_parsed {
+        Some(v) => v,
+        None => match serde_json::from_str(data) {
+            Ok(v) => v,
+            Err(_) => {
+                let chunk = format!("{}\n\n", raw_block);
+                return tx.send(Ok(Bytes::from(chunk))).is_ok();
+            }
+        },
     };
 
     let event_type = get_event_type(event_name, &parsed_data);
@@ -770,29 +782,31 @@ pub(super) async fn handle_streaming_with_tool_interception(
 
                             match action {
                                 StreamAction::Forward => {
+                                    // Parse data once and reuse for skip check, forwarding, and in_progress check
+                                    let parsed = serde_json::from_str::<Value>(data.as_ref()).ok();
+
                                     // Skip response.created and response.in_progress on subsequent iterations
                                     let should_skip = if !is_first_iteration {
-                                        if let Ok(parsed) =
-                                            serde_json::from_str::<Value>(data.as_ref())
-                                        {
+                                        parsed.as_ref().is_some_and(|v| {
                                             matches!(
-                                                parsed.get("type").and_then(|v| v.as_str()),
+                                                v.get("type").and_then(|t| t.as_str()),
                                                 Some(ResponseEvent::CREATED)
                                                     | Some(ResponseEvent::IN_PROGRESS)
                                             )
-                                        } else {
-                                            false
-                                        }
+                                        })
                                     } else {
                                         false
                                     };
 
                                     if !should_skip {
-                                        // Forward the event
+                                        // Forward the event with pre-parsed value
                                         if !forward_streaming_event(
-                                            &raw_block,
-                                            event_name,
-                                            data.as_ref(),
+                                            SseEventData {
+                                                raw_block: &raw_block,
+                                                event_name,
+                                                data: data.as_ref(),
+                                                pre_parsed: parsed.clone(),
+                                            },
                                             &mut handler,
                                             &tx,
                                             &streaming_ctx,
@@ -805,32 +819,30 @@ pub(super) async fn handle_streaming_with_tool_interception(
 
                                     // After forwarding response.in_progress, send mcp_list_tools events (once)
                                     if !seen_in_progress {
-                                        if let Ok(parsed) =
-                                            serde_json::from_str::<Value>(data.as_ref())
-                                        {
-                                            if parsed.get("type").and_then(|v| v.as_str())
+                                        let is_in_progress = parsed.as_ref().is_some_and(|v| {
+                                            v.get("type").and_then(|t| t.as_str())
                                                 == Some(ResponseEvent::IN_PROGRESS)
-                                            {
-                                                seen_in_progress = true;
-                                                if !mcp_list_tools_sent {
-                                                    for (label, key) in session.mcp_servers().iter()
-                                                    {
-                                                        let list_tools_index = handler
-                                                            .allocate_synthetic_output_index();
-                                                        if !send_mcp_list_tools_events(
-                                                            &tx,
-                                                            &session,
-                                                            label,
-                                                            list_tools_index,
-                                                            &mut sequence_number,
-                                                            key,
-                                                        ) {
-                                                            // Client disconnected
-                                                            return;
-                                                        }
+                                        });
+                                        if is_in_progress {
+                                            seen_in_progress = true;
+                                            if !mcp_list_tools_sent {
+                                                for (label, key) in session.mcp_servers().iter()
+                                                {
+                                                    let list_tools_index = handler
+                                                        .allocate_synthetic_output_index();
+                                                    if !send_mcp_list_tools_events(
+                                                        &tx,
+                                                        &session,
+                                                        label,
+                                                        list_tools_index,
+                                                        &mut sequence_number,
+                                                        key,
+                                                    ) {
+                                                        // Client disconnected
+                                                        return;
                                                     }
-                                                    mcp_list_tools_sent = true;
                                                 }
+                                                mcp_list_tools_sent = true;
                                             }
                                         }
                                     }
@@ -840,9 +852,12 @@ pub(super) async fn handle_streaming_with_tool_interception(
                                 }
                                 StreamAction::ExecuteTools => {
                                     if !forward_streaming_event(
-                                        &raw_block,
-                                        event_name,
-                                        data.as_ref(),
+                                        SseEventData {
+                                            raw_block: &raw_block,
+                                            event_name,
+                                            data: data.as_ref(),
+                                            pre_parsed: None,
+                                        },
                                         &mut handler,
                                         &tx,
                                         &streaming_ctx,

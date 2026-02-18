@@ -140,25 +140,22 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         previous_response_id.as_deref(),
     );
 
-    if let Err(err) = persist_conversation_items(
-        ctx.components
-            .conversation_storage()
-            .expect("Conversation storage required")
-            .clone(),
-        ctx.components
-            .conversation_item_storage()
-            .expect("Conversation item storage required")
-            .clone(),
-        ctx.components
-            .response_storage()
-            .expect("Response storage required")
-            .clone(),
-        &response_json,
-        original_body,
-    )
-    .await
-    {
-        warn!("Failed to persist conversation items: {}", err);
+    if let (Some(conv_storage), Some(item_storage), Some(resp_storage)) = (
+        ctx.components.conversation_storage(),
+        ctx.components.conversation_item_storage(),
+        ctx.components.response_storage(),
+    ) {
+        if let Err(err) = persist_conversation_items(
+            conv_storage.clone(),
+            item_storage.clone(),
+            resp_storage.clone(),
+            &response_json,
+            original_body,
+        )
+        .await
+        {
+            warn!("Failed to persist conversation items: {}", err);
+        }
     }
 
     (StatusCode::OK, Json(response_json)).into_response()
