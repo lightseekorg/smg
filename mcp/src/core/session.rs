@@ -42,8 +42,6 @@ pub struct McpToolSession<'a> {
     /// All MCP servers in this session (including builtin).
     all_mcp_servers: Vec<(String, String)>,
     /// Non-builtin MCP servers only — used for `mcp_list_tools` output.
-    /// Servers configured with `builtin_type` are filtered out to avoid
-    /// exposing internal MCP details in client-facing responses.
     mcp_servers: Vec<(String, String)>,
     mcp_tools: Vec<ToolEntry>,
     exposed_name_map: HashMap<String, ExposedToolBinding>,
@@ -71,8 +69,6 @@ impl<'a> McpToolSession<'a> {
             Self::build_exposed_function_tools(&mcp_tools, &mcp_servers);
 
         // Filter out servers configured with builtin_type from the visible list.
-        // These servers' tools are exposed to the model as function tools internally,
-        // but should not appear in client-facing mcp_list_tools output.
         let builtin_names = orchestrator.builtin_server_names();
         let visible_mcp_servers: Vec<(String, String)> = mcp_servers
             .iter()
@@ -101,11 +97,7 @@ impl<'a> McpToolSession<'a> {
         &self.request_ctx
     }
 
-    /// Returns only non-builtin MCP servers (for `mcp_list_tools` output).
-    ///
-    /// Servers configured with `builtin_type` are filtered out because their
-    /// tools are exposed to the model as function tools internally, but should
-    /// not appear in client-facing `mcp_list_tools` items.
+    /// Returns only non-builtin MCP servers
     pub fn mcp_servers(&self) -> &[(String, String)] {
         &self.mcp_servers
     }

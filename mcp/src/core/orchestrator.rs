@@ -945,11 +945,6 @@ impl McpOrchestrator {
     }
 
     /// Returns the set of server names that have `builtin_type` configured.
-    ///
-    /// Used by [`McpToolSession`] to detect servers that should be hidden from
-    /// `mcp_list_tools` output — their tools are exposed to the model as
-    /// function tools (so the model can call them), but the client-facing
-    /// response should not include MCP metadata for built-in tool servers.
     pub fn builtin_server_names(&self) -> HashSet<String> {
         let mut names = HashSet::new();
 
