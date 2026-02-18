@@ -156,7 +156,6 @@ struct BenchResult {
     latency_p50_ms: f64,
     latency_p95_ms: f64,
     latency_p99_ms: f64,
-    latency_min_ms: f64,
     latency_max_ms: f64,
     errors: u64,
 }
@@ -289,8 +288,8 @@ async fn run_benchmark(
     let mut latency_values = latencies.lock().await;
     latency_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let (p50, p95, p99, min_lat, max_lat) = if latency_values.is_empty() {
-        (0.0, 0.0, 0.0, 0.0, 0.0)
+    let (p50, p95, p99, max_lat) = if latency_values.is_empty() {
+        (0.0, 0.0, 0.0, 0.0)
     } else {
         let len = latency_values.len();
         let p50_idx = (len as f64 * 0.50) as usize;
@@ -300,7 +299,6 @@ async fn run_benchmark(
             latency_values[p50_idx],
             latency_values[p95_idx.min(len - 1)],
             latency_values[p99_idx],
-            latency_values[0],
             latency_values[len - 1],
         )
     };
@@ -312,7 +310,6 @@ async fn run_benchmark(
         latency_p50_ms: p50,
         latency_p95_ms: p95,
         latency_p99_ms: p99,
-        latency_min_ms: min_lat,
         latency_max_ms: max_lat,
         errors,
     }
