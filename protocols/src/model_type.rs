@@ -1,10 +1,7 @@
 //! Model type definitions using bitflags for endpoint support.
 //!
-//! This module defines [`ModelType`] using bitflags to represent which endpoints
-//! a model can support. This allows combining capabilities like
-//! `ModelType::CHAT | ModelType::COMPLETIONS`.
-//!
-//! Inspired by Dynamo's model_type.rs implementation.
+//! Defines [`ModelType`] using bitflags to represent which endpoints a model
+//! can support, and [`Endpoint`] for routing decisions.
 
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
@@ -68,7 +65,6 @@ bitflags! {
 }
 
 /// Mapping of individual capability flags to their names.
-/// Used by `as_capability_names()` for a data-driven approach.
 const CAPABILITY_NAMES: &[(ModelType, &str)] = &[
     (ModelType::CHAT, "chat"),
     (ModelType::COMPLETIONS, "completions"),
@@ -166,7 +162,7 @@ impl ModelType {
             Endpoint::Embeddings => self.supports_embeddings(),
             Endpoint::Rerank => self.supports_rerank(),
             Endpoint::Generate => self.supports_generate(),
-            Endpoint::Models => true, // Models endpoint is always supported
+            Endpoint::Models => true,
         }
     }
 
@@ -229,14 +225,18 @@ impl std::fmt::Display for ModelType {
     }
 }
 
-// Custom Serialize/Deserialize for ModelType to handle bitflags properly
 impl Serialize for ModelType {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        // Serialize as the underlying u16 bits
-        serializer.serialize_u16(self.bits())
+        use serde::ser::SerializeSeq;
+        let names = self.as_capability_names();
+        let mut seq = serializer.serialize_seq(Some(names.len()))?;
+        for name in names {
+            seq.serialize_element(name)?;
+        }
+        seq.end()
     }
 }
 
@@ -245,15 +245,47 @@ impl<'de> Deserialize<'de> for ModelType {
     where
         D: serde::Deserializer<'de>,
     {
-        let bits = u16::deserialize(deserializer)?;
-        ModelType::from_bits(bits)
-            .ok_or_else(|| serde::de::Error::custom(format!("invalid ModelType bits: {}", bits)))
+        use serde::de;
+
+        struct ModelTypeVisitor;
+
+        impl<'de> de::Visitor<'de> for ModelTypeVisitor {
+            type Value = ModelType;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an array of capability names or a u16 bitfield")
+            }
+
+            // Backward compat: accept numeric u16 bitfield
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<ModelType, E> {
+                let bits = u16::try_from(v)
+                    .map_err(|_| E::custom(format!("ModelType bits out of u16 range: {}", v)))?;
+                ModelType::from_bits(bits)
+                    .ok_or_else(|| E::custom(format!("invalid ModelType bits: {}", bits)))
+            }
+
+            // New format: array of capability name strings
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<ModelType, A::Error> {
+                let mut model_type = ModelType::empty();
+                while let Some(name) = seq.next_element::<String>()? {
+                    let flag = CAPABILITY_NAMES
+                        .iter()
+                        .find(|(_, n)| *n == name.as_str())
+                        .map(|(f, _)| *f)
+                        .ok_or_else(|| {
+                            de::Error::custom(format!("unknown ModelType capability: {}", name))
+                        })?;
+                    model_type |= flag;
+                }
+                Ok(model_type)
+            }
+        }
+
+        deserializer.deserialize_any(ModelTypeVisitor)
     }
 }
 
 /// Endpoint types for routing decisions.
-///
-/// This enum represents the different API endpoints that can be routed to workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Endpoint {
@@ -289,7 +321,6 @@ impl Endpoint {
 
     /// Parse an endpoint from a URL path
     pub fn from_path(path: &str) -> Option<Self> {
-        // Normalize: strip trailing slash and match
         let path = path.trim_end_matches('/');
         match path {
             "/v1/chat/completions" => Some(Endpoint::Chat),
@@ -312,7 +343,7 @@ impl Endpoint {
             Endpoint::Embeddings => Some(ModelType::EMBEDDINGS),
             Endpoint::Rerank => Some(ModelType::RERANK),
             Endpoint::Generate => Some(ModelType::GENERATE),
-            Endpoint::Models => None, // No specific capability required
+            Endpoint::Models => None,
         }
     }
 }

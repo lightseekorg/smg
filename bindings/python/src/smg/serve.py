@@ -4,6 +4,8 @@ Serve command: two-pass CLI argument parsing with lazy backend import.
 Launches backend worker(s) + gateway router via a single `smg serve` command.
 """
 
+from __future__ import annotations
+
 import argparse
 import atexit
 import logging

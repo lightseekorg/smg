@@ -3,29 +3,16 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use openai_protocol::{model_card::ModelCard, model_type::ModelType, worker::WorkerSpec};
 use tracing::debug;
+use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::{
-    app_context::AppContext,
-    core::{
-        circuit_breaker::CircuitBreakerConfig,
-        model_card::ModelCard,
-        steps::workflow_data::LocalWorkerWorkflowData,
-        worker::{HealthConfig, RuntimeType, WorkerType},
-        BasicWorkerBuilder, ConnectionMode, DPAwareWorkerBuilder, Worker, UNKNOWN_MODEL_ID,
-    },
-    protocols::worker_spec::WorkerConfigRequest,
-    workflow::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
+use crate::core::{
+    circuit_breaker::CircuitBreakerConfig, steps::workflow_data::LocalWorkerWorkflowData,
+    worker::RuntimeType, BasicWorkerBuilder, ConnectionMode, Worker, UNKNOWN_MODEL_ID,
 };
 
 /// Step 3: Create worker object(s) with merged configuration + metadata.
-///
-/// This step:
-/// 1. Merges discovered labels with config labels
-/// 2. Determines the model ID from various sources
-/// 3. Creates ModelCard with metadata
-/// 4. Builds worker(s) - either single worker or multiple DP-aware workers
-/// 5. Outputs unified `workers: Vec<Arc<dyn Worker>>` for downstream steps
 pub struct CreateLocalWorkerStep;
 
 #[async_trait]
@@ -44,7 +31,6 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
             context.data.connection_mode.as_ref().ok_or_else(|| {
                 WorkflowError::ContextValueNotFound("connection_mode".to_string())
             })?;
-        let discovered_labels = &context.data.discovered_labels;
 
         // Check if worker already exists
         if app_context
@@ -58,109 +44,108 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
             });
         }
 
-        // Build labels from config
-        let mut config_labels = config.labels.clone();
-        if let Some(priority) = config.priority {
-            config_labels.insert("priority".to_string(), priority.to_string());
-        }
-        if let Some(cost) = config.cost {
-            config_labels.insert("cost".to_string(), cost.to_string());
+        // Merge labels: discovered first, then config (config takes precedence)
+        let mut labels = context.data.discovered_labels.clone();
+        for (key, value) in &config.labels {
+            labels.insert(key.clone(), value.clone());
         }
 
-        // Merge: discovered labels first, then config labels (config takes precedence)
-        let mut final_labels = discovered_labels.clone();
-        for (key, value) in &config_labels {
-            final_labels.insert(key.clone(), value.clone());
-        }
+        // Extract KV transfer config (dedicated metadata fields, not labels)
+        let kv_connector = labels.remove("kv_connector");
+        let kv_role = labels.remove("kv_role");
 
-        // Extract KV transfer config (stored in dedicated metadata fields, not labels)
-        let kv_connector = final_labels.remove("kv_connector");
-        let kv_role = final_labels.remove("kv_role");
-
-        // Determine model_id: config > served_model_name > model_id > model_path > UNKNOWN_MODEL_ID
-        // TODO: Normalize field names in ModelInfo::to_labels() so all backends use consistent
-        // names (e.g., always "model_id"). This would eliminate the need for backend-specific
-        // fallback chains here.
+        // Determine model_id: config.models > discovered labels > UNKNOWN_MODEL_ID
         let model_id = config
-            .model_id
-            .clone()
-            .or_else(|| final_labels.get("served_model_name").cloned()) // SGLang
-            .or_else(|| final_labels.get("model_id").cloned()) // TensorRT-LLM
-            .or_else(|| final_labels.get("model_path").cloned()) // vLLM
+            .models
+            .primary()
+            .map(|m| m.id.clone())
+            .or_else(|| labels.get("served_model_name").cloned())
+            .or_else(|| labels.get("model_id").cloned())
+            .or_else(|| labels.get("model_path").cloned())
             .unwrap_or_else(|| UNKNOWN_MODEL_ID.to_string());
 
-        if model_id != UNKNOWN_MODEL_ID {
-            debug!("Using model_id: {}", model_id);
-        }
+        let model_card = build_model_card(&model_id, config, &labels);
 
-        // Create ModelCard
-        let model_card = build_model_card(&model_id, config, &final_labels);
-
-        debug!(
-            "Creating worker {} with {} discovered + {} config = {} final labels",
-            config.url,
-            discovered_labels.len(),
-            config_labels.len(),
-            final_labels.len()
-        );
-
-        // Parse worker type
-        let worker_type = parse_worker_type(config);
-
-        // Get runtime type (for gRPC workers)
-        let runtime_type = determine_runtime_type(connection_mode, &context.data, config);
-
-        // Build circuit breaker config
-        let circuit_breaker_config = build_circuit_breaker_config(app_context);
-
-        // Build health config
-        let health_config = build_health_config(app_context, config);
-
-        // Normalize URL
-        let normalized_url = normalize_url(&config.url, connection_mode);
-
-        if normalized_url != config.url {
-            debug!(
-                "Normalized worker URL: {} -> {} ({:?})",
-                config.url, normalized_url, connection_mode
-            );
-        }
-
-        // Create workers - always output as Vec for unified downstream handling
-        let workers = if config.dp_aware {
-            create_dp_aware_workers(
-                &context.data,
-                &normalized_url,
-                model_card,
-                worker_type,
-                connection_mode,
-                runtime_type,
-                circuit_breaker_config,
-                health_config,
-                config,
-                &final_labels,
-                kv_connector.as_deref(),
-                kv_role.as_deref(),
-            )?
-        } else {
-            create_single_worker(
-                &normalized_url,
-                model_card,
-                worker_type,
-                connection_mode,
-                runtime_type,
-                circuit_breaker_config,
-                health_config,
-                config,
-                &final_labels,
-                kv_connector.as_deref(),
-                kv_role.as_deref(),
-            )
+        let runtime_type = match context.data.detected_runtime_type.as_deref() {
+            Some(s) => s.parse::<RuntimeType>().unwrap_or(config.runtime_type),
+            None => config.runtime_type,
         };
 
-        // Update workflow data
+        // Normalize URL
+        let url = normalize_url(&config.url, connection_mode);
+
+        // Build workers
+        let cb_cfg = app_context.router_config.effective_circuit_breaker_config();
+        let circuit_breaker = CircuitBreakerConfig {
+            failure_threshold: cb_cfg.failure_threshold,
+            success_threshold: cb_cfg.success_threshold,
+            timeout_duration: Duration::from_secs(cb_cfg.timeout_duration_secs),
+            window_duration: Duration::from_secs(cb_cfg.window_duration_secs),
+        };
+        let health_base = app_context.router_config.health_check.to_protocol_config();
+        let health_config = config.health.apply_to(&health_base);
+        let health_endpoint = &app_context.router_config.health_check.endpoint;
+
+        let dp_ranks: Vec<Option<(usize, usize)>> = if app_context.router_config.dp_aware {
+            let dp_info = context
+                .data
+                .dp_info
+                .as_ref()
+                .ok_or_else(|| WorkflowError::ContextValueNotFound("dp_info".to_string()))?;
+            (0..dp_info.dp_size)
+                .map(|r| Some((r, dp_info.dp_size)))
+                .collect()
+        } else {
+            vec![None] // single worker, no DP
+        };
+
+        let workers: Vec<Arc<dyn Worker>> = dp_ranks
+            .into_iter()
+            .map(|dp| {
+                let mut builder = BasicWorkerBuilder::new(url.clone())
+                    .model(model_card.clone())
+                    .worker_type(config.worker_type)
+                    .connection_mode(*connection_mode)
+                    .runtime_type(runtime_type)
+                    .circuit_breaker_config(circuit_breaker.clone())
+                    .health_config(health_config.clone())
+                    .health_endpoint(health_endpoint)
+                    .bootstrap_port(config.bootstrap_port)
+                    .priority(config.priority)
+                    .cost(config.cost);
+
+                if let Some((rank, size)) = dp {
+                    builder = builder.dp_config(rank, size);
+                }
+                if let Some(ref key) = config.api_key {
+                    builder = builder.api_key(key.clone());
+                }
+                if !labels.is_empty() {
+                    builder = builder.labels(labels.clone());
+                }
+                if let Some(ref c) = kv_connector {
+                    builder = builder.kv_connector(c);
+                }
+                if let Some(ref r) = kv_role {
+                    builder = builder.kv_role(r);
+                }
+
+                let worker = Arc::new(builder.build()) as Arc<dyn Worker>;
+                worker.set_healthy(health_config.disable_health_check);
+                worker
+            })
+            .collect();
+
+        debug!(
+            "Created {} worker(s) for {} ({:?}, {} labels)",
+            workers.len(),
+            url,
+            connection_mode,
+            labels.len()
+        );
+
         context.data.actual_workers = Some(workers);
-        context.data.final_labels = final_labels;
+        context.data.final_labels = labels;
         Ok(StepResult::Success)
     }
 
@@ -171,129 +156,107 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
 
 fn build_model_card(
     model_id: &str,
-    config: &WorkerConfigRequest,
+    config: &WorkerSpec,
     labels: &HashMap<String, String>,
 ) -> ModelCard {
-    let mut card = ModelCard::new(model_id);
+    let user_provided = config.models.find(model_id).is_some();
+    let mut card = config
+        .models
+        .find(model_id)
+        .cloned()
+        .unwrap_or_else(|| ModelCard::new(model_id));
 
-    if let Some(ref tokenizer_path) = config.tokenizer_path {
-        card = card.with_tokenizer_path(tokenizer_path.clone());
+    if let Some(mt) = labels.get("model_type") {
+        card = card.with_hf_model_type(mt.clone());
     }
-    if let Some(ref reasoning_parser) = config.reasoning_parser {
-        card = card.with_reasoning_parser(reasoning_parser.clone());
-    }
-    if let Some(ref tool_parser) = config.tool_parser {
-        card = card.with_tool_parser(tool_parser.clone());
-    }
-    if let Some(ref chat_template) = config.chat_template {
-        card = card.with_chat_template(chat_template.clone());
-    }
-    if let Some(model_type_str) = labels.get("model_type") {
-        card = card.with_hf_model_type(model_type_str.clone());
-    }
-    if let Some(architectures_json) = labels.get("architectures") {
-        if let Ok(architectures) = serde_json::from_str::<Vec<String>>(architectures_json) {
-            card = card.with_architectures(architectures);
+    if let Some(archs_json) = labels.get("architectures") {
+        if let Ok(archs) = serde_json::from_str::<Vec<String>>(archs_json) {
+            card = card.with_architectures(archs);
         }
     }
 
-    // Parse classification model id2label mapping
-    // The proto field is id2label_json: JSON string like {"0": "negative", "1": "positive"}
-    if let Some(id2label_json) = labels.get("id2label_json") {
-        if !id2label_json.is_empty() {
-            // Parse JSON: keys are string indices, values are label names
-            if let Ok(string_map) = serde_json::from_str::<HashMap<String, String>>(id2label_json) {
-                // Convert string keys ("0", "1") to u32 keys (0, 1)
-                let id2label: HashMap<u32, String> = string_map
-                    .into_iter()
-                    .filter_map(|(k, v)| k.parse::<u32>().ok().map(|idx| (idx, v)))
-                    .collect();
-
-                if !id2label.is_empty() {
-                    card = card.with_id2label(id2label);
-                    debug!("Parsed id2label with {} classes", card.num_labels);
-                }
-            }
-        }
-    }
-    // Fallback: if num_labels is set but id2label wasn't parsed, create default labels
-    // Match logic in serving_classify.py::_get_id2label_mapping
-    else if let Some(num_labels_str) = labels.get("num_labels") {
-        if let Ok(num_labels) = num_labels_str.parse::<u32>() {
-            if num_labels > 0 {
-                // Create default mapping: {0: "LABEL_0", 1: "LABEL_1", ...}
-                let id2label: HashMap<u32, String> = (0..num_labels)
-                    .map(|i| (i, format!("LABEL_{}", i)))
-                    .collect();
+    // Classification model id2label
+    if let Some(json) = labels.get("id2label_json").filter(|s| !s.is_empty()) {
+        if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(json) {
+            let id2label: HashMap<u32, String> = map
+                .into_iter()
+                .filter_map(|(k, v)| k.parse::<u32>().ok().map(|i| (i, v)))
+                .collect();
+            if !id2label.is_empty() {
                 card = card.with_id2label(id2label);
-                debug!("Created default id2label with {} classes", num_labels);
             }
         }
+    } else if let Some(n) = labels
+        .get("num_labels")
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n > 0)
+    {
+        let id2label: HashMap<u32, String> = (0..n).map(|i| (i, format!("LABEL_{}", i))).collect();
+        card = card.with_id2label(id2label);
+    }
+
+    // Fill context_length from whichever backend key is available
+    if card.context_length.is_none() {
+        card.context_length = [
+            "context_length",
+            "max_context_length",
+            "max_model_len",
+            "max_total_tokens",
+            "max_seq_len",
+        ]
+        .iter()
+        .find_map(|k| labels.get(*k))
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n > 0);
+    }
+
+    // Fill tokenizer_path
+    if card.tokenizer_path.is_none() {
+        card.tokenizer_path = labels
+            .get("tokenizer_path")
+            .filter(|s| !s.is_empty())
+            .cloned();
+    }
+
+    // Infer model_type capabilities from discovered signals
+    let has_vision = labels
+        .get("supports_vision")
+        .or(labels.get("has_image_understanding"))
+        .map(|s| s == "true")
+        .unwrap_or(false);
+
+    if !user_provided {
+        let is_embedding = labels.get("is_embedding").is_some_and(|s| s == "true");
+        let is_non_generation = labels.get("is_generation").is_some_and(|s| s == "false");
+
+        if is_embedding || is_non_generation {
+            card.model_type = infer_non_generation_type(labels);
+        } else if has_vision && !card.model_type.supports_vision() {
+            card.model_type |= ModelType::VISION;
+        }
+    } else if has_vision && !card.model_type.supports_vision() {
+        card.model_type |= ModelType::VISION;
     }
 
     card
 }
 
-fn parse_worker_type(config: &WorkerConfigRequest) -> WorkerType {
-    config
-        .worker_type
-        .as_ref()
-        .map(|t| match t.as_str() {
-            "prefill" => WorkerType::Prefill {
-                bootstrap_port: config.bootstrap_port,
-            },
-            "decode" => WorkerType::Decode,
-            _ => WorkerType::Regular,
-        })
-        .unwrap_or(WorkerType::Regular)
-}
-
-fn determine_runtime_type(
-    connection_mode: &ConnectionMode,
-    data: &LocalWorkerWorkflowData,
-    config: &WorkerConfigRequest,
-) -> RuntimeType {
-    if !matches!(connection_mode, ConnectionMode::Grpc { .. }) {
-        return RuntimeType::Sglang;
-    }
-
-    if let Some(ref detected_runtime) = data.detected_runtime_type {
-        match detected_runtime.as_str() {
-            "vllm" => RuntimeType::Vllm,
-            "trtllm" => RuntimeType::Trtllm,
-            _ => RuntimeType::Sglang,
+/// Determine embedding vs rerank from architecture/model_type hints.
+fn infer_non_generation_type(labels: &HashMap<String, String>) -> ModelType {
+    if let Some(archs_json) = labels.get("architectures") {
+        if let Ok(archs) = serde_json::from_str::<Vec<String>>(archs_json) {
+            let joined = archs.join(" ").to_lowercase();
+            if joined.contains("rerank") || joined.contains("crossencoder") {
+                return ModelType::RERANK;
+            }
         }
-    } else if let Some(ref runtime) = config.runtime {
-        match runtime.as_str() {
-            "vllm" => RuntimeType::Vllm,
-            "trtllm" => RuntimeType::Trtllm,
-            _ => RuntimeType::Sglang,
+    }
+    if let Some(mt) = labels.get("model_type") {
+        if mt.to_lowercase().contains("rerank") {
+            return ModelType::RERANK;
         }
-    } else {
-        RuntimeType::Sglang
     }
-}
-
-fn build_circuit_breaker_config(app_context: &AppContext) -> CircuitBreakerConfig {
-    let cfg = app_context.router_config.effective_circuit_breaker_config();
-    CircuitBreakerConfig {
-        failure_threshold: cfg.failure_threshold,
-        success_threshold: cfg.success_threshold,
-        timeout_duration: Duration::from_secs(cfg.timeout_duration_secs),
-        window_duration: Duration::from_secs(cfg.window_duration_secs),
-    }
-}
-
-fn build_health_config(app_context: &AppContext, config: &WorkerConfigRequest) -> HealthConfig {
-    let cfg = &app_context.router_config.health_check;
-    HealthConfig {
-        timeout_secs: cfg.timeout_secs,
-        check_interval_secs: cfg.check_interval_secs,
-        endpoint: cfg.endpoint.clone(),
-        failure_threshold: cfg.failure_threshold,
-        success_threshold: cfg.success_threshold,
-        disable_health_check: cfg.disable_health_check || config.disable_health_check,
-    }
+    ModelType::EMBEDDINGS
 }
 
 fn normalize_url(url: &str, connection_mode: &ConnectionMode) -> String {
@@ -302,127 +265,7 @@ fn normalize_url(url: &str, connection_mode: &ConnectionMode) -> String {
     } else {
         match connection_mode {
             ConnectionMode::Http => format!("http://{}", url),
-            ConnectionMode::Grpc { .. } => format!("grpc://{}", url),
+            ConnectionMode::Grpc => format!("grpc://{}", url),
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn create_dp_aware_workers(
-    data: &LocalWorkerWorkflowData,
-    normalized_url: &str,
-    model_card: ModelCard,
-    worker_type: WorkerType,
-    connection_mode: &ConnectionMode,
-    runtime_type: RuntimeType,
-    circuit_breaker_config: CircuitBreakerConfig,
-    health_config: HealthConfig,
-    config: &WorkerConfigRequest,
-    labels: &HashMap<String, String>,
-    kv_connector: Option<&str>,
-    kv_role: Option<&str>,
-) -> Result<Vec<Arc<dyn Worker>>, WorkflowError> {
-    let dp_info = data
-        .dp_info
-        .as_ref()
-        .ok_or_else(|| WorkflowError::ContextValueNotFound("dp_info".to_string()))?;
-
-    debug!(
-        "Creating {} DP-aware workers for {} (dp_size: {})",
-        dp_info.dp_size, normalized_url, dp_info.dp_size
-    );
-
-    let mut workers = Vec::with_capacity(dp_info.dp_size);
-    for rank in 0..dp_info.dp_size {
-        let mut builder =
-            DPAwareWorkerBuilder::new(normalized_url.to_string(), rank, dp_info.dp_size)
-                .model(model_card.clone())
-                .worker_type(worker_type.clone())
-                .connection_mode(connection_mode.clone())
-                .runtime_type(runtime_type.clone())
-                .circuit_breaker_config(circuit_breaker_config.clone())
-                .health_config(health_config.clone());
-
-        if let Some(ref api_key) = config.api_key {
-            builder = builder.api_key(api_key.clone());
-        }
-        if !labels.is_empty() {
-            builder = builder.labels(labels.clone());
-        }
-        if let Some(connector) = kv_connector {
-            builder = builder.kv_connector(connector);
-        }
-        if let Some(role) = kv_role {
-            builder = builder.kv_role(role);
-        }
-
-        let worker = Arc::new(builder.build()) as Arc<dyn Worker>;
-        if health_config.disable_health_check {
-            worker.set_healthy(true);
-        } else {
-            worker.set_healthy(false);
-        }
-        workers.push(worker);
-
-        debug!(
-            "Created DP-aware worker {}@{}/{} ({:?})",
-            normalized_url, rank, dp_info.dp_size, connection_mode
-        );
-    }
-
-    Ok(workers)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn create_single_worker(
-    normalized_url: &str,
-    model_card: ModelCard,
-    worker_type: WorkerType,
-    connection_mode: &ConnectionMode,
-    runtime_type: RuntimeType,
-    circuit_breaker_config: CircuitBreakerConfig,
-    health_config: HealthConfig,
-    config: &WorkerConfigRequest,
-    labels: &HashMap<String, String>,
-    kv_connector: Option<&str>,
-    kv_role: Option<&str>,
-) -> Vec<Arc<dyn Worker>> {
-    let health_check_disabled = health_config.disable_health_check;
-
-    let mut builder = BasicWorkerBuilder::new(normalized_url.to_string())
-        .model(model_card)
-        .worker_type(worker_type)
-        .connection_mode(connection_mode.clone())
-        .runtime_type(runtime_type)
-        .circuit_breaker_config(circuit_breaker_config)
-        .health_config(health_config);
-
-    if let Some(ref api_key) = config.api_key {
-        builder = builder.api_key(api_key.clone());
-    }
-    if !labels.is_empty() {
-        builder = builder.labels(labels.clone());
-    }
-    if let Some(connector) = kv_connector {
-        builder = builder.kv_connector(connector);
-    }
-    if let Some(role) = kv_role {
-        builder = builder.kv_role(role);
-    }
-
-    let worker = Arc::new(builder.build()) as Arc<dyn Worker>;
-    if health_check_disabled {
-        worker.set_healthy(true);
-    } else {
-        worker.set_healthy(false);
-    }
-
-    debug!(
-        "Created worker object for {} ({:?}) with {} labels",
-        normalized_url,
-        connection_mode,
-        labels.len()
-    );
-
-    vec![worker]
 }

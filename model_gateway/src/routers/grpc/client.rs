@@ -1,15 +1,14 @@
 //! Unified gRPC client wrapper for SGLang, vLLM, and TensorRT-LLM backends
 
-use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
+use std::collections::HashMap;
 
-use crate::{
-    grpc_client::{
-        sglang_proto::MultimodalInputs, SglangSchedulerClient, TrtllmServiceClient,
-        VllmEngineClient,
-    },
-    routers::grpc::proto_wrapper::{
-        ProtoEmbedRequest, ProtoEmbedResponse, ProtoGenerateRequest, ProtoStream,
-    },
+use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
+use smg_grpc_client::{
+    sglang_proto::MultimodalInputs, SglangSchedulerClient, TrtllmServiceClient, VllmEngineClient,
+};
+
+use crate::routers::grpc::proto_wrapper::{
+    ProtoEmbedRequest, ProtoEmbedResponse, ProtoGenerateRequest, ProtoStream,
 };
 
 /// Health check response (common across backends)
@@ -28,7 +27,6 @@ pub enum GrpcClient {
 }
 
 impl GrpcClient {
-    /// Get reference to SGLang client (panics if not SGLang)
     pub fn as_sglang(&self) -> &SglangSchedulerClient {
         match self {
             Self::Sglang(client) => client,
@@ -36,7 +34,6 @@ impl GrpcClient {
         }
     }
 
-    /// Get mutable reference to SGLang client (panics if not SGLang)
     pub fn as_sglang_mut(&mut self) -> &mut SglangSchedulerClient {
         match self {
             Self::Sglang(client) => client,
@@ -44,7 +41,6 @@ impl GrpcClient {
         }
     }
 
-    /// Get reference to vLLM client (panics if not vLLM)
     pub fn as_vllm(&self) -> &VllmEngineClient {
         match self {
             Self::Vllm(client) => client,
@@ -52,7 +48,6 @@ impl GrpcClient {
         }
     }
 
-    /// Get mutable reference to vLLM client (panics if not vLLM)
     pub fn as_vllm_mut(&mut self) -> &mut VllmEngineClient {
         match self {
             Self::Vllm(client) => client,
@@ -60,7 +55,6 @@ impl GrpcClient {
         }
     }
 
-    /// Get reference to TensorRT-LLM client (panics if not TensorRT-LLM)
     pub fn as_trtllm(&self) -> &TrtllmServiceClient {
         match self {
             Self::Trtllm(client) => client,
@@ -68,7 +62,6 @@ impl GrpcClient {
         }
     }
 
-    /// Get mutable reference to TensorRT-LLM client (panics if not TensorRT-LLM)
     pub fn as_trtllm_mut(&mut self) -> &mut TrtllmServiceClient {
         match self {
             Self::Trtllm(client) => client,
@@ -76,22 +69,18 @@ impl GrpcClient {
         }
     }
 
-    /// Check if this is a SGLang client
     pub fn is_sglang(&self) -> bool {
         matches!(self, Self::Sglang(_))
     }
 
-    /// Check if this is a vLLM client
     pub fn is_vllm(&self) -> bool {
         matches!(self, Self::Vllm(_))
     }
 
-    /// Check if this is a TensorRT-LLM client
     pub fn is_trtllm(&self) -> bool {
         matches!(self, Self::Trtllm(_))
     }
 
-    /// Connect to gRPC server (runtime-aware)
     pub async fn connect(
         url: &str,
         runtime_type: &str,
@@ -104,7 +93,6 @@ impl GrpcClient {
         }
     }
 
-    /// Perform health check (dispatches to appropriate backend)
     pub async fn health_check(
         &self,
     ) -> Result<HealthCheckResponse, Box<dyn std::error::Error + Send + Sync>> {
@@ -125,7 +113,6 @@ impl GrpcClient {
             }
             Self::Trtllm(client) => {
                 let resp = client.health_check().await?;
-                // TensorRT-LLM returns status string, not separate healthy/message fields
                 let healthy = resp.status.to_lowercase().contains("ok")
                     || resp.status.to_lowercase().contains("healthy");
                 Ok(HealthCheckResponse {
@@ -136,49 +123,28 @@ impl GrpcClient {
         }
     }
 
-    /// Get model info (returns enum wrapping backend-specific response)
     pub async fn get_model_info(
         &self,
     ) -> Result<ModelInfo, Box<dyn std::error::Error + Send + Sync>> {
         match self {
-            Self::Sglang(client) => {
-                let info = client.get_model_info().await?;
-                Ok(ModelInfo::Sglang(Box::new(info)))
-            }
-            Self::Vllm(client) => {
-                let info = client.get_model_info().await?;
-                Ok(ModelInfo::Vllm(info))
-            }
-            Self::Trtllm(client) => {
-                let info = client.get_model_info().await?;
-                Ok(ModelInfo::Trtllm(info))
-            }
+            Self::Sglang(client) => Ok(ModelInfo::Sglang(Box::new(client.get_model_info().await?))),
+            Self::Vllm(client) => Ok(ModelInfo::Vllm(client.get_model_info().await?)),
+            Self::Trtllm(client) => Ok(ModelInfo::Trtllm(client.get_model_info().await?)),
         }
     }
 
-    /// Get server info (returns enum wrapping backend-specific response)
     pub async fn get_server_info(
         &self,
     ) -> Result<ServerInfo, Box<dyn std::error::Error + Send + Sync>> {
         match self {
-            Self::Sglang(client) => {
-                let info = client.get_server_info().await?;
-                Ok(ServerInfo::Sglang(Box::new(info)))
-            }
-            Self::Vllm(client) => {
-                let info = client.get_server_info().await?;
-                Ok(ServerInfo::Vllm(info))
-            }
-            Self::Trtllm(client) => {
-                let info = client.get_server_info().await?;
-                Ok(ServerInfo::Trtllm(info))
-            }
+            Self::Sglang(client) => Ok(ServerInfo::Sglang(Box::new(
+                client.get_server_info().await?,
+            ))),
+            Self::Vllm(client) => Ok(ServerInfo::Vllm(client.get_server_info().await?)),
+            Self::Trtllm(client) => Ok(ServerInfo::Trtllm(client.get_server_info().await?)),
         }
     }
 
-    /// Generate streaming response from request
-    ///
-    /// Dispatches to the appropriate backend client and wraps the result in ProtoStream
     pub async fn generate(
         &mut self,
         req: ProtoGenerateRequest,
@@ -200,7 +166,6 @@ impl GrpcClient {
         }
     }
 
-    /// Submit an embedding request
     pub async fn embed(
         &mut self,
         req: ProtoEmbedRequest,
@@ -214,10 +179,6 @@ impl GrpcClient {
         }
     }
 
-    /// Build a generate request from a chat completion request
-    ///
-    /// Dispatches to the appropriate backend client and wraps the result.
-    /// Note: `multimodal_inputs` is only used by SGLang, other backends ignore it.
     pub fn build_chat_request(
         &self,
         request_id: String,
@@ -262,9 +223,6 @@ impl GrpcClient {
         }
     }
 
-    /// Build a plain generate request (non-chat)
-    ///
-    /// Dispatches to the appropriate backend client and wraps the result.
     pub fn build_generate_request(
         &self,
         request_id: String,
@@ -304,78 +262,133 @@ impl GrpcClient {
     }
 }
 
-/// Unified ModelInfo wrapper
+// ---------------------------------------------------------------------------
+// Metadata wrappers
+// ---------------------------------------------------------------------------
+
 pub enum ModelInfo {
-    Sglang(Box<crate::grpc_client::sglang_proto::GetModelInfoResponse>),
-    Vllm(crate::grpc_client::vllm_proto::GetModelInfoResponse),
-    Trtllm(crate::grpc_client::trtllm_proto::GetModelInfoResponse),
+    Sglang(Box<smg_grpc_client::sglang_proto::GetModelInfoResponse>),
+    Vllm(smg_grpc_client::vllm_proto::GetModelInfoResponse),
+    Trtllm(smg_grpc_client::trtllm_proto::GetModelInfoResponse),
 }
 
-/// Unified ServerInfo wrapper
 pub enum ServerInfo {
-    Sglang(Box<crate::grpc_client::sglang_proto::GetServerInfoResponse>),
-    Vllm(crate::grpc_client::vllm_proto::GetServerInfoResponse),
-    Trtllm(crate::grpc_client::trtllm_proto::GetServerInfoResponse),
-}
-
-impl ServerInfo {
-    /// Get KV connector type (only available for vLLM)
-    pub fn kv_connector(&self) -> Option<String> {
-        match self {
-            ServerInfo::Vllm(info) => Some(info.kv_connector.clone()).filter(|c| !c.is_empty()),
-            _ => None,
-        }
-    }
-
-    /// Get KV role (only available for vLLM)
-    pub fn kv_role(&self) -> Option<String> {
-        match self {
-            ServerInfo::Vllm(info) => Some(info.kv_role.clone()).filter(|r| !r.is_empty()),
-            _ => None,
-        }
-    }
+    Sglang(Box<smg_grpc_client::sglang_proto::GetServerInfoResponse>),
+    Vllm(smg_grpc_client::vllm_proto::GetServerInfoResponse),
+    Trtllm(smg_grpc_client::trtllm_proto::GetServerInfoResponse),
 }
 
 impl ModelInfo {
-    /// Convert model info to label map for worker metadata
-    pub fn to_labels(&self) -> std::collections::HashMap<String, String> {
-        let mut labels = std::collections::HashMap::new();
+    pub fn to_labels(&self) -> HashMap<String, String> {
+        match self {
+            ModelInfo::Sglang(info) => flat_labels(info),
+            ModelInfo::Vllm(info) => flat_labels(info),
+            ModelInfo::Trtllm(info) => flat_labels(info),
+        }
+    }
+}
 
-        // Serialize to JSON Value (like pydantic's model_dump)
-        let value = match self {
-            ModelInfo::Sglang(info) => serde_json::to_value(info).ok(),
-            ModelInfo::Vllm(info) => serde_json::to_value(info).ok(),
-            ModelInfo::Trtllm(info) => serde_json::to_value(info).ok(),
-        };
+impl ServerInfo {
+    /// Convert to labels. SGLang needs special handling because its `server_args`
+    /// is a `prost_types::Struct` (not Serialize). vLLM/TRT-LLM are plain structs.
+    pub fn to_labels(&self) -> HashMap<String, String> {
+        match self {
+            ServerInfo::Sglang(info) => {
+                let mut labels = HashMap::new();
+                if let Some(ref args) = info.server_args {
+                    pick_prost_fields(&mut labels, args, SGLANG_GRPC_KEYS);
+                }
+                if !info.sglang_version.is_empty() {
+                    labels.insert("version".to_string(), info.sglang_version.clone());
+                }
+                labels
+            }
+            ServerInfo::Vllm(info) => flat_labels(info),
+            ServerInfo::Trtllm(info) => flat_labels(info),
+        }
+    }
+}
 
-        // Convert JSON object to HashMap, filtering out empty/zero/false values
-        if let Some(serde_json::Value::Object(obj)) = value {
-            for (key, val) in obj {
-                match val {
-                    // Insert non-empty strings
-                    serde_json::Value::String(s) if !s.is_empty() => {
+/// Keys worth extracting from SGLang gRPC `server_args` (which contains the full config).
+const SGLANG_GRPC_KEYS: &[&str] = &[
+    "model_path",
+    "served_model_name",
+    "tokenizer_path",
+    "tp_size",
+    "dp_size",
+    "pp_size",
+    "context_length",
+    "max_total_tokens",
+    "max_running_requests",
+    "load_balance_method",
+    "disaggregation_mode",
+    "is_embedding",
+    "vocab_size",
+    "weight_version",
+];
+
+// ---------------------------------------------------------------------------
+// Label helpers
+// ---------------------------------------------------------------------------
+
+/// Serialize to flat label map, skipping nulls/zeros/empty.
+///
+/// Booleans are emitted as `"true"` / `"false"` so downstream consumers
+/// (e.g. `is_generation == "false"` for embedding detection) work correctly.
+pub(crate) fn flat_labels<T: serde::Serialize>(value: &T) -> HashMap<String, String> {
+    let mut labels = HashMap::new();
+    if let Ok(serde_json::Value::Object(obj)) = serde_json::to_value(value) {
+        for (key, val) in obj {
+            match val {
+                serde_json::Value::String(s) if !s.is_empty() && s != "null" => {
+                    labels.insert(key, s);
+                }
+                serde_json::Value::Number(n) if n.as_f64().is_some_and(|v| v != 0.0) => {
+                    // Format integers without decimal point
+                    let formatted = n
+                        .as_i64()
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| n.to_string());
+                    labels.insert(key, formatted);
+                }
+                serde_json::Value::Bool(b) => {
+                    labels.insert(key, b.to_string());
+                }
+                serde_json::Value::Array(arr) if !arr.is_empty() => {
+                    if let Ok(s) = serde_json::to_string(&arr) {
                         labels.insert(key, s);
                     }
-                    // Insert positive numbers
-                    serde_json::Value::Number(n) if n.as_i64().unwrap_or(0) > 0 => {
-                        labels.insert(key, n.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    labels
+}
+
+/// Pick specific keys from a `prost_types::Struct`.
+fn pick_prost_fields(labels: &mut HashMap<String, String>, s: &prost_types::Struct, keys: &[&str]) {
+    for key in keys {
+        if let Some(val) = s.fields.get(*key) {
+            if let Some(ref kind) = val.kind {
+                match kind {
+                    prost_types::value::Kind::StringValue(s) if !s.is_empty() && s != "null" => {
+                        labels.insert(key.to_string(), s.clone());
                     }
-                    // Insert true booleans
-                    serde_json::Value::Bool(true) => {
-                        labels.insert(key, "true".to_string());
+                    prost_types::value::Kind::NumberValue(n) if *n != 0.0 => {
+                        let formatted = if *n == (*n as i64) as f64 {
+                            (*n as i64).to_string()
+                        } else {
+                            n.to_string()
+                        };
+                        labels.insert(key.to_string(), formatted);
                     }
-                    // Insert non-empty arrays as JSON strings (for architectures, etc.)
-                    serde_json::Value::Array(arr) if !arr.is_empty() => {
-                        if let Ok(json_str) = serde_json::to_string(&arr) {
-                            labels.insert(key, json_str);
-                        }
+                    prost_types::value::Kind::BoolValue(b) => {
+                        labels.insert(key.to_string(), b.to_string());
                     }
-                    // Skip empty strings, zeros, false, nulls, empty arrays, objects
                     _ => {}
                 }
             }
         }
-
-        labels
     }
 }

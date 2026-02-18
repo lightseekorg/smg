@@ -4,15 +4,13 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tracing::{debug, info};
+use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::{
-    core::{
-        circuit_breaker::CircuitBreakerConfig,
-        steps::workflow_data::{ExternalWorkerWorkflowData, WorkerList},
-        worker::{HealthConfig, RuntimeType, WorkerType},
-        BasicWorkerBuilder, ConnectionMode, Worker,
-    },
-    workflow::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult},
+use crate::core::{
+    circuit_breaker::CircuitBreakerConfig,
+    steps::workflow_data::{ExternalWorkerWorkflowData, WorkerList},
+    worker::{RuntimeType, WorkerType},
+    BasicWorkerBuilder, ConnectionMode, Worker,
 };
 
 /// Normalize URL for external APIs (ensure https://).
@@ -52,26 +50,23 @@ impl StepExecutor<ExternalWorkerWorkflowData> for CreateExternalWorkersStep {
             }
         };
 
-        let health_config = {
-            let cfg = &app_context.router_config.health_check;
-            HealthConfig {
-                timeout_secs: cfg.timeout_secs,
-                check_interval_secs: cfg.check_interval_secs,
-                endpoint: cfg.endpoint.clone(),
-                failure_threshold: cfg.failure_threshold,
-                success_threshold: cfg.success_threshold,
-                disable_health_check: cfg.disable_health_check || config.disable_health_check,
+        let (health_config, health_endpoint) = {
+            let base = app_context.router_config.health_check.to_protocol_config();
+            let mut merged = config.health.apply_to(&base);
+            // External workers (OpenAI, Anthropic, etc.) should not be health-checked
+            // by default — they are third-party APIs that don't expose a /health endpoint.
+            // Only apply the default if the user hasn't explicitly overridden it.
+            if config.health.disable_health_check.is_none() {
+                merged.disable_health_check = true;
             }
+            (
+                merged,
+                app_context.router_config.health_check.endpoint.clone(),
+            )
         };
 
         // Build labels from config
-        let mut labels: HashMap<String, String> = config.labels.clone();
-        if let Some(priority) = config.priority {
-            labels.insert("priority".to_string(), priority.to_string());
-        }
-        if let Some(cost) = config.cost {
-            labels.insert("cost".to_string(), cost.to_string());
-        }
+        let labels: HashMap<String, String> = config.labels.clone();
 
         // Normalize URL (ensure https:// for external APIs)
         let normalized_url = normalize_external_url(&config.url);
@@ -83,12 +78,14 @@ impl StepExecutor<ExternalWorkerWorkflowData> for CreateExternalWorkersStep {
             debug!("Creating wildcard worker (no models) for {}", config.url);
 
             let mut builder = BasicWorkerBuilder::new(normalized_url.clone())
-                .models(vec![]) // Empty models = accepts any model
                 .worker_type(WorkerType::Regular)
                 .connection_mode(ConnectionMode::Http)
                 .runtime_type(RuntimeType::External)
                 .circuit_breaker_config(circuit_breaker_config.clone())
-                .health_config(health_config.clone());
+                .health_config(health_config.clone())
+                .health_endpoint(&health_endpoint)
+                .priority(config.priority)
+                .cost(config.cost);
 
             if let Some(ref api_key) = config.api_key {
                 builder = builder.api_key(api_key.clone());
@@ -126,7 +123,10 @@ impl StepExecutor<ExternalWorkerWorkflowData> for CreateExternalWorkersStep {
                     .connection_mode(ConnectionMode::Http)
                     .runtime_type(RuntimeType::External)
                     .circuit_breaker_config(circuit_breaker_config.clone())
-                    .health_config(health_config.clone());
+                    .health_config(health_config.clone())
+                    .health_endpoint(&health_endpoint)
+                    .priority(config.priority)
+                    .cost(config.cost);
 
                 if let Some(ref api_key) = config.api_key {
                     builder = builder.api_key(api_key.clone());

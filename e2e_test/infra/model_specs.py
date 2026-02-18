@@ -14,6 +14,8 @@ import os
 
 # Environment variable for local model paths (CI uses local copies for speed)
 ROUTER_LOCAL_MODEL_PATH = os.environ.get("ROUTER_LOCAL_MODEL_PATH", "")
+# Nightly benchmarks skip --enforce-eager for performance measurement
+_is_nightly = os.environ.get("E2E_NIGHTLY") == "1"
 
 
 def _resolve_model_path(hf_path: str) -> str:
@@ -68,6 +70,7 @@ MODEL_SPECS: dict[str, dict] = {
         "memory_gb": 60,
         "tp": 4,
         "features": ["chat", "streaming", "thinking", "reasoning"],
+        "vllm_args": [] if _is_nightly else ["--enforce-eager"],
     },
     # Mistral for function calling
     "mistralai/Mistral-7B-Instruct-v0.3": {
@@ -99,15 +102,13 @@ MODEL_SPECS: dict[str, dict] = {
         "worker_args": [
             "--trust-remote-code",
             "--context-length=163840",  # 160K context length (SGLang)
-            "--prefill-attention-backend=flashinfer",  # MLA attention backend
-            "--decode-attention-backend=flashinfer",  # MLA attention backend
-            "--flashinfer-mla-disable-ragged",  # Disable ragged attention for MLA
-            "--mem-fraction-static=0.9",  # 90% GPU memory for static allocation
-            "--cuda-graph-max-bs=256",  # CUDA graph batch size optimization
+            "--attention-backend=fa3",  # fa3 attention backend
+            "--mem-fraction-static=0.82",  # 82% GPU memory for static allocation
         ],
         "vllm_args": [
             "--trust-remote-code",
             "--max-model-len=163840",  # 160K context length (vLLM)
+            "--attention-backend=FLASHINFER",  # FLASHINFER attention backend
         ],
     },
 }

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from smg.router_args import RouterArgs
 from smg.smg_rs import (
     BackendType,
@@ -236,7 +238,7 @@ class Router:
         self._router = router
 
     @staticmethod
-    def from_args(args: RouterArgs) -> "Router":
+    def from_args(args: RouterArgs) -> Router:
         """Create a router from a RouterArgs instance."""
 
         args_dict = vars(args)
@@ -278,6 +280,7 @@ class Router:
                 username=args_dict.get("oracle_username"),
                 connect_descriptor=final_descriptor,
                 wallet_path=args_dict.get("oracle_wallet_path"),
+                external_auth=args_dict.get("oracle_external_auth", False),
                 pool_min=args_dict.get("oracle_pool_min", 1),
                 pool_max=args_dict.get("oracle_pool_max", 16),
                 pool_timeout_secs=args_dict.get("oracle_pool_timeout_secs", 30),
@@ -318,6 +321,7 @@ class Router:
             "oracle_connect_descriptor",
             "oracle_username",
             "oracle_password",
+            "oracle_external_auth",
             "oracle_pool_min",
             "oracle_pool_max",
             "oracle_pool_timeout_secs",

@@ -1,15 +1,13 @@
 //! MCP tool execution logic for Harmony Responses
 
 use axum::response::Response;
+use openai_protocol::{common::ToolCall, responses::ResponseTool};
 use serde_json::{from_str, json, Value};
+use smg_mcp::{McpToolSession, ToolExecutionInput};
 use tracing::{debug, error};
 
 use super::common::McpCallTracking;
-use crate::{
-    mcp::{build_response_tools_with_names, McpToolSession, ToolExecutionInput},
-    observability::metrics::{metrics_labels, Metrics},
-    protocols::{common::ToolCall, responses::ResponseTool},
-};
+use crate::observability::metrics::{metrics_labels, Metrics};
 
 /// Tool execution result
 ///
@@ -103,15 +101,8 @@ pub(super) async fn execute_mcp_tools(
     Ok(results)
 }
 
-/// Convert MCP tools to Responses API tool format
-///
-/// Converts MCP ToolEntry (from inventory) to ResponseTool format so the model
-/// knows about available MCP tools when making tool calls.
 pub(crate) fn convert_mcp_tools_to_response_tools(
     session: &McpToolSession<'_>,
 ) -> Vec<ResponseTool> {
-    build_response_tools_with_names(
-        session.mcp_tools(),
-        Some(session.exposed_name_by_qualified()),
-    )
+    session.build_response_tools()
 }

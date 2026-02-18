@@ -1,0 +1,101 @@
+pull_request_rules:
+  - name: Enforce branch naming convention (internal)
+    description: Auto-close PRs from internal branches that don't follow naming convention
+    conditions:
+      - -head~=^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(/[a-z0-9._-]+)+$
+      - head != main
+      - head-repo-full-name = lightseekorg/smg
+    actions:
+      comment:
+        message: |
+          Hi @{{author}}, the branch `{{head}}` does not follow our naming convention.
+
+          Please use one of the following formats:
+          - `<type>/<description>` — e.g. `feat/add-auth`, `fix/null-pointer`, `dependabot/cargo/pyo3-0.28.1`
+          - `<username>/<description>` — e.g. `changsu/fix-routing`
+
+          Allowed types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`
+
+          > **Note:** PRs with non-conforming branch names **will be auto-closed**. Please follow the naming convention for all branches.
+      post_check:
+        title: Branch naming convention
+        summary: |
+          Branch `{{head}}` does not match the required pattern: `<type>/<description>` or `<username>/<description>` (sub-paths like `a/b/c` are also allowed).
+      close:
+        message: |
+          Closing this PR because the branch name `{{head}}` does not follow the naming convention.
+
+          To fix this, please rename your branch locally, push the new branch, and open a new PR:
+          ```bash
+          git branch -m <new-branch-name>
+          git push origin -u <new-branch-name>
+          ```
+
+  - name: Comment on DCO check failure
+    description: Post fix instructions when DCO sign-off is missing
+    conditions:
+      - check-failure = dco-check
+      - -closed
+      - -draft
+    actions:
+      comment:
+        message: |
+          Hi @{{author}}, the DCO sign-off check has failed. All commits must include a `Signed-off-by` line.
+
+          **To fix existing commits:**
+          ```bash
+          # Sign off the last N commits (replace N with the number of unsigned commits)
+          git rebase HEAD~N --signoff
+          git push --force-with-lease
+          ```
+
+          **To sign off future commits automatically:**
+          - Use `git commit -s` every time, or
+          - **VSCode**: enable `Git: Always Sign Off` in Settings
+          - **PyCharm**: enable `Sign-off commit` in the Commit tool window
+
+  - name: Add needs-rebase label and comment on merge conflicts
+    description: Label and comment when a PR has merge conflicts
+    conditions:
+      - conflict
+      - -closed
+      - -draft
+    actions:
+      label:
+        add:
+          - needs-rebase
+      comment:
+        message: |
+          Hi @{{author}}, this PR has merge conflicts that must be resolved before it can be merged. Please rebase your branch:
+          ```bash
+          git fetch origin main
+          git rebase origin/main
+          # resolve any conflicts, then:
+          git push --force-with-lease
+          ```
+
+  - name: Remove needs-rebase label when conflict is resolved
+    description: Remove needs-rebase label when PR no longer has conflicts
+    conditions:
+      - -conflict
+      - -closed
+      - label = needs-rebase
+    actions:
+      label:
+        remove:
+          - needs-rebase
+
+  - name: Remind on stale PRs
+    description: Comment and label PRs inactive for 14 days
+    conditions:
+      - updated-at < 14 days ago
+      - -merged
+      - -closed
+      - -draft
+    actions:
+      comment:
+        message: |
+          Hi @{{author}}, this PR has been inactive for 14 days. Please update it or close it if it's no longer needed.
+      label:
+        add:
+          - stale
