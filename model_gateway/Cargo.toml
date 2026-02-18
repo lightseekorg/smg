@@ -137,6 +137,7 @@ kv-index.workspace = true
 wasmtime-wasi = { workspace = true }
 lru = { workspace = true }
 wat = "1.244"
+tokio-stream = { version = "0.1", features = ["net"] }
 
 [[bench]]
 name = "wasm_middleware_latency"
@@ -176,6 +177,11 @@ path = "benches/radix_tree_benchmark.rs"
 name = "wasm_instantiation"
 harness = false
 path = "benches/wasm_instantiation.rs"
+
+[[bench]]
+name = "grpc_channel_bench"
+harness = false
+path = "benches/grpc_channel_bench.rs"
 
 [lints]
 workspace = true
