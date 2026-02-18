@@ -1,7 +1,7 @@
 use std::{
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     task::{Context, Poll},
@@ -116,10 +116,21 @@ impl futures::Stream for AbortOnDropStream {
     }
 }
 
+/// Number of gRPC channels (TCP connections) per client.
+/// Multiple channels avoid HTTP/2 head-of-line blocking and TCP congestion
+/// window limits under high concurrency.
+const DEFAULT_CHANNEL_POOL_SIZE: usize = 4;
+
+/// Internal pool of gRPC channels for distributing RPCs across TCP connections.
+struct ChannelPool {
+    clients: Vec<proto::sglang_scheduler_client::SglangSchedulerClient<Channel>>,
+    next_idx: AtomicUsize,
+}
+
 /// gRPC client for SGLang scheduler
 #[derive(Clone)]
 pub struct SglangSchedulerClient {
-    client: proto::sglang_scheduler_client::SglangSchedulerClient<Channel>,
+    pool: Arc<ChannelPool>,
     trace_injector: BoxedTraceInjector,
 }
 
@@ -134,7 +145,10 @@ impl SglangSchedulerClient {
         endpoint: &str,
         trace_injector: BoxedTraceInjector,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        debug!("Connecting to SGLang scheduler at {}", endpoint);
+        debug!(
+            "Connecting to SGLang scheduler at {} with pool of {} channels",
+            endpoint, DEFAULT_CHANNEL_POOL_SIZE
+        );
 
         // Convert grpc:// to http:// for tonic
         let http_endpoint = if let Some(addr) = endpoint.strip_prefix("grpc://") {
@@ -143,22 +157,31 @@ impl SglangSchedulerClient {
             endpoint.to_string()
         };
 
-        let channel = Channel::from_shared(http_endpoint)?
-            .http2_keep_alive_interval(Duration::from_secs(30))
-            .keep_alive_timeout(Duration::from_secs(10))
-            .keep_alive_while_idle(true)
-            .tcp_keepalive(Some(Duration::from_secs(60)))
-            .tcp_nodelay(true)
-            .http2_adaptive_window(true)
-            .initial_stream_window_size(Some(16 * 1024 * 1024)) // 16MB
-            .initial_connection_window_size(Some(32 * 1024 * 1024)) // 32MB
-            .connect()
-            .await?;
-
-        let client = proto::sglang_scheduler_client::SglangSchedulerClient::new(channel);
+        // Create a pool of channels (each with its own TCP connection) to avoid
+        // HTTP/2 head-of-line blocking and TCP congestion window limits
+        let mut clients = Vec::with_capacity(DEFAULT_CHANNEL_POOL_SIZE);
+        for _ in 0..DEFAULT_CHANNEL_POOL_SIZE {
+            let channel = Channel::from_shared(http_endpoint.clone())?
+                .http2_keep_alive_interval(Duration::from_secs(30))
+                .keep_alive_timeout(Duration::from_secs(10))
+                .keep_alive_while_idle(true)
+                .tcp_keepalive(Some(Duration::from_secs(60)))
+                .tcp_nodelay(true)
+                .http2_adaptive_window(true)
+                .initial_stream_window_size(Some(16 * 1024 * 1024)) // 16MB
+                .initial_connection_window_size(Some(32 * 1024 * 1024)) // 32MB
+                .connect()
+                .await?;
+            clients.push(proto::sglang_scheduler_client::SglangSchedulerClient::new(
+                channel,
+            ));
+        }
 
         Ok(Self {
-            client,
+            pool: Arc::new(ChannelPool {
+                clients,
+                next_idx: AtomicUsize::new(0),
+            }),
             trace_injector,
         })
     }
@@ -168,6 +191,14 @@ impl SglangSchedulerClient {
     pub fn with_trace_injector(mut self, trace_injector: BoxedTraceInjector) -> Self {
         self.trace_injector = trace_injector;
         self
+    }
+
+    /// Get the next client from the round-robin channel pool.
+    /// Distributes concurrent RPCs across multiple TCP connections
+    /// to avoid HTTP/2 head-of-line blocking on a single connection.
+    fn next_client(&self) -> proto::sglang_scheduler_client::SglangSchedulerClient<Channel> {
+        let idx = self.pool.next_idx.fetch_add(1, Ordering::Relaxed) % self.pool.clients.len();
+        self.pool.clients[idx].clone()
     }
 
     /// Submit a generation request (returns auto-aborting streaming response)
@@ -181,7 +212,7 @@ impl SglangSchedulerClient {
         req: proto::GenerateRequest,
     ) -> Result<AbortOnDropStream, Box<dyn std::error::Error + Send + Sync>> {
         let request_id = req.request_id.clone();
-        let mut client = self.client.clone();
+        let mut client = self.next_client();
         let mut request = Request::new(req);
 
         // Inject W3C trace context into gRPC metadata for distributed tracing
@@ -203,7 +234,7 @@ impl SglangSchedulerClient {
         &self,
         req: proto::EmbedRequest,
     ) -> Result<proto::EmbedResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let mut client = self.client.clone();
+        let mut client = self.next_client();
         let mut request = Request::new(req);
 
         // Inject W3C trace context into gRPC metadata
@@ -223,7 +254,7 @@ impl SglangSchedulerClient {
         // HealthCheckRequest is now empty - server generates its own health check internally
         let request = Request::new(proto::HealthCheckRequest {});
 
-        let mut client = self.client.clone();
+        let mut client = self.next_client();
         let response = client.health_check(request).await?;
         debug!("Health check response received");
         Ok(response.into_inner())
@@ -244,7 +275,7 @@ impl SglangSchedulerClient {
             reason,
         });
 
-        let mut client = self.client.clone();
+        let mut client = self.next_client();
         let response = client.abort(request).await?;
         debug!(
             "Abort response for {}: success={}, message={}",
@@ -262,7 +293,7 @@ impl SglangSchedulerClient {
         debug!("Requesting model info");
         let request = Request::new(proto::GetModelInfoRequest {});
 
-        let mut client = self.client.clone();
+        let mut client = self.next_client();
         let response = client.get_model_info(request).await?;
         debug!("Model info response received");
         Ok(response.into_inner())
@@ -275,7 +306,7 @@ impl SglangSchedulerClient {
         debug!("Requesting server info");
         let request = Request::new(proto::GetServerInfoRequest {});
 
-        let mut client = self.client.clone();
+        let mut client = self.next_client();
         let response = client.get_server_info(request).await?;
         debug!("Server info response received");
         Ok(response.into_inner())

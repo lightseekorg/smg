@@ -393,16 +393,5 @@ fn main() {
         }
 
         print_footer();
-
-        // Summary analysis
-        println!("=== Analysis ===");
-        println!("Look for:");
-        println!(
-            "  • Throughput plateau — if req/s stops growing, the single channel is saturated"
-        );
-        println!(
-            "  • p99 spike — high-concurrency p99 >> low-concurrency p99 indicates HOL blocking"
-        );
-        println!("  • After optimization — re-run with channel pool to compare\n");
     });
 }
