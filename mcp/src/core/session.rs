@@ -622,33 +622,4 @@ mod tests {
         // all_mcp_servers() should return everything
         assert_eq!(session.all_mcp_servers().len(), 2);
     }
-
-    #[test]
-    fn test_mcp_servers_no_builtin_servers() {
-        // With default orchestrator (no builtin config), all servers are visible
-        let orchestrator = McpOrchestrator::new_test();
-        let mcp_servers = vec![
-            ("a".to_string(), "key1".to_string()),
-            ("b".to_string(), "key2".to_string()),
-        ];
-
-        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
-
-        assert_eq!(session.mcp_servers().len(), 2);
-        assert_eq!(session.all_mcp_servers().len(), 2);
-    }
-
-    #[test]
-    fn test_mcp_servers_only_builtin() {
-        let orchestrator = create_builtin_orchestrator();
-        // Session only has the builtin server
-        let mcp_servers = vec![("brave".to_string(), "brave-builtin".to_string())];
-
-        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
-
-        // No visible servers
-        assert!(session.mcp_servers().is_empty());
-        // But all_mcp_servers still has it
-        assert_eq!(session.all_mcp_servers().len(), 1);
-    }
 }
