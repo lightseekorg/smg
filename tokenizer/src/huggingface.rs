@@ -267,6 +267,10 @@ impl TokenizerTrait for HuggingFaceTokenizer {
         self
     }
 
+    fn backend(&self) -> crate::traits::TokenizerBackend {
+        crate::traits::TokenizerBackend::HuggingFace
+    }
+
     fn apply_chat_template(
         &self,
         messages: &[serde_json::Value],
