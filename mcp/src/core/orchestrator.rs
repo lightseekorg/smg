@@ -310,10 +310,42 @@ pub struct McpOrchestrator {
 }
 
 impl McpOrchestrator {
-    /// Create a new orchestrator with the given configuration.
+    /// Create a new orchestrator and immediately connect to all configured servers.
     ///
-    /// Policy is built from `config.policy`. Default policy allows all tools.
+    /// This blocks until all server connections are attempted. Use [`new_deferred`]
+    /// when connections should be established later (e.g., via an async job queue).
     pub async fn new(config: McpConfig) -> McpResult<Self> {
+        let orchestrator = Self::new_deferred(config).await?;
+
+        // Connect to static servers
+        for server_config in &orchestrator.config.servers.clone() {
+            if let Err(e) = orchestrator.connect_static_server(server_config).await {
+                if server_config.required {
+                    return Err(e);
+                }
+                error!(
+                    "Failed to connect to optional server '{}': {}",
+                    server_config.name, e
+                );
+            }
+        }
+
+        info!(
+            "McpOrchestrator initialized with {} static servers",
+            orchestrator.static_servers.len()
+        );
+
+        Ok(orchestrator)
+    }
+
+    /// Create a new orchestrator with the given configuration but do NOT connect
+    /// to any servers.
+    ///
+    /// The config is stored so that methods like [`find_builtin_server`] can
+    /// discover configured servers immediately. Actual connections are expected
+    /// to happen later via [`connect_static_server`] (e.g., driven by an async
+    /// job queue).
+    pub async fn new_deferred(config: McpConfig) -> McpResult<Self> {
         // Validate configuration (server pairs, no duplicate builtin_types)
         config
             .validate()
@@ -359,29 +391,11 @@ impl McpOrchestrator {
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
             reconnection_locks: DashMap::new(),
-            config: config.clone(),
+            config,
         };
-
-        // Connect to static servers
-        for server_config in &config.servers {
-            if let Err(e) = orchestrator.connect_static_server(server_config).await {
-                if server_config.required {
-                    return Err(e);
-                }
-                error!(
-                    "Failed to connect to optional server '{}': {}",
-                    server_config.name, e
-                );
-            }
-        }
 
         // Start background refresh task
         orchestrator.spawn_refresh_handler(refresh_rx);
-
-        info!(
-            "McpOrchestrator initialized with {} static servers",
-            orchestrator.static_servers.len()
-        );
 
         Ok(orchestrator)
     }

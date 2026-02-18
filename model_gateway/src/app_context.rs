@@ -482,34 +482,26 @@ impl AppContextBuilder {
         self
     }
 
-    /// Create and initialize MCP orchestrator with empty config
+    /// Create MCP orchestrator with the real config but deferred connections.
     ///
-    /// This initializes the MCP orchestrator with an empty config and default settings.
-    /// MCP servers will be registered later via the InitializeMcpServers job.
-    async fn with_mcp_orchestrator(
-        mut self,
-        _router_config: &RouterConfig,
-    ) -> Result<Self, String> {
-        // Create OnceLock container
+    /// The full MCP config is stored so that `find_builtin_server()` can
+    /// discover builtin servers immediately (e.g., for `web_search_preview`
+    /// routing). Actual server connections happen later via the
+    /// `InitializeMcpServers` async job.
+    async fn with_mcp_orchestrator(mut self, router_config: &RouterConfig) -> Result<Self, String> {
         let mcp_orchestrator_lock = Arc::new(OnceLock::new());
 
-        // Always create with empty config and defaults
-        debug!("Initializing MCP orchestrator with empty config and default settings (5 min TTL, 100 max connections)");
+        let config = router_config.mcp_config.clone().unwrap_or_default();
 
-        let empty_config = smg_mcp::McpConfig {
-            servers: Vec::new(),
-            pool: Default::default(),
-            proxy: None,
-            warmup: Vec::new(),
-            inventory: Default::default(),
-            policy: Default::default(),
-        };
+        debug!(
+            "Initializing MCP orchestrator with {} server config(s) (deferred connections)",
+            config.servers.len()
+        );
 
-        let orchestrator = McpOrchestrator::new(empty_config)
+        let orchestrator = McpOrchestrator::new_deferred(config)
             .await
             .map_err(|e| format!("Failed to initialize MCP orchestrator: {}", e))?;
 
-        // Store the initialized orchestrator in the OnceLock
         mcp_orchestrator_lock
             .set(Arc::new(orchestrator))
             .map_err(|_| "Failed to set MCP orchestrator in OnceLock".to_string())?;
