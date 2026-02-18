@@ -464,7 +464,10 @@ impl OpenAIRouter {
             }
         }
 
-        // Apply previous response chain items if loaded
+        // Apply previous response chain items if loaded.
+        // Note: conversation and previous_response_id are mutually exclusive
+        // (enforced by the caller in route_responses), so this branch and the
+        // conversation branch above never both modify request_body.input.
         if let Some(mut items) = chain_items {
             let id_suffix = original_previous_response_id.as_deref().unwrap_or("new");
             Self::append_current_input(&mut items, &request_body.input, id_suffix);
@@ -865,7 +868,13 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         };
 
         // Validate mutual exclusivity of conversation and previous_response_id
-        if body.conversation.is_some() && body.previous_response_id.is_some() {
+        // Treat empty strings as unset to match other metadata paths
+        let has_conversation = body.conversation.as_ref().is_some_and(|s| !s.is_empty());
+        let has_previous_response = body
+            .previous_response_id
+            .as_ref()
+            .is_some_and(|s| !s.is_empty());
+        if has_conversation && has_previous_response {
             Metrics::record_router_error(
                 metrics_labels::ROUTER_OPENAI,
                 metrics_labels::BACKEND_EXTERNAL,

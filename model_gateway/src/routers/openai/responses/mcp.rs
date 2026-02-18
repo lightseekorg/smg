@@ -562,7 +562,6 @@ pub(super) async fn execute_tool_loop(
         }
 
         state.iteration += 1;
-        state.total_calls += function_calls.len();
         Metrics::record_mcp_tool_iteration(&original_body.model);
 
         info!(
@@ -576,21 +575,22 @@ pub(super) async fn execute_tool_loop(
             None => DEFAULT_MAX_ITERATIONS,
         };
 
-        if state.total_calls > effective_limit {
-            warn!(
-                "Reached tool call limit ({}) after {} calls",
-                effective_limit, state.total_calls
-            );
-            return build_incomplete_response(
-                response_json,
-                state,
-                "max_tool_calls",
-                session,
-                original_body,
-            );
-        }
-
         for call in function_calls {
+            state.total_calls += 1;
+
+            if state.total_calls > effective_limit {
+                warn!(
+                    "Reached tool call limit ({}) after {} calls",
+                    effective_limit, state.total_calls
+                );
+                return build_incomplete_response(
+                    response_json,
+                    state,
+                    "max_tool_calls",
+                    session,
+                    original_body,
+                );
+            }
             let arguments: Value = match serde_json::from_str(&call.arguments) {
                 Ok(v) => v,
                 Err(e) => {
