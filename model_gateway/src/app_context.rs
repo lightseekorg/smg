@@ -503,6 +503,7 @@ impl AppContextBuilder {
             warmup: Vec::new(),
             inventory: Default::default(),
             policy: Default::default(),
+            rate_limits: None,
         };
 
         let orchestrator = McpOrchestrator::new(empty_config)
