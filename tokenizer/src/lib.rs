@@ -35,6 +35,7 @@ pub use stream::DecodeStream;
 pub use tiktoken::{TiktokenModel, TiktokenTokenizer};
 pub use traits::{
     Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait,
+    TokenizerBackend,
 };
 
 /// Main tokenizer wrapper that provides a unified interface for different tokenizer implementations
