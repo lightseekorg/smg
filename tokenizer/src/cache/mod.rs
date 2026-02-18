@@ -272,6 +272,10 @@ impl Tokenizer for CachedTokenizer {
         self
     }
 
+    fn backend(&self) -> crate::traits::TokenizerBackend {
+        self.inner.backend()
+    }
+
     fn apply_chat_template(
         &self,
         messages: &[serde_json::Value],
