@@ -1,16 +1,17 @@
 pull_request_rules:
-  - name: Enforce branch naming convention
-    description: Branch must follow <type>/<description> or <username>/<description> format
+  - name: Enforce branch naming convention (internal)
+    description: Auto-close PRs from internal branches that don't follow naming convention
     conditions:
-      - -head~=^[a-z0-9]([a-z0-9._-]*[a-z0-9])?/[a-z0-9._-]+$
+      - -head~=^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(/[a-z0-9._-]+)+$
       - head != main
+      - head-repo-full-name = lightseekorg/smg
     actions:
       comment:
         message: |
           Hi @{{author}}, the branch `{{head}}` does not follow our naming convention.
 
           Please use one of the following formats:
-          - `<type>/<description>` — e.g. `feat/add-auth`, `fix/null-pointer`
+          - `<type>/<description>` — e.g. `feat/add-auth`, `fix/null-pointer`, `dependabot/cargo/pyo3-0.28.1`
           - `<username>/<description>` — e.g. `changsu/fix-routing`
 
           Allowed types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`, `perf`
@@ -19,7 +20,7 @@ pull_request_rules:
       post_check:
         title: Branch naming convention
         summary: |
-          Branch `{{head}}` does not match the required pattern: `<type>/<description>` or `<username>/<description>`.
+          Branch `{{head}}` does not match the required pattern: `<type>/<description>` or `<username>/<description>` (sub-paths like `a/b/c` are also allowed).
       close:
         message: |
           Closing this PR because the branch name `{{head}}` does not follow the naming convention.
