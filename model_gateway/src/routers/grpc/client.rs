@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use llm_tokenizer::bundle::TokenizerBundle;
 use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
 use smg_grpc_client::{
     sglang_proto::MultimodalInputs, SglangSchedulerClient, TrtllmServiceClient, VllmEngineClient,
@@ -145,6 +146,20 @@ impl GrpcClient {
         }
     }
 
+    /// Fetch tokenizer bundle from backend runtime when supported.
+    pub async fn get_tokenizer(
+        &self,
+    ) -> Result<TokenizerBundle, Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            Self::Sglang(client) => client.get_tokenizer().await,
+            Self::Vllm(client) => client.get_tokenizer().await,
+            Self::Trtllm(client) => client.get_tokenizer().await,
+        }
+    }
+
+    /// Generate streaming response from request
+    ///
+    /// Dispatches to the appropriate backend client and wraps the result in ProtoStream
     pub async fn generate(
         &mut self,
         req: ProtoGenerateRequest,

@@ -113,6 +113,8 @@ bitflags.workspace = true
 once_cell = "1.21.3"
 sha2 = "0.10"
 wasmtime = { workspace = true }
+zip = "8.1"
+tempfile = "3.8"
 
 [build-dependencies]
 chrono = { version = "0.4", features = ["clock"] }
@@ -123,7 +125,6 @@ criterion = { version = "0.8", features = ["html_reports"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 portpicker = "0.1"
-tempfile = "3.8"
 lazy_static = "1.4"
 wasm-encoder = "0.244"
 npyz = { version = "0.8", features = ["npz"] }

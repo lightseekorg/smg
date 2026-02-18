@@ -12,9 +12,11 @@ pub mod stop;
 pub mod stream;
 pub mod traits;
 
+pub mod bundle;
 pub mod chat_template;
 pub mod huggingface;
 pub mod tiktoken;
+pub mod validation;
 
 #[cfg(test)]
 mod tests;

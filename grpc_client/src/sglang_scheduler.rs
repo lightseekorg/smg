@@ -8,6 +8,11 @@ use std::{
     time::Duration,
 };
 
+/// Tokenizer bundle downloaded from backend
+use llm_tokenizer::bundle::{
+    collect_tokenizer_bundle, TokenizerBundle, TokenizerChunk, TokenizerFileChunk,
+    TokenizerFileDescriptor, TokenizerMetadata,
+};
 use openai_protocol::{
     chat::ChatCompletionRequest,
     common::{ResponseFormat, StringOrArray, ToolChoice, ToolChoiceValue},
@@ -115,6 +120,8 @@ impl futures::Stream for AbortOnDropStream {
         Pin::new(&mut self.inner).poll_next(cx)
     }
 }
+
+crate::impl_decode_tokenizer_chunk!();
 
 /// gRPC client for SGLang scheduler
 #[derive(Clone)]
@@ -280,6 +287,8 @@ impl SglangSchedulerClient {
         debug!("Server info response received");
         Ok(response.into_inner())
     }
+
+    crate::impl_get_tokenizer!();
 
     /// Build a single SGLang EmbedRequest
     pub fn build_embed_request(

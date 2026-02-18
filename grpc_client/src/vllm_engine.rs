@@ -8,6 +8,10 @@ use std::{
     time::Duration,
 };
 
+use llm_tokenizer::bundle::{
+    collect_tokenizer_bundle, TokenizerBundle, TokenizerChunk, TokenizerFileChunk,
+    TokenizerFileDescriptor, TokenizerMetadata,
+};
 use openai_protocol::{
     chat::ChatCompletionRequest,
     common::{ResponseFormat, StringOrArray, ToolChoice, ToolChoiceValue},
@@ -115,6 +119,8 @@ impl futures::Stream for AbortOnDropStream {
         Pin::new(&mut self.inner).poll_next(cx)
     }
 }
+
+crate::impl_decode_tokenizer_chunk!();
 
 /// gRPC client for vLLM scheduler
 #[derive(Clone)]
@@ -254,6 +260,8 @@ impl VllmEngineClient {
         debug!("Server info response received");
         Ok(response.into_inner())
     }
+
+    crate::impl_get_tokenizer!();
 
     /// Build a single vLLM GenerateRequest from OpenAI ChatCompletionRequest
     pub fn build_generate_request_from_chat(
