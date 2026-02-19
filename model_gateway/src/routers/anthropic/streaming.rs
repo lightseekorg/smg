@@ -32,32 +32,6 @@ use crate::{
 /// Channel buffer size for SSE events sent to the client.
 const SSE_CHANNEL_SIZE: usize = 128;
 
-/// RAII guard: decrements worker load and records outcome on drop.
-struct WorkerLoadGuard {
-    worker: Arc<dyn Worker>,
-    success: bool,
-}
-
-impl WorkerLoadGuard {
-    fn new(worker: Arc<dyn Worker>) -> Self {
-        Self {
-            worker,
-            success: false,
-        }
-    }
-
-    fn mark_success(&mut self) {
-        self.success = true;
-    }
-}
-
-impl Drop for WorkerLoadGuard {
-    fn drop(&mut self) {
-        self.worker.decrement_load();
-        self.worker.record_outcome(self.success);
-    }
-}
-
 /// Execute a streaming Messages API request, handling both
 /// passthrough (no MCP) and MCP tool loop paths.
 pub(crate) async fn execute(router: &RouterContext, req_ctx: RequestContext) -> Response {
@@ -237,7 +211,7 @@ async fn run_tool_loop(
         Metrics::record_mcp_tool_iteration(&req_ctx.model_id);
 
         let (response, selected_worker) = send_streaming_request(&router, &req_ctx).await?;
-        let mut guard = WorkerLoadGuard::new(selected_worker);
+        let mut guard = worker::WorkerLoadGuard::new(selected_worker);
 
         if !response.status().is_success() {
             return Err(format!(

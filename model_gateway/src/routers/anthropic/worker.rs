@@ -26,6 +26,32 @@ use crate::{
 /// Maximum error response body size to prevent DoS (1 MB)
 const MAX_ERROR_RESPONSE_SIZE: usize = 1024 * 1024;
 
+/// RAII guard: decrements worker load and records outcome on drop.
+pub(crate) struct WorkerLoadGuard {
+    worker: Arc<dyn Worker>,
+    success: bool,
+}
+
+impl WorkerLoadGuard {
+    pub(crate) fn new(worker: Arc<dyn Worker>) -> Self {
+        Self {
+            worker,
+            success: false,
+        }
+    }
+
+    pub(crate) fn mark_success(&mut self) {
+        self.success = true;
+    }
+}
+
+impl Drop for WorkerLoadGuard {
+    fn drop(&mut self) {
+        self.worker.decrement_load();
+        self.worker.record_outcome(self.success);
+    }
+}
+
 /// Select the best worker for the given model.
 #[allow(clippy::result_large_err)]
 pub(crate) fn select_worker(
