@@ -216,9 +216,9 @@ impl WorkerSelectionStage {
                 .fold((Vec::new(), Vec::new()), |mut acc, w| {
                     if w.is_available() {
                         match w.metadata().spec.worker_type {
-                            WorkerType::Prefill => acc.0.push(w),
-                            WorkerType::Decode => acc.1.push(w),
-                            WorkerType::Regular => {}
+                            WorkerType::Prefill | WorkerType::PrePrefill => acc.0.push(w),
+                            WorkerType::Decode | WorkerType::PrePrefillDecode => acc.1.push(w),
+                            _ => {}
                         }
                     }
                     acc

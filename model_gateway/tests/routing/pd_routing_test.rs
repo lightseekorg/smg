@@ -246,16 +246,18 @@ mod pd_routing_tests {
                 prefill_urls: vec![
                     (format!("http://127.0.0.1:{}", prefill_port_1), None),
                     (format!("http://127.0.0.1:{}", prefill_port_2), None),
-                    (format!("http://127.0.0.1:{}", pp_prefill_port), None),
                 ],
                 decode_urls: vec![
                     format!("http://127.0.0.1:{}", decode_port),
-                    format!("http://127.0.0.1:{}", pp_decode_port),
                 ],
                 prefill_policy: None,
                 decode_policy: None,
-                pre_prefill_url: Some(format!("http://127.0.0.1:{}", pp_prefill_port)),
-                pre_prefill_decode_url: Some(format!("http://127.0.0.1:{}", pp_decode_port)),
+                pre_prefill_urls: vec![
+                    (format!("http://127.0.0.1:{}", pp_prefill_port), None),
+                ],
+                pre_prefill_decode_urls: vec![
+                    format!("http://127.0.0.1:{}", pp_decode_port),
+                ],
                 pre_prefill_match_threshold: 0.1,
                 pre_prefill_unmatched_chars_threshold: 50,
                 pre_prefill_min_tokens: 50,
@@ -412,16 +414,18 @@ mod pd_routing_tests {
                 prefill_urls: vec![
                     (format!("http://127.0.0.1:{}", p1_port), None),
                     (format!("http://127.0.0.1:{}", p2_port), None),
-                    (format!("http://127.0.0.1:{}", pp_port), None),
                 ],
                 decode_urls: vec![
                     format!("http://127.0.0.1:{}", d_port),
-                    format!("http://127.0.0.1:{}", ppd_port),
                 ],
                 prefill_policy: None,
                 decode_policy: None,
-                pre_prefill_url: Some(format!("http://127.0.0.1:{}", pp_port)),
-                pre_prefill_decode_url: Some(format!("http://127.0.0.1:{}", ppd_port)),
+                pre_prefill_urls: vec![
+                    (format!("http://127.0.0.1:{}", pp_port), None),
+                ],
+                pre_prefill_decode_urls: vec![
+                    format!("http://127.0.0.1:{}", ppd_port),
+                ],
                 pre_prefill_match_threshold: 0.1,
                 pre_prefill_unmatched_chars_threshold: 50,
                 pre_prefill_min_tokens: 50,

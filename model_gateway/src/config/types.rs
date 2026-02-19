@@ -162,12 +162,12 @@ pub enum RoutingMode {
         prefill_policy: Option<PolicyConfig>,
         #[serde(skip_serializing_if = "Option::is_none")]
         decode_policy: Option<PolicyConfig>,
-        /// URL for the pre-prefill worker (cold request warming)
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pre_prefill_url: Option<String>,
-        /// Decode URL paired with the pre-prefill worker
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pre_prefill_decode_url: Option<String>,
+        /// Pre-prefill worker URLs with optional bootstrap ports (cold request warming)
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pre_prefill_urls: Vec<(String, Option<u16>)>,
+        /// Decode URLs paired with pre-prefill workers
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pre_prefill_decode_urls: Vec<String>,
         /// Cache match ratio threshold below which a request is considered "cold"
         #[serde(default = "default_pre_prefill_match_threshold")]
         pre_prefill_match_threshold: f32,
@@ -195,8 +195,15 @@ impl RoutingMode {
             RoutingMode::PrefillDecode {
                 prefill_urls,
                 decode_urls,
+                pre_prefill_urls,
+                pre_prefill_decode_urls,
                 ..
-            } => prefill_urls.len() + decode_urls.len(),
+            } => {
+                prefill_urls.len()
+                    + decode_urls.len()
+                    + pre_prefill_urls.len()
+                    + pre_prefill_decode_urls.len()
+            }
             RoutingMode::OpenAI { worker_urls } => worker_urls.len(),
             RoutingMode::Anthropic { worker_urls } => worker_urls.len(),
         }
@@ -719,8 +726,8 @@ mod tests {
             decode_urls: vec!["http://decode1".to_string()],
             prefill_policy: None,
             decode_policy: None,
-            pre_prefill_url: None,
-            pre_prefill_decode_url: None,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
             pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
             pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
             pre_prefill_min_tokens: default_pre_prefill_min_tokens(),
@@ -751,8 +758,8 @@ mod tests {
             ],
             prefill_policy: None,
             decode_policy: None,
-            pre_prefill_url: None,
-            pre_prefill_decode_url: None,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
             pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
             pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
             pre_prefill_min_tokens: default_pre_prefill_min_tokens(),
@@ -779,8 +786,8 @@ mod tests {
             decode_urls: vec!["http://decode1".to_string()],
             prefill_policy: None,
             decode_policy: None,
-            pre_prefill_url: None,
-            pre_prefill_decode_url: None,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
             pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
             pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
             pre_prefill_min_tokens: default_pre_prefill_min_tokens(),
@@ -1251,8 +1258,8 @@ mod tests {
             decode_policy: Some(PolicyConfig::PowerOfTwo {
                 load_check_interval_secs: 60,
             }),
-            pre_prefill_url: None,
-            pre_prefill_decode_url: None,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
             pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
             pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
             pre_prefill_min_tokens: default_pre_prefill_min_tokens(),
@@ -1284,8 +1291,8 @@ mod tests {
                 max_tree_size: 1000,
             }),
             decode_policy: None,
-            pre_prefill_url: None,
-            pre_prefill_decode_url: None,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
             pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
             pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
             pre_prefill_min_tokens: default_pre_prefill_min_tokens(),
@@ -1313,8 +1320,8 @@ mod tests {
             decode_policy: Some(PolicyConfig::PowerOfTwo {
                 load_check_interval_secs: 60,
             }),
-            pre_prefill_url: None,
-            pre_prefill_decode_url: None,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
             pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
             pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
             pre_prefill_min_tokens: default_pre_prefill_min_tokens(),
@@ -1340,8 +1347,8 @@ mod tests {
             decode_urls: vec!["http://decode1".to_string()],
             prefill_policy: None,
             decode_policy: None,
-            pre_prefill_url: None,
-            pre_prefill_decode_url: None,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
             pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
             pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
             pre_prefill_min_tokens: default_pre_prefill_min_tokens(),

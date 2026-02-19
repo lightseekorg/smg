@@ -24,8 +24,12 @@ class RouterArgs:
     )  # List of (url, bootstrap_port)
     decode_urls: list[str] = dataclasses.field(default_factory=list)
     # Pre-prefill routing configuration
-    pre_prefill_url: str | None = None  # URL for pre-prefill worker
-    pre_prefill_decode_url: str | None = None  # Decode URL paired with pre-prefill worker
+    pre_prefill_urls: list[tuple] = dataclasses.field(
+        default_factory=list
+    )  # List of (url, bootstrap_port) for pre-prefill workers
+    pre_prefill_decode_urls: list[str] = dataclasses.field(
+        default_factory=list
+    )  # Decode URLs paired with pre-prefill workers
     pre_prefill_match_threshold: float = 0.1  # Cache match threshold for cold detection
     pre_prefill_unmatched_chars_threshold: int = 10000  # Min unmatched chars to trigger
     pre_prefill_min_tokens: int = 10000  # Min total tokens for eligibility
@@ -405,16 +409,18 @@ class RouterArgs:
             help="Interval in seconds between checks for worker startup",
         )
         pd_group.add_argument(
-            f"--{prefix}pre-prefill-url",
-            type=str,
-            default=None,
-            help="URL for the pre-prefill worker (cold request warming)",
+            f"--{prefix}pre-prefill",
+            nargs="+",
+            action="append",
+            help="Pre-prefill server URL and optional bootstrap port. Can be specified multiple times. "
+            "Format: --pre-prefill URL [BOOTSTRAP_PORT]. Same format as --prefill.",
         )
         pd_group.add_argument(
-            f"--{prefix}pre-prefill-decode-url",
-            type=str,
-            default=None,
-            help="Decode URL paired with the pre-prefill worker",
+            f"--{prefix}pre-prefill-decode",
+            nargs=1,
+            action="append",
+            metavar=("URL",),
+            help="Decode server URL paired with pre-prefill workers. Can be specified multiple times.",
         )
         pd_group.add_argument(
             f"--{prefix}pre-prefill-match-threshold",
@@ -1028,6 +1034,12 @@ class RouterArgs:
         )
         args_dict["decode_urls"] = cls._parse_decode_urls(
             cli_args_dict.get(f"{prefix}decode", None)
+        )
+        args_dict["pre_prefill_urls"] = cls._parse_prefill_urls(
+            cli_args_dict.get(f"{prefix}pre_prefill", None)
+        )
+        args_dict["pre_prefill_decode_urls"] = cls._parse_decode_urls(
+            cli_args_dict.get(f"{prefix}pre_prefill_decode", None)
         )
         args_dict["selector"] = cls._parse_selector(cli_args_dict.get(f"{prefix}selector", None))
         args_dict["prefill_selector"] = cls._parse_selector(
