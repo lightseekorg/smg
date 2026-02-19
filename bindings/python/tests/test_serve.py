@@ -756,7 +756,7 @@ class TestServeOrchestrator:
 
     def test_build_router_args_injects_worker_urls_grpc(self):
         args = _make_args(data_parallel_size=2, connection_mode="grpc")
-        backend_args = "--model-path /tmp/model"
+        backend_args = ["--model-path", "/tmp/model"]
         orch = ServeOrchestrator("sglang", args, backend_args)
         # Simulate workers already launched
         mock_proc1 = MagicMock()
@@ -777,7 +777,7 @@ class TestServeOrchestrator:
 
     def test_build_router_args_http_mode(self):
         args = _make_args(data_parallel_size=2, connection_mode="http")
-        backend_args = "--model-path /tmp/model"
+        backend_args = ["--model-path", "/tmp/model"]
         orch = ServeOrchestrator("sglang", args, backend_args)
         mock_proc = MagicMock()
         orch.workers = [(mock_proc, 31000), (mock_proc, 31003)]
@@ -796,7 +796,7 @@ class TestServeOrchestrator:
         args = _make_args(
             backend="vllm", data_parallel_size=2, model="/tmp/m", connection_mode="grpc"
         )
-        backend_args = "--model /tmp/m"
+        backend_args = ["--model", "/tmp/m"]
         orch = ServeOrchestrator("vllm", args, backend_args)
         mock_proc = MagicMock()
         orch.workers = [(mock_proc, 32000), (mock_proc, 32003)]
@@ -813,7 +813,7 @@ class TestServeOrchestrator:
 
     def test_cleanup_workers_handles_already_dead_process(self):
         args = _make_args()
-        backend_args = "--model-path /tmp/model"
+        backend_args = ["--model-path", "/tmp/model"]
         orch = ServeOrchestrator("sglang", args, backend_args)
         mock_proc = MagicMock()
         mock_proc.pid = 99999
@@ -828,7 +828,7 @@ class TestServeOrchestrator:
 
     def test_cleanup_workers_sigkill_on_timeout(self):
         args = _make_args()
-        backend_args = "--model-path /tmp/model"
+        backend_args = ["--model-path", "/tmp/model"]
         orch = ServeOrchestrator("sglang", args, backend_args)
         mock_proc = MagicMock()
         mock_proc.pid = 12345
@@ -845,7 +845,7 @@ class TestServeOrchestrator:
 
     def test_cleanup_workers_empty_list(self):
         args = _make_args()
-        backend_args = "--model-path /tmp/model"
+        backend_args = ["--model-path", "/tmp/model"]
         orch = ServeOrchestrator("sglang", args, backend_args)
         orch.workers = []
         # Should be a no-op
@@ -853,7 +853,7 @@ class TestServeOrchestrator:
 
     def test_signal_handler_sets_guard_flag(self):
         args = _make_args()
-        backend_args = "--model-path /tmp/model"
+        backend_args = ["--model-path", "/tmp/model"]
         orch = ServeOrchestrator("sglang", args, backend_args)
         orch.workers = []
 
@@ -865,7 +865,7 @@ class TestServeOrchestrator:
 
     def test_signal_handler_guard_prevents_reentry(self):
         args = _make_args()
-        backend_args = "--model-path /tmp/model"
+        backend_args = ["--model-path", "/tmp/model"]
         orch = ServeOrchestrator("sglang", args, backend_args)
         orch._shutting_down = True
 
@@ -876,7 +876,7 @@ class TestServeOrchestrator:
         args = _make_args(
             backend="trtllm", data_parallel_size=1, model="/tmp/m", connection_mode="grpc"
         )
-        backend_args = "--config /tmp/config.yml"
+        backend_args = ["--config", "/tmp/config.yml"]
         orch = ServeOrchestrator("trtllm", args, backend_args)
 
         with patch("smg.serve._find_available_ports", return_value=[50051]):

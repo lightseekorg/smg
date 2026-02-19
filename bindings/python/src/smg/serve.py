@@ -355,7 +355,7 @@ def _add_trtllm_stub_args(parser: argparse.ArgumentParser) -> None:
     """
     group = parser.add_argument_group("TensorRT-LLM Options")
     group.add_argument("--model", type=str, help="Model path (HuggingFace ID or local path)")
-    group.add_argument("--tp-size", type=str, help="Tensor parallel size (overrides config file)")
+    group.add_argument("--tp-size", type=int, help="Tensor parallel size (overrides config file)")
     group.add_argument(
         "--config",
         type=str,
