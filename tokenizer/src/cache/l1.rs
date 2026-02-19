@@ -242,7 +242,11 @@ impl L1Cache {
             };
 
             if let Some(old) = self.shards[shard_idx].insert(hash_bytes, cached) {
-                // Replaced an existing entry — subtract old size, add new size
+                // Replaced an existing entry — adjust delta only.
+                // Note: the counter update is not atomic with the shard insert, so
+                // concurrent replacements of the same key can briefly skew the
+                // counter. This is benign — eviction is best-effort and the drift
+                // is bounded to a single entry's size per race.
                 let old_size = old.size_bytes as u64;
                 let new_size = size_bytes as u64;
                 if new_size >= old_size {

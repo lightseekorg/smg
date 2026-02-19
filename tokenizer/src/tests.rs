@@ -149,8 +149,10 @@ fn test_thread_safety() {
 fn test_decode_stream_multibyte_char_boundary() {
     use anyhow::Result;
 
-    use crate::stream::DecodeStream;
-    use crate::traits::{Decoder, Encoder, Encoding, SpecialTokens, Tokenizer as TokenizerTrait};
+    use crate::{
+        stream::DecodeStream,
+        traits::{Decoder, Encoder, Encoding, SpecialTokens, Tokenizer as TokenizerTrait},
+    };
 
     /// Mock tokenizer simulating byte-fallback context sensitivity.
     ///
@@ -167,12 +169,11 @@ fn test_decode_stream_multibyte_char_boundary() {
             Ok(Encoding::Sp(vec![]))
         }
 
-        fn encode_batch(
-            &self,
-            inputs: &[&str],
-            add_special_tokens: bool,
-        ) -> Result<Vec<Encoding>> {
-            inputs.iter().map(|s| self.encode(s, add_special_tokens)).collect()
+        fn encode_batch(&self, inputs: &[&str], add_special_tokens: bool) -> Result<Vec<Encoding>> {
+            inputs
+                .iter()
+                .map(|s| self.encode(s, add_special_tokens))
+                .collect()
         }
     }
 

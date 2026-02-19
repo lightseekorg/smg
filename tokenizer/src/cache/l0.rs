@@ -69,29 +69,34 @@ impl L0Cache {
         }
     }
 
-    /// Evict one arbitrary entry from the given map if total capacity is reached.
-    fn maybe_evict(&self, map: &DashMap<String, Arc<Encoding>>) {
+    /// Evict one arbitrary entry if total capacity is reached.
+    /// Evicts from the larger map to keep both maps roughly balanced.
+    fn maybe_evict(&self) {
         if self.len() >= self.max_entries {
+            let victim = if self.map_plain.len() >= self.map_special.len() {
+                &self.map_plain
+            } else {
+                &self.map_special
+            };
             // Scope the iterator so all shard read-locks are released before remove()
-            let key_to_remove = { map.iter().next().map(|entry| entry.key().clone()) };
+            let key_to_remove = { victim.iter().next().map(|entry| entry.key().clone()) };
             if let Some(k) = key_to_remove {
-                map.remove(&k);
+                victim.remove(&k);
             }
         }
     }
 
     /// Insert an encoding into the cache
     pub fn insert(&self, key: String, add_special_tokens: bool, value: Encoding) {
-        let map = self.map_for(add_special_tokens);
-        self.maybe_evict(map);
-        map.insert(key, Arc::new(value));
+        self.maybe_evict();
+        self.map_for(add_special_tokens)
+            .insert(key, Arc::new(value));
     }
 
     /// Insert a pre-wrapped Arc encoding into the cache (avoids double-wrapping)
     pub fn insert_arc(&self, key: String, add_special_tokens: bool, value: Arc<Encoding>) {
-        let map = self.map_for(add_special_tokens);
-        self.maybe_evict(map);
-        map.insert(key, value);
+        self.maybe_evict();
+        self.map_for(add_special_tokens).insert(key, value);
     }
 
     /// Get the current number of entries in the cache
@@ -202,6 +207,20 @@ mod tests {
 
         // Cache should have exactly 2 entries
         assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn test_eviction_across_maps() {
+        let cache = L0Cache::new(2);
+
+        // Fill up map_plain to capacity
+        cache.insert("a".to_string(), false, mock_encoding(vec![1]));
+        cache.insert("b".to_string(), false, mock_encoding(vec![2]));
+        assert_eq!(cache.len(), 2);
+
+        // Insert into map_special — should evict from map_plain (the larger map)
+        cache.insert("c".to_string(), true, mock_encoding(vec![3]));
+        assert_eq!(cache.len(), 2, "total entries must not exceed max_entries");
     }
 
     #[test]
