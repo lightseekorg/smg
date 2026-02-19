@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::response::Response;
 use openai_protocol::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse};
 use serde_json::json;
-use smg_mcp::{McpToolSession, ToolExecutionInput};
+use smg_mcp::{McpSessionOptions, McpToolSession, ToolExecutionInput};
 use tracing::{debug, error, trace, warn};
 
 use super::{
@@ -151,7 +151,15 @@ pub(super) async fn execute_tool_loop(
         .response_id
         .clone()
         .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4()));
-    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
+
+    let session = McpToolSession::new(
+        &ctx.mcp_orchestrator,
+        mcp_servers,
+        &session_request_id,
+        McpSessionOptions {
+            request_tools: original_request.tools.as_deref(),
+        },
+    );
 
     // Get MCP tools and convert to chat format (do this once before loop)
     let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&session);

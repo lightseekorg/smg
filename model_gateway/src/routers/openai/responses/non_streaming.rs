@@ -8,7 +8,7 @@ use axum::{
     Json,
 };
 use serde_json::Value;
-use smg_mcp::McpToolSession;
+use smg_mcp::{McpSessionOptions, McpToolSession};
 use tracing::warn;
 
 use super::{
@@ -71,7 +71,14 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             .request_id
             .clone()
             .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
-        let session = McpToolSession::new(mcp_orchestrator, mcp_servers, &session_request_id);
+        let session = McpToolSession::new(
+            mcp_orchestrator,
+            mcp_servers,
+            &session_request_id,
+            McpSessionOptions {
+                request_tools: original_body.tools.as_deref(),
+            },
+        );
         prepare_mcp_tools_as_functions(&mut payload, &session);
 
         match execute_tool_loop(
@@ -84,7 +91,10 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         )
         .await
         {
-            Ok(resp) => response_json = resp,
+            Ok(resp) => {
+                worker.circuit_breaker().record_success();
+                response_json = resp;
+            }
             Err(err) => {
                 worker.circuit_breaker().record_failure();
                 return error::internal_error("upstream_error", err);
@@ -116,6 +126,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             let status = StatusCode::from_u16(response.status().as_u16())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let body = response.text().await.unwrap_or_default();
+            let body = error::sanitize_error_body(&body);
             return (status, body).into_response();
         }
 
@@ -140,25 +151,24 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         previous_response_id.as_deref(),
     );
 
-    if let Err(err) = persist_conversation_items(
-        ctx.components
-            .conversation_storage()
-            .expect("Conversation storage required")
-            .clone(),
-        ctx.components
-            .conversation_item_storage()
-            .expect("Conversation item storage required")
-            .clone(),
-        ctx.components
-            .response_storage()
-            .expect("Response storage required")
-            .clone(),
-        &response_json,
-        original_body,
-    )
-    .await
-    {
-        warn!("Failed to persist conversation items: {}", err);
+    if let (Some(conv_storage), Some(item_storage), Some(resp_storage)) = (
+        ctx.components.conversation_storage(),
+        ctx.components.conversation_item_storage(),
+        ctx.components.response_storage(),
+    ) {
+        if let Err(err) = persist_conversation_items(
+            conv_storage.clone(),
+            item_storage.clone(),
+            resp_storage.clone(),
+            &response_json,
+            original_body,
+        )
+        .await
+        {
+            warn!("Failed to persist conversation items: {}", err);
+        }
+    } else {
+        warn!("Storage not configured, skipping conversation persistence");
     }
 
     (StatusCode::OK, Json(response_json)).into_response()

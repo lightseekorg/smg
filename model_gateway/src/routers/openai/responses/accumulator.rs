@@ -4,11 +4,7 @@ use openai_protocol::event_types::{OutputItemEvent, ResponseEvent};
 use serde_json::Value;
 use tracing::warn;
 
-use super::common::{extract_output_index, get_event_type};
-
-// ============================================================================
-// Streaming Response Accumulator
-// ============================================================================
+use super::common::{extract_output_index, get_event_type, parse_sse_block};
 
 /// Helper that parses SSE frames from the OpenAI responses stream and
 /// accumulates enough information to persist the final response locally.
@@ -90,23 +86,12 @@ impl StreamingResponseAccumulator {
             return;
         }
 
-        let mut event_name: Option<String> = None;
-        let mut data_lines: Vec<String> = Vec::new();
-
-        for line in trimmed.lines() {
-            if let Some(rest) = line.strip_prefix("event:") {
-                event_name = Some(rest.trim().to_string());
-            } else if let Some(rest) = line.strip_prefix("data:") {
-                data_lines.push(rest.trim_start().to_string());
-            }
-        }
-
-        let data_payload = data_lines.join("\n");
-        if data_payload.is_empty() {
+        let (event_name, data) = parse_sse_block(trimmed);
+        if data.is_empty() {
             return;
         }
 
-        self.handle_event(event_name.as_deref(), &data_payload);
+        self.handle_event(event_name, &data);
     }
 
     fn handle_event(&mut self, event_name: Option<&str>, data_payload: &str) {

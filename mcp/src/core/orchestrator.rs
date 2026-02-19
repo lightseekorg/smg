@@ -28,7 +28,7 @@
 
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -389,6 +389,12 @@ impl McpOrchestrator {
     /// Create a simplified orchestrator for testing.
     #[cfg(test)]
     pub fn new_test() -> Self {
+        Self::new_test_with_config(McpConfig::default())
+    }
+
+    /// Create a simplified orchestrator with a specific config for testing.
+    #[cfg(test)]
+    pub fn new_test_with_config(config: McpConfig) -> Self {
         use crate::approval::{audit::AuditLog, policy::PolicyEngine};
 
         let (refresh_tx, _) = mpsc::channel(10);
@@ -406,7 +412,7 @@ impl McpOrchestrator {
             active_executions: Arc::new(AtomicUsize::new(0)),
             shutdown_token: CancellationToken::new(),
             reconnection_locks: DashMap::new(),
-            config: McpConfig::default(),
+            config,
         }
     }
 
@@ -936,6 +942,27 @@ impl McpOrchestrator {
         }
 
         None
+    }
+
+    /// Returns the set of server names that have `builtin_type` configured.
+    pub fn builtin_server_names(&self) -> HashSet<String> {
+        let mut names = HashSet::new();
+
+        // Check connected static servers first
+        for entry in self.static_servers.iter() {
+            if entry.config.builtin_type.is_some() {
+                names.insert(entry.config.name.clone());
+            }
+        }
+
+        // Also check initial config (covers not-yet-connected servers and tests)
+        for server_config in &self.config.servers {
+            if server_config.builtin_type.is_some() {
+                names.insert(server_config.name.clone());
+            }
+        }
+
+        names
     }
 
     /// Execute a single tool using an already-resolved qualified binding.

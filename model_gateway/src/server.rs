@@ -1004,9 +1004,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         ]
     });
 
-    let auth_config = AuthConfig {
-        api_key: config.router_config.api_key.clone(),
-    };
+    let auth_config = AuthConfig::new(config.router_config.api_key.clone());
 
     // Initialize control plane authentication if configured
     let control_plane_auth_state =

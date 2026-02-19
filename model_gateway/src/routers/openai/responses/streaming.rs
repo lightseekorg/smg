@@ -24,7 +24,7 @@ use openai_protocol::{
     responses::{ResponseToolType, ResponsesRequest},
 };
 use serde_json::{json, Value};
-use smg_mcp::{McpOrchestrator, McpToolSession, ResponseFormat};
+use smg_mcp::{McpOrchestrator, McpSessionOptions, McpToolSession, ResponseFormat};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -53,10 +53,6 @@ use crate::{
     },
 };
 
-// ============================================================================
-// Event Transformation and Forwarding
-// ============================================================================
-
 /// Apply all transformations to event data in-place (rewrite + transform)
 /// Optimized to parse JSON only once instead of multiple times
 /// Returns true if any changes were made
@@ -67,13 +63,12 @@ pub(super) fn apply_event_transformations_inplace(
     let mut changed = false;
 
     // 1. Apply rewrite_streaming_block logic (store, previous_response_id, tools masking)
-    // Get event_type as owned String to avoid borrow conflict with mutable operations below
     let event_type = parsed_data
         .get("type")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let should_patch = is_response_event(event_type);
-    // Need owned copy for the match below since we mutate parsed_data
+    // Owned copy needed for the match below since we mutate parsed_data
     let event_type = event_type.to_string();
 
     if should_patch {
@@ -311,29 +306,45 @@ fn send_buffered_arguments(
     true
 }
 
-/// Forward and transform a streaming event to the client
-/// Returns false if client disconnected
+/// An SSE event to be forwarded to the client, with optional pre-parsed JSON.
+pub(super) struct SseEventData<'a> {
+    pub raw_block: &'a str,
+    pub event_name: Option<&'a str>,
+    pub data: &'a str,
+    /// Pre-parsed JSON value. When `Some`, avoids re-parsing `data`.
+    pub pre_parsed: Option<Value>,
+}
+
+/// Forward and transform a streaming event to the client.
+/// Returns false if client disconnected.
 pub(super) fn forward_streaming_event(
-    raw_block: &str,
-    event_name: Option<&str>,
-    data: &str,
+    event: SseEventData<'_>,
     handler: &mut StreamingToolHandler,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     ctx: &StreamingEventContext<'_>,
     sequence_number: &mut u64,
 ) -> bool {
-    // Skip individual function_call_arguments.delta events - we'll send them as one
+    let SseEventData {
+        raw_block,
+        event_name,
+        data,
+        pre_parsed,
+    } = event;
+
     if event_name == Some(FunctionCallEvent::ARGUMENTS_DELTA) {
         return true;
     }
 
-    // Parse JSON data once
-    let mut parsed_data: Value = match serde_json::from_str(data) {
-        Ok(v) => v,
-        Err(_) => {
-            let chunk = format!("{}\n\n", raw_block);
-            return tx.send(Ok(Bytes::from(chunk))).is_ok();
-        }
+    // Use pre-parsed value or parse JSON data
+    let mut parsed_data: Value = match pre_parsed {
+        Some(v) => v,
+        None => match serde_json::from_str(data) {
+            Ok(v) => v,
+            Err(_) => {
+                let chunk = format!("{}\n\n", raw_block);
+                return tx.send(Ok(Bytes::from(chunk))).is_ok();
+            }
+        },
     };
 
     let event_type = get_event_type(event_name, &parsed_data);
@@ -355,7 +366,6 @@ pub(super) fn forward_streaming_event(
         return false;
     }
 
-    // Remap output_index for sequential downstream indices
     if mapped_output_index.is_none() {
         if let Some(idx) = extract_output_index(&parsed_data) {
             mapped_output_index = handler.mapped_output_index(idx);
@@ -365,10 +375,8 @@ pub(super) fn forward_streaming_event(
         parsed_data["output_index"] = json!(mapped);
     }
 
-    // Apply transformations
     apply_event_transformations_inplace(&mut parsed_data, ctx);
 
-    // Restore original response ID
     if let Some(response_obj) = parsed_data
         .get_mut("response")
         .and_then(|v| v.as_object_mut())
@@ -378,13 +386,11 @@ pub(super) fn forward_streaming_event(
         }
     }
 
-    // Update sequence number
     if parsed_data.get("sequence_number").is_some() {
         parsed_data["sequence_number"] = json!(*sequence_number);
         *sequence_number += 1;
     }
 
-    // Serialize and send
     let final_data = match serde_json::to_string(&parsed_data) {
         Ok(s) => s,
         Err(_) => {
@@ -393,7 +399,6 @@ pub(super) fn forward_streaming_event(
         }
     };
 
-    // Build SSE block with transformed event name
     let final_block = match event_name {
         Some(evt) => format!("event: {}\ndata: {}\n\n", map_event_name(evt), final_data),
         None => format!("data: {}\n\n", final_data),
@@ -403,7 +408,6 @@ pub(super) fn forward_streaming_event(
         return false;
     }
 
-    // After sending output_item.added for tool calls, inject in_progress event
     if event_name == Some(OutputItemEvent::ADDED)
         && !maybe_inject_tool_in_progress(&parsed_data, tx, sequence_number)
     {
@@ -507,10 +511,6 @@ pub(super) fn send_final_response_event(
     tx.send(Ok(Bytes::from(completed_event))).is_ok()
 }
 
-// ============================================================================
-// Main Streaming Handlers
-// ============================================================================
-
 /// Simple pass-through streaming without MCP interception
 pub(super) async fn handle_simple_streaming_passthrough(
     client: &reqwest::Client,
@@ -548,6 +548,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
             .text()
             .await
             .unwrap_or_else(|err| format!("Failed to read upstream error body: {}", err));
+        let error_body = error::sanitize_error_body(&error_body);
         return (status_code, error_body).into_response();
     }
 
@@ -686,7 +687,6 @@ pub(super) async fn handle_streaming_with_tool_interception(
     let payload_clone = payload.clone();
     let orchestrator_clone = Arc::clone(orchestrator);
 
-    // Spawn the streaming loop task
     tokio::spawn(async move {
         let mut state = ToolLoopState::new(original_request.input.clone());
         let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
@@ -697,6 +697,9 @@ pub(super) async fn handle_streaming_with_tool_interception(
             &orchestrator_clone,
             mcp_servers.clone(),
             &session_request_id,
+            McpSessionOptions {
+                request_tools: original_request.tools.as_deref(),
+            },
         );
         let mut current_payload = payload_clone;
         prepare_mcp_tools_as_functions(&mut current_payload, &session);
@@ -734,6 +737,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
+                let body = error::sanitize_error_body(&body);
                 let _ = send_sse_event(
                     &tx,
                     "error",
@@ -742,7 +746,6 @@ pub(super) async fn handle_streaming_with_tool_interception(
                 return;
             }
 
-            // Stream events and check for tool calls
             let mut upstream_stream = response.bytes_stream();
             let mut handler = StreamingToolHandler::with_starting_index(next_output_index);
             if let Some(ref id) = preserved_response_id {
@@ -770,67 +773,64 @@ pub(super) async fn handle_streaming_with_tool_interception(
 
                             match action {
                                 StreamAction::Forward => {
+                                    // Parse data once and reuse for skip check, forwarding, and in_progress check
+                                    let parsed = serde_json::from_str::<Value>(data.as_ref()).ok();
+
                                     // Skip response.created and response.in_progress on subsequent iterations
                                     let should_skip = if !is_first_iteration {
-                                        if let Ok(parsed) =
-                                            serde_json::from_str::<Value>(data.as_ref())
-                                        {
+                                        parsed.as_ref().is_some_and(|v| {
                                             matches!(
-                                                parsed.get("type").and_then(|v| v.as_str()),
+                                                v.get("type").and_then(|t| t.as_str()),
                                                 Some(ResponseEvent::CREATED)
                                                     | Some(ResponseEvent::IN_PROGRESS)
                                             )
-                                        } else {
-                                            false
-                                        }
+                                        })
                                     } else {
                                         false
                                     };
 
                                     if !should_skip {
-                                        // Forward the event
+                                        // Forward the event with pre-parsed value
                                         if !forward_streaming_event(
-                                            &raw_block,
-                                            event_name,
-                                            data.as_ref(),
+                                            SseEventData {
+                                                raw_block: &raw_block,
+                                                event_name,
+                                                data: data.as_ref(),
+                                                pre_parsed: parsed.clone(),
+                                            },
                                             &mut handler,
                                             &tx,
                                             &streaming_ctx,
                                             &mut sequence_number,
                                         ) {
-                                            // Client disconnected
                                             return;
                                         }
                                     }
 
-                                    // After forwarding response.in_progress, send mcp_list_tools events (once)
                                     if !seen_in_progress {
-                                        if let Ok(parsed) =
-                                            serde_json::from_str::<Value>(data.as_ref())
-                                        {
-                                            if parsed.get("type").and_then(|v| v.as_str())
+                                        let is_in_progress = parsed.as_ref().is_some_and(|v| {
+                                            v.get("type").and_then(|t| t.as_str())
                                                 == Some(ResponseEvent::IN_PROGRESS)
-                                            {
-                                                seen_in_progress = true;
-                                                if !mcp_list_tools_sent {
-                                                    for (label, key) in session.mcp_servers().iter()
-                                                    {
-                                                        let list_tools_index = handler
-                                                            .allocate_synthetic_output_index();
-                                                        if !send_mcp_list_tools_events(
-                                                            &tx,
-                                                            &session,
-                                                            label,
-                                                            list_tools_index,
-                                                            &mut sequence_number,
-                                                            key,
-                                                        ) {
-                                                            // Client disconnected
-                                                            return;
-                                                        }
+                                        });
+                                        if is_in_progress {
+                                            seen_in_progress = true;
+                                            if !mcp_list_tools_sent {
+                                                for (label, key) in session.mcp_servers().iter() {
+                                                    let list_tools_index =
+                                                        handler.allocate_synthetic_output_index();
+                                                    if !send_mcp_list_tools_events(
+                                                        &tx,
+                                                        &session,
+                                                        label,
+                                                        list_tools_index,
+                                                        &mut sequence_number,
+                                                        key,
+                                                    ) {
+                                                        // Client disconnected
+                                                        return;
                                                     }
-                                                    mcp_list_tools_sent = true;
                                                 }
+                                                mcp_list_tools_sent = true;
                                             }
                                         }
                                     }
@@ -840,15 +840,17 @@ pub(super) async fn handle_streaming_with_tool_interception(
                                 }
                                 StreamAction::ExecuteTools => {
                                     if !forward_streaming_event(
-                                        &raw_block,
-                                        event_name,
-                                        data.as_ref(),
+                                        SseEventData {
+                                            raw_block: &raw_block,
+                                            event_name,
+                                            data: data.as_ref(),
+                                            pre_parsed: None,
+                                        },
                                         &mut handler,
                                         &tx,
                                         &streaming_ctx,
                                         &mut sequence_number,
                                     ) {
-                                        // Client disconnected
                                         return;
                                     }
                                     tool_calls_detected = true;
@@ -971,7 +973,6 @@ pub(super) async fn handle_streaming_with_tool_interception(
             )
             .await
             {
-                // Client disconnected during tool execution
                 return;
             }
 
@@ -985,9 +986,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
             ) {
                 Ok(resume_payload) => {
                     current_payload = resume_payload;
-                    // Mark that we're no longer on the first iteration
                     is_first_iteration = false;
-                    // Continue loop to make next streaming request
                 }
                 Err(e) => {
                     send_sse_event(
@@ -1051,7 +1050,6 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         }
     };
 
-    // If no MCP tools, use simple passthrough
     let Some(mcp_servers) = mcp_servers else {
         return handle_simple_streaming_passthrough(
             &client,
@@ -1062,7 +1060,6 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         .await;
     };
 
-    // MCP is active - transform tools and set up interception
     handle_streaming_with_tool_interception(
         &client,
         headers.as_ref(),

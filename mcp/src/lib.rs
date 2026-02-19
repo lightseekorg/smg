@@ -30,9 +30,10 @@ pub use core::{config, pool as connection_pool};
 pub use core::{
     ArgMappingConfig, BuiltinToolType, ConfigValidationError, HandlerRequestContext,
     LatencySnapshot, McpConfig, McpMetrics, McpOrchestrator, McpRequestContext, McpServerConfig,
-    McpToolSession, McpTransport, MetricsSnapshot, PolicyConfig, PolicyDecisionConfig, PoolKey,
-    RefreshRequest, ResponseFormatConfig, ServerPolicyConfig, SmgClientHandler, Tool,
-    ToolCallResult, ToolConfig, ToolExecutionInput, ToolExecutionOutput, TrustLevelConfig,
+    McpSessionOptions, McpToolSession, McpTransport, MetricsSnapshot, PolicyConfig,
+    PolicyDecisionConfig, PoolKey, RefreshRequest, ResponseFormatConfig, ServerPolicyConfig,
+    SmgClientHandler, Tool, ToolCallResult, ToolConfig, ToolExecutionInput, ToolExecutionOutput,
+    TrustLevelConfig,
 };
 
 // Re-export shared types
