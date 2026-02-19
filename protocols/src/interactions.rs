@@ -1123,23 +1123,28 @@ fn validate_tools(tools: &[InteractionsTool]) -> Result<(), ValidationError> {
 
 fn validate_input(input: &InteractionsInput) -> Result<(), ValidationError> {
     // Reject empty input
-    if let Some(message) = match input {
+    let empty_msg = match input {
         InteractionsInput::Text(s) if s.trim().is_empty() => Some("Input text cannot be empty"),
         InteractionsInput::Content(content) if is_content_empty(content) => {
             Some("Input content cannot be empty")
         }
-        InteractionsInput::Contents(contents)
-            if contents.is_empty() || contents.iter().any(is_content_empty) =>
-        {
+        InteractionsInput::Contents(contents) if contents.is_empty() => {
             Some("Input content array cannot be empty")
         }
-        InteractionsInput::Turns(turns) if turns.is_empty() || turns.iter().any(is_turn_empty) => {
+        InteractionsInput::Contents(contents) if contents.iter().any(is_content_empty) => {
+            Some("Input content array contains empty content items")
+        }
+        InteractionsInput::Turns(turns) if turns.is_empty() => {
             Some("Input turns array cannot be empty")
         }
+        InteractionsInput::Turns(turns) if turns.iter().any(is_turn_empty) => {
+            Some("Input turns array contains empty turn items")
+        }
         _ => None,
-    } {
+    };
+    if let Some(msg) = empty_msg {
         let mut e = ValidationError::new("input_cannot_be_empty");
-        e.message = Some(message.into());
+        e.message = Some(msg.into());
         return Err(e);
     }
 
