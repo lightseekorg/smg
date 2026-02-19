@@ -8,6 +8,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use openai_protocol::responses::{ResponseTool, ResponseToolType};
+
 use super::orchestrator::{
     McpOrchestrator, McpRequestContext, ToolExecutionInput, ToolExecutionOutput,
 };
@@ -48,6 +50,15 @@ pub struct McpToolSession<'a> {
     exposed_name_by_qualified: HashMap<QualifiedToolName, String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct McpSessionOptions<'a> {
+    /// OpenAI Responses API tools array.
+    ///
+    /// If present, MCP toolsets may carry an `allowed_tools` allowlist which will be applied
+    /// per server/toolset.
+    pub request_tools: Option<&'a [ResponseTool]>,
+}
+
 impl<'a> McpToolSession<'a> {
     /// Create a new session by performing the setup every path currently repeats:
     /// 1. Create request context with default tenant and policy-only approval
@@ -56,7 +67,11 @@ impl<'a> McpToolSession<'a> {
         orchestrator: &'a McpOrchestrator,
         mcp_servers: Vec<(String, String)>,
         request_id: impl Into<String>,
+        options: McpSessionOptions<'_>,
     ) -> Self {
+        let allowed_tools_by_server_key =
+            compute_allowed_tools_by_server_key(&mcp_servers, options.request_tools);
+
         let request_ctx = orchestrator.create_request_context(
             request_id,
             TenantContext::default(),
@@ -64,7 +79,16 @@ impl<'a> McpToolSession<'a> {
         );
         let mut server_keys = Vec::with_capacity(mcp_servers.len());
         server_keys.extend(mcp_servers.iter().map(|(_, key)| key.clone()));
-        let mcp_tools = orchestrator.list_tools_for_servers(&server_keys);
+        let mut mcp_tools = orchestrator.list_tools_for_servers(&server_keys);
+
+        if !allowed_tools_by_server_key.is_empty() {
+            mcp_tools.retain(
+                |entry| match allowed_tools_by_server_key.get(entry.server_key()) {
+                    None => true,
+                    Some(allowed) => allowed.contains(entry.tool_name()),
+                },
+            );
+        }
         let (exposed_name_map, exposed_name_by_qualified) =
             Self::build_exposed_function_tools(&mcp_tools, &mcp_servers);
 
@@ -207,8 +231,12 @@ impl<'a> McpToolSession<'a> {
     ///
     /// Useful for emitting per-server `mcp_list_tools` items.
     pub fn list_tools_for_server(&self, server_key: &str) -> Vec<ToolEntry> {
-        self.orchestrator
-            .list_tools_for_servers(&[server_key.to_string()])
+        // Use the session's pre-filtered tool snapshot for consistency.
+        self.mcp_tools
+            .iter()
+            .filter(|entry| entry.server_key() == server_key)
+            .cloned()
+            .collect()
     }
 
     /// Look up the response format for a tool.
@@ -232,7 +260,7 @@ impl<'a> McpToolSession<'a> {
     }
 
     /// Build Responses API `ResponseTool` structs.
-    pub fn build_response_tools(&self) -> Vec<openai_protocol::responses::ResponseTool> {
+    pub fn build_response_tools(&self) -> Vec<ResponseTool> {
         build_response_tools_with_names(&self.mcp_tools, Some(&self.exposed_name_by_qualified))
     }
 
@@ -355,6 +383,67 @@ impl<'a> McpToolSession<'a> {
     }
 }
 
+fn compute_allowed_tools_by_server_key(
+    mcp_servers: &[(String, String)],
+    request_tools: Option<&[ResponseTool]>,
+) -> HashMap<String, HashSet<String>> {
+    let Some(request_tools) = request_tools else {
+        return HashMap::new();
+    };
+
+    // Build per-server_label allowlists from request toolsets.
+    let mut allowed_by_label: HashMap<String, HashSet<String>> = HashMap::new();
+    for tool in request_tools
+        .iter()
+        .filter(|t| matches!(t.r#type, ResponseToolType::Mcp))
+    {
+        let Some(allowed_tools) = tool.allowed_tools.as_ref() else {
+            continue;
+        };
+
+        let label = tool
+            .server_label
+            .clone()
+            .unwrap_or_else(|| "mcp".to_string());
+        let entry = allowed_by_label.entry(label).or_default();
+
+        for name in allowed_tools {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                // Match OpenAI behavior: ignore invalid/empty entries.
+                continue;
+            }
+            entry.insert(trimmed.to_string());
+        }
+    }
+
+    if allowed_by_label.is_empty() {
+        return HashMap::new();
+    }
+
+    // Map server_label -> server_key for connected servers.
+    let mut label_to_key: HashMap<&str, &str> = HashMap::with_capacity(mcp_servers.len());
+    for (label, key) in mcp_servers {
+        label_to_key.insert(label.as_str(), key.as_str());
+    }
+
+    // Translate label-based allowlists to server_key-based allowlists.
+    let mut allowed_by_server_key: HashMap<String, HashSet<String>> = HashMap::new();
+    for (label, allowed_set) in allowed_by_label {
+        let Some(server_key) = label_to_key.get(label.as_str()) else {
+            // If the server wasn't connected/available, ignore.
+            continue;
+        };
+
+        allowed_by_server_key
+            .entry((*server_key).to_string())
+            .or_default()
+            .extend(allowed_set);
+    }
+
+    allowed_by_server_key
+}
+
 fn sanitize_tool_token(input: &str) -> String {
     let mut out = String::with_capacity(input.len().max(1));
     for ch in input.chars() {
@@ -386,7 +475,12 @@ mod tests {
             ("label2".to_string(), "key2".to_string()),
         ];
 
-        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
+        let session = McpToolSession::new(
+            &orchestrator,
+            mcp_servers,
+            "test-request",
+            Default::default(),
+        );
 
         assert_eq!(session.mcp_servers().len(), 2);
         assert_eq!(
@@ -398,7 +492,8 @@ mod tests {
     #[test]
     fn test_session_empty_servers() {
         let orchestrator = McpOrchestrator::new_test();
-        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
+        let session =
+            McpToolSession::new(&orchestrator, vec![], "test-request", Default::default());
 
         assert!(session.mcp_servers().is_empty());
         assert!(session.mcp_tools().is_empty());
@@ -408,7 +503,12 @@ mod tests {
     fn test_resolve_tool_server_label_fallback() {
         let orchestrator = McpOrchestrator::new_test();
         let mcp_servers = vec![("my_label".to_string(), "my_key".to_string())];
-        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
+        let session = McpToolSession::new(
+            &orchestrator,
+            mcp_servers,
+            "test-request",
+            Default::default(),
+        );
 
         // Tool doesn't exist, should fall back to first label
         let label = session.resolve_tool_server_label("nonexistent_tool");
@@ -418,7 +518,8 @@ mod tests {
     #[test]
     fn test_resolve_tool_server_label_no_servers() {
         let orchestrator = McpOrchestrator::new_test();
-        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
+        let session =
+            McpToolSession::new(&orchestrator, vec![], "test-request", Default::default());
 
         // No servers, should fall back to "mcp"
         let label = session.resolve_tool_server_label("nonexistent_tool");
@@ -428,7 +529,8 @@ mod tests {
     #[test]
     fn test_tool_response_format_default() {
         let orchestrator = McpOrchestrator::new_test();
-        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
+        let session =
+            McpToolSession::new(&orchestrator, vec![], "test-request", Default::default());
 
         let format = session.tool_response_format("nonexistent");
         assert!(matches!(format, ResponseFormat::Passthrough));
@@ -458,7 +560,12 @@ mod tests {
         orchestrator.tool_inventory().insert_entry(entry);
 
         let mcp_servers = vec![("label1".to_string(), "server1".to_string())];
-        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
+        let session = McpToolSession::new(
+            &orchestrator,
+            mcp_servers,
+            "test-request",
+            Default::default(),
+        );
 
         assert!(session.has_exposed_tool("test_tool"));
         assert_eq!(session.mcp_tools().len(), 1);
@@ -473,7 +580,12 @@ mod tests {
         orchestrator.tool_inventory().insert_entry(entry);
 
         let mcp_servers = vec![("my_server".to_string(), "server1".to_string())];
-        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
+        let session = McpToolSession::new(
+            &orchestrator,
+            mcp_servers,
+            "test-request",
+            Default::default(),
+        );
 
         let label = session.resolve_tool_server_label("test_tool");
         assert_eq!(label, "my_server");
@@ -499,6 +611,7 @@ mod tests {
                 ("beta".to_string(), "server2".to_string()),
             ],
             "test-request",
+            Default::default(),
         );
 
         let name_a = session
@@ -545,6 +658,7 @@ mod tests {
                 ("c".to_string(), "s3".to_string()),
             ],
             "test-request",
+            Default::default(),
         );
 
         let exposed_names: HashSet<String> = session
@@ -603,7 +717,12 @@ mod tests {
             ("regular".to_string(), "regular-server".to_string()),
         ];
 
-        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
+        let session = McpToolSession::new(
+            &orchestrator,
+            mcp_servers,
+            "test-request",
+            Default::default(),
+        );
 
         // mcp_servers() should only return non-builtin servers
         let visible = session.mcp_servers();
@@ -613,5 +732,112 @@ mod tests {
 
         // all_mcp_servers() should return everything
         assert_eq!(session.all_mcp_servers().len(), 2);
+    }
+
+    #[test]
+    fn test_allowed_tools_filters_inventory_and_list_tools() {
+        let orchestrator = McpOrchestrator::new_test();
+
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "server1",
+                create_test_tool("brave_web_search"),
+            ));
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "server1",
+                create_test_tool("brave_local_search"),
+            ));
+
+        let request_tools = vec![ResponseTool {
+            r#type: ResponseToolType::Mcp,
+            server_label: Some("mock".to_string()),
+            allowed_tools: Some(vec!["brave_web_search".to_string()]),
+            ..Default::default()
+        }];
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![("mock".to_string(), "server1".to_string())],
+            "test-request",
+            McpSessionOptions {
+                request_tools: Some(&request_tools),
+            },
+        );
+
+        assert!(session.has_exposed_tool("brave_web_search"));
+        assert!(!session.has_exposed_tool("brave_local_search"));
+        assert_eq!(session.mcp_tools().len(), 1);
+
+        let listed = session.list_tools_for_server("server1");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].tool_name(), "brave_web_search");
+    }
+
+    #[test]
+    fn test_allowed_tools_filters_only_target_server() {
+        let orchestrator = McpOrchestrator::new_test();
+
+        // server1 has two tools
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "server1",
+                create_test_tool("brave_web_search"),
+            ));
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "server1",
+                create_test_tool("brave_local_search"),
+            ));
+
+        // server2 has two tools
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "server2",
+                create_test_tool("deepwiki_search"),
+            ));
+        orchestrator
+            .tool_inventory()
+            .insert_entry(ToolEntry::from_server_tool(
+                "server2",
+                create_test_tool("deepwiki_read"),
+            ));
+
+        let request_tools = vec![ResponseTool {
+            r#type: ResponseToolType::Mcp,
+            server_label: Some("brave".to_string()),
+            allowed_tools: Some(vec!["brave_web_search".to_string()]),
+            ..Default::default()
+        }];
+
+        let session = McpToolSession::new(
+            &orchestrator,
+            vec![
+                ("brave".to_string(), "server1".to_string()),
+                ("deepwiki".to_string(), "server2".to_string()),
+            ],
+            "test-request",
+            McpSessionOptions {
+                request_tools: Some(&request_tools),
+            },
+        );
+
+        // server1 is filtered
+        assert!(session.has_exposed_tool("brave_web_search"));
+        assert!(!session.has_exposed_tool("brave_local_search"));
+        let listed_server1 = session.list_tools_for_server("server1");
+        assert_eq!(listed_server1.len(), 1);
+        assert_eq!(listed_server1[0].tool_name(), "brave_web_search");
+
+        // server2 is unfiltered
+        assert!(session.has_exposed_tool("deepwiki_search"));
+        assert!(session.has_exposed_tool("deepwiki_read"));
+        let listed_server2 = session.list_tools_for_server("server2");
+        assert_eq!(listed_server2.len(), 2);
     }
 }
