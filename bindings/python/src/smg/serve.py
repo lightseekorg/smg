@@ -185,9 +185,9 @@ class TrtllmWorkerLauncher(WorkerLauncher):
                 with open(config_path) as f:
                     config = yaml.safe_load(f)
                     if config and "tensor_parallel_size" in config:
-                        return config["tensor_parallel_size"]
+                        return int(config["tensor_parallel_size"])
                     if config and "tp_size" in config:
-                        return config["tp_size"]
+                        return int(config["tp_size"])
             except Exception as e:
                 logger.warning(
                     "Failed to read tensor_parallel_size from config %s: %s", config_path, e
