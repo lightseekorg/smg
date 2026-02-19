@@ -26,8 +26,6 @@ use crate::{
 /// Maximum error response body size to prevent DoS (1 MB)
 const MAX_ERROR_RESPONSE_SIZE: usize = 1024 * 1024;
 
-
-
 /// Select the best worker for the given model.
 #[allow(clippy::result_large_err)]
 pub(crate) fn select_worker(
