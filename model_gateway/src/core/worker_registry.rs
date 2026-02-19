@@ -417,23 +417,32 @@ impl WorkerRegistry {
         }
     }
 
-    /// Get all prefill workers (regardless of bootstrap_port)
+    /// Get all prefill workers (including PrePrefill subtype)
     pub fn get_prefill_workers(&self) -> Vec<Arc<dyn Worker>> {
         self.workers
             .iter()
             .filter_map(|entry| {
                 let worker = entry.value();
                 match worker.worker_type() {
-                    WorkerType::Prefill => Some(worker.clone()),
+                    WorkerType::Prefill | WorkerType::PrePrefill => Some(worker.clone()),
                     _ => None,
                 }
             })
             .collect()
     }
 
-    /// Get all decode workers
+    /// Get all decode workers (including PrePrefillDecode subtype)
     pub fn get_decode_workers(&self) -> Vec<Arc<dyn Worker>> {
-        self.get_by_type(&WorkerType::Decode)
+        self.workers
+            .iter()
+            .filter_map(|entry| {
+                let worker = entry.value();
+                match worker.worker_type() {
+                    WorkerType::Decode | WorkerType::PrePrefillDecode => Some(worker.clone()),
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     /// Get all workers by connection mode
@@ -588,8 +597,8 @@ impl WorkerRegistry {
 
             match worker.worker_type() {
                 WorkerType::Regular => regular_count += 1,
-                WorkerType::Prefill => prefill_count += 1,
-                WorkerType::Decode => decode_count += 1,
+                WorkerType::Prefill | WorkerType::PrePrefill => prefill_count += 1,
+                WorkerType::Decode | WorkerType::PrePrefillDecode => decode_count += 1,
             }
 
             match worker.connection_mode() {

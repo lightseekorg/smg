@@ -106,12 +106,18 @@ async fn readiness(State(state): State<Arc<AppState>>) -> Response {
     } else {
         match &state.context.router_config.mode {
             RoutingMode::PrefillDecode { .. } => {
-                let has_prefill = healthy_workers
-                    .iter()
-                    .any(|w| matches!(w.worker_type(), WorkerType::Prefill));
-                let has_decode = healthy_workers
-                    .iter()
-                    .any(|w| matches!(w.worker_type(), WorkerType::Decode));
+                let has_prefill = healthy_workers.iter().any(|w| {
+                    matches!(
+                        w.worker_type(),
+                        WorkerType::Prefill | WorkerType::PrePrefill
+                    )
+                });
+                let has_decode = healthy_workers.iter().any(|w| {
+                    matches!(
+                        w.worker_type(),
+                        WorkerType::Decode | WorkerType::PrePrefillDecode
+                    )
+                });
                 has_prefill && has_decode
             }
             RoutingMode::Regular { .. } => !healthy_workers.is_empty(),

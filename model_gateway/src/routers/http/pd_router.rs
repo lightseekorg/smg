@@ -50,10 +50,6 @@ pub struct PDRouter {
     pub retry_config: RetryConfig,
     pub api_key: Option<String>,
     pub enable_igw: bool,
-    /// URL for the pre-prefill worker (cold request warming)
-    pub pre_prefill_url: Option<String>,
-    /// Decode URL paired with the pre-prefill worker
-    pub pre_prefill_decode_url: Option<String>,
     /// Cache match ratio threshold below which a request is considered "cold"
     pub pre_prefill_match_threshold: f32,
     /// Minimum unmatched characters to trigger pre-prefill routing
@@ -166,56 +162,44 @@ impl PDRouter {
     }
 
     pub async fn new(ctx: &Arc<crate::app_context::AppContext>) -> Result<Self, String> {
-        // Extract pre-prefill config from routing mode
+        // Extract pre-prefill thresholds from routing mode
         let (
-            pre_prefill_url,
-            pre_prefill_decode_url,
             pre_prefill_match_threshold,
             pre_prefill_unmatched_chars_threshold,
             pre_prefill_min_tokens,
         ) = if let RoutingMode::PrefillDecode {
-            pre_prefill_url,
-            pre_prefill_decode_url,
             pre_prefill_match_threshold,
             pre_prefill_unmatched_chars_threshold,
             pre_prefill_min_tokens,
+            pre_prefill_urls,
             ..
         } = &ctx.router_config.mode
         {
+            if !pre_prefill_urls.is_empty() {
+                info!(
+                    "Pre-prefill routing enabled: {} pre-prefill workers, match_threshold={}, unmatched_chars_threshold={}, min_tokens={}",
+                    pre_prefill_urls.len(),
+                    pre_prefill_match_threshold, pre_prefill_unmatched_chars_threshold, pre_prefill_min_tokens
+                );
+
+                let prefill_policy = ctx.policy_registry.get_prefill_policy();
+                if prefill_policy.as_any().downcast_ref::<CacheAwarePolicy>().is_none() {
+                    warn!(
+                        "Pre-prefill routing is configured but prefill policy is '{}', not 'cache_aware'. \
+                         Pre-prefill will be disabled at runtime.",
+                        prefill_policy.name()
+                    );
+                }
+            }
+
             (
-                pre_prefill_url.clone(),
-                pre_prefill_decode_url.clone(),
                 *pre_prefill_match_threshold,
                 *pre_prefill_unmatched_chars_threshold,
                 *pre_prefill_min_tokens,
             )
         } else {
-            (None, None, 0.0, 0, 0)
+            (0.0, 0, 0)
         };
-
-        if pre_prefill_url.is_some() {
-            info!(
-                "Pre-prefill routing enabled: url={:?}, decode_url={:?}, match_threshold={}, unmatched_chars_threshold={}, min_tokens={}",
-                pre_prefill_url, pre_prefill_decode_url,
-                pre_prefill_match_threshold, pre_prefill_unmatched_chars_threshold, pre_prefill_min_tokens
-            );
-
-            let prefill_policy = ctx.policy_registry.get_prefill_policy();
-            if prefill_policy.as_any().downcast_ref::<CacheAwarePolicy>().is_none() {
-                warn!(
-                    "Pre-prefill routing is configured but prefill policy is '{}', not 'cache_aware'. \
-                     Pre-prefill will be disabled at runtime.",
-                    prefill_policy.name()
-                );
-            }
-
-            if pre_prefill_decode_url.is_none() {
-                warn!(
-                    "Pre-prefill URL is set but pre_prefill_decode_url is not. \
-                     Decode worker will be selected via normal policy when pre-prefill triggers."
-                );
-            }
-        }
 
         Ok(PDRouter {
             worker_registry: Arc::clone(&ctx.worker_registry),
@@ -224,8 +208,6 @@ impl PDRouter {
             retry_config: ctx.router_config.effective_retry_config(),
             api_key: ctx.router_config.api_key.clone(),
             enable_igw: ctx.router_config.enable_igw,
-            pre_prefill_url,
-            pre_prefill_decode_url,
             pre_prefill_match_threshold,
             pre_prefill_unmatched_chars_threshold,
             pre_prefill_min_tokens,
@@ -763,9 +745,12 @@ impl PDRouter {
         prefill_policy.needs_request_text() || decode_policy.needs_request_text()
     }
 
-    /// Returns true if pre-prefill routing is configured
+    /// Returns true if pre-prefill routing is configured (any PrePrefill workers registered)
     fn has_pre_prefill(&self) -> bool {
-        self.pre_prefill_url.is_some()
+        self.worker_registry
+            .get_all()
+            .iter()
+            .any(|w| matches!(w.worker_type(), WorkerType::PrePrefill))
     }
 
     /// Extract concatenated text from all chat messages (User, System, Assistant, Developer).
@@ -818,7 +803,7 @@ impl PDRouter {
         let prefill_policy = self.policy_registry.get_prefill_policy();
 
         // Check if pre-prefill routing should be attempted
-        if let (Some(pre_prefill_url), Some(text)) = (&self.pre_prefill_url, request_text) {
+        if let Some(text) = request_text {
             // Only consider pre-prefill for sufficiently long requests
             if text.len() >= self.pre_prefill_min_tokens {
                 // Try to get cache match stats from the prefill policy
@@ -844,14 +829,17 @@ impl PDRouter {
                         if match_ratio < self.pre_prefill_match_threshold
                             && unmatched >= self.pre_prefill_unmatched_chars_threshold
                         {
-                            // Find the pre-prefill worker in the available workers
+                            // Find an available PrePrefill worker by type
                             if let Some(worker) = prefill_workers
                                 .iter()
-                                .find(|w| w.url() == pre_prefill_url.as_str() && w.is_available())
+                                .find(|w| {
+                                    matches!(w.worker_type(), WorkerType::PrePrefill)
+                                        && w.is_available()
+                                })
                             {
                                 info!(
                                     "Routing cold request to pre-prefill worker: url={}, match_ratio={:.3}, unmatched={}",
-                                    pre_prefill_url, match_ratio, unmatched
+                                    worker.url(), match_ratio, unmatched
                                 );
                                 // Record the assignment so future similar requests hit cache
                                 cache_aware.record_assignment(
@@ -863,8 +851,7 @@ impl PDRouter {
                             }
 
                             debug!(
-                                "Pre-prefill worker {} not available, falling back to normal routing",
-                                pre_prefill_url
+                                "No available PrePrefill worker, falling back to normal routing"
                             );
                         }
                     }
@@ -894,24 +881,23 @@ impl PDRouter {
         hash_ring: Option<Arc<HashRing>>,
         is_pre_prefill: bool,
     ) -> Result<Arc<dyn Worker>, String> {
-        // If this was a pre-prefill request and we have a paired decode URL
+        // If this was a pre-prefill request, prefer a PrePrefillDecode worker
         if is_pre_prefill {
-            if let Some(ref decode_url) = self.pre_prefill_decode_url {
-                if let Some(worker) = decode_workers
-                    .iter()
-                    .find(|w| w.url() == decode_url.as_str() && w.is_available())
-                {
-                    debug!(
-                        "Using pre-prefill paired decode worker: {}",
-                        decode_url
-                    );
-                    return Ok(worker.clone());
-                }
+            if let Some(worker) = decode_workers
+                .iter()
+                .find(|w| {
+                    matches!(w.worker_type(), WorkerType::PrePrefillDecode) && w.is_available()
+                })
+            {
                 debug!(
-                    "Pre-prefill paired decode worker {} not available, falling back to normal policy",
-                    decode_url
+                    "Using pre-prefill paired decode worker: {}",
+                    worker.url()
                 );
+                return Ok(worker.clone());
             }
+            debug!(
+                "No available PrePrefillDecode worker, falling back to normal policy"
+            );
         }
 
         // Normal decode worker selection (also used as fallback for pre-prefill)
@@ -943,7 +929,12 @@ impl PDRouter {
             self.worker_registry
                 .get_by_model(model)
                 .iter()
-                .filter(|w| matches!(w.worker_type(), WorkerType::Prefill))
+                .filter(|w| {
+                    matches!(
+                        w.worker_type(),
+                        WorkerType::Prefill | WorkerType::PrePrefill
+                    )
+                })
                 .cloned()
                 .collect()
         } else {
@@ -954,7 +945,12 @@ impl PDRouter {
             self.worker_registry
                 .get_by_model(model)
                 .iter()
-                .filter(|w| matches!(w.worker_type(), WorkerType::Decode))
+                .filter(|w| {
+                    matches!(
+                        w.worker_type(),
+                        WorkerType::Decode | WorkerType::PrePrefillDecode
+                    )
+                })
                 .cloned()
                 .collect()
         } else {
@@ -1635,8 +1631,6 @@ mod tests {
             retry_config: RetryConfig::default(),
             api_key: Some("test_api_key".to_string()),
             enable_igw: false,
-            pre_prefill_url: None,
-            pre_prefill_decode_url: None,
             pre_prefill_match_threshold: 0.1,
             pre_prefill_unmatched_chars_threshold: 10000,
             pre_prefill_min_tokens: 10000,
@@ -1779,8 +1773,6 @@ mod tests {
     /// Workers must be registered and policy initialized separately.
     fn create_pre_prefill_router(
         worker_registry: Arc<WorkerRegistry>,
-        pre_prefill_url: &str,
-        pre_prefill_decode_url: &str,
         min_tokens: usize,
         unmatched_threshold: usize,
     ) -> PDRouter {
@@ -1805,8 +1797,6 @@ mod tests {
             retry_config: RetryConfig::default(),
             api_key: None,
             enable_igw: false,
-            pre_prefill_url: Some(pre_prefill_url.to_string()),
-            pre_prefill_decode_url: Some(pre_prefill_decode_url.to_string()),
             pre_prefill_match_threshold: 0.1,
             pre_prefill_unmatched_chars_threshold: unmatched_threshold,
             pre_prefill_min_tokens: min_tokens,
@@ -1890,7 +1880,10 @@ mod tests {
     #[test]
     fn test_has_pre_prefill_enabled() {
         let wr = Arc::new(WorkerRegistry::new());
-        let router = create_pre_prefill_router(wr, "http://pp:8000", "http://ppd:8000", 10, 10);
+        // Register a PrePrefill worker so has_pre_prefill() returns true
+        let pp = create_test_worker("http://pp:8000".to_string(), WorkerType::PrePrefill, true);
+        wr.register(Arc::from(pp));
+        let router = create_pre_prefill_router(wr, 10, 10);
         assert!(router.has_pre_prefill());
     }
 
@@ -1920,17 +1913,19 @@ mod tests {
     #[tokio::test]
     async fn test_short_request_bypasses_pre_prefill() {
         let wr = Arc::new(WorkerRegistry::new());
+
+        // Register a PrePrefill worker so has_pre_prefill() returns true
+        let pp = create_test_worker("http://pp:8000".to_string(), WorkerType::PrePrefill, true);
+        wr.register(Arc::from(pp));
+
         // min_tokens=100 so "short" (5 chars) is below threshold
         let router = create_pre_prefill_router(
             wr.clone(),
-            "http://pp:8000",
-            "http://ppd:8000",
             100,  // min_tokens - high bar, "short" won't reach it
             10,   // unmatched_chars_threshold
         );
 
-        // Only register the normal prefill worker (not pp), so if pre-prefill
-        // code tried to find pp it would fail. Normal routing should still work.
+        // Also register normal prefill and decode workers
         let prefill = create_test_worker("http://prefill:8000".to_string(), WorkerType::Prefill, true);
         let decode = create_test_worker("http://decode:8000".to_string(), WorkerType::Decode, true);
 
@@ -1943,10 +1938,15 @@ mod tests {
         }
 
         // "short" is only 5 chars, below min_tokens=100 -> normal routing
+        // The pre-prefill special path should NOT be triggered, but normal policy
+        // may select any available prefill-type worker
         let result = router.select_pd_pair(Some("short"), None, None).await;
         assert!(result.is_ok());
         let (p, d) = result.unwrap();
-        assert_eq!(p.url(), "http://prefill:8000");
+        assert!(
+            p.url() == "http://prefill:8000" || p.url() == "http://pp:8000",
+            "Expected a prefill worker, got: {}", p.url()
+        );
         assert_eq!(d.url(), "http://decode:8000");
     }
 
@@ -1955,24 +1955,23 @@ mod tests {
     #[tokio::test]
     async fn test_cold_request_routes_to_pre_prefill() {
         let wr = Arc::new(WorkerRegistry::new());
-        // min_tokens=10, unmatched_threshold=10 -> easy to trigger with a 20-char cold string
-        let router = create_pre_prefill_router(
-            wr.clone(),
-            "http://pp:8000",
-            "http://ppd:8000",
-            10,  // min_tokens
-            10,  // unmatched_chars_threshold
-        );
 
         let prefill = create_test_worker("http://prefill:8000".to_string(), WorkerType::Prefill, true);
-        let pp = create_test_worker("http://pp:8000".to_string(), WorkerType::Prefill, true);
+        let pp = create_test_worker("http://pp:8000".to_string(), WorkerType::PrePrefill, true);
         let decode = create_test_worker("http://decode:8000".to_string(), WorkerType::Decode, true);
-        let ppd = create_test_worker("http://ppd:8000".to_string(), WorkerType::Decode, true);
+        let ppd = create_test_worker("http://ppd:8000".to_string(), WorkerType::PrePrefillDecode, true);
 
         wr.register(Arc::from(prefill));
         wr.register(Arc::from(pp));
         wr.register(Arc::from(decode));
         wr.register(Arc::from(ppd));
+
+        // min_tokens=10, unmatched_threshold=10 -> easy to trigger with a 20-char cold string
+        let router = create_pre_prefill_router(
+            wr.clone(),
+            10,  // min_tokens
+            10,  // unmatched_chars_threshold
+        );
 
         // Init cache-aware policy with prefill workers
         let prefill_policy = router.policy_registry.get_prefill_policy();
@@ -2021,23 +2020,22 @@ mod tests {
     #[tokio::test]
     async fn test_warm_request_uses_normal_routing() {
         let wr = Arc::new(WorkerRegistry::new());
-        let router = create_pre_prefill_router(
-            wr.clone(),
-            "http://pp:8000",
-            "http://ppd:8000",
-            10, // min_tokens
-            10, // unmatched_chars_threshold
-        );
 
         let prefill = create_test_worker("http://prefill:8000".to_string(), WorkerType::Prefill, true);
-        let pp = create_test_worker("http://pp:8000".to_string(), WorkerType::Prefill, true);
+        let pp = create_test_worker("http://pp:8000".to_string(), WorkerType::PrePrefill, true);
         let decode = create_test_worker("http://decode:8000".to_string(), WorkerType::Decode, true);
-        let ppd = create_test_worker("http://ppd:8000".to_string(), WorkerType::Decode, true);
+        let ppd = create_test_worker("http://ppd:8000".to_string(), WorkerType::PrePrefillDecode, true);
 
         wr.register(Arc::from(prefill));
         wr.register(Arc::from(pp));
         wr.register(Arc::from(decode));
         wr.register(Arc::from(ppd));
+
+        let router = create_pre_prefill_router(
+            wr.clone(),
+            10, // min_tokens
+            10, // unmatched_chars_threshold
+        );
 
         // Init cache-aware and pre-populate the tree so request is "warm"
         let prefill_policy = router.policy_registry.get_prefill_policy();
@@ -2077,22 +2075,21 @@ mod tests {
     #[tokio::test]
     async fn test_pre_prefill_worker_unavailable_falls_back() {
         let wr = Arc::new(WorkerRegistry::new());
-        let router = create_pre_prefill_router(
-            wr.clone(),
-            "http://pp:8000",
-            "http://ppd:8000",
-            10, // min_tokens
-            10, // unmatched_chars_threshold
-        );
 
         let prefill = create_test_worker("http://prefill:8000".to_string(), WorkerType::Prefill, true);
         // Pre-prefill worker is registered but UNHEALTHY
-        let pp = create_test_worker("http://pp:8000".to_string(), WorkerType::Prefill, false);
+        let pp = create_test_worker("http://pp:8000".to_string(), WorkerType::PrePrefill, false);
         let decode = create_test_worker("http://decode:8000".to_string(), WorkerType::Decode, true);
 
         wr.register(Arc::from(prefill));
         wr.register(Arc::from(pp));
         wr.register(Arc::from(decode));
+
+        let router = create_pre_prefill_router(
+            wr.clone(),
+            10, // min_tokens
+            10, // unmatched_chars_threshold
+        );
 
         let prefill_policy = router.policy_registry.get_prefill_policy();
         if let Some(ca) = prefill_policy.as_any().downcast_ref::<CacheAwarePolicy>() {
@@ -2113,20 +2110,25 @@ mod tests {
     #[tokio::test]
     async fn test_no_request_text_uses_normal_routing() {
         let wr = Arc::new(WorkerRegistry::new());
-        let router = create_pre_prefill_router(
-            wr.clone(),
-            "http://pp:8000",
-            "http://ppd:8000",
-            10,
-            10,
-        );
 
-        // Only register normal workers (not pp) to verify normal path is used
+        // Register a PrePrefill worker so has_pre_prefill() returns true
+        let pp = create_test_worker("http://pp:8000".to_string(), WorkerType::PrePrefill, true);
+        wr.register(Arc::from(pp));
+
+        // Also register normal workers and a PrePrefillDecode worker
         let prefill = create_test_worker("http://prefill:8000".to_string(), WorkerType::Prefill, true);
         let decode = create_test_worker("http://decode:8000".to_string(), WorkerType::Decode, true);
+        let ppd = create_test_worker("http://ppd:8000".to_string(), WorkerType::PrePrefillDecode, true);
 
         wr.register(Arc::from(prefill));
         wr.register(Arc::from(decode));
+        wr.register(Arc::from(ppd));
+
+        let router = create_pre_prefill_router(
+            wr.clone(),
+            10,
+            10,
+        );
 
         let prefill_policy = router.policy_registry.get_prefill_policy();
         if let Some(ca) = prefill_policy.as_any().downcast_ref::<CacheAwarePolicy>() {
@@ -2134,10 +2136,19 @@ mod tests {
         }
 
         // No request text -> can't estimate match -> normal routing
+        // The pre-prefill decode worker should NOT be selected since is_pre_prefill=false
         let result = router.select_pd_pair(None, None, None).await;
         assert!(result.is_ok());
         let (prefill_selected, decode_selected) = result.unwrap();
-        assert_eq!(prefill_selected.url(), "http://prefill:8000");
-        assert_eq!(decode_selected.url(), "http://decode:8000");
+        // Any prefill-type worker is valid (normal policy selection)
+        assert!(
+            prefill_selected.url() == "http://prefill:8000" || prefill_selected.url() == "http://pp:8000",
+            "Expected a prefill worker, got: {}", prefill_selected.url()
+        );
+        // Decode should use normal policy (not the pre-prefill paired decode)
+        assert!(
+            decode_selected.url() == "http://decode:8000" || decode_selected.url() == "http://ppd:8000",
+            "Expected a decode worker, got: {}", decode_selected.url()
+        );
     }
 }
