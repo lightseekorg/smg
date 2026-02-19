@@ -74,15 +74,13 @@ pub(crate) fn build_request(
     (url, propagated)
 }
 
-/// Send the HTTP request to the worker. Records circuit breaker failure on
-/// connection/timeout errors.
+/// Send the HTTP request to the worker.
 pub(crate) async fn send_request(
     http_client: &reqwest::Client,
     url: &str,
     headers: &HeaderMap,
     request: &CreateMessageRequest,
     timeout: Duration,
-    worker: &dyn Worker,
 ) -> Result<reqwest::Response, Response> {
     debug!(url = %url, "Sending request to worker");
 
@@ -98,7 +96,6 @@ pub(crate) async fn send_request(
         }
         Err(e) => {
             warn!(url = %url, error = %e, "Request to worker failed");
-            worker.record_outcome(false);
 
             if e.is_timeout() {
                 Err(error::gateway_timeout(
@@ -120,21 +117,19 @@ pub(crate) async fn send_request(
     }
 }
 
-/// Parse a successful non-streaming JSON response. Records circuit breaker outcome.
+/// Parse a successful non-streaming JSON response.
 pub(crate) async fn parse_response(
     response: reqwest::Response,
     model_id: &str,
     start_time: Instant,
-    worker: &dyn Worker,
 ) -> Result<Message, Response> {
-    let result = match response.json::<Message>().await {
+    match response.json::<Message>().await {
         Ok(message) => {
             debug!(
                 model = %model_id,
                 message_id = %message.id,
                 "Successfully parsed response"
             );
-            worker.record_outcome(true);
             record_success_metrics(model_id, &message, start_time);
             info!(
                 model = %model_id,
@@ -147,7 +142,6 @@ pub(crate) async fn parse_response(
         }
         Err(e) => {
             error!(model = %model_id, error = %e, "Failed to parse response");
-            worker.record_outcome(false);
             Metrics::record_router_duration(
                 metrics_labels::ROUTER_HTTP,
                 metrics_labels::BACKEND_EXTERNAL,
@@ -169,17 +163,14 @@ pub(crate) async fn parse_response(
                 "Invalid response from backend",
             ))
         }
-    };
-
-    result
+    }
 }
 
-/// Handle a non-success response: read body (limited), record metrics and circuit breaker.
+/// Handle a non-success response: read body (limited) and record metrics.
 pub(crate) async fn handle_error_response(
     response: reqwest::Response,
     model_id: &str,
     start_time: Instant,
-    worker: &dyn Worker,
 ) -> Response {
     let status = response.status();
 
@@ -206,8 +197,6 @@ pub(crate) async fn handle_error_response(
         body_preview = %body.chars().take(200).collect::<String>(),
         "Backend error"
     );
-
-    worker.record_outcome(false);
 
     Metrics::record_router_duration(
         metrics_labels::ROUTER_HTTP,

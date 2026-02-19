@@ -109,28 +109,20 @@ async fn send_one_request(
     let model_id = &req_ctx.model_id;
     let start_time = Instant::now();
 
-    let selected_worker = worker::select_worker(&router.worker_registry, model_id)?;
     worker::record_router_request(model_id, false);
-    let (url, req_headers) = worker::build_request(&*selected_worker, req_ctx.headers.as_ref());
+    let (url, req_headers) = worker::build_request(&*req_ctx.worker, req_ctx.headers.as_ref());
     let response = worker::send_request(
         &router.http_client,
         &url,
         &req_headers,
         &req_ctx.request,
         router.request_timeout,
-        &*selected_worker,
     )
     .await?;
 
     if !response.status().is_success() {
-        return Err(worker::handle_error_response(
-            response,
-            model_id,
-            start_time,
-            &*selected_worker,
-        )
-        .await);
+        return Err(worker::handle_error_response(response, model_id, start_time).await);
     }
 
-    worker::parse_response(response, model_id, start_time, &*selected_worker).await
+    worker::parse_response(response, model_id, start_time).await
 }

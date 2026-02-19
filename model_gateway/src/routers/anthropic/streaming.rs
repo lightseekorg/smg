@@ -3,7 +3,7 @@
 //! Handles both passthrough (no MCP) and MCP tool loop streaming paths,
 //! composing worker, sse, and mcp primitives.
 
-use std::{io, sync::Arc, time::Instant};
+use std::{io, time::Instant};
 
 use axum::{
     body::Body,
@@ -21,7 +21,6 @@ use super::{
     mcp, sse, worker,
 };
 use crate::{
-    core::Worker,
     observability::metrics::{metrics_labels, Metrics},
     routers::{
         error::{self as router_error, extract_error_code_from_response},
@@ -45,24 +44,19 @@ pub(crate) async fn execute(router: &RouterContext, req_ctx: RequestContext) -> 
 // Passthrough streaming (no MCP)
 // ============================================================================
 
-/// Direct streaming: select worker, send, wrap in load-tracking SSE response.
+/// Direct streaming: send request and wrap in SSE response.
 async fn execute_passthrough(router: &RouterContext, req_ctx: &RequestContext) -> Response {
     let model_id = &req_ctx.model_id;
     let start_time = Instant::now();
 
-    let worker_arc = match worker::select_worker(&router.worker_registry, model_id) {
-        Ok(w) => w,
-        Err(resp) => return resp,
-    };
     worker::record_router_request(model_id, true);
-    let (url, req_headers) = worker::build_request(&*worker_arc, req_ctx.headers.as_ref());
+    let (url, req_headers) = worker::build_request(&*req_ctx.worker, req_ctx.headers.as_ref());
     let response = match worker::send_request(
         &router.http_client,
         &url,
         &req_headers,
         &req_ctx.request,
         router.request_timeout,
-        &*worker_arc,
     )
     .await
     {
@@ -70,20 +64,19 @@ async fn execute_passthrough(router: &RouterContext, req_ctx: &RequestContext) -
         Err(resp) => return resp,
     };
 
-    build_streaming_response(response, model_id, start_time, worker_arc).await
+    build_streaming_response(response, model_id, start_time).await
 }
 
-/// Build a streaming SSE response with load tracking.
+/// Build a streaming SSE response.
 async fn build_streaming_response(
     response: reqwest::Response,
     model_id: &str,
     start_time: Instant,
-    worker: Arc<dyn Worker>,
 ) -> Response {
     let status = response.status();
 
     if !status.is_success() {
-        return build_streaming_error_response(response, model_id, start_time, worker).await;
+        return build_streaming_error_response(response, model_id, start_time).await;
     }
 
     debug!(model = %model_id, status = %status, "Starting streaming response");
@@ -97,8 +90,6 @@ async fn build_streaming_response(
         start_time.elapsed(),
     );
 
-    worker.record_outcome(true);
-
     let headers = response.headers().clone();
     let body = Body::from_stream(response.bytes_stream());
 
@@ -110,7 +101,6 @@ async fn build_streaming_error_response(
     response: reqwest::Response,
     model_id: &str,
     start_time: Instant,
-    worker: Arc<dyn Worker>,
 ) -> Response {
     let status = response.status();
     let content_type = response
@@ -125,8 +115,6 @@ async fn build_streaming_error_response(
         .contains("text/event-stream")
     {
         warn!(model = %model_id, status = %status, "Streaming error response (SSE)");
-
-        worker.record_outcome(false);
 
         Metrics::record_router_duration(
             metrics_labels::ROUTER_HTTP,
@@ -152,7 +140,7 @@ async fn build_streaming_error_response(
     }
 
     // Non-SSE error: read the body and return a proper error response
-    worker::handle_error_response(response, model_id, start_time, &*worker).await
+    worker::handle_error_response(response, model_id, start_time).await
 }
 
 // ============================================================================
@@ -210,10 +198,9 @@ async fn run_tool_loop(
     for _iteration in 0..DEFAULT_MAX_ITERATIONS {
         Metrics::record_mcp_tool_iteration(&req_ctx.model_id);
 
-        let (response, selected_worker) = send_streaming_request(&router, &req_ctx).await?;
+        let response = send_streaming_request(&router, &req_ctx).await?;
 
         if !response.status().is_success() {
-            selected_worker.record_outcome(false);
             return Err(format!(
                 "Worker returned error status: {}",
                 response.status()
@@ -229,8 +216,6 @@ async fn run_tool_loop(
             |name| session.resolve_tool_server_label(name),
         )
         .await;
-
-        selected_worker.record_outcome(result.is_ok());
 
         let consumed = result?;
         is_first_iteration = false;
@@ -292,35 +277,20 @@ async fn run_tool_loop(
     Ok(())
 }
 
-/// Select a worker and send a streaming request.
-///
-/// Caller owns load management via `WorkerLoadGuard`. Connection-level
-/// failures are cleaned up internally by `worker::send_request`.
+/// Send a streaming request to the pre-selected worker.
 async fn send_streaming_request(
     router: &RouterContext,
     req_ctx: &RequestContext,
-) -> Result<(reqwest::Response, Arc<dyn Worker>), String> {
-    let model_id = &req_ctx.model_id;
+) -> Result<reqwest::Response, String> {
+    worker::record_router_request(&req_ctx.model_id, true);
 
-    let selected_worker =
-        worker::select_worker(&router.worker_registry, model_id).map_err(|e| {
-            format!(
-                "No healthy workers available for model '{}' ({})",
-                model_id,
-                extract_error_code_from_response(&e)
-            )
-        })?;
-
-    worker::record_router_request(model_id, true);
-
-    let (url, req_headers) = worker::build_request(&*selected_worker, req_ctx.headers.as_ref());
+    let (url, req_headers) = worker::build_request(&*req_ctx.worker, req_ctx.headers.as_ref());
     let response = worker::send_request(
         &router.http_client,
         &url,
         &req_headers,
         &req_ctx.request,
         router.request_timeout,
-        &*selected_worker,
     )
     .await
     .map_err(|e| {
@@ -330,5 +300,5 @@ async fn send_streaming_request(
         )
     })?;
 
-    Ok((response, selected_worker))
+    Ok(response)
 }
