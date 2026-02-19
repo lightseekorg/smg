@@ -208,6 +208,7 @@ fn default_health_check_timeout() -> u64 {
 
 fn default_health_check_interval() -> u64 {
     60
+    
 }
 
 fn default_health_success_threshold() -> u32 {

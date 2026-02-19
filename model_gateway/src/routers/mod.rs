@@ -93,10 +93,16 @@ pub trait RouterTrait: Send + Sync + Debug {
     /// Route a chat completion request
     async fn route_chat(
         &self,
-        headers: Option<&HeaderMap>,
-        body: &ChatCompletionRequest,
-        model_id: Option<&str>,
-    ) -> Response;
+        _headers: Option<&HeaderMap>,
+        _body: &ChatCompletionRequest,
+        _model_id: Option<&str>,
+    ) -> Response {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            "Chat completions not implemented",
+        )
+            .into_response()
+    }
 
     /// Route a completion request
     async fn route_completion(

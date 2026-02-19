@@ -9,7 +9,7 @@ use std::{any::Any, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
-use openai_protocol::{chat::ChatCompletionRequest, messages::CreateMessageRequest};
+use openai_protocol::messages::CreateMessageRequest;
 use tracing::{info, warn};
 
 use super::{
@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{
     app_context::AppContext,
-    routers::{error, RouterTrait},
+    routers::RouterTrait,
 };
 
 /// Router for Anthropic-specific APIs
@@ -77,19 +77,6 @@ impl AnthropicRouter {
 impl RouterTrait for AnthropicRouter {
     fn as_any(&self) -> &dyn Any {
         self
-    }
-
-    /// Route chat completion requests (not supported by Anthropic router)
-    async fn route_chat(
-        &self,
-        _headers: Option<&HeaderMap>,
-        _body: &ChatCompletionRequest,
-        _model_id: Option<&str>,
-    ) -> Response {
-        error::not_found(
-            "unsupported_endpoint",
-            "Chat completions not supported on Anthropic router. Use /v1/messages instead.",
-        )
     }
 
     async fn route_messages(
