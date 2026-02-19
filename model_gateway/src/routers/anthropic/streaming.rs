@@ -195,7 +195,12 @@ async fn run_tool_loop(
 ) -> Result<(), String> {
     let session_id = format!("msg_{}", uuid::Uuid::new_v4());
     let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
-    let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &session_id);
+    let session = McpToolSession::new(
+        &router.mcp_orchestrator,
+        mcp_servers,
+        &session_id,
+        Default::default(),
+    );
 
     let mut global_index: u32 = 0;
     let mut total_input_tokens: u32 = 0;

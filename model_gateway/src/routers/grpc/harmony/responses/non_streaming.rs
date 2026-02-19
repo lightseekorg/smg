@@ -14,7 +14,7 @@ use openai_protocol::{
     },
 };
 use serde_json::{json, to_string};
-use smg_mcp::McpToolSession;
+use smg_mcp::{McpSessionOptions, McpToolSession};
 use tracing::{debug, error, warn};
 
 use super::{
@@ -103,7 +103,15 @@ async fn execute_with_mcp_loop(
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
     let session_request_id = format!("resp_{}", uuid::Uuid::new_v4());
-    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
+
+    let session = McpToolSession::new(
+        &ctx.mcp_orchestrator,
+        mcp_servers,
+        &session_request_id,
+        McpSessionOptions {
+            request_tools: original_tools.as_deref(),
+        },
+    );
 
     // Add filtered MCP tools (static + requested dynamic) to the request
     let mcp_tools = session.mcp_tools();
