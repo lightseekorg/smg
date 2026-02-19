@@ -46,8 +46,10 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{ end }}
           env:
-            - name: REGION_AIRPORT_CODE
-              value: {{ .Values.regionAirportCode | quote }}
+            {{- range $key, $value := .Values.applicationEnv }}
+            - name: {{ $key | quote }}
+              value: {{ $value | toString | quote }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}

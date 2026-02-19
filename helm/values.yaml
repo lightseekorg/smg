@@ -63,6 +63,8 @@ service:
 metrics:
   port: 29000
 
+applicationEnv: {}
+
 # Additional arguments to pass to the container.
 args:
   - "--enable-igw"
@@ -75,8 +77,6 @@ args:
   - "0.0.0.0"
   - "--history-backend"
   - "oracle"
-  - "--oracle-connect-descriptor"
-  - "tcps://adb.us-sanjose-1.oraclecloud.com:1522/g9fe6ef5b169add_eprjahpmqahvuj8j_high.adb.oraclecloud.com?ssl_server_dn_match=true"
   - "--oracle-external-auth"
 
 # This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
@@ -193,22 +193,12 @@ volumeMounts:
     readOnly: true
 
 csiSecretsStore:
-  enabled: true
-  mounts:
-    - name: openai-secret
-      mountPath: "/mnt/openai-secrets"
-      region: "us-sanjose-1"
-      vaultId: "ocid1.vault.oc1.us-sanjose-1.gruoavluaagvg.abzwuljrzskormigtxjyl2k5xylbfnh5hfqhnsxq3ebyr53zum3jq2ujchya"
-      secrets:
-        - name: "openai-passthrough-api-key"
-          fileName: "openai-passthrough-api-key"
+  enabled: false
+  mounts: []
 
 nodeSelector: {}
 
 tolerations: []
 
 affinity: {}
-
-# Region airport code (injected from Terraform via helm_release set)
-regionAirportCode: ""
  
