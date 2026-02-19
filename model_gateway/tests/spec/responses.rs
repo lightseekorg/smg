@@ -653,18 +653,43 @@ fn test_validate_tools_function_missing() {
     );
 }
 
-/// Test tools validation (MCP tool must have server_url)
+/// Test tools validation (valid MCP tool should pass)
 #[test]
-fn test_validate_tools_mcp_missing_url() {
+fn test_validate_tools_mcp_valid_ok() {
     let request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
         tools: Some(vec![ResponseTool {
             r#type: ResponseToolType::Mcp,
             function: None,
-            server_url: None, // Missing server_url
+            server_url: None, // server_url is optional when server_label is provided
             authorization: None,
             headers: None,
-            server_label: None,
+            server_label: Some("mock".to_string()),
+            server_description: None,
+            require_approval: None,
+            allowed_tools: None,
+        }]),
+        ..Default::default()
+    };
+
+    assert!(
+        request.validate().is_ok(),
+        "Valid MCP tool configuration should be accepted"
+    );
+}
+
+/// Test tools validation (MCP tool must have server_label; server_url is optional)
+#[test]
+fn test_validate_tools_mcp_missing_server_label() {
+    let request = ResponsesRequest {
+        input: ResponseInput::Text("test".to_string()),
+        tools: Some(vec![ResponseTool {
+            r#type: ResponseToolType::Mcp,
+            function: None,
+            server_url: None,
+            authorization: None,
+            headers: None,
+            server_label: None, // Missing required server_label
             server_description: None,
             require_approval: None,
             allowed_tools: None,
@@ -674,8 +699,105 @@ fn test_validate_tools_mcp_missing_url() {
     let result = request.validate();
     assert!(
         result.is_err(),
-        "MCP tool without server_url should be invalid"
+        "MCP tool without server_label should be invalid"
     );
+
+    let err = result.unwrap_err();
+    let s = format!("{:?}", err);
+    assert!(
+        s.contains("missing_required_parameter"),
+        "Expected error code missing_required_parameter, got: {:?}",
+        err
+    );
+    assert!(
+        s.contains("tools[0].server_label"),
+        "Expected error to reference tools[0].server_label, got: {:?}",
+        err
+    );
+}
+
+/// Test tools validation (MCP tool server_label must be unique; case-insensitive)
+#[test]
+fn test_validate_tools_mcp_duplicate_server_label() {
+    let request = ResponsesRequest {
+        input: ResponseInput::Text("test".to_string()),
+        tools: Some(vec![
+            ResponseTool {
+                r#type: ResponseToolType::Mcp,
+                function: None,
+                server_url: None,
+                authorization: None,
+                headers: None,
+                server_label: Some("Foo".to_string()),
+                server_description: None,
+                require_approval: None,
+                allowed_tools: None,
+            },
+            ResponseTool {
+                r#type: ResponseToolType::Mcp,
+                function: None,
+                server_url: None,
+                authorization: None,
+                headers: None,
+                server_label: Some("foo".to_string()),
+                server_description: None,
+                require_approval: None,
+                allowed_tools: None,
+            },
+        ]),
+        ..Default::default()
+    };
+
+    let result = request.validate();
+    assert!(
+        result.is_err(),
+        "MCP tools with duplicate server_label should be invalid"
+    );
+
+    let err = result.unwrap_err();
+    assert!(
+        format!("{:?}", err).contains("mcp_tool_duplicate_server_label"),
+        "Expected error code mcp_tool_duplicate_server_label, got: {:?}",
+        err
+    );
+}
+
+/// Test tools validation (MCP tool server_label must follow OpenAI label rules)
+#[test]
+fn test_validate_tools_mcp_server_label_invalid_cases() {
+    let invalid_labels = vec!["   deepwiki", "1deepwiki", "deepwiki."];
+
+    for label in invalid_labels {
+        let request = ResponsesRequest {
+            input: ResponseInput::Text("test".to_string()),
+            tools: Some(vec![ResponseTool {
+                r#type: ResponseToolType::Mcp,
+                function: None,
+                server_url: Some("https://example.com/mcp".to_string()),
+                authorization: None,
+                headers: None,
+                server_label: Some(label.to_string()),
+                server_description: None,
+                require_approval: None,
+                allowed_tools: None,
+            }]),
+            ..Default::default()
+        };
+
+        let result = request.validate();
+        assert!(
+            result.is_err(),
+            "Expected '{}' to be invalid, but validation passed",
+            label
+        );
+
+        let err = result.unwrap_err();
+        assert!(
+            format!("{:?}", err).contains("invalid_server_label"),
+            "Expected error code invalid_server_label, got: {:?}",
+            err
+        );
+    }
 }
 
 /// Test text format validation (JSON schema name cannot be empty)
