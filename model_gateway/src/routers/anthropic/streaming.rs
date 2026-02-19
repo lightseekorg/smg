@@ -32,6 +32,32 @@ use crate::{
 /// Channel buffer size for SSE events sent to the client.
 const SSE_CHANNEL_SIZE: usize = 128;
 
+/// RAII guard: decrements worker load and records outcome on drop.
+struct WorkerLoadGuard {
+    worker: Arc<dyn Worker>,
+    success: bool,
+}
+
+impl WorkerLoadGuard {
+    fn new(worker: Arc<dyn Worker>) -> Self {
+        Self {
+            worker,
+            success: false,
+        }
+    }
+
+    fn mark_success(&mut self) {
+        self.success = true;
+    }
+}
+
+impl Drop for WorkerLoadGuard {
+    fn drop(&mut self) {
+        self.worker.decrement_load();
+        self.worker.record_outcome(self.success);
+    }
+}
+
 /// Execute a streaming Messages API request, handling both
 /// passthrough (no MCP) and MCP tool loop paths.
 pub(crate) async fn execute(router: &RouterContext, req_ctx: RequestContext) -> Response {
@@ -211,6 +237,14 @@ async fn run_tool_loop(
         Metrics::record_mcp_tool_iteration(&req_ctx.model_id);
 
         let (response, selected_worker) = send_streaming_request(&router, &req_ctx).await?;
+        let mut guard = WorkerLoadGuard::new(selected_worker);
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "Worker returned error status: {}",
+                response.status()
+            ));
+        }
 
         // Consume the upstream SSE stream
         let result = sse::consume_and_forward(
@@ -222,12 +256,10 @@ async fn run_tool_loop(
         )
         .await;
 
-        // Worker load management
-        selected_worker.decrement_load();
-        match &result {
-            Ok(_) => selected_worker.record_outcome(true),
-            Err(_) => selected_worker.record_outcome(false),
+        if result.is_ok() {
+            guard.mark_success();
         }
+        drop(guard);
 
         let consumed = result?;
         is_first_iteration = false;
@@ -289,10 +321,10 @@ async fn run_tool_loop(
     Ok(())
 }
 
-/// Select a worker, send a streaming request, and return the response.
+/// Select a worker and send a streaming request.
 ///
-/// Returns the worker alongside the response for load tracking after
-/// the stream is consumed.
+/// Caller owns load management via `WorkerLoadGuard`. Connection-level
+/// failures are cleaned up internally by `worker::send_request`.
 async fn send_streaming_request(
     router: &RouterContext,
     req_ctx: &RequestContext,
@@ -326,13 +358,6 @@ async fn send_streaming_request(
             extract_error_code_from_response(&e)
         )
     })?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        selected_worker.decrement_load();
-        selected_worker.record_outcome(false);
-        return Err(format!("Worker returned error status: {}", status));
-    }
 
     Ok((response, selected_worker))
 }
