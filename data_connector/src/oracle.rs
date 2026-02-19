@@ -36,25 +36,36 @@ use crate::{
 ///
 /// This helper eliminates ~540 LOC of duplication across storage implementations.
 /// It handles connection pooling, error mapping, and client configuration.
+pub(crate) type SchemaInitFn = fn(&Connection) -> Result<(), String>;
+
+/// Shared Oracle connection pool infrastructure
+///
+/// This helper eliminates ~540 LOC of duplication across storage implementations.
+/// It handles connection pooling, error mapping, and client configuration.
 pub(crate) struct OracleStore {
     pool: Pool<OracleConnectionManager>,
 }
 
 impl OracleStore {
-    /// Create pool with custom schema initialization
+    /// Create a connection pool and initialize all schemas.
     ///
-    /// The `init_schema` function receives a connection and should:
-    /// - Check if tables/indexes exist
-    /// - Create them if needed
-    /// - Return Ok(()) on success or Err(message) on failure
+    /// Accepts a list of schema initializers that run on a single connection
+    /// before the pool is created, ensuring all tables exist.
     pub fn new(
         config: &OracleConfig,
-        init_schema: impl FnOnce(&Connection) -> Result<(), String>,
+        init_schemas: &[SchemaInitFn],
     ) -> Result<Self, String> {
-        // Configure Oracle client (wallet, etc.)
-        configure_oracle_client(config)?;
+        // Guard: wallet-based connections require TNS_ADMIN to be set by
+        // pre_configure_env() before the async runtime starts.
+        if config.wallet_path.is_some() && std::env::var("TNS_ADMIN").is_err() {
+            return Err(
+                "Oracle wallet_path is configured but TNS_ADMIN is not set. \
+                 Call pre_configure_env() before starting the async runtime."
+                    .to_string(),
+            );
+        }
 
-        // Initialize schema using the provided function
+        // Initialize schemas using a single connection
         let conn = connect_oracle(
             config.external_auth,
             &config.username,
@@ -63,7 +74,9 @@ impl OracleStore {
         )
         .map_err(map_oracle_error)?;
 
-        init_schema(&conn)?;
+        for init_schema in init_schemas {
+            init_schema(&conn)?;
+        }
         drop(conn);
 
         // Create connection pool
@@ -130,8 +143,11 @@ pub(crate) fn map_oracle_error(err: oracle::Error) -> String {
     }
 }
 
-// Client configuration helper
-fn configure_oracle_client(config: &OracleConfig) -> Result<(), String> {
+/// Validate Oracle wallet path and set `TNS_ADMIN` environment variable.
+///
+/// Must be called from a single-threaded context (before the async runtime starts)
+/// because `std::env::set_var` is not safe to call concurrently with env reads.
+pub(crate) fn configure_oracle_env(config: &OracleConfig) -> Result<(), String> {
     if let Some(wallet_path) = &config.wallet_path {
         let path = Path::new(wallet_path);
 
@@ -255,34 +271,31 @@ pub(super) struct OracleConversationStorage {
 }
 
 impl OracleConversationStorage {
-    pub fn new(config: OracleConfig) -> Result<Self, ConversationStorageError> {
-        let store = OracleStore::new(&config, |conn| {
-            // Check if table exists
-            let exists: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATIONS'",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
+    pub fn new(store: OracleStore) -> Self {
+        Self { store }
+    }
 
-            // Create table if missing
-            if exists == 0 {
-                conn.execute(
-                    "CREATE TABLE conversations (
-                        id VARCHAR2(64) PRIMARY KEY,
-                        created_at TIMESTAMP WITH TIME ZONE,
-                        metadata CLOB
-                    )",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
-            }
+    pub(crate) fn init_schema(conn: &Connection) -> Result<(), String> {
+        let exists: i64 = conn
+            .query_row_as(
+                "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATIONS'",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
 
-            Ok(())
-        })
-        .map_err(ConversationStorageError::StorageError)?;
+        if exists == 0 {
+            conn.execute(
+                "CREATE TABLE conversations (
+                    id VARCHAR2(64) PRIMARY KEY,
+                    created_at TIMESTAMP WITH TIME ZONE,
+                    metadata CLOB
+                )",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+        }
 
-        Ok(Self { store })
+        Ok(())
     }
 
     fn parse_metadata(
@@ -443,64 +456,61 @@ pub(super) struct OracleConversationItemStorage {
 }
 
 impl OracleConversationItemStorage {
-    pub fn new(config: OracleConfig) -> Result<Self, ConversationItemStorageError> {
-        let store = OracleStore::new(&config, |conn| {
-            // Create conversation_items table
-            let exists_items: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEMS'",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
+    pub fn new(store: OracleStore) -> Self {
+        Self { store }
+    }
 
-            if exists_items == 0 {
-                conn.execute(
-                    "CREATE TABLE conversation_items (
-                        id VARCHAR2(64) PRIMARY KEY,
-                        response_id VARCHAR2(64),
-                        item_type VARCHAR2(32) NOT NULL,
-                        role VARCHAR2(32),
-                        content CLOB,
-                        status VARCHAR2(32),
-                        created_at TIMESTAMP WITH TIME ZONE
-                    )",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
-            }
+    pub(crate) fn init_schema(conn: &Connection) -> Result<(), String> {
+        let exists_items: i64 = conn
+            .query_row_as(
+                "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEMS'",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
 
-            // Create conversation_item_links table
-            let exists_links: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEM_LINKS'",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
+        if exists_items == 0 {
+            conn.execute(
+                "CREATE TABLE conversation_items (
+                    id VARCHAR2(64) PRIMARY KEY,
+                    response_id VARCHAR2(64),
+                    item_type VARCHAR2(32) NOT NULL,
+                    role VARCHAR2(32),
+                    content CLOB,
+                    status VARCHAR2(32),
+                    created_at TIMESTAMP WITH TIME ZONE
+                )",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+        }
 
-            if exists_links == 0 {
-                conn.execute(
-                    "CREATE TABLE conversation_item_links (
-                        conversation_id VARCHAR2(64) NOT NULL,
-                        item_id VARCHAR2(64) NOT NULL,
-                        added_at TIMESTAMP WITH TIME ZONE,
-                        CONSTRAINT pk_conv_item_link PRIMARY KEY (conversation_id, item_id)
-                    )",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
+        let exists_links: i64 = conn
+            .query_row_as(
+                "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEM_LINKS'",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
 
-                conn.execute(
-                    "CREATE INDEX conv_item_links_conv_idx ON conversation_item_links (conversation_id, added_at)",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
-            }
+        if exists_links == 0 {
+            conn.execute(
+                "CREATE TABLE conversation_item_links (
+                    conversation_id VARCHAR2(64) NOT NULL,
+                    item_id VARCHAR2(64) NOT NULL,
+                    added_at TIMESTAMP WITH TIME ZONE,
+                    CONSTRAINT pk_conv_item_link PRIMARY KEY (conversation_id, item_id)
+                )",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
 
-            Ok(())
-        })
-        .map_err(ConversationItemStorageError::StorageError)?;
+            conn.execute(
+                "CREATE INDEX conv_item_links_conv_idx ON conversation_item_links (conversation_id, added_at)",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+        }
 
-        Ok(Self { store })
+        Ok(())
     }
 }
 
@@ -798,57 +808,54 @@ pub(super) struct OracleResponseStorage {
 }
 
 impl OracleResponseStorage {
-    pub fn new(config: OracleConfig) -> Result<Self, ResponseStorageError> {
-        let store = OracleStore::new(&config, |conn| {
-            // Create responses table
-            let exists: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'RESPONSES'",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
+    pub fn new(store: OracleStore) -> Self {
+        Self { store }
+    }
 
-            if exists == 0 {
-                conn.execute(
-                    "CREATE TABLE responses (
-                        id VARCHAR2(64) PRIMARY KEY,
-                        conversation_id VARCHAR2(64),
-                        previous_response_id VARCHAR2(64),
-                        input CLOB,
-                        instructions CLOB,
-                        output CLOB,
-                        tool_calls CLOB,
-                        metadata CLOB,
-                        created_at TIMESTAMP WITH TIME ZONE,
-                        safety_identifier VARCHAR2(128),
-                        model VARCHAR2(128),
-                        raw_response CLOB
-                    )",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
-            } else {
-                Self::alter_safety_identifier_column(conn)?;
-                Self::remove_user_id_column_if_exists(conn)?;
-            }
+    pub(crate) fn init_schema(conn: &Connection) -> Result<(), String> {
+        let exists: i64 = conn
+            .query_row_as(
+                "SELECT COUNT(*) FROM user_tables WHERE table_name = 'RESPONSES'",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
 
-            // Create indexes
-            create_index_if_missing(
-                conn,
-                "RESPONSES_PREV_IDX",
-                "CREATE INDEX responses_prev_idx ON responses(previous_response_id)",
-            )?;
-            create_index_if_missing(
-                conn,
-                "RESPONSES_USER_IDX",
-                "CREATE INDEX responses_user_idx ON responses(safety_identifier)",
-            )?;
+        if exists == 0 {
+            conn.execute(
+                "CREATE TABLE responses (
+                    id VARCHAR2(64) PRIMARY KEY,
+                    conversation_id VARCHAR2(64),
+                    previous_response_id VARCHAR2(64),
+                    input CLOB,
+                    instructions CLOB,
+                    output CLOB,
+                    tool_calls CLOB,
+                    metadata CLOB,
+                    created_at TIMESTAMP WITH TIME ZONE,
+                    safety_identifier VARCHAR2(128),
+                    model VARCHAR2(128),
+                    raw_response CLOB
+                )",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+        } else {
+            Self::alter_safety_identifier_column(conn)?;
+            Self::remove_user_id_column_if_exists(conn)?;
+        }
 
-            Ok(())
-        })
-        .map_err(ResponseStorageError::StorageError)?;
+        create_index_if_missing(
+            conn,
+            "RESPONSES_PREV_IDX",
+            "CREATE INDEX responses_prev_idx ON responses(previous_response_id)",
+        )?;
+        create_index_if_missing(
+            conn,
+            "RESPONSES_USER_IDX",
+            "CREATE INDEX responses_user_idx ON responses(safety_identifier)",
+        )?;
 
-        Ok(Self { store })
+        Ok(())
     }
 
     // Alter safety_identifier column if missing

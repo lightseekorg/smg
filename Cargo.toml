@@ -12,7 +12,7 @@ llm-tokenizer = { version = "1.1.0", path = "tokenizer" }
 smg-auth = { version = "1.1.0", path = "auth" }
 smg-mcp = { version = "2.0.0", path = "mcp" }
 kv-index = { version = "1.0.0", path = "kv_index" }
-smg-data-connector = { version = "1.1.0", path = "data_connector", package = "data-connector" }
+smg-data-connector = { version = "2.0.0", path = "data_connector", package = "data-connector" }
 llm-multimodal = { version = "1.1.0", path = "multimodal" }
 smg-wasm = { version = "1.0.0", path = "wasm", package = "smg-wasm" }
 smg-mesh = { version = "1.1.0", path = "mesh", package = "smg-mesh" }

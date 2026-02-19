@@ -60,13 +60,7 @@ pub(super) struct PostgresConversationStorage {
 }
 
 impl PostgresConversationStorage {
-    pub fn new(store: PostgresStore) -> Result<Self, ConversationStorageError> {
-        futures::executor::block_on(Self::initialize_schema(store.clone()))
-            .expect("Failed to initialize conversations schema");
-        Ok(Self { store })
-    }
-
-    async fn initialize_schema(store: PostgresStore) -> Result<(), ConversationStorageError> {
+    pub async fn new(store: PostgresStore) -> Result<Self, ConversationStorageError> {
         let client = store
             .pool
             .get()
@@ -83,8 +77,7 @@ impl PostgresConversationStorage {
             )
             .await
             .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
-
-        Ok(())
+        Ok(Self { store })
     }
 
     fn parse_metadata(
@@ -224,13 +217,7 @@ pub(super) struct PostgresConversationItemStorage {
 }
 
 impl PostgresConversationItemStorage {
-    pub fn new(store: PostgresStore) -> Result<Self, ConversationItemStorageError> {
-        futures::executor::block_on(Self::initialize_schema(store.clone()))
-            .expect("Failed to initialize conversation_items or conversation_item_links schema");
-        Ok(Self { store })
-    }
-
-    async fn initialize_schema(store: PostgresStore) -> Result<(), ConversationItemStorageError> {
+    pub async fn new(store: PostgresStore) -> Result<Self, ConversationItemStorageError> {
         let client = store
             .pool
             .get()
@@ -240,7 +227,7 @@ impl PostgresConversationItemStorage {
             .batch_execute(
                 "
             CREATE TABLE IF NOT EXISTS conversation_items (
-                id SERIAL PRIMARY KEY,
+                id VARCHAR(64) PRIMARY KEY,
                 response_id VARCHAR(64),
                 item_type VARCHAR(32) NOT NULL,
                 role VARCHAR(32),
@@ -252,7 +239,6 @@ impl PostgresConversationItemStorage {
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
 
-        // Create conversation_item_links table
         client
             .batch_execute(
                 "
@@ -266,7 +252,7 @@ impl PostgresConversationItemStorage {
             )
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
-        Ok(())
+        Ok(Self { store })
     }
 }
 
@@ -555,13 +541,7 @@ pub(super) struct PostgresResponseStorage {
 }
 
 impl PostgresResponseStorage {
-    pub fn new(store: PostgresStore) -> Result<Self, ResponseStorageError> {
-        futures::executor::block_on(Self::initialize_schema(store.clone()))
-            .expect("Failed to initialize responses schema");
-        Ok(Self { store })
-    }
-
-    async fn initialize_schema(store: PostgresStore) -> Result<(), ResponseStorageError> {
+    pub async fn new(store: PostgresStore) -> Result<Self, ResponseStorageError> {
         let client = store
             .pool
             .get()
@@ -587,7 +567,7 @@ impl PostgresResponseStorage {
             )
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
-        Ok(())
+        Ok(Self { store })
     }
 
     pub fn build_response_from_now(row: &Row) -> Result<StoredResponse, String> {
