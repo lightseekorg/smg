@@ -20,13 +20,13 @@ use smg::{
 };
 use smg_auth::{ApiKeyEntry, ControlPlaneAuthConfig, JwtConfig, Role};
 use smg_mesh::MeshServerConfig;
-fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
+fn parse_multi_url_args(flag: &str) -> Vec<(String, Option<u16>)> {
     let args: Vec<String> = std::env::args().collect();
-    let mut prefill_entries = Vec::new();
+    let mut entries = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
-        if args[i] == "--prefill" && i + 1 < args.len() {
+        if args[i] == flag && i + 1 < args.len() {
             let url = args[i + 1].clone();
             let bootstrap_port = if i + 2 < args.len() && !args[i + 2].starts_with("--") {
                 if let Ok(port) = args[i + 2].parse::<u16>() {
@@ -41,14 +41,22 @@ fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
             } else {
                 None
             };
-            prefill_entries.push((url, bootstrap_port));
+            entries.push((url, bootstrap_port));
             i += 2;
         } else {
             i += 1;
         }
     }
 
-    prefill_entries
+    entries
+}
+
+fn parse_prefill_args() -> Vec<(String, Option<u16>)> {
+    parse_multi_url_args("--prefill")
+}
+
+fn parse_pre_prefill_args() -> Vec<(String, Option<u16>)> {
+    parse_multi_url_args("--pre-prefill")
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -218,13 +226,14 @@ struct CliArgs {
     #[arg(long, default_value_t = 30, help_heading = "PD Disaggregation")]
     worker_startup_check_interval: u64,
 
-    /// URL for the pre-prefill worker (cold request warming)
-    #[arg(long, help_heading = "PD Disaggregation")]
-    pre_prefill_url: Option<String>,
+    /// Pre-prefill worker URLs with optional bootstrap ports (cold request warming).
+    /// Same format as --prefill: --pre-prefill URL [BOOTSTRAP_PORT]
+    #[arg(long, num_args = 0.., help_heading = "PD Disaggregation")]
+    pre_prefill: Vec<String>,
 
-    /// Decode URL paired with the pre-prefill worker
-    #[arg(long, help_heading = "PD Disaggregation")]
-    pre_prefill_decode_url: Option<String>,
+    /// Decode URLs paired with pre-prefill workers (can be specified multiple times)
+    #[arg(long, action = ArgAction::Append, help_heading = "PD Disaggregation")]
+    pre_prefill_decode: Vec<String>,
 
     /// Cache match ratio threshold below which a request is considered "cold" (default: 0.1)
     #[arg(long, default_value_t = 0.1, help_heading = "PD Disaggregation")]
@@ -904,6 +913,7 @@ impl CliArgs {
     fn to_router_config(
         &self,
         prefill_urls: Vec<(String, Option<u16>)>,
+        pre_prefill_urls: Vec<(String, Option<u16>)>,
     ) -> ConfigResult<RouterConfig> {
         // Determine routing mode based on backend type and PD disaggregation flag
         // IGW mode doesn't change routing mode, only affects router initialization
@@ -921,8 +931,8 @@ impl CliArgs {
                 decode_urls: self.decode.clone(),
                 prefill_policy: self.prefill_policy.as_ref().map(|p| self.parse_policy(p)),
                 decode_policy: self.decode_policy.as_ref().map(|p| self.parse_policy(p)),
-                pre_prefill_url: self.pre_prefill_url.clone(),
-                pre_prefill_decode_url: self.pre_prefill_decode_url.clone(),
+                pre_prefill_urls: pre_prefill_urls,
+                pre_prefill_decode_urls: self.pre_prefill_decode.clone(),
                 pre_prefill_match_threshold: self.pre_prefill_match_threshold,
                 pre_prefill_unmatched_chars_threshold: self.pre_prefill_unmatched_chars_threshold,
                 pre_prefill_min_tokens: self.pre_prefill_min_tokens,
@@ -970,12 +980,18 @@ impl CliArgs {
             RoutingMode::PrefillDecode {
                 prefill_urls,
                 decode_urls,
+                pre_prefill_urls,
+                pre_prefill_decode_urls,
                 ..
             } => {
                 for (url, _) in prefill_urls {
                     all_urls.push(url.clone());
                 }
                 all_urls.extend(decode_urls.clone());
+                for (url, _) in pre_prefill_urls {
+                    all_urls.push(url.clone());
+                }
+                all_urls.extend(pre_prefill_decode_urls.clone());
             }
             RoutingMode::OpenAI { worker_urls } => {
                 all_urls.extend(worker_urls.clone());
@@ -1206,13 +1222,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let prefill_urls = parse_prefill_args();
+    let pre_prefill_urls = parse_pre_prefill_args();
 
     let mut filtered_args: Vec<String> = Vec::new();
     let raw_args: Vec<String> = std::env::args().collect();
     let mut i = 0;
 
     while i < raw_args.len() {
-        if raw_args[i] == "--prefill" && i + 1 < raw_args.len() {
+        if (raw_args[i] == "--prefill" || raw_args[i] == "--pre-prefill")
+            && i + 1 < raw_args.len()
+        {
             i += 2;
             if i < raw_args.len()
                 && !raw_args[i].starts_with("--")
@@ -1265,7 +1284,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let router_config = cli_args.to_router_config(prefill_urls)?;
+    let router_config = cli_args.to_router_config(prefill_urls, pre_prefill_urls)?;
     router_config.validate()?;
     let server_config = cli_args.to_server_config(router_config);
     let runtime = tokio::runtime::Runtime::new()?;
