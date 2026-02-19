@@ -26,31 +26,7 @@ use crate::{
 /// Maximum error response body size to prevent DoS (1 MB)
 const MAX_ERROR_RESPONSE_SIZE: usize = 1024 * 1024;
 
-/// RAII guard: decrements worker load and records outcome on drop.
-pub(crate) struct WorkerLoadGuard {
-    worker: Arc<dyn Worker>,
-    success: bool,
-}
 
-impl WorkerLoadGuard {
-    pub(crate) fn new(worker: Arc<dyn Worker>) -> Self {
-        Self {
-            worker,
-            success: false,
-        }
-    }
-
-    pub(crate) fn mark_success(&mut self) {
-        self.success = true;
-    }
-}
-
-impl Drop for WorkerLoadGuard {
-    fn drop(&mut self) {
-        self.worker.decrement_load();
-        self.worker.record_outcome(self.success);
-    }
-}
 
 /// Select the best worker for the given model.
 #[allow(clippy::result_large_err)]
@@ -98,8 +74,8 @@ pub(crate) fn build_request(
     (url, propagated)
 }
 
-/// Send the HTTP request to the worker. Increments load on send; decrements + records
-/// circuit breaker failure on connection/timeout errors.
+/// Send the HTTP request to the worker. Records circuit breaker failure on
+/// connection/timeout errors.
 pub(crate) async fn send_request(
     http_client: &reqwest::Client,
     url: &str,
@@ -109,7 +85,6 @@ pub(crate) async fn send_request(
     worker: &dyn Worker,
 ) -> Result<reqwest::Response, Response> {
     debug!(url = %url, "Sending request to worker");
-    worker.increment_load();
 
     let mut builder = http_client.post(url).json(request).timeout(timeout);
     for (key, value) in headers {
@@ -123,7 +98,6 @@ pub(crate) async fn send_request(
         }
         Err(e) => {
             warn!(url = %url, error = %e, "Request to worker failed");
-            worker.decrement_load();
             worker.record_outcome(false);
 
             if e.is_timeout() {
@@ -146,7 +120,7 @@ pub(crate) async fn send_request(
     }
 }
 
-/// Parse a successful non-streaming JSON response. Decrements load and records circuit breaker.
+/// Parse a successful non-streaming JSON response. Records circuit breaker outcome.
 pub(crate) async fn parse_response(
     response: reqwest::Response,
     model_id: &str,
@@ -197,11 +171,10 @@ pub(crate) async fn parse_response(
         }
     };
 
-    worker.decrement_load();
     result
 }
 
-/// Handle a non-success response: read body (limited), record metrics, decrement load.
+/// Handle a non-success response: read body (limited), record metrics and circuit breaker.
 pub(crate) async fn handle_error_response(
     response: reqwest::Response,
     model_id: &str,
@@ -252,8 +225,6 @@ pub(crate) async fn handle_error_response(
         "messages",
         metrics_labels::ERROR_BACKEND,
     );
-
-    worker.decrement_load();
 
     (status, body).into_response()
 }

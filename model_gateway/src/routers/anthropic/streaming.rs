@@ -97,10 +97,10 @@ async fn build_streaming_response(
         start_time.elapsed(),
     );
 
+    worker.record_outcome(true);
+
     let headers = response.headers().clone();
-    let stream = response.bytes_stream();
-    let load_stream = sse::LoadTrackingStream::new(stream, worker);
-    let body = Body::from_stream(load_stream);
+    let body = Body::from_stream(response.bytes_stream());
 
     sse::build_sse_response(status, headers, body)
 }
@@ -119,12 +119,14 @@ async fn build_streaming_error_response(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    // If it's an SSE error stream, pass it through (with worker load tracking)
+    // If it's an SSE error stream, pass it through
     if content_type
         .to_ascii_lowercase()
         .contains("text/event-stream")
     {
         warn!(model = %model_id, status = %status, "Streaming error response (SSE)");
+
+        worker.record_outcome(false);
 
         Metrics::record_router_duration(
             metrics_labels::ROUTER_HTTP,
@@ -144,9 +146,7 @@ async fn build_streaming_error_response(
         );
 
         let headers = response.headers().clone();
-        let stream = response.bytes_stream();
-        let load_stream = sse::LoadTrackingStream::new_force_failure(stream, worker);
-        let body = Body::from_stream(load_stream);
+        let body = Body::from_stream(response.bytes_stream());
 
         return sse::build_sse_response(status, headers, body);
     }
@@ -211,9 +211,9 @@ async fn run_tool_loop(
         Metrics::record_mcp_tool_iteration(&req_ctx.model_id);
 
         let (response, selected_worker) = send_streaming_request(&router, &req_ctx).await?;
-        let mut guard = worker::WorkerLoadGuard::new(selected_worker);
 
         if !response.status().is_success() {
+            selected_worker.record_outcome(false);
             return Err(format!(
                 "Worker returned error status: {}",
                 response.status()
@@ -230,10 +230,7 @@ async fn run_tool_loop(
         )
         .await;
 
-        if result.is_ok() {
-            guard.mark_success();
-        }
-        drop(guard);
+        selected_worker.record_outcome(result.is_ok());
 
         let consumed = result?;
         is_first_iteration = false;
