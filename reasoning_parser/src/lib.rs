@@ -5,6 +5,6 @@ pub mod traits;
 pub use factory::{ParserFactory, ParserRegistry, PooledParser};
 pub use parsers::{
     BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, KimiParser, MiniMaxParser,
-    Qwen3Parser, QwenThinkingParser, Step3Parser,
+    NanoV3Parser, Qwen3Parser, QwenThinkingParser, Step3Parser,
 };
 pub use traits::{ParseError, ParserConfig, ParserResult, ReasoningParser};
