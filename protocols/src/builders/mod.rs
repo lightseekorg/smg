@@ -7,6 +7,7 @@
 //!
 //! Builders are organized by API:
 //! - `chat/` - Chat Completion API builders (response, stream_response)
+//! - `realtime/` - Realtime API builders (response, server_event)
 //! - `responses/` - Responses API builder (response)
 //!
 //! # Optional Fields
@@ -20,8 +21,10 @@
 //! ```
 
 pub mod chat;
+pub mod realtime;
 pub mod responses;
 
 // Re-export all builders for convenient access
 pub use chat::{ChatCompletionResponseBuilder, ChatCompletionStreamResponseBuilder};
+pub use realtime::{RealtimeResponseBuilder, ServerEventBuilder};
 pub use responses::ResponsesResponseBuilder;
