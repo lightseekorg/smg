@@ -134,14 +134,15 @@ pub async fn auth_middleware(
             .and_then(|h| h.to_str().ok())
             .and_then(|h| h.strip_prefix("Bearer "));
 
-        match token {
-            Some(token) => {
-                let token_hash = Sha256::digest(token.as_bytes());
-                if token_hash.as_slice().ct_eq(expected_hash).unwrap_u8() != 1 {
-                    return StatusCode::UNAUTHORIZED.into_response();
-                }
-            }
-            _ => return StatusCode::UNAUTHORIZED.into_response(),
+        let authorized = token.is_some_and(|t| {
+            Sha256::digest(t.as_bytes())
+                .as_slice()
+                .ct_eq(expected_hash)
+                .unwrap_u8()
+                == 1
+        });
+        if !authorized {
+            return StatusCode::UNAUTHORIZED.into_response();
         }
     }
 
@@ -770,8 +771,8 @@ pub async fn wasm_middleware(
             Err(e) => {
                 error!("Failed to read request body for WASM processing: {}", e);
                 return (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    Json(json!({"error": "Request body too large for WASM processing"})),
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("Failed to read request body: {e}")})),
                 )
                     .into_response();
             }
