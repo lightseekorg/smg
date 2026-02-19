@@ -27,7 +27,7 @@ use tracing::{debug, info, warn};
 use super::tool_handler::FunctionCallInProgress;
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
-    routers::{header_utils::apply_request_headers, mcp_utils::DEFAULT_MAX_ITERATIONS},
+    routers::{error, header_utils::apply_request_headers, mcp_utils::DEFAULT_MAX_ITERATIONS},
 };
 
 /// State for tracking multi-turn tool calling loop
@@ -541,6 +541,7 @@ pub(super) async fn execute_tool_loop(
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            let body = error::sanitize_error_body(&body);
             return Err(format!("upstream error {}: {}", status, body));
         }
 

@@ -548,6 +548,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
             .text()
             .await
             .unwrap_or_else(|err| format!("Failed to read upstream error body: {}", err));
+        let error_body = error::sanitize_error_body(&error_body);
         return (status_code, error_body).into_response();
     }
 
@@ -733,6 +734,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
+                let body = error::sanitize_error_body(&body);
                 let _ = send_sse_event(
                     &tx,
                     "error",
