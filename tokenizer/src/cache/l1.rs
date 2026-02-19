@@ -230,20 +230,36 @@ impl L1Cache {
             self.evict_lru(total_size_needed);
         }
 
-        // Insert all entries
+        // Insert all entries, accounting for replaced entries in memory tracking
         let current_timestamp = self.access_counter.load(Ordering::Relaxed);
         for (hash_bytes, prefix_tokens, size_bytes) in entries_to_insert {
             let shard_idx = hash_bytes[0] as usize % NUM_SHARDS;
 
             let cached = CachedPrefix {
-                tokens: prefix_tokens, // Already Arc<[TokenIdType]>
+                tokens: prefix_tokens,
                 last_accessed: Arc::new(AtomicU64::new(current_timestamp)),
                 size_bytes,
             };
 
-            self.shards[shard_idx].insert(hash_bytes, cached);
-            self.current_memory
-                .fetch_add(size_bytes as u64, Ordering::Relaxed);
+            if let Some(old) = self.shards[shard_idx].insert(hash_bytes, cached) {
+                // Replaced an existing entry — adjust delta only.
+                // Note: the counter update is not atomic with the shard insert, so
+                // concurrent replacements of the same key can briefly skew the
+                // counter. This is benign — eviction is best-effort and the drift
+                // is bounded to a single entry's size per race.
+                let old_size = old.size_bytes as u64;
+                let new_size = size_bytes as u64;
+                if new_size >= old_size {
+                    self.current_memory
+                        .fetch_add(new_size - old_size, Ordering::Relaxed);
+                } else {
+                    self.current_memory
+                        .fetch_sub(old_size - new_size, Ordering::Relaxed);
+                }
+            } else {
+                self.current_memory
+                    .fetch_add(size_bytes as u64, Ordering::Relaxed);
+            }
         }
 
         Ok(())

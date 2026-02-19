@@ -1,5 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
+    // std::sync::Mutex is intentional: all critical sections are tiny
+    // (HashSet insert/remove/contains) and never cross .await boundaries.
+    // See: https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html#which-kind-of-mutex-should-you-use
     sync::{Arc, Mutex},
     time::Duration,
 };

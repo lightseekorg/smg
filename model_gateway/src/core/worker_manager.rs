@@ -323,11 +323,14 @@ impl LoadMonitor {
     }
 
     pub async fn stop(&self) {
-        let mut handle_guard = self.monitor_handle.lock().await;
-        if let Some(handle) = handle_guard.take() {
+        let handle = {
+            let mut handle_guard = self.monitor_handle.lock().await;
+            handle_guard.take()
+        };
+        if let Some(handle) = handle {
             info!("Stopping load monitoring");
             handle.abort();
-            let _ = handle.await; // Wait for task to finish
+            let _ = handle.await;
         }
     }
 

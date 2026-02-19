@@ -139,3 +139,80 @@ fn test_thread_safety() {
         handle.join().unwrap();
     }
 }
+
+/// Regression test: DecodeStream must not panic when prefix_text.len()
+/// falls mid-codepoint in new_text.  This happens with real tokenizers
+/// that use byte-fallback — partial byte tokens merge into multi-byte
+/// characters when more context arrives, changing the byte length of
+/// the prefix portion.
+#[test]
+fn test_decode_stream_multibyte_char_boundary() {
+    use anyhow::Result;
+
+    use crate::{
+        stream::DecodeStream,
+        traits::{Decoder, Encoder, Encoding, SpecialTokens, Tokenizer as TokenizerTrait},
+    };
+
+    /// Mock tokenizer simulating byte-fallback context sensitivity.
+    ///
+    /// decode([1, 2])   → "abc"  (3 bytes — incomplete byte rendered as ASCII)
+    /// decode([1, 2, 3]) → "ab🎉" (6 bytes — merged into 4-byte emoji)
+    ///
+    /// prefix_text.len() = 3 lands inside the emoji (bytes 2..6 in new_text).
+    struct MultiByteTokenizer {
+        special_tokens: SpecialTokens,
+    }
+
+    impl Encoder for MultiByteTokenizer {
+        fn encode(&self, _input: &str, _add_special_tokens: bool) -> Result<Encoding> {
+            Ok(Encoding::Sp(vec![]))
+        }
+
+        fn encode_batch(&self, inputs: &[&str], add_special_tokens: bool) -> Result<Vec<Encoding>> {
+            inputs
+                .iter()
+                .map(|s| self.encode(s, add_special_tokens))
+                .collect()
+        }
+    }
+
+    impl Decoder for MultiByteTokenizer {
+        fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
+            Ok(match token_ids {
+                [1, 2] => "abc".into(),
+                [1, 2, 3] => "ab\u{1F389}".into(), // "ab🎉"
+                _ => String::new(),
+            })
+        }
+    }
+
+    impl TokenizerTrait for MultiByteTokenizer {
+        fn vocab_size(&self) -> usize {
+            10
+        }
+        fn get_special_tokens(&self) -> &SpecialTokens {
+            &self.special_tokens
+        }
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            None
+        }
+        fn id_to_token(&self, _id: u32) -> Option<String> {
+            None
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    let tokenizer: Arc<dyn TokenizerTrait> = Arc::new(MultiByteTokenizer {
+        special_tokens: SpecialTokens::default(),
+    });
+    let prompt_tokens = vec![1, 2];
+    let mut stream = DecodeStream::new(tokenizer, &prompt_tokens, false);
+
+    // Without the char-boundary fix this panics:
+    //   "byte index 3 is not a char boundary; it is inside '🎉' (bytes 2..6)"
+    let result = stream.step(3).unwrap();
+    assert_eq!(result, Some("\u{1F389}".to_string()));
+}
