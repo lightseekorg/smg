@@ -20,6 +20,7 @@ use bytes::Bytes;
 use http_body::Frame;
 use rand::Rng;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tower::{Layer, Service};
@@ -106,45 +107,45 @@ impl http_body::Body for TokenGuardBody {
 
 #[derive(Clone)]
 pub struct AuthConfig {
-    pub api_key: Option<String>,
+    /// Precomputed SHA-256 hash of the API key, used for constant-time comparison
+    /// that doesn't leak key length via timing.
+    api_key_hash: Option<[u8; 32]>,
 }
 
-/// Middleware to validate Bearer token against configured API key
-/// Only active when router has an API key configured
+impl AuthConfig {
+    pub fn new(api_key: Option<String>) -> Self {
+        Self {
+            api_key_hash: api_key.map(|k| Sha256::digest(k.as_bytes()).into()),
+        }
+    }
+}
+
+/// Middleware to validate Bearer token against configured API key.
+/// Only active when router has an API key configured.
 pub async fn auth_middleware(
     State(auth_config): State<AuthConfig>,
     request: Request<Body>,
     next: Next,
-) -> Result<Response, StatusCode> {
-    if let Some(expected_key) = &auth_config.api_key {
-        // Extract Authorization header
-        let auth_header = request
+) -> Response {
+    if let Some(expected_hash) = &auth_config.api_key_hash {
+        let token = request
             .headers()
             .get(header::AUTHORIZATION)
-            .and_then(|h| h.to_str().ok());
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer "));
 
-        match auth_header {
-            Some(header_value) if header_value.starts_with("Bearer ") => {
-                let token = &header_value[7..]; // Skip "Bearer "
-                                                // Use constant-time comparison to prevent timing attacks
-                let token_bytes = token.as_bytes();
-                let expected_bytes = expected_key.as_bytes();
-
-                // Check if lengths match first (this is not constant-time but necessary)
-                if token_bytes.len() != expected_bytes.len() {
-                    return Err(StatusCode::UNAUTHORIZED);
-                }
-
-                // Constant-time comparison of the actual values
-                if token_bytes.ct_eq(expected_bytes).unwrap_u8() != 1 {
-                    return Err(StatusCode::UNAUTHORIZED);
+        match token {
+            Some(token) => {
+                let token_hash = Sha256::digest(token.as_bytes());
+                if token_hash.as_slice().ct_eq(expected_hash).unwrap_u8() != 1 {
+                    return StatusCode::UNAUTHORIZED.into_response();
                 }
             }
-            _ => return Err(StatusCode::UNAUTHORIZED),
+            _ => return StatusCode::UNAUTHORIZED.into_response(),
         }
     }
 
-    Ok(next.run(request).await)
+    next.run(request).await
 }
 
 /// Alphanumeric characters for request ID generation (as bytes for O(1) indexing)
@@ -314,18 +315,8 @@ impl<B> OnRequest<B> for RequestLogger {
 }
 
 /// Custom on_response handler
-#[derive(Clone, Debug)]
-pub struct ResponseLogger {
-    _start_time: Instant,
-}
-
-impl Default for ResponseLogger {
-    fn default() -> Self {
-        Self {
-            _start_time: Instant::now(),
-        }
-    }
-}
+#[derive(Clone, Debug, Default)]
+pub struct ResponseLogger;
 
 impl<B> OnResponse<B> for ResponseLogger {
     fn on_response(self, response: &Response<B>, latency: Duration, span: &Span) {
@@ -374,7 +365,7 @@ pub fn create_logging_layer() -> TraceLayer<
     TraceLayer::new_for_http()
         .make_span_with(RequestSpan)
         .on_request(RequestLogger)
-        .on_response(ResponseLogger::default())
+        .on_response(ResponseLogger)
 }
 
 /// Request queue entry
@@ -383,15 +374,6 @@ pub struct QueuedRequest {
     queued_at: Instant,
     /// Channel to send the permit back when acquired
     permit_tx: oneshot::Sender<Result<(), StatusCode>>,
-}
-
-/// Queue metrics for monitoring
-#[derive(Debug, Default)]
-pub struct QueueMetrics {
-    pub total_queued: AtomicU64,
-    pub current_queued: AtomicU64,
-    pub total_timeout: AtomicU64,
-    pub total_rejected: AtomicU64,
 }
 
 /// Queue processor that handles queued requests
@@ -524,12 +506,6 @@ pub async fn concurrency_limit_middleware(
         }
     };
 
-    // Static counter for embeddings queue size
-    static EMBEDDINGS_QUEUE_SIZE: AtomicU64 = AtomicU64::new(0);
-
-    // Identify if this is an embeddings request based on path
-    let is_embeddings = request.uri().path().contains("/v1/embeddings");
-
     // Try to acquire token immediately
     if token_bucket.try_acquire(1.0).await.is_ok() {
         debug!("Acquired token immediately");
@@ -558,21 +534,11 @@ pub async fn concurrency_limit_middleware(
             // Try to send to queue
             match queue_tx.try_send(queued) {
                 Ok(_) => {
-                    // On successful enqueue, update embeddings queue counter if applicable
-                    if is_embeddings {
-                        EMBEDDINGS_QUEUE_SIZE.fetch_add(1, Ordering::Relaxed);
-                    }
-
                     // Wait for token from queue processor
                     match permit_rx.await {
                         Ok(Ok(())) => {
                             debug!("Acquired token from queue");
                             Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_ALLOWED);
-                            // Dequeue for embeddings
-                            if is_embeddings {
-                                EMBEDDINGS_QUEUE_SIZE.fetch_sub(1, Ordering::Relaxed);
-                            }
-
                             let response = next.run(request).await;
 
                             // Wrap the response body with TokenGuardBody to return token when stream ends
@@ -583,19 +549,11 @@ pub async fn concurrency_limit_middleware(
                         Ok(Err(status)) => {
                             warn!("Queue returned error status: {}", status);
                             Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_REJECTED);
-                            // Dequeue for embeddings on error
-                            if is_embeddings {
-                                EMBEDDINGS_QUEUE_SIZE.fetch_sub(1, Ordering::Relaxed);
-                            }
                             status.into_response()
                         }
                         Err(_) => {
                             error!("Queue response channel closed");
                             Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_REJECTED);
-                            // Dequeue for embeddings on channel error
-                            if is_embeddings {
-                                EMBEDDINGS_QUEUE_SIZE.fetch_sub(1, Ordering::Relaxed);
-                            }
                             StatusCode::INTERNAL_SERVER_ERROR.into_response()
                         }
                     }
@@ -762,17 +720,17 @@ pub async fn wasm_middleware(
     State(app_state): State<Arc<AppState>>,
     request: Request<Body>,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Response {
     // Check if WASM is enabled
     if !app_state.context.router_config.enable_wasm {
-        return Ok(next.run(request).await);
+        return next.run(request).await;
     }
 
     // Get WASM manager
     let wasm_manager = match &app_state.context.wasm_manager {
         Some(manager) => manager,
         None => {
-            return Ok(next.run(request).await);
+            return next.run(request).await;
         }
     };
 
@@ -792,28 +750,30 @@ pub async fn wasm_middleware(
             Ok(modules) => modules,
             Err(e) => {
                 error!("Failed to get WASM modules for OnRequest: {}", e);
-                return Ok(next.run(request).await);
+                return next.run(request).await;
             }
         };
 
     let response = if modules_on_request.is_empty() {
         next.run(request).await
     } else {
-        // Extract request body once before processing modules
-        let method = request.method().clone();
-        let uri = request.uri().clone();
-        let mut headers = request.headers().clone();
+        // Decompose request to preserve extensions across reconstruction
+        let (parts, body) = request.into_parts();
+        let method = parts.method;
+        let uri = parts.uri;
+        let mut headers = parts.headers;
+        let extensions = parts.extensions;
+
         let max_body_size = wasm_manager.get_max_body_size();
-        let body_bytes = match axum::body::to_bytes(request.into_body(), max_body_size).await {
+        let body_bytes = match axum::body::to_bytes(body, max_body_size).await {
             Ok(bytes) => bytes.to_vec(),
             Err(e) => {
-                error!("Failed to read request body: {}", e);
-                // Create a minimal request with empty body for error recovery
-                let error_request = Request::builder()
-                    .uri(uri)
-                    .body(Body::empty())
-                    .unwrap_or_else(|_| Request::new(Body::empty()));
-                return Ok(next.run(error_request).await);
+                error!("Failed to read request body for WASM processing: {}", e);
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(json!({"error": "Request body too large for WASM processing"})),
+                )
+                    .into_response();
             }
         };
 
@@ -826,7 +786,6 @@ pub async fn wasm_middleware(
         let query_str = uri.query().unwrap_or("").to_string();
 
         for module in modules_on_request {
-            // Build WebAssembly request from collected data
             let wasm_headers = build_wasm_headers_from_axum_headers(&headers);
             let wasm_request = WasmRequest {
                 method: method_str.clone(),
@@ -841,7 +800,6 @@ pub async fn wasm_middleware(
                     .as_millis() as u64,
             };
 
-            // Execute WASM component
             let action = match wasm_manager
                 .execute_module_for_attach_point(
                     &module,
@@ -851,17 +809,17 @@ pub async fn wasm_middleware(
                 .await
             {
                 Some(action) => action,
-                None => continue, // Continue to next module on error
+                None => continue,
             };
 
-            // Process action
             match action {
                 Action::Continue => {}
                 Action::Reject(status) => {
-                    return Err(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST));
+                    return StatusCode::from_u16(status)
+                        .unwrap_or(StatusCode::BAD_REQUEST)
+                        .into_response();
                 }
                 Action::Modify(modify) => {
-                    // Apply modifications to headers and body
                     apply_modify_action_to_headers(&mut headers, &modify);
                     if let Some(body_bytes) = modify.body_replace {
                         modified_body = body_bytes;
@@ -870,15 +828,15 @@ pub async fn wasm_middleware(
             }
         }
 
-        // Reconstruct request with modifications
+        // Reconstruct request with modifications, preserving original extensions
         let mut final_request = Request::builder()
             .method(method)
             .uri(uri)
             .body(Body::from(modified_body))
             .unwrap_or_else(|_| Request::new(Body::empty()));
         *final_request.headers_mut() = headers;
+        *final_request.extensions_mut() = extensions;
 
-        // Continue with request processing
         next.run(final_request).await
     };
 
@@ -891,12 +849,30 @@ pub async fn wasm_middleware(
             Ok(modules) => modules,
             Err(e) => {
                 error!("Failed to get WASM modules for OnResponse: {}", e);
-                return Ok(response);
+                return response;
             }
         };
     if modules_on_response.is_empty() {
-        return Ok(response);
+        return response;
     }
+
+    // Skip WASM OnResponse processing for streaming responses to avoid
+    // buffering the entire stream into memory (breaks SSE, causes OOM on large streams).
+    let is_streaming = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/event-stream") || ct.contains("application/x-ndjson"))
+        || response
+            .headers()
+            .get(header::TRANSFER_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|te| te.contains("chunked"));
+    if is_streaming {
+        warn!("Skipping WASM OnResponse for streaming response; OnResponse modules do not apply to streaming");
+        return response;
+    }
+
     // Extract response data once before processing modules
     let mut status = response.status();
     let mut headers = response.headers().clone();
@@ -904,19 +880,17 @@ pub async fn wasm_middleware(
     let mut body_bytes = match axum::body::to_bytes(response.into_body(), max_body_size).await {
         Ok(bytes) => bytes.to_vec(),
         Err(e) => {
-            error!("Failed to read response body: {}", e);
-            // Create a minimal response with empty body for error recovery
-            let error_response = Response::builder()
-                .status(status)
-                .body(Body::empty())
-                .unwrap_or_else(|_| Response::new(Body::empty()));
-            return Ok(error_response);
+            error!("Failed to read response body for WASM processing: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Failed to read response body"})),
+            )
+                .into_response();
         }
     };
 
     // Process each OnResponse module
     for module in modules_on_response {
-        // Build WebAssembly response from collected data
         let wasm_headers = build_wasm_headers_from_axum_headers(&headers);
         let wasm_response = WasmResponse {
             status: status.as_u16(),
@@ -924,7 +898,6 @@ pub async fn wasm_middleware(
             body: body_bytes.clone(),
         };
 
-        // Execute WASM component
         let action = match wasm_manager
             .execute_module_for_attach_point(
                 &module,
@@ -934,34 +907,25 @@ pub async fn wasm_middleware(
             .await
         {
             Some(action) => action,
-            None => continue, // Continue to next module on error
+            None => continue,
         };
 
-        // Process action - apply modifications incrementally
         match action {
-            Action::Continue => {
-                // Continue to next module
-            }
+            Action::Continue => {}
             Action::Reject(status_code) => {
-                // Override response status
                 status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_REQUEST);
-                // Return immediately with current state
-                let final_response = Response::builder()
+                let mut final_response = Response::builder()
                     .status(status)
                     .body(Body::from(body_bytes))
                     .unwrap_or_else(|_| Response::new(Body::empty()));
-                let mut final_response = final_response;
                 *final_response.headers_mut() = headers;
-                return Ok(final_response);
+                return final_response;
             }
             Action::Modify(modify) => {
-                // Apply status modification
                 if let Some(new_status) = modify.status {
                     status = StatusCode::from_u16(new_status).unwrap_or(status);
                 }
-                // Apply headers modifications
                 apply_modify_action_to_headers(&mut headers, &modify);
-                // Apply body_replace
                 if let Some(new_body) = modify.body_replace {
                     body_bytes = new_body;
                 }
@@ -970,13 +934,12 @@ pub async fn wasm_middleware(
     }
 
     // Reconstruct final response with all modifications
-    let final_response = Response::builder()
+    let mut final_response = Response::builder()
         .status(status)
         .body(Body::from(body_bytes))
         .unwrap_or_else(|_| Response::new(Body::empty()));
-    let mut final_response = final_response;
     *final_response.headers_mut() = headers;
-    Ok(final_response)
+    final_response
 }
 
 #[cfg(test)]
