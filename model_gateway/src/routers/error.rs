@@ -110,8 +110,8 @@ pub fn extract_error_code_from_response<B>(response: &Response<B>) -> &str {
         .unwrap_or_default()
 }
 
-static ORG_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s+organization org-\S+").unwrap());
-static PROJ_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s+project proj_\S+").unwrap());
+static ORG_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s*\borganization org-\S+").unwrap());
+static PROJ_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s*\bproject proj_\S+").unwrap());
 
 /// Sanitize upstream error response bodies to prevent leaking internal identifiers.
 /// - Strips org-ID patterns (`org-xxx`)
@@ -191,6 +191,26 @@ mod tests {
         assert!(!msg.contains("org-"));
         assert!(!msg.contains("proj_"));
         assert!(msg.contains("Rate limit for"));
+    }
+
+    #[test]
+    fn test_sanitize_org_id_at_start() {
+        let body = r#"{"error":{"message":"organization org-abc123 exceeded quota","type":"rate_limit","code":"rate_limit_exceeded"}}"#;
+        let result = sanitize_error_body(body);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let msg = parsed["error"]["message"].as_str().unwrap();
+        assert!(!msg.contains("org-"));
+        assert!(msg.contains("exceeded quota"));
+    }
+
+    #[test]
+    fn test_sanitize_project_id_at_start() {
+        let body = r#"{"error":{"message":"project proj_xyz789 quota exceeded","type":"insufficient_quota","code":"quota_exceeded"}}"#;
+        let result = sanitize_error_body(body);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let msg = parsed["error"]["message"].as_str().unwrap();
+        assert!(!msg.contains("proj_"));
+        assert!(msg.contains("quota exceeded"));
     }
 
     #[test]
