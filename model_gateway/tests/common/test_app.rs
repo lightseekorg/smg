@@ -102,10 +102,7 @@ pub fn create_test_app(
         ]
     });
 
-    // Create auth config from router config
-    let auth_config = AuthConfig {
-        api_key: router_config.api_key.clone(),
-    };
+    let auth_config = AuthConfig::new(router_config.api_key.clone());
 
     // Use the actual server's build_app function
     build_app(
@@ -146,10 +143,7 @@ pub fn create_test_app_with_context(
         ]
     });
 
-    // Create auth config from router config
-    let auth_config = AuthConfig {
-        api_key: router_config.api_key.clone(),
-    };
+    let auth_config = AuthConfig::new(router_config.api_key.clone());
 
     // Use the actual server's build_app function
     build_app(
