@@ -1243,15 +1243,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router_config = cli_args.to_router_config(prefill_urls)?;
     router_config.validate()?;
 
-    // Set up process-level env vars (e.g. Oracle TNS_ADMIN) before spawning
-    // threads. Must happen while we are still single-threaded.
-    smg_data_connector::pre_configure_env(&smg_data_connector::StorageFactoryConfig {
-        backend: &router_config.history_backend,
-        oracle: router_config.oracle.as_ref(),
-        postgres: router_config.postgres.as_ref(),
-        redis: router_config.redis.as_ref(),
-    })?;
-
     let server_config = cli_args.to_server_config(router_config);
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move { server::startup(server_config).await })?;

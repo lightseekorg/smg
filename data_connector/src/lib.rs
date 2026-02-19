@@ -32,6 +32,6 @@ pub use core::{
 
 pub use config::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
 // Re-export factory
-pub use factory::{create_storage, pre_configure_env, StorageFactoryConfig};
+pub use factory::{create_storage, StorageFactoryConfig};
 // Re-export memory implementations for testing
 pub use memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage};

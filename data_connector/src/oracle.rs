@@ -32,13 +32,10 @@ use crate::{
 // PART 1: OracleStore Helper + Common Utilities
 // ============================================================================
 
-/// Shared Oracle connection pool infrastructure
-///
-/// This helper eliminates ~540 LOC of duplication across storage implementations.
-/// It handles connection pooling, error mapping, and client configuration.
+/// Schema initializer function signature for Oracle storage backends.
 pub(crate) type SchemaInitFn = fn(&Connection) -> Result<(), String>;
 
-/// Shared Oracle connection pool infrastructure
+/// Shared Oracle connection pool infrastructure.
 ///
 /// This helper eliminates ~540 LOC of duplication across storage implementations.
 /// It handles connection pooling, error mapping, and client configuration.
@@ -51,19 +48,9 @@ impl OracleStore {
     ///
     /// Accepts a list of schema initializers that run on a single connection
     /// before the pool is created, ensuring all tables exist.
-    pub fn new(
-        config: &OracleConfig,
-        init_schemas: &[SchemaInitFn],
-    ) -> Result<Self, String> {
-        // Guard: wallet-based connections require TNS_ADMIN to be set by
-        // pre_configure_env() before the async runtime starts.
-        if config.wallet_path.is_some() && std::env::var("TNS_ADMIN").is_err() {
-            return Err(
-                "Oracle wallet_path is configured but TNS_ADMIN is not set. \
-                 Call pre_configure_env() before starting the async runtime."
-                    .to_string(),
-            );
-        }
+    pub fn new(config: &OracleConfig, init_schemas: &[SchemaInitFn]) -> Result<Self, String> {
+        // Configure Oracle client (wallet env vars, etc.)
+        configure_oracle_env(config)?;
 
         // Initialize schemas using a single connection
         let conn = connect_oracle(
@@ -144,9 +131,6 @@ pub(crate) fn map_oracle_error(err: oracle::Error) -> String {
 }
 
 /// Validate Oracle wallet path and set `TNS_ADMIN` environment variable.
-///
-/// Must be called from a single-threaded context (before the async runtime starts)
-/// because `std::env::set_var` is not safe to call concurrently with env reads.
 pub(crate) fn configure_oracle_env(config: &OracleConfig) -> Result<(), String> {
     if let Some(wallet_path) = &config.wallet_path {
         let path = Path::new(wallet_path);

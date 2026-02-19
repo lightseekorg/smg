@@ -36,23 +36,6 @@ pub struct StorageFactoryConfig<'a> {
     pub redis: Option<&'a RedisConfig>,
 }
 
-/// Set up process-level environment variables required by storage backends.
-///
-/// Must be called **before** the async runtime starts (i.e. from `main()` on
-/// the single main thread) because `std::env::set_var` is not safe to call
-/// concurrently with env reads from other threads.
-///
-/// Currently this only affects the Oracle backend (`TNS_ADMIN` env var for
-/// wallet-based connections). Other backends require no pre-initialization.
-pub fn pre_configure_env(config: &StorageFactoryConfig<'_>) -> Result<(), String> {
-    if *config.backend == HistoryBackend::Oracle {
-        if let Some(oracle_cfg) = config.oracle {
-            crate::oracle::configure_oracle_env(oracle_cfg)?;
-        }
-    }
-    Ok(())
-}
-
 /// Create all three storage backends based on configuration.
 ///
 /// # Arguments
@@ -309,37 +292,5 @@ mod tests {
         };
         let err = create_storage(config).await.err().expect("should fail");
         assert!(err.contains("Redis configuration is required"));
-    }
-
-    #[test]
-    fn test_pre_configure_env_noop_for_non_oracle() {
-        // Memory, None, Postgres, Redis should all be no-ops
-        for backend in &[
-            HistoryBackend::Memory,
-            HistoryBackend::None,
-            HistoryBackend::Postgres,
-            HistoryBackend::Redis,
-        ] {
-            let config = StorageFactoryConfig {
-                backend,
-                oracle: None,
-                postgres: None,
-                redis: None,
-            };
-            assert!(pre_configure_env(&config).is_ok());
-        }
-    }
-
-    #[test]
-    fn test_pre_configure_env_oracle_without_config_is_noop() {
-        // Oracle backend with no oracle config — pre_configure_env should
-        // succeed (the actual error is caught later in create_storage).
-        let config = StorageFactoryConfig {
-            backend: &HistoryBackend::Oracle,
-            oracle: None,
-            postgres: None,
-            redis: None,
-        };
-        assert!(pre_configure_env(&config).is_ok());
     }
 }
