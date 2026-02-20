@@ -619,6 +619,11 @@ where
 // SSE frame parsing
 // ============================================================================
 
+/// Find the position of `\n\n` in a byte buffer.
+fn find_double_newline(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\n\n")
+}
+
 /// Parse a raw SSE frame into `(event_type, data)`.
 ///
 /// SSE frames look like:
@@ -626,11 +631,6 @@ where
 /// event: content_block_start
 /// data: {"type":"content_block_start",...}
 /// ```
-/// Find the position of `\n\n` in a byte buffer.
-fn find_double_newline(buf: &[u8]) -> Option<usize> {
-    buf.windows(2).position(|w| w == b"\n\n")
-}
-
 fn parse_sse_frame(frame: &str) -> Option<(String, String)> {
     let mut event_type = String::new();
     let mut data_lines = Vec::new();
