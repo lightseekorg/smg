@@ -567,6 +567,12 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let previous_response_id = req.previous_response_id;
     let storage = req.storage;
 
+    // Capture task-local context before spawning.
+    let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
+        .try_with(|id| id.clone())
+        .ok()
+        .flatten();
+
     tokio::spawn(async move {
         let mut accumulator = StreamingResponseAccumulator::new();
         let mut upstream_failed = false;
@@ -636,6 +642,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                     storage.response.clone(),
                     &response_json,
                     &original_request,
+                    conversation_store_id.clone(),
                 )
                 .await
                 {
@@ -682,6 +689,12 @@ pub(super) async fn handle_streaming_with_tool_interception(
     let previous_response_id = req.previous_response_id;
     let url = req.url;
     let storage = req.storage;
+
+    // Capture task-local context before spawning.
+    let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
+        .try_with(|id| id.clone())
+        .ok()
+        .flatten();
 
     let client_clone = client.clone();
     let url_clone = url.clone();
@@ -921,6 +934,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                         storage.response.clone(),
                         &response_json,
                         &original_request,
+                        conversation_store_id.clone(),
                     )
                     .await
                     {

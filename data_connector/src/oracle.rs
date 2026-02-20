@@ -29,6 +29,9 @@ use crate::config::OracleConfig;
 // PART 1: OracleStore Helper + Common Utilities
 // ============================================================================
 
+/// Schema initializer function signature for Oracle storage backends.
+pub(crate) type SchemaInitFn = fn(&Connection) -> Result<(), String>;
+
 /// Shared Oracle connection pool infrastructure
 ///
 /// This helper eliminates ~540 LOC of duplication across storage implementations.
@@ -38,20 +41,15 @@ pub(crate) struct OracleStore {
 }
 
 impl OracleStore {
-    /// Create pool with custom schema initialization
+    /// Create a connection pool and initialize all schemas.
     ///
-    /// The `init_schema` function receives a connection and should:
-    /// - Check if tables/indexes exist
-    /// - Create them if needed
-    /// - Return Ok(()) on success or Err(message) on failure
-    pub fn new(
-        config: &OracleConfig,
-        init_schema: impl FnOnce(&Connection) -> Result<(), String>,
-    ) -> Result<Self, String> {
-        // Configure Oracle client (wallet, etc.)
-        configure_oracle_client(config)?;
+    /// Accepts a list of schema initializers that run on a single connection
+    /// before the pool is created.
+    pub fn new(config: &OracleConfig, init_schemas: &[SchemaInitFn]) -> Result<Self, String> {
+        // Configure Oracle client (wallet env vars, etc.)
+        configure_oracle_env(config)?;
 
-        // Initialize schema using the provided function
+        // Initialize schemas using a single connection
         let conn = connect_oracle(
             config.external_auth,
             &config.username,
@@ -60,7 +58,9 @@ impl OracleStore {
         )
         .map_err(map_oracle_error)?;
 
-        init_schema(&conn)?;
+        for init_schema in init_schemas {
+            init_schema(&conn)?;
+        }
         drop(conn);
 
         // Create connection pool
@@ -127,8 +127,8 @@ pub(crate) fn map_oracle_error(err: oracle::Error) -> String {
     }
 }
 
-// Client configuration helper
-fn configure_oracle_client(config: &OracleConfig) -> Result<(), String> {
+/// Validate Oracle wallet path and set `TNS_ADMIN` environment variable.
+pub(crate) fn configure_oracle_env(config: &OracleConfig) -> Result<(), String> {
     if let Some(wallet_path) = &config.wallet_path {
         let path = Path::new(wallet_path);
 
@@ -252,28 +252,24 @@ pub(super) struct OracleConversationStorage {
 }
 
 impl OracleConversationStorage {
-    pub fn new(config: OracleConfig) -> Result<Self, ConversationStorageError> {
-        let store = OracleStore::new(&config, |conn| {
-            // Check if table exists in ADMIN schema
-            let exists: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM all_tables WHERE owner = 'ADMIN' AND table_name = 'CONVERSATIONS'",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
+    pub fn new(store: OracleStore) -> Self {
+        Self { store }
+    }
 
-            // Return error if table doesn't exist
-            if exists == 0 {
-                return Err(
-                    "CONVERSATIONS table does not exist. Please create the table.".to_string(),
-                );
-            }
+    pub(crate) fn init_schema(conn: &Connection) -> Result<(), String> {
+        // Downstream expects tables to exist in ADMIN schema.
+        let exists: i64 = conn
+            .query_row_as(
+                "SELECT COUNT(*) FROM all_tables WHERE owner = 'ADMIN' AND table_name = 'CONVERSATIONS'",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
 
-            Ok(())
-        })
-        .map_err(ConversationStorageError::StorageError)?;
+        if exists == 0 {
+            return Err("CONVERSATIONS table does not exist. Please create the table.".to_string());
+        }
 
-        Ok(Self { store })
+        Ok(())
     }
 
     fn parse_metadata(
@@ -454,12 +450,24 @@ pub(super) struct OracleConversationItemStorage {
 }
 
 impl OracleConversationItemStorage {
-    pub fn new(config: OracleConfig) -> Result<Self, ConversationItemStorageError> {
-        // No schema initialization needed - items are stored in CONVERSATIONS table
-        let store = OracleStore::new(&config, |_| Ok(()))
-            .map_err(ConversationItemStorageError::StorageError)?;
+    pub fn new(store: OracleStore) -> Self {
+        Self { store }
+    }
 
-        Ok(Self { store })
+    pub(crate) fn init_schema(conn: &Connection) -> Result<(), String> {
+        // Items are embedded in ADMIN.CONVERSATIONS.ITEMS.
+        let exists: i64 = conn
+            .query_row_as(
+                "SELECT COUNT(*) FROM all_tables WHERE owner = 'ADMIN' AND table_name = 'CONVERSATIONS'",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+
+        if exists == 0 {
+            return Err("CONVERSATIONS table does not exist. Please create the table.".to_string());
+        }
+
+        Ok(())
     }
 }
 
@@ -801,26 +809,24 @@ pub(super) struct OracleResponseStorage {
 }
 
 impl OracleResponseStorage {
-    pub fn new(config: OracleConfig) -> Result<Self, ResponseStorageError> {
-        let store = OracleStore::new(&config, |conn| {
-            // Check if table exists in ADMIN schema
-            let exists: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM all_tables WHERE owner = 'ADMIN' AND table_name = 'RESPONSES'",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
+    pub fn new(store: OracleStore) -> Self {
+        Self { store }
+    }
 
-            // Return error if table doesn't exist
-            if exists == 0 {
-                return Err("RESPONSES table does not exist. Please create the table.".to_string());
-            }
+    pub(crate) fn init_schema(conn: &Connection) -> Result<(), String> {
+        // Downstream expects tables to exist in ADMIN schema.
+        let exists: i64 = conn
+            .query_row_as(
+                "SELECT COUNT(*) FROM all_tables WHERE owner = 'ADMIN' AND table_name = 'RESPONSES'",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
 
-            Ok(())
-        })
-        .map_err(ResponseStorageError::StorageError)?;
+        if exists == 0 {
+            return Err("RESPONSES table does not exist. Please create the table.".to_string());
+        }
 
-        Ok(Self { store })
+        Ok(())
     }
 
     fn build_response_from_row(row: &Row) -> Result<StoredResponse, String> {
