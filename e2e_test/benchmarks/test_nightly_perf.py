@@ -6,7 +6,8 @@ as artifacts for tracking over time.
 
 Each model has Single (1 worker) and Multi (N workers) classes, both
 parametrized with http and grpc backends. The workflow matrix crosses
-model × variant (single/multi × sglang/vllm), filtering vllm to grpc-only.
+model × variant (single/multi × sglang/vllm); both protocols run for
+all runtimes.
 
 genai-bench defaults (omitted flags):
   - Concurrency: [1, 2, 4, 8, 16, 32, 64, 128, 256]
