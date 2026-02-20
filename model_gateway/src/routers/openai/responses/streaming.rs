@@ -24,7 +24,9 @@ use openai_protocol::{
     responses::{ResponseToolType, ResponsesRequest},
 };
 use serde_json::{json, Value};
-use smg_mcp::{McpOrchestrator, McpServerBinding, McpSessionOptions, McpToolSession, ResponseFormat};
+use smg_mcp::{
+    McpOrchestrator, McpServerBinding, McpSessionOptions, McpToolSession, ResponseFormat,
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;

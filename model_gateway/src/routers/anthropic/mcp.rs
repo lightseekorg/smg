@@ -1,12 +1,11 @@
 //! MCP tool processing layer for Anthropic Messages API
 //!
-//! Provides MCP server connection, tool injection, tool execution,
-//! and the standard `process_iteration` interface used by both
-//! streaming and non-streaming processors.
+//! Provides tool injection, tool execution, and the standard
+//! `process_iteration` interface used by both streaming and
+//! non-streaming processors.
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
-use axum::response::Response;
 use openai_protocol::messages::{
     ContentBlock, CreateMessageRequest, CustomTool, InputContentBlock, InputSchema, Message,
     RedactedThinkingBlock, ServerToolUseBlock, StopReason, TextBlock, ThinkingBlock, Tool,
@@ -14,13 +13,10 @@ use openai_protocol::messages::{
     WebSearchToolResultBlock,
 };
 use serde_json::Value;
-use smg_mcp::{McpServerBinding, McpToolSession, ToolEntry, ToolExecutionInput};
-use tracing::{debug, error, info, warn};
+use smg_mcp::{McpToolSession, ToolEntry, ToolExecutionInput};
+use tracing::{debug, info, warn};
 
-use crate::{
-    observability::metrics::{metrics_labels, Metrics},
-    routers::{error as router_error, mcp_utils},
-};
+use crate::observability::metrics::{metrics_labels, Metrics};
 
 // ============================================================================
 // Standard I/O types for processor ↔ MCP layer communication
@@ -142,55 +138,6 @@ pub(crate) fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> 
             _ => None,
         })
         .collect()
-}
-
-/// Connect MCP servers, inject tools into the request, and return connected servers.
-///
-/// Request is validated by `ValidatedJson` before reaching the router,
-/// so `mcp_server_configs()` is guaranteed to be `Some` here.
-pub(crate) async fn ensure_connection(
-    request: &mut CreateMessageRequest,
-    orchestrator: &Arc<smg_mcp::McpOrchestrator>,
-) -> Result<Vec<McpServerBinding>, Response> {
-    let inputs: Vec<mcp_utils::McpServerInput> = request
-        .mcp_server_configs()
-        .unwrap_or_default()
-        .iter()
-        .map(|server| mcp_utils::McpServerInput {
-            label: server.name.clone(),
-            url: Some(server.url.clone()),
-            authorization: server.authorization_token.clone(),
-            headers: HashMap::new(),
-        })
-        .collect();
-
-    let mcp_servers = mcp_utils::connect_mcp_servers(orchestrator, &inputs).await;
-    if mcp_servers.is_empty() {
-        error!("Failed to connect to any MCP servers");
-        return Err(router_error::bad_gateway(
-            "mcp_connection_failed",
-            "Failed to connect to MCP servers. Check server URLs and authorization.",
-        ));
-    }
-
-    info!(
-        server_count = mcp_servers.len(),
-        "MCP: connected to MCP servers"
-    );
-
-    let allowed_tools = collect_allowed_tools_from_toolsets(&request.tools);
-
-    let session_id = format!("msg_{}", uuid::Uuid::new_v4());
-    let session = McpToolSession::new(
-        orchestrator,
-        mcp_servers.clone(),
-        &session_id,
-        Default::default(),
-    );
-
-    inject_mcp_tools_into_request(request, &session, &allowed_tools);
-
-    Ok(mcp_servers)
 }
 
 /// Strip `mcp_servers` from request and inject MCP tools as regular tools.
@@ -360,7 +307,9 @@ pub(crate) fn rebuild_response_with_mcp_blocks(
 /// Collect allowed tools filter from `McpToolset` entries in the tools array.
 ///
 /// Returns `None` (no filtering) if any toolset allows all tools.
-pub(crate) fn collect_allowed_tools_from_toolsets(tools: &Option<Vec<Tool>>) -> Option<Vec<String>> {
+pub(crate) fn collect_allowed_tools_from_toolsets(
+    tools: &Option<Vec<Tool>>,
+) -> Option<Vec<String>> {
     let tools = tools.as_ref()?;
 
     let mut all_allowed = Vec::new();

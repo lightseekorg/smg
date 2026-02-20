@@ -484,7 +484,8 @@ pub(super) fn inject_mcp_metadata_streaming(
         });
 
         for binding in mcp_servers.iter().rev() {
-            let list_tools_item = session.build_mcp_list_tools_json(&binding.label, &binding.server_key);
+            let list_tools_item =
+                session.build_mcp_list_tools_json(&binding.label, &binding.server_key);
             output_array.insert(0, list_tools_item);
         }
 
@@ -497,7 +498,8 @@ pub(super) fn inject_mcp_metadata_streaming(
     } else if let Some(obj) = response.as_object_mut() {
         let mut output_items = Vec::new();
         for binding in mcp_servers.iter() {
-            output_items.push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
+            output_items
+                .push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
         }
         // Use stored transformed items (no reconstruction needed)
         output_items.extend(state.mcp_call_items.iter().cloned());
@@ -730,7 +732,8 @@ pub(super) fn build_incomplete_response(
         // Add mcp_list_tools and executed mcp_call items at the beginning
         if state.total_calls > 0 || !incomplete_items.is_empty() {
             for binding in mcp_servers.iter().rev() {
-                let list_tools_item = session.build_mcp_list_tools_json(&binding.label, &binding.server_key);
+                let list_tools_item =
+                    session.build_mcp_list_tools_json(&binding.label, &binding.server_key);
                 output_array.insert(0, list_tools_item);
             }
 

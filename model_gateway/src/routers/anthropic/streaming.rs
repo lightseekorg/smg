@@ -190,6 +190,10 @@ async fn run_tool_loop(
         Default::default(),
     );
 
+    // Inject MCP tools into the request as regular tools
+    let allowed_tools = mcp::collect_allowed_tools_from_toolsets(&req_ctx.request.tools);
+    mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session, &allowed_tools);
+
     let mut global_index: u32 = 0;
     let mut total_input_tokens: u32 = 0;
     let mut total_output_tokens: u32 = 0;

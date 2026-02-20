@@ -10,7 +10,7 @@ use std::{any::Any, collections::HashMap, fmt, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
 use openai_protocol::messages::CreateMessageRequest;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use super::{
     context::{RequestContext, RouterContext},
@@ -85,7 +85,7 @@ impl RouterTrait for AnthropicRouter {
         body: &CreateMessageRequest,
         model_id: &str,
     ) -> Response {
-        let mut request = body.clone();
+        let request = body.clone();
         let headers_owned = headers.cloned();
 
         let mcp_servers = if request.has_mcp_toolset() {
@@ -101,15 +101,14 @@ impl RouterTrait for AnthropicRouter {
                 })
                 .collect();
 
-            match mcp_utils::ensure_mcp_servers(
-                &self.router_ctx.mcp_orchestrator,
-                &inputs,
-                &[],
-            )
-            .await
+            match mcp_utils::ensure_mcp_servers(&self.router_ctx.mcp_orchestrator, &inputs, &[])
+                .await
             {
                 Some(servers) => {
-                    info!(server_count = servers.len(), "MCP: connected to MCP servers");
+                    info!(
+                        server_count = servers.len(),
+                        "MCP: connected to MCP servers"
+                    );
                     Some(servers)
                 }
                 None => {

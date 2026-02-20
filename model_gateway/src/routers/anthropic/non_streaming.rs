@@ -43,6 +43,10 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
         Default::default(),
     );
 
+    // Inject MCP tools into the request as regular tools
+    let allowed_tools = mcp::collect_allowed_tools_from_toolsets(&req_ctx.request.tools);
+    mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session, &allowed_tools);
+
     let mut all_mcp_calls: Vec<mcp::McpToolCall> = Vec::new();
 
     let mut message = match send_one_request(router, &req_ctx).await {

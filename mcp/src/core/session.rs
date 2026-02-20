@@ -311,7 +311,10 @@ impl<'a> McpToolSession<'a> {
 
         // 1. Prepend mcp_list_tools for each non-builtin server
         for binding in self.mcp_servers.iter().rev() {
-            output.insert(0, self.build_mcp_list_tools_item(&binding.label, &binding.server_key));
+            output.insert(
+                0,
+                self.build_mcp_list_tools_item(&binding.label, &binding.server_key),
+            );
         }
 
         // 2. Insert tool call items right after mcp_list_tools
@@ -483,8 +486,14 @@ mod tests {
     fn test_session_creation_keeps_servers() {
         let orchestrator = McpOrchestrator::new_test();
         let mcp_servers = vec![
-            McpServerBinding { label: "label1".to_string(), server_key: "key1".to_string() },
-            McpServerBinding { label: "label2".to_string(), server_key: "key2".to_string() },
+            McpServerBinding {
+                label: "label1".to_string(),
+                server_key: "key1".to_string(),
+            },
+            McpServerBinding {
+                label: "label2".to_string(),
+                server_key: "key2".to_string(),
+            },
         ];
 
         let session = McpToolSession::new(
@@ -512,7 +521,10 @@ mod tests {
     #[test]
     fn test_resolve_tool_server_label_fallback() {
         let orchestrator = McpOrchestrator::new_test();
-        let mcp_servers = vec![McpServerBinding { label: "my_label".to_string(), server_key: "my_key".to_string() }];
+        let mcp_servers = vec![McpServerBinding {
+            label: "my_label".to_string(),
+            server_key: "my_key".to_string(),
+        }];
         let session = McpToolSession::new(
             &orchestrator,
             mcp_servers,
@@ -569,7 +581,10 @@ mod tests {
         let entry = ToolEntry::from_server_tool("server1", tool);
         orchestrator.tool_inventory().insert_entry(entry);
 
-        let mcp_servers = vec![McpServerBinding { label: "label1".to_string(), server_key: "server1".to_string() }];
+        let mcp_servers = vec![McpServerBinding {
+            label: "label1".to_string(),
+            server_key: "server1".to_string(),
+        }];
         let session = McpToolSession::new(
             &orchestrator,
             mcp_servers,
@@ -589,7 +604,10 @@ mod tests {
         let entry = ToolEntry::from_server_tool("server1", tool);
         orchestrator.tool_inventory().insert_entry(entry);
 
-        let mcp_servers = vec![McpServerBinding { label: "my_server".to_string(), server_key: "server1".to_string() }];
+        let mcp_servers = vec![McpServerBinding {
+            label: "my_server".to_string(),
+            server_key: "server1".to_string(),
+        }];
         let session = McpToolSession::new(
             &orchestrator,
             mcp_servers,
@@ -617,8 +635,14 @@ mod tests {
         let session = McpToolSession::new(
             &orchestrator,
             vec![
-                McpServerBinding { label: "alpha".to_string(), server_key: "server1".to_string() },
-                McpServerBinding { label: "beta".to_string(), server_key: "server2".to_string() },
+                McpServerBinding {
+                    label: "alpha".to_string(),
+                    server_key: "server1".to_string(),
+                },
+                McpServerBinding {
+                    label: "beta".to_string(),
+                    server_key: "server2".to_string(),
+                },
             ],
             "test-request",
             Default::default(),
@@ -663,9 +687,18 @@ mod tests {
         let session = McpToolSession::new(
             &orchestrator,
             vec![
-                McpServerBinding { label: "a".to_string(), server_key: "s1".to_string() },
-                McpServerBinding { label: "b".to_string(), server_key: "s2".to_string() },
-                McpServerBinding { label: "c".to_string(), server_key: "s3".to_string() },
+                McpServerBinding {
+                    label: "a".to_string(),
+                    server_key: "s1".to_string(),
+                },
+                McpServerBinding {
+                    label: "b".to_string(),
+                    server_key: "s2".to_string(),
+                },
+                McpServerBinding {
+                    label: "c".to_string(),
+                    server_key: "s3".to_string(),
+                },
             ],
             "test-request",
             Default::default(),
@@ -723,8 +756,14 @@ mod tests {
     fn test_mcp_servers_filters_builtin() {
         let orchestrator = create_builtin_orchestrator();
         let mcp_servers = vec![
-            McpServerBinding { label: "brave".to_string(), server_key: "brave-builtin".to_string() },
-            McpServerBinding { label: "regular".to_string(), server_key: "regular-server".to_string() },
+            McpServerBinding {
+                label: "brave".to_string(),
+                server_key: "brave-builtin".to_string(),
+            },
+            McpServerBinding {
+                label: "regular".to_string(),
+                server_key: "regular-server".to_string(),
+            },
         ];
 
         let session = McpToolSession::new(
@@ -770,7 +809,10 @@ mod tests {
 
         let session = McpToolSession::new(
             &orchestrator,
-            vec![McpServerBinding { label: "mock".to_string(), server_key: "server1".to_string() }],
+            vec![McpServerBinding {
+                label: "mock".to_string(),
+                server_key: "server1".to_string(),
+            }],
             "test-request",
             McpSessionOptions {
                 request_tools: Some(&request_tools),
@@ -828,8 +870,14 @@ mod tests {
         let session = McpToolSession::new(
             &orchestrator,
             vec![
-                McpServerBinding { label: "brave".to_string(), server_key: "server1".to_string() },
-                McpServerBinding { label: "deepwiki".to_string(), server_key: "server2".to_string() },
+                McpServerBinding {
+                    label: "brave".to_string(),
+                    server_key: "server1".to_string(),
+                },
+                McpServerBinding {
+                    label: "deepwiki".to_string(),
+                    server_key: "server2".to_string(),
+                },
             ],
             "test-request",
             McpSessionOptions {
