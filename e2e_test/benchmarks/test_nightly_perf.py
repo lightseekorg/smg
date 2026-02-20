@@ -6,7 +6,8 @@ as artifacts for tracking over time.
 
 Each model has Single (1 worker) and Multi (N workers) classes, both
 parametrized with http and grpc backends. The workflow matrix crosses
-model × variant (single/multi × sglang/vllm), filtering vllm to grpc-only.
+model × variant (single/multi × sglang/vllm); both protocols run for
+all runtimes.
 
 genai-bench defaults (omitted flags):
   - Concurrency: [1, 2, 4, 8, 16, 32, 64, 128, 256]
@@ -29,7 +30,7 @@ _MAX_REQUESTS = 300
 _MAX_TIME_PER_RUN = 10  # seconds per scenario×concurrency combo
 _TIMEOUT_SEC = 1440 * 60  # match workflow timeout-minutes
 
-_TEST_MODE = False
+_TEST_MODE = True # TODO: remove this when we want to run the full benchmark
 _TEST_NUM_CONCURRENCY = 1
 _TEST_TRAFFIC_SCENARIO = "D(100,100)"
 _TEST_MAX_REQUESTS = 10

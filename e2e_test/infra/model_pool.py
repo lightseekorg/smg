@@ -186,12 +186,17 @@ class ModelInstance:
     def deep_health_check(self, timeout: float = 30.0) -> bool:
         """Deep health check that verifies the model can actually generate.
 
-        Uses /health_generate for HTTP workers (runs actual inference).
+        Uses /health_generate for SGLang HTTP workers (runs actual inference).
+        For vLLM HTTP workers, falls back to /health (no /health_generate).
         For gRPC workers, falls back to standard health check.
         """
         if self.mode == ConnectionMode.GRPC:
             # For gRPC, use standard health check (no /health_generate equivalent)
             return self._grpc_health_check(timeout)
+
+        # vLLM HTTP does not support /health_generate, use /health instead
+        if self.mode == ConnectionMode.HTTP and is_vllm():
+            return self._http_health_check(timeout)
 
         try:
             resp = httpx.get(f"{self.base_url}/health_generate", timeout=timeout)
@@ -516,6 +521,26 @@ class ModelPool:
                 )
                 assert instance is not None
                 return instance
+
+        # vLLM HTTP: use dedicated vLLM OpenAI-compatible API server
+        if mode == ConnectionMode.HTTP and is_vllm():
+            runtime_label = RUNTIME_LABELS.get(get_runtime(), "vLLM")
+            logger.info(
+                "HTTP worker requested for %s: E2E_RUNTIME=vllm, routing to %s HTTP backend",
+                model_id,
+                runtime_label,
+            )
+            spec = get_model_spec(model_id)
+            assert gpu_slot is not None
+            instance = self._launch_vllm_http_worker(
+                model_id=model_id,
+                model_spec=spec,
+                gpu_slot=gpu_slot,
+                startup_timeout=600,
+                instance_key=instance_key,
+            )
+            assert instance is not None
+            return instance
 
         spec = get_model_spec(model_id)
         model_path = spec["model"]
@@ -1197,6 +1222,48 @@ class ModelPool:
             cmd.extend(extra)
         return cmd
 
+    @staticmethod
+    def _build_vllm_http_cmd(
+        model_path: str,
+        host: str,
+        port: int,
+        tp_size: int,
+        model_spec: dict,
+    ) -> list[str]:
+        """Build the vLLM HTTP (OpenAI-compatible) server launch command.
+
+        Args:
+            model_path: HuggingFace model path.
+            host: Host to bind to.
+            port: Port to bind to.
+            tp_size: Tensor parallel size.
+            model_spec: Model specification dict (for vllm_args).
+
+        Returns:
+            Command list for subprocess.Popen.
+        """
+        cmd = [
+            "python3",
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            model_path,
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--tensor-parallel-size",
+            str(tp_size),
+            "--max-model-len",
+            "16384",
+            "--gpu-memory-utilization",
+            "0.9",
+        ]
+        extra = model_spec.get("vllm_args", [])
+        if extra:
+            cmd.extend(extra)
+        return cmd
+
     def _launch_grpc_worker(
         self,
         runtime: str,
@@ -1391,6 +1458,102 @@ class ModelPool:
 
             instance.acquire()
             return instance
+
+    def _launch_vllm_http_worker(
+        self,
+        model_id: str,
+        model_spec: dict,
+        gpu_slot: GPUSlot,
+        startup_timeout: int,
+        instance_key: str | None = None,
+    ) -> ModelInstance | None:
+        """Launch a vLLM HTTP (OpenAI-compatible) worker.
+
+        Args:
+            model_id: Model identifier.
+            model_spec: Model specification dict from MODEL_SPECS.
+            gpu_slot: GPU slot assignment.
+            startup_timeout: Timeout for worker to become healthy.
+            instance_key: Custom instance key, or None to auto-generate.
+
+        Returns:
+            The launched ModelInstance, or None if launch fails.
+        """
+        model_path = model_spec["model"]
+        tp_size = model_spec.get("tp", 1)
+        port = gpu_slot.port
+        assert port is not None
+
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = gpu_slot.cuda_visible_devices()
+
+        cmd = self._build_vllm_http_cmd(model_path, DEFAULT_HOST, port, tp_size, model_spec)
+
+        if instance_key:
+            key = instance_key
+        else:
+            key = f"{model_id}:http"
+        logger.info(
+            "Launching vLLM HTTP worker %s on GPUs %s port %d",
+            key,
+            gpu_slot.gpu_ids,
+            port,
+        )
+
+        show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
+
+        # Determine output targets: terminal, log file, or devnull
+        stdout_target: int | IO[Any] | None = None
+        stderr_target: int | IO[Any] | None = None
+        if not show_output:
+            if self.log_dir:
+                os.makedirs(self.log_dir, exist_ok=True)
+                safe_key = key.replace("/", "__").replace(":", "_")
+                log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
+                self._log_files[key] = log_file
+                stdout_target = log_file
+                stderr_target = subprocess.STDOUT
+            else:
+                stdout_target = subprocess.DEVNULL
+                stderr_target = subprocess.DEVNULL
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=stdout_target,
+                stderr=stderr_target,
+                start_new_session=True,
+            )
+        except Exception:
+            lf = self._log_files.pop(key, None)
+            if lf is not None:
+                lf.close()
+            raise
+
+        base_url = f"http://{DEFAULT_HOST}:{port}"
+        instance = ModelInstance(
+            model_id=model_id,
+            mode=ConnectionMode.HTTP,
+            model_path=model_path,
+            base_url=base_url,
+            port=port,
+            process=proc,
+            gpu_slot=gpu_slot,
+            key=key,
+            worker_type=WorkerType.REGULAR,
+            bootstrap_port=None,
+            last_used=time.time(),
+        )
+        self.instances[key] = instance
+
+        try:
+            self._wait_worker_healthy(instance, startup_timeout)
+            return instance
+        except Exception as e:
+            logger.error("Failed to start vLLM HTTP worker %s: %s", key, e)
+            self._evict_instance(key)
+            return None
 
     def launch_workers(
         self,
