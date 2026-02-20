@@ -4,7 +4,10 @@
 use std::{
     collections::{HashMap, HashSet},
     convert::Infallible,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -300,6 +303,7 @@ async fn generate_handler(
 ) -> Response {
     let config = config.read().await;
     let worker_id = format!("worker-{}", config.port);
+    increment_request_count(config.port);
 
     if should_fail(&config).await {
         return (
@@ -410,6 +414,7 @@ async fn chat_completions_handler(
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
     let config = config.read().await;
+    increment_request_count(config.port);
 
     if should_fail(&config).await {
         return (
@@ -1212,6 +1217,37 @@ fn response_exists_for_port(port: u16, response_id: &str) -> bool {
     map.get(&port)
         .map(|set| set.contains(response_id))
         .unwrap_or(false)
+}
+
+// --- Per-port request counter for verifying which worker handled a request ---
+static REQUEST_COUNTERS: OnceLock<Mutex<HashMap<u16, Arc<AtomicU64>>>> = OnceLock::new();
+
+fn get_counters() -> &'static Mutex<HashMap<u16, Arc<AtomicU64>>> {
+    REQUEST_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn increment_request_count(port: u16) {
+    let mut map = get_counters().lock().unwrap();
+    map.entry(port)
+        .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+        .fetch_add(1, Ordering::Relaxed);
+}
+
+/// Get the total number of chat/generate requests received by a worker on this port.
+/// Call this from tests to verify which worker handled a request.
+pub fn get_request_count(port: u16) -> u64 {
+    let map = get_counters().lock().unwrap();
+    map.get(&port)
+        .map(|c| c.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
+/// Reset request counters for all ports. Call at the start of a test.
+pub fn reset_request_counters() {
+    let map = get_counters().lock().unwrap();
+    for counter in map.values() {
+        counter.store(0, Ordering::Relaxed);
+    }
 }
 
 // Minimal rerank handler returning mock results; router shapes final response

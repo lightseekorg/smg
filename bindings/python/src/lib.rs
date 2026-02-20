@@ -437,6 +437,11 @@ struct Router {
     enable_trace: bool,
     otlp_traces_endpoint: String,
     control_plane_auth: Option<PyControlPlaneAuthConfig>,
+    pre_prefill_urls: Option<Vec<(String, Option<u16>)>>,
+    pre_prefill_decode_urls: Option<Vec<String>>,
+    pre_prefill_match_threshold: f32,
+    pre_prefill_unmatched_chars_threshold: usize,
+    pre_prefill_min_tokens: usize,
 }
 
 impl Router {
@@ -523,6 +528,11 @@ impl Router {
                     .as_ref()
                     .map(convert_policy)
                     .transpose()?,
+                pre_prefill_urls: self.pre_prefill_urls.clone().unwrap_or_default(),
+                pre_prefill_decode_urls: self.pre_prefill_decode_urls.clone().unwrap_or_default(),
+                pre_prefill_match_threshold: self.pre_prefill_match_threshold,
+                pre_prefill_unmatched_chars_threshold: self.pre_prefill_unmatched_chars_threshold,
+                pre_prefill_min_tokens: self.pre_prefill_min_tokens,
             }
         } else {
             RoutingMode::Regular {
@@ -756,6 +766,11 @@ impl Router {
         enable_trace = false,
         otlp_traces_endpoint = String::from("localhost:4317"),
         control_plane_auth = None,
+        pre_prefill_urls = None,
+        pre_prefill_decode_urls = None,
+        pre_prefill_match_threshold = 0.1,
+        pre_prefill_unmatched_chars_threshold = 10000,
+        pre_prefill_min_tokens = 10000,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -843,6 +858,11 @@ impl Router {
         enable_trace: bool,
         otlp_traces_endpoint: String,
         control_plane_auth: Option<PyControlPlaneAuthConfig>,
+        pre_prefill_urls: Option<Vec<(String, Option<u16>)>>,
+        pre_prefill_decode_urls: Option<Vec<String>>,
+        pre_prefill_match_threshold: f32,
+        pre_prefill_unmatched_chars_threshold: usize,
+        pre_prefill_min_tokens: usize,
     ) -> PyResult<Self> {
         let mut all_urls = worker_urls.clone();
 
@@ -854,6 +874,16 @@ impl Router {
 
         if let Some(ref decode_urls) = decode_urls {
             all_urls.extend(decode_urls.clone());
+        }
+
+        if let Some(ref pre_prefill_urls) = pre_prefill_urls {
+            for (url, _) in pre_prefill_urls {
+                all_urls.push(url.clone());
+            }
+        }
+
+        if let Some(ref pre_prefill_decode_urls) = pre_prefill_decode_urls {
+            all_urls.extend(pre_prefill_decode_urls.clone());
         }
 
         let connection_mode = Self::determine_connection_mode(&all_urls);
@@ -944,6 +974,11 @@ impl Router {
             enable_trace,
             otlp_traces_endpoint,
             control_plane_auth,
+            pre_prefill_urls,
+            pre_prefill_decode_urls,
+            pre_prefill_match_threshold,
+            pre_prefill_unmatched_chars_threshold,
+            pre_prefill_min_tokens,
         })
     }
 

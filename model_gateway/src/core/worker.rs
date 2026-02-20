@@ -401,8 +401,8 @@ impl WorkerTypeExt for WorkerType {
     fn as_metric_label(&self) -> &'static str {
         match self {
             WorkerType::Regular => metrics_labels::WORKER_REGULAR,
-            WorkerType::Prefill => metrics_labels::WORKER_PREFILL,
-            WorkerType::Decode => metrics_labels::WORKER_DECODE,
+            WorkerType::Prefill | WorkerType::PrePrefill => metrics_labels::WORKER_PREFILL,
+            WorkerType::Decode | WorkerType::PrePrefillDecode => metrics_labels::WORKER_DECODE,
         }
     }
 }
@@ -940,6 +940,8 @@ mod tests {
         assert_eq!(WorkerType::Regular.to_string(), "regular");
         assert_eq!(WorkerType::Prefill.to_string(), "prefill");
         assert_eq!(WorkerType::Decode.to_string(), "decode");
+        assert_eq!(WorkerType::PrePrefill.to_string(), "pre_prefill");
+        assert_eq!(WorkerType::PrePrefillDecode.to_string(), "pre_prefill_decode");
     }
 
     #[test]
