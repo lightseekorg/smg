@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
 use smg_grpc_client::{
-    sglang_proto::MultimodalInputs, SglangSchedulerClient, TrtllmServiceClient, VllmEngineClient,
+    archive_ops, sglang_proto::MultimodalInputs, stream_bundle::StreamBundle,
+    SglangSchedulerClient, TrtllmServiceClient, VllmEngineClient,
 };
 
 use crate::routers::grpc::proto_wrapper::{
@@ -145,6 +146,29 @@ impl GrpcClient {
         }
     }
 
+    /// Fetch tokenizer bundle from backend runtime and validate integrity/safety.
+    pub async fn get_tokenizer(
+        &self,
+    ) -> Result<StreamBundle, Box<dyn std::error::Error + Send + Sync>> {
+        let bundle = match self {
+            Self::Sglang(client) => client.get_tokenizer().await,
+            Self::Vllm(client) => client.get_tokenizer().await,
+            Self::Trtllm(client) => client.get_tokenizer().await,
+        }?;
+
+        archive_ops::validate_bundle_sha256(&bundle).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Tokenizer bundle SHA256 validation failed: {}", e),
+            )
+        })?;
+
+        Ok(bundle)
+    }
+
+    /// Generate streaming response from request
+    ///
+    /// Dispatches to the appropriate backend client and wraps the result in ProtoStream
     pub async fn generate(
         &mut self,
         req: ProtoGenerateRequest,

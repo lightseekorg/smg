@@ -46,6 +46,9 @@ service TrtllmService {
 
   // Get server information (version, parallelism, etc.)
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+
+  // Get tokenizer artifacts for remote construction
+  rpc GetTokenizer(GetTokenizerRequest) returns (stream GetTokenizerChunk);
 }
 
 // ============================================================================
@@ -508,4 +511,15 @@ message GetServerInfoResponse {
   int32 pipeline_parallel_size = 4; // PP size
   int32 context_parallel_size = 5;  // CP size
   int32 world_size = 6;             // Total world size
+}
+
+// ============================================================================
+// Tokenizer
+// ============================================================================
+
+message GetTokenizerRequest {}
+
+message GetTokenizerChunk {
+  bytes data = 1;       // Raw zip bytes (concatenate all chunks)
+  string sha256 = 2;    // SHA-256 fingerprint; set on final chunk only, empty on previous
 }

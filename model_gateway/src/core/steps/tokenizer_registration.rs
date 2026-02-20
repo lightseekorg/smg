@@ -17,14 +17,15 @@ use llm_tokenizer::{
     traits::Tokenizer,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use smg_grpc_client::{archive_ops, stream_bundle::StreamBundle};
+use tracing::{debug, error, info, warn};
 use wfaas::{
     BackoffStrategy, FailureAction, RetryPolicy, StepDefinition, StepExecutor, StepId, StepResult,
     WorkflowContext, WorkflowDefinition, WorkflowError, WorkflowResult,
 };
 
 use super::workflow_data::TokenizerWorkflowData;
-use crate::{app_context::AppContext, config::TokenizerCacheConfig};
+use crate::{app_context::AppContext, config::TokenizerCacheConfig, core::ConnectionMode};
 
 /// Configuration for adding a tokenizer
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,30 +109,34 @@ impl StepExecutor<TokenizerWorkflowData> for LoadTokenizerStep {
                 let source = source.clone();
                 let chat_template = chat_template.clone();
                 let cache_cfg = cache_config.clone();
+                let app_context = app_context.clone();
+                let name = name.clone();
                 async move {
-                    // Load base tokenizer
-                    let base_tokenizer = factory::create_tokenizer_async_with_chat_template(
+                    let base_tokenizer = match factory::create_tokenizer_async_with_chat_template(
                         &source,
                         chat_template.as_deref(),
                     )
                     .await
-                    .map_err(|e| format!("Failed to load tokenizer: {}", e))?;
+                    {
+                        Ok(tok) => tok,
+                        Err(local_err) => {
+                            debug!(
+                                "Local tokenizer load failed for source '{}', attempting to fetch from worker. Error: {:?}",
+                                source, local_err
+                            );
 
-                    // Wrap with caching layer if configured
-                    let tokenizer: Arc<dyn Tokenizer> = match cache_cfg {
-                        Some(cfg) if cfg.enable_l0 || cfg.enable_l1 => {
-                            let cache_config = CacheConfig {
-                                enable_l0: cfg.enable_l0,
-                                l0_max_entries: cfg.l0_max_entries,
-                                enable_l1: cfg.enable_l1,
-                                l1_max_memory: cfg.l1_max_memory,
-                            };
-                            Arc::new(CachedTokenizer::new(base_tokenizer, cache_config))
+                            fetch_tokenizer_from_worker(&app_context, &name).await.map_err(
+                                |worker_err| {
+                                    format!(
+                                        "Failed to load tokenizer locally ({}) and remotely from worker ({})",
+                                        local_err, worker_err
+                                    )
+                                },
+                            )?
                         }
-                        _ => base_tokenizer,
                     };
 
-                    Ok(tokenizer)
+                    Ok(with_optional_cache(base_tokenizer, cache_cfg))
                 }
             })
             .await;
@@ -190,6 +195,137 @@ impl StepExecutor<TokenizerWorkflowData> for LoadTokenizerStep {
     fn is_retryable(&self, _error: &WorkflowError) -> bool {
         true // Network/IO errors are retryable
     }
+}
+
+fn with_optional_cache(
+    tokenizer: Arc<dyn Tokenizer>,
+    cache_cfg: Option<TokenizerCacheConfig>,
+) -> Arc<dyn Tokenizer> {
+    match cache_cfg {
+        Some(cfg) if cfg.enable_l0 || cfg.enable_l1 => {
+            let cache_config = CacheConfig {
+                enable_l0: cfg.enable_l0,
+                l0_max_entries: cfg.l0_max_entries,
+                enable_l1: cfg.enable_l1,
+                l1_max_memory: cfg.l1_max_memory,
+            };
+            Arc::new(CachedTokenizer::new(tokenizer, cache_config))
+        }
+        _ => tokenizer,
+    }
+}
+
+fn load_tokenizer_from_bundle(bundle: &StreamBundle) -> Result<Arc<dyn Tokenizer>, String> {
+    archive_ops::with_extracted_bundle(bundle, |tokenizer_dir| {
+        let tokenizer_path = tokenizer_dir.to_string_lossy().into_owned();
+        info!(
+            "Tokenizer extracted from temporary path: {}",
+            tokenizer_path
+        );
+        factory::create_tokenizer_with_chat_template(&tokenizer_path, None)
+            .map_err(|e| format!("tokenizer load failed: {}", e))
+    })
+    .map_err(|e| format!("bundle extraction/load failed: {}", e))
+}
+
+/// Fetch a tokenizer from a healthy gRPC worker when local loading fails.
+async fn fetch_tokenizer_from_worker(
+    app_context: &AppContext,
+    model_id: &str,
+) -> Result<Arc<dyn Tokenizer>, String> {
+    let workers = app_context.worker_registry.get_workers_filtered(
+        Some(model_id),
+        None,
+        Some(ConnectionMode::Grpc),
+        None,
+        true,
+    );
+
+    if workers.is_empty() {
+        return Err(format!(
+            "No healthy gRPC worker available to fetch tokenizer for model '{}'",
+            model_id
+        ));
+    }
+
+    let mut failures = Vec::new();
+    let worker_count = workers.len();
+
+    for worker in workers {
+        let runtime = worker.metadata().spec.runtime_type;
+        info!(
+            "Fetching tokenizer from worker: {} (runtime: {})",
+            worker.url(),
+            runtime
+        );
+
+        let grpc_client = match worker.get_grpc_client().await {
+            Ok(Some(client)) => client,
+            Ok(None) => {
+                failures.push(format!(
+                    "worker {} (runtime: {}) does not provide a gRPC client",
+                    worker.url(),
+                    runtime
+                ));
+                continue;
+            }
+            Err(e) => {
+                failures.push(format!(
+                    "failed to create gRPC client for worker {} (runtime: {}): {}",
+                    worker.url(),
+                    runtime,
+                    e
+                ));
+                continue;
+            }
+        };
+
+        let bundle = match grpc_client.get_tokenizer().await {
+            Ok(bundle) => bundle,
+            Err(e) => {
+                let is_unimplemented = e
+                    .downcast_ref::<tonic::Status>()
+                    .is_some_and(|s| s.code() == tonic::Code::Unimplemented);
+                if is_unimplemented {
+                    debug!(
+                        "Worker {} (runtime: {}) does not support GetTokenizer",
+                        worker.url(),
+                        runtime
+                    );
+                } else {
+                    warn!(
+                        "Worker {} (runtime: {}) get_tokenizer failed: {}",
+                        worker.url(),
+                        runtime,
+                        e
+                    );
+                }
+                failures.push(format!(
+                    "worker {} (runtime: {}) get_tokenizer failed: {}",
+                    worker.url(),
+                    runtime,
+                    e
+                ));
+                continue;
+            }
+        };
+        debug!(
+            "Tokenizer bundle validation passed for worker {}",
+            worker.url()
+        );
+
+        match load_tokenizer_from_bundle(&bundle) {
+            Ok(tokenizer) => return Ok(tokenizer),
+            Err(e) => failures.push(e),
+        };
+    }
+
+    Err(format!(
+        "Failed to fetch tokenizer for model '{}' from {} healthy gRPC worker(s): {}",
+        model_id,
+        worker_count,
+        failures.join("; ")
+    ))
 }
 
 // ============================================================================

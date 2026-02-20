@@ -23,6 +23,9 @@ service VllmEngine {
 
   // Get server information
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+
+  // Get tokenizer artifacts for remote construction
+  rpc GetTokenizer(GetTokenizerRequest) returns (stream GetTokenizerChunk);
 }
 
 // =====================
@@ -244,4 +247,15 @@ message GetServerInfoResponse {
   // KV transfer config (for PD disaggregation)
   string kv_connector = 6;  // "MooncakeConnector", "NixlConnector", "" if not configured
   string kv_role = 7;       // "kv_producer", "kv_consumer", "kv_both", "" if not configured
+}
+
+// =====================
+// Tokenizer
+// =====================
+
+message GetTokenizerRequest {}
+
+message GetTokenizerChunk {
+  bytes data = 1;       // Raw zip bytes (concatenate all chunks)
+  string sha256 = 2;    // SHA-256 fingerprint; set on final chunk only, empty on previous
 }

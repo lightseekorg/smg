@@ -29,6 +29,9 @@ service SglangScheduler {
   // Get comprehensive load metrics
   rpc GetLoads(GetLoadsRequest) returns (GetLoadsResponse);
 
+  // Get tokenizer artifacts for remote construction
+  rpc GetTokenizer(GetTokenizerRequest) returns (stream GetTokenizerChunk);
+
 }
 
 // =====================
@@ -563,4 +566,16 @@ message AggregateMetrics {
   double avg_token_usage = 4;
   double avg_throughput = 5;
   double avg_utilization = 6;
+}
+
+
+// =====================
+// Tokenizer
+// =====================
+
+message GetTokenizerRequest {}
+
+message GetTokenizerChunk {
+  bytes data = 1;       // Raw zip bytes (concatenate all chunks)
+  string sha256 = 2;    // SHA-256 fingerprint; set on final chunk only, empty on previous
 }
