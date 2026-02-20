@@ -8,7 +8,10 @@ use serde_json::Value;
 use serde_with::skip_serializing_none;
 use validator::{Validate, ValidationError};
 
-use super::common::{default_model, default_true, Function, GenerationRequest};
+use super::{
+    common::{default_model, default_true, Function, GenerationRequest},
+    sampling_params::validate_top_p_value,
+};
 
 // ============================================================================
 // Request Type
@@ -56,6 +59,7 @@ pub struct InteractionsRequest {
     pub background: bool,
 
     /// Generation configuration
+    #[validate(nested)]
     pub generation_config: Option<GenerationConfig>,
 
     /// Agent configuration (only applicable when agent is specified)
@@ -496,14 +500,17 @@ pub enum ToolChoiceType {
 // ============================================================================
 
 #[skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct GenerationConfig {
+    #[validate(range(min = 0.0, max = 2.0))]
     pub temperature: Option<f32>,
 
+    #[validate(custom(function = "validate_top_p_value"))]
     pub top_p: Option<f32>,
 
     pub seed: Option<i64>,
 
+    #[validate(custom(function = "validate_stop_sequences"))]
     pub stop_sequences: Option<Vec<String>>,
 
     pub tool_choice: Option<ToolChoice>,
@@ -512,6 +519,7 @@ pub struct GenerationConfig {
 
     pub thinking_summaries: Option<ThinkingSummaries>,
 
+    #[validate(range(min = 1))]
     pub max_output_tokens: Option<u32>,
 
     pub speech_config: Option<Vec<SpeechConfig>>,
@@ -1061,15 +1069,43 @@ pub enum ResponseModality {
     Audio,
 }
 
+fn is_option_blank(v: &Option<String>) -> bool {
+    v.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true)
+}
+
 fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), ValidationError> {
-    let is_blank = |v: &Option<String>| v.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true);
-    // Either model or agent must be provided
-    if is_blank(&req.model) && is_blank(&req.agent) {
+    // Exactly one of model or agent must be provided
+    if is_option_blank(&req.model) && is_option_blank(&req.agent) {
         return Err(ValidationError::new("model_or_agent_required"));
     }
+    if !is_option_blank(&req.model) && !is_option_blank(&req.agent) {
+        let mut e = ValidationError::new("model_and_agent_mutually_exclusive");
+        e.message = Some("Cannot set both model and agent. Provide exactly one.".into());
+        return Err(e);
+    }
+
     // response_mime_type is required when response_format is set
-    if req.response_format.is_some() && is_blank(&req.response_mime_type) {
+    if req.response_format.is_some() && is_option_blank(&req.response_mime_type) {
         return Err(ValidationError::new("response_mime_type_required"));
+    }
+
+    // background mode is required for agent interactions, and only for agents
+    if !is_option_blank(&req.agent) && !req.background {
+        let mut e = ValidationError::new("agent_requires_background");
+        e.message = Some("Agent interactions require background mode to be enabled.".into());
+        return Err(e);
+    }
+    if !is_option_blank(&req.model) && req.background {
+        let mut e = ValidationError::new("background_requires_agent");
+        e.message = Some("Background mode is only supported for agent interactions.".into());
+        return Err(e);
+    }
+
+    // background and stream are mutually exclusive
+    if req.background && req.stream {
+        let mut e = ValidationError::new("background_conflicts_with_stream");
+        e.message = Some("Cannot set both background and stream to true.".into());
+        return Err(e);
     }
     Ok(())
 }
@@ -1086,6 +1122,33 @@ fn validate_tools(tools: &[InteractionsTool]) -> Result<(), ValidationError> {
 }
 
 fn validate_input(input: &InteractionsInput) -> Result<(), ValidationError> {
+    // Reject empty input
+    let empty_msg = match input {
+        InteractionsInput::Text(s) if s.trim().is_empty() => Some("Input text cannot be empty"),
+        InteractionsInput::Content(content) if is_content_empty(content) => {
+            Some("Input content cannot be empty")
+        }
+        InteractionsInput::Contents(contents) if contents.is_empty() => {
+            Some("Input content array cannot be empty")
+        }
+        InteractionsInput::Contents(contents) if contents.iter().any(is_content_empty) => {
+            Some("Input content array contains empty content items")
+        }
+        InteractionsInput::Turns(turns) if turns.is_empty() => {
+            Some("Input turns array cannot be empty")
+        }
+        InteractionsInput::Turns(turns) if turns.iter().any(is_turn_empty) => {
+            Some("Input turns array contains empty turn items")
+        }
+        _ => None,
+    };
+    if let Some(msg) = empty_msg {
+        let mut e = ValidationError::new("input_cannot_be_empty");
+        e.message = Some(msg.into());
+        return Err(e);
+    }
+
+    // Reject unsupported file search content
     fn has_file_search_content(content: &Content) -> bool {
         matches!(
             content,
@@ -1113,6 +1176,47 @@ fn validate_input(input: &InteractionsInput) -> Result<(), ValidationError> {
 
     if has_file_search {
         return Err(ValidationError::new("file_search_content_not_supported"));
+    }
+    Ok(())
+}
+
+fn is_content_empty(content: &Content) -> bool {
+    match content {
+        Content::Text { text, .. } => is_option_blank(text),
+        Content::Image { data, uri, .. }
+        | Content::Audio { data, uri, .. }
+        | Content::Document { data, uri, .. }
+        | Content::Video { data, uri, .. } => is_option_blank(data) && is_option_blank(uri),
+        Content::CodeExecutionCall { id, .. }
+        | Content::UrlContextCall { id, .. }
+        | Content::GoogleSearchCall { id, .. } => is_option_blank(id),
+        Content::CodeExecutionResult { call_id, .. }
+        | Content::UrlContextResult { call_id, .. }
+        | Content::GoogleSearchResult { call_id, .. } => is_option_blank(call_id),
+        _ => false,
+    }
+}
+
+fn is_turn_empty(turn: &Turn) -> bool {
+    match &turn.content {
+        None => true,
+        Some(TurnContent::Text(s)) => s.trim().is_empty(),
+        Some(TurnContent::Contents(contents)) => {
+            contents.is_empty() || contents.iter().any(is_content_empty)
+        }
+    }
+}
+
+fn validate_stop_sequences(seqs: &[String]) -> Result<(), ValidationError> {
+    if seqs.len() > 5 {
+        let mut e = ValidationError::new("too_many_stop_sequences");
+        e.message = Some("Maximum 5 stop sequences allowed".into());
+        return Err(e);
+    }
+    if seqs.iter().any(|s| s.trim().is_empty()) {
+        let mut e = ValidationError::new("stop_sequences_cannot_be_empty");
+        e.message = Some("Stop sequences cannot contain empty strings".into());
+        return Err(e);
     }
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! L0 Cache: Whole-string exact match cache
 //!
 //! This is the simplest and most effective cache layer.
-//! Key: input string → Value: full encoding result (Arc-wrapped for zero-copy cache hits)
+//! Key: (input string, add_special_tokens) → Value: full encoding result (Arc-wrapped for zero-copy cache hits)
 //!
 //! Expected hit rate: 60-90% for workloads with repeated system prompts
 
@@ -14,12 +14,16 @@ use dashmap::DashMap;
 
 use crate::traits::Encoding;
 
-/// L0 cache implementation using DashMap for lock-free reads
-/// Uses Arc<Encoding> internally to provide zero-copy cache hits
+/// L0 cache implementation using DashMap for lock-free reads.
+///
+/// Uses two separate maps (one per `add_special_tokens` value) so that
+/// lookups can borrow the key as `&str` without allocating a `String`.
 pub struct L0Cache {
-    /// The cache map: input string → Arc-wrapped encoding for cheap cloning
-    map: Arc<DashMap<String, Arc<Encoding>>>,
-    /// Maximum number of entries before eviction
+    /// Cache for encode(input, add_special_tokens = false)
+    map_plain: Arc<DashMap<String, Arc<Encoding>>>,
+    /// Cache for encode(input, add_special_tokens = true)
+    map_special: Arc<DashMap<String, Arc<Encoding>>>,
+    /// Maximum number of entries (across both maps) before eviction
     max_entries: usize,
     /// Cache hit counter
     hits: AtomicU64,
@@ -30,21 +34,32 @@ pub struct L0Cache {
 impl L0Cache {
     /// Create a new L0 cache with the specified capacity
     pub fn new(max_entries: usize) -> Self {
+        let per_map = max_entries.min(1024) / 2 + 1;
         Self {
-            map: Arc::new(DashMap::with_capacity(max_entries.min(1024))),
+            map_plain: Arc::new(DashMap::with_capacity(per_map)),
+            map_special: Arc::new(DashMap::with_capacity(per_map)),
             max_entries,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
     }
 
-    /// Get an encoding from the cache (returns Arc for zero-copy access)
     #[inline]
-    pub fn get(&self, key: &str) -> Option<Arc<Encoding>> {
-        match self.map.get(key) {
+    fn map_for(&self, add_special_tokens: bool) -> &DashMap<String, Arc<Encoding>> {
+        if add_special_tokens {
+            &self.map_special
+        } else {
+            &self.map_plain
+        }
+    }
+
+    /// Get an encoding from the cache (returns Arc for zero-copy access).
+    /// Zero-allocation on the lookup path.
+    #[inline]
+    pub fn get(&self, key: &str, add_special_tokens: bool) -> Option<Arc<Encoding>> {
+        match self.map_for(add_special_tokens).get(key) {
             Some(entry) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
-                // Arc::clone is cheap (just increment reference count)
                 Some(Arc::clone(entry.value()))
             }
             None => {
@@ -54,41 +69,44 @@ impl L0Cache {
         }
     }
 
-    /// Insert an encoding into the cache
-    pub fn insert(&self, key: String, value: Encoding) {
-        // Simple eviction: if we're at capacity, remove a random entry
-        // DashMap doesn't support LRU directly, so we use a simple strategy
-        if self.map.len() >= self.max_entries {
-            let key_to_remove = { self.map.iter().next().map(|entry| entry.key().clone()) };
-
-            // Now remove it
+    /// Evict one arbitrary entry if total capacity is reached.
+    /// Evicts from the larger map to keep both maps roughly balanced.
+    fn maybe_evict(&self) {
+        if self.len() >= self.max_entries {
+            let victim = if self.map_plain.len() >= self.map_special.len() {
+                &self.map_plain
+            } else {
+                &self.map_special
+            };
+            // Scope the iterator so all shard read-locks are released before remove()
+            let key_to_remove = { victim.iter().next().map(|entry| entry.key().clone()) };
             if let Some(k) = key_to_remove {
-                self.map.remove(&k);
+                victim.remove(&k);
             }
         }
+    }
 
-        self.map.insert(key, Arc::new(value));
+    /// Insert an encoding into the cache
+    pub fn insert(&self, key: String, add_special_tokens: bool, value: Encoding) {
+        self.maybe_evict();
+        self.map_for(add_special_tokens)
+            .insert(key, Arc::new(value));
     }
 
     /// Insert a pre-wrapped Arc encoding into the cache (avoids double-wrapping)
-    pub fn insert_arc(&self, key: String, value: Arc<Encoding>) {
-        if self.map.len() >= self.max_entries {
-            let key_to_remove = { self.map.iter().next().map(|entry| entry.key().clone()) };
-            if let Some(k) = key_to_remove {
-                self.map.remove(&k);
-            }
-        }
-        self.map.insert(key, value);
+    pub fn insert_arc(&self, key: String, add_special_tokens: bool, value: Arc<Encoding>) {
+        self.maybe_evict();
+        self.map_for(add_special_tokens).insert(key, value);
     }
 
     /// Get the current number of entries in the cache
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.map_plain.len() + self.map_special.len()
     }
 
     /// Check if the cache is empty
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.map_plain.is_empty() && self.map_special.is_empty()
     }
 
     /// Get cache statistics
@@ -111,7 +129,8 @@ impl L0Cache {
 
     /// Clear the cache
     pub fn clear(&self) {
-        self.map.clear();
+        self.map_plain.clear();
+        self.map_special.clear();
         self.hits.store(0, Ordering::Relaxed);
         self.misses.store(0, Ordering::Relaxed);
     }
@@ -146,42 +165,75 @@ mod tests {
         let cache = L0Cache::new(10);
 
         // Miss
-        assert!(cache.get("hello").is_none());
+        assert!(cache.get("hello", false).is_none());
 
         // Insert
-        cache.insert("hello".to_string(), mock_encoding(vec![1, 2, 3]));
+        cache.insert("hello".to_string(), false, mock_encoding(vec![1, 2, 3]));
 
-        // Hit - now returns Arc<Encoding>
-        let result = cache.get("hello");
+        // Hit
+        let result = cache.get("hello", false);
         assert!(result.is_some());
         assert_eq!(result.unwrap().token_ids(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn test_add_special_tokens_flag_separates_entries() {
+        let cache = L0Cache::new(10);
+
+        cache.insert("hello".to_string(), false, mock_encoding(vec![1, 2, 3]));
+        cache.insert(
+            "hello".to_string(),
+            true,
+            mock_encoding(vec![100, 1, 2, 3, 101]),
+        );
+
+        // Different flags should return different results
+        let without = cache.get("hello", false).unwrap();
+        let with = cache.get("hello", true).unwrap();
+        assert_eq!(without.token_ids(), &[1, 2, 3]);
+        assert_eq!(with.token_ids(), &[100, 1, 2, 3, 101]);
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]
     fn test_eviction() {
         let cache = L0Cache::new(2);
 
-        cache.insert("a".to_string(), mock_encoding(vec![1]));
-        cache.insert("b".to_string(), mock_encoding(vec![2]));
+        cache.insert("a".to_string(), false, mock_encoding(vec![1]));
+        cache.insert("b".to_string(), false, mock_encoding(vec![2]));
 
         // Should evict when adding third
-        cache.insert("c".to_string(), mock_encoding(vec![3]));
+        cache.insert("c".to_string(), false, mock_encoding(vec![3]));
 
         // Cache should have exactly 2 entries
         assert_eq!(cache.len(), 2);
     }
 
     #[test]
+    fn test_eviction_across_maps() {
+        let cache = L0Cache::new(2);
+
+        // Fill up map_plain to capacity
+        cache.insert("a".to_string(), false, mock_encoding(vec![1]));
+        cache.insert("b".to_string(), false, mock_encoding(vec![2]));
+        assert_eq!(cache.len(), 2);
+
+        // Insert into map_special — should evict from map_plain (the larger map)
+        cache.insert("c".to_string(), true, mock_encoding(vec![3]));
+        assert_eq!(cache.len(), 2, "total entries must not exceed max_entries");
+    }
+
+    #[test]
     fn test_stats() {
         let cache = L0Cache::new(10);
 
-        cache.insert("test".to_string(), mock_encoding(vec![1, 2, 3]));
+        cache.insert("test".to_string(), false, mock_encoding(vec![1, 2, 3]));
 
-        // 1 miss (initial get that returned None)
-        let _ = cache.get("missing");
+        // 1 miss
+        let _ = cache.get("missing", false);
 
         // 1 hit
-        let _ = cache.get("test");
+        let _ = cache.get("test", false);
 
         let stats = cache.stats();
         assert_eq!(stats.hits, 1);
@@ -193,12 +245,12 @@ mod tests {
     fn test_clear() {
         let cache = L0Cache::new(10);
 
-        cache.insert("test".to_string(), mock_encoding(vec![1, 2, 3]));
+        cache.insert("test".to_string(), false, mock_encoding(vec![1, 2, 3]));
         assert_eq!(cache.len(), 1);
 
         cache.clear();
         assert_eq!(cache.len(), 0);
-        assert!(cache.get("test").is_none());
+        assert!(cache.get("test", false).is_none());
     }
 
     #[test]
@@ -212,12 +264,10 @@ mod tests {
         for i in 0..10 {
             let cache_clone = cache.clone();
             handles.push(thread::spawn(move || {
-                // Each thread inserts and reads
                 let key = format!("key_{}", i);
-                cache_clone.insert(key.clone(), mock_encoding(vec![i as u32]));
+                cache_clone.insert(key.clone(), false, mock_encoding(vec![i as u32]));
 
-                // Read it back
-                let result = cache_clone.get(&key);
+                let result = cache_clone.get(&key, false);
                 assert!(result.is_some());
             }));
         }
@@ -226,18 +276,16 @@ mod tests {
             handle.join().unwrap();
         }
 
-        // Should have 10 entries
         assert_eq!(cache.len(), 10);
     }
 
     #[test]
     fn test_arc_reuse() {
-        // Test that multiple gets return the same Arc (reference counting)
         let cache = L0Cache::new(10);
-        cache.insert("test".to_string(), mock_encoding(vec![1, 2, 3]));
+        cache.insert("test".to_string(), false, mock_encoding(vec![1, 2, 3]));
 
-        let arc1 = cache.get("test").unwrap();
-        let arc2 = cache.get("test").unwrap();
+        let arc1 = cache.get("test", false).unwrap();
+        let arc2 = cache.get("test", false).unwrap();
 
         // Both should point to the same allocation
         assert!(Arc::ptr_eq(&arc1, &arc2));

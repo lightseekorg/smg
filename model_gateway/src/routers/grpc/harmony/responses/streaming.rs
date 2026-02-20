@@ -6,7 +6,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use openai_protocol::responses::{ResponseToolType, ResponsesRequest};
 use serde_json::json;
-use smg_mcp::McpToolSession;
+use smg_mcp::{McpServerBinding, McpSessionOptions, McpToolSession};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -120,7 +120,7 @@ async fn execute_mcp_tool_loop_streaming(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
-    mcp_servers: Vec<(String, String)>,
+    mcp_servers: Vec<McpServerBinding>,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) {
@@ -131,7 +131,15 @@ async fn execute_mcp_tool_loop_streaming(
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
     let session_request_id = format!("resp_{}", Uuid::new_v4());
-    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
+
+    let session = McpToolSession::new(
+        &ctx.mcp_orchestrator,
+        mcp_servers,
+        &session_request_id,
+        McpSessionOptions {
+            request_tools: original_request.tools.as_deref(),
+        },
+    );
 
     // Add filtered MCP tools (static + requested dynamic) to the request
     let mcp_tools = session.mcp_tools();
@@ -164,11 +172,11 @@ async fn execute_mcp_tool_loop_streaming(
     let mut mcp_tracking = McpCallTracking::new();
 
     // Emit mcp_list_tools on first iteration
-    for (label, key) in session.mcp_servers().iter() {
-        let tools_for_server = session.list_tools_for_server(key);
+    for binding in session.mcp_servers().iter() {
+        let tools_for_server = session.list_tools_for_server(&binding.server_key);
 
         if emitter
-            .emit_mcp_list_tools_sequence(label, &tools_for_server, tx)
+            .emit_mcp_list_tools_sequence(&binding.label, &tools_for_server, tx)
             .is_err()
         {
             return;

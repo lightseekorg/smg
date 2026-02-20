@@ -1,5 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    // std::sync::Mutex is correct: all locking functions are synchronous,
+    // so there is no risk of holding locks across .await points.
     sync::{Arc, Mutex, RwLock},
     thread,
     time::{Duration, SystemTime},

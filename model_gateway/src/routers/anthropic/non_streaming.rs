@@ -36,7 +36,16 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
     // MCP tool loop path
     let session_id = format!("msg_{}", uuid::Uuid::new_v4());
     let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
-    let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &session_id);
+    let session = McpToolSession::new(
+        &router.mcp_orchestrator,
+        mcp_servers,
+        &session_id,
+        Default::default(),
+    );
+
+    // Inject MCP tools into the request as regular tools
+    let allowed_tools = mcp::collect_allowed_tools_from_toolsets(&req_ctx.request.tools);
+    mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session, &allowed_tools);
 
     let mut all_mcp_calls: Vec<mcp::McpToolCall> = Vec::new();
 
@@ -104,28 +113,20 @@ async fn send_one_request(
     let model_id = &req_ctx.model_id;
     let start_time = Instant::now();
 
-    let selected_worker = worker::select_worker(&router.worker_registry, model_id)?;
     worker::record_router_request(model_id, false);
-    let (url, req_headers) = worker::build_request(&*selected_worker, req_ctx.headers.as_ref());
+    let (url, req_headers) = worker::build_request(&*req_ctx.worker, req_ctx.headers.as_ref());
     let response = worker::send_request(
         &router.http_client,
         &url,
         &req_headers,
         &req_ctx.request,
         router.request_timeout,
-        &*selected_worker,
     )
     .await?;
 
     if !response.status().is_success() {
-        return Err(worker::handle_error_response(
-            response,
-            model_id,
-            start_time,
-            &*selected_worker,
-        )
-        .await);
+        return Err(worker::handle_error_response(response, model_id, start_time).await);
     }
 
-    worker::parse_response(response, model_id, start_time, &*selected_worker).await
+    worker::parse_response(response, model_id, start_time).await
 }

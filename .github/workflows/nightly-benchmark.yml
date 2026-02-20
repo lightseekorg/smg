@@ -245,7 +245,7 @@ jobs:
           pip uninstall -y smg || true
           pip install wheel/*.whl
           bash scripts/ci_install_e2e_deps.sh ${{ matrix.variant.extra_deps }}
-      
+
       - name: Pull genai-bench image
         if: steps.filter.outputs.skip != 'true'
         run: docker pull ${{ env.GENAI_BENCH_IMAGE }}

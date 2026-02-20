@@ -293,7 +293,7 @@ impl AppContextBuilder {
         router_config: RouterConfig,
         request_timeout_secs: u64,
     ) -> Result<Self, String> {
-        Ok(Self::new()
+        let ctx = Self::new()
             .with_client(&router_config, request_timeout_secs)?
             .maybe_rate_limiter(&router_config)
             .with_tokenizer_registry(&router_config)?
@@ -301,7 +301,9 @@ impl AppContextBuilder {
             .with_tool_parser_factory()
             .with_worker_registry()
             .with_policy_registry(&router_config)
-            .with_storage(&router_config)?
+            .with_storage(&router_config)
+            .await?;
+        Ok(ctx
             .with_load_monitor(&router_config)
             .with_worker_job_queue()
             .with_workflow_engines()
@@ -432,7 +434,7 @@ impl AppContextBuilder {
     }
 
     /// Create all storage backends using the factory function
-    fn with_storage(mut self, config: &RouterConfig) -> Result<Self, String> {
+    async fn with_storage(mut self, config: &RouterConfig) -> Result<Self, String> {
         let storage_config = StorageFactoryConfig {
             backend: &config.history_backend,
             oracle: config.oracle.as_ref(),
@@ -440,7 +442,7 @@ impl AppContextBuilder {
             redis: config.redis.as_ref(),
         };
         let (response_storage, conversation_storage, conversation_item_storage) =
-            create_storage(storage_config)?;
+            create_storage(storage_config).await?;
 
         self.response_storage = Some(response_storage);
         self.conversation_storage = Some(conversation_storage);

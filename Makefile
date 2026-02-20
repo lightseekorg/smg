@@ -18,9 +18,9 @@ else
     $(info sccache not found. Install it for faster builds: cargo install sccache)
 endif
 
-.PHONY: help build test clean docs check fmt lint dev-setup pre-commit setup-rust setup-sccache sccache-stats sccache-clean sccache-stop \
+.PHONY: help build test clean docs check fmt dev-setup pre-commit setup-sccache sccache-stats sccache-clean sccache-stop \
         python-dev python-build python-build-release python-install python-clean python-test python-check \
-        show-version bump-version release-notes
+        show-version bump-version check-versions
 
 help: ## Show this help message
 	@echo "Model Gateway Development Commands"
@@ -29,16 +29,13 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 
-setup-rust: ## Install Rust toolchain and deps (Oracle Linux)
-	@bash scripts/ci_install_rust_oracle.sh
-
 build: ## Build the project in release mode
 	@echo "Building Shepherd Model Gateway..."
 	@cargo build --release
 
 test: ## Run all tests
 	@echo "Running tests..."
-	@source "$$HOME/.cargo/env" && cargo test
+	@cargo test
 
 clean: ## Clean build artifacts
 	@echo "Cleaning build artifacts..."
@@ -48,18 +45,15 @@ docs: ## Generate and open documentation
 	@echo "Generating documentation..."
 	@cargo doc --open
 
-check: ## Run cargo check
-	@source "$$HOME/.cargo/env" && cargo check
-
-lint: ## Run clippy lint checks
-	@source "$$HOME/.cargo/env" && rustup component add clippy
-	@source "$$HOME/.cargo/env" && cargo clippy --all-targets --all-features -- -D warnings
+check: ## Run cargo check and clippy
+	@echo "Running cargo check..."
+	@cargo check
+	@echo "Running clippy..."
+	@cargo clippy --all-targets --all-features -- -D warnings
 
 fmt: ## Format code with rustfmt
 	@echo "Formatting code..."
-	@source "$$HOME/.cargo/env" && rustup component add --toolchain nightly rustfmt
-	@source "$$HOME/.cargo/env" && rustup toolchain install nightly --profile minimal
-	@source "$$HOME/.cargo/env" && cargo +nightly fmt -- --check
+	@rustup run nightly cargo fmt
 
 # Development workflow shortcuts
 dev-setup: build test ## Set up development environment
@@ -194,25 +188,9 @@ bump-version: ## Bump version across all files (usage: make bump-version VERSION
 	@echo ""
 	@echo "Verify with: make show-version"
 
-release-notes: ## Generate release notes for gateway (usage: make release-notes PREV=gateway-v0.2.2 CURR=gateway-v1.0.0)
-	@if [ -z "$(PREV)" ] || [ -z "$(CURR)" ]; then \
-		echo "Usage: make release-notes PREV=<previous-tag> CURR=<current-tag>"; \
-		echo "Example: make release-notes PREV=gateway-v0.2.2 CURR=gateway-v1.0.0"; \
-		echo ""; \
-		echo "Options:"; \
-		echo "  OUTPUT=<file>     Save to file (default: stdout)"; \
-		echo "  CREATE_RELEASE=1  Create GitHub draft release via gh CLI (default: draft)"; \
-		echo "  DRAFT=0           Publish release immediately (skip draft)"; \
-		exit 1; \
+check-versions: ## Check workspace crate versions against latest tag (usage: make check-versions [TAG=v1.0.0])
+	@if [ -n "$(TAG)" ]; then \
+		./scripts/check_release_versions.sh "$(TAG)"; \
+	else \
+		./scripts/check_release_versions.sh; \
 	fi
-	@ARGS="$(PREV) $(CURR)"; \
-	if [ -n "$(OUTPUT)" ]; then \
-		ARGS="$$ARGS --output $(OUTPUT)"; \
-	fi; \
-	if [ "$(CREATE_RELEASE)" = "1" ]; then \
-		ARGS="$$ARGS --create-release"; \
-		if [ "$(DRAFT)" = "0" ]; then \
-			ARGS="$$ARGS --no-draft"; \
-		fi; \
-	fi; \
-	./scripts/generate_gateway_release_notes.sh $$ARGS

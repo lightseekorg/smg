@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from smg.router_args import RouterArgs
 from smg.smg_rs import (
     BackendType,
@@ -236,7 +238,7 @@ class Router:
         self._router = router
 
     @staticmethod
-    def from_args(args: RouterArgs) -> "Router":
+    def from_args(args: RouterArgs) -> Router:
         """Create a router from a RouterArgs instance."""
 
         args_dict = vars(args)

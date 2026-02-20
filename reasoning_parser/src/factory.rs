@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use crate::{
     parsers::{
         BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, KimiParser,
-        MiniMaxParser, Qwen3Parser, QwenThinkingParser, Step3Parser,
+        MiniMaxParser, NanoV3Parser, Qwen3Parser, QwenThinkingParser, Step3Parser,
     },
     traits::{ParseError, ParserConfig, ReasoningParser},
 };
@@ -195,6 +195,9 @@ impl ParserFactory {
         // Register Cohere Command parser (uses <|START_THINKING|> / <|END_THINKING|>)
         registry.register_parser("cohere_cmd", || Box::new(CohereCmdParser::new()));
 
+        // Register NanoV3 parser (same format as DeepSeek-R1)
+        registry.register_parser("nano_v3", || Box::new(NanoV3Parser::new()));
+
         // Register model patterns
         registry.register_pattern("deepseek-r1", "deepseek_r1");
         registry.register_pattern("qwen3-thinking", "qwen3_thinking");
@@ -215,9 +218,10 @@ impl ParserFactory {
         registry.register_pattern("c4ai-command", "cohere_cmd");
         registry.register_pattern("cohere", "cohere_cmd");
 
-        // Nano V3 uses same format as Qwen3 (requires explicit <think> token)
-        registry.register_pattern("nemotron-nano", "qwen3");
-        registry.register_pattern("nano-v3", "qwen3");
+        // Nano V3 / Nemotron uses same format as DeepSeek-R1 (initial_in_reasoning=true)
+        registry.register_pattern("nemotron-nano", "nano_v3");
+        registry.register_pattern("nemotron-super", "nano_v3");
+        registry.register_pattern("nano-v3", "nano_v3");
 
         Self { registry }
     }
@@ -359,6 +363,20 @@ mod tests {
         // Also test alternate patterns
         let mm = factory.create("mm-m2-chat").unwrap();
         assert_eq!(mm.model_type(), "minimax");
+    }
+
+    #[test]
+    fn test_nano_v3_model() {
+        let factory = ParserFactory::new();
+
+        let nano = factory.create("nano-v3-chat").unwrap();
+        assert_eq!(nano.model_type(), "nano_v3");
+
+        let nemotron_nano = factory.create("nemotron-nano-4b").unwrap();
+        assert_eq!(nemotron_nano.model_type(), "nano_v3");
+
+        let nemotron_super = factory.create("NVIDIA-Nemotron/nemotron-super").unwrap();
+        assert_eq!(nemotron_super.model_type(), "nano_v3");
     }
 
     #[test]

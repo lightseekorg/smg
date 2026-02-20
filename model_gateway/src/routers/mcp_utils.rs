@@ -3,7 +3,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use openai_protocol::responses::{ResponseTool, ResponseToolType};
-use smg_mcp::{BuiltinToolType, McpOrchestrator, McpServerConfig, McpTransport, ResponseFormat};
+use smg_mcp::{
+    BuiltinToolType, McpOrchestrator, McpServerBinding, McpServerConfig, McpTransport,
+    ResponseFormat,
+};
 use tracing::{debug, warn};
 
 /// Default maximum tool loop iterations (safety limit).
@@ -26,12 +29,12 @@ pub struct McpServerInput {
 /// - If `url` is present, connects a dynamic MCP server (SSE or Streamable).
 /// - If `url` is absent, registers the label as a static server reference.
 ///
-/// Returns a list of `(label, server_key)` pairs for successfully connected servers.
+/// Returns a list of [`McpServerBinding`]s for successfully connected servers.
 pub async fn connect_mcp_servers(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     inputs: &[McpServerInput],
-) -> Vec<(String, String)> {
-    let mut mcp_servers = Vec::new();
+) -> Vec<McpServerBinding> {
+    let mut mcp_servers: Vec<McpServerBinding> = Vec::new();
 
     for input in inputs {
         // Case A: Dynamic Server (Has URL)
@@ -81,8 +84,11 @@ pub async fn connect_mcp_servers(
 
             match mcp_orchestrator.connect_dynamic_server(server_config).await {
                 Ok(_) => {
-                    if !mcp_servers.iter().any(|(_, key)| key == &server_key) {
-                        mcp_servers.push((input.label.clone(), server_key));
+                    if !mcp_servers.iter().any(|b| b.server_key == server_key) {
+                        mcp_servers.push(McpServerBinding {
+                            label: input.label.clone(),
+                            server_key,
+                        });
                     }
                 }
                 Err(err) => {
@@ -91,8 +97,11 @@ pub async fn connect_mcp_servers(
             }
         }
         // Case B: Static Server (No URL)
-        else if !mcp_servers.iter().any(|(_, key)| key == &input.label) {
-            mcp_servers.push((input.label.clone(), input.label.clone()));
+        else if !mcp_servers.iter().any(|b| b.server_key == input.label) {
+            mcp_servers.push(McpServerBinding {
+                label: input.label.clone(),
+                server_key: input.label.clone(),
+            });
         }
     }
 
@@ -172,25 +181,72 @@ pub fn collect_builtin_routing(
     routing
 }
 
-/// Ensure MCP clients are connected for request-level MCP tools and built-in tool routing.
+/// Extract builtin tool types from an OpenAI `ResponseTool` array.
 ///
-/// This function handles three cases:
-/// 1. **Dynamic MCP tools**: Tools with `type: mcp` and `server_url` in the request.
-///    These require connecting to the MCP server dynamically.
-/// 2. **Static MCP tools**: Tools with `type: mcp` and `server_label` (but no URL).
-///    These resolve to pre-configured static servers by name.
-/// 3. **Built-in tool routing**: Tools like `web_search_preview` that have a static
-///    MCP server configured via `builtin_type`. These use pre-connected static servers.
+/// Used by routers to determine which built-in tool types are present in
+/// a request, for passing to [`ensure_mcp_servers`].
+pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
+    tools
+        .iter()
+        .filter_map(|t| match t.r#type {
+            ResponseToolType::WebSearchPreview => Some(BuiltinToolType::WebSearchPreview),
+            ResponseToolType::CodeInterpreter => Some(BuiltinToolType::CodeInterpreter),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Unified MCP server connection logic shared by all routers.
 ///
-/// Headers for MCP servers come from the tool payload (`tool.headers`), not HTTP request headers.
+/// Connects dynamic/static MCP servers described by `inputs`, then adds
+/// any static builtin servers for the given `builtin_types`.
 ///
-/// Returns `Some(mcp_servers)` if MCP tools or built-in routing is available,
-/// `None` otherwise.
+/// Returns `Some(servers)` if at least one server is available, `None` otherwise.
+pub async fn ensure_mcp_servers(
+    orchestrator: &Arc<McpOrchestrator>,
+    inputs: &[McpServerInput],
+    builtin_types: &[BuiltinToolType],
+) -> Option<Vec<McpServerBinding>> {
+    let mut mcp_servers = connect_mcp_servers(orchestrator, inputs).await;
+
+    // Add builtin tool routing servers
+    for &builtin_type in builtin_types {
+        if let Some((server_name, tool_name, _)) = orchestrator.find_builtin_server(builtin_type) {
+            debug!(
+                builtin_type = ?builtin_type,
+                server = %server_name,
+                tool = %tool_name,
+                "Adding static server for built-in tool routing"
+            );
+            if !mcp_servers.iter().any(|b| b.server_key == server_name) {
+                mcp_servers.push(McpServerBinding {
+                    label: server_name.clone(),
+                    server_key: server_name,
+                });
+            }
+        } else {
+            warn!(
+                builtin_type = %builtin_type,
+                "Request includes built-in tool but no MCP server is configured for it"
+            );
+        }
+    }
+
+    if mcp_servers.is_empty() {
+        None
+    } else {
+        Some(mcp_servers)
+    }
+}
+
+/// Convenience wrapper for OpenAI Responses API routers.
+///
+/// Extracts MCP server inputs and builtin types from `ResponseTool` array,
+/// then delegates to [`ensure_mcp_servers`].
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
-) -> Option<Vec<(String, String)>> {
-    // 1. Convert MCP-typed ResponseTools into protocol-agnostic McpServerInputs
+) -> Option<Vec<McpServerBinding>> {
     let inputs: Vec<McpServerInput> = tools
         .iter()
         .filter(|t| matches!(t.r#type, ResponseToolType::Mcp))
@@ -205,28 +261,9 @@ pub async fn ensure_request_mcp_client(
         })
         .collect();
 
-    let mut mcp_servers = connect_mcp_servers(mcp_orchestrator, &inputs).await;
+    let builtin_types = extract_builtin_types(tools);
 
-    // 2. Process built-in tool routing (static servers configured with builtin_type)
-    for routing in collect_builtin_routing(mcp_orchestrator, Some(tools)) {
-        debug!(
-            builtin_type = %routing.builtin_type,
-            server = %routing.server_name,
-            tool = %routing.tool_name,
-            "Adding static server for built-in tool routing"
-        );
-
-        let server_name = routing.server_name;
-        if !mcp_servers.iter().any(|(_, key)| key == &server_name) {
-            mcp_servers.push((server_name.clone(), server_name));
-        }
-    }
-
-    if mcp_servers.is_empty() {
-        None
-    } else {
-        Some(mcp_servers)
-    }
+    ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types).await
 }
 
 #[cfg(test)]
@@ -481,9 +518,8 @@ mod tests {
         assert_eq!(mcp_servers.len(), 1);
 
         // The server key should be the static server name
-        let (label, key) = &mcp_servers[0];
-        assert_eq!(label, "search-server");
-        assert_eq!(key, "search-server");
+        assert_eq!(mcp_servers[0].label, "search-server");
+        assert_eq!(mcp_servers[0].server_key, "search-server");
     }
 
     #[tokio::test]
@@ -543,6 +579,6 @@ mod tests {
 
         let mcp_servers = result.unwrap();
         assert_eq!(mcp_servers.len(), 1);
-        assert_eq!(mcp_servers[0].0, "search-server");
+        assert_eq!(mcp_servers[0].label, "search-server");
     }
 }

@@ -9,12 +9,12 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock as ParkingLotRwLock;
+use parking_lot::RwLock;
 
 use super::core::*;
 
@@ -25,13 +25,13 @@ use super::core::*;
 /// In-memory conversation storage used for development and tests
 #[derive(Default, Clone)]
 pub struct MemoryConversationStorage {
-    inner: Arc<ParkingLotRwLock<HashMap<ConversationId, Conversation>>>,
+    inner: Arc<RwLock<HashMap<ConversationId, Conversation>>>,
 }
 
 impl MemoryConversationStorage {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(ParkingLotRwLock::new(HashMap::new())),
+            inner: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -80,14 +80,23 @@ impl ConversationStorage for MemoryConversationStorage {
 // PART 2: MemoryConversationItemStorage
 // ============================================================================
 
+/// Internal store for conversation items, protected by a single lock to prevent
+/// lock ordering inversions between the three maps.
 #[derive(Default)]
+struct ConversationItemInner {
+    /// All items indexed by ID
+    items: HashMap<ConversationItemId, ConversationItem>,
+    /// Per-conversation sorted links: (timestamp, item_id_str) -> ConversationItemId
+    #[allow(clippy::type_complexity)]
+    links: HashMap<ConversationId, BTreeMap<(i64, String), ConversationItemId>>,
+    /// Per-conversation reverse index: item_id_str -> (timestamp, item_id_str)
+    #[allow(clippy::type_complexity)]
+    rev_index: HashMap<ConversationId, HashMap<String, (i64, String)>>,
+}
+
+#[derive(Default, Clone)]
 pub struct MemoryConversationItemStorage {
-    items: RwLock<HashMap<ConversationItemId, ConversationItem>>, // item_id -> item
-    #[allow(clippy::type_complexity)]
-    links: RwLock<HashMap<ConversationId, BTreeMap<(i64, String), ConversationItemId>>>,
-    // Per-conversation reverse index for fast after cursor lookup: item_id_str -> (ts, item_id_str)
-    #[allow(clippy::type_complexity)]
-    rev_index: RwLock<HashMap<ConversationId, HashMap<String, (i64, String)>>>,
+    inner: Arc<RwLock<ConversationItemInner>>,
 }
 
 impl MemoryConversationItemStorage {
@@ -116,8 +125,7 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
             status: new_item.status,
             created_at,
         };
-        let mut items = self.items.write().unwrap();
-        items.insert(id.clone(), item.clone());
+        self.inner.write().items.insert(id, item.clone());
         Ok(item)
     }
 
@@ -127,16 +135,17 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
         item_id: &ConversationItemId,
         added_at: DateTime<Utc>,
     ) -> ConversationItemResult<()> {
-        {
-            let mut links = self.links.write().unwrap();
-            let entry = links.entry(conversation_id.clone()).or_default();
-            entry.insert((added_at.timestamp(), item_id.0.clone()), item_id.clone());
-        }
-        {
-            let mut rev = self.rev_index.write().unwrap();
-            let entry = rev.entry(conversation_id.clone()).or_default();
-            entry.insert(item_id.0.clone(), (added_at.timestamp(), item_id.0.clone()));
-        }
+        let mut store = self.inner.write();
+        store
+            .links
+            .entry(conversation_id.clone())
+            .or_default()
+            .insert((added_at.timestamp(), item_id.0.clone()), item_id.clone());
+        store
+            .rev_index
+            .entry(conversation_id.clone())
+            .or_default()
+            .insert(item_id.0.clone(), (added_at.timestamp(), item_id.0.clone()));
         Ok(())
     }
 
@@ -145,32 +154,28 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
         conversation_id: &ConversationId,
         params: ListParams,
     ) -> ConversationItemResult<Vec<ConversationItem>> {
-        let links_guard = self.links.read().unwrap();
-        let map = match links_guard.get(conversation_id) {
+        let store = self.inner.read();
+        let map = match store.links.get(conversation_id) {
             Some(m) => m,
             None => return Ok(Vec::new()),
         };
 
-        let mut results: Vec<ConversationItem> = Vec::new();
         let after_key: Option<(i64, String)> = if let Some(after_id) = &params.after {
-            // O(1) lookup via reverse index for this conversation
-            if let Some(conv_idx) = self.rev_index.read().unwrap().get(conversation_id) {
-                conv_idx.get(after_id).cloned()
-            } else {
-                None
-            }
+            store
+                .rev_index
+                .get(conversation_id)
+                .and_then(|idx| idx.get(after_id).cloned())
         } else {
             None
         };
 
         let take = params.limit;
-        let items_guard = self.items.read().unwrap();
+        let mut results: Vec<ConversationItem> = Vec::new();
 
         use std::ops::Bound::{Excluded, Unbounded};
 
-        // Helper to push item if it exists and stop when reaching the limit
         let mut push_item = |key: &ConversationItemId| -> bool {
-            if let Some(it) = items_guard.get(key) {
+            if let Some(it) = store.items.get(key) {
                 results.push(it.clone());
                 if results.len() == take {
                     return true;
@@ -217,8 +222,7 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
         &self,
         item_id: &ConversationItemId,
     ) -> ConversationItemResult<Option<ConversationItem>> {
-        let items = self.items.read().unwrap();
-        Ok(items.get(item_id).cloned())
+        Ok(self.inner.read().items.get(item_id).cloned())
     }
 
     async fn is_item_linked(
@@ -226,12 +230,11 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
         conversation_id: &ConversationId,
         item_id: &ConversationItemId,
     ) -> ConversationItemResult<bool> {
-        let rev = self.rev_index.read().unwrap();
-        if let Some(conv_idx) = rev.get(conversation_id) {
-            Ok(conv_idx.contains_key(&item_id.0))
-        } else {
-            Ok(false)
-        }
+        let store = self.inner.read();
+        Ok(store
+            .rev_index
+            .get(conversation_id)
+            .is_some_and(|idx| idx.contains_key(&item_id.0)))
     }
 
     async fn delete_item(
@@ -239,20 +242,14 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
         conversation_id: &ConversationId,
         item_id: &ConversationItemId,
     ) -> ConversationItemResult<()> {
-        // Get the key from rev_index and remove the entry at the same time
-        let key_to_remove = {
-            let mut rev = self.rev_index.write().unwrap();
-            if let Some(conv_idx) = rev.get_mut(conversation_id) {
-                conv_idx.remove(&item_id.0)
-            } else {
-                None
-            }
-        };
+        let mut store = self.inner.write();
+        let key_to_remove = store
+            .rev_index
+            .get_mut(conversation_id)
+            .and_then(|idx| idx.remove(&item_id.0));
 
-        // If the item was in rev_index, remove it from links as well
         if let Some(key) = key_to_remove {
-            let mut links = self.links.write().unwrap();
-            if let Some(conv_links) = links.get_mut(conversation_id) {
+            if let Some(conv_links) = store.links.get_mut(conversation_id) {
                 conv_links.remove(&key);
             }
         }
@@ -277,13 +274,13 @@ struct InnerStore {
 /// In-memory implementation of response storage
 pub struct MemoryResponseStorage {
     /// Single lock wrapping both maps to prevent deadlocks and ensure atomic updates
-    store: Arc<ParkingLotRwLock<InnerStore>>,
+    store: Arc<RwLock<InnerStore>>,
 }
 
 impl MemoryResponseStorage {
     pub fn new() -> Self {
         Self {
-            store: Arc::new(ParkingLotRwLock::new(InnerStore::default())),
+            store: Arc::new(RwLock::new(InnerStore::default())),
         }
     }
 
@@ -730,5 +727,47 @@ mod tests {
         let stats = store.stats();
         assert_eq!(stats.response_count, 2);
         assert_eq!(stats.identifier_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_conversation_item_storage_clone_shares_state() {
+        let store = MemoryConversationItemStorage::new();
+        let clone = store.clone();
+
+        // Write through original
+        let item = store
+            .create_item(make_item("message", Some("user"), json!([])))
+            .await
+            .unwrap();
+
+        // Read through clone — should see the same item
+        let found = clone.get_item(&item.id).await.unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, item.id);
+    }
+
+    #[tokio::test]
+    async fn test_delete_item_unlinks_but_preserves_item() {
+        let store = MemoryConversationItemStorage::new();
+        let conv: ConversationId = "conv_del".into();
+
+        let item = store
+            .create_item(make_item("message", Some("user"), json!([])))
+            .await
+            .unwrap();
+        let t = Utc::now();
+        store.link_item(&conv, &item.id, t).await.unwrap();
+
+        // Item is linked
+        assert!(store.is_item_linked(&conv, &item.id).await.unwrap());
+
+        // Delete (unlink)
+        store.delete_item(&conv, &item.id).await.unwrap();
+
+        // No longer linked
+        assert!(!store.is_item_linked(&conv, &item.id).await.unwrap());
+
+        // But item data itself is still retrievable
+        assert!(store.get_item(&item.id).await.unwrap().is_some());
     }
 }

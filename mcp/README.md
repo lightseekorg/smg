@@ -419,7 +419,7 @@ orchestrator.register_alias(
 For executing multiple tools efficiently (e.g., parallel tool calls from LLM):
 
 ```rust
-use smg_mcp::{McpToolSession, ToolExecutionInput, ToolExecutionOutput};
+use smg_mcp::{McpSessionOptions, McpToolSession, ToolExecutionInput, ToolExecutionOutput};
 
 // Convert tool calls to inputs
 let inputs: Vec<ToolExecutionInput> = tool_calls
@@ -435,6 +435,7 @@ let session = McpToolSession::new(
     &orchestrator,
     vec![("my-server".to_string(), "my-server".to_string())],
     "req-123",
+    Default::default(),
 );
 
 // Execute all tools through session mapping
@@ -453,6 +454,29 @@ for output in outputs {
         eprintln!("Tool {} failed: {:?}", output.tool_name, output.error_message);
     }
 }
+```
+
+### Allowed Tools Filtering
+
+To enforce the OpenAI Responses-style MCP allowlist (`allowed_tools: ["toolA", ...]`),
+pass the request's `tools` array via `McpSessionOptions`. Filtering is applied per
+MCP toolset/server.
+
+```rust
+use smg_mcp::{McpSessionOptions, McpToolSession};
+
+// Default behavior: no allowlist filtering
+let session = McpToolSession::new(&orchestrator, mcp_servers, "req-123", Default::default());
+
+// Optional: enforce allowlist filtering from the incoming request
+let session = McpToolSession::new(
+    &orchestrator,
+    mcp_servers,
+    "req-123",
+    McpSessionOptions {
+        request_tools: request.tools.as_deref(),
+    },
+);
 ```
 
 **Key types:**

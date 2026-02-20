@@ -11,12 +11,7 @@ use tracing::warn;
 use super::{
     accumulator::StreamingResponseAccumulator,
     common::{extract_output_index, get_event_type},
-    mcp::FunctionCallInProgress,
 };
-
-// ============================================================================
-// Stream Action Enum
-// ============================================================================
 
 /// Action to take based on streaming event processing
 #[derive(Debug)]
@@ -25,10 +20,6 @@ pub(super) enum StreamAction {
     Buffer,       // Accumulate for tool execution
     ExecuteTools, // Function call complete, execute now
 }
-
-// ============================================================================
-// Output Index Mapper
-// ============================================================================
 
 /// Maps upstream output indices to sequential downstream indices
 #[derive(Debug, Default)]
@@ -69,9 +60,37 @@ impl OutputIndexMapper {
     }
 }
 
-// ============================================================================
-// Streaming Tool Handler
-// ============================================================================
+/// Represents a function call being accumulated across delta events
+#[derive(Debug, Clone)]
+pub(super) struct FunctionCallInProgress {
+    pub call_id: String,
+    pub name: String,
+    pub arguments_buffer: String,
+    pub output_index: usize,
+    pub last_obfuscation: Option<String>,
+    pub assigned_output_index: Option<usize>,
+}
+
+impl FunctionCallInProgress {
+    pub fn new(call_id: String, output_index: usize) -> Self {
+        Self {
+            call_id,
+            name: String::new(),
+            arguments_buffer: String::new(),
+            output_index,
+            last_obfuscation: None,
+            assigned_output_index: None,
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        !self.name.is_empty()
+    }
+
+    pub fn effective_output_index(&self) -> usize {
+        self.assigned_output_index.unwrap_or(self.output_index)
+    }
+}
 
 /// Handles streaming responses with MCP tool call interception
 pub(super) struct StreamingToolHandler {
@@ -175,7 +194,6 @@ impl StreamingToolHandler {
             self.ensure_output_index(output_index);
         }
 
-        // Check if this is a function_call item being added
         let Some(item) = parsed.get("item") else {
             return StreamAction::Forward;
         };
@@ -262,7 +280,6 @@ impl StreamingToolHandler {
             None => return StreamAction::Forward,
         };
 
-        // Check if this is a function call delta
         let item_type = delta.get("type").and_then(|v| v.as_str());
 
         if item_type.is_some_and(is_function_call_type) {
@@ -272,17 +289,12 @@ impl StreamingToolHandler {
             let call = self.get_or_create_call(output_index, delta);
             call.assigned_output_index = Some(assigned_index);
 
-            // Accumulate call_id if present
             if let Some(call_id) = delta.get("call_id").and_then(|v| v.as_str()) {
                 call.call_id = call_id.to_string();
             }
-
-            // Accumulate name if present
             if let Some(name) = delta.get("name").and_then(|v| v.as_str()) {
                 call.name.push_str(name);
             }
-
-            // Accumulate arguments if present
             if let Some(args) = delta.get("arguments").and_then(|v| v.as_str()) {
                 call.arguments_buffer.push_str(args);
             }
@@ -291,11 +303,9 @@ impl StreamingToolHandler {
                 call.last_obfuscation = Some(obfuscation.to_string());
             }
 
-            // Buffer this event, don't forward to client
             return StreamAction::Buffer;
         }
 
-        // Forward non-function-call events
         StreamAction::Forward
     }
 
@@ -304,7 +314,6 @@ impl StreamingToolHandler {
         output_index: usize,
         delta: &Value,
     ) -> &mut FunctionCallInProgress {
-        // Find existing call for this output index
         if let Some(pos) = self
             .pending_calls
             .iter()
@@ -313,7 +322,6 @@ impl StreamingToolHandler {
             return &mut self.pending_calls[pos];
         }
 
-        // Create new call
         let call_id = delta
             .get("call_id")
             .and_then(|v| v.as_str())

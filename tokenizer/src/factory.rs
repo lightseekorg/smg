@@ -263,6 +263,22 @@ pub async fn create_tokenizer_async(
     create_tokenizer_async_with_chat_template(model_name_or_path, None).await
 }
 
+/// Check if a model name looks like an OpenAI model that should use tiktoken.
+///
+/// Uses targeted patterns to avoid false positives on HuggingFace models
+/// like "openai/gpt-oss-20b".
+fn is_likely_openai_model(name: &str) -> bool {
+    name.contains("gpt-4")
+        || name.contains("gpt-3.5")
+        || name.contains("gpt-3")
+        || name.contains("turbo")
+        || name.contains("davinci")
+        || name.contains("curie")
+        || name.contains("babbage")
+        || name.contains("ada")
+        || name.contains("codex")
+}
+
 /// Factory function to create tokenizer with optional chat template (async version)
 pub async fn create_tokenizer_async_with_chat_template(
     model_name_or_path: &str,
@@ -275,17 +291,7 @@ pub async fn create_tokenizer_async_with_chat_template(
     }
 
     // Check if it's a GPT model name that should use Tiktoken
-    // Only match specific OpenAI model patterns to avoid catching HuggingFace models like "openai/gpt-oss-20b"
-    if model_name_or_path.contains("gpt-4")
-        || model_name_or_path.contains("gpt-3.5")
-        || model_name_or_path.contains("gpt-3")
-        || model_name_or_path.contains("turbo")
-        || model_name_or_path.contains("davinci")
-        || model_name_or_path.contains("curie")
-        || model_name_or_path.contains("babbage")
-        || model_name_or_path.contains("ada")
-        || model_name_or_path.contains("codex")
-    {
+    if is_likely_openai_model(model_name_or_path) {
         // Try tiktoken first, but fall back to HuggingFace if it fails
         match TiktokenTokenizer::from_model_name(model_name_or_path) {
             Ok(tokenizer) => return Ok(Arc::new(tokenizer)),
@@ -381,20 +387,21 @@ pub fn create_tokenizer_with_chat_template_blocking(
     }
 
     // Check if it's a GPT model name that should use Tiktoken
-    if model_name_or_path.contains("gpt-")
-        || model_name_or_path.contains("davinci")
-        || model_name_or_path.contains("curie")
-        || model_name_or_path.contains("babbage")
-        || model_name_or_path.contains("ada")
-    {
-        let tokenizer = TiktokenTokenizer::from_model_name(model_name_or_path)?;
-        return Ok(Arc::new(tokenizer));
+    // Try tiktoken first, but fall back to HuggingFace if it fails
+    if is_likely_openai_model(model_name_or_path) {
+        match TiktokenTokenizer::from_model_name(model_name_or_path) {
+            Ok(tokenizer) => return Ok(Arc::new(tokenizer)),
+            Err(e) => {
+                debug!(
+                    "Tiktoken failed for '{}': {}, falling back to HuggingFace",
+                    model_name_or_path, e
+                );
+            }
+        }
     }
 
-    // Only use tokio for HuggingFace downloads
-    // Check if we're already in a tokio runtime
+    // Fall back to HuggingFace Hub download (requires tokio runtime)
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        // We're in a runtime, use block_in_place
         tokio::task::block_in_place(|| {
             handle.block_on(create_tokenizer_async_with_chat_template(
                 model_name_or_path,
@@ -402,7 +409,6 @@ pub fn create_tokenizer_with_chat_template_blocking(
             ))
         })
     } else {
-        // No runtime, create a temporary one
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(create_tokenizer_async_with_chat_template(
             model_name_or_path,

@@ -230,7 +230,13 @@ impl Serialize for ModelType {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_u16(self.bits())
+        use serde::ser::SerializeSeq;
+        let names = self.as_capability_names();
+        let mut seq = serializer.serialize_seq(Some(names.len()))?;
+        for name in names {
+            seq.serialize_element(name)?;
+        }
+        seq.end()
     }
 }
 
@@ -239,9 +245,43 @@ impl<'de> Deserialize<'de> for ModelType {
     where
         D: serde::Deserializer<'de>,
     {
-        let bits = u16::deserialize(deserializer)?;
-        ModelType::from_bits(bits)
-            .ok_or_else(|| serde::de::Error::custom(format!("invalid ModelType bits: {}", bits)))
+        use serde::de;
+
+        struct ModelTypeVisitor;
+
+        impl<'de> de::Visitor<'de> for ModelTypeVisitor {
+            type Value = ModelType;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an array of capability names or a u16 bitfield")
+            }
+
+            // Backward compat: accept numeric u16 bitfield
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<ModelType, E> {
+                let bits = u16::try_from(v)
+                    .map_err(|_| E::custom(format!("ModelType bits out of u16 range: {}", v)))?;
+                ModelType::from_bits(bits)
+                    .ok_or_else(|| E::custom(format!("invalid ModelType bits: {}", bits)))
+            }
+
+            // New format: array of capability name strings
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<ModelType, A::Error> {
+                let mut model_type = ModelType::empty();
+                while let Some(name) = seq.next_element::<String>()? {
+                    let flag = CAPABILITY_NAMES
+                        .iter()
+                        .find(|(_, n)| *n == name.as_str())
+                        .map(|(f, _)| *f)
+                        .ok_or_else(|| {
+                            de::Error::custom(format!("unknown ModelType capability: {}", name))
+                        })?;
+                    model_type |= flag;
+                }
+                Ok(model_type)
+            }
+        }
+
+        deserializer.deserialize_any(ModelTypeVisitor)
     }
 }
 

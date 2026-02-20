@@ -305,6 +305,177 @@ impl OpenAIRouter {
             }
         }
     }
+
+    /// Load conversation history and/or previous response chain into request input.
+    ///
+    /// Mutates `request_body.input` with the loaded items.
+    /// Returns `Ok(original_previous_response_id)` on success, or `Err(response)` on validation failure.
+    async fn load_input_history(
+        &self,
+        body: &ResponsesRequest,
+        request_body: &mut ResponsesRequest,
+        model: &str,
+    ) -> Result<Option<String>, Response> {
+        let original_previous_response_id = request_body.previous_response_id.clone();
+
+        // Load items from previous response chain if specified
+        let mut chain_items: Option<Vec<ResponseInputOutputItem>> = None;
+        if let Some(prev_id_str) = request_body.previous_response_id.take() {
+            let prev_id = ResponseId::from(prev_id_str.as_str());
+            match self
+                .responses_components
+                .response_storage
+                .get_response_chain(&prev_id, None)
+                .await
+            {
+                Ok(chain) => {
+                    let items: Vec<ResponseInputOutputItem> = chain
+                        .responses
+                        .iter()
+                        .flat_map(|stored| {
+                            Self::deserialize_items_from_array(&stored.input)
+                                .into_iter()
+                                .chain(Self::deserialize_items_from_array(&stored.output))
+                        })
+                        .collect();
+                    chain_items = Some(items);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to load previous response chain for {}: {}",
+                        prev_id_str, e
+                    );
+                }
+            }
+        }
+
+        // Load conversation history if specified
+        if let Some(conv_id_str) = body.conversation.clone() {
+            let conv_id = ConversationId::from(conv_id_str.as_str());
+
+            if let Ok(None) = self
+                .responses_components
+                .conversation_storage
+                .get_conversation(&conv_id)
+                .await
+            {
+                Metrics::record_router_error(
+                    metrics_labels::ROUTER_OPENAI,
+                    metrics_labels::BACKEND_EXTERNAL,
+                    metrics_labels::CONNECTION_HTTP,
+                    model,
+                    metrics_labels::ENDPOINT_RESPONSES,
+                    metrics_labels::ERROR_VALIDATION,
+                );
+                return Err(error::not_found(
+                    "not_found",
+                    format!("No conversation found with id '{}'", conv_id.0),
+                ));
+            }
+
+            let params = ListParams {
+                limit: Self::MAX_CONVERSATION_HISTORY_ITEMS,
+                order: SortOrder::Asc,
+                after: None,
+            };
+
+            match self
+                .responses_components
+                .conversation_item_storage
+                .list_items(&conv_id, params)
+                .await
+            {
+                Ok(stored_items) => {
+                    let mut items: Vec<ResponseInputOutputItem> = Vec::new();
+                    for item in stored_items.into_iter() {
+                        match item.item_type.as_str() {
+                            "message" => {
+                                match serde_json::from_value::<Vec<ResponseContentPart>>(
+                                    item.content.clone(),
+                                ) {
+                                    Ok(content_parts) => {
+                                        items.push(ResponseInputOutputItem::Message {
+                                            id: item.id.0.clone(),
+                                            role: item
+                                                .role
+                                                .clone()
+                                                .unwrap_or_else(|| "user".to_string()),
+                                            content: content_parts,
+                                            status: item.status.clone(),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Failed to deserialize message content: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                            "function_call" => {
+                                match serde_json::from_value::<ResponseInputOutputItem>(
+                                    item.content.clone(),
+                                ) {
+                                    Ok(func_call) => items.push(func_call),
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Failed to deserialize function_call: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                            "function_call_output" => {
+                                tracing::debug!(
+                                    "Loading function_call_output from DB - content: {}",
+                                    serde_json::to_string_pretty(&item.content)
+                                        .unwrap_or_else(|_| "failed to serialize".to_string())
+                                );
+                                match serde_json::from_value::<ResponseInputOutputItem>(
+                                    item.content.clone(),
+                                ) {
+                                    Ok(func_output) => {
+                                        tracing::debug!(
+                                            "Successfully deserialized function_call_output"
+                                        );
+                                        items.push(func_output);
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Failed to deserialize function_call_output: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                            "reasoning" => {}
+                            _ => {
+                                warn!("Unknown item type in conversation: {}", item.item_type);
+                            }
+                        }
+                    }
+
+                    Self::append_current_input(&mut items, &request_body.input, &conv_id.0);
+                    request_body.input = ResponseInput::Items(items);
+                }
+                Err(e) => {
+                    warn!("Failed to load conversation history: {}", e);
+                }
+            }
+        }
+
+        // Apply previous response chain items if loaded.
+        // Note: conversation and previous_response_id are mutually exclusive
+        // (enforced by the caller in route_responses), so this branch and the
+        // conversation branch above never both modify request_body.input.
+        if let Some(mut items) = chain_items {
+            let id_suffix = original_previous_response_id.as_deref().unwrap_or("new");
+            Self::append_current_input(&mut items, &request_body.input, id_suffix);
+            request_body.input = ResponseInput::Items(items);
+        }
+
+        Ok(original_previous_response_id)
+    }
 }
 
 #[async_trait::async_trait]
@@ -696,165 +867,41 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             }
         };
 
+        // Validate mutual exclusivity of conversation and previous_response_id
+        // Treat empty strings as unset to match other metadata paths
+        let has_conversation = body.conversation.as_ref().is_some_and(|s| !s.is_empty());
+        let has_previous_response = body
+            .previous_response_id
+            .as_ref()
+            .is_some_and(|s| !s.is_empty());
+        if has_conversation && has_previous_response {
+            Metrics::record_router_error(
+                metrics_labels::ROUTER_OPENAI,
+                metrics_labels::BACKEND_EXTERNAL,
+                metrics_labels::CONNECTION_HTTP,
+                model,
+                metrics_labels::ENDPOINT_RESPONSES,
+                metrics_labels::ERROR_VALIDATION,
+            );
+            return error::bad_request(
+                "invalid_request",
+                "Cannot specify both 'conversation' and 'previous_response_id'".to_string(),
+            );
+        }
+
         let mut request_body = body.clone();
         if let Some(model) = model_id {
             request_body.model = model.to_string();
         }
         request_body.conversation = None;
 
-        let original_previous_response_id = request_body.previous_response_id.clone();
-
-        // Load items from previous response chain if specified
-        let mut conversation_items: Option<Vec<ResponseInputOutputItem>> = None;
-        if let Some(prev_id_str) = request_body.previous_response_id.take() {
-            let prev_id = ResponseId::from(prev_id_str.as_str());
-            match self
-                .responses_components
-                .response_storage
-                .get_response_chain(&prev_id, None)
-                .await
-            {
-                Ok(chain) => {
-                    let items: Vec<ResponseInputOutputItem> = chain
-                        .responses
-                        .iter()
-                        .flat_map(|stored| {
-                            Self::deserialize_items_from_array(&stored.input)
-                                .into_iter()
-                                .chain(Self::deserialize_items_from_array(&stored.output))
-                        })
-                        .collect();
-                    conversation_items = Some(items);
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to load previous response chain for {}: {}",
-                        prev_id_str, e
-                    );
-                }
-            }
-        }
-
-        if let Some(conv_id_str) = body.conversation.clone() {
-            let conv_id = ConversationId::from(conv_id_str.as_str());
-
-            if let Ok(None) = self
-                .responses_components
-                .conversation_storage
-                .get_conversation(&conv_id)
-                .await
-            {
-                Metrics::record_router_error(
-                    metrics_labels::ROUTER_OPENAI,
-                    metrics_labels::BACKEND_EXTERNAL,
-                    metrics_labels::CONNECTION_HTTP,
-                    model,
-                    metrics_labels::ENDPOINT_RESPONSES,
-                    metrics_labels::ERROR_VALIDATION,
-                );
-                return error::not_found(
-                    "not_found",
-                    format!("No conversation found with id '{}'", conv_id.0),
-                );
-            }
-
-            let params = ListParams {
-                limit: Self::MAX_CONVERSATION_HISTORY_ITEMS,
-                order: SortOrder::Asc,
-                after: None,
-            };
-
-            match self
-                .responses_components
-                .conversation_item_storage
-                .list_items(&conv_id, params)
-                .await
-            {
-                Ok(stored_items) => {
-                    let mut items: Vec<ResponseInputOutputItem> = Vec::new();
-                    for item in stored_items.into_iter() {
-                        match item.item_type.as_str() {
-                            "message" => {
-                                match serde_json::from_value::<Vec<ResponseContentPart>>(
-                                    item.content.clone(),
-                                ) {
-                                    Ok(content_parts) => {
-                                        items.push(ResponseInputOutputItem::Message {
-                                            id: item.id.0.clone(),
-                                            role: item
-                                                .role
-                                                .clone()
-                                                .unwrap_or_else(|| "user".to_string()),
-                                            content: content_parts,
-                                            status: item.status.clone(),
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "Failed to deserialize message content: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                            "function_call" => {
-                                match serde_json::from_value::<ResponseInputOutputItem>(
-                                    item.content.clone(),
-                                ) {
-                                    Ok(func_call) => items.push(func_call),
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "Failed to deserialize function_call: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                            "function_call_output" => {
-                                tracing::debug!(
-                                    "Loading function_call_output from DB - content: {}",
-                                    serde_json::to_string_pretty(&item.content)
-                                        .unwrap_or_else(|_| "failed to serialize".to_string())
-                                );
-                                match serde_json::from_value::<ResponseInputOutputItem>(
-                                    item.content.clone(),
-                                ) {
-                                    Ok(func_output) => {
-                                        tracing::debug!(
-                                            "Successfully deserialized function_call_output"
-                                        );
-                                        items.push(func_output);
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "Failed to deserialize function_call_output: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                            "reasoning" => {}
-                            _ => {
-                                warn!("Unknown item type in conversation: {}", item.item_type);
-                            }
-                        }
-                    }
-
-                    Self::append_current_input(&mut items, &request_body.input, &conv_id.0);
-                    request_body.input = ResponseInput::Items(items);
-                }
-                Err(e) => {
-                    warn!("Failed to load conversation history: {}", e);
-                }
-            }
-        }
-
-        // Apply previous response chain items if loaded
-        if let Some(mut items) = conversation_items {
-            let id_suffix = original_previous_response_id.as_deref().unwrap_or("new");
-            Self::append_current_input(&mut items, &request_body.input, id_suffix);
-            request_body.input = ResponseInput::Items(items);
-        }
+        let original_previous_response_id = match self
+            .load_input_history(body, &mut request_body, model)
+            .await
+        {
+            Ok(id) => id,
+            Err(response) => return response,
+        };
 
         request_body.store = Some(false);
         if let ResponseInput::Items(ref mut items) = request_body.input {

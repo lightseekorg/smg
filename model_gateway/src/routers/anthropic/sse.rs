@@ -3,12 +3,7 @@
 //! Provides SSE frame parsing, event formatting, stream wrappers,
 //! and the core stream consumption logic used by the streaming processor.
 
-use std::{
-    io,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use std::io;
 
 use axum::{
     body::Body,
@@ -16,14 +11,13 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use openai_protocol::messages::{ContentBlock, MessageDeltaUsage, StopReason, ToolUseBlock};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 use super::mcp::{IterationResult, McpToolCall};
-use crate::core::Worker;
 
 // ============================================================================
 // Constants
@@ -85,95 +79,6 @@ pub(crate) fn build_sse_response(
         error!("Failed to build streaming response: {}", e);
         crate::routers::error::internal_error("response_build_failed", "Failed to build response")
     })
-}
-
-// ============================================================================
-// Load Tracking Stream Wrapper
-// ============================================================================
-
-/// Stream wrapper that tracks worker load and circuit breaker outcome.
-///
-/// Decrements worker load when the stream completes or is dropped, and records
-/// circuit breaker outcome based on whether the stream completed successfully.
-pub(crate) struct LoadTrackingStream<S> {
-    inner: Pin<Box<S>>,
-    /// Worker is wrapped in `Option` so `Drop` can `.take()` it exactly once.
-    /// It is always `Some` during the stream's lifetime.
-    worker: Option<Arc<dyn Worker>>,
-    completed_successfully: bool,
-    encountered_error: bool,
-    /// If true, always record failure regardless of stream completion
-    force_failure: bool,
-}
-
-impl<S> LoadTrackingStream<S> {
-    pub(crate) fn new(inner: S, worker: Arc<dyn Worker>) -> Self {
-        Self {
-            inner: Box::pin(inner),
-            worker: Some(worker),
-            completed_successfully: false,
-            encountered_error: false,
-            force_failure: false,
-        }
-    }
-
-    pub(crate) fn new_force_failure(inner: S, worker: Arc<dyn Worker>) -> Self {
-        Self {
-            inner: Box::pin(inner),
-            worker: Some(worker),
-            completed_successfully: false,
-            encountered_error: false,
-            force_failure: true,
-        }
-    }
-}
-
-impl<S> Stream for LoadTrackingStream<S>
-where
-    S: Stream<Item = Result<Bytes, reqwest::Error>>,
-{
-    type Item = Result<Bytes, io::Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.inner.as_mut().poll_next(cx) {
-            Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(bytes))),
-            Poll::Ready(Some(Err(e))) => {
-                self.encountered_error = true;
-                Poll::Ready(Some(Err(io::Error::other(e.to_string()))))
-            }
-            Poll::Ready(None) => {
-                self.completed_successfully = true;
-                Poll::Ready(None)
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl<S> Drop for LoadTrackingStream<S> {
-    fn drop(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            worker.decrement_load();
-
-            if self.force_failure {
-                worker.record_outcome(false);
-                debug!(
-                    completed = %self.completed_successfully,
-                    "LoadTrackingStream (force_failure) completed, recorded failure"
-                );
-            } else if self.completed_successfully && !self.encountered_error {
-                worker.record_outcome(true);
-                debug!("LoadTrackingStream completed successfully, recorded success");
-            } else {
-                worker.record_outcome(false);
-                debug!(
-                    completed = %self.completed_successfully,
-                    error = %self.encountered_error,
-                    "LoadTrackingStream interrupted or errored, recorded failure"
-                );
-            }
-        }
-    }
 }
 
 // ============================================================================

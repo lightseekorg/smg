@@ -3,7 +3,10 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::Serialize;
+use serde_json::Value;
 
 #[derive(Serialize)]
 struct ErrorResponse<'a> {
@@ -105,4 +108,123 @@ pub fn extract_error_code_from_response<B>(response: &Response<B>) -> &str {
         .get(HEADER_X_SMG_ERROR_CODE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
+}
+
+static ORG_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s*\borganization org-\S+").unwrap());
+static PROJ_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s*\bproject proj_\S+").unwrap());
+
+/// Sanitize upstream error response bodies to prevent leaking internal identifiers.
+/// - Strips org-ID patterns (`org-xxx`)
+/// - Strips project-ID patterns (`proj_xxx`)
+/// - Replaces `invalid_image_url` error messages
+/// - Non-JSON bodies pass through unchanged
+pub fn sanitize_error_body(body: &str) -> String {
+    let mut json: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return body.to_string(),
+    };
+
+    let mut modified = false;
+
+    if let Some(error) = json.get_mut("error").and_then(Value::as_object_mut) {
+        if error.get("code").and_then(Value::as_str) == Some("invalid_image_url") {
+            error.insert("message".into(), Value::String("Invalid Image URL".into()));
+            modified = true;
+        } else if let Some(Value::String(msg)) = error.get("message") {
+            let sanitized = ORG_ID_RE.replace_all(msg, "");
+            let sanitized = PROJ_ID_RE.replace_all(&sanitized, "");
+            if sanitized.as_ref() != msg.as_str() {
+                error.insert("message".into(), Value::String(sanitized.into_owned()));
+                modified = true;
+            }
+        }
+    }
+
+    if modified {
+        serde_json::to_string(&json).unwrap_or_else(|_| body.to_string())
+    } else {
+        body.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_org_id() {
+        let body = r#"{"error":{"message":"Rate limit reached for model in organization org-abc123","type":"rate_limit","code":"rate_limit_exceeded"}}"#;
+        let result = sanitize_error_body(body);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let msg = parsed["error"]["message"].as_str().unwrap();
+        assert!(!msg.contains("org-"));
+        assert!(msg.contains("Rate limit reached for model"));
+    }
+
+    #[test]
+    fn test_sanitize_project_id() {
+        let body = r#"{"error":{"message":"Quota exceeded for project proj_xyz789","type":"insufficient_quota","code":"quota_exceeded"}}"#;
+        let result = sanitize_error_body(body);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let msg = parsed["error"]["message"].as_str().unwrap();
+        assert!(!msg.contains("proj_"));
+        assert!(msg.contains("Quota exceeded"));
+    }
+
+    #[test]
+    fn test_sanitize_invalid_image_url() {
+        let body = r#"{"error":{"message":"Could not process image at URL https://internal.corp/img.png: connection refused from 10.0.1.5","type":"invalid_request_error","code":"invalid_image_url"}}"#;
+        let result = sanitize_error_body(body);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["error"]["message"].as_str().unwrap(),
+            "Invalid Image URL"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_both_org_and_project() {
+        let body = r#"{"error":{"message":"Rate limit for organization org-abc123 project proj_xyz789","type":"rate_limit","code":"rate_limit_exceeded"}}"#;
+        let result = sanitize_error_body(body);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let msg = parsed["error"]["message"].as_str().unwrap();
+        assert!(!msg.contains("org-"));
+        assert!(!msg.contains("proj_"));
+        assert!(msg.contains("Rate limit for"));
+    }
+
+    #[test]
+    fn test_sanitize_org_id_at_start() {
+        let body = r#"{"error":{"message":"organization org-abc123 exceeded quota","type":"rate_limit","code":"rate_limit_exceeded"}}"#;
+        let result = sanitize_error_body(body);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let msg = parsed["error"]["message"].as_str().unwrap();
+        assert!(!msg.contains("org-"));
+        assert!(msg.contains("exceeded quota"));
+    }
+
+    #[test]
+    fn test_sanitize_project_id_at_start() {
+        let body = r#"{"error":{"message":"project proj_xyz789 quota exceeded","type":"insufficient_quota","code":"quota_exceeded"}}"#;
+        let result = sanitize_error_body(body);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        let msg = parsed["error"]["message"].as_str().unwrap();
+        assert!(!msg.contains("proj_"));
+        assert!(msg.contains("quota exceeded"));
+    }
+
+    #[test]
+    fn test_sanitize_non_json_passthrough() {
+        let body = "Bad Gateway";
+        let result = sanitize_error_body(body);
+        assert_eq!(result, "Bad Gateway");
+    }
+
+    #[test]
+    fn test_sanitize_json_without_error_field() {
+        let body = r#"{"status":"ok","data":"hello"}"#;
+        let result = sanitize_error_body(body);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["status"].as_str().unwrap(), "ok");
+    }
 }

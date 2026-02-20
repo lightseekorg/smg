@@ -362,6 +362,11 @@ class TestBuiltinToolRouting:
             f"Built-in tool should NOT produce mcp_call, got: {output_types}"
         )
 
+        # Built-in tool should NOT produce mcp_list_tools output
+        assert "mcp_list_tools" not in output_types, (
+            f"Built-in tool should NOT produce mcp_list_tools, got: {output_types}"
+        )
+
     def test_response_tools_shows_original_type(self, gateway_with_mcp_config):
         """Test that response tools field shows web_search_preview, not mcp."""
         gateway, client = gateway_with_mcp_config
@@ -520,6 +525,14 @@ class TestWebSearchStreamingEvents:
             "Built-in tool should NOT produce mcp_call events"
         )
 
+        # Verify no mcp_list_tools events (builtin servers should be hidden)
+        assert "response.mcp_list_tools.in_progress" not in event_types, (
+            "Built-in tool should NOT produce mcp_list_tools events"
+        )
+        assert "response.mcp_list_tools.completed" not in event_types, (
+            "Built-in tool should NOT produce mcp_list_tools events"
+        )
+
         # Verify final response
         completed_events = [e for e in events if e.type == "response.completed"]
         final_response = completed_events[0].response
@@ -532,6 +545,11 @@ class TestWebSearchStreamingEvents:
         )
         assert "mcp_call" not in final_output_types, (
             "Built-in tool should NOT produce mcp_call output"
+        )
+
+        # Verify no mcp_list_tools in final output
+        assert "mcp_list_tools" not in final_output_types, (
+            "Built-in tool should NOT produce mcp_list_tools output"
         )
 
         # Verify web_search_call item structure
@@ -640,6 +658,11 @@ class TestBuiltinToolRoutingGrpc:
             f"Built-in tool should NOT produce mcp_call, got: {output_types}"
         )
 
+        # Built-in tool should NOT produce mcp_list_tools output
+        assert "mcp_list_tools" not in output_types, (
+            f"Built-in tool should NOT produce mcp_list_tools, got: {output_types}"
+        )
+
     def test_response_tools_shows_original_type(self, gateway_with_mcp_config_grpc):
         """Test that response tools field shows web_search_preview, not mcp (gRPC)."""
         gateway, client, model_path = gateway_with_mcp_config_grpc
@@ -716,6 +739,14 @@ class TestWebSearchStreamingEventsGrpc:
             "Built-in tool should NOT produce mcp_call events"
         )
 
+        # Verify no mcp_list_tools events (builtin servers should be hidden)
+        assert "response.mcp_list_tools.in_progress" not in event_types, (
+            "Built-in tool should NOT produce mcp_list_tools events"
+        )
+        assert "response.mcp_list_tools.completed" not in event_types, (
+            "Built-in tool should NOT produce mcp_list_tools events"
+        )
+
         # Verify final response
         completed_events = [e for e in events if e.type == "response.completed"]
         final_response = completed_events[0].response
@@ -728,6 +759,11 @@ class TestWebSearchStreamingEventsGrpc:
         )
         assert "mcp_call" not in final_output_types, (
             "Built-in tool should NOT produce mcp_call output"
+        )
+
+        # Verify no mcp_list_tools in final output
+        assert "mcp_list_tools" not in final_output_types, (
+            "Built-in tool should NOT produce mcp_list_tools output"
         )
 
         # Verify web_search_call item structure
