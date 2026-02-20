@@ -34,7 +34,7 @@ pull_request_rules:
   - name: Comment on DCO check failure
     description: Post fix instructions when DCO sign-off is missing
     conditions:
-      - check-failure = dco
+      - check-failure = DCO
       - -closed
       - -draft
     actions:
