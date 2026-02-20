@@ -98,6 +98,7 @@ impl RouterTrait for AnthropicRouter {
                     url: Some(server.url.clone()),
                     authorization: server.authorization_token.clone(),
                     headers: HashMap::new(),
+                    allowed_tools: None,
                 })
                 .collect();
 

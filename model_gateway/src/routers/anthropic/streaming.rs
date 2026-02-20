@@ -187,12 +187,7 @@ async fn run_tool_loop(
 ) -> Result<(), String> {
     let session_id = format!("msg_{}", uuid::Uuid::new_v4());
     let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
-    let session = McpToolSession::new(
-        &router.mcp_orchestrator,
-        mcp_servers,
-        &session_id,
-        Default::default(),
-    );
+    let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &session_id);
 
     // Inject MCP tools into the request as regular tools
     let allowed_tools = mcp::collect_allowed_tools_from_toolsets(req_ctx.request.tools.as_deref());

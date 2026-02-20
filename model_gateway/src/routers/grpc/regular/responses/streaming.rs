@@ -31,9 +31,7 @@ use openai_protocol::{
 };
 use serde_json::{json, Value};
 use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
-use smg_mcp::{
-    McpServerBinding, McpSessionOptions, McpToolSession, ResponseFormat, ToolExecutionInput,
-};
+use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, trace, warn};
@@ -503,14 +501,7 @@ async fn execute_tool_loop_streaming_internal(
     let response_id = format!("resp_{}", Uuid::new_v4());
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
-    let session = McpToolSession::new(
-        &ctx.mcp_orchestrator,
-        mcp_servers,
-        &response_id,
-        McpSessionOptions {
-            request_tools: original_request.tools.as_deref(),
-        },
-    );
+    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &response_id);
 
     // Create response event emitter
     let model = current_request.model.clone();

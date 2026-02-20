@@ -21,6 +21,8 @@ pub struct McpServerInput {
     pub url: Option<String>,
     pub authorization: Option<String>,
     pub headers: HashMap<String, String>,
+    /// Optional per-server tool allowlist.
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 /// Connect to MCP servers described by protocol-agnostic inputs.
@@ -88,6 +90,7 @@ pub async fn connect_mcp_servers(
                         mcp_servers.push(McpServerBinding {
                             label: input.label.clone(),
                             server_key,
+                            allowed_tools: input.allowed_tools.clone(),
                         });
                     }
                 }
@@ -101,6 +104,7 @@ pub async fn connect_mcp_servers(
             mcp_servers.push(McpServerBinding {
                 label: input.label.clone(),
                 server_key: input.label.clone(),
+                allowed_tools: input.allowed_tools.clone(),
             });
         }
     }
@@ -222,6 +226,7 @@ pub async fn ensure_mcp_servers(
                 mcp_servers.push(McpServerBinding {
                     label: server_name.clone(),
                     server_key: server_name,
+                    allowed_tools: None,
                 });
             }
         } else {
@@ -258,6 +263,7 @@ pub async fn ensure_request_mcp_client(
             url: tool.server_url.clone(),
             authorization: tool.authorization.clone(),
             headers: tool.headers.clone().unwrap_or_default(),
+            allowed_tools: tool.allowed_tools.clone(),
         })
         .collect();
 
