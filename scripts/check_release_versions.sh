@@ -102,13 +102,13 @@ get_crate_version() {
     grep -m1 '^version' "$file" | sed 's/.*"\(.*\)".*/\1/'
 }
 
-# Extract version at a specific git ref
+# Extract version at a specific git ref (returns empty string if crate missing)
 get_crate_version_at_ref() {
     local path="$1"
     local ref="$2"
-    git show "$ref:$path/Cargo.toml" 2>/dev/null \
-        | grep -m1 '^version' \
-        | sed 's/.*"\(.*\)".*/\1/'
+    local content
+    content=$(git show "$ref:$path/Cargo.toml" 2>/dev/null) || return 0
+    echo "$content" | grep -m1 '^version' | sed 's/.*"\(.*\)".*/\1/'
 }
 
 # Extract workspace dep version from root Cargo.toml
@@ -206,10 +206,8 @@ set_workspace_dep_version() {
     local escaped_old
     escaped_old=$(escape_version "$old_version")
     sed_inplace "s/^${dep_key} = { version = \"${escaped_old}\"/${dep_key} = { version = \"${new_version}\"/" "$root_toml"
-    local escaped_new
-    escaped_new=$(escape_version "$new_version")
     if ! grep -q "^${dep_key} .* version = \"${new_version}\"" "$root_toml"; then
-        echo -e "    ${RED}FAILED to update $dep_key in workspace Cargo.toml (expected v${old_version}, not found)${NC}" >&2
+        echo -e "    ${RED}FAILED to update $dep_key in workspace Cargo.toml to v${new_version}${NC}" >&2
         return 1
     fi
 }
@@ -309,10 +307,12 @@ for entry in "${NEEDS_BUMP[@]}"; do
     fi
 done
 
-for entry in "${NEEDS_WS_SYNC[@]+"${NEEDS_WS_SYNC[@]}"}"; do
-    IFS='|' read -r name dep_key crate_version ws_version path <<< "$entry"
-    echo -e "  ${BLUE}sync${NC} workspace Cargo.toml $dep_key v$ws_version → v$crate_version"
-done
+if [[ ${#NEEDS_WS_SYNC[@]} -gt 0 ]]; then
+    for entry in "${NEEDS_WS_SYNC[@]}"; do
+        IFS='|' read -r name dep_key crate_version ws_version path <<< "$entry"
+        echo -e "  ${BLUE}sync${NC} workspace Cargo.toml $dep_key v$ws_version → v$crate_version"
+    done
+fi
 
 echo ""
 read -rp "Apply fixes? [y/N] " answer
@@ -348,14 +348,16 @@ for entry in "${NEEDS_BUMP[@]}"; do
     fi
 done
 
-for entry in "${NEEDS_WS_SYNC[@]+"${NEEDS_WS_SYNC[@]}"}"; do
-    IFS='|' read -r name dep_key crate_version ws_version path <<< "$entry"
-    if set_workspace_dep_version "$dep_key" "$ws_version" "$crate_version"; then
-        echo -e "  ${GREEN}✓${NC} Cargo.toml $dep_key → v$crate_version"
-    else
-        fix_failed=$((fix_failed + 1))
-    fi
-done
+if [[ ${#NEEDS_WS_SYNC[@]} -gt 0 ]]; then
+    for entry in "${NEEDS_WS_SYNC[@]}"; do
+        IFS='|' read -r name dep_key crate_version ws_version path <<< "$entry"
+        if set_workspace_dep_version "$dep_key" "$ws_version" "$crate_version"; then
+            echo -e "  ${GREEN}✓${NC} Cargo.toml $dep_key → v$crate_version"
+        else
+            fix_failed=$((fix_failed + 1))
+        fi
+    done
+fi
 
 echo ""
 if [[ "$fix_failed" -gt 0 ]]; then
