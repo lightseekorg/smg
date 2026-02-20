@@ -44,7 +44,7 @@ sed_inplace() {
 
 # Escape dots in a version string for use in sed regex
 escape_version() {
-    echo "$1" | sed 's/\./\\./g'
+    echo "${1//./\\.}"
 }
 
 # ---------------------------------------------------------------------------
@@ -176,6 +176,10 @@ detect_bump_level() {
 bump_version() {
     local version="$1"
     local level="$2"
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "ERROR: bump_version only supports X.Y.Z format, got: $version" >&2
+        return 1
+    fi
     local major minor patch
     IFS='.' read -r major minor patch <<< "$version"
     case "$level" in
@@ -348,7 +352,6 @@ for entry in "${NEEDS_BUMP[@]}"; do
 
     # Sync workspace root Cargo.toml (read actual ws version in case it drifted)
     if [[ "$dep_key" != "-" ]]; then
-        local ws_old
         ws_old=$(get_workspace_dep_version "$dep_key")
         if set_workspace_dep_version "$dep_key" "$ws_old" "$new_version"; then
             echo -e "  ${GREEN}✓${NC} Cargo.toml $dep_key → v$new_version"
