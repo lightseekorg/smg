@@ -194,7 +194,7 @@ pub(crate) async fn ensure_connection(
 }
 
 /// Strip `mcp_servers` from request and inject MCP tools as regular tools.
-fn inject_mcp_tools_into_request(
+pub(crate) fn inject_mcp_tools_into_request(
     request: &mut CreateMessageRequest,
     session: &McpToolSession<'_>,
     allowed_tools_filter: &Option<Vec<String>>,
@@ -360,7 +360,7 @@ pub(crate) fn rebuild_response_with_mcp_blocks(
 /// Collect allowed tools filter from `McpToolset` entries in the tools array.
 ///
 /// Returns `None` (no filtering) if any toolset allows all tools.
-fn collect_allowed_tools_from_toolsets(tools: &Option<Vec<Tool>>) -> Option<Vec<String>> {
+pub(crate) fn collect_allowed_tools_from_toolsets(tools: &Option<Vec<Tool>>) -> Option<Vec<String>> {
     let tools = tools.as_ref()?;
 
     let mut all_allowed = Vec::new();

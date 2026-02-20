@@ -5,18 +5,21 @@
 //! - Tool use and MCP integration
 //! - Extended thinking and prompt caching
 
-use std::{any::Any, fmt, sync::Arc, time::Duration};
+use std::{any::Any, collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use axum::{body::Body, extract::Request, http::HeaderMap, response::Response};
 use openai_protocol::messages::CreateMessageRequest;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::{
     context::{RequestContext, RouterContext},
-    mcp, models, non_streaming, streaming, worker,
+    models, non_streaming, streaming, worker,
 };
-use crate::{app_context::AppContext, routers::RouterTrait};
+use crate::{
+    app_context::AppContext,
+    routers::{mcp_utils, RouterTrait},
+};
 
 /// Router for Anthropic-specific APIs
 ///
@@ -86,11 +89,35 @@ impl RouterTrait for AnthropicRouter {
         let headers_owned = headers.cloned();
 
         let mcp_servers = if request.has_mcp_toolset() {
-            match mcp::ensure_connection(&mut request, &self.router_ctx.mcp_orchestrator).await {
-                Ok(servers) => Some(servers),
-                Err(response) => {
-                    warn!(model = %model_id, "MCP connection setup failed");
-                    return response;
+            let inputs: Vec<mcp_utils::McpServerInput> = request
+                .mcp_server_configs()
+                .unwrap_or_default()
+                .iter()
+                .map(|server| mcp_utils::McpServerInput {
+                    label: server.name.clone(),
+                    url: Some(server.url.clone()),
+                    authorization: server.authorization_token.clone(),
+                    headers: HashMap::new(),
+                })
+                .collect();
+
+            match mcp_utils::ensure_mcp_servers(
+                &self.router_ctx.mcp_orchestrator,
+                &inputs,
+                &[],
+            )
+            .await
+            {
+                Some(servers) => {
+                    info!(server_count = servers.len(), "MCP: connected to MCP servers");
+                    Some(servers)
+                }
+                None => {
+                    error!("Failed to connect to any MCP servers");
+                    return crate::routers::error::bad_gateway(
+                        "mcp_connection_failed",
+                        "Failed to connect to MCP servers. Check server URLs and authorization.",
+                    );
                 }
             }
         } else {
