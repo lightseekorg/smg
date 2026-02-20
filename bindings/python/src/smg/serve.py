@@ -66,19 +66,23 @@ class WorkerLauncher(ABC):
         return env
 
     def _filter_backend_args(self, backend_args: list[str], filter_args: list[str]) -> list[str]:
-        """Filter backend_args to only include those relevant for vLLM's grpc_server."""
-        filtered_backend_args = []
+        """Filter out args from backend_args that are already set by the launcher.
+
+        Handles both ``--key value`` and ``--key=value`` syntax.
+        """
+        filtered = []
         skip_next = False
         for arg in backend_args:
             if skip_next:
                 skip_next = False
                 continue
-            if arg in filter_args:
-                skip_next = True  # Assume all valid args take a value
+            key = arg.split("=", 1)[0]
+            if key in filter_args:
+                if "=" not in arg:
+                    skip_next = True  # value is the next token
                 continue
-            filtered_backend_args.append(arg)
-
-        return filtered_backend_args
+            filtered.append(arg)
+        return filtered
 
     def launch(
         self, args: argparse.Namespace, backend_args: list[str], host: str, port: int, env: dict
@@ -124,7 +128,7 @@ class SglangWorkerLauncher(WorkerLauncher):
 
 
 class VllmWorkerLauncher(WorkerLauncher):
-    """Launcher for vLLM inference workers (gRPC mode only)."""
+    """Launcher for vLLM inference workers."""
 
     def _get_tp_size(self, args: argparse.Namespace) -> int:
         return getattr(args, "tensor_parallel_size", 1)
@@ -165,6 +169,10 @@ class TrtllmWorkerLauncher(WorkerLauncher):
         """Get tensor parallel size from args or config file.
 
         Priority: args.tp_size > args.tensor_parallel_size > config file > default(1)
+
+        Raises:
+            FileNotFoundError: If --config path does not exist.
+            yaml.YAMLError: If --config file contains invalid YAML.
         """
         # Try --tp-size argument first
         tp_size = getattr(args, "tp_size", None)
@@ -176,22 +184,22 @@ class TrtllmWorkerLauncher(WorkerLauncher):
         if tp_size is not None:
             return tp_size
 
-        # Try reading from config YAML file
+        # Try reading from config YAML file — let I/O and parse errors propagate
+        # so misconfigurations are caught early instead of silently using tp=1.
         config_path = getattr(args, "config", None)
         if config_path:
-            try:
-                import yaml
+            import yaml
 
-                with open(config_path) as f:
-                    config = yaml.safe_load(f)
-                    if config and "tensor_parallel_size" in config:
-                        return int(config["tensor_parallel_size"])
-                    if config and "tp_size" in config:
-                        return int(config["tp_size"])
-            except Exception as e:
-                logger.warning(
-                    "Failed to read tensor_parallel_size from config %s: %s", config_path, e
-                )
+            with open(config_path) as f:
+                config = yaml.safe_load(f)
+            if config and "tensor_parallel_size" in config:
+                return int(config["tensor_parallel_size"])
+            if config and "tp_size" in config:
+                return int(config["tp_size"])
+            logger.warning(
+                "Config %s does not contain tensor_parallel_size or tp_size, defaulting to 1",
+                config_path,
+            )
 
         return 1
 

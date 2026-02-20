@@ -382,6 +382,37 @@ class TestWorkerLauncherGpuEnv:
         assert env["CUDA_VISIBLE_DEVICES"] == "0"
 
 
+class TestFilterBackendArgs:
+    """Test _filter_backend_args handles both --key value and --key=value."""
+
+    def test_filters_key_value_pair(self):
+        launcher = SglangWorkerLauncher()
+        backend_args = ["--model-path", "/tmp/m", "--trust-remote-code"]
+        result = launcher._filter_backend_args(backend_args, ["--model-path"])
+        assert result == ["--trust-remote-code"]
+
+    def test_filters_key_equals_value(self):
+        launcher = SglangWorkerLauncher()
+        backend_args = ["--model-path=/tmp/m", "--trust-remote-code"]
+        result = launcher._filter_backend_args(backend_args, ["--model-path"])
+        assert result == ["--trust-remote-code"]
+
+    def test_filters_multiple_keys(self):
+        launcher = SglangWorkerLauncher()
+        backend_args = ["--model", "/tmp/m", "--host", "0.0.0.0", "--extra-flag"]
+        result = launcher._filter_backend_args(backend_args, ["--model", "--host"])
+        assert result == ["--extra-flag"]
+
+    def test_empty_backend_args(self):
+        launcher = SglangWorkerLauncher()
+        assert launcher._filter_backend_args([], ["--model"]) == []
+
+    def test_no_filter_args(self):
+        launcher = SglangWorkerLauncher()
+        backend_args = ["--foo", "bar"]
+        assert launcher._filter_backend_args(backend_args, []) == ["--foo", "bar"]
+
+
 class TestSglangWorkerLauncher:
     """Test SglangWorkerLauncher.build_command()."""
 
@@ -485,7 +516,6 @@ class TestTrtllmWorkerLauncher:
         assert "0.0.0.0" in cmd
         assert "--port" in cmd
         assert "50051" in cmd
-        print(cmd)
         for arg in backend_args:
             assert arg in cmd
 
@@ -533,26 +563,38 @@ class TestTrtllmWorkerLauncher:
         args = argparse.Namespace(config=str(config_file))
         assert launcher._get_tp_size(args) == 8
 
-    def test_get_tp_size_from_config_read_fails_returns_default(self):
-        """When config file read fails, log warning and return default 1."""
+    def test_get_tp_size_from_config_read_fails_raises(self):
+        """When config file does not exist, FileNotFoundError propagates."""
         launcher = TrtllmWorkerLauncher()
         args = argparse.Namespace(config="/nonexistent/config.yaml")
-        with patch("smg.serve.logger") as mock_logger:
-            result = launcher._get_tp_size(args)
-        assert result == 1
-        mock_logger.warning.assert_called_once()
-        call_args = mock_logger.warning.call_args[0]
-        assert "Failed to read tensor_parallel_size from config" in call_args[0]
-        assert "/nonexistent/config.yaml" in call_args[1]
-        assert call_args[2] is not None  # exception message or object
+        with pytest.raises(FileNotFoundError):
+            launcher._get_tp_size(args)
 
     def test_get_tp_size_from_config_empty_or_no_keys_returns_default(self, tmp_path):
-        """When config has no tp keys or is empty, return default 1."""
+        """When config has no tp keys or is empty, warn and return default 1."""
         config_file = tmp_path / "config.yaml"
         config_file.write_text("other_key: 42\n")
         launcher = TrtllmWorkerLauncher()
         args = argparse.Namespace(config=str(config_file))
-        assert launcher._get_tp_size(args) == 1
+        with patch("smg.serve.logger") as mock_logger:
+            result = launcher._get_tp_size(args)
+        assert result == 1
+        mock_logger.warning.assert_called_once()
+        assert (
+            "does not contain tensor_parallel_size or tp_size"
+            in mock_logger.warning.call_args[0][0]
+        )
+
+    def test_get_tp_size_from_config_malformed_yaml_raises(self, tmp_path):
+        """When config file contains invalid YAML, error propagates."""
+        config_file = tmp_path / "bad.yaml"
+        config_file.write_text("{{invalid yaml")
+        launcher = TrtllmWorkerLauncher()
+        args = argparse.Namespace(config=str(config_file))
+        import yaml
+
+        with pytest.raises(yaml.YAMLError):
+            launcher._get_tp_size(args)
 
 
 # ---------------------------------------------------------------------------
