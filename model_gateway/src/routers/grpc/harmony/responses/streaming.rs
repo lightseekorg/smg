@@ -6,7 +6,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use openai_protocol::responses::{ResponseToolType, ResponsesRequest};
 use serde_json::json;
-use smg_mcp::{McpSessionOptions, McpToolSession};
+use smg_mcp::{McpServerBinding, McpSessionOptions, McpToolSession};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -120,7 +120,7 @@ async fn execute_mcp_tool_loop_streaming(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
-    mcp_servers: Vec<(String, String)>,
+    mcp_servers: Vec<McpServerBinding>,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) {
@@ -172,11 +172,11 @@ async fn execute_mcp_tool_loop_streaming(
     let mut mcp_tracking = McpCallTracking::new();
 
     // Emit mcp_list_tools on first iteration
-    for (label, key) in session.mcp_servers().iter() {
-        let tools_for_server = session.list_tools_for_server(key);
+    for binding in session.mcp_servers().iter() {
+        let tools_for_server = session.list_tools_for_server(&binding.server_key);
 
         if emitter
-            .emit_mcp_list_tools_sequence(label, &tools_for_server, tx)
+            .emit_mcp_list_tools_sequence(&binding.label, &tools_for_server, tx)
             .is_err()
         {
             return;

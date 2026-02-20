@@ -31,7 +31,9 @@ use openai_protocol::{
 };
 use serde_json::{json, Value};
 use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
-use smg_mcp::{McpSessionOptions, McpToolSession, ResponseFormat, ToolExecutionInput};
+use smg_mcp::{
+    McpServerBinding, McpSessionOptions, McpToolSession, ResponseFormat, ToolExecutionInput,
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, trace, warn};
@@ -421,7 +423,7 @@ pub(super) async fn execute_tool_loop_streaming(
     current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
     params: ResponsesCallContext,
-    mcp_servers: Vec<(String, String)>,
+    mcp_servers: Vec<McpServerBinding>,
 ) -> Response {
     // Create SSE channel for client
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
@@ -488,7 +490,7 @@ async fn execute_tool_loop_streaming_internal(
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
     params: ResponsesCallContext,
-    mcp_servers: Vec<(String, String)>,
+    mcp_servers: Vec<McpServerBinding>,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
     let mut state = ToolLoopState::new(original_request.input.clone());
@@ -549,10 +551,10 @@ async fn execute_tool_loop_streaming_internal(
 
         // Emit mcp_list_tools as first output item (only once, on first iteration)
         if !mcp_list_tools_emitted {
-            for (label, key) in session.mcp_servers().iter() {
-                let tools_for_server = session.list_tools_for_server(key);
+            for binding in session.mcp_servers().iter() {
+                let tools_for_server = session.list_tools_for_server(&binding.server_key);
 
-                emitter.emit_mcp_list_tools_sequence(label, &tools_for_server, &tx)?;
+                emitter.emit_mcp_list_tools_sequence(&binding.label, &tools_for_server, &tx)?;
             }
             mcp_list_tools_emitted = true;
         }
