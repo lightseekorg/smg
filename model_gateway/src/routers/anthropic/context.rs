@@ -9,7 +9,7 @@ use axum::http::HeaderMap;
 use openai_protocol::messages::CreateMessageRequest;
 use smg_mcp::McpOrchestrator;
 
-use crate::core::WorkerRegistry;
+use crate::core::{Worker, WorkerRegistry};
 
 /// Shared context passed to all Anthropic handler functions.
 #[derive(Clone)]
@@ -27,4 +27,6 @@ pub(crate) struct RequestContext {
     pub model_id: String,
     /// Connected MCP server keys, present when the request includes `mcp_toolset` tools.
     pub mcp_servers: Option<Vec<(String, String)>>,
+    /// Worker selected once in `route_messages`, reused for all iterations.
+    pub worker: Arc<dyn Worker>,
 }

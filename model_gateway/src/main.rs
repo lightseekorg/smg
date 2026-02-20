@@ -1242,6 +1242,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let router_config = cli_args.to_router_config(prefill_urls)?;
     router_config.validate()?;
+
     let server_config = cli_args.to_server_config(router_config);
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move { server::startup(server_config).await })?;

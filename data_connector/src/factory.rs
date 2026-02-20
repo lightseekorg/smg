@@ -46,7 +46,7 @@ pub struct StorageFactoryConfig<'a> {
 ///
 /// # Errors
 /// Returns error string if required configuration is missing or initialization fails
-pub fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageTuple, String> {
+pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageTuple, String> {
     match config.backend {
         HistoryBackend::Memory => {
             info!("Initializing data connector: Memory");
@@ -99,7 +99,7 @@ pub fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageTuple, 
                 log_db_url, postgres_cfg.pool_max
             );
 
-            let storages = create_postgres_storage(postgres_cfg)?;
+            let storages = create_postgres_storage(postgres_cfg).await?;
 
             info!("Data connector initialized successfully: Postgres");
 
@@ -134,31 +134,36 @@ pub fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageTuple, 
     }
 }
 
-/// Create Oracle storage backends
+/// Create Oracle storage backends with a single shared connection pool.
 fn create_oracle_storage(oracle_cfg: &OracleConfig) -> Result<StorageTuple, String> {
-    let response_storage = OracleResponseStorage::new(oracle_cfg.clone())
-        .map_err(|err| format!("failed to initialize Oracle response storage: {err}"))?;
+    use crate::oracle::OracleStore;
 
-    let conversation_storage = OracleConversationStorage::new(oracle_cfg.clone())
-        .map_err(|err| format!("failed to initialize Oracle conversation storage: {err}"))?;
-
-    let conversation_item_storage = OracleConversationItemStorage::new(oracle_cfg.clone())
-        .map_err(|err| format!("failed to initialize Oracle conversation item storage: {err}"))?;
+    let store = OracleStore::new(
+        oracle_cfg,
+        &[
+            OracleConversationStorage::init_schema,
+            OracleConversationItemStorage::init_schema,
+            OracleResponseStorage::init_schema,
+        ],
+    )?;
 
     Ok((
-        Arc::new(response_storage),
-        Arc::new(conversation_storage),
-        Arc::new(conversation_item_storage),
+        Arc::new(OracleResponseStorage::new(store.clone())),
+        Arc::new(OracleConversationStorage::new(store.clone())),
+        Arc::new(OracleConversationItemStorage::new(store)),
     ))
 }
 
-fn create_postgres_storage(postgres_cfg: &PostgresConfig) -> Result<StorageTuple, String> {
+async fn create_postgres_storage(postgres_cfg: &PostgresConfig) -> Result<StorageTuple, String> {
     let store = PostgresStore::new(postgres_cfg.clone())?;
     let postgres_resp = PostgresResponseStorage::new(store.clone())
+        .await
         .map_err(|err| format!("failed to initialize Postgres response storage: {err}"))?;
     let postgres_conv = PostgresConversationStorage::new(store.clone())
+        .await
         .map_err(|err| format!("failed to initialize Postgres conversation storage: {err}"))?;
-    let postgres_item = PostgresConversationItemStorage::new(store.clone())
+    let postgres_item = PostgresConversationItemStorage::new(store)
+        .await
         .map_err(|err| format!("failed to initialize Postgres conversation item storage: {err}"))?;
 
     Ok((
@@ -172,11 +177,120 @@ fn create_redis_storage(redis_cfg: &RedisConfig) -> Result<StorageTuple, String>
     let store = RedisStore::new(redis_cfg.clone())?;
     let redis_resp = RedisResponseStorage::new(store.clone());
     let redis_conv = RedisConversationStorage::new(store.clone());
-    let redis_item = RedisConversationItemStorage::new(store.clone());
+    let redis_item = RedisConversationItemStorage::new(store);
 
     Ok((
         Arc::new(redis_resp),
         Arc::new(redis_conv),
         Arc::new(redis_item),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::core::{NewConversation, NewConversationItem, StoredResponse};
+
+    #[tokio::test]
+    async fn test_create_storage_memory() {
+        let config = StorageFactoryConfig {
+            backend: &HistoryBackend::Memory,
+            oracle: None,
+            postgres: None,
+            redis: None,
+        };
+        let (resp, conv, items) = create_storage(config).await.unwrap();
+
+        // Verify they work end-to-end
+        let mut response = StoredResponse::new(None);
+        response.input = json!("hello");
+        let id = resp.store_response(response).await.unwrap();
+        assert!(resp.get_response(&id).await.unwrap().is_some());
+
+        let conversation = conv
+            .create_conversation(NewConversation {
+                id: None,
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(conv
+            .get_conversation(&conversation.id)
+            .await
+            .unwrap()
+            .is_some());
+
+        let item = items
+            .create_item(NewConversationItem {
+                id: None,
+                response_id: None,
+                item_type: "message".to_string(),
+                role: Some("user".to_string()),
+                content: json!([]),
+                status: Some("completed".to_string()),
+            })
+            .await
+            .unwrap();
+        assert!(items.get_item(&item.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_create_storage_none() {
+        let config = StorageFactoryConfig {
+            backend: &HistoryBackend::None,
+            oracle: None,
+            postgres: None,
+            redis: None,
+        };
+        let (resp, conv, _items) = create_storage(config).await.unwrap();
+
+        // NoOp storage should accept writes but return nothing on reads
+        let mut response = StoredResponse::new(None);
+        response.input = json!("hello");
+        let id = resp.store_response(response).await.unwrap();
+        assert!(resp.get_response(&id).await.unwrap().is_none());
+        assert!(conv
+            .get_conversation(&"nonexistent".into())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_create_storage_oracle_missing_config() {
+        let config = StorageFactoryConfig {
+            backend: &HistoryBackend::Oracle,
+            oracle: None,
+            postgres: None,
+            redis: None,
+        };
+        let err = create_storage(config).await.err().expect("should fail");
+        assert!(err.contains("oracle configuration is required"));
+    }
+
+    #[tokio::test]
+    async fn test_create_storage_postgres_missing_config() {
+        let config = StorageFactoryConfig {
+            backend: &HistoryBackend::Postgres,
+            oracle: None,
+            postgres: None,
+            redis: None,
+        };
+        let err = create_storage(config).await.err().expect("should fail");
+        assert!(err.contains("Postgres configuration is required"));
+    }
+
+    #[tokio::test]
+    async fn test_create_storage_redis_missing_config() {
+        let config = StorageFactoryConfig {
+            backend: &HistoryBackend::Redis,
+            oracle: None,
+            postgres: None,
+            redis: None,
+        };
+        let err = create_storage(config).await.err().expect("should fail");
+        assert!(err.contains("Redis configuration is required"));
+    }
 }
