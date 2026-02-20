@@ -332,6 +332,13 @@ pub(crate) fn collect_allowed_tools_per_server(
             None => Some(Vec::new()),
         };
 
+        if result.contains_key(&toolset.mcp_server_name) {
+            warn!(
+                server_name = %toolset.mcp_server_name,
+                "Duplicate mcp_toolset for the same server; keeping first entry"
+            );
+            continue;
+        }
         result.insert(toolset.mcp_server_name.clone(), allowed);
     }
 
