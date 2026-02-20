@@ -23,6 +23,9 @@ use super::mcp::{IterationResult, McpToolCall};
 // Constants
 // ============================================================================
 
+/// Sentinel error string returned when the downstream SSE client disconnects.
+pub(crate) const CLIENT_DISCONNECTED_ERROR: &str = "Client disconnected";
+
 /// Maximum SSE buffer size (1 MB) to prevent DoS from upstream workers
 /// that send data without frame delimiters.
 const MAX_SSE_BUFFER_SIZE: usize = 1024 * 1024;
@@ -443,7 +446,7 @@ where
     /// Send an SSE event to the client, returning `Err` on disconnect.
     async fn send(&self, event_type: &str, data: &Value) -> Result<(), String> {
         if !send_event(self.tx, event_type, data).await {
-            return Err("Client disconnected".into());
+            return Err(CLIENT_DISCONNECTED_ERROR.into());
         }
         Ok(())
     }

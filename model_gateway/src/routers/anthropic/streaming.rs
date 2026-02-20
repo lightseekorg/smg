@@ -159,7 +159,7 @@ fn execute_mcp_streaming(router: &RouterContext, req_ctx: RequestContext) -> Res
     )]
     tokio::spawn(async move {
         if let Err(e) = run_tool_loop(tx.clone(), router, req_ctx).await {
-            if e == "Client disconnected" {
+            if e == sse::CLIENT_DISCONNECTED_ERROR {
                 debug!(error = %e, "Streaming tool loop ended: client disconnected");
                 return;
             }
