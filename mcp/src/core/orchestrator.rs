@@ -54,6 +54,7 @@ use super::{
     metrics::McpMetrics,
     pool::{McpConnectionPool, PoolKey},
     reconnect::ReconnectionManager,
+    session::McpServerBinding,
 };
 use crate::{
     approval::{
@@ -1165,16 +1166,16 @@ impl McpOrchestrator {
         &self,
         inputs: Vec<ToolExecutionInput>,
         allowed_servers: &[String],
-        mcp_servers: &[(String, String)],
+        mcp_servers: &[McpServerBinding],
         request_ctx: &McpRequestContext<'_>,
     ) -> Vec<ToolExecutionOutput> {
         let fallback_label = mcp_servers
             .first()
-            .map(|(label, _)| label.as_str())
+            .map(|b| b.label.as_str())
             .unwrap_or("mcp");
         let server_label_map: HashMap<_, _> = mcp_servers
             .iter()
-            .map(|(label, key)| (key.as_str(), label.as_str()))
+            .map(|b| (b.server_key.as_str(), b.label.as_str()))
             .collect();
         let mut results = Vec::with_capacity(inputs.len());
 

@@ -7,7 +7,7 @@ use std::{sync::Arc, time::Duration};
 
 use axum::http::HeaderMap;
 use openai_protocol::messages::CreateMessageRequest;
-use smg_mcp::McpOrchestrator;
+use smg_mcp::{McpOrchestrator, McpServerBinding};
 
 use crate::core::{Worker, WorkerRegistry};
 
@@ -26,7 +26,7 @@ pub(crate) struct RequestContext {
     pub headers: Option<HeaderMap>,
     pub model_id: String,
     /// Connected MCP server keys, present when the request includes `mcp_toolset` tools.
-    pub mcp_servers: Option<Vec<(String, String)>>,
+    pub mcp_servers: Option<Vec<McpServerBinding>>,
     /// Worker selected once in `route_messages`, reused for all iterations.
     pub worker: Arc<dyn Worker>,
 }

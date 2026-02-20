@@ -24,7 +24,7 @@ use openai_protocol::{
     responses::{ResponseToolType, ResponsesRequest},
 };
 use serde_json::{json, Value};
-use smg_mcp::{McpOrchestrator, McpSessionOptions, McpToolSession, ResponseFormat};
+use smg_mcp::{McpOrchestrator, McpServerBinding, McpSessionOptions, McpToolSession, ResponseFormat};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -669,7 +669,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
     orchestrator: &Arc<McpOrchestrator>,
-    mcp_servers: Vec<(String, String)>,
+    mcp_servers: Vec<McpServerBinding>,
 ) -> Response {
     let payload = req.payload;
 
@@ -815,16 +815,16 @@ pub(super) async fn handle_streaming_with_tool_interception(
                                         if is_in_progress {
                                             seen_in_progress = true;
                                             if !mcp_list_tools_sent {
-                                                for (label, key) in session.mcp_servers().iter() {
+                                                for binding in session.mcp_servers().iter() {
                                                     let list_tools_index =
                                                         handler.allocate_synthetic_output_index();
                                                     if !send_mcp_list_tools_events(
                                                         &tx,
                                                         &session,
-                                                        label,
+                                                        &binding.label,
                                                         list_tools_index,
                                                         &mut sequence_number,
-                                                        key,
+                                                        &binding.server_key,
                                                     ) {
                                                         // Client disconnected
                                                         return;

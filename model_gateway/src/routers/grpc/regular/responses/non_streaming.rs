@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::response::Response;
 use openai_protocol::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse};
 use serde_json::json;
-use smg_mcp::{McpSessionOptions, McpToolSession, ToolExecutionInput};
+use smg_mcp::{McpServerBinding, McpSessionOptions, McpToolSession, ToolExecutionInput};
 use tracing::{debug, error, trace, warn};
 
 use super::{
@@ -133,7 +133,7 @@ pub(super) async fn execute_tool_loop(
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
     params: &ResponsesCallContext,
-    mcp_servers: Vec<(String, String)>,
+    mcp_servers: Vec<McpServerBinding>,
 ) -> Result<ResponsesResponse, Response> {
     let mut state = ToolLoopState::new(original_request.input.clone());
 

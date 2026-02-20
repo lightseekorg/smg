@@ -14,7 +14,7 @@ use openai_protocol::messages::{
     WebSearchToolResultBlock,
 };
 use serde_json::Value;
-use smg_mcp::{McpToolSession, ToolEntry, ToolExecutionInput};
+use smg_mcp::{McpServerBinding, McpToolSession, ToolEntry, ToolExecutionInput};
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -151,7 +151,7 @@ pub(crate) fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> 
 pub(crate) async fn ensure_connection(
     request: &mut CreateMessageRequest,
     orchestrator: &Arc<smg_mcp::McpOrchestrator>,
-) -> Result<Vec<(String, String)>, Response> {
+) -> Result<Vec<McpServerBinding>, Response> {
     let inputs: Vec<mcp_utils::McpServerInput> = request
         .mcp_server_configs()
         .unwrap_or_default()

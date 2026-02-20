@@ -14,7 +14,7 @@ use openai_protocol::{
     },
 };
 use serde_json::{json, to_string};
-use smg_mcp::{McpSessionOptions, McpToolSession};
+use smg_mcp::{McpServerBinding, McpSessionOptions, McpToolSession};
 use tracing::{debug, error, warn};
 
 use super::{
@@ -88,7 +88,7 @@ pub(crate) async fn serve_harmony_responses(
 async fn execute_with_mcp_loop(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
-    mcp_servers: Vec<(String, String)>,
+    mcp_servers: Vec<McpServerBinding>,
 ) -> Result<ResponsesResponse, Response> {
     let mut iteration_count = 0;
 

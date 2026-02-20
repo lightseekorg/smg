@@ -24,6 +24,18 @@ use crate::{
     transform::ResponseFormat,
 };
 
+/// Named pair of `(label, server_key)` for a connected MCP server.
+///
+/// Replaces the opaque `(String, String)` tuple that was threaded through
+/// ~20 call sites, improving readability and preventing field-swap bugs.
+#[derive(Debug, Clone)]
+pub struct McpServerBinding {
+    /// User-facing label (e.g. the `server_label` from the request).
+    pub label: String,
+    /// Internal key used to look up the server in the orchestrator.
+    pub server_key: String,
+}
+
 #[derive(Debug, Clone)]
 struct ExposedToolBinding {
     server_key: String,
@@ -42,9 +54,9 @@ pub struct McpToolSession<'a> {
     orchestrator: &'a McpOrchestrator,
     request_ctx: McpRequestContext<'a>,
     /// All MCP servers in this session (including builtin).
-    all_mcp_servers: Vec<(String, String)>,
+    all_mcp_servers: Vec<McpServerBinding>,
     /// Non-builtin MCP servers only — used for `mcp_list_tools` output.
-    mcp_servers: Vec<(String, String)>,
+    mcp_servers: Vec<McpServerBinding>,
     mcp_tools: Vec<ToolEntry>,
     exposed_name_map: HashMap<String, ExposedToolBinding>,
     exposed_name_by_qualified: HashMap<QualifiedToolName, String>,
@@ -65,7 +77,7 @@ impl<'a> McpToolSession<'a> {
     /// 2. List tools for the selected servers
     pub fn new(
         orchestrator: &'a McpOrchestrator,
-        mcp_servers: Vec<(String, String)>,
+        mcp_servers: Vec<McpServerBinding>,
         request_id: impl Into<String>,
         options: McpSessionOptions<'_>,
     ) -> Self {
@@ -78,7 +90,7 @@ impl<'a> McpToolSession<'a> {
             ApprovalMode::PolicyOnly,
         );
         let mut server_keys = Vec::with_capacity(mcp_servers.len());
-        server_keys.extend(mcp_servers.iter().map(|(_, key)| key.clone()));
+        server_keys.extend(mcp_servers.iter().map(|b| b.server_key.clone()));
         let mut mcp_tools = orchestrator.list_tools_for_servers(&server_keys);
 
         if !allowed_tools_by_server_key.is_empty() {
@@ -94,9 +106,9 @@ impl<'a> McpToolSession<'a> {
 
         // Filter out servers configured with builtin_type from the visible list.
         let builtin_names = orchestrator.builtin_server_names();
-        let visible_mcp_servers: Vec<(String, String)> = mcp_servers
+        let visible_mcp_servers: Vec<McpServerBinding> = mcp_servers
             .iter()
-            .filter(|(_, key)| !builtin_names.contains(key))
+            .filter(|b| !builtin_names.contains(&b.server_key))
             .cloned()
             .collect();
 
@@ -122,12 +134,12 @@ impl<'a> McpToolSession<'a> {
     }
 
     /// Returns only non-builtin MCP servers
-    pub fn mcp_servers(&self) -> &[(String, String)] {
+    pub fn mcp_servers(&self) -> &[McpServerBinding] {
         &self.mcp_servers
     }
 
     /// Returns all MCP servers including builtin ones.
-    pub fn all_mcp_servers(&self) -> &[(String, String)] {
+    pub fn all_mcp_servers(&self) -> &[McpServerBinding] {
         &self.all_mcp_servers
     }
 
@@ -186,7 +198,7 @@ impl<'a> McpToolSession<'a> {
             let fallback_label = self
                 .all_mcp_servers
                 .first()
-                .map(|(label, _)| label.clone())
+                .map(|b| b.label.clone())
                 .unwrap_or_else(|| "mcp".to_string());
             let err = format!(
                 "Tool '{}' is not in this session's exposed tool map",
@@ -218,7 +230,7 @@ impl<'a> McpToolSession<'a> {
         let fallback_label = self
             .all_mcp_servers
             .first()
-            .map(|(label, _)| label.as_str())
+            .map(|b| b.label.as_str())
             .unwrap_or("mcp");
 
         self.exposed_name_map
@@ -298,8 +310,8 @@ impl<'a> McpToolSession<'a> {
         let num_servers = self.mcp_servers.len();
 
         // 1. Prepend mcp_list_tools for each non-builtin server
-        for (label, key) in self.mcp_servers.iter().rev() {
-            output.insert(0, self.build_mcp_list_tools_item(label, key));
+        for binding in self.mcp_servers.iter().rev() {
+            output.insert(0, self.build_mcp_list_tools_item(&binding.label, &binding.server_key));
         }
 
         // 2. Insert tool call items right after mcp_list_tools
@@ -312,14 +324,14 @@ impl<'a> McpToolSession<'a> {
 
     fn build_exposed_function_tools(
         tools: &[ToolEntry],
-        mcp_servers: &[(String, String)],
+        mcp_servers: &[McpServerBinding],
     ) -> (
         HashMap<String, ExposedToolBinding>,
         HashMap<QualifiedToolName, String>,
     ) {
         let server_labels: HashMap<&str, &str> = mcp_servers
             .iter()
-            .map(|(label, key)| (key.as_str(), label.as_str()))
+            .map(|b| (b.server_key.as_str(), b.label.as_str()))
             .collect();
 
         let mut name_counts: HashMap<&str, usize> = HashMap::new();
@@ -384,7 +396,7 @@ impl<'a> McpToolSession<'a> {
 }
 
 fn compute_allowed_tools_by_server_key(
-    mcp_servers: &[(String, String)],
+    mcp_servers: &[McpServerBinding],
     request_tools: Option<&[ResponseTool]>,
 ) -> HashMap<String, HashSet<String>> {
     let Some(request_tools) = request_tools else {
@@ -423,8 +435,8 @@ fn compute_allowed_tools_by_server_key(
 
     // Map server_label -> server_key for connected servers.
     let mut label_to_key: HashMap<&str, &str> = HashMap::with_capacity(mcp_servers.len());
-    for (label, key) in mcp_servers {
-        label_to_key.insert(label.as_str(), key.as_str());
+    for binding in mcp_servers {
+        label_to_key.insert(binding.label.as_str(), binding.server_key.as_str());
     }
 
     // Translate label-based allowlists to server_key-based allowlists.
@@ -471,8 +483,8 @@ mod tests {
     fn test_session_creation_keeps_servers() {
         let orchestrator = McpOrchestrator::new_test();
         let mcp_servers = vec![
-            ("label1".to_string(), "key1".to_string()),
-            ("label2".to_string(), "key2".to_string()),
+            McpServerBinding { label: "label1".to_string(), server_key: "key1".to_string() },
+            McpServerBinding { label: "label2".to_string(), server_key: "key2".to_string() },
         ];
 
         let session = McpToolSession::new(
@@ -483,10 +495,8 @@ mod tests {
         );
 
         assert_eq!(session.mcp_servers().len(), 2);
-        assert_eq!(
-            session.mcp_servers()[0],
-            ("label1".to_string(), "key1".to_string())
-        );
+        assert_eq!(session.mcp_servers()[0].label, "label1");
+        assert_eq!(session.mcp_servers()[0].server_key, "key1");
     }
 
     #[test]
@@ -502,7 +512,7 @@ mod tests {
     #[test]
     fn test_resolve_tool_server_label_fallback() {
         let orchestrator = McpOrchestrator::new_test();
-        let mcp_servers = vec![("my_label".to_string(), "my_key".to_string())];
+        let mcp_servers = vec![McpServerBinding { label: "my_label".to_string(), server_key: "my_key".to_string() }];
         let session = McpToolSession::new(
             &orchestrator,
             mcp_servers,
@@ -559,7 +569,7 @@ mod tests {
         let entry = ToolEntry::from_server_tool("server1", tool);
         orchestrator.tool_inventory().insert_entry(entry);
 
-        let mcp_servers = vec![("label1".to_string(), "server1".to_string())];
+        let mcp_servers = vec![McpServerBinding { label: "label1".to_string(), server_key: "server1".to_string() }];
         let session = McpToolSession::new(
             &orchestrator,
             mcp_servers,
@@ -579,7 +589,7 @@ mod tests {
         let entry = ToolEntry::from_server_tool("server1", tool);
         orchestrator.tool_inventory().insert_entry(entry);
 
-        let mcp_servers = vec![("my_server".to_string(), "server1".to_string())];
+        let mcp_servers = vec![McpServerBinding { label: "my_server".to_string(), server_key: "server1".to_string() }];
         let session = McpToolSession::new(
             &orchestrator,
             mcp_servers,
@@ -607,8 +617,8 @@ mod tests {
         let session = McpToolSession::new(
             &orchestrator,
             vec![
-                ("alpha".to_string(), "server1".to_string()),
-                ("beta".to_string(), "server2".to_string()),
+                McpServerBinding { label: "alpha".to_string(), server_key: "server1".to_string() },
+                McpServerBinding { label: "beta".to_string(), server_key: "server2".to_string() },
             ],
             "test-request",
             Default::default(),
@@ -653,9 +663,9 @@ mod tests {
         let session = McpToolSession::new(
             &orchestrator,
             vec![
-                ("a".to_string(), "s1".to_string()),
-                ("b".to_string(), "s2".to_string()),
-                ("c".to_string(), "s3".to_string()),
+                McpServerBinding { label: "a".to_string(), server_key: "s1".to_string() },
+                McpServerBinding { label: "b".to_string(), server_key: "s2".to_string() },
+                McpServerBinding { label: "c".to_string(), server_key: "s3".to_string() },
             ],
             "test-request",
             Default::default(),
@@ -713,8 +723,8 @@ mod tests {
     fn test_mcp_servers_filters_builtin() {
         let orchestrator = create_builtin_orchestrator();
         let mcp_servers = vec![
-            ("brave".to_string(), "brave-builtin".to_string()),
-            ("regular".to_string(), "regular-server".to_string()),
+            McpServerBinding { label: "brave".to_string(), server_key: "brave-builtin".to_string() },
+            McpServerBinding { label: "regular".to_string(), server_key: "regular-server".to_string() },
         ];
 
         let session = McpToolSession::new(
@@ -727,8 +737,8 @@ mod tests {
         // mcp_servers() should only return non-builtin servers
         let visible = session.mcp_servers();
         assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].0, "regular");
-        assert_eq!(visible[0].1, "regular-server");
+        assert_eq!(visible[0].label, "regular");
+        assert_eq!(visible[0].server_key, "regular-server");
 
         // all_mcp_servers() should return everything
         assert_eq!(session.all_mcp_servers().len(), 2);
@@ -760,7 +770,7 @@ mod tests {
 
         let session = McpToolSession::new(
             &orchestrator,
-            vec![("mock".to_string(), "server1".to_string())],
+            vec![McpServerBinding { label: "mock".to_string(), server_key: "server1".to_string() }],
             "test-request",
             McpSessionOptions {
                 request_tools: Some(&request_tools),
@@ -818,8 +828,8 @@ mod tests {
         let session = McpToolSession::new(
             &orchestrator,
             vec![
-                ("brave".to_string(), "server1".to_string()),
-                ("deepwiki".to_string(), "server2".to_string()),
+                McpServerBinding { label: "brave".to_string(), server_key: "server1".to_string() },
+                McpServerBinding { label: "deepwiki".to_string(), server_key: "server2".to_string() },
             ],
             "test-request",
             McpSessionOptions {
