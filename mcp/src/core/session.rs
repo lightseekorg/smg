@@ -28,7 +28,7 @@ use crate::{
 ///
 /// Replaces the opaque `(String, String)` tuple that was threaded through
 /// ~20 call sites, improving readability and preventing field-swap bugs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerBinding {
     /// User-facing label (e.g. the `server_label` from the request).
     pub label: String,
@@ -89,8 +89,7 @@ impl<'a> McpToolSession<'a> {
             TenantContext::default(),
             ApprovalMode::PolicyOnly,
         );
-        let mut server_keys = Vec::with_capacity(mcp_servers.len());
-        server_keys.extend(mcp_servers.iter().map(|b| b.server_key.clone()));
+        let server_keys: Vec<String> = mcp_servers.iter().map(|b| b.server_key.clone()).collect();
         let mut mcp_tools = orchestrator.list_tools_for_servers(&server_keys);
 
         if !allowed_tools_by_server_key.is_empty() {
@@ -437,10 +436,10 @@ fn compute_allowed_tools_by_server_key(
     }
 
     // Map server_label -> server_key for connected servers.
-    let mut label_to_key: HashMap<&str, &str> = HashMap::with_capacity(mcp_servers.len());
-    for binding in mcp_servers {
-        label_to_key.insert(binding.label.as_str(), binding.server_key.as_str());
-    }
+    let label_to_key: HashMap<&str, &str> = mcp_servers
+        .iter()
+        .map(|binding| (binding.label.as_str(), binding.server_key.as_str()))
+        .collect();
 
     // Translate label-based allowlists to server_key-based allowlists.
     let mut allowed_by_server_key: HashMap<String, HashSet<String>> = HashMap::new();
