@@ -20,7 +20,7 @@ endif
 
 .PHONY: help build test clean docs check fmt dev-setup pre-commit setup-sccache sccache-stats sccache-clean sccache-stop \
         python-dev python-build python-build-release python-install python-clean python-test python-check \
-        show-version bump-version release-notes
+        show-version bump-version check-versions
 
 help: ## Show this help message
 	@echo "Model Gateway Development Commands"
@@ -188,25 +188,9 @@ bump-version: ## Bump version across all files (usage: make bump-version VERSION
 	@echo ""
 	@echo "Verify with: make show-version"
 
-release-notes: ## Generate release notes for gateway (usage: make release-notes PREV=gateway-v0.2.2 CURR=gateway-v1.0.0)
-	@if [ -z "$(PREV)" ] || [ -z "$(CURR)" ]; then \
-		echo "Usage: make release-notes PREV=<previous-tag> CURR=<current-tag>"; \
-		echo "Example: make release-notes PREV=gateway-v0.2.2 CURR=gateway-v1.0.0"; \
-		echo ""; \
-		echo "Options:"; \
-		echo "  OUTPUT=<file>     Save to file (default: stdout)"; \
-		echo "  CREATE_RELEASE=1  Create GitHub draft release via gh CLI (default: draft)"; \
-		echo "  DRAFT=0           Publish release immediately (skip draft)"; \
-		exit 1; \
+check-versions: ## Check workspace crate versions against latest tag (usage: make check-versions [TAG=v1.0.0])
+	@if [ -n "$(TAG)" ]; then \
+		./scripts/check_release_versions.sh "$(TAG)"; \
+	else \
+		./scripts/check_release_versions.sh; \
 	fi
-	@ARGS="$(PREV) $(CURR)"; \
-	if [ -n "$(OUTPUT)" ]; then \
-		ARGS="$$ARGS --output $(OUTPUT)"; \
-	fi; \
-	if [ "$(CREATE_RELEASE)" = "1" ]; then \
-		ARGS="$$ARGS --create-release"; \
-		if [ "$(DRAFT)" = "0" ]; then \
-			ARGS="$$ARGS --no-draft"; \
-		fi; \
-	fi; \
-	./scripts/generate_gateway_release_notes.sh $$ARGS
