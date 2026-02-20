@@ -99,6 +99,10 @@ echo ""
 # Extract version from a Cargo.toml (first version = line in [package])
 get_crate_version() {
     local file="$1"
+    if grep -qE 'version\.workspace\s*=\s*true|version\s*=\s*\{\s*workspace\s*=\s*true' "$file"; then
+        echo -e "${RED}ERROR: $file uses workspace versioning; this script expects explicit version strings.${NC}" >&2
+        exit 1
+    fi
     grep -m1 '^version' "$file" | sed 's/.*"\(.*\)".*/\1/'
 }
 
@@ -108,6 +112,10 @@ get_crate_version_at_ref() {
     local ref="$2"
     local content
     content=$(git show "$ref:$path/Cargo.toml" 2>/dev/null) || return 0
+    if echo "$content" | grep -qE 'version\.workspace\s*=\s*true|version\s*=\s*\{\s*workspace\s*=\s*true'; then
+        echo -e "${RED}ERROR: $path/Cargo.toml at $ref uses workspace versioning; this script expects explicit version strings.${NC}" >&2
+        exit 1
+    fi
     echo "$content" | grep -m1 '^version' | sed 's/.*"\(.*\)".*/\1/'
 }
 
@@ -338,9 +346,11 @@ for entry in "${NEEDS_BUMP[@]}"; do
         fix_failed=$((fix_failed + 1))
     fi
 
-    # Sync workspace root Cargo.toml
+    # Sync workspace root Cargo.toml (read actual ws version in case it drifted)
     if [[ "$dep_key" != "-" ]]; then
-        if set_workspace_dep_version "$dep_key" "$current_version" "$new_version"; then
+        local ws_old
+        ws_old=$(get_workspace_dep_version "$dep_key")
+        if set_workspace_dep_version "$dep_key" "$ws_old" "$new_version"; then
             echo -e "  ${GREEN}✓${NC} Cargo.toml $dep_key → v$new_version"
         else
             fix_failed=$((fix_failed + 1))
