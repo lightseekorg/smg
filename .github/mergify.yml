@@ -1,3 +1,4 @@
+# test: verify DCO rule (will revert)
 pull_request_rules:
   - name: Enforce branch naming convention (internal)
     description: Auto-close PRs from internal branches that don't follow naming convention
