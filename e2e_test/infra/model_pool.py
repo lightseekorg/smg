@@ -38,6 +38,14 @@ from .process_utils import detect_ib_device
 
 logger = logging.getLogger(__name__)
 
+# Shared vLLM defaults for both gRPC and HTTP modes.
+_VLLM_DEFAULT_ARGS = [
+    "--max-model-len",
+    "16384",
+    "--gpu-memory-utilization",
+    "0.9",
+]
+
 
 @dataclass(frozen=True)
 class WorkerIdentity:
@@ -524,11 +532,9 @@ class ModelPool:
 
         # vLLM HTTP: use dedicated vLLM OpenAI-compatible API server
         if mode == ConnectionMode.HTTP and is_vllm():
-            runtime_label = RUNTIME_LABELS.get(get_runtime(), "vLLM")
             logger.info(
-                "HTTP worker requested for %s: E2E_RUNTIME=vllm, routing to %s HTTP backend",
+                "HTTP worker requested for %s: routing to vLLM HTTP backend",
                 model_id,
-                runtime_label,
             )
             spec = get_model_spec(model_id)
             assert gpu_slot is not None
@@ -1191,11 +1197,8 @@ class ModelPool:
                 str(port),
                 "--tensor-parallel-size",
                 str(tp_size),
-                "--max-model-len",
-                "16384",
-                "--gpu-memory-utilization",
-                "0.9",
             ]
+            cmd.extend(_VLLM_DEFAULT_ARGS)
             extra = model_spec.get("vllm_args", [])
         elif runtime == "trtllm":
             cmd = [
@@ -1254,11 +1257,8 @@ class ModelPool:
             str(port),
             "--tensor-parallel-size",
             str(tp_size),
-            "--max-model-len",
-            "16384",
-            "--gpu-memory-utilization",
-            "0.9",
         ]
+        cmd.extend(_VLLM_DEFAULT_ARGS)
         extra = model_spec.get("vllm_args", [])
         if extra:
             cmd.extend(extra)
@@ -1489,10 +1489,7 @@ class ModelPool:
 
         cmd = self._build_vllm_http_cmd(model_path, DEFAULT_HOST, port, tp_size, model_spec)
 
-        if instance_key:
-            key = instance_key
-        else:
-            key = f"{model_id}:http"
+        key = instance_key or f"{model_id}:http"
         logger.info(
             "Launching vLLM HTTP worker %s on GPUs %s port %d",
             key,
