@@ -186,6 +186,7 @@ bump_version() {
         major) echo "$((major + 1)).0.0" ;;
         minor) echo "${major}.$((minor + 1)).0" ;;
         patch) echo "${major}.${minor}.$((patch + 1))" ;;
+        *) echo "ERROR: bump_version unknown level: $level" >&2; return 1 ;;
     esac
 }
 
@@ -202,7 +203,10 @@ bump_label() {
 set_crate_version() {
     local file="$1"
     local new_version="$2"
-    sed_inplace "0,/^version = \".*\"/s//version = \"${new_version}\"/" "$file"
+    awk -v new="$new_version" '
+        !done && /^version = ".*"/ { sub(/^version = ".*"/, "version = \"" new "\""); done=1 }
+        { print }
+    ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
     if ! grep -q "^version = \"${new_version}\"" "$file"; then
         echo -e "    ${RED}FAILED to update $file${NC}" >&2
         return 1
