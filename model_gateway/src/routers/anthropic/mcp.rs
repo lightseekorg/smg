@@ -141,10 +141,12 @@ pub(crate) fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> 
 }
 
 /// Strip `mcp_servers` from request and inject MCP tools as regular tools.
+///
+/// Tool filtering is already applied by `McpServerBinding.allowed_tools` during
+/// session creation — this function just converts and injects.
 pub(crate) fn inject_mcp_tools_into_request(
     request: &mut CreateMessageRequest,
     session: &McpToolSession<'_>,
-    allowed_tools_filter: Option<&[String]>,
 ) {
     request.mcp_servers = None;
 
@@ -157,14 +159,6 @@ pub(crate) fn inject_mcp_tools_into_request(
         .collect();
 
     for entry in session.mcp_tools() {
-        let tool_name = entry.tool.name.to_string();
-
-        if let Some(allowed) = allowed_tools_filter {
-            if !allowed.contains(&tool_name) {
-                continue;
-            }
-        }
-
         tools.push(Tool::Custom(convert_tool_entry_to_anthropic_tool(entry)));
     }
 
@@ -300,50 +294,53 @@ pub(crate) fn rebuild_response_with_mcp_blocks(
     message
 }
 
+/// Extract per-server allowed tool names from `McpToolset` entries.
+///
+/// Returns a map of `mcp_server_name` → `Option<Vec<String>>`:
+/// - `None` → all tools allowed for that server
+/// - `Some(names)` → only these tools allowed
+pub(crate) fn collect_allowed_tools_per_server(
+    tools: &Option<Vec<Tool>>,
+) -> HashMap<String, Option<Vec<String>>> {
+    let Some(tools) = tools.as_ref() else {
+        return HashMap::new();
+    };
+
+    let mut result: HashMap<String, Option<Vec<String>>> = HashMap::new();
+
+    for tool in tools {
+        let Tool::McpToolset(toolset) = tool else {
+            continue;
+        };
+
+        let default_enabled = toolset
+            .default_config
+            .as_ref()
+            .and_then(|c| c.enabled)
+            .unwrap_or(true);
+
+        let allowed = match &toolset.configs {
+            Some(configs) => {
+                let names: Vec<String> = configs
+                    .iter()
+                    .filter(|(_, config)| config.enabled.unwrap_or(default_enabled))
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                Some(names)
+            }
+            None if default_enabled => None,
+            None => Some(Vec::new()),
+        };
+
+        result.insert(toolset.mcp_server_name.clone(), allowed);
+    }
+
+    result
+}
+
 // ============================================================================
 // Private helpers
 // ============================================================================
-
-/// Collect allowed tools filter from `McpToolset` entries in the tools array.
-///
-/// Returns `None` (no filtering) if any toolset allows all tools.
-pub(crate) fn collect_allowed_tools_from_toolsets(tools: Option<&[Tool]>) -> Option<Vec<String>> {
-    let tools = tools?;
-
-    let mut all_allowed = Vec::new();
-    let mut saw_mcp_toolset = false;
-    for tool in tools {
-        if let Tool::McpToolset(toolset) = tool {
-            saw_mcp_toolset = true;
-            let default_enabled = toolset
-                .default_config
-                .as_ref()
-                .and_then(|c| c.enabled)
-                .unwrap_or(true);
-
-            match &toolset.configs {
-                Some(configs) => {
-                    for (tool_name, config) in configs {
-                        let enabled = config.enabled.unwrap_or(default_enabled);
-                        if enabled {
-                            all_allowed.push(tool_name.clone());
-                        }
-                    }
-                }
-                None if default_enabled => {
-                    // This server allows all tools — skip global filtering
-                    return None;
-                }
-                None => {}
-            }
-        }
-    }
-    if saw_mcp_toolset {
-        Some(all_allowed)
-    } else {
-        None
-    }
-}
 
 /// Convert an MCP `ToolEntry` to an Anthropic `CustomTool`.
 fn convert_tool_entry_to_anthropic_tool(entry: &ToolEntry) -> CustomTool {

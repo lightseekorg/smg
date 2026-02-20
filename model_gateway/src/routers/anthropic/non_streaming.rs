@@ -39,8 +39,7 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
     let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &session_id);
 
     // Inject MCP tools into the request as regular tools
-    let allowed_tools = mcp::collect_allowed_tools_from_toolsets(req_ctx.request.tools.as_deref());
-    mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session, allowed_tools.as_deref());
+    mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session);
 
     let mut all_mcp_calls: Vec<mcp::McpToolCall> = Vec::new();
 
