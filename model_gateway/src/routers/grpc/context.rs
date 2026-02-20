@@ -21,6 +21,7 @@ use tracing::debug;
 
 use super::{
     client::GrpcClient,
+    multimodal::MultimodalComponents,
     proto_wrapper::{ProtoEmbedComplete, ProtoRequest, ProtoStream},
 };
 use crate::core::{RuntimeType, Worker, WorkerLoadGuard};
@@ -60,6 +61,8 @@ pub(crate) struct SharedComponents {
     pub tool_parser_factory: ToolParserFactory,
     #[expect(dead_code)]
     pub reasoning_parser_factory: ReasoningParserFactory,
+    /// Multimodal processing components (initialized at router creation)
+    pub multimodal: Option<Arc<MultimodalComponents>>,
 }
 
 /// Mutable processing state (evolves through pipeline stages)

@@ -7,6 +7,7 @@ pub mod client; // Used by core/
 pub(crate) mod common;
 pub(crate) mod context;
 pub(crate) mod harmony;
+pub(crate) mod multimodal;
 pub(crate) mod pd_router; // Used by routers/factory
 pub(crate) mod pipeline;
 pub(crate) mod proto_wrapper;

@@ -22,6 +22,7 @@ use super::{
     },
     context::SharedComponents,
     harmony::{serve_harmony_responses, serve_harmony_responses_stream, HarmonyDetector},
+    multimodal::MultimodalComponents,
     pipeline::RequestPipeline,
     regular::responses,
 };
@@ -67,11 +68,21 @@ impl GrpcRouter {
         let worker_registry = ctx.worker_registry.clone();
         let _policy_registry = ctx.policy_registry.clone();
 
+        // Create multimodal components (best-effort; non-fatal if initialization fails)
+        let multimodal = match MultimodalComponents::new() {
+            Ok(mc) => Some(Arc::new(mc)),
+            Err(e) => {
+                tracing::warn!("Multimodal components initialization failed (non-fatal): {e}");
+                None
+            }
+        };
+
         // Create shared components for pipeline
         let shared_components = Arc::new(SharedComponents {
             tokenizer_registry: tokenizer_registry.clone(),
             tool_parser_factory: tool_parser_factory.clone(),
             reasoning_parser_factory: reasoning_parser_factory.clone(),
+            multimodal,
         });
 
         // Create regular pipeline
