@@ -8,7 +8,7 @@ use axum::{
     Json,
 };
 use serde_json::Value;
-use smg_mcp::{McpSessionOptions, McpToolSession};
+use smg_mcp::McpToolSession;
 use tracing::warn;
 
 use super::{
@@ -71,14 +71,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             .request_id
             .clone()
             .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
-        let session = McpToolSession::new(
-            mcp_orchestrator,
-            mcp_servers,
-            &session_request_id,
-            McpSessionOptions {
-                request_tools: original_body.tools.as_deref(),
-            },
-        );
+        let session = McpToolSession::new(mcp_orchestrator, mcp_servers, &session_request_id);
         prepare_mcp_tools_as_functions(&mut payload, &session);
 
         match execute_tool_loop(

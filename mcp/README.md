@@ -419,7 +419,7 @@ orchestrator.register_alias(
 For executing multiple tools efficiently (e.g., parallel tool calls from LLM):
 
 ```rust
-use smg_mcp::{McpSessionOptions, McpToolSession, ToolExecutionInput, ToolExecutionOutput};
+use smg_mcp::{McpServerBinding, McpToolSession, ToolExecutionInput, ToolExecutionOutput};
 
 // Convert tool calls to inputs
 let inputs: Vec<ToolExecutionInput> = tool_calls
@@ -433,9 +433,12 @@ let inputs: Vec<ToolExecutionInput> = tool_calls
 
 let session = McpToolSession::new(
     &orchestrator,
-    vec![("my-server".to_string(), "my-server".to_string())],
+    vec![McpServerBinding {
+        label: "my-server".to_string(),
+        server_key: "my-server".to_string(),
+        allowed_tools: None,
+    }],
     "req-123",
-    Default::default(),
 );
 
 // Execute all tools through session mapping
@@ -458,25 +461,28 @@ for output in outputs {
 
 ### Allowed Tools Filtering
 
-To enforce the OpenAI Responses-style MCP allowlist (`allowed_tools: ["toolA", ...]`),
-pass the request's `tools` array via `McpSessionOptions`. Filtering is applied per
-MCP toolset/server.
+To enforce a per-server tool allowlist, set `allowed_tools` on the `McpServerBinding`.
+Each router extracts the allowlist from its protocol-specific request type and populates
+the binding — the MCP session layer is protocol-agnostic.
 
 ```rust
-use smg_mcp::{McpSessionOptions, McpToolSession};
+use smg_mcp::{McpServerBinding, McpToolSession};
 
-// Default behavior: no allowlist filtering
-let session = McpToolSession::new(&orchestrator, mcp_servers, "req-123", Default::default());
+// No filtering (all tools exposed)
+let binding = McpServerBinding {
+    label: "my-server".to_string(),
+    server_key: "my-server".to_string(),
+    allowed_tools: None,
+};
 
-// Optional: enforce allowlist filtering from the incoming request
-let session = McpToolSession::new(
-    &orchestrator,
-    mcp_servers,
-    "req-123",
-    McpSessionOptions {
-        request_tools: request.tools.as_deref(),
-    },
-);
+// Only expose specific tools from this server
+let binding = McpServerBinding {
+    label: "my-server".to_string(),
+    server_key: "my-server".to_string(),
+    allowed_tools: Some(vec!["tool_a".to_string(), "tool_b".to_string()]),
+};
+
+let session = McpToolSession::new(&orchestrator, vec![binding], "req-123");
 ```
 
 **Key types:**

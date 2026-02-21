@@ -24,9 +24,7 @@ use openai_protocol::{
     responses::{ResponseToolType, ResponsesRequest},
 };
 use serde_json::{json, Value};
-use smg_mcp::{
-    McpOrchestrator, McpServerBinding, McpSessionOptions, McpToolSession, ResponseFormat,
-};
+use smg_mcp::{McpOrchestrator, McpServerBinding, McpToolSession, ResponseFormat};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -707,9 +705,6 @@ pub(super) fn handle_streaming_with_tool_interception(
             &orchestrator_clone,
             mcp_servers.clone(),
             &session_request_id,
-            McpSessionOptions {
-                request_tools: original_request.tools.as_deref(),
-            },
         );
         let mut current_payload = payload_clone;
         prepare_mcp_tools_as_functions(&mut current_payload, &session);
