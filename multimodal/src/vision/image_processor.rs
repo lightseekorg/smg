@@ -91,6 +91,14 @@ impl ModelSpecificValue {
             shape: vec![len],
         }
     }
+
+    /// Create a 2D int tensor.
+    pub fn int_2d(data: Vec<i64>, rows: usize, cols: usize) -> Self {
+        Self::IntTensor {
+            data,
+            shape: vec![rows, cols],
+        }
+    }
 }
 
 /// Preprocessed images ready for model consumption.
@@ -457,6 +465,24 @@ mod tests {
                 assert_eq!(shape, vec![2, 2]);
             }
             _ => panic!("Expected UintTensor"),
+        }
+
+        let int_1d = ModelSpecificValue::int_1d(vec![1, 2, 3]);
+        match int_1d {
+            ModelSpecificValue::IntTensor { data, shape } => {
+                assert_eq!(data, vec![1, 2, 3]);
+                assert_eq!(shape, vec![3]);
+            }
+            _ => panic!("Expected IntTensor"),
+        }
+
+        let int_2d = ModelSpecificValue::int_2d(vec![1, 2, 3, 4], 2, 2);
+        match int_2d {
+            ModelSpecificValue::IntTensor { data, shape } => {
+                assert_eq!(data, vec![1, 2, 3, 4]);
+                assert_eq!(shape, vec![2, 2]);
+            }
+            _ => panic!("Expected IntTensor"),
         }
     }
 
