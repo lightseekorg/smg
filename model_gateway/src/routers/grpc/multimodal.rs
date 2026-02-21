@@ -4,11 +4,7 @@
 //! handling the full processing chain: extract content parts → fetch images →
 //! preprocess pixels → expand placeholder tokens → build proto MultimodalInputs.
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -23,14 +19,8 @@ use openai_protocol::{
     chat::{ChatMessage, MessageContent},
     common::ContentPart,
 };
-use prost_types::value::Kind;
 use smg_grpc_client::sglang_proto;
 use tracing::{debug, warn};
-
-fn base64_encode(data: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(data)
-}
 
 /// Cached model configuration files loaded from the tokenizer directory.
 #[derive(Debug, Clone)]
@@ -75,9 +65,7 @@ impl MultimodalComponents {
             return Ok(cached.clone());
         }
 
-        let base_dir = Path::new(tokenizer_source)
-            .parent()
-            .unwrap_or(Path::new(tokenizer_source));
+        let base_dir = Path::new(tokenizer_source);
 
         // Load config.json
         let config_path = base_dir.join("config.json");
@@ -338,20 +326,35 @@ pub(crate) async fn process_multimodal(
         .prompt_replacements(&metadata, &image_sizes)
         .map_err(|e| anyhow::anyhow!("Failed to compute prompt replacements: {}", e))?;
 
-    // Expand placeholder tokens in the token ID sequence
-    let placeholder_token_id = tokenizer.token_to_id(&placeholder_token);
+    // Two token IDs may differ for the same placeholder:
+    // - search_token_id: what the tokenizer actually emits (e.g. 200090 for "<|image|>")
+    // - im_token_id: what the model config declares (e.g. config.image_token_index = 200092)
+    //
+    // expand_tokens searches input_ids for search_token_id and replaces each with
+    // the replacement sequence from prompt_replacements (which uses im_token_id).
+    // The proto im_token_id tells sglang's pad_input_tokens what to look for
+    // in the *expanded* output.
+    let search_token_id = tokenizer.token_to_id(&placeholder_token);
+    let im_token_id: Option<u32> = spec
+        .placeholder_token_id(&metadata)
+        .ok()
+        .map(|id| id as u32)
+        .or(search_token_id);
     let (expanded_token_ids, mm_placeholders) =
-        expand_tokens(&token_ids, placeholder_token_id, &prompt_replacements);
+        expand_tokens(&token_ids, search_token_id, &prompt_replacements);
 
     debug!(
         original_len = token_ids.len(),
         expanded_len = expanded_token_ids.len(),
         placeholder_count = mm_placeholders.len(),
+        ?search_token_id,
+        ?im_token_id,
         "Token expansion complete"
     );
 
     // Build proto MultimodalInputs
-    let proto_mm_inputs = build_proto_multimodal_inputs(&preprocessed, &mm_placeholders, &images);
+    let proto_mm_inputs =
+        build_proto_multimodal_inputs(&preprocessed, im_token_id, &mm_placeholders, &images);
 
     Ok(MultimodalOutput {
         expanded_token_ids,
@@ -407,132 +410,31 @@ fn expand_tokens(
     (expanded, placeholders)
 }
 
-/// Build proto `MultimodalInputs` from preprocessed images and placeholder ranges.
+/// Build proto `MultimodalInputs` from preprocessed images.
 fn build_proto_multimodal_inputs(
     preprocessed: &PreprocessedImages,
+    im_token_id: Option<u32>,
     placeholders: &[PlaceholderRange],
     images: &[Arc<ImageFrame>],
 ) -> sglang_proto::MultimodalInputs {
-    // Serialize pixel values as raw f32 bytes
-    let pixel_bytes = pixel_values_to_bytes(preprocessed);
-
-    // Build processed_features as a protobuf Struct
-    let mut fields = BTreeMap::new();
-
-    // pixel_values as base64-encoded bytes stored in a string value
-    // (protobuf Struct doesn't have a bytes type, so we encode as base64)
-    let pixel_b64 = base64_encode(&pixel_bytes);
-    fields.insert(
-        "pixel_values".to_string(),
-        prost_types::Value {
-            kind: Some(Kind::StringValue(pixel_b64)),
-        },
-    );
-
-    // pixel_values shape
-    let shape_list: Vec<prost_types::Value> = preprocessed
+    // Serialize pixel values as raw little-endian f32 bytes
+    let pixel_slice = preprocessed
+        .pixel_values
+        .as_slice()
+        .unwrap_or_else(|| preprocessed.pixel_values.as_slice_memory_order().unwrap());
+    let pixel_bytes: Vec<u8> = pixel_slice.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let pixel_shape: Vec<u32> = preprocessed
         .pixel_values
         .shape()
         .iter()
-        .map(|&dim| prost_types::Value {
-            kind: Some(Kind::NumberValue(dim as f64)),
-        })
+        .map(|&d| d as u32)
         .collect();
-    fields.insert(
-        "pixel_values_shape".to_string(),
-        prost_types::Value {
-            kind: Some(Kind::ListValue(prost_types::ListValue {
-                values: shape_list,
-            })),
-        },
-    );
 
-    // pixel_values dtype
-    fields.insert(
-        "pixel_values_dtype".to_string(),
-        prost_types::Value {
-            kind: Some(Kind::StringValue("float32".to_string())),
-        },
-    );
-
-    // Image sizes
-    let sizes_list: Vec<prost_types::Value> = preprocessed
-        .image_sizes
-        .iter()
-        .map(|&(w, h)| prost_types::Value {
-            kind: Some(Kind::ListValue(prost_types::ListValue {
-                values: vec![
-                    prost_types::Value {
-                        kind: Some(Kind::NumberValue(w as f64)),
-                    },
-                    prost_types::Value {
-                        kind: Some(Kind::NumberValue(h as f64)),
-                    },
-                ],
-            })),
-        })
-        .collect();
-    fields.insert(
-        "image_sizes".to_string(),
-        prost_types::Value {
-            kind: Some(Kind::ListValue(prost_types::ListValue {
-                values: sizes_list,
-            })),
-        },
-    );
-
-    // Placeholder ranges for token alignment
-    let placeholder_list: Vec<prost_types::Value> = placeholders
-        .iter()
-        .map(|p| {
-            let mut ph_fields = BTreeMap::new();
-            ph_fields.insert(
-                "offset".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::NumberValue(p.offset as f64)),
-                },
-            );
-            ph_fields.insert(
-                "length".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::NumberValue(p.length as f64)),
-                },
-            );
-            prost_types::Value {
-                kind: Some(Kind::StructValue(prost_types::Struct { fields: ph_fields })),
-            }
-        })
-        .collect();
-    fields.insert(
-        "mm_placeholders".to_string(),
-        prost_types::Value {
-            kind: Some(Kind::ListValue(prost_types::ListValue {
-                values: placeholder_list,
-            })),
-        },
-    );
-
-    // num_img_tokens per image
-    let token_counts: Vec<prost_types::Value> = preprocessed
-        .num_img_tokens
-        .iter()
-        .map(|&count| prost_types::Value {
-            kind: Some(Kind::NumberValue(count as f64)),
-        })
-        .collect();
-    fields.insert(
-        "num_img_tokens".to_string(),
-        prost_types::Value {
-            kind: Some(Kind::ListValue(prost_types::ListValue {
-                values: token_counts,
-            })),
-        },
-    );
-
-    // Add model-specific values
+    // Build model-specific tensors
+    let mut model_specific_tensors = HashMap::new();
     for (key, value) in &preprocessed.model_specific {
-        if let Some(proto_value) = model_specific_to_proto(value) {
-            fields.insert(key.clone(), proto_value);
+        if let Some(tensor) = model_specific_to_tensor_data(value) {
+            model_specific_tensors.insert(key.clone(), tensor);
         }
     }
 
@@ -542,195 +444,69 @@ fn build_proto_multimodal_inputs(
         .map(|frame| frame.raw_bytes.to_vec())
         .collect();
 
+    // Convert placeholder ranges to proto
+    let mm_placeholders = placeholders
+        .iter()
+        .map(|p| sglang_proto::PlaceholderRange {
+            offset: p.offset as u32,
+            length: p.length as u32,
+        })
+        .collect();
+
     sglang_proto::MultimodalInputs {
         image_urls: vec![],
         video_urls: vec![],
         audio_urls: vec![],
-        processed_features: Some(prost_types::Struct { fields }),
         image_data,
         video_data: vec![],
         audio_data: vec![],
         modalities: vec!["image".to_string()],
+        pixel_values: Some(sglang_proto::TensorData {
+            data: pixel_bytes,
+            shape: pixel_shape,
+            dtype: "float32".to_string(),
+        }),
+        model_specific_tensors,
+        im_token_id,
+        mm_placeholders,
     }
 }
 
-/// Serialize pixel values (ArrayD<f32>) to raw little-endian f32 bytes.
-fn pixel_values_to_bytes(preprocessed: &PreprocessedImages) -> Vec<u8> {
-    let slice = preprocessed
-        .pixel_values
-        .as_slice()
-        .unwrap_or_else(|| preprocessed.pixel_values.as_slice_memory_order().unwrap());
-    let mut bytes = Vec::with_capacity(slice.len() * 4);
-    for &val in slice {
-        bytes.extend_from_slice(&val.to_le_bytes());
-    }
-    bytes
-}
-
-/// Convert a model-specific value to a protobuf Value.
-fn model_specific_to_proto(value: &ModelSpecificValue) -> Option<prost_types::Value> {
+/// Convert a model-specific value to a proto TensorData.
+fn model_specific_to_tensor_data(value: &ModelSpecificValue) -> Option<sglang_proto::TensorData> {
     match value {
-        ModelSpecificValue::Tensor { data, shape } => {
-            // Encode tensor as base64 bytes + shape
-            let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
-            let b64 = base64_encode(&bytes);
-
-            let mut fields = BTreeMap::new();
-            fields.insert(
-                "data".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::StringValue(b64)),
-                },
-            );
-            fields.insert(
-                "shape".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::ListValue(prost_types::ListValue {
-                        values: shape
-                            .iter()
-                            .map(|&d| prost_types::Value {
-                                kind: Some(Kind::NumberValue(d as f64)),
-                            })
-                            .collect(),
-                    })),
-                },
-            );
-            fields.insert(
-                "dtype".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::StringValue("float32".to_string())),
-                },
-            );
-            Some(prost_types::Value {
-                kind: Some(Kind::StructValue(prost_types::Struct { fields })),
-            })
-        }
-        ModelSpecificValue::IntTensor { data, shape } => {
-            let bytes: Vec<u8> = data.iter().flat_map(|i| i.to_le_bytes()).collect();
-            let b64 = base64_encode(&bytes);
-
-            let mut fields = BTreeMap::new();
-            fields.insert(
-                "data".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::StringValue(b64)),
-                },
-            );
-            fields.insert(
-                "shape".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::ListValue(prost_types::ListValue {
-                        values: shape
-                            .iter()
-                            .map(|&d| prost_types::Value {
-                                kind: Some(Kind::NumberValue(d as f64)),
-                            })
-                            .collect(),
-                    })),
-                },
-            );
-            fields.insert(
-                "dtype".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::StringValue("int64".to_string())),
-                },
-            );
-            Some(prost_types::Value {
-                kind: Some(Kind::StructValue(prost_types::Struct { fields })),
-            })
-        }
-        ModelSpecificValue::UintTensor { data, shape } => {
-            let bytes: Vec<u8> = data.iter().flat_map(|u| u.to_le_bytes()).collect();
-            let b64 = base64_encode(&bytes);
-
-            let mut fields = BTreeMap::new();
-            fields.insert(
-                "data".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::StringValue(b64)),
-                },
-            );
-            fields.insert(
-                "shape".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::ListValue(prost_types::ListValue {
-                        values: shape
-                            .iter()
-                            .map(|&d| prost_types::Value {
-                                kind: Some(Kind::NumberValue(d as f64)),
-                            })
-                            .collect(),
-                    })),
-                },
-            );
-            fields.insert(
-                "dtype".to_string(),
-                prost_types::Value {
-                    kind: Some(Kind::StringValue("uint32".to_string())),
-                },
-            );
-            Some(prost_types::Value {
-                kind: Some(Kind::StructValue(prost_types::Struct { fields })),
-            })
-        }
-        ModelSpecificValue::Int(v) => Some(prost_types::Value {
-            kind: Some(Kind::NumberValue(*v as f64)),
+        ModelSpecificValue::Tensor { data, shape } => Some(sglang_proto::TensorData {
+            data: data.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            shape: shape.iter().map(|&d| d as u32).collect(),
+            dtype: "float32".to_string(),
         }),
-        ModelSpecificValue::Float(v) => Some(prost_types::Value {
-            kind: Some(Kind::NumberValue(*v)),
+        ModelSpecificValue::IntTensor { data, shape } => Some(sglang_proto::TensorData {
+            data: data.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            shape: shape.iter().map(|&d| d as u32).collect(),
+            dtype: "int64".to_string(),
         }),
-        ModelSpecificValue::IntVec(v) => Some(prost_types::Value {
-            kind: Some(Kind::ListValue(prost_types::ListValue {
-                values: v
-                    .iter()
-                    .map(|&i| prost_types::Value {
-                        kind: Some(Kind::NumberValue(i as f64)),
-                    })
-                    .collect(),
-            })),
+        ModelSpecificValue::UintTensor { data, shape } => Some(sglang_proto::TensorData {
+            data: data.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            shape: shape.iter().map(|&d| d as u32).collect(),
+            dtype: "uint32".to_string(),
         }),
-        ModelSpecificValue::UintVec(v) => Some(prost_types::Value {
-            kind: Some(Kind::ListValue(prost_types::ListValue {
-                values: v
-                    .iter()
-                    .map(|&u| prost_types::Value {
-                        kind: Some(Kind::NumberValue(u as f64)),
-                    })
-                    .collect(),
-            })),
+        ModelSpecificValue::UintVec(v) => Some(sglang_proto::TensorData {
+            data: v.iter().flat_map(|val| val.to_le_bytes()).collect(),
+            shape: vec![v.len() as u32],
+            dtype: "uint32".to_string(),
         }),
-        ModelSpecificValue::FloatVec(v) => Some(prost_types::Value {
-            kind: Some(Kind::ListValue(prost_types::ListValue {
-                values: v
-                    .iter()
-                    .map(|&f| prost_types::Value {
-                        kind: Some(Kind::NumberValue(f as f64)),
-                    })
-                    .collect(),
-            })),
+        ModelSpecificValue::IntVec(v) => Some(sglang_proto::TensorData {
+            data: v.iter().flat_map(|val| val.to_le_bytes()).collect(),
+            shape: vec![v.len() as u32],
+            dtype: "int64".to_string(),
         }),
-        ModelSpecificValue::TupleVec(v) => Some(prost_types::Value {
-            kind: Some(Kind::ListValue(prost_types::ListValue {
-                values: v
-                    .iter()
-                    .map(|&(a, b)| prost_types::Value {
-                        kind: Some(Kind::ListValue(prost_types::ListValue {
-                            values: vec![
-                                prost_types::Value {
-                                    kind: Some(Kind::NumberValue(a as f64)),
-                                },
-                                prost_types::Value {
-                                    kind: Some(Kind::NumberValue(b as f64)),
-                                },
-                            ],
-                        })),
-                    })
-                    .collect(),
-            })),
+        ModelSpecificValue::FloatVec(v) => Some(sglang_proto::TensorData {
+            data: v.iter().flat_map(|val| val.to_le_bytes()).collect(),
+            shape: vec![v.len() as u32],
+            dtype: "float32".to_string(),
         }),
-        ModelSpecificValue::Bool(v) => Some(prost_types::Value {
-            kind: Some(Kind::BoolValue(*v)),
-        }),
+        // Scalar/tuple/bool types not used by any current processor; skip.
+        _ => None,
     }
 }
 
