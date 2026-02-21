@@ -95,7 +95,7 @@ fn max_diff(a: &Array4<f32>, b: &ndarray::ArrayD<f32>) -> f32 {
 }
 
 /// Load image_grid_thw from npz file
-fn load_golden_grid_thw(path: &Path) -> Vec<u32> {
+fn load_golden_grid_thw(path: &Path) -> Vec<i64> {
     let file = File::open(path).expect("Failed to open golden file");
     let mut npz = npyz::npz::NpzArchive::new(file).expect("Failed to parse npz");
 
@@ -108,10 +108,7 @@ fn load_golden_grid_thw(path: &Path) -> Vec<u32> {
     let _shape = reader.shape();
 
     // Read data as i64 vec (numpy default for int)
-    let data: Vec<i64> = reader.into_vec().expect("Failed to read array");
-
-    // Convert to u32
-    data.into_iter().map(|v| v as u32).collect()
+    reader.into_vec().expect("Failed to read array")
 }
 
 /// Load num_tokens from npz file
@@ -360,7 +357,7 @@ fn run_qwen2_vl_golden_test(image_name: &str) {
 
     // Extract image_grid_thw from result
     let rust_grid_thw = match result.model_specific.get("image_grid_thw") {
-        Some(ModelSpecificValue::UintTensor { data, shape }) => {
+        Some(ModelSpecificValue::IntTensor { data, shape }) => {
             assert_eq!(shape, &[1, 3], "Expected shape [1, 3] for single image");
             data.clone()
         }
@@ -534,7 +531,7 @@ fn run_qwen3_vl_golden_test(image_name: &str) {
 
     // Extract image_grid_thw from result
     let rust_grid_thw = match result.model_specific.get("image_grid_thw") {
-        Some(ModelSpecificValue::UintTensor { data, shape }) => {
+        Some(ModelSpecificValue::IntTensor { data, shape }) => {
             assert_eq!(shape, &[1, 3], "Expected shape [1, 3] for single image");
             data.clone()
         }
@@ -697,7 +694,7 @@ fn load_golden_npz_5d(path: &Path) -> Array5<f32> {
 }
 
 /// Load image_sizes from Phi3-Vision npz file (2D tensor [batch, 2])
-fn load_phi3_image_sizes(path: &Path) -> Vec<(u32, u32)> {
+fn load_phi3_image_sizes(path: &Path) -> Vec<(i64, i64)> {
     let file = File::open(path).expect("Failed to open golden file");
     let mut npz = npyz::npz::NpzArchive::new(file).expect("Failed to parse npz");
 
@@ -712,7 +709,7 @@ fn load_phi3_image_sizes(path: &Path) -> Vec<(u32, u32)> {
     // Reshape to pairs
     let num_images = shape[0] as usize;
     (0..num_images)
-        .map(|i| (data[i * 2] as u32, data[i * 2 + 1] as u32))
+        .map(|i| (data[i * 2], data[i * 2 + 1]))
         .collect()
 }
 
@@ -830,8 +827,8 @@ fn run_phi3_vision_golden_test(image_name: &str) {
 
     // Check image_sizes
     // Note: HuggingFace returns [h, w], we store as (w, h) but model_specific stores (h, w)
-    let rust_image_sizes: Vec<(u32, u32)> = match result.model_specific.get("image_sizes") {
-        Some(ModelSpecificValue::UintTensor { data, shape }) => {
+    let rust_image_sizes: Vec<(i64, i64)> = match result.model_specific.get("image_sizes") {
+        Some(ModelSpecificValue::IntTensor { data, shape }) => {
             let num_images = shape[0];
             (0..num_images)
                 .map(|i| (data[i * 2], data[i * 2 + 1]))
@@ -961,7 +958,7 @@ fn load_phi4_num_img_tokens(path: &Path) -> Vec<usize> {
 }
 
 /// Load image_sizes from Phi4-Vision npz file (2D tensor [batch, 2])
-fn load_phi4_image_sizes(path: &Path) -> Vec<(u32, u32)> {
+fn load_phi4_image_sizes(path: &Path) -> Vec<(i64, i64)> {
     let file = File::open(path).expect("Failed to open golden file");
     let mut npz = npyz::npz::NpzArchive::new(file).expect("Failed to parse npz");
 
@@ -976,7 +973,7 @@ fn load_phi4_image_sizes(path: &Path) -> Vec<(u32, u32)> {
     // Reshape to pairs
     let num_images = shape[0] as usize;
     (0..num_images)
-        .map(|i| (data[i * 2] as u32, data[i * 2 + 1] as u32))
+        .map(|i| (data[i * 2], data[i * 2 + 1]))
         .collect()
 }
 
@@ -1030,8 +1027,8 @@ fn run_phi4_vision_golden_test(image_name: &str) {
     );
 
     // Check image_sizes
-    let rust_image_sizes: Vec<(u32, u32)> = match result.model_specific.get("image_sizes") {
-        Some(ModelSpecificValue::UintTensor { data, shape }) => {
+    let rust_image_sizes: Vec<(i64, i64)> = match result.model_specific.get("image_sizes") {
+        Some(ModelSpecificValue::IntTensor { data, shape }) => {
             let num_images = shape[0];
             (0..num_images)
                 .map(|i| (data[i * 2], data[i * 2 + 1]))
