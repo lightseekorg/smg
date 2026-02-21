@@ -405,6 +405,7 @@ pub async fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
         warmup: vec![],
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
     let mcp_orchestrator = McpOrchestrator::new(empty_config)
         .await
@@ -535,6 +536,7 @@ pub async fn create_test_context_with_parsers(config: RouterConfig) -> Arc<AppCo
         warmup: vec![],
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
     let mcp_orchestrator = McpOrchestrator::new(empty_config)
         .await

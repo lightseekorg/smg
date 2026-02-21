@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::RateLimits;
+
 /// Unique identifier for a tenant.
 ///
 /// Uses `Arc<str>` internally for cheap cloning in hot paths.
@@ -102,6 +104,7 @@ impl<'de> Deserialize<'de> for SessionId {
 pub struct TenantContext {
     pub tenant_id: TenantId,
     pub session_id: SessionId,
+    pub limits: Option<RateLimits>,
 }
 
 impl TenantContext {

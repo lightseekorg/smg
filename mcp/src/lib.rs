@@ -21,6 +21,7 @@ pub mod transform;
 pub mod approval;
 pub mod core;
 pub mod inventory;
+pub mod rate_limit;
 pub mod responses_bridge;
 
 // Backward-compatible re-exports (old module paths)
@@ -49,6 +50,7 @@ pub use error::{ApprovalError, McpError, McpResult};
 pub use inventory::{
     AliasTarget, ArgMapping, QualifiedToolName, ToolCategory, ToolEntry, ToolInventory,
 };
+pub use rate_limit::{RateLimiter, RateLimits};
 pub use responses_bridge::{
     build_chat_function_tools, build_chat_function_tools_with_names, build_function_tools_json,
     build_function_tools_json_with_names, build_mcp_list_tools_item, build_mcp_list_tools_json,
