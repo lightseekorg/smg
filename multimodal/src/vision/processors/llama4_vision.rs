@@ -31,7 +31,7 @@
 use std::collections::HashSet;
 
 use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage};
-use ndarray::{s, Array3, Array4, IxDyn};
+use ndarray::{s, Array3, Array4};
 
 use crate::vision::{
     image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
@@ -436,39 +436,29 @@ impl ImagePreProcessor for Llama4VisionProcessor {
             num_img_tokens.push(tokens);
         }
 
-        // Find max tiles across batch for padding
-        let max_tiles = all_outputs
-            .iter()
-            .map(|o| o.shape()[0])
-            .max()
-            .ok_or(TransformError::EmptyBatch)?;
-        let tile = self.tile_size as usize;
-
-        // Pad all outputs to max_tiles
-        let batch_size = images.len();
-        let mut pixel_values =
-            ndarray::ArrayD::<f32>::zeros(IxDyn(&[batch_size, max_tiles, 3, tile, tile]));
-
-        for (b, output) in all_outputs.iter().enumerate() {
-            let num_tiles = output.shape()[0];
-            for t in 0..num_tiles {
-                pixel_values
-                    .slice_mut(s![b, t, .., .., ..])
-                    .assign(&output.slice(s![t, .., .., ..]));
+        // Concatenate all tiles from all images into a single 4D tensor
+        // [total_tiles, C, H, W] — no batch dimension, no zero-padding.
+        // This matches what sglang and vLLM vision models expect.
+        let tile_views: Vec<ndarray::ArrayView4<f32>> =
+            all_outputs.iter().map(|o| o.view()).collect();
+        let pixel_values = ndarray::concatenate(ndarray::Axis(0), &tile_views).map_err(|e| {
+            TransformError::InvalidShape {
+                expected: "concatenatable tile arrays".to_string(),
+                actual: vec![e.to_string().len()],
             }
-            // Remaining tiles stay as zeros (padding)
-        }
+        })?;
 
         // Store aspect ratios as model-specific data
         let mut model_specific = std::collections::HashMap::new();
+        let batch_size = images.len();
 
-        let aspect_ratios_flat: Vec<u32> = all_aspect_ratios
+        let aspect_ratios_flat: Vec<i64> = all_aspect_ratios
             .iter()
-            .flat_map(|&(h, w)| vec![h as u32, w as u32])
+            .flat_map(|&(h, w)| vec![h as i64, w as i64])
             .collect();
         model_specific.insert(
             "aspect_ratios".to_string(),
-            ModelSpecificValue::UintTensor {
+            ModelSpecificValue::IntTensor {
                 data: aspect_ratios_flat,
                 shape: vec![batch_size, 2],
             },
@@ -592,7 +582,9 @@ mod tests {
         let image = create_test_image(500, 500, Rgb([128, 128, 128]));
         let result = processor.preprocess(&[image], &config).unwrap();
 
-        assert_eq!(result.batch_size(), 1);
+        // 4D output: [total_tiles, C, H, W]
+        assert_eq!(result.pixel_values.ndim(), 4);
+        assert_eq!(result.num_img_tokens.len(), 1);
         assert!(result.num_img_tokens[0] > 0);
 
         // Check pixel values are normalized
@@ -608,10 +600,12 @@ mod tests {
         let image = create_test_image(1000, 300, Rgb([128, 128, 128]));
         let result = processor.preprocess(&[image], &config).unwrap();
 
-        assert_eq!(result.batch_size(), 1);
+        // 4D output: [total_tiles, C, H, W]
+        assert_eq!(result.pixel_values.ndim(), 4);
+        assert_eq!(result.num_img_tokens.len(), 1);
         // Wide image should have more tiles in width direction
         let aspect_ratios = result.model_specific.get("aspect_ratios").unwrap();
-        if let ModelSpecificValue::UintTensor { data, .. } = aspect_ratios {
+        if let ModelSpecificValue::IntTensor { data, .. } = aspect_ratios {
             let h_tiles = data[0];
             let w_tiles = data[1];
             assert!(w_tiles >= h_tiles);
@@ -630,9 +624,12 @@ mod tests {
 
         let result = processor.preprocess(&images, &config).unwrap();
 
-        assert_eq!(result.batch_size(), 2);
-        assert_eq!(result.image_sizes.len(), 2);
+        // 4D output: [total_tiles, C, H, W] — tiles from both images concatenated
+        assert_eq!(result.pixel_values.ndim(), 4);
         assert_eq!(result.num_img_tokens.len(), 2);
+        assert_eq!(result.image_sizes.len(), 2);
+        // Total tiles should be > 2 (at least 1 tile per image)
+        assert!(result.pixel_values.shape()[0] >= 2);
     }
 
     #[test]
@@ -645,15 +642,16 @@ mod tests {
         let result = processor.preprocess(&[image], &config).unwrap();
 
         let aspect_ratios = result.model_specific.get("aspect_ratios").unwrap();
-        if let ModelSpecificValue::UintTensor { data, .. } = aspect_ratios {
+        if let ModelSpecificValue::IntTensor { data, .. } = aspect_ratios {
             let h_tiles = data[0] as usize;
             let w_tiles = data[1] as usize;
             let num_tiles = h_tiles * w_tiles;
 
             if num_tiles > 1 {
-                // Output should have num_tiles + 1 (for global tile)
+                // 4D output: [total_tiles, C, H, W]
+                // total_tiles = num_tiles + 1 (global tile)
                 let shape = result.pixel_values.shape();
-                assert_eq!(shape[1], num_tiles + 1);
+                assert_eq!(shape[0], num_tiles + 1);
             }
         }
     }
