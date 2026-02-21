@@ -53,6 +53,10 @@ After editing `.proto` files locally, build a wheel and install it in the remote
 ```bash
 # 1. Build wheel (regenerates Python stubs from latest .proto files)
 cd grpc_client/python
+# Copy proto files into the package tree (the repo uses a symlink which
+# won't survive wheel packaging)
+mkdir -p smg_grpc_proto/proto
+cp ../proto/*.proto smg_grpc_proto/proto/
 pip wheel . --no-deps -w dist/
 
 # 2. Copy to remote
