@@ -26,7 +26,7 @@ pub(crate) struct ChatPreparationStage;
 impl PipelineStage for ChatPreparationStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
         let request = ctx.chat_request_arc();
-        self.prepare_chat(ctx, &request)?;
+        self.prepare_chat(ctx, &request).await?;
         Ok(None)
     }
 
@@ -36,15 +36,7 @@ impl PipelineStage for ChatPreparationStage {
 }
 
 impl ChatPreparationStage {
-    #[expect(
-        clippy::unused_self,
-        reason = "method on stage struct for consistency with PipelineStage pattern"
-    )]
-    #[expect(
-        clippy::result_large_err,
-        reason = "Response is the standard error type in the pipeline stage pattern"
-    )]
-    fn prepare_chat(
+    async fn prepare_chat(
         &self,
         ctx: &mut RequestContext,
         request: &ChatCompletionRequest,
@@ -101,7 +93,7 @@ impl ChatPreparationStage {
                     );
                     return Err(error::bad_request(
                         "multimodal_config_missing",
-                        format!("Tokenizer source path not found for model: {}", model_id),
+                        format!("Tokenizer source path not found for model: {model_id}"),
                     ));
                 }
 
@@ -134,7 +126,7 @@ impl ChatPreparationStage {
                         );
                         return Err(error::bad_request(
                             "multimodal_processing_failed",
-                            format!("Multimodal processing failed: {}", e),
+                            format!("Multimodal processing failed: {e}"),
                         ));
                     }
                 }

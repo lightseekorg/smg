@@ -9,10 +9,10 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use llm_multimodal::{
-    AsyncMultiModalTracker, ChatContentPart, ConversationSegment, ImageDetail, ImageFrame,
-    ImageProcessorRegistry, ImageSize, MediaConnector, MediaConnectorConfig, Modality,
-    ModelMetadata, ModelRegistry, ModelSpecificValue, PlaceholderRange, PreProcessorConfig,
-    PreprocessedImages, PromptReplacement, TrackedMedia, TrackerConfig, TrackerOutput,
+    AsyncMultiModalTracker, ChatContentPart, ImageDetail, ImageFrame, ImageProcessorRegistry,
+    ImageSize, MediaConnector, MediaConnectorConfig, Modality, ModelMetadata, ModelRegistry,
+    ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
+    PromptReplacement, TrackedMedia, TrackerConfig, TrackerOutput,
 };
 use llm_tokenizer::TokenizerTrait;
 use openai_protocol::{
@@ -159,7 +159,7 @@ fn extract_content_parts(messages: &[ChatMessage]) -> Vec<ChatContentPart> {
                     ContentPart::Text { text } => {
                         parts.push(ChatContentPart::Text { text: text.clone() });
                     }
-                    _ => {} // Skip VideoUrl etc. for now
+                    ContentPart::VideoUrl { .. } => {} // Skip VideoUrl for now
                 }
             }
         }
@@ -176,21 +176,6 @@ fn parse_detail(detail: &str) -> Option<ImageDetail> {
         "high" => Some(ImageDetail::High),
         _ => None,
     }
-}
-
-/// Reconstruct the text content from tracker conversation segments.
-///
-/// Placeholder segments produce the placeholder token string (e.g., "<image>").
-#[allow(dead_code)]
-fn reconstruct_text_from_segments(segments: &[ConversationSegment]) -> String {
-    let mut text = String::new();
-    for segment in segments {
-        match segment {
-            ConversationSegment::Text(s) => text.push_str(s),
-            ConversationSegment::Placeholder { token } => text.push_str(token),
-        }
-    }
-    text
 }
 
 /// Full multimodal processing pipeline.
@@ -223,7 +208,7 @@ pub(crate) async fn process_multimodal(
     let spec = components
         .model_registry
         .lookup(&metadata)
-        .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {}", model_id))?;
+        .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {model_id}"))?;
 
     debug!(
         model_id,
@@ -234,10 +219,10 @@ pub(crate) async fn process_multimodal(
     // Build tracker config from spec
     let placeholder_token = spec
         .placeholder_token(&metadata)
-        .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {e}"))?;
     let modality_limits = spec
         .modality_limits(&metadata)
-        .map_err(|e| anyhow::anyhow!("Failed to get modality limits: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to get modality limits: {e}"))?;
 
     let tracker_config = TrackerConfig {
         placeholder_tokens: {
@@ -256,13 +241,13 @@ pub(crate) async fn process_multimodal(
     for part in content_parts {
         tracker
             .push_part(part)
-            .map_err(|e| anyhow::anyhow!("Failed to push content part: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to push content part: {e}"))?;
     }
 
     let tracker_output: TrackerOutput = tracker
         .finalize()
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to finalize multimodal tracker: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to finalize multimodal tracker: {e}"))?;
 
     // Collect fetched images from tracker output
     let images: Vec<Arc<ImageFrame>> = tracker_output
@@ -294,7 +279,7 @@ pub(crate) async fn process_multimodal(
     let image_processor = components
         .image_processor_registry
         .find(model_id)
-        .ok_or_else(|| anyhow::anyhow!("No image processor found for model: {}", model_id))?;
+        .ok_or_else(|| anyhow::anyhow!("No image processor found for model: {model_id}"))?;
 
     // Preprocess images (compute pixel values)
     // Clone needed: ImagePreProcessor::preprocess takes &[DynamicImage] but images are behind Arc<ImageFrame>.
@@ -303,7 +288,7 @@ pub(crate) async fn process_multimodal(
 
     let preprocessed: PreprocessedImages = image_processor
         .preprocess(&dynamic_images, &model_config.preprocessor_config)
-        .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Image preprocessing failed: {e}"))?;
 
     debug!(
         num_images = preprocessed.num_img_tokens.len(),
@@ -324,7 +309,7 @@ pub(crate) async fn process_multimodal(
     // Get prompt replacements (token expansion rules) from spec
     let prompt_replacements = spec
         .prompt_replacements(&metadata, &image_sizes)
-        .map_err(|e| anyhow::anyhow!("Failed to compute prompt replacements: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to compute prompt replacements: {e}"))?;
 
     // Two token IDs may differ for the same placeholder:
     // - search_token_id: what the tokenizer actually emits (e.g. 200090 for "<|image|>")
@@ -421,7 +406,8 @@ fn build_proto_multimodal_inputs(
     let pixel_slice = preprocessed
         .pixel_values
         .as_slice()
-        .unwrap_or_else(|| preprocessed.pixel_values.as_slice_memory_order().unwrap());
+        .or_else(|| preprocessed.pixel_values.as_slice_memory_order())
+        .unwrap_or_default();
     let pixel_bytes: Vec<u8> = pixel_slice.iter().flat_map(|v| v.to_le_bytes()).collect();
     let pixel_shape: Vec<u32> = preprocessed
         .pixel_values
@@ -512,9 +498,22 @@ fn model_specific_to_tensor_data(value: &ModelSpecificValue) -> Option<sglang_pr
 
 #[cfg(test)]
 mod tests {
+    use llm_multimodal::ConversationSegment;
     use openai_protocol::common::ImageUrl;
 
     use super::*;
+
+    /// Reconstruct the text content from tracker conversation segments.
+    fn reconstruct_text_from_segments(segments: &[ConversationSegment]) -> String {
+        let mut text = String::new();
+        for segment in segments {
+            match segment {
+                ConversationSegment::Text(s) => text.push_str(s),
+                ConversationSegment::Placeholder { token } => text.push_str(token),
+            }
+        }
+        text
+    }
 
     #[test]
     fn test_has_multimodal_content_with_images() {
