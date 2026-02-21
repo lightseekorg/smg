@@ -363,13 +363,7 @@ def _add_trtllm_stub_args(parser: argparse.ArgumentParser) -> None:
     """
     group = parser.add_argument_group("TensorRT-LLM Options")
     group.add_argument("--model", type=str, help="Model path (HuggingFace ID or local path)")
-    group.add_argument("--tp-size", type=int, help="Tensor parallel size (overrides config file)")
-    group.add_argument(
-        "--config",
-        type=str,
-        required=False,
-        help="Config file path (YAML, optional - must contain tensor_parallel_size if provided)",
-    )
+    group.add_argument("--tp_size", type=int, help="Tensor parallel size (overrides config file)")
 
 
 BACKEND_ARG_ADDERS = {
@@ -482,7 +476,10 @@ def parse_serve_args(
     _import_backend_args(backend, parser)
     RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
 
-    args = parser.parse_args(argv)
+    if backend == "trtllm":
+        args, _ = parser.parse_known_args(argv)
+    else:
+        args = parser.parse_args(argv)
     return backend, args, backend_args
 
 
