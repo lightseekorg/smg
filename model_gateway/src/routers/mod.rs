@@ -24,6 +24,7 @@ pub mod anthropic;
 pub mod conversations;
 pub mod error;
 pub mod factory;
+pub mod gemini;
 pub mod grpc;
 pub mod header_utils;
 pub mod http;
