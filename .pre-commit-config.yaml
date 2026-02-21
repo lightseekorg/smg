@@ -14,6 +14,7 @@ repos:
       - id: check-added-large-files
       - id: check-merge-conflict
       - id: check-shebang-scripts-are-executable
+        exclude: \.rs$
       - id: detect-private-key
         exclude: .*tests/.*_test\.rs$
       - id: mixed-line-ending
