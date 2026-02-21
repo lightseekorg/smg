@@ -404,12 +404,20 @@ fn build_proto_multimodal_inputs(
     images: &[Arc<ImageFrame>],
 ) -> sglang_proto::MultimodalInputs {
     // Serialize pixel values as raw little-endian f32 bytes
-    let pixel_slice = preprocessed
+    let pixel_bytes: Vec<u8> = if let Some(pixel_slice) = preprocessed
         .pixel_values
         .as_slice()
         .or_else(|| preprocessed.pixel_values.as_slice_memory_order())
-        .unwrap_or_default();
-    let pixel_bytes: Vec<u8> = pixel_slice.iter().flat_map(|v| v.to_le_bytes()).collect();
+    {
+        pixel_slice.iter().flat_map(|v| v.to_le_bytes()).collect()
+    } else {
+        // Fallback for non-contiguous arrays
+        preprocessed
+            .pixel_values
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect()
+    };
     let pixel_shape: Vec<u32> = preprocessed
         .pixel_values
         .shape()
