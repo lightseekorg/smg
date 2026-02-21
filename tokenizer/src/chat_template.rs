@@ -48,12 +48,7 @@ impl std::fmt::Display for ChatTemplateContentFormat {
 /// - ChatTemplateContentFormat::String if template expects simple string content
 pub fn detect_chat_template_content_format(template: &str) -> ChatTemplateContentFormat {
     // Use AST-based detection (enabled by default)
-    if let Some(format) = detect_format_with_ast(template) {
-        return format;
-    }
-
-    // Default to string format if AST parsing fails
-    ChatTemplateContentFormat::String
+    detect_format_with_ast(template)
 }
 
 /// Flags tracking which OpenAI-style patterns we've seen
@@ -315,7 +310,7 @@ impl<'a> Detector<'a> {
 
 /// AST-based detection using minijinja's unstable machinery
 /// Single-pass detector with scope tracking
-fn detect_format_with_ast(template: &str) -> Option<ChatTemplateContentFormat> {
+fn detect_format_with_ast(template: &str) -> ChatTemplateContentFormat {
     let ast = match parse(
         template,
         "template",
@@ -323,15 +318,15 @@ fn detect_format_with_ast(template: &str) -> Option<ChatTemplateContentFormat> {
         WhitespaceConfig::default(),
     ) {
         Ok(ast) => ast,
-        Err(_) => return Some(ChatTemplateContentFormat::String),
+        Err(_) => return ChatTemplateContentFormat::String,
     };
 
     let flags = Detector::new(&ast).run();
-    Some(if flags.any() {
+    if flags.any() {
         ChatTemplateContentFormat::OpenAI
     } else {
         ChatTemplateContentFormat::String
-    })
+    }
 }
 
 /// Parameters for chat template application
@@ -366,7 +361,7 @@ fn tojson_filter(value: Value, kwargs: Kwargs) -> std::result::Result<Value, Min
     let json_value: serde_json::Value = serde_json::to_value(&value).map_err(|e| {
         MinijinjaError::new(
             ErrorKind::InvalidOperation,
-            format!("Failed to convert to JSON value: {}", e),
+            format!("Failed to convert to JSON value: {e}"),
         )
     })?;
 
@@ -382,13 +377,13 @@ fn tojson_filter(value: Value, kwargs: Kwargs) -> std::result::Result<Value, Min
         value.serialize(&mut serializer).map_err(|e| {
             MinijinjaError::new(
                 ErrorKind::InvalidOperation,
-                format!("Failed to serialize JSON: {}", e),
+                format!("Failed to serialize JSON: {e}"),
             )
         })?;
         String::from_utf8(buf).map_err(|e| {
             MinijinjaError::new(
                 ErrorKind::InvalidOperation,
-                format!("Invalid UTF-8 in JSON output: {}", e),
+                format!("Invalid UTF-8 in JSON output: {e}"),
             )
         })
     }
@@ -415,7 +410,7 @@ fn tojson_filter(value: Value, kwargs: Kwargs) -> std::result::Result<Value, Min
             serde_json::to_string(value_to_serialize).map_err(|e| {
                 MinijinjaError::new(
                     ErrorKind::InvalidOperation,
-                    format!("Failed to serialize JSON: {}", e),
+                    format!("Failed to serialize JSON: {e}"),
                 )
             })
         }
@@ -466,7 +461,7 @@ impl ChatTemplateProcessor {
 
         // Register the template
         env.add_template("chat", &self.template)
-            .map_err(|e| anyhow!("Failed to add template: {}", e))?;
+            .map_err(|e| anyhow!("Failed to add template: {e}"))?;
 
         // Enable Python method compatibility (e.g., str.startswith, str.endswith)
         env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
@@ -479,7 +474,7 @@ impl ChatTemplateProcessor {
         // Get the template
         let tmpl = env
             .get_template("chat")
-            .map_err(|e| anyhow!("Failed to get template: {}", e))?;
+            .map_err(|e| anyhow!("Failed to get template: {e}"))?;
 
         // Convert messages to minijinja::Value (messages already processed by router)
         let minijinja_messages: Vec<Value> = messages.iter().map(Value::from_serialize).collect();
@@ -504,7 +499,7 @@ impl ChatTemplateProcessor {
         // Render the template
         let rendered = tmpl
             .render(&ctx)
-            .map_err(|e| anyhow!("Failed to render template: {}", e))?;
+            .map_err(|e| anyhow!("Failed to render template: {e}"))?;
 
         Ok(rendered)
     }
@@ -529,11 +524,11 @@ pub fn load_chat_template_from_config(config_path: &str) -> Result<Option<String
 /// Shared between all tokenizer backends.
 pub fn load_chat_template_from_file(template_path: &str) -> Result<Option<String>> {
     let content = fs::read_to_string(template_path)
-        .map_err(|e| anyhow!("Failed to read chat template file: {}", e))?;
+        .map_err(|e| anyhow!("Failed to read chat template file: {e}"))?;
 
     if template_path.ends_with(".json") {
         let json_value: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| anyhow!("Failed to parse chat_template.json: {}", e))?;
+            .map_err(|e| anyhow!("Failed to parse chat_template.json: {e}"))?;
 
         if let Some(template_str) = json_value.as_str() {
             return Ok(Some(template_str.to_string()));

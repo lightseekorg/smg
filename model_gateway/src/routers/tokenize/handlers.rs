@@ -103,7 +103,7 @@ pub async fn tokenize(registry: &Arc<TokenizerRegistry>, request: TokenizeReques
                 error!("Tokenization failed: {}", e);
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Tokenization failed: {}", e),
+                    &format!("Tokenization failed: {e}"),
                     "tokenization_error",
                 );
             }
@@ -164,7 +164,7 @@ pub async fn detokenize(registry: &Arc<TokenizerRegistry>, request: DetokenizeRe
                 error!("Detokenization failed: {}", e);
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Detokenization failed: {}", e),
+                    &format!("Detokenization failed: {e}"),
                     "detokenization_error",
                 );
             }
@@ -315,7 +315,7 @@ pub async fn remove_tokenizer(context: &Arc<AppContext>, tokenizer_id: &str) -> 
             StatusCode::NOT_FOUND,
             Json(RemoveTokenizerResponse {
                 success: false,
-                message: format!("Tokenizer '{}' not found", tokenizer_id),
+                message: format!("Tokenizer '{tokenizer_id}' not found"),
             }),
         )
             .into_response()
@@ -344,7 +344,7 @@ pub async fn get_tokenizer_info(context: &Arc<AppContext>, tokenizer_id: &str) -
         }
         None => error_response(
             StatusCode::NOT_FOUND,
-            &format!("Tokenizer '{}' not found", tokenizer_id),
+            &format!("Tokenizer '{tokenizer_id}' not found"),
             "tokenizer_not_found",
         ),
     }
@@ -388,7 +388,7 @@ pub async fn get_tokenizer_status(context: &Arc<AppContext>, tokenizer_id: &str)
     // Not found
     error_response(
         StatusCode::NOT_FOUND,
-        &format!("Tokenizer '{}' not found and no pending job", tokenizer_id),
+        &format!("Tokenizer '{tokenizer_id}' not found and no pending job"),
         "not_found",
     )
 }

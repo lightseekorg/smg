@@ -56,9 +56,9 @@ pub(crate) enum RequestType {
 /// Shared components (injected once at creation)
 pub(crate) struct SharedComponents {
     pub tokenizer_registry: Arc<TokenizerRegistry>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub tool_parser_factory: ToolParserFactory,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub reasoning_parser_factory: ReasoningParserFactory,
 }
 
@@ -116,7 +116,7 @@ pub(crate) struct PreparationOutput {
     pub selection_text: Option<String>,
 
     /// Harmony messages for history tracking (Harmony only)
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub harmony_messages: Option<Vec<super::harmony::HarmonyMessage>>,
 
     /// Stop token IDs for Harmony models
@@ -291,6 +291,10 @@ impl RequestContext {
     }
 
     /// Get chat request (panics if not chat)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via RequestType construction"
+    )]
     pub fn chat_request(&self) -> &ChatCompletionRequest {
         match &self.input.request_type {
             RequestType::Chat(req) => req.as_ref(),
@@ -299,6 +303,10 @@ impl RequestContext {
     }
 
     /// Get Arc clone of chat request (panics if not chat)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via RequestType construction"
+    )]
     pub fn chat_request_arc(&self) -> Arc<ChatCompletionRequest> {
         match &self.input.request_type {
             RequestType::Chat(req) => Arc::clone(req),
@@ -307,6 +315,10 @@ impl RequestContext {
     }
 
     /// Get generate request (panics if not generate)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via RequestType construction"
+    )]
     pub fn generate_request(&self) -> &GenerateRequest {
         match &self.input.request_type {
             RequestType::Generate(req) => req.as_ref(),
@@ -315,6 +327,10 @@ impl RequestContext {
     }
 
     /// Get Arc clone of generate request (panics if not generate)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via RequestType construction"
+    )]
     pub fn generate_request_arc(&self) -> Arc<GenerateRequest> {
         match &self.input.request_type {
             RequestType::Generate(req) => Arc::clone(req),
@@ -323,6 +339,10 @@ impl RequestContext {
     }
 
     /// Get Arc clone of responses request (panics if not responses)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via RequestType construction"
+    )]
     pub fn responses_request_arc(&self) -> Arc<ResponsesRequest> {
         match &self.input.request_type {
             RequestType::Responses(req) => Arc::clone(req),
@@ -351,7 +371,7 @@ impl RequestContext {
 }
 
 /// Some methods are kept for API completeness even if currently unused.
-#[allow(dead_code)]
+#[expect(dead_code)]
 impl WorkerSelection {
     pub fn is_dual(&self) -> bool {
         matches!(self, Self::Dual { .. })
@@ -360,7 +380,7 @@ impl WorkerSelection {
     pub fn single(&self) -> Option<&Arc<dyn Worker>> {
         match self {
             Self::Single { worker } => Some(worker),
-            _ => None,
+            Self::Dual { .. } => None,
         }
     }
 
@@ -408,27 +428,27 @@ impl WorkerSelection {
         }
     }
 
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     pub fn dual(&self) -> Option<(&Arc<dyn Worker>, &Arc<dyn Worker>)> {
         match self {
             Self::Dual {
                 prefill, decode, ..
             } => Some((prefill, decode)),
-            _ => None,
+            Self::Single { .. } => None,
         }
     }
 
     pub fn prefill_worker(&self) -> Option<&Arc<dyn Worker>> {
         match self {
             Self::Dual { prefill, .. } => Some(prefill),
-            _ => None,
+            Self::Single { .. } => None,
         }
     }
 
     pub fn decode_worker(&self) -> Option<&Arc<dyn Worker>> {
         match self {
             Self::Dual { decode, .. } => Some(decode),
-            _ => None,
+            Self::Single { .. } => None,
         }
     }
 
@@ -436,60 +456,60 @@ impl WorkerSelection {
     pub fn pd_runtime_type(&self) -> Option<&RuntimeType> {
         match self {
             Self::Dual { runtime_type, .. } => Some(runtime_type),
-            _ => None,
+            Self::Single { .. } => None,
         }
     }
 }
 
 /// Some methods are kept for API completeness even if currently unused.
-#[allow(dead_code)]
+#[expect(dead_code)]
 impl ClientSelection {
     pub fn single(&self) -> Option<&GrpcClient> {
         match self {
             Self::Single { client } => Some(client),
-            _ => None,
+            Self::Dual { .. } => None,
         }
     }
 
     pub fn single_mut(&mut self) -> Option<&mut GrpcClient> {
         match self {
             Self::Single { client } => Some(client),
-            _ => None,
+            Self::Dual { .. } => None,
         }
     }
 
     pub fn dual_mut(&mut self) -> Option<(&mut GrpcClient, &mut GrpcClient)> {
         match self {
             Self::Dual { prefill, decode } => Some((prefill, decode)),
-            _ => None,
+            Self::Single { .. } => None,
         }
     }
 
     pub fn prefill_client(&self) -> Option<&GrpcClient> {
         match self {
             Self::Dual { prefill, .. } => Some(prefill),
-            _ => None,
+            Self::Single { .. } => None,
         }
     }
 
     pub fn prefill_client_mut(&mut self) -> Option<&mut GrpcClient> {
         match self {
             Self::Dual { prefill, .. } => Some(prefill),
-            _ => None,
+            Self::Single { .. } => None,
         }
     }
 
     pub fn decode_client(&self) -> Option<&GrpcClient> {
         match self {
             Self::Dual { decode, .. } => Some(decode),
-            _ => None,
+            Self::Single { .. } => None,
         }
     }
 
     pub fn decode_client_mut(&mut self) -> Option<&mut GrpcClient> {
         match self {
             Self::Dual { decode, .. } => Some(decode),
-            _ => None,
+            Self::Single { .. } => None,
         }
     }
 }

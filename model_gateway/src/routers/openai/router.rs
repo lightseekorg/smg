@@ -88,6 +88,10 @@ impl OpenAIRouter {
         Arc::clone(&self.responses_components)
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "async for API consistency with other router constructors"
+    )]
     pub async fn new(ctx: &Arc<AppContext>) -> Result<Self, String> {
         let worker_registry = ctx.worker_registry.clone();
         let mcp_orchestrator = ctx
@@ -256,10 +260,7 @@ impl OpenAIRouter {
             if self.any_worker_supports_model(model_id) {
                 error::service_unavailable(
                     "service_unavailable",
-                    format!(
-                        "All workers for model '{}' are temporarily unavailable",
-                        model_id
-                    ),
+                    format!("All workers for model '{model_id}' are temporarily unavailable"),
                 )
             } else {
                 error::model_not_found(model_id)
@@ -292,7 +293,7 @@ impl OpenAIRouter {
         match input {
             ResponseInput::Text(text) => {
                 items.push(ResponseInputOutputItem::Message {
-                    id: format!("msg_u_{}", id_suffix),
+                    id: format!("msg_u_{id_suffix}"),
                     role: "user".to_string(),
                     content: vec![ResponseContentPart::InputText { text: text.clone() }],
                     status: Some("completed".to_string()),
@@ -387,7 +388,7 @@ impl OpenAIRouter {
             {
                 Ok(stored_items) => {
                     let mut items: Vec<ResponseInputOutputItem> = Vec::new();
-                    for item in stored_items.into_iter() {
+                    for item in stored_items {
                         match item.item_type.as_str() {
                             "message" => {
                                 match serde_json::from_value::<Vec<ResponseContentPart>>(
@@ -544,7 +545,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             );
         }
 
-        let auth_header = extract_auth_header(Some(req.headers()), &None);
+        let auth_header = extract_auth_header(Some(req.headers()), None);
         self.refresh_external_models(auth_header.as_ref()).await;
 
         let mut all_models = Vec::new();
@@ -555,7 +556,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                 let owned_by = model_card
                     .provider
                     .as_ref()
-                    .map(|p| format!("{:?}", p).to_lowercase())
+                    .map(|p| format!("{p:?}").to_lowercase())
                     .unwrap_or_else(|| "unknown".to_string());
 
                 if seen_models.insert(model_card.id.clone()) {
@@ -611,7 +612,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             bool_to_static_str(streaming),
         );
 
-        let auth_header = extract_auth_header(headers, &None);
+        let auth_header = extract_auth_header(headers, None);
 
         let worker = match self
             .select_worker_for_model(body.model.as_str(), auth_header.as_ref())
@@ -644,7 +645,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                 );
                 return error::bad_request(
                     "invalid_request",
-                    format!("Failed to serialize request: {}", e),
+                    format!("Failed to serialize request: {e}"),
                 );
             }
         };
@@ -659,10 +660,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                 metrics_labels::ENDPOINT_CHAT,
                 metrics_labels::ERROR_VALIDATION,
             );
-            return error::bad_request(
-                "invalid_request",
-                format!("Provider transform error: {}", e),
-            );
+            return error::bad_request("invalid_request", format!("Provider transform error: {e}"));
         }
 
         let mut ctx = RequestContext::for_chat(
@@ -685,11 +683,15 @@ impl crate::routers::RouterTrait for OpenAIRouter {
         });
 
         // Wrap values in Arc to avoid cloning large objects on each retry attempt
+        #[expect(
+            clippy::expect_used,
+            reason = "payload is set earlier in this function; absence is a logic error"
+        )]
         let payload_ref = ctx.payload().expect("Payload not prepared");
         let payload_json = Arc::new(payload_ref.json.clone());
         let client = ctx.components.client().clone();
         let headers_cloned = Arc::new(ctx.headers().cloned());
-        let worker_api_key = Arc::new(worker.api_key().clone());
+        let worker_api_key = Arc::new(worker.api_key().cloned());
         let is_streaming = ctx.is_streaming();
 
         let response = RetryExecutor::execute_response_with_retry(
@@ -704,7 +706,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
 
                 async move {
                     let mut req = client.post(&url).json(&*payload);
-                    let auth_header = extract_auth_header((*headers).as_ref(), &worker_api_key);
+                    let auth_header = extract_auth_header((*headers).as_ref(), (*worker_api_key).as_ref());
                     req = apply_provider_headers(req, &url, auth_header.as_ref());
 
                     if is_streaming {
@@ -717,7 +719,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                             worker.circuit_breaker().record_failure();
                             return error::service_unavailable(
                                 "upstream_error",
-                                format!("Failed to contact upstream: {}", e),
+                                format!("Failed to contact upstream: {e}"),
                             );
                         }
                     };
@@ -730,7 +732,38 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                         worker.circuit_breaker().record_failure();
                     }
 
-                    if !is_streaming {
+                    if is_streaming {
+                        // Streaming response - record success when stream starts
+                        if status.is_success() {
+                            worker.circuit_breaker().record_success();
+                        }
+                        let stream = resp.bytes_stream();
+                        let (tx, rx) = mpsc::unbounded_channel();
+                        #[expect(clippy::disallowed_methods, reason = "fire-and-forget stream relay; gateway shutdown need not wait for individual stream forwarding")]
+                        tokio::spawn(async move {
+                            let mut s = stream;
+                            while let Some(chunk) = s.next().await {
+                                match chunk {
+                                    Ok(bytes) => {
+                                        if tx.send(Ok(bytes)).is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(Err(format!("Stream error: {e}")));
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                        let mut response =
+                            Response::new(Body::from_stream(UnboundedReceiverStream::new(rx)));
+                        *response.status_mut() = status;
+                        response
+                            .headers_mut()
+                            .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+                        response
+                    } else {
                         let content_type = resp.headers().get(CONTENT_TYPE).cloned();
                         match resp.bytes().await {
                             Ok(body) => {
@@ -749,40 +782,10 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                                 worker.circuit_breaker().record_failure();
                                 error::internal_error(
                                     "upstream_error",
-                                    format!("Failed to read response: {}", e),
+                                    format!("Failed to read response: {e}"),
                                 )
                             }
                         }
-                    } else {
-                        // Streaming response - record success when stream starts
-                        if status.is_success() {
-                            worker.circuit_breaker().record_success();
-                        }
-                        let stream = resp.bytes_stream();
-                        let (tx, rx) = mpsc::unbounded_channel();
-                        tokio::spawn(async move {
-                            let mut s = stream;
-                            while let Some(chunk) = s.next().await {
-                                match chunk {
-                                    Ok(bytes) => {
-                                        if tx.send(Ok(bytes)).is_err() {
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let _ = tx.send(Err(format!("Stream error: {}", e)));
-                                        break;
-                                    }
-                                }
-                            }
-                        });
-                        let mut response =
-                            Response::new(Body::from_stream(UnboundedReceiverStream::new(rx)));
-                        *response.status_mut() = status;
-                        response
-                            .headers_mut()
-                            .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-                        response
                     }
                 }
             },
@@ -847,7 +850,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             bool_to_static_str(streaming),
         );
 
-        let auth_header = extract_auth_header(headers, &None);
+        let auth_header = extract_auth_header(headers, None);
 
         let worker = match self
             .select_worker_for_model(model, auth_header.as_ref())
@@ -921,7 +924,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                 );
                 return error::bad_request(
                     "invalid_request",
-                    format!("Failed to serialize request: {}", e),
+                    format!("Failed to serialize request: {e}"),
                 );
             }
         };
@@ -936,10 +939,7 @@ impl crate::routers::RouterTrait for OpenAIRouter {
                 metrics_labels::ENDPOINT_RESPONSES,
                 metrics_labels::ERROR_VALIDATION,
             );
-            return error::bad_request(
-                "invalid_request",
-                format!("Provider transform error: {}", e),
-            );
+            return error::bad_request("invalid_request", format!("Provider transform error: {e}"));
         }
 
         let mut ctx = RequestContext::for_responses(
@@ -1003,10 +1003,10 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             }
             Ok(None) => error::not_found(
                 "not_found",
-                format!("No response found with id '{}'", response_id),
+                format!("No response found with id '{response_id}'"),
             ),
             Err(e) => {
-                error::internal_error("storage_error", format!("Failed to get response: {}", e))
+                error::internal_error("storage_error", format!("Failed to get response: {e}"))
             }
         }
     }
@@ -1051,13 +1051,13 @@ impl crate::routers::RouterTrait for OpenAIRouter {
             }
             Ok(None) => error::not_found(
                 "not_found",
-                format!("No response found with id '{}'", response_id),
+                format!("No response found with id '{response_id}'"),
             ),
             Err(e) => {
                 warn!("Failed to retrieve input items for {}: {}", response_id, e);
                 error::internal_error(
                     "storage_error",
-                    format!("Failed to retrieve input items: {}", e),
+                    format!("Failed to retrieve input items: {e}"),
                 )
             }
         }

@@ -59,7 +59,7 @@ fn create_mtls_client(
     let client_config = ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_client_auth_cert(client_certs, client_key.into())
-        .map_err(|e| format!("Failed to build client config: {}", e))?;
+        .map_err(|e| format!("Failed to build client config: {e}"))?;
 
     let client = reqwest::Client::builder()
         .use_preconfigured_tls(client_config)
@@ -153,7 +153,7 @@ mod mtls_tests {
 
         // Test health endpoint
         let health_resp = client
-            .get(format!("{}/health", worker_url))
+            .get(format!("{worker_url}/health"))
             .send()
             .await
             .expect("Health request failed");
@@ -175,7 +175,7 @@ mod mtls_tests {
         });
 
         let gen_resp = client
-            .post(format!("{}/generate", worker_url))
+            .post(format!("{worker_url}/generate"))
             .json(&payload)
             .send()
             .await
@@ -226,7 +226,7 @@ mod mtls_tests {
         let client = create_tls_client(&certs).expect("Failed to create TLS-only client");
 
         // Attempt to connect - should fail because no client cert provided
-        let result = client.get(format!("{}/health", worker_url)).send().await;
+        let result = client.get(format!("{worker_url}/health")).send().await;
 
         // Connection should fail or be rejected
         assert!(
@@ -270,7 +270,7 @@ mod mtls_tests {
 
         // Test health endpoint - should succeed without client cert
         let health_resp = client
-            .get(format!("{}/health", worker_url))
+            .get(format!("{worker_url}/health"))
             .send()
             .await
             .expect("Health request failed");
@@ -291,7 +291,7 @@ mod mtls_tests {
         });
 
         let chat_resp = client
-            .post(format!("{}/v1/chat/completions", worker_url))
+            .post(format!("{worker_url}/v1/chat/completions"))
             .json(&payload)
             .send()
             .await
@@ -334,7 +334,7 @@ mod mtls_tests {
         let client = create_client_without_ca().expect("Failed to create client without CA");
 
         // Attempt to connect - should fail because cannot verify server cert
-        let result = client.get(format!("{}/health", worker_url)).send().await;
+        let result = client.get(format!("{worker_url}/health")).send().await;
 
         // Connection should fail due to certificate verification
         assert!(
@@ -350,6 +350,7 @@ mod mtls_tests {
     ///
     /// This test verifies that mTLS connections work correctly under concurrent load
     #[tokio::test]
+    #[expect(clippy::disallowed_methods)]
     async fn test_mtls_concurrent_requests() {
         use std::sync::{
             atomic::{AtomicUsize, Ordering},
@@ -391,12 +392,12 @@ mod mtls_tests {
 
             let handle = tokio::spawn(async move {
                 let payload = json!({
-                    "text": format!("Concurrent mTLS request {}", i),
+                    "text": format!("Concurrent mTLS request {i}"),
                     "stream": false
                 });
 
                 let resp = client_clone
-                    .post(format!("{}/generate", url_clone))
+                    .post(format!("{url_clone}/generate"))
                     .json(&payload)
                     .send()
                     .await;

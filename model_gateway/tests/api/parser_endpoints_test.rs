@@ -44,6 +44,7 @@ impl ParserTestContext {
         Self::new_with_config(config, worker_configs).await
     }
 
+    #[expect(clippy::unwrap_used, reason = "test helper with known-valid setup")]
     async fn new_with_config(
         mut config: RouterConfig,
         worker_configs: Vec<MockWorkerConfig>,
@@ -69,14 +70,14 @@ impl ParserTestContext {
                 worker_urls: ref mut urls,
             } => {
                 if urls.is_empty() {
-                    *urls = worker_urls.clone();
+                    urls.clone_from(&worker_urls);
                 }
             }
             RoutingMode::OpenAI {
                 worker_urls: ref mut urls,
             } => {
                 if urls.is_empty() {
-                    *urls = worker_urls.clone();
+                    urls.clone_from(&worker_urls);
                 }
             }
             _ => {} // PrefillDecode mode has its own setup
@@ -103,7 +104,7 @@ impl ParserTestContext {
         }
     }
 
-    async fn create_app(&self) -> axum::Router {
+    fn create_app(&self) -> axum::Router {
         crate::common::test_app::create_test_app_with_context(
             Arc::clone(&self.router),
             Arc::clone(&self.app_context),
@@ -124,7 +125,7 @@ mod parse_function_call_tests {
     #[tokio::test]
     async fn test_parse_function_call_success() {
         let ctx = ParserTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": r#"I need to call the weather function <tool_call>{"function_name": "get_weather", "parameters": {"location": "Beijing"}}</tool_call>"#,
@@ -181,7 +182,7 @@ mod parse_function_call_tests {
     #[tokio::test]
     async fn test_parse_function_call_invalid_parser() {
         let ctx = ParserTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "some text",
@@ -219,7 +220,7 @@ mod parse_function_call_tests {
     #[tokio::test]
     async fn test_parse_function_call_missing_fields() {
         let ctx = ParserTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Missing 'text' field
         let payload = json!({
@@ -260,7 +261,7 @@ mod parse_function_call_tests {
     #[tokio::test]
     async fn test_parse_function_call_empty_text() {
         let ctx = ParserTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "",
@@ -296,7 +297,7 @@ mod separate_reasoning_tests {
     #[tokio::test]
     async fn test_separate_reasoning_success() {
         let ctx = ParserTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "<think>Let me think about this problem. The user is asking for help.</think>Sure, I can help you with that.",
@@ -336,7 +337,7 @@ mod separate_reasoning_tests {
     #[tokio::test]
     async fn test_separate_reasoning_invalid_parser() {
         let ctx = ParserTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "some text",
@@ -373,7 +374,7 @@ mod separate_reasoning_tests {
     #[tokio::test]
     async fn test_separate_reasoning_missing_fields() {
         let ctx = ParserTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Missing 'text' field
         let payload = json!({
@@ -412,7 +413,7 @@ mod separate_reasoning_tests {
     #[tokio::test]
     async fn test_separate_reasoning_empty_text() {
         let ctx = ParserTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "",
@@ -442,7 +443,7 @@ mod separate_reasoning_tests {
     #[tokio::test]
     async fn test_separate_reasoning_without_reasoning_tags() {
         let ctx = ParserTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "Just a normal text without any reasoning tags",
@@ -483,7 +484,7 @@ mod separate_reasoning_tests {
     #[tokio::test]
     async fn test_separate_reasoning_multiple_reasoning_blocks() {
         let ctx = ParserTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Some parsers may handle multiple reasoning blocks
         let payload = json!({
@@ -519,7 +520,7 @@ mod api_routing_tests {
     #[tokio::test]
     async fn test_admin_routes_accessible() {
         let ctx = ParserTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Test that both endpoints exist and are accessible (even if parser factory not initialized)
         let payload = json!({
@@ -563,7 +564,7 @@ mod api_routing_tests {
     #[tokio::test]
     async fn test_endpoints_only_accept_post() {
         let ctx = ParserTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Test GET request to parse/function_call
         let req = Request::builder()

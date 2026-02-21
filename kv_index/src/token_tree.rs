@@ -221,7 +221,7 @@ impl Node {
         }
     }
 
-    #[allow(dead_code)] // Reserved for priority-based eviction policy support
+    #[expect(dead_code)] // Reserved for priority-based eviction policy support
     fn new_with_priority(tokens: Vec<TokenId>, priority: i32) -> Self {
         Self {
             tokens: ParkingLotRwLock::new(tokens),
@@ -314,7 +314,7 @@ impl Node {
     }
 
     /// Update priority (take max to propagate higher priority, matching SGLang)
-    #[allow(dead_code)] // Reserved for priority-based eviction policy support
+    #[expect(dead_code)] // Reserved for priority-based eviction policy support
     fn update_priority(&self, new_priority: i32) {
         // Use fetch_max for correct concurrent updates (avoids CAS race condition)
         self.priority.fetch_max(new_priority, Ordering::Relaxed);
@@ -373,9 +373,8 @@ impl TokenTree {
     pub fn with_config(page_size: usize, policy: EvictionPolicy) -> Self {
         assert_eq!(
             page_size, PAGE_SIZE,
-            "TokenTree currently only supports page_size={} (compile-time limitation). \
-             Got page_size={}. Future versions may support configurable page sizes.",
-            PAGE_SIZE, page_size
+            "TokenTree currently only supports page_size={PAGE_SIZE} (compile-time limitation). \
+             Got page_size={page_size}. Future versions may support configurable page sizes."
         );
         Self {
             root: Arc::new(Node::new_root()),
@@ -748,7 +747,6 @@ impl TokenTree {
     }
 
     /// Get token counts per tenant.
-    #[allow(dead_code)]
     pub fn get_tenant_token_counts(&self) -> HashMap<String, usize> {
         self.tenant_token_count
             .iter()
@@ -878,7 +876,7 @@ impl TokenTree {
                 .contains_key(tenant_id.as_ref());
 
         let mut any_child_has_tenant = false;
-        for child_entry in node.children.iter() {
+        for child_entry in &node.children {
             let child = child_entry.value();
             if child
                 .tenant_last_access_time
@@ -896,6 +894,10 @@ impl TokenTree {
         }
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the tree instance; keeps API consistent with collect_tenant_leaves"
+    )]
     fn is_tenant_leaf(&self, node: &NodeRef, tenant_id: &TenantId) -> bool {
         if !node
             .tenant_last_access_time
@@ -903,7 +905,7 @@ impl TokenTree {
         {
             return false;
         }
-        for child_entry in node.children.iter() {
+        for child_entry in &node.children {
             if child_entry
                 .value()
                 .tenant_last_access_time
@@ -1204,7 +1206,7 @@ mod tests {
                 for j in 0..100 {
                     let base = (i * 1000000 + j * 1000) as u32;
                     let tokens = make_tokens(base, 2);
-                    tree.insert_tokens(&tokens, &format!("tenant{}", i));
+                    tree.insert_tokens(&tokens, &format!("tenant{i}"));
                 }
             }));
         }
@@ -1390,7 +1392,7 @@ mod tests {
         for i in 0..100 {
             let base = (i * 1000) as u32;
             let tokens = make_tokens(base, 2);
-            tree.insert_tokens(&tokens, &format!("tenant{}", i));
+            tree.insert_tokens(&tokens, &format!("tenant{i}"));
         }
 
         for i in 0..100 {
@@ -1398,7 +1400,7 @@ mod tests {
             let tokens = make_tokens(base, 2);
             let result = tree.match_prefix_with_counts(&tokens);
             assert_eq!(result.matched_token_count, 2 * PAGE_SIZE);
-            assert_eq!(result.tenant.as_ref(), &format!("tenant{}", i));
+            assert_eq!(result.tenant.as_ref(), &format!("tenant{i}"));
         }
     }
 
@@ -1416,7 +1418,7 @@ mod tests {
                 for i in 0..entries_per_thread {
                     let base = (t * 1000000 + i * 1000) as u32;
                     let tokens = make_tokens(base, 2);
-                    tree.insert_tokens(&tokens, &format!("tenant{}", t));
+                    tree.insert_tokens(&tokens, &format!("tenant{t}"));
                 }
             }));
         }
@@ -1434,7 +1436,7 @@ mod tests {
                     let tokens = make_tokens(base, 2);
                     let result = tree.match_prefix_with_counts(&tokens);
                     assert_eq!(result.matched_token_count, 2 * PAGE_SIZE);
-                    assert_eq!(result.tenant.as_ref(), &format!("tenant{}", t));
+                    assert_eq!(result.tenant.as_ref(), &format!("tenant{t}"));
                 }
             }));
         }
@@ -1457,7 +1459,7 @@ mod tests {
                 for i in 0..entries_per_thread {
                     let base = (t * 1000000 + i * 1000) as u32;
                     let tokens = make_tokens(base, 3);
-                    tree.insert_tokens(&tokens, &format!("tenant{}", t));
+                    tree.insert_tokens(&tokens, &format!("tenant{t}"));
                 }
             }));
         }
@@ -1500,7 +1502,7 @@ mod tests {
                     let mut tokens = prefix.clone();
                     let suffix = make_tokens((t * 10000 + i * 100) as u32, 1);
                     tokens.extend(suffix);
-                    tree.insert_tokens(&tokens, &format!("tenant{}", t));
+                    tree.insert_tokens(&tokens, &format!("tenant{t}"));
                 }
             }));
         }
@@ -1522,7 +1524,7 @@ mod tests {
         for i in 0..100 {
             let base = (i * 1000) as u32;
             let tokens = make_tokens(base, 2);
-            tree.insert_tokens(&tokens, &format!("initial{}", i));
+            tree.insert_tokens(&tokens, &format!("initial{i}"));
         }
 
         let mut handles = vec![];
@@ -1534,7 +1536,7 @@ mod tests {
                 for i in 0..100 {
                     let base = (10000000 + t * 100000 + i * 1000) as u32;
                     let tokens = make_tokens(base, 2);
-                    tree.insert_tokens(&tokens, &format!("new_tenant{}", t));
+                    tree.insert_tokens(&tokens, &format!("new_tenant{t}"));
                 }
             }));
         }
@@ -1622,7 +1624,7 @@ mod tests {
                 for i in 0..50 {
                     let base = (10000000 + t * 100000 + i * 1000) as u32;
                     let tokens = make_tokens(base, 2);
-                    tree.insert_tokens(&tokens, &format!("tenant{}", t));
+                    tree.insert_tokens(&tokens, &format!("tenant{t}"));
                 }
             }));
         }
@@ -1631,7 +1633,7 @@ mod tests {
         for t in 0..num_threads {
             let tree = Arc::clone(&tree);
             handles.push(thread::spawn(move || {
-                let tenant_id: TenantId = Arc::from(format!("tenant{}", t));
+                let tenant_id: TenantId = Arc::from(format!("tenant{t}"));
                 for _ in 0..10 {
                     tree.evict_tenant(&tenant_id, 50);
                     thread::sleep(std::time::Duration::from_millis(1));
@@ -2018,7 +2020,7 @@ mod tests {
                     let mut tokens = p.clone();
                     let suffix = make_tokens((t * 10000 + i * 100) as u32, 1);
                     tokens.extend(suffix);
-                    tree.insert_tokens(&tokens, &format!("tenant{}", t));
+                    tree.insert_tokens(&tokens, &format!("tenant{t}"));
                 }
             }));
         }
@@ -2041,13 +2043,13 @@ mod tests {
         for t in 0..num_threads {
             let tree = Arc::clone(&tree);
             handles.push(thread::spawn(move || {
-                let tenant_id: TenantId = Arc::from(format!("tenant{}", t));
+                let tenant_id: TenantId = Arc::from(format!("tenant{t}"));
                 for cycle in 0..10 {
                     // Insert
                     for i in 0..20 {
                         let base = (t * 10000000 + cycle * 100000 + i * 1000) as u32;
                         let tokens = make_tokens(base, 2);
-                        tree.insert_tokens(&tokens, &format!("tenant{}", t));
+                        tree.insert_tokens(&tokens, &format!("tenant{t}"));
                     }
                     // Evict
                     tree.evict_tenant(&tenant_id, 10);
@@ -2185,7 +2187,7 @@ mod tests {
                 for i in 0..200 {
                     let base = (t * 10000000 + i * 1000) as u32;
                     let tokens = make_tokens(base, 2);
-                    tree.insert_tokens(&tokens, &format!("tenant{}", t));
+                    tree.insert_tokens(&tokens, &format!("tenant{t}"));
                 }
             }));
         }
@@ -2231,7 +2233,7 @@ mod tests {
         let tokens = make_tokens(1, 2);
 
         for i in 0..100 {
-            tree.insert_tokens(&tokens, &format!("tenant{}", i));
+            tree.insert_tokens(&tokens, &format!("tenant{i}"));
         }
 
         let result = tree.match_prefix_with_counts(&tokens);

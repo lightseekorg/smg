@@ -77,7 +77,7 @@ pub unsafe extern "C" fn sgl_tokenizer_create_from_file(
     let path_str = match CStr::from_ptr(path).to_str() {
         Ok(s) => s,
         Err(e) => {
-            set_error_message(error_out, &format!("Invalid UTF-8 in path: {}", e));
+            set_error_message(error_out, &format!("Invalid UTF-8 in path: {e}"));
             return ptr::null_mut();
         }
     };
@@ -198,7 +198,7 @@ pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template_with_tools(
     let messages: Vec<Value> = match serde_json::from_str(messages_str) {
         Ok(msgs) => msgs,
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to parse messages JSON: {}", e));
+            set_error_message(error_out, &format!("Failed to parse messages JSON: {e}"));
             return SglErrorCode::InvalidArgument;
         }
     };
@@ -212,7 +212,7 @@ pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template_with_tools(
             Ok(s) => match serde_json::from_str::<Vec<Value>>(s) {
                 Ok(t) => Some(t),
                 Err(e) => {
-                    set_error_message(error_out, &format!("Failed to parse tools JSON: {}", e));
+                    set_error_message(error_out, &format!("Failed to parse tools JSON: {e}"));
                     return SglErrorCode::InvalidArgument;
                 }
             },
@@ -229,7 +229,7 @@ pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template_with_tools(
             let result_cstr = match CString::new(result) {
                 Ok(s) => s,
                 Err(e) => {
-                    set_error_message(error_out, &format!("Failed to create result string: {}", e));
+                    set_error_message(error_out, &format!("Failed to create result string: {e}"));
                     return SglErrorCode::MemoryError;
                 }
             };
@@ -284,7 +284,7 @@ pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template(
     let messages: Vec<Value> = match serde_json::from_str(messages_str) {
         Ok(msgs) => msgs,
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to parse messages JSON: {}", e));
+            set_error_message(error_out, &format!("Failed to parse messages JSON: {e}"));
             return SglErrorCode::InvalidArgument;
         }
     };
@@ -295,7 +295,7 @@ pub unsafe extern "C" fn sgl_tokenizer_apply_chat_template(
             let result_cstr = match CString::new(result) {
                 Ok(s) => s,
                 Err(e) => {
-                    set_error_message(error_out, &format!("Failed to create result string: {}", e));
+                    set_error_message(error_out, &format!("Failed to create result string: {e}"));
                     return SglErrorCode::MemoryError;
                 }
             };
@@ -344,7 +344,7 @@ pub unsafe extern "C" fn sgl_tokenizer_decode(
     }
 
     if token_count == 0 {
-        let empty = CString::new("").unwrap();
+        let empty = CString::default();
         *result_out = empty.into_raw();
         clear_error_message(error_out);
         return SglErrorCode::Success;
@@ -359,7 +359,7 @@ pub unsafe extern "C" fn sgl_tokenizer_decode(
             let result_cstr = match CString::new(text) {
                 Ok(s) => s,
                 Err(e) => {
-                    set_error_message(error_out, &format!("Failed to create result string: {}", e));
+                    set_error_message(error_out, &format!("Failed to create result string: {e}"));
                     return SglErrorCode::MemoryError;
                 }
             };

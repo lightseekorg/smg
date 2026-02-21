@@ -188,7 +188,7 @@ impl RequestExecutionStage {
             );
             error::internal_error(
                 "start_generation_failed",
-                format!("Failed to start generation: {}", e),
+                format!("Failed to start generation: {e}"),
             )
         })?;
 
@@ -219,7 +219,7 @@ impl RequestExecutionStage {
             );
             error::internal_error(
                 "start_embedding_failed",
-                format!("Failed to start embedding: {}", e),
+                format!("Failed to start embedding: {e}"),
             )
         })?;
 
@@ -290,7 +290,7 @@ impl RequestExecutionStage {
                 );
                 return Err(error::internal_error(
                     "prefill_worker_failed_to_start",
-                    format!("Prefill worker failed to start: {}", e),
+                    format!("Prefill worker failed to start: {e}"),
                 ));
             }
         };
@@ -306,7 +306,7 @@ impl RequestExecutionStage {
                 );
                 return Err(error::internal_error(
                     "decode_worker_failed_to_start",
-                    format!("Decode worker failed to start: {}", e),
+                    format!("Decode worker failed to start: {e}"),
                 ));
             }
         };
@@ -399,7 +399,7 @@ impl RequestExecutionStage {
                 );
                 error::internal_error(
                     "prefill_worker_failed_to_start",
-                    format!("Prefill worker failed to start: {}", e),
+                    format!("Prefill worker failed to start: {e}"),
                 )
             })?;
 
@@ -418,7 +418,7 @@ impl RequestExecutionStage {
                     );
                     return Err(error::internal_error(
                         "prefill_stream_error",
-                        format!("Prefill stream error: {}", e),
+                        format!("Prefill stream error: {e}"),
                     ));
                 }
             }
@@ -449,7 +449,7 @@ impl RequestExecutionStage {
             );
             error::internal_error(
                 "decode_worker_failed_to_start",
-                format!("Decode worker failed to start: {}", e),
+                format!("Decode worker failed to start: {e}"),
             )
         })?;
 

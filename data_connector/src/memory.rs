@@ -87,10 +87,8 @@ struct ConversationItemInner {
     /// All items indexed by ID
     items: HashMap<ConversationItemId, ConversationItem>,
     /// Per-conversation sorted links: (timestamp, item_id_str) -> ConversationItemId
-    #[allow(clippy::type_complexity)]
     links: HashMap<ConversationId, BTreeMap<(i64, String), ConversationItemId>>,
     /// Per-conversation reverse index: item_id_str -> (timestamp, item_id_str)
-    #[allow(clippy::type_complexity)]
     rev_index: HashMap<ConversationId, HashMap<String, (i64, String)>>,
 }
 
@@ -207,7 +205,7 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
                 }
             }
             (SortOrder::Asc, None) => {
-                for ((_ts, _id), item_key) in map.iter() {
+                for ((_ts, _id), item_key) in map {
                     if push_item(item_key) {
                         break;
                     }
@@ -285,7 +283,7 @@ impl MemoryResponseStorage {
     }
 
     /// Get statistics about the store
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn stats(&self) -> MemoryStoreStats {
         let store = self.store.read();
         MemoryStoreStats {
@@ -387,7 +385,13 @@ impl ResponseStorage for MemoryResponseStorage {
 
                 if let Some(response) = store.responses.get(&id) {
                     response_ids.push(id);
-                    current_id = response.previous_response_id.clone();
+                    #[expect(
+                        clippy::assigning_clones,
+                        reason = "false positive: while-let moves out of current_id, making clone_from invalid"
+                    )]
+                    {
+                        current_id = response.previous_response_id.clone();
+                    }
                     depth += 1;
                 } else {
                     break;
@@ -456,8 +460,8 @@ impl ResponseStorage for MemoryResponseStorage {
 }
 
 /// Statistics for the memory store
+#[cfg(test)]
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(super) struct MemoryStoreStats {
     pub response_count: usize,
     pub identifier_count: usize,

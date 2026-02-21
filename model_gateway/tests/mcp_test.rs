@@ -20,6 +20,7 @@ use smg_mcp::{
 };
 
 /// Create a new mock server for testing (each test gets its own)
+#[expect(clippy::expect_used)]
 async fn create_mock_server() -> MockMCPServer {
     MockMCPServer::start()
         .await
@@ -127,15 +128,13 @@ async fn test_tool_availability_checking() {
             "brave_web_search" | "brave_local_search" => {
                 assert!(
                     available,
-                    "Tool {} should be available from mock server",
-                    tool
+                    "Tool {tool} should be available from mock server"
                 );
             }
             "calculator" => {
                 assert!(
                     !available,
-                    "Tool {} should not be available from mock server",
-                    tool
+                    "Tool {tool} should not be available from mock server"
                 );
             }
             _ => {}
@@ -267,7 +266,7 @@ async fn test_tool_execution_with_mock() {
                 _ => panic!("Expected McpCall output item"),
             }
         }
-        _ => panic!("Expected Success result"),
+        ToolCallResult::PendingApproval(_) => panic!("Expected Success result"),
     }
 
     manager.shutdown().await;
@@ -317,7 +316,7 @@ async fn test_concurrent_tool_execution() {
             .call_tool("mock_server", tool_name, args, "mock_server", &request_ctx)
             .await;
 
-        assert!(result.is_ok(), "Tool {} should succeed", tool_name);
+        assert!(result.is_ok(), "Tool {tool_name} should succeed");
         let response = result.unwrap();
         match response {
             ToolCallResult::Success(output_item) => {
@@ -330,7 +329,7 @@ async fn test_concurrent_tool_execution() {
                     _ => panic!("Expected McpCall output item"),
                 }
             }
-            _ => panic!("Expected Success result"),
+            ToolCallResult::PendingApproval(_) => panic!("Expected Success result"),
         }
     }
 
@@ -648,7 +647,7 @@ async fn test_complete_workflow() {
                 _ => panic!("Expected McpCall output item"),
             }
         }
-        _ => panic!("Expected Success result"),
+        ToolCallResult::PendingApproval(_) => panic!("Expected Success result"),
     }
 
     // 7. Clean shutdown

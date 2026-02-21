@@ -61,7 +61,7 @@ impl MistralParser {
         }
     }
 
-    fn extract_json_array_with_pos<'a>(&self, text: &'a str) -> Option<(usize, &'a str)> {
+    fn extract_json_array_with_pos(text: &str) -> Option<(usize, &str)> {
         const BOT_TOKEN: &str = "[TOOL_CALLS] [";
 
         // Find the start of the token
@@ -113,21 +113,21 @@ impl MistralParser {
     }
 
     /// Parse tool calls from a JSON array
-    fn parse_json_array(&self, json_str: &str) -> ParserResult<Vec<ToolCall>> {
+    fn parse_json_array(json_str: &str) -> ParserResult<Vec<ToolCall>> {
         let value: Value = serde_json::from_str(json_str)
             .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
 
         let mut tools = Vec::new();
 
         if let Value::Array(arr) = value {
-            for item in arr.iter() {
-                if let Some(tool) = self.parse_single_object(item)? {
+            for item in &arr {
+                if let Some(tool) = Self::parse_single_object(item)? {
                     tools.push(tool);
                 }
             }
         } else {
             // Single object case (shouldn't happen with Mistral format, but handle it)
-            if let Some(tool) = self.parse_single_object(&value)? {
+            if let Some(tool) = Self::parse_single_object(&value)? {
                 tools.push(tool);
             }
         }
@@ -136,7 +136,7 @@ impl MistralParser {
     }
 
     /// Parse a single JSON object into a ToolCall
-    fn parse_single_object(&self, obj: &Value) -> ParserResult<Option<ToolCall>> {
+    fn parse_single_object(obj: &Value) -> ParserResult<Option<ToolCall>> {
         let name = obj.get("name").and_then(|v| v.as_str());
 
         if let Some(name) = name {
@@ -175,7 +175,7 @@ impl ToolParser for MistralParser {
         }
 
         // Extract JSON array from Mistral format with position
-        if let Some((start_idx, json_array)) = self.extract_json_array_with_pos(text) {
+        if let Some((start_idx, json_array)) = Self::extract_json_array_with_pos(text) {
             // Extract normal text before BOT_TOKEN
             let normal_text_before = if start_idx > 0 {
                 text[..start_idx].to_string()
@@ -183,7 +183,7 @@ impl ToolParser for MistralParser {
                 String::new()
             };
 
-            match self.parse_json_array(json_array) {
+            match Self::parse_json_array(json_array) {
                 Ok(tools) => Ok((normal_text_before, tools)),
                 Err(e) => {
                     // If JSON parsing fails, return the original text as normal text
@@ -222,10 +222,10 @@ impl ToolParser for MistralParser {
                     && self.current_tool_id > 0
                     && normal_text.starts_with(self.eot_token)
                 {
-                    normal_text = normal_text
-                        .strip_prefix(self.eot_token)
-                        .unwrap()
-                        .to_string();
+                    // Safe: starts_with(self.eot_token) check guarantees strip_prefix succeeds
+                    if let Some(stripped) = normal_text.strip_prefix(self.eot_token) {
+                        normal_text = stripped.to_string();
+                    }
                     self.array_closed = true;
                 }
 

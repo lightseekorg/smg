@@ -144,7 +144,7 @@ pub(crate) fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> 
 pub(crate) fn inject_mcp_tools_into_request(
     request: &mut CreateMessageRequest,
     session: &McpToolSession<'_>,
-    allowed_tools_filter: &Option<Vec<String>>,
+    allowed_tools_filter: Option<&[String]>,
 ) {
     request.mcp_servers = None;
 
@@ -307,10 +307,8 @@ pub(crate) fn rebuild_response_with_mcp_blocks(
 /// Collect allowed tools filter from `McpToolset` entries in the tools array.
 ///
 /// Returns `None` (no filtering) if any toolset allows all tools.
-pub(crate) fn collect_allowed_tools_from_toolsets(
-    tools: &Option<Vec<Tool>>,
-) -> Option<Vec<String>> {
-    let tools = tools.as_ref()?;
+pub(crate) fn collect_allowed_tools_from_toolsets(tools: Option<&[Tool]>) -> Option<Vec<String>> {
+    let tools = tools?;
 
     let mut all_allowed = Vec::new();
     let mut saw_mcp_toolset = false;

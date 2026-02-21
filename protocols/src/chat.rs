@@ -98,11 +98,11 @@ impl MessageContent {
     pub fn append_text_to(&self, buffer: &mut String) -> bool {
         match self {
             MessageContent::Text(text) => {
-                if !text.is_empty() {
+                if text.is_empty() {
+                    false
+                } else {
                     buffer.push_str(text);
                     true
-                } else {
-                    false
                 }
             }
             MessageContent::Parts(parts) => {
@@ -329,7 +329,7 @@ fn validate_messages(messages: &[ChatMessage]) -> Result<(), validator::Validati
         return Err(validator::ValidationError::new("messages cannot be empty"));
     }
 
-    for msg in messages.iter() {
+    for msg in messages {
         if let ChatMessage::User { content, .. } = msg {
             match content {
                 MessageContent::Text(text) if text.is_empty() => {
@@ -434,9 +434,7 @@ fn validate_chat_cross_parameters(
         }
 
         // Additional validation when tools are present
-        if has_tools {
-            let tools = req.tools.as_ref().unwrap();
-
+        if let Some(tools) = req.tools.as_ref().filter(|t| !t.is_empty()) {
             match tool_choice {
                 ToolChoice::Function { function, .. } => {
                     // Validate that the specified function name exists in tools
@@ -466,8 +464,7 @@ fn validate_chat_cross_parameters(
                     if mode != "auto" && mode != "required" {
                         let mut e = validator::ValidationError::new("tool_choice_invalid_mode");
                         e.message = Some(format!(
-                            "Invalid value for 'tool_choice.mode': must be 'auto' or 'required', got '{}'.",
-                            mode
+                            "Invalid value for 'tool_choice.mode': must be 'auto' or 'required', got '{mode}'."
                         ).into());
                         return Err(e);
                     }
@@ -487,8 +484,7 @@ fn validate_chat_cross_parameters(
                                     );
                                     e.message = Some(
                                         format!(
-                                            "Invalid value for 'tool_choice.tools': tool '{}' not found in 'tools'.",
-                                            name
+                                            "Invalid value for 'tool_choice.tools': tool '{name}' not found in 'tools'."
                                         )
                                         .into(),
                                     );
@@ -512,7 +508,7 @@ fn validate_chat_cross_parameters(
                         }
                     }
                 }
-                _ => {}
+                ToolChoice::Value(_) => {}
             }
         }
     }
@@ -531,14 +527,14 @@ impl Normalizable for ChatCompletionRequest {
     /// 3. Apply OpenAI defaults for tool_choice
     fn normalize(&mut self) {
         // Migrate deprecated max_tokens → max_completion_tokens
-        #[allow(deprecated)]
+        #[expect(deprecated)]
         if self.max_completion_tokens.is_none() && self.max_tokens.is_some() {
             self.max_completion_tokens = self.max_tokens;
             self.max_tokens = None; // Clear deprecated field
         }
 
         // Migrate deprecated functions → tools
-        #[allow(deprecated)]
+        #[expect(deprecated)]
         if self.tools.is_none() && self.functions.is_some() {
             tracing::warn!("functions is deprecated, use tools instead");
             self.tools = self.functions.as_ref().map(|functions| {
@@ -554,7 +550,7 @@ impl Normalizable for ChatCompletionRequest {
         }
 
         // Migrate deprecated function_call → tool_choice
-        #[allow(deprecated)]
+        #[expect(deprecated)]
         if self.tool_choice.is_none() && self.function_call.is_some() {
             tracing::warn!("function_call is deprecated, use tool_choice instead");
             self.tool_choice = self.function_call.as_ref().map(|fc| match fc {
@@ -571,10 +567,10 @@ impl Normalizable for ChatCompletionRequest {
         // Apply tool_choice defaults
         if self.tool_choice.is_none() {
             if let Some(tools) = &self.tools {
-                let choice_value = if !tools.is_empty() {
-                    ToolChoiceValue::Auto
-                } else {
+                let choice_value = if tools.is_empty() {
                     ToolChoiceValue::None
+                } else {
+                    ToolChoiceValue::Auto
                 };
                 self.tool_choice = Some(ToolChoice::Value(choice_value));
             }

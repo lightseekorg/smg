@@ -6,6 +6,12 @@
 //! - Concurrent parsing with shared parsers
 //! - Streaming vs complete parsing
 //! - Different model formats (JSON, Mistral, Qwen, Pythonic, etc.)
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    reason = "benchmark code: panicking on setup failure is expected, println used for benchmark output"
+)]
 
 use std::{
     collections::BTreeMap,
@@ -157,8 +163,7 @@ fn generate_large_json(num_tools: usize) -> String {
     let mut tools = Vec::new();
     for i in 0..num_tools {
         tools.push(format!(
-            r#"{{"name": "tool_{}", "arguments": {{"param1": "value{}", "param2": {}, "param3": true}}}}"#,
-            i, i, i
+            r#"{{"name": "tool_{i}", "arguments": {{"param1": "value{i}", "param2": {i}, "param3": true}}}}"#
         ));
     }
     format!("[{}]", tools.join(", "))
@@ -172,7 +177,7 @@ lazy_static::lazy_static! {
 fn add_result(category: &str, result: String) {
     let mut results = BENCHMARK_RESULTS.lock().unwrap();
     let index = results.len();
-    results.insert(format!("{:03}_{}", index, category), result);
+    results.insert(format!("{index:03}_{category}"), result);
 }
 
 fn bench_registry_creation(c: &mut Criterion) {
@@ -322,8 +327,7 @@ fn bench_complete_parsing(c: &mut Criterion) {
                     let time_per_op = duration.as_micros() as f64 / iters as f64;
 
                     let result = format!(
-                        "{:<25} | {:>10} | {:>12.0} | {:>12.0} | {:>10.1}µs",
-                        name, input_len, ops_per_sec, bytes_per_sec, time_per_op
+                        "{name:<25} | {input_len:>10} | {ops_per_sec:>12.0} | {bytes_per_sec:>12.0} | {time_per_op:>10.1}µs"
                     );
                     add_result("complete", result);
 
@@ -351,7 +355,7 @@ fn bench_streaming_parsing(c: &mut Criterion) {
         r#"ramming", "li"#,
         r#"mit": 10, "off"#,
         r#"set": 0}"#,
-        r#"}"#,
+        r"}",
     ];
 
     let mut group = c.benchmark_group("streaming_parsing");
@@ -691,7 +695,16 @@ fn bench_latency_distribution(c: &mut Criterion) {
             b.iter_custom(|iters| {
                 let parser = registry.get_parser(parser_name).expect("Parser not found");
 
-                let total_duration = if !printed_clone.load(Ordering::Relaxed) {
+                let total_duration = if printed_clone.load(Ordering::Relaxed) {
+                    // Regular benchmark iterations
+                    let start = Instant::now();
+                    for _ in 0..iters {
+                        let parser = parser.clone();
+                        rt.block_on(async { parser.parse_complete(input).await })
+                            .unwrap();
+                    }
+                    start.elapsed()
+                } else {
                     let mut latencies = Vec::new();
 
                     // Warm up
@@ -732,15 +745,6 @@ fn bench_latency_distribution(c: &mut Criterion) {
 
                     // Return median for consistency
                     p50 * iters as u32
-                } else {
-                    // Regular benchmark iterations
-                    let start = Instant::now();
-                    for _ in 0..iters {
-                        let parser = parser.clone();
-                        rt.block_on(async { parser.parse_complete(input).await })
-                            .unwrap();
-                    }
-                    start.elapsed()
                 };
 
                 total_duration
@@ -764,7 +768,7 @@ fn print_summary() {
         let category = key.split('_').skip(1).collect::<Vec<_>>().join("_");
 
         if category != current_category {
-            current_category = category.clone();
+            current_category.clone_from(&category);
 
             // Print section header based on category
             println!("\n{}", "-".repeat(120));
@@ -830,7 +834,7 @@ fn print_summary() {
             println!("{}", "-".repeat(120));
         }
 
-        println!("{}", value);
+        println!("{value}");
     }
 
     println!("\n{}", "=".repeat(120));
@@ -856,12 +860,12 @@ fn print_summary() {
 
             if new_ops > 0.0 && reuse_ops > 0.0 {
                 let improvement = (reuse_ops / new_ops - 1.0) * 100.0;
-                println!("Parser Reuse Improvement: {:.1}% faster", improvement);
+                println!("Parser Reuse Improvement: {improvement:.1}% faster");
 
                 if improvement < 100.0 {
                     println!("⚠️  WARNING: Parser reuse improvement is lower than expected!");
                     println!("   Expected: >100% improvement with singleton pattern");
-                    println!("   Actual: {:.1}% improvement", improvement);
+                    println!("   Actual: {improvement:.1}% improvement");
                     println!("   Recommendation: Implement global singleton registry");
                 }
             }

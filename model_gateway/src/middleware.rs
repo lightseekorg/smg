@@ -176,7 +176,7 @@ fn generate_request_id(path: &str) -> String {
         })
         .collect();
 
-    format!("{}{}", prefix, random_part)
+    format!("{prefix}{random_part}")
 }
 
 // Re-export RequestId from auth crate for backward compatibility
@@ -413,7 +413,7 @@ impl QueueProcessor {
             let remaining_timeout = self.queue_timeout - elapsed;
 
             // Try to acquire token for this request
-            if self.token_bucket.try_acquire(1.0).await.is_ok() {
+            if self.token_bucket.try_acquire(1.0).is_ok() {
                 // Got token immediately
                 debug!("Queue: acquired token immediately for queued request");
                 let _ = queued.permit_tx.send(Ok(()));
@@ -422,6 +422,10 @@ impl QueueProcessor {
                 let token_bucket = self.token_bucket.clone();
 
                 // Spawn task only when we actually need to wait
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "fire-and-forget permit acquisition: task is bounded by remaining_timeout and communicates via oneshot; dropping the JoinHandle detaches the task but it self-terminates"
+                )]
                 tokio::spawn(async move {
                     if token_bucket
                         .acquire_timeout(1.0, remaining_timeout)
@@ -508,7 +512,7 @@ pub async fn concurrency_limit_middleware(
     };
 
     // Try to acquire token immediately
-    if token_bucket.try_acquire(1.0).await.is_ok() {
+    if token_bucket.try_acquire(1.0).is_ok() {
         debug!("Acquired token immediately");
         Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_ALLOWED);
         let response = next.run(request).await;
@@ -534,7 +538,7 @@ pub async fn concurrency_limit_middleware(
 
             // Try to send to queue
             match queue_tx.try_send(queued) {
-                Ok(_) => {
+                Ok(()) => {
                     // Wait for token from queue processor
                     match permit_rx.await {
                         Ok(Ok(())) => {

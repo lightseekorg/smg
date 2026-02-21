@@ -40,7 +40,7 @@ fn preprocess_impl(
     let processed_messages = process_chat_messages(chat_request, tokenizer).map_err(|e| {
         (
             SglErrorCode::ParsingError,
-            format!("Failed to process chat messages: {}", e),
+            format!("Failed to process chat messages: {e}"),
         )
     })?;
 
@@ -50,7 +50,7 @@ fn preprocess_impl(
         .map_err(|e| {
             (
                 SglErrorCode::TokenizationError,
-                format!("Tokenization failed: {}", e),
+                format!("Tokenization failed: {e}"),
             )
         })?;
 
@@ -59,18 +59,22 @@ fn preprocess_impl(
 
     // Generate tool constraints if tools are present
     let tool_constraints = if let Some(tools) = chat_request.tools.as_ref() {
-        match generate_tool_constraints(tools, &chat_request.tool_choice, &chat_request.model) {
+        match generate_tool_constraints(
+            tools,
+            chat_request.tool_choice.as_ref(),
+            &chat_request.model,
+        ) {
             Ok(Some(constraints)) => {
                 let json_str = serde_json::to_string(&constraints).map_err(|e| {
                     (
                         SglErrorCode::ParsingError,
-                        format!("Failed to serialize tool constraints: {}", e),
+                        format!("Failed to serialize tool constraints: {e}"),
                     )
                 })?;
                 Some(CString::new(json_str).map_err(|e| {
                     (
                         SglErrorCode::MemoryError,
-                        format!("Failed to create C string: {}", e),
+                        format!("Failed to create C string: {e}"),
                     )
                 })?)
             }
@@ -78,7 +82,7 @@ fn preprocess_impl(
             Err(e) => {
                 return Err((
                     SglErrorCode::ParsingError,
-                    format!("Failed to generate tool constraints: {}", e),
+                    format!("Failed to generate tool constraints: {e}"),
                 ))
             }
         }
@@ -90,7 +94,7 @@ fn preprocess_impl(
     let prompt_text = CString::new(processed_messages.text).map_err(|e| {
         (
             SglErrorCode::MemoryError,
-            format!("Failed to create C string: {}", e),
+            format!("Failed to create C string: {e}"),
         )
     })?;
 
@@ -200,7 +204,7 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request(
     let chat_request: ChatCompletionRequest = match serde_json::from_str(request_str) {
         Ok(req) => req,
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to parse request JSON: {}", e));
+            set_error_message(error_out, &format!("Failed to parse request JSON: {e}"));
             return SglErrorCode::ParsingError;
         }
     };
@@ -208,7 +212,7 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request(
     let tokenizer = match create_tokenizer_from_file(tokenizer_path_str) {
         Ok(t) => t,
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to create tokenizer: {}", e));
+            set_error_message(error_out, &format!("Failed to create tokenizer: {e}"));
             return SglErrorCode::TokenizationError;
         }
     };
@@ -291,7 +295,7 @@ pub unsafe extern "C" fn sgl_preprocess_chat_request_with_tokenizer(
     let chat_request: ChatCompletionRequest = match serde_json::from_str(request_str) {
         Ok(req) => req,
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to parse request JSON: {}", e));
+            set_error_message(error_out, &format!("Failed to parse request JSON: {e}"));
             return SglErrorCode::ParsingError;
         }
     };

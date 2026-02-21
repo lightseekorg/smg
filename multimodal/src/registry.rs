@@ -121,7 +121,7 @@ impl LlavaSpec {
             .unwrap_or(14)
     }
 
-    fn tokens_per_image(metadata: &ModelMetadata, size: &ImageSize) -> usize {
+    fn tokens_per_image(metadata: &ModelMetadata, size: ImageSize) -> usize {
         let patch = Self::patch_size(metadata);
         let cols = size.width.div_ceil(patch) as usize;
         let rows = size.height.div_ceil(patch) as usize;
@@ -170,7 +170,7 @@ impl ModelProcessorSpec for LlavaSpec {
         Ok(image_sizes
             .iter()
             .map(|size| {
-                let count = Self::tokens_per_image(metadata, size);
+                let count = Self::tokens_per_image(metadata, *size);
                 PromptReplacement::repeated(Modality::Image, &token, token_id, count)
             })
             .collect())
@@ -198,7 +198,7 @@ impl QwenVLVisionSpec {
             })
     }
 
-    fn patch_grid(metadata: &ModelMetadata, size: &ImageSize) -> (usize, usize) {
+    fn patch_grid(metadata: &ModelMetadata, size: ImageSize) -> (usize, usize) {
         let patch = metadata
             .config_u32(&["vision_config", "patch_size"])
             .unwrap_or(14);
@@ -253,7 +253,7 @@ impl ModelProcessorSpec for QwenVLVisionSpec {
         Ok(image_sizes
             .iter()
             .map(|size| {
-                let (rows, cols) = Self::patch_grid(metadata, size);
+                let (rows, cols) = Self::patch_grid(metadata, *size);
                 let pad_len = rows * cols;
                 let mut tokens = Vec::with_capacity(pad_len + 1);
                 tokens.push(start_token_id);

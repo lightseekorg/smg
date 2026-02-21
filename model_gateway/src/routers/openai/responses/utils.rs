@@ -106,7 +106,7 @@ fn rebuild_sse_block(block: &str, new_payload: &str) -> String {
     for line in block.lines() {
         if line.starts_with("data:") {
             if !data_written {
-                rebuilt_lines.push(format!("data: {}", new_payload));
+                rebuilt_lines.push(format!("data: {new_payload}"));
                 data_written = true;
             }
         } else {
@@ -115,7 +115,7 @@ fn rebuild_sse_block(block: &str, new_payload: &str) -> String {
     }
 
     if !data_written {
-        rebuilt_lines.push(format!("data: {}", new_payload));
+        rebuilt_lines.push(format!("data: {new_payload}"));
     }
 
     rebuilt_lines.join("\n")
@@ -188,7 +188,7 @@ pub(super) fn rewrite_streaming_block(
 pub(super) fn insert_optional_string(
     map: &mut Map<String, Value>,
     key: &str,
-    value: &Option<String>,
+    value: Option<&String>,
 ) {
     if let Some(v) = value {
         map.insert(key.to_string(), Value::String(v.clone()));
@@ -204,10 +204,14 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
         ResponseToolType::Mcp if tool.server_url.is_some() => {
             let mut m = Map::new();
             m.insert("type".to_string(), json!("mcp"));
-            insert_optional_string(&mut m, "server_label", &tool.server_label);
-            insert_optional_string(&mut m, "server_url", &tool.server_url);
-            insert_optional_string(&mut m, "server_description", &tool.server_description);
-            insert_optional_string(&mut m, "require_approval", &tool.require_approval);
+            insert_optional_string(&mut m, "server_label", tool.server_label.as_ref());
+            insert_optional_string(&mut m, "server_url", tool.server_url.as_ref());
+            insert_optional_string(
+                &mut m,
+                "server_description",
+                tool.server_description.as_ref(),
+            );
+            insert_optional_string(&mut m, "require_approval", tool.require_approval.as_ref());
             if let Some(allowed) = &tool.allowed_tools {
                 m.insert(
                     "allowed_tools".to_string(),

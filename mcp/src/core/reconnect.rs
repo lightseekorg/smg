@@ -71,8 +71,7 @@ impl ReconnectionManager {
             }
         }
         Err(McpError::ConnectionFailed(format!(
-            "Max retries reached for {}",
-            server_name
+            "Max retries reached for {server_name}"
         )))
     }
 }

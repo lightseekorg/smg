@@ -439,6 +439,10 @@ pub struct CitationsConfig {
 /// Citation types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "variant names match the OpenAI API citation type discriminators (char_location, page_location, etc.)"
+)]
 pub enum Citation {
     CharLocation(CharLocationCitation),
     PageLocation(PageLocationCitation),
@@ -857,6 +861,10 @@ pub struct MessageDeltaUsage {
 /// Content block delta for streaming updates
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "variant names match the OpenAI/Anthropic streaming delta type discriminators (text_delta, input_json_delta, etc.)"
+)]
 pub enum ContentBlockDelta {
     /// Text delta
     TextDelta { text: String },
@@ -886,6 +894,10 @@ pub struct ErrorResponse {
 /// API error types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "variant names match the OpenAI API error type discriminators (invalid_request_error, authentication_error, etc.)"
+)]
 pub enum ApiError {
     InvalidRequestError { message: String },
     AuthenticationError { message: String },

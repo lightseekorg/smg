@@ -61,7 +61,7 @@ pub(crate) fn build_sse_response(
         .header(header::CACHE_CONTROL, "no-cache")
         .header(header::CONNECTION, "keep-alive");
 
-    for (key, value) in upstream_headers.iter() {
+    for (key, value) in &upstream_headers {
         let key_str = key.as_str();
         if !matches!(
             key_str,
@@ -100,7 +100,7 @@ pub(crate) async fn send_event(
 /// Format a `MessageStreamEvent` as SSE bytes: `event: <type>\ndata: <json>\n\n`
 fn format_sse_event(event_type: &str, data: &Value) -> Bytes {
     let json = serde_json::to_string(data).unwrap_or_else(|_| "{}".to_string());
-    Bytes::from(format!("event: {}\ndata: {}\n\n", event_type, json))
+    Bytes::from(format!("event: {event_type}\ndata: {json}\n\n"))
 }
 
 /// Send an SSE error event.
@@ -217,15 +217,14 @@ where
         EventProcessor::new(tx, global_index, is_first_iteration, resolve_server_name);
 
     while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
+        let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
         let text = String::from_utf8_lossy(&chunk);
         buffer.push_str(&text);
 
         // Guard against unbounded buffer growth (DoS protection)
         if buffer.len() > MAX_SSE_BUFFER_SIZE {
             return Err(format!(
-                "SSE buffer exceeded maximum size ({} bytes) — possible malformed upstream stream",
-                MAX_SSE_BUFFER_SIZE
+                "SSE buffer exceeded maximum size ({MAX_SSE_BUFFER_SIZE} bytes) — possible malformed upstream stream"
             ));
         }
 
@@ -434,7 +433,7 @@ where
     /// Process a single SSE event from the upstream worker.
     async fn process(&mut self, event_type: &str, data: &str) -> Result<(), String> {
         let mut parsed: Value =
-            serde_json::from_str(data).map_err(|e| format!("Failed to parse SSE data: {}", e))?;
+            serde_json::from_str(data).map_err(|e| format!("Failed to parse SSE data: {e}"))?;
 
         match event_type {
             "message_start" => {
@@ -469,8 +468,7 @@ where
 
         if upstream_index > MAX_UPSTREAM_BLOCK_INDEX {
             return Err(format!(
-                "Upstream content block index {} exceeds maximum ({})",
-                upstream_index, MAX_UPSTREAM_BLOCK_INDEX
+                "Upstream content block index {upstream_index} exceeds maximum ({MAX_UPSTREAM_BLOCK_INDEX})"
             ));
         }
 

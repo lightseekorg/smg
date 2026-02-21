@@ -504,6 +504,7 @@ fn test_json_serialization() {
     assert_eq!(parsed.tools.as_ref().map(|t| t.len()), Some(1));
 }
 
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 #[tokio::test]
 async fn test_multi_turn_loop_with_mcp() {
     // This test verifies the multi-turn loop functionality:
@@ -664,6 +665,7 @@ async fn test_multi_turn_loop_with_mcp() {
     mcp.stop().await;
 }
 
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 #[tokio::test]
 async fn test_max_tool_calls_limit() {
     // This test verifies that max_tool_calls is respected
@@ -783,6 +785,11 @@ async fn test_max_tool_calls_limit() {
 
 /// Helper function to set up common test infrastructure for streaming MCP tests
 /// Returns (mcp_server, worker, router, temp_dir)
+#[expect(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn setup_streaming_mcp_test() -> (
     MockMCPServer,
     MockWorker,
@@ -864,6 +871,7 @@ fn parse_sse_events(body: &str) -> Vec<(Option<String>, serde_json::Value)> {
     events
 }
 
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 #[tokio::test]
 async fn test_streaming_with_mcp_tool_calls() {
     // This test verifies that streaming works with MCP tool calls:
@@ -944,7 +952,7 @@ async fn test_streaming_with_mcp_tool_calls() {
     let body_bytes = to_bytes(response_body, usize::MAX).await.unwrap();
     let body_text = String::from_utf8_lossy(&body_bytes);
 
-    println!("Streaming SSE response:\n{}", body_text);
+    println!("Streaming SSE response:\n{body_text}");
 
     // Parse all SSE events into structured format
     let events = parse_sse_events(&body_text);
@@ -1088,33 +1096,27 @@ async fn test_streaming_with_mcp_tool_calls() {
                 println!("✓ Found response.completed event");
             }
             _ => {
-                println!("  Other event: {}", event_type);
+                println!("  Other event: {event_type}");
             }
         }
 
         if let Some(name) = event_name {
-            println!("  Event name: {}", name);
+            println!("  Event name: {name}");
         }
     }
 
     // Verify key events were present
     println!("\n=== Event Summary ===");
-    println!("MCP list_tools added: {}", found_mcp_list_tools);
-    println!(
-        "MCP list_tools in_progress: {}",
-        found_mcp_list_tools_in_progress
-    );
-    println!(
-        "MCP list_tools completed: {}",
-        found_mcp_list_tools_completed
-    );
-    println!("Response created: {}", found_response_created);
-    println!("MCP call added: {}", found_mcp_call_added);
-    println!("MCP call in_progress: {}", found_mcp_call_in_progress);
-    println!("MCP call arguments delta: {}", found_mcp_call_arguments);
-    println!("MCP call arguments done: {}", found_mcp_call_arguments_done);
-    println!("MCP call done: {}", found_mcp_call_done);
-    println!("Response completed: {}", found_response_completed);
+    println!("MCP list_tools added: {found_mcp_list_tools}");
+    println!("MCP list_tools in_progress: {found_mcp_list_tools_in_progress}");
+    println!("MCP list_tools completed: {found_mcp_list_tools_completed}");
+    println!("Response created: {found_response_created}");
+    println!("MCP call added: {found_mcp_call_added}");
+    println!("MCP call in_progress: {found_mcp_call_in_progress}");
+    println!("MCP call arguments delta: {found_mcp_call_arguments}");
+    println!("MCP call arguments done: {found_mcp_call_arguments_done}");
+    println!("MCP call done: {found_mcp_call_done}");
+    println!("Response completed: {found_response_completed}");
 
     // Assert critical events are present
     assert!(
@@ -1154,6 +1156,7 @@ async fn test_streaming_with_mcp_tool_calls() {
     mcp.stop().await;
 }
 
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 #[tokio::test]
 async fn test_streaming_multi_turn_with_mcp() {
     // Test streaming with multiple tool call rounds
@@ -1205,7 +1208,7 @@ async fn test_streaming_multi_turn_with_mcp() {
     let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body_text = String::from_utf8_lossy(&body_bytes);
 
-    println!("Multi-turn streaming response:\n{}", body_text);
+    println!("Multi-turn streaming response:\n{body_text}");
 
     // Verify streaming completed successfully
     assert!(body_text.contains("data: [DONE]"));
@@ -1216,7 +1219,7 @@ async fn test_streaming_multi_turn_with_mcp() {
         .split("\n\n")
         .filter(|s| !s.trim().is_empty())
         .count();
-    println!("Total events in multi-turn stream: {}", event_count);
+    println!("Total events in multi-turn stream: {event_count}");
 
     assert!(event_count > 0, "Should have received streaming events");
 

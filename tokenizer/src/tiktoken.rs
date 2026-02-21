@@ -125,7 +125,7 @@ fn parse_special_tokens(config: &serde_json::Value) -> SpecialTokens {
 /// Tiktoken tokenizer wrapper — supports both built-in OpenAI encodings and hub-loaded models.
 pub struct TiktokenTokenizer {
     tokenizer: CoreBPE,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     model: Option<TiktokenModel>,
     special_tokens: SpecialTokens,
     vocab: HashMap<String, TokenIdType>,
@@ -150,17 +150,20 @@ pub enum TiktokenModel {
 impl TiktokenTokenizer {
     /// Create a new Tiktoken tokenizer for the specified built-in model
     pub fn new(model: TiktokenModel) -> Result<Self> {
-        let tokenizer =
-            match model {
-                TiktokenModel::Cl100kBase => cl100k_base()
-                    .map_err(|e| Error::msg(format!("Failed to load cl100k_base: {}", e)))?,
-                TiktokenModel::P50kBase => p50k_base()
-                    .map_err(|e| Error::msg(format!("Failed to load p50k_base: {}", e)))?,
-                TiktokenModel::P50kEdit => p50k_edit()
-                    .map_err(|e| Error::msg(format!("Failed to load p50k_edit: {}", e)))?,
-                TiktokenModel::R50kBase => r50k_base()
-                    .map_err(|e| Error::msg(format!("Failed to load r50k_base: {}", e)))?,
-            };
+        let tokenizer = match model {
+            TiktokenModel::Cl100kBase => {
+                cl100k_base().map_err(|e| Error::msg(format!("Failed to load cl100k_base: {e}")))?
+            }
+            TiktokenModel::P50kBase => {
+                p50k_base().map_err(|e| Error::msg(format!("Failed to load p50k_base: {e}")))?
+            }
+            TiktokenModel::P50kEdit => {
+                p50k_edit().map_err(|e| Error::msg(format!("Failed to load p50k_edit: {e}")))?
+            }
+            TiktokenModel::R50kBase => {
+                r50k_base().map_err(|e| Error::msg(format!("Failed to load r50k_base: {e}")))?
+            }
+        };
 
         let special_tokens = Self::get_special_tokens_for_model(model);
 
@@ -298,8 +301,7 @@ impl TiktokenTokenizer {
             Ok(TiktokenModel::R50kBase)
         } else {
             Err(anyhow::anyhow!(
-                "Unrecognized OpenAI model name: '{}'. Expected GPT-3, GPT-3.5, GPT-4, or related model names",
-                model_name
+                "Unrecognized OpenAI model name: '{model_name}'. Expected GPT-3, GPT-3.5, GPT-4, or related model names"
             ))
         }
     }
@@ -455,7 +457,7 @@ impl Decoder for TiktokenTokenizer {
     fn decode(&self, token_ids: &[TokenIdType], _skip_special_tokens: bool) -> Result<String> {
         self.tokenizer
             .decode(token_ids.to_vec())
-            .map_err(|e| Error::msg(format!("Decoding failed: {}", e)))
+            .map_err(|e| Error::msg(format!("Decoding failed: {e}")))
     }
 }
 

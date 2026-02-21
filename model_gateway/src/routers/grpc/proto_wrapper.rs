@@ -126,6 +126,10 @@ pub enum ProtoGenerateRequest {
 
 impl ProtoGenerateRequest {
     /// Get SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang(&self) -> &sglang::GenerateRequest {
         match self {
             Self::Sglang(req) => req,
@@ -134,6 +138,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get mutable SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang_mut(&mut self) -> &mut sglang::GenerateRequest {
         match self {
             Self::Sglang(req) => req,
@@ -142,6 +150,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get vLLM variant (panics if not vLLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm(&self) -> &vllm::GenerateRequest {
         match self {
             Self::Vllm(req) => req,
@@ -150,6 +162,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get mutable vLLM variant (panics if not vLLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm_mut(&mut self) -> &mut vllm::GenerateRequest {
         match self {
             Self::Vllm(req) => req,
@@ -158,6 +174,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get TensorRT-LLM variant (panics if not TensorRT-LLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm(&self) -> &trtllm::GenerateRequest {
         match self {
             Self::Trtllm(req) => req,
@@ -166,6 +186,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get mutable TensorRT-LLM variant (panics if not TensorRT-LLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm_mut(&mut self) -> &mut trtllm::GenerateRequest {
         match self {
             Self::Trtllm(req) => req,
@@ -318,6 +342,10 @@ pub enum ProtoGenerateStreamChunk {
 
 impl ProtoGenerateStreamChunk {
     /// Get SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang(&self) -> &sglang::GenerateStreamChunk {
         match self {
             Self::Sglang(chunk) => chunk,
@@ -326,6 +354,10 @@ impl ProtoGenerateStreamChunk {
     }
 
     /// Get vLLM variant (panics if not vLLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm(&self) -> &vllm::GenerateStreamChunk {
         match self {
             Self::Vllm(chunk) => chunk,
@@ -334,6 +366,10 @@ impl ProtoGenerateStreamChunk {
     }
 
     /// Get TensorRT-LLM variant (panics if not TensorRT-LLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm(&self) -> &trtllm::GenerateStreamChunk {
         match self {
             Self::Trtllm(chunk) => chunk,
@@ -444,6 +480,10 @@ pub enum ProtoGenerateComplete {
 
 impl ProtoGenerateComplete {
     /// Get SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang(&self) -> &sglang::GenerateComplete {
         match self {
             Self::Sglang(complete) => complete,
@@ -452,6 +492,10 @@ impl ProtoGenerateComplete {
     }
 
     /// Get mutable SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang_mut(&mut self) -> &mut sglang::GenerateComplete {
         match self {
             Self::Sglang(complete) => complete,
@@ -460,6 +504,10 @@ impl ProtoGenerateComplete {
     }
 
     /// Get vLLM variant (panics if not vLLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm(&self) -> &vllm::GenerateComplete {
         match self {
             Self::Vllm(complete) => complete,
@@ -468,6 +516,10 @@ impl ProtoGenerateComplete {
     }
 
     /// Get TensorRT-LLM variant (panics if not TensorRT-LLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm(&self) -> &trtllm::GenerateComplete {
         match self {
             Self::Trtllm(complete) => complete,

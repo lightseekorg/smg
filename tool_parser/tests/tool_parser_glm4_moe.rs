@@ -8,14 +8,14 @@ use tool_parser::{Glm4MoeParser, ToolParser};
 async fn test_glm4_complete_parsing() {
     let parser = Glm4MoeParser::glm45();
 
-    let input = r#"Let me search for that.
+    let input = r"Let me search for that.
 <tool_call>get_weather
 <arg_key>city</arg_key>
 <arg_value>Beijing</arg_value>
 <arg_key>date</arg_key>
 <arg_value>2024-12-25</arg_value>
 </tool_call>
-The weather will be..."#;
+The weather will be...";
 
     let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -31,7 +31,7 @@ The weather will be..."#;
 async fn test_glm4_multiple_tools() {
     let parser = Glm4MoeParser::glm45();
 
-    let input = r#"<tool_call>search
+    let input = r"<tool_call>search
 <arg_key>query</arg_key>
 <arg_value>rust tutorials</arg_value>
 </tool_call>
@@ -40,7 +40,7 @@ async fn test_glm4_multiple_tools() {
 <arg_value>Hello World</arg_value>
 <arg_key>target_lang</arg_key>
 <arg_value>zh</arg_value>
-</tool_call>"#;
+</tool_call>";
 
     let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 2);
@@ -53,7 +53,7 @@ async fn test_glm4_multiple_tools() {
 async fn test_glm4_type_conversion() {
     let parser = Glm4MoeParser::glm45();
 
-    let input = r#"<tool_call>process
+    let input = r"<tool_call>process
 <arg_key>count</arg_key>
 <arg_value>42</arg_value>
 <arg_key>rate</arg_key>
@@ -64,7 +64,7 @@ async fn test_glm4_type_conversion() {
 <arg_value>null</arg_value>
 <arg_key>text</arg_key>
 <arg_value>string value</arg_value>
-</tool_call>"#;
+</tool_call>";
 
     let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -129,14 +129,14 @@ fn test_glm4_format_detection() {
 async fn test_python_literals() {
     let parser = Glm4MoeParser::glm45();
 
-    let input = r#"<tool_call>test_func
+    let input = r"<tool_call>test_func
 <arg_key>bool_true</arg_key>
 <arg_value>True</arg_value>
 <arg_key>bool_false</arg_key>
 <arg_value>False</arg_value>
 <arg_key>none_val</arg_key>
 <arg_value>None</arg_value>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);

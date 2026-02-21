@@ -1,5 +1,5 @@
 // TLS certificate generation for integration tests
-#![allow(dead_code)]
+#![allow(dead_code, clippy::allow_attributes)]
 
 use std::path::PathBuf;
 
@@ -84,22 +84,42 @@ impl TestCertificates {
     }
 
     /// Get paths as string references for use with RouterConfig builder
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test helper - panicking on failure is intentional"
+    )]
     pub fn ca_cert_str(&self) -> &str {
         self.ca_cert_path.to_str().unwrap()
     }
 
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test helper - panicking on failure is intentional"
+    )]
     pub fn server_cert_str(&self) -> &str {
         self.server_cert_path.to_str().unwrap()
     }
 
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test helper - panicking on failure is intentional"
+    )]
     pub fn server_key_str(&self) -> &str {
         self.server_key_path.to_str().unwrap()
     }
 
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test helper - panicking on failure is intentional"
+    )]
     pub fn client_cert_str(&self) -> &str {
         self.client_cert_path.to_str().unwrap()
     }
 
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test helper - panicking on failure is intentional"
+    )]
     pub fn client_key_str(&self) -> &str {
         self.client_key_path.to_str().unwrap()
     }

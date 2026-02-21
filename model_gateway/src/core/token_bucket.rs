@@ -55,7 +55,11 @@ impl TokenBucket {
     /// Try to acquire tokens immediately.
     ///
     /// Returns `Ok(())` if tokens were acquired, `Err(())` if insufficient tokens.
-    pub async fn try_acquire(&self, tokens: f64) -> Result<(), ()> {
+    #[expect(
+        clippy::result_unit_err,
+        reason = "Try-acquire pattern: callers only need success/failure, a custom error type adds no information"
+    )]
+    pub fn try_acquire(&self, tokens: f64) -> Result<(), ()> {
         self.try_acquire_sync(tokens)
     }
 
@@ -93,7 +97,7 @@ impl TokenBucket {
     /// When `refill_rate=0`, waits indefinitely for tokens to be returned via `return_tokens()`.
     /// Use `acquire_timeout()` to set an appropriate timeout.
     pub async fn acquire(&self, tokens: f64) -> Result<(), tokio::time::error::Elapsed> {
-        if self.try_acquire(tokens).await.is_ok() {
+        if self.try_acquire(tokens).is_ok() {
             return Ok(());
         }
 
@@ -109,7 +113,7 @@ impl TokenBucket {
                 // Wait for notify signal from return_tokens()
                 self.notify.notified().await;
 
-                if self.try_acquire(tokens).await.is_ok() {
+                if self.try_acquire(tokens).is_ok() {
                     return Ok(());
                 }
             }
@@ -129,12 +133,12 @@ impl TokenBucket {
 
         tokio::time::timeout(wait_time, async {
             loop {
-                if self.try_acquire(tokens).await.is_ok() {
+                if self.try_acquire(tokens).is_ok() {
                     return;
                 }
                 tokio::select! {
-                    _ = self.notify.notified() => {},
-                    _ = tokio::time::sleep(Duration::from_millis(10)) => {},
+                    () = self.notify.notified() => {},
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {},
                 }
             }
         })
@@ -168,13 +172,13 @@ impl TokenBucket {
         self.notify.notify_waiters();
     }
 
-    /// Return tokens to the bucket (async version for API compatibility).
-    pub async fn return_tokens(&self, tokens: f64) {
+    /// Return tokens to the bucket.
+    pub fn return_tokens(&self, tokens: f64) {
         self.return_tokens_sync(tokens);
     }
 
     /// Get current available tokens (for monitoring).
-    pub async fn available_tokens(&self) -> f64 {
+    pub fn available_tokens(&self) -> f64 {
         let mut inner = self.inner.lock();
 
         let now = Instant::now();
@@ -196,25 +200,25 @@ mod tests {
     async fn test_token_bucket_basic() {
         let bucket = TokenBucket::new(10, 5);
 
-        assert!(bucket.try_acquire(5.0).await.is_ok());
-        assert!(bucket.try_acquire(5.0).await.is_ok());
+        assert!(bucket.try_acquire(5.0).is_ok());
+        assert!(bucket.try_acquire(5.0).is_ok());
 
-        assert!(bucket.try_acquire(1.0).await.is_err());
+        assert!(bucket.try_acquire(1.0).is_err());
 
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        assert!(bucket.try_acquire(1.0).await.is_ok());
+        assert!(bucket.try_acquire(1.0).is_ok());
     }
 
     #[tokio::test]
     async fn test_token_bucket_refill() {
         let bucket = TokenBucket::new(10, 10);
 
-        assert!(bucket.try_acquire(10.0).await.is_ok());
+        assert!(bucket.try_acquire(10.0).is_ok());
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let available = bucket.available_tokens().await;
+        let available = bucket.available_tokens();
         assert!((4.0..=6.0).contains(&available));
     }
 
@@ -224,22 +228,22 @@ mod tests {
         let bucket = TokenBucket::new(2, 0);
 
         // Acquire both tokens
-        assert!(bucket.try_acquire(1.0).await.is_ok());
-        assert!(bucket.try_acquire(1.0).await.is_ok());
+        assert!(bucket.try_acquire(1.0).is_ok());
+        assert!(bucket.try_acquire(1.0).is_ok());
 
         // No more tokens available
-        assert!(bucket.try_acquire(1.0).await.is_err());
+        assert!(bucket.try_acquire(1.0).is_err());
 
         // Wait - should NOT refill automatically
         tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(bucket.try_acquire(1.0).await.is_err());
+        assert!(bucket.try_acquire(1.0).is_err());
 
         // Return a token - now we should be able to acquire
-        bucket.return_tokens(1.0).await;
-        assert!(bucket.try_acquire(1.0).await.is_ok());
+        bucket.return_tokens(1.0);
+        assert!(bucket.try_acquire(1.0).is_ok());
 
         // No more tokens again
-        assert!(bucket.try_acquire(1.0).await.is_err());
+        assert!(bucket.try_acquire(1.0).is_err());
     }
 
     #[tokio::test]
@@ -248,14 +252,18 @@ mod tests {
         let bucket = Arc::new(TokenBucket::new(1, 0));
 
         // Acquire the only token
-        assert!(bucket.try_acquire(1.0).await.is_ok());
+        assert!(bucket.try_acquire(1.0).is_ok());
 
         let bucket_clone = bucket.clone();
 
         // Spawn a task that will return the token after a delay
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "Test helper: short-lived task that completes before test ends"
+        )]
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            bucket_clone.return_tokens(1.0).await;
+            bucket_clone.return_tokens(1.0);
         });
 
         // This should wait and then succeed when token is returned
@@ -268,12 +276,12 @@ mod tests {
         // Test that sync return works correctly
         let bucket = TokenBucket::new(2, 0);
 
-        assert!(bucket.try_acquire(1.0).await.is_ok());
-        assert!(bucket.try_acquire(1.0).await.is_ok());
-        assert!(bucket.try_acquire(1.0).await.is_err());
+        assert!(bucket.try_acquire(1.0).is_ok());
+        assert!(bucket.try_acquire(1.0).is_ok());
+        assert!(bucket.try_acquire(1.0).is_err());
 
         // Use sync return
         bucket.return_tokens_sync(1.0);
-        assert!(bucket.try_acquire(1.0).await.is_ok());
+        assert!(bucket.try_acquire(1.0).is_ok());
     }
 }

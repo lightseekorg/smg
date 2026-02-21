@@ -226,7 +226,7 @@ mod tests {
         Tool {
             name: Cow::Owned(name.to_string()),
             title: None,
-            description: Some(Cow::Owned(format!("Test tool: {}", name))),
+            description: Some(Cow::Owned(format!("Test tool: {name}"))),
             input_schema: Arc::new(schema_map),
             output_schema: None,
             annotations: None,
@@ -239,7 +239,7 @@ mod tests {
         let name = QualifiedToolName::new("server", "tool");
         assert_eq!(name.server_key(), "server");
         assert_eq!(name.tool_name(), "tool");
-        assert_eq!(format!("{}", name), "server:tool");
+        assert_eq!(format!("{name}"), "server:tool");
     }
 
     #[test]

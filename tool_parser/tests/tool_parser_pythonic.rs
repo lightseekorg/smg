@@ -40,7 +40,7 @@ async fn test_pythonic_multiple_functions() {
 #[tokio::test]
 async fn test_pythonic_with_python_literals() {
     let parser = PythonicParser::new();
-    let input = r#"[configure(enabled=True, disabled=False, optional=None)]"#;
+    let input = r"[configure(enabled=True, disabled=False, optional=None)]";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -71,7 +71,7 @@ async fn test_pythonic_with_special_tokens() {
     let parser = PythonicParser::new();
 
     // Llama 4 sometimes outputs these tokens
-    let input = r#"<|python_start|>[calculate(x=10, y=20)]<|python_end|>"#;
+    let input = r"<|python_start|>[calculate(x=10, y=20)]<|python_end|>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -110,7 +110,7 @@ async fn test_pythonic_with_escaped_quotes() {
 #[tokio::test]
 async fn test_pythonic_empty_arguments() {
     let parser = PythonicParser::new();
-    let input = r#"[ping()]"#;
+    let input = r"[ping()]";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -135,7 +135,7 @@ async fn test_pythonic_invalid_syntax() {
     let parser = PythonicParser::new();
 
     // Missing closing bracket
-    let input = r#"[function(arg=value"#;
+    let input = r"[function(arg=value";
     if let Ok((_normal_text, tools)) = parser.parse_complete(input).await {
         assert_eq!(tools.len(), 0);
     }
@@ -144,7 +144,7 @@ async fn test_pythonic_invalid_syntax() {
     // Invalid Python syntax - empty parameter name
     // Note: The parser currently accepts this invalid syntax and returns a result
     // This is a known limitation of the current implementation
-    let input = r#"[function(=value)]"#;
+    let input = r"[function(=value)]";
     if let Ok((_normal_text, tools)) = parser.parse_complete(input).await {
         // The parser incorrectly accepts this, returning 1 result
         // We'll accept this behavior for now but note it's not ideal
@@ -410,7 +410,7 @@ async fn test_parse_streaming_nested_brackets_dict() {
     let mut parser = PythonicParser::new();
     let tools = create_test_tools();
 
-    let text = r#"[search(query='test', config={'options': [1, 2], 'nested': {'key': 'value'}})]"#;
+    let text = r"[search(query='test', config={'options': [1, 2], 'nested': {'key': 'value'}})]";
     let result = parser.parse_incremental(text, &tools).await.unwrap();
 
     assert!(

@@ -72,7 +72,10 @@ fn html_unescape(s: &str) -> String {
                     break;
                 }
                 if next.is_alphanumeric() || next == '#' {
-                    entity.push(chars.next().unwrap());
+                    // Safe: peek() returned Some, so next() will too
+                    if let Some(ch) = chars.next() {
+                        entity.push(ch);
+                    }
                 } else {
                     break;
                 }
@@ -152,6 +155,10 @@ fn safe_val(raw: &str) -> Value {
 
 impl QwenCoderParser {
     /// Create a new Qwen Coder parser
+    #[expect(
+        clippy::expect_used,
+        reason = "regex patterns are compile-time string literals"
+    )]
     pub fn new() -> Self {
         // Support XML format: <tool_call>\n<function=name>\n<parameter=key>value</parameter>\n</function>\n</tool_call>
         let pattern = r"(?s)<tool_call>\s*(.*?)\s*</tool_call>";
@@ -222,7 +229,7 @@ impl QwenCoderParser {
 
     /// Parse and stream complete parameters from buffer
     /// Returns tool call items to emit (similar to Python's _parse_and_stream_parameters)
-    fn parse_and_stream_parameters(&mut self) -> ParserResult<Vec<ToolCallItem>> {
+    fn parse_and_stream_parameters(&mut self) -> Vec<ToolCallItem> {
         let mut calls: Vec<ToolCallItem> = vec![];
 
         // Find all complete parameter patterns in buffer
@@ -245,9 +252,9 @@ impl QwenCoderParser {
                 let mut items = Vec::new();
                 for (key, value) in &new_params {
                     let key_json =
-                        serde_json::to_string(key).unwrap_or_else(|_| format!("\"{}\"", key));
+                        serde_json::to_string(key).unwrap_or_else(|_| format!("\"{key}\""));
                     let value_json = serde_json::to_string(value).unwrap_or_default();
-                    items.push(format!("{}: {}", key_json, value_json));
+                    items.push(format!("{key_json}: {value_json}"));
                 }
                 let json_fragment = format!("{{{}", items.join(", "));
 
@@ -268,10 +275,10 @@ impl QwenCoderParser {
                     let mut continuation_parts = Vec::new();
                     for key in new_keys {
                         if let Some(value) = new_params.get(key) {
-                            let key_json = serde_json::to_string(key)
-                                .unwrap_or_else(|_| format!("\"{}\"", key));
+                            let key_json =
+                                serde_json::to_string(key).unwrap_or_else(|_| format!("\"{key}\""));
                             let value_json = serde_json::to_string(value).unwrap_or_default();
-                            continuation_parts.push(format!("{}: {}", key_json, value_json));
+                            continuation_parts.push(format!("{key_json}: {value_json}"));
                         }
                     }
 
@@ -287,7 +294,7 @@ impl QwenCoderParser {
             }
 
             // Update current state
-            self.current_parameters = new_params.clone();
+            self.current_parameters.clone_from(&new_params);
             if let Some(tool_obj) =
                 self.prev_tool_call_arr[self.current_tool_id as usize].as_object_mut()
             {
@@ -295,7 +302,7 @@ impl QwenCoderParser {
             }
         }
 
-        Ok(calls)
+        calls
     }
 
     /// Reset streaming state for next tool call
@@ -322,7 +329,10 @@ impl ToolParser for QwenCoderParser {
         }
 
         // Find where the first tool call begins
-        let idx = text.find(self.tool_call_start_token).unwrap();
+        // Safe: has_tool_markers() already confirmed the marker exists
+        let idx = text
+            .find(self.tool_call_start_token)
+            .ok_or_else(|| ParserError::ParsingFailed("tool call marker not found".to_string()))?;
         let normal_text = text[..idx].to_string();
 
         // Extract tool calls
@@ -399,7 +409,7 @@ impl ToolParser for QwenCoderParser {
 
                         // Validate function name
                         if tool_indices.contains_key(&function_name) {
-                            self.current_function_name = function_name.clone();
+                            self.current_function_name.clone_from(&function_name);
                             self.current_tool_name_sent = true;
 
                             // Initialize tool call tracking
@@ -428,7 +438,9 @@ impl ToolParser for QwenCoderParser {
                             });
 
                             // Remove processed function declaration from buffer
-                            self.buffer = self.buffer[captures.get(0).unwrap().end()..].to_string();
+                            // Safe: captures.get(0) always returns Some (group 0 is the entire match)
+                            self.buffer =
+                                self.buffer[captures.get(0).map_or(0, |m| m.end())..].to_string();
                             continue;
                         } else {
                             // Invalid function name, reset state
@@ -447,7 +459,7 @@ impl ToolParser for QwenCoderParser {
 
             // Parse parameters (only complete ones)
             if self.current_tool_name_sent {
-                let param_calls = self.parse_and_stream_parameters()?;
+                let param_calls = self.parse_and_stream_parameters();
                 calls.extend(param_calls);
 
                 // Check if tool call is complete
@@ -555,7 +567,7 @@ mod tests {
             safe_val(r#"{"key": "value"}"#),
             serde_json::json!({"key": "value"})
         );
-        assert_eq!(safe_val(r#"[1, 2, 3]"#), serde_json::json!([1, 2, 3]));
+        assert_eq!(safe_val(r"[1, 2, 3]"), serde_json::json!([1, 2, 3]));
     }
 
     #[test]

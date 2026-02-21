@@ -20,7 +20,6 @@ pub struct RequestContext {
 pub struct RequestInput {
     pub request_type: RequestType,
     pub headers: Option<HeaderMap>,
-    #[allow(dead_code)]
     pub model_id: Option<String>,
 }
 
@@ -92,7 +91,6 @@ pub struct ProcessingState {
 
 pub struct WorkerSelection {
     pub worker: Arc<dyn Worker>,
-    #[allow(dead_code)]
     pub provider: Arc<dyn Provider>,
 }
 
@@ -142,15 +140,14 @@ impl RequestContext {
     pub fn responses_request(&self) -> Option<&ResponsesRequest> {
         match &self.input.request_type {
             RequestType::Responses(req) => Some(req.as_ref()),
-            _ => None,
+            RequestType::Chat(_) => None,
         }
     }
 
-    #[allow(dead_code)]
     pub fn responses_request_arc(&self) -> Option<Arc<ResponsesRequest>> {
         match &self.input.request_type {
             RequestType::Responses(req) => Some(Arc::clone(req)),
-            _ => None,
+            RequestType::Chat(_) => None,
         }
     }
 
@@ -165,7 +162,6 @@ impl RequestContext {
         self.input.headers.as_ref()
     }
 
-    #[allow(dead_code)]
     pub fn model_id(&self) -> Option<&str> {
         self.input.model_id.as_deref()
     }
@@ -174,7 +170,6 @@ impl RequestContext {
         self.state.worker.as_ref().map(|w| &w.worker)
     }
 
-    #[allow(dead_code)]
     pub fn provider(&self) -> Option<&dyn Provider> {
         self.state.worker.as_ref().map(|w| w.provider.as_ref())
     }

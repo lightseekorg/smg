@@ -129,8 +129,7 @@ async fn route_responses_streaming(
             &request,
             params,
             mcp_servers,
-        )
-        .await;
+        );
     }
 
     // 3. Convert ResponsesRequest → ChatCompletionRequest
@@ -139,7 +138,7 @@ async fn route_responses_streaming(
         Err(e) => {
             return error::bad_request(
                 "convert_request_failed",
-                format!("Failed to convert request: {}", e),
+                format!("Failed to convert request: {e}"),
             );
         }
     };

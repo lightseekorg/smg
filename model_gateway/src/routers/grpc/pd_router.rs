@@ -28,7 +28,7 @@ pub struct GrpcPDRouter {
 
 impl GrpcPDRouter {
     /// Create a new gRPC PD router
-    pub async fn new(ctx: &Arc<AppContext>) -> Result<Self, String> {
+    pub fn new(ctx: &Arc<AppContext>) -> Result<Self, String> {
         // Get registries from context
         let worker_registry = ctx.worker_registry.clone();
         let policy_registry = ctx.policy_registry.clone();

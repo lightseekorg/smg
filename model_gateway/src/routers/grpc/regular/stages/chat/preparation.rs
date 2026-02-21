@@ -26,7 +26,7 @@ pub(crate) struct ChatPreparationStage;
 impl PipelineStage for ChatPreparationStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
         let request = ctx.chat_request_arc();
-        self.prepare_chat(ctx, &request).await?;
+        self.prepare_chat(ctx, &request)?;
         Ok(None)
     }
 
@@ -36,7 +36,15 @@ impl PipelineStage for ChatPreparationStage {
 }
 
 impl ChatPreparationStage {
-    async fn prepare_chat(
+    #[expect(
+        clippy::unused_self,
+        reason = "method on stage struct for consistency with PipelineStage pattern"
+    )]
+    #[expect(
+        clippy::result_large_err,
+        reason = "Response is the standard error type in the pipeline stage pattern"
+    )]
+    fn prepare_chat(
         &self,
         ctx: &mut RequestContext,
         request: &ChatCompletionRequest,
@@ -64,7 +72,7 @@ impl ChatPreparationStage {
                 error!(function = "ChatPreparationStage::execute", error = %e, "Tokenization failed");
                 return Err(error::internal_error(
                     "tokenization_failed",
-                    format!("Tokenization failed: {}", e),
+                    format!("Tokenization failed: {e}"),
                 ));
             }
         };
@@ -73,10 +81,10 @@ impl ChatPreparationStage {
 
         // Step 4: Build tool constraints if needed
         let tool_call_constraint = if let Some(tools) = body_ref.tools.as_ref() {
-            utils::generate_tool_constraints(tools, &request.tool_choice, &request.model)
+            utils::generate_tool_constraints(tools, request.tool_choice.as_ref(), &request.model)
                 .map_err(|e| {
                     error!(function = "ChatPreparationStage::execute", error = %e, "Invalid tool configuration");
-                    error::bad_request("invalid_tool_configuration", format!("Invalid tool configuration: {}", e))
+                    error::bad_request("invalid_tool_configuration", format!("Invalid tool configuration: {e}"))
                 })?
         } else {
             None

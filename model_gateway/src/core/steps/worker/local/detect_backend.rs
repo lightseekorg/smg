@@ -49,13 +49,12 @@ async fn detect_grpc_backend(
             .await
             .is_ok()
         {
-            return Ok(runtime.to_string());
+            return Ok((*runtime).to_string());
         }
     }
 
     Err(format!(
-        "gRPC backend detection failed for {} (tried sglang, vllm, trtllm)",
-        url
+        "gRPC backend detection failed for {url} (tried sglang, vllm, trtllm)"
     ))
 }
 
@@ -80,7 +79,7 @@ async fn detect_via_models_endpoint(
     let response = req
         .send()
         .await
-        .map_err(|e| format!("Failed to reach {}: {}", models_url, e))?;
+        .map_err(|e| format!("Failed to reach {models_url}: {e}"))?;
 
     if !response.status().is_success() {
         return Err(format!(
@@ -93,17 +92,17 @@ async fn detect_via_models_endpoint(
     let models: ModelsResponse = response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse /v1/models response: {}", e))?;
+        .map_err(|e| format!("Failed to parse /v1/models response: {e}"))?;
 
     let first_model = models
         .data
         .first()
-        .ok_or_else(|| format!("/v1/models returned empty data array from {}", models_url))?;
+        .ok_or_else(|| format!("/v1/models returned empty data array from {models_url}"))?;
 
     match first_model.owned_by.as_deref() {
         Some("sglang") => Ok("sglang".to_string()),
         Some("vllm") => Ok("vllm".to_string()),
-        other => Err(format!("Unrecognized owned_by value: {:?}", other)),
+        other => Err(format!("Unrecognized owned_by value: {other:?}")),
     }
 }
 
@@ -126,7 +125,7 @@ async fn try_vllm_version(
     let response = req
         .send()
         .await
-        .map_err(|e| format!("Failed to reach {}: {}", version_url, e))?;
+        .map_err(|e| format!("Failed to reach {version_url}: {e}"))?;
 
     if !response.status().is_success() {
         return Err(format!("/version returned {}", response.status()));
@@ -154,7 +153,7 @@ async fn try_sglang_server_info(
     let response = req
         .send()
         .await
-        .map_err(|e| format!("Failed to reach {}: {}", info_url, e))?;
+        .map_err(|e| format!("Failed to reach {info_url}: {e}"))?;
 
     if !response.status().is_success() {
         return Err(format!("/server_info returned {}", response.status()));
@@ -213,8 +212,7 @@ async fn detect_http_backend(
     }
 
     Err(format!(
-        "Could not detect HTTP backend for {} (tried /v1/models, /version, /server_info)",
-        url
+        "Could not detect HTTP backend for {url} (tried /v1/models, /version, /server_info)"
     ))
 }
 

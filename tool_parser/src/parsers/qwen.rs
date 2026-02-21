@@ -56,6 +56,10 @@ pub struct QwenParser {
 
 impl QwenParser {
     /// Create a new Qwen parser
+    #[expect(
+        clippy::expect_used,
+        reason = "regex pattern is a compile-time string literal"
+    )]
     pub fn new() -> Self {
         // Use (?s) flag for DOTALL mode to handle newlines
         let pattern = r"(?s)<tool_call>\n(.*?)\n</tool_call>";
@@ -77,7 +81,7 @@ impl QwenParser {
     }
 
     /// Parse a single JSON object into a ToolCall
-    fn parse_single_object(&self, obj: &Value) -> ParserResult<Option<ToolCall>> {
+    fn parse_single_object(obj: &Value) -> ParserResult<Option<ToolCall>> {
         let name = obj.get("name").and_then(|v| v.as_str());
 
         if let Some(name) = name {
@@ -116,7 +120,10 @@ impl ToolParser for QwenParser {
         }
 
         // Find where the first tool call begins
-        let idx = text.find("<tool_call>").unwrap(); // Safe because has_tool_markers checked
+        // Safe: has_tool_markers() already confirmed the marker exists
+        let idx = text
+            .find("<tool_call>")
+            .ok_or_else(|| ParserError::ParsingFailed("tool_call marker not found".to_string()))?;
         let normal_text = text[..idx].to_string();
 
         // Extract tool calls
@@ -125,7 +132,7 @@ impl ToolParser for QwenParser {
             if let Some(json_str) = captures.get(1) {
                 let parsed = serde_json::from_str::<Value>(json_str.as_str().trim())
                     .map_err(|e| ParserError::ParsingFailed(e.to_string()))
-                    .and_then(|v| self.parse_single_object(&v));
+                    .and_then(|v| Self::parse_single_object(&v));
 
                 match parsed {
                     Ok(Some(tool)) => tools.push(tool),

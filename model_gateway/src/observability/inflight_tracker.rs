@@ -38,7 +38,13 @@ impl InFlightRequestTracker {
         let task = PeriodicTask::spawn(interval_secs, "InFlightRequestSampler", move || {
             tracker.sample_and_record();
         });
-        self.sampler.set(task).unwrap();
+        #[expect(
+            clippy::expect_used,
+            reason = "start_sampler is called once at startup; double-init is a fatal bug"
+        )]
+        self.sampler
+            .set(task)
+            .expect("start_sampler is called once at startup; double-init is a bug");
     }
 
     pub fn track(self: &Arc<Self>) -> InFlightGuard {
@@ -151,7 +157,7 @@ mod tests {
         assert_eq!(ages.len(), 3);
         // Ages should be approximately 0, 45, 100 (order may vary due to DashMap)
         let mut sorted_ages = ages.clone();
-        sorted_ages.sort();
+        sorted_ages.sort_unstable();
         assert!(sorted_ages[0] <= 1); // ~0s
         assert!((44..=46).contains(&sorted_ages[1])); // ~45s
         assert!((99..=101).contains(&sorted_ages[2])); // ~100s

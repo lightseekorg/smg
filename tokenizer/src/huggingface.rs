@@ -38,7 +38,7 @@ impl HuggingFaceTokenizer {
         chat_template_path: Option<&str>,
     ) -> Result<Self> {
         let mut tokenizer = HfTokenizer::from_file(file_path)
-            .map_err(|e| Error::msg(format!("Failed to load tokenizer: {}", e)))?;
+            .map_err(|e| Error::msg(format!("Failed to load tokenizer: {e}")))?;
 
         // Extract special tokens
         let special_tokens = Self::extract_special_tokens(&tokenizer);
@@ -161,7 +161,7 @@ impl HuggingFaceTokenizer {
         let find_token = |patterns: &[&str]| -> Option<String> {
             for pattern in patterns {
                 if vocab.contains_key(*pattern) {
-                    return Some(pattern.to_string());
+                    return Some((*pattern).to_string());
                 }
             }
             None
@@ -221,14 +221,14 @@ impl Encoder for HuggingFaceTokenizer {
     fn encode(&self, input: &str, add_special_tokens: bool) -> Result<Encoding> {
         self.tokenizer
             .encode(input, add_special_tokens)
-            .map_err(|e| Error::msg(format!("Encoding failed: {}", e)))
+            .map_err(|e| Error::msg(format!("Encoding failed: {e}")))
             .map(|encoding| Encoding::Hf(Box::new(encoding)))
     }
 
     fn encode_batch(&self, inputs: &[&str], add_special_tokens: bool) -> Result<Vec<Encoding>> {
         self.tokenizer
             .encode_batch(inputs.to_vec(), add_special_tokens)
-            .map_err(|e| Error::msg(format!("Batch encoding failed: {}", e)))
+            .map_err(|e| Error::msg(format!("Batch encoding failed: {e}")))
             .map(|encodings| {
                 encodings
                     .into_iter()
@@ -242,7 +242,7 @@ impl Decoder for HuggingFaceTokenizer {
     fn decode(&self, token_ids: &[TokenIdType], skip_special_tokens: bool) -> Result<String> {
         self.tokenizer
             .decode(token_ids, skip_special_tokens)
-            .map_err(|e| Error::msg(format!("Decoding failed: {}", e)))
+            .map_err(|e| Error::msg(format!("Decoding failed: {e}")))
     }
 }
 

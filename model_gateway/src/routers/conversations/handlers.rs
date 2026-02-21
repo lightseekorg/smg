@@ -540,7 +540,7 @@ pub async fn delete_conversation_item(
         };
 
     match item_storage.delete_item(&conversation_id, &item_id).await {
-        Ok(_) => {
+        Ok(()) => {
             info!(
                 conversation_id = %conversation_id.0,
                 item_id = %item_id.0,
@@ -572,14 +572,13 @@ fn parse_item_from_value(
         ));
     }
 
-    let warning = if !IMPLEMENTED_ITEM_TYPES.contains(&item_type) {
-        Some(format!(
-            "Item type '{}' is accepted but not yet implemented. \
-             The item will be stored but may not function as expected.",
-            item_type
-        ))
-    } else {
+    let warning = if IMPLEMENTED_ITEM_TYPES.contains(&item_type) {
         None
+    } else {
+        Some(format!(
+            "Item type '{item_type}' is accepted but not yet implemented. \
+             The item will be stored but may not function as expected."
+        ))
     };
 
     let role = item_val

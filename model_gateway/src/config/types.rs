@@ -1008,7 +1008,7 @@ mod tests {
 
     #[test]
     fn test_large_worker_lists() {
-        let large_urls: Vec<String> = (0..1000).map(|i| format!("http://worker{}", i)).collect();
+        let large_urls: Vec<String> = (0..1000).map(|i| format!("http://worker{i}")).collect();
 
         let config = RouterConfig::builder()
             .regular_mode(large_urls.clone())
@@ -1060,8 +1060,8 @@ mod tests {
             .build_unchecked();
 
         assert_eq!(config.host, "");
-        assert_eq!(config.log_dir, Some("".to_string()));
-        assert_eq!(config.log_level, Some("".to_string()));
+        assert_eq!(config.log_dir, Some(String::new()));
+        assert_eq!(config.log_level, Some(String::new()));
     }
 
     #[test]

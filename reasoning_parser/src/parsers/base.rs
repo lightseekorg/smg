@@ -71,7 +71,7 @@ impl ReasoningParser for BaseReasoningParser {
         let splits: Vec<&str> = processed_text
             .splitn(2, &self.config.think_end_token)
             .collect();
-        let reasoning_text = splits.first().unwrap_or(&"").to_string();
+        let reasoning_text = (*splits.first().unwrap_or(&"")).to_string();
         let normal_text = splits
             .get(1)
             .map(|s| s.trim().to_string())
@@ -101,7 +101,7 @@ impl ReasoningParser for BaseReasoningParser {
         // Strip start token if present
         if !self.stripped_think_start && current_text.contains(&self.config.think_start_token) {
             current_text = current_text.replace(&self.config.think_start_token, "");
-            self.buffer = current_text.clone();
+            self.buffer.clone_from(&current_text);
             self.stripped_think_start = true;
             self.in_reasoning = true;
         }

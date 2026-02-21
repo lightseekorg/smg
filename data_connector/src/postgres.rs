@@ -33,7 +33,7 @@ pub(crate) struct PostgresStore {
 impl PostgresStore {
     pub fn new(config: PostgresConfig) -> Result<Self, String> {
         let pg_config = tokio_postgres::Config::from_str(config.db_url.as_str())
-            .map_err(|e| format!("Invalid PostgreSQL connection URL: {}", e))?;
+            .map_err(|e| format!("Invalid PostgreSQL connection URL: {e}"))?;
         let mgr_config = ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         };
@@ -41,7 +41,7 @@ impl PostgresStore {
         let pool = Pool::builder(mgr)
             .max_size(config.pool_max)
             .build()
-            .map_err(|e| format!("Failed to build PostgreSQL connection pool: {}", e))?;
+            .map_err(|e| format!("Failed to build PostgreSQL connection pool: {e}"))?;
 
         Ok(Self { pool })
     }
@@ -343,12 +343,12 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
                 )
                 .await
                 .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
-            if !rows.is_empty() {
+            if rows.is_empty() {
+                None
+            } else {
                 let row = &rows[0];
                 let ts: DateTime<Utc> = row.get(0);
                 Some((ts, aid))
-            } else {
-                None
             }
         } else {
             None
@@ -712,7 +712,7 @@ impl ResponseStorage for PostgresResponseStorage {
             let fetched = self.get_response(lookup_id).await?;
             match fetched {
                 Some(response) => {
-                    current_id = response.previous_response_id.clone();
+                    current_id.clone_from(&response.previous_response_id);
                     chain.responses.push(response);
                     visited += 1;
                 }

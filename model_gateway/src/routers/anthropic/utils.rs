@@ -64,6 +64,6 @@ pub async fn read_response_body_limited(
     // sequences that may be split across chunk boundaries.
     match String::from_utf8(buf) {
         Ok(body) => ReadBodyResult::Ok(body),
-        Err(e) => ReadBodyResult::Error(format!("invalid UTF-8 in response body: {}", e)),
+        Err(e) => ReadBodyResult::Error(format!("invalid UTF-8 in response body: {e}")),
     }
 }

@@ -21,7 +21,7 @@ fn resolved_name_for_entry<'a>(
     exposed_names
         .and_then(|m| m.get(&entry.qualified_name))
         .map(|s| s.as_str())
-        .unwrap_or(entry.tool_name())
+        .unwrap_or_else(|| entry.tool_name())
 }
 
 /// Build function-tool JSON payloads from MCP tool entries.

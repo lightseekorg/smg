@@ -86,7 +86,7 @@ pub async fn add_wasm_module(
     let mut status = StatusCode::OK;
     let mut modules = config.modules.clone();
 
-    for module in modules.iter_mut() {
+    for module in &mut modules {
         let wasm_config = WasmModuleConfigRequest {
             descriptor: module.clone(),
         };
@@ -99,7 +99,7 @@ pub async fn add_wasm_module(
 
         // Submit job to queue
         match job_queue.submit(job).await {
-            Ok(_) => {
+            Ok(()) => {
                 // Wait for job completion (timeout: 5 minutes)
                 let timeout = Duration::from_secs(300);
                 match wait_for_job_completion(job_queue, &worker_url, timeout).await {
@@ -144,8 +144,7 @@ pub async fn add_wasm_module(
             }
             Err(e) => {
                 module.add_result = Some(WasmModuleAddResult::Error(format!(
-                    "Failed to submit job: {}",
-                    e
+                    "Failed to submit job: {e}"
                 )));
                 status = StatusCode::BAD_REQUEST;
             }
@@ -184,7 +183,7 @@ pub async fn remove_wasm_module(
 
     // Submit job to queue
     match job_queue.submit(job).await {
-        Ok(_) => {
+        Ok(()) => {
             // Wait for job completion (timeout: 1 minute)
             let timeout = Duration::from_secs(60);
             match wait_for_job_completion(job_queue, &worker_url, timeout).await {
@@ -194,7 +193,7 @@ pub async fn remove_wasm_module(
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to submit job: {}", e),
+            format!("Failed to submit job: {e}"),
         )
             .into_response(),
     }

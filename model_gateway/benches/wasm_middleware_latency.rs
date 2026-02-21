@@ -1,3 +1,4 @@
+#![expect(clippy::unwrap_used, clippy::disallowed_methods)]
 use std::sync::Arc;
 
 use axum::{
@@ -38,7 +39,7 @@ impl RouterTrait for MockRouter {
 }
 
 /// Mock service that simulates a streaming response with a 500ms delay.
-async fn mock_next_streaming(_req: Request<Body>) -> Response<Body> {
+fn mock_next_streaming(_req: Request<Body>) -> Response<Body> {
     let (tx, rx) = tokio::sync::mpsc::channel(16);
 
     tokio::spawn(async move {
@@ -86,7 +87,7 @@ fn bench_wasm_middleware_buffering(c: &mut Criterion) {
                 let mut service =
                     middleware::from_fn_with_state(app_state.clone(), wasm_middleware).layer(
                         tower::service_fn(|req: Request<Body>| async move {
-                            Ok::<_, std::convert::Infallible>(mock_next_streaming(req).await)
+                            Ok::<_, std::convert::Infallible>(mock_next_streaming(req))
                         }),
                     );
 

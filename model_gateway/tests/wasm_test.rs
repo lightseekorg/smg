@@ -39,14 +39,13 @@ use tokio::fs;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+#[expect(clippy::expect_used)]
 /// Create a test AppContext with WASM manager initialized
 async fn create_test_context_with_wasm() -> Arc<AppContext> {
     let config = RouterConfig::default();
 
     // Initialize WASM manager first
-    let wasm_manager = Arc::new(
-        WasmModuleManager::with_default_config().expect("Failed to create WASM module manager"),
-    );
+    let wasm_manager = Arc::new(WasmModuleManager::with_default_config());
 
     // Create AppContext with wasm_manager from the start
     let client = reqwest::Client::new();
@@ -134,6 +133,7 @@ async fn create_test_context_with_wasm() -> Arc<AppContext> {
     app_context
 }
 
+#[expect(clippy::expect_used, clippy::unwrap_used)]
 /// Create a test WASM component file
 /// Dynamically generates a valid WASM component programmatically without external tools
 /// This ensures tests work in new environments without requiring pre-built files or external tools
@@ -164,6 +164,7 @@ async fn create_test_wasm_component(temp_dir: &TempDir) -> String {
         .to_string()
 }
 
+#[expect(clippy::expect_used)]
 /// Create a test app with WASM support
 async fn create_test_app_with_wasm() -> (axum::Router, Arc<AppContext>, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
@@ -237,20 +238,22 @@ async fn test_wasm_api_add_module() {
     assert_eq!(response_json.modules.len(), 1);
     let module_result = &response_json.modules[0].add_result;
 
-    // Print error for debugging
-    if let Some(smg::wasm::module::WasmModuleAddResult::Error(err)) = module_result {
-        eprintln!("Module registration failed: {}", err);
-    }
+    // Assert module didn't fail with error
+    assert!(
+        !matches!(
+            module_result,
+            Some(smg::wasm::module::WasmModuleAddResult::Error(_))
+        ),
+        "Module registration failed: {module_result:?}"
+    );
 
     // If status is not OK, check the error message
-    if status != StatusCode::OK {
-        eprintln!("Response status: {:?}", status);
-        eprintln!("Response body: {}", String::from_utf8_lossy(&body));
-        panic!(
-            "Expected OK status but got {:?}. Error: {:?}",
-            status, module_result
-        );
-    }
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Expected OK status but got {status:?}. Error: {module_result:?}. Body: {}",
+        String::from_utf8_lossy(&body)
+    );
 
     assert!(module_result.is_some());
 
@@ -505,7 +508,7 @@ async fn test_wasm_api_remove_module() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(format!("/wasm/{}", module_uuid))
+                .uri(format!("/wasm/{module_uuid}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -513,17 +516,11 @@ async fn test_wasm_api_remove_module() {
         .unwrap();
 
     let remove_status = remove_response.status();
-    if remove_status != StatusCode::OK {
-        let body = to_bytes(remove_response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        eprintln!(
-            "Remove module failed with status {:?}: {}",
-            remove_status,
-            String::from_utf8_lossy(&body)
-        );
-        panic!("Expected OK status but got {:?}", remove_status);
-    }
+    assert_eq!(
+        remove_status,
+        StatusCode::OK,
+        "Expected OK status for remove but got {remove_status:?}"
+    );
 
     // Wait for removal to complete
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -547,7 +544,7 @@ async fn test_wasm_api_remove_module_not_found() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(format!("/wasm/{}", fake_uuid))
+                .uri(format!("/wasm/{fake_uuid}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -703,9 +700,7 @@ async fn test_wasm_module_execution() {
     let start = std::time::Instant::now();
 
     let module_uuid = loop {
-        if start.elapsed() > timeout {
-            panic!("Workflow timeout");
-        }
+        assert!(start.elapsed() <= timeout, "Workflow timeout");
 
         let state = engines
             .wasm_registration
@@ -723,7 +718,7 @@ async fn test_wasm_module_execution() {
                     .expect("Module UUID should be in context");
             }
             wfaas::WorkflowStatus::Failed => {
-                panic!("Workflow failed: {:?}", state);
+                panic!("Workflow failed: {state:?}");
             }
             _ => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -749,7 +744,7 @@ async fn test_wasm_module_execution() {
     let request = middleware_types::Request {
         method: "GET".to_string(),
         path: "/test".to_string(),
-        query: "".to_string(),
+        query: String::new(),
         headers: vec![],
         body: vec![],
         request_id: "test-request-id".to_string(),
@@ -781,13 +776,9 @@ async fn test_wasm_module_execution() {
                 }
             }
         }
-        Err(e) => {
+        Err(_e) => {
             // Execution might fail if the WASM component is not properly built
             // This is acceptable for testing - we're testing the execution path, not the component itself
-            eprintln!(
-                "Module execution failed (expected if component is not properly built): {:?}",
-                e
-            );
         }
     }
 

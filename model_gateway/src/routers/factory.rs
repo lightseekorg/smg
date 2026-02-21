@@ -49,20 +49,17 @@ impl RouterFactory {
     pub async fn create_router(ctx: &Arc<AppContext>) -> Result<Box<dyn RouterTrait>, String> {
         match ctx.router_config.connection_mode {
             ConnectionMode::Grpc => match &ctx.router_config.mode {
-                RoutingMode::Regular { .. } => Self::create_grpc_router(ctx).await,
+                RoutingMode::Regular { .. } => Self::create_grpc_router(ctx),
                 RoutingMode::PrefillDecode {
                     prefill_policy,
                     decode_policy,
                     ..
-                } => {
-                    Self::create_grpc_pd_router(
-                        prefill_policy.as_ref(),
-                        decode_policy.as_ref(),
-                        &ctx.router_config.policy,
-                        ctx,
-                    )
-                    .await
-                }
+                } => Self::create_grpc_pd_router(
+                    prefill_policy.as_ref(),
+                    decode_policy.as_ref(),
+                    &ctx.router_config.policy,
+                    ctx,
+                ),
                 RoutingMode::OpenAI { .. } => {
                     Err("OpenAI mode requires HTTP connection_mode".to_string())
                 }
@@ -121,14 +118,14 @@ impl RouterFactory {
     }
 
     /// Create a gRPC router with injected policy
-    pub async fn create_grpc_router(ctx: &Arc<AppContext>) -> Result<Box<dyn RouterTrait>, String> {
-        let router = GrpcRouter::new(ctx).await?;
+    pub fn create_grpc_router(ctx: &Arc<AppContext>) -> Result<Box<dyn RouterTrait>, String> {
+        let router = GrpcRouter::new(ctx)?;
 
         Ok(Box::new(router))
     }
 
     /// Create a gRPC PD router with tokenizer and worker configuration
-    pub async fn create_grpc_pd_router(
+    pub fn create_grpc_pd_router(
         prefill_policy_config: Option<&PolicyConfig>,
         decode_policy_config: Option<&PolicyConfig>,
         main_policy_config: &PolicyConfig,
@@ -141,7 +138,7 @@ impl RouterFactory {
 
         ctx.policy_registry.set_prefill_policy(prefill_policy);
         ctx.policy_registry.set_decode_policy(decode_policy);
-        let router = GrpcPDRouter::new(ctx).await?;
+        let router = GrpcPDRouter::new(ctx)?;
 
         Ok(Box::new(router))
     }
@@ -162,6 +159,10 @@ impl RouterFactory {
     ///
     /// Handles Anthropic Messages API (/v1/messages) with support for streaming,
     /// tool use, extended thinking, and other Anthropic-specific features.
+    #[expect(
+        clippy::unused_async,
+        reason = "async for API consistency with other create_* factory methods"
+    )]
     pub async fn create_anthropic_router(
         ctx: &Arc<AppContext>,
     ) -> Result<Box<dyn RouterTrait>, String> {
@@ -186,7 +187,7 @@ impl RouterFactory {
             (
                 router_ids::GRPC_REGULAR,
                 "gRPC Regular",
-                Self::create_grpc_router(ctx).await,
+                Self::create_grpc_router(ctx),
             ),
             (
                 router_ids::HTTP_PD,
@@ -196,7 +197,7 @@ impl RouterFactory {
             (
                 router_ids::GRPC_PD,
                 "gRPC PD",
-                Self::create_grpc_pd_router(None, None, policy, ctx).await,
+                Self::create_grpc_pd_router(None, None, policy, ctx),
             ),
             (
                 router_ids::HTTP_OPENAI,

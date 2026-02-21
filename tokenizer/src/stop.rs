@@ -103,6 +103,12 @@ impl StopSequenceDecoder {
         let aho_corasick = if patterns.is_empty() {
             None
         } else {
+            // AhoCorasick::new is infallible for non-empty, pre-filtered string patterns.
+            // Failure would indicate a bug in the Aho-Corasick library itself.
+            #[expect(
+                clippy::expect_used,
+                reason = "AhoCorasick::new with pre-filtered non-empty &str patterns is practically infallible"
+            )]
             Some(AhoCorasick::new(patterns).expect("Failed to build Aho-Corasick automaton"))
         };
 
@@ -252,11 +258,11 @@ impl StopSequenceDecoder {
 
     /// Flush any held text
     pub fn flush(&mut self) -> SequenceDecoderOutput {
-        if !self.jail_buffer.is_empty() {
+        if self.jail_buffer.is_empty() {
+            SequenceDecoderOutput::Text(String::new())
+        } else {
             // Use mem::take to avoid clone - transfers ownership and leaves empty string
             SequenceDecoderOutput::Text(std::mem::take(&mut self.jail_buffer))
-        } else {
-            SequenceDecoderOutput::Text(String::new())
         }
     }
 
@@ -632,9 +638,7 @@ mod tests {
                 let result = decoder.process_token(token_id);
                 assert!(
                     result.is_ok(),
-                    "Failed on {} with token {}",
-                    description,
-                    token_id
+                    "Failed on {description} with token {token_id}"
                 );
             }
         }

@@ -432,7 +432,7 @@ mod tests {
         Tool {
             name: Cow::Owned(name.to_string()),
             title: None,
-            description: Some(Cow::Owned(format!("Test tool: {}", name))),
+            description: Some(Cow::Owned(format!("Test tool: {name}"))),
             input_schema: Arc::new(schema_map),
             output_schema: None,
             annotations: None,
@@ -445,7 +445,7 @@ mod tests {
         Prompt {
             name: name.to_string(),
             title: None,
-            description: Some(format!("Test prompt: {}", name)),
+            description: Some(format!("Test prompt: {name}")),
             arguments: None,
             icons: None,
         }
@@ -457,7 +457,7 @@ mod tests {
             uri: uri.to_string(),
             name: uri.to_string(),
             title: None,
-            description: Some(format!("Test resource: {}", uri)),
+            description: Some(format!("Test resource: {uri}")),
             mime_type: Some("text/plain".to_string()),
             size: None,
             icons: None,
@@ -582,6 +582,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test concurrency: handles are stored and awaited"
+    )]
     async fn test_concurrent_access() {
         use std::sync::Arc;
 
@@ -592,8 +596,8 @@ mod tests {
         for i in 0..10 {
             let inv = Arc::clone(&inventory);
             let handle = tokio::spawn(async move {
-                let tool = create_test_tool(&format!("tool_{}", i));
-                inv.insert_tool(format!("tool_{}", i), format!("server_{}", i % 3), tool);
+                let tool = create_test_tool(&format!("tool_{i}"));
+                inv.insert_tool(format!("tool_{i}"), format!("server_{}", i % 3), tool);
             });
             handles.push(handle);
         }
@@ -651,7 +655,7 @@ mod tests {
     #[test]
     fn test_qualified_tool_name_display() {
         let qualified = QualifiedToolName::new("server-b", "write_file");
-        assert_eq!(format!("{}", qualified), "server-b:write_file");
+        assert_eq!(format!("{qualified}"), "server-b:write_file");
     }
 
     #[test]

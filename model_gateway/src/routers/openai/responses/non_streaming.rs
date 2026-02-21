@@ -116,7 +116,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
                 );
                 return error::bad_gateway(
                     "upstream_error",
-                    format!("Failed to forward request to OpenAI: {}", e),
+                    format!("Failed to forward request to OpenAI: {e}"),
                 );
             }
         };
@@ -136,7 +136,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
                 worker.circuit_breaker().record_failure();
                 return error::internal_error(
                     "parse_error",
-                    format!("Failed to parse upstream response: {}", e),
+                    format!("Failed to parse upstream response: {e}"),
                 );
             }
         };

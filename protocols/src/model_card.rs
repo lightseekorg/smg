@@ -12,6 +12,10 @@ use super::{
     worker::ProviderType,
 };
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if passes &T"
+)]
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }
@@ -293,7 +297,7 @@ impl ModelCard {
         self.id2label
             .get(&class_idx)
             .cloned()
-            .unwrap_or_else(|| format!("LABEL_{}", class_idx))
+            .unwrap_or_else(|| format!("LABEL_{class_idx}"))
     }
 }
 

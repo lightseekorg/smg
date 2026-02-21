@@ -1,3 +1,4 @@
+#![expect(clippy::unwrap_used, clippy::expect_used)]
 //! Benchmark: WASM Component Instantiation Overhead
 //!
 //! Measures the per-request cost of creating a Store, WasiCtx, ResourceTable,

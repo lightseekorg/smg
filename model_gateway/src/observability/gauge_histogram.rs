@@ -83,6 +83,10 @@ impl<const N: usize> BucketBounds<N> {
     /// Returns the number of buckets (one more than the number of bounds).
     #[inline]
     #[must_use]
+    #[expect(
+        clippy::unused_self,
+        reason = "method uses const generic N, takes &self for API consistency"
+    )]
     pub const fn bucket_count(&self) -> usize {
         N + 1
     }
@@ -90,6 +94,10 @@ impl<const N: usize> BucketBounds<N> {
     /// Returns the number of bounds.
     #[inline]
     #[must_use]
+    #[expect(
+        clippy::unused_self,
+        reason = "method uses const generic N, takes &self for API consistency"
+    )]
     pub const fn bound_count(&self) -> usize {
         N
     }
@@ -350,14 +358,17 @@ impl<const N: usize> CachedGaugeHistogram<N> {
             return entry;
         }
 
-        // Slow path: use entry API to handle concurrent inserts atomically
-        self.cache.entry(Arc::from(label_value)).or_insert_with(|| {
-            let handle = self.histogram.register(&[(self.label_key, label_value)]);
-            let counts_buf = vec![0usize; self.histogram.bounds.bucket_count()];
-            (handle, counts_buf)
-        });
-
-        self.cache.get(label_value).unwrap()
+        // Slow path: use entry API to handle concurrent inserts atomically.
+        // Return the reference directly from the entry API to avoid a second
+        // lookup that could race with a concurrent `remove()` or `retain_only()`.
+        self.cache
+            .entry(Arc::from(label_value))
+            .or_insert_with(|| {
+                let handle = self.histogram.register(&[(self.label_key, label_value)]);
+                let counts_buf = vec![0usize; self.histogram.bounds.bucket_count()];
+                (handle, counts_buf)
+            })
+            .downgrade()
     }
 
     /// Observe a distribution for a label value. **Zero allocation after first call.**

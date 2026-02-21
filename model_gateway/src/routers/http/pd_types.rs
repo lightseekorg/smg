@@ -28,9 +28,9 @@ pub enum PDRouterError {
 /// Construct a full API URL from a base URL and path.
 pub fn api_path(url: &str, api_path: &str) -> String {
     if api_path.starts_with('/') {
-        format!("{}{}", url, api_path)
+        format!("{url}{api_path}")
     } else {
-        format!("{}/{}", url, api_path)
+        format!("{url}/{api_path}")
     }
 }
 

@@ -4,7 +4,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::{
-    errors::ParserResult,
+    errors::{ParserError, ParserResult},
     parsers::helpers,
     traits::ToolParser,
     types::{FunctionCall, StreamingParseResult, ToolCall, ToolCallItem},
@@ -52,6 +52,10 @@ pub struct KimiK2Parser {
 
 impl KimiK2Parser {
     /// Create a new Kimi K2 parser
+    #[expect(
+        clippy::expect_used,
+        reason = "regex patterns are compile-time string literals"
+    )]
     pub fn new() -> Self {
         // Pattern for complete tool calls
         let tool_call_pattern = r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>\{.*?\})\s*<\|tool_call_end\|>";
@@ -109,7 +113,10 @@ impl ToolParser for KimiK2Parser {
         }
 
         // Find where tool calls begin
-        let idx = text.find("<|tool_calls_section_begin|>").unwrap();
+        // Safe: has_tool_markers() already confirmed the marker exists
+        let idx = text
+            .find("<|tool_calls_section_begin|>")
+            .ok_or_else(|| ParserError::ParsingFailed("tool call marker not found".to_string()))?;
         let normal_text = text[..idx].to_string();
 
         // Try to extract tool calls
@@ -227,25 +234,7 @@ impl ToolParser for KimiK2Parser {
                     );
 
                     // Send tool name if not sent yet
-                    if !self.current_tool_name_sent {
-                        calls.push(ToolCallItem {
-                            tool_index: self.current_tool_id as usize,
-                            name: Some(func_name.clone()),
-                            parameters: String::new(),
-                        });
-                        self.current_tool_name_sent = true;
-
-                        // Store the tool call info for serving layer completions endpoint
-                        let tool_id = self.current_tool_id as usize;
-                        if self.prev_tool_call_arr.len() <= tool_id {
-                            self.prev_tool_call_arr
-                                .resize_with(tool_id + 1, || Value::Null);
-                        }
-                        self.prev_tool_call_arr[tool_id] = serde_json::json!({
-                            "name": func_name,
-                            "arguments": {},
-                        });
-                    } else {
+                    if self.current_tool_name_sent {
                         // Compute incremental diff
                         let argument_diff = if function_args.starts_with(&self.last_arguments) {
                             &function_args[self.last_arguments.len()..]
@@ -316,6 +305,24 @@ impl ToolParser for KimiK2Parser {
                             self.current_tool_name_sent = false;
                             return Ok(result);
                         }
+                    } else {
+                        calls.push(ToolCallItem {
+                            tool_index: self.current_tool_id as usize,
+                            name: Some(func_name.clone()),
+                            parameters: String::new(),
+                        });
+                        self.current_tool_name_sent = true;
+
+                        // Store the tool call info for serving layer completions endpoint
+                        let tool_id = self.current_tool_id as usize;
+                        if self.prev_tool_call_arr.len() <= tool_id {
+                            self.prev_tool_call_arr
+                                .resize_with(tool_id + 1, || Value::Null);
+                        }
+                        self.prev_tool_call_arr[tool_id] = serde_json::json!({
+                            "name": func_name,
+                            "arguments": {},
+                        });
                     }
                 }
             }

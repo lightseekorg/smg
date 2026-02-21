@@ -31,7 +31,7 @@ impl HarmonyParserAdapter {
     pub fn new() -> Result<Self, String> {
         let encoding = get_harmony_encoding();
         let parser = StreamableParser::new(encoding.clone(), Some(Role::Assistant))
-            .map_err(|e| format!("Failed to create StreamableParser: {}", e))?;
+            .map_err(|e| format!("Failed to create StreamableParser: {e}"))?;
 
         Ok(Self {
             parser,
@@ -126,9 +126,8 @@ impl HarmonyParserAdapter {
             // instead of channel="commentary" + recipient="functions.*"
             // We should trust the recipient field to determine if this is a tool call
             if let Some(recipient_str) = recipient {
-                if recipient_str.starts_with("functions.") {
+                if let Some(function_name) = recipient_str.strip_prefix("functions.") {
                     // This is a tool call, regardless of channel
-                    let function_name = recipient_str.strip_prefix("functions.").unwrap();
 
                     // Process each content item separately
                     for content in &msg.content {
@@ -249,7 +248,7 @@ impl HarmonyParserAdapter {
         for &token_id in output_ids {
             self.parser
                 .process(token_id)
-                .map_err(|e| format!("Failed to process token {}: {}", token_id, e))?;
+                .map_err(|e| format!("Failed to process token {token_id}: {e}"))?;
 
             // Count reasoning tokens (analysis + commentary channels)
             if let Some(channel) = self.parser.current_channel() {
@@ -322,7 +321,10 @@ impl HarmonyParserAdapter {
         }
 
         // Extract function name from recipient
-        let function_name = recipient.strip_prefix("functions.").unwrap();
+        let Some(function_name) = recipient.strip_prefix("functions.") else {
+            // guarded by starts_with("functions.") check above
+            return None;
+        };
 
         // Create tool call from incomplete content
         let call_id = format!("call_{}", Uuid::new_v4());
@@ -369,7 +371,7 @@ impl HarmonyParserAdapter {
         for &token_id in chunk_ids {
             self.parser
                 .process(token_id)
-                .map_err(|e| format!("Failed to process token {}: {}", token_id, e))?;
+                .map_err(|e| format!("Failed to process token {token_id}: {e}"))?;
 
             // Count reasoning tokens (analysis + commentary channels)
             if let Some(channel) = self.parser.current_channel() {
@@ -403,7 +405,7 @@ impl HarmonyParserAdapter {
         // Handle commentary channel tool call deltas
         if self.parser.current_channel().as_deref() == Some("commentary") {
             if let Some(cur_recipient) = self.parser.current_recipient() {
-                if cur_recipient.starts_with("functions.") {
+                if let Some(tool_name) = cur_recipient.strip_prefix("functions.") {
                     has_delta = true;
 
                     // Count completed tool calls for index
@@ -425,7 +427,6 @@ impl HarmonyParserAdapter {
 
                     if recipient_changed {
                         // NEW tool call: emit name + id
-                        let tool_name = cur_recipient.strip_prefix("functions.").unwrap();
                         let call_id = format!("call_{}", Uuid::new_v4());
 
                         commentary_delta = Some(super::types::ToolCallDelta {
@@ -487,7 +488,7 @@ impl HarmonyParserAdapter {
         &mut self,
         finish_reason: String,
         matched_stop: Option<serde_json::Value>,
-    ) -> Result<HarmonyChannelOutput, String> {
+    ) -> HarmonyChannelOutput {
         // Extract all completed messages
         let messages = self.parser.messages();
 
@@ -504,25 +505,25 @@ impl HarmonyParserAdapter {
             finish_reason
         };
 
-        Ok(HarmonyChannelOutput {
+        HarmonyChannelOutput {
             analysis,
             commentary,
             final_text,
             finish_reason: final_finish_reason,
             matched_stop,
             reasoning_token_count: self.reasoning_token_count,
-        })
+        }
     }
 
     /// Reset parser state
     ///
     /// Resets the parser to initial state for reuse
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn reset(&mut self) -> Result<(), String> {
         // Create a new parser instance (StreamableParser doesn't have a reset method)
         let encoding = get_harmony_encoding();
         self.parser = StreamableParser::new(encoding.clone(), Some(Role::Assistant))
-            .map_err(|e| format!("Failed to reset parser: {}", e))?;
+            .map_err(|e| format!("Failed to reset parser: {e}"))?;
         self.prev_recipient = None;
         self.reasoning_token_count = 0;
         Ok(())
@@ -530,6 +531,10 @@ impl HarmonyParserAdapter {
 }
 
 impl Default for HarmonyParserAdapter {
+    #[expect(
+        clippy::expect_used,
+        reason = "Harmony parser creation requires a valid encoding which is statically guaranteed"
+    )]
     fn default() -> Self {
         Self::new().expect("Failed to create default parser")
     }

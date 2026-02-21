@@ -77,6 +77,7 @@ async fn test_guard_dropped_when_response_dropped_without_consumption() {
     assert_eq!(worker.load(), 0);
 }
 
+#[expect(clippy::disallowed_methods, reason = "test infrastructure")]
 #[tokio::test]
 async fn test_streaming_guard_dropped_when_stream_ends() {
     let worker = create_test_worker();

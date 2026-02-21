@@ -1,5 +1,5 @@
 // TLS-enabled mock worker for mTLS integration tests
-#![allow(dead_code)]
+#![allow(dead_code, clippy::allow_attributes)]
 
 use std::{
     net::SocketAddr,
@@ -74,6 +74,11 @@ impl TlsMockWorker {
     /// * `server_cert_path` - Path to server certificate PEM file
     /// * `server_key_path` - Path to server private key PEM file
     /// * `ca_cert_path` - Path to CA certificate for client verification (optional for TLS-only mode)
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::print_stderr,
+        reason = "test infrastructure"
+    )]
     pub async fn start(
         &mut self,
         server_cert_path: &Path,
@@ -113,7 +118,7 @@ impl TlsMockWorker {
         let rustls_config = if require_client_cert {
             // mTLS: require client certificate
             let ca_cert_path = ca_cert_path.ok_or("CA cert path required for mTLS")?;
-            build_mtls_config(server_cert_path, server_key_path, ca_cert_path).await?
+            build_mtls_config(server_cert_path, server_key_path, ca_cert_path)?
         } else {
             // TLS only: no client cert required
             build_tls_config(server_cert_path, server_key_path).await?
@@ -129,7 +134,7 @@ impl TlsMockWorker {
             tokio::select! {
                 result = server => {
                     if let Err(e) = result {
-                        eprintln!("TLS Server error: {}", e);
+                        eprintln!("TLS Server error: {e}");
                     }
                 }
                 _ = &mut shutdown_rx => {
@@ -143,7 +148,7 @@ impl TlsMockWorker {
         // Wait for the server to start
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-        let url = format!("https://127.0.0.1:{}", port);
+        let url = format!("https://127.0.0.1:{port}");
         Ok(url)
     }
 
@@ -177,7 +182,7 @@ async fn build_tls_config(
 }
 
 /// Build mTLS config requiring client certificate
-async fn build_mtls_config(
+fn build_mtls_config_sync(
     cert_path: &Path,
     key_path: &Path,
     ca_cert_path: &Path,
@@ -212,27 +217,40 @@ async fn build_mtls_config(
     // Create client certificate verifier
     let client_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
         .build()
-        .map_err(|e| format!("Failed to build client verifier: {}", e))?;
+        .map_err(|e| format!("Failed to build client verifier: {e}"))?;
 
     // Build server config with client verification
     let server_config = rustls::ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
         .with_single_cert(cert_chain, private_key.into())
-        .map_err(|e| format!("Failed to build server config: {}", e))?;
+        .map_err(|e| format!("Failed to build server config: {e}"))?;
 
     Ok(RustlsConfig::from_config(Arc::new(server_config)))
 }
 
+/// Build mTLS config requiring client certificate (wrapper)
+fn build_mtls_config(
+    cert_path: &Path,
+    key_path: &Path,
+    ca_cert_path: &Path,
+) -> Result<RustlsConfig, Box<dyn std::error::Error + Send + Sync>> {
+    build_mtls_config_sync(cert_path, key_path, ca_cert_path)
+}
+
 // Handler implementations (simplified versions of mock_worker handlers)
 
-async fn should_fail(config: &TlsMockWorkerConfig) -> bool {
+fn should_fail(config: &TlsMockWorkerConfig) -> bool {
     rand::random::<f32>() < config.fail_rate
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn health_handler(State(config): State<Arc<RwLock<TlsMockWorkerConfig>>>) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "Random failure" })),
@@ -253,7 +271,7 @@ async fn health_generate_handler(
 ) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "Random failure" })),
@@ -272,7 +290,7 @@ async fn health_generate_handler(
 async fn server_info_handler(State(config): State<Arc<RwLock<TlsMockWorkerConfig>>>) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "Random failure" })),
@@ -296,7 +314,7 @@ async fn generate_handler(
 ) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "Random failure" })),
@@ -319,13 +337,17 @@ async fn generate_handler(
     .into_response()
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn chat_completions_handler(
     State(config): State<Arc<RwLock<TlsMockWorkerConfig>>>,
     Json(_payload): Json<serde_json::Value>,
 ) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({

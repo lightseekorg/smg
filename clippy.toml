@@ -1,0 +1,24 @@
+# Allow unwrap/expect/panic in test code — production code is restricted via workspace lints
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true
+
+# Panic safety — force explicit error handling
+disallowed-macros = [
+    { path = "std::unimplemented", reason = "Use a proper error type or todo! only in stubs that must not reach production" },
+    { path = "std::todo", reason = "Remove all todo! before merging to main" },
+]
+
+disallowed-methods = [
+    { path = "tokio::task::spawn", reason = "Verify that it's okay for the gateway to shut down without waiting for this task" },
+    { path = "std::process::exit", reason = "Verify that it's okay to shut down the entire process without our normal shutdown logic" },
+]
+
+# Cognitive complexity limit — keeps routing/scheduling logic reviewable
+cognitive-complexity-threshold = 25
+
+# Type complexity — flag deeply nested generics common in async tower stacks
+type-complexity-threshold = 250
+
+# Enforce API discipline during refactors
+avoid-breaking-exported-api = false

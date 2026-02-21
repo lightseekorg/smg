@@ -264,7 +264,7 @@ mod tests {
         for i in 0..10 {
             let cache_clone = cache.clone();
             handles.push(thread::spawn(move || {
-                let key = format!("key_{}", i);
+                let key = format!("key_{i}");
                 cache_clone.insert(key.clone(), false, mock_encoding(vec![i as u32]));
 
                 let result = cache_clone.get(&key, false);

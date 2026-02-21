@@ -37,7 +37,7 @@ enum ExecutionBranch {
 }
 
 impl ExecutionBranch {
-    fn as_str(&self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::NoHealthyWorkers => "no_healthy_workers",
             Self::OccupiedHit => "occupied_hit",
@@ -355,7 +355,7 @@ mod tests {
 
         let mut distribution = HashMap::new();
         for i in 0..100 {
-            let headers = headers_with_routing_key(&format!("user-{}", i));
+            let headers = headers_with_routing_key(&format!("user-{i}"));
             let info = SelectWorkerInfo {
                 headers: Some(&headers),
                 ..Default::default()
@@ -771,7 +771,7 @@ mod tests {
         let workers = create_workers(&["http://w1:8000", "http://w2:8000", "http://w3:8000"]);
 
         for i in 0..9 {
-            let routing_key = format!("key-{}", i);
+            let routing_key = format!("key-{i}");
             let headers = headers_with_routing_key(&routing_key);
             let info = SelectWorkerInfo {
                 headers: Some(&headers),
@@ -912,7 +912,7 @@ mod tests {
 
         let mut selected_worker_0 = false;
         for i in 0..50 {
-            let headers = headers_with_routing_key(&format!("test-{}", i));
+            let headers = headers_with_routing_key(&format!("test-{i}"));
             let info = SelectWorkerInfo {
                 headers: Some(&headers),
                 ..Default::default()

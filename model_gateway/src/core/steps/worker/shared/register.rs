@@ -39,7 +39,7 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for RegisterWorke
 
         let mut worker_ids = Vec::with_capacity(workers.len());
 
-        for worker in workers.iter() {
+        for worker in workers {
             let worker_id = app_context.worker_registry.register(Arc::clone(worker));
             debug!(
                 "Registered worker {} (model: {}) with ID {:?}",

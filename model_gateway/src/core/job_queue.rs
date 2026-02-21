@@ -166,6 +166,10 @@ impl JobQueue {
         let status = status_map.clone();
         let sem = concurrency_limit.clone();
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "Core job dispatcher loop: runs for the lifetime of the gateway and drains cleanly when the channel sender is dropped on shutdown"
+        )]
         tokio::spawn(async move {
             while let Some(job) = rx.recv().await {
                 // Acquire permit (blocks if at concurrency limit)
@@ -177,6 +181,10 @@ impl JobQueue {
                 let ctx_clone = ctx.clone();
                 let status_clone = status.clone();
 
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "Job processing task: bounded by the semaphore permit which is dropped when the task completes"
+                )]
                 tokio::spawn(async move {
                     Self::process_job(job, ctx_clone, status_clone, permit).await;
                 });
@@ -187,6 +195,10 @@ impl JobQueue {
 
         // Spawn cleanup task for old job statuses (TTL 5 minutes)
         let cleanup_status_map = status_map.clone();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "Background cleanup loop: runs periodically to evict expired job statuses, bounded by the DashMap's own TTL logic"
+        )]
         tokio::spawn(async move {
             Self::cleanup_old_statuses(cleanup_status_map).await;
         });
@@ -219,7 +231,7 @@ impl JobQueue {
         );
 
         match self.tx.send(job).await {
-            Ok(_) => {
+            Ok(()) => {
                 let (queue_depth, available_permits) = self.get_load_info();
                 debug!(
                     "Job submitted: type={}, worker={}, queue_depth={}, available_slots={}",
@@ -319,8 +331,7 @@ impl JobQueue {
                             .await
                             .map_err(|e| {
                                 format!(
-                                    "Failed to start external worker registration workflow: {:?}",
-                                    e
+                                    "Failed to start external worker registration workflow: {e:?}"
                                 )
                             })?;
 
@@ -347,10 +358,7 @@ impl JobQueue {
                             )
                             .await
                             .map_err(|e| {
-                                format!(
-                                    "Failed to start local worker registration workflow: {:?}",
-                                    e
-                                )
+                                format!("Failed to start local worker registration workflow: {e:?}")
                             })?;
 
                         debug!(
@@ -381,7 +389,7 @@ impl JobQueue {
                     .worker_update
                     .start_workflow(WorkflowId::new("worker_update"), workflow_data)
                     .await
-                    .map_err(|e| format!("Failed to start worker update workflow: {:?}", e))?;
+                    .map_err(|e| format!("Failed to start worker update workflow: {e:?}"))?;
 
                 debug!(
                     "Started worker update workflow for {} (instance: {})",
@@ -411,7 +419,7 @@ impl JobQueue {
                     .worker_removal
                     .start_workflow(WorkflowId::new("worker_removal"), workflow_data)
                     .await
-                    .map_err(|e| format!("Failed to start worker removal workflow: {:?}", e))?;
+                    .map_err(|e| format!("Failed to start worker removal workflow: {e:?}"))?;
 
                 debug!(
                     "Started worker removal workflow for {} (instance: {})",
@@ -446,7 +454,7 @@ impl JobQueue {
                     .start_workflow(WorkflowId::new("wasm_module_registration"), workflow_data)
                     .await
                     .map_err(|e| {
-                        format!("Failed to start WASM module registration workflow: {:?}", e)
+                        format!("Failed to start WASM module registration workflow: {e:?}")
                     })?;
 
                 debug!(
@@ -474,9 +482,7 @@ impl JobQueue {
                     .wasm_removal
                     .start_workflow(WorkflowId::new("wasm_module_removal"), workflow_data)
                     .await
-                    .map_err(|e| {
-                        format!("Failed to start WASM module removal workflow: {:?}", e)
-                    })?;
+                    .map_err(|e| format!("Failed to start WASM module removal workflow: {e:?}"))?;
 
                 debug!(
                     "Started WASM module removal workflow for {} (instance: {})",
@@ -536,8 +542,7 @@ impl JobQueue {
                             if let Some(queue) = context.worker_job_queue.get() {
                                 queue.submit(job).await.map_err(|e| {
                                     format!(
-                                        "Failed to submit AddWorker job for external endpoint {}: {}",
-                                        url_for_error, e
+                                        "Failed to submit AddWorker job for external endpoint {url_for_error}: {e}"
                                     )
                                 })?;
                                 submitted_count += 1;
@@ -552,8 +557,7 @@ impl JobQueue {
                         }
 
                         return Ok(format!(
-                            "Submitted {} AddWorker jobs for external endpoints",
-                            submitted_count
+                            "Submitted {submitted_count} AddWorker jobs for external endpoints"
                         ));
                     }
                     RoutingMode::Anthropic { worker_urls } => {
@@ -573,8 +577,7 @@ impl JobQueue {
                             if let Some(queue) = context.worker_job_queue.get() {
                                 queue.submit(job).await.map_err(|e| {
                                     format!(
-                                        "Failed to submit AddWorker job for Anthropic endpoint {}: {}",
-                                        url_for_error, e
+                                        "Failed to submit AddWorker job for Anthropic endpoint {url_for_error}: {e}"
                                     )
                                 })?;
                                 submitted_count += 1;
@@ -589,8 +592,7 @@ impl JobQueue {
                         }
 
                         return Ok(format!(
-                            "Submitted {} AddWorker jobs for Anthropic endpoints",
-                            submitted_count
+                            "Submitted {submitted_count} AddWorker jobs for Anthropic endpoints"
                         ));
                     }
                 };
@@ -610,7 +612,7 @@ impl JobQueue {
                     };
                     let mut spec = WorkerSpec::new(url);
                     spec.worker_type = proto_worker_type;
-                    spec.api_key = api_key.clone();
+                    spec.api_key.clone_from(&api_key);
                     spec.bootstrap_port = bootstrap_port;
                     // Health config is resolved at worker build time from router
                     // defaults + per-worker overrides (spec.health). No need to
@@ -626,8 +628,7 @@ impl JobQueue {
                     if let Some(queue) = context.worker_job_queue.get() {
                         queue.submit(job).await.map_err(|e| {
                             format!(
-                                "Failed to submit AddWorker job for {} worker {}: {}",
-                                worker_type, url_for_error, e
+                                "Failed to submit AddWorker job for {worker_type} worker {url_for_error}: {e}"
                             )
                         })?;
                         worker_count += 1;
@@ -636,7 +637,7 @@ impl JobQueue {
                     }
                 }
 
-                Ok(format!("Submitted {} AddWorker jobs", worker_count))
+                Ok(format!("Submitted {worker_count} AddWorker jobs"))
             }
             Job::InitializeMcpServers { mcp_config } => {
                 let mut server_count = 0;
@@ -670,7 +671,7 @@ impl JobQueue {
                     }
                 }
 
-                Ok(format!("Submitted {} RegisterMcpServer jobs", server_count))
+                Ok(format!("Submitted {server_count} RegisterMcpServer jobs"))
             }
             Job::RegisterMcpServer { config } => {
                 let engines = context
@@ -685,7 +686,7 @@ impl JobQueue {
                     .mcp
                     .start_workflow(WorkflowId::new("mcp_registration"), workflow_data)
                     .await
-                    .map_err(|e| format!("Failed to start MCP registration workflow: {:?}", e))?;
+                    .map_err(|e| format!("Failed to start MCP registration workflow: {e:?}"))?;
 
                 debug!(
                     "Started MCP registration workflow for {} (instance: {})",
@@ -713,7 +714,7 @@ impl JobQueue {
                     .start_workflow(WorkflowId::new("tokenizer_registration"), workflow_data)
                     .await
                     .map_err(|e| {
-                        format!("Failed to start tokenizer registration workflow: {:?}", e)
+                        format!("Failed to start tokenizer registration workflow: {e:?}")
                     })?;
 
                 debug!(
@@ -783,7 +784,7 @@ impl JobQueue {
 
             let now = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs();
 
             // Remove statuses older than TTL

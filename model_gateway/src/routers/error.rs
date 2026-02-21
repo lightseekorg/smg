@@ -98,7 +98,7 @@ pub fn model_not_found(model: &str) -> Response {
     create_error(
         StatusCode::NOT_FOUND,
         "model_not_found",
-        format!("No worker available for model '{}'", model),
+        format!("No worker available for model '{model}'"),
     )
 }
 
@@ -110,8 +110,19 @@ pub fn extract_error_code_from_response<B>(response: &Response<B>) -> &str {
         .unwrap_or_default()
 }
 
-static ORG_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s*\borganization org-\S+").unwrap());
-static PROJ_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\s*\bproject proj_\S+").unwrap());
+#[expect(
+    clippy::expect_used,
+    reason = "static regex patterns are compile-time constants; invalid pattern is a developer bug"
+)]
+static ORG_ID_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\s*\borganization org-\S+").expect("static regex pattern is valid")
+});
+#[expect(
+    clippy::expect_used,
+    reason = "static regex patterns are compile-time constants; invalid pattern is a developer bug"
+)]
+static PROJ_ID_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\s*\bproject proj_\S+").expect("static regex pattern is valid"));
 
 /// Sanitize upstream error response bodies to prevent leaking internal identifiers.
 /// - Strips org-ID patterns (`org-xxx`)

@@ -55,6 +55,10 @@ pub struct Step3Parser {
 
 impl Step3Parser {
     /// Create a new Step3 parser
+    #[expect(
+        clippy::expect_used,
+        reason = "regex patterns are compile-time string literals"
+    )]
     pub fn new() -> Self {
         // Pattern for individual tool calls
         let tool_call_pattern = r"(?s)<｜tool_call_begin｜>.*?<｜tool_call_end｜>";
@@ -108,25 +112,25 @@ impl Step3Parser {
     fn parse_partial_tool_call(
         &mut self,
         tool_indices: &HashMap<String, usize>,
-    ) -> ParserResult<StreamingParseResult> {
+    ) -> StreamingParseResult {
         let mut calls = Vec::new();
 
         // Check if we have tool_sep (means we're past the type declaration)
         if !self.buffer.contains(self.tool_sep) {
-            return Ok(StreamingParseResult {
+            return StreamingParseResult {
                 normal_text: String::new(),
                 calls,
-            });
+            };
         }
 
         // Clone the buffer to avoid borrow conflicts
         let buffer_clone = self.buffer.clone();
         let parts: Vec<&str> = buffer_clone.splitn(2, self.tool_sep).collect();
         if parts.len() != 2 {
-            return Ok(StreamingParseResult {
+            return StreamingParseResult {
                 normal_text: String::new(),
                 calls,
-            });
+            };
         }
 
         let type_part = parts[0].trim();
@@ -136,10 +140,10 @@ impl Step3Parser {
         if type_part != "function" {
             // Invalid tool type, skip this tool call
             self.reset_streaming_state();
-            return Ok(StreamingParseResult {
+            return StreamingParseResult {
                 normal_text: String::new(),
                 calls,
-            });
+            };
         }
 
         // Try to extract function name if not sent yet
@@ -181,17 +185,17 @@ impl Step3Parser {
                     // Invalid function name
                     tracing::debug!("Invalid function name: {}", func_name);
                     self.reset_streaming_state();
-                    return Ok(StreamingParseResult {
+                    return StreamingParseResult {
                         normal_text: String::new(),
                         calls,
-                    });
+                    };
                 }
             } else {
                 // Function name not complete yet
-                return Ok(StreamingParseResult {
+                return StreamingParseResult {
                     normal_text: String::new(),
                     calls,
-                });
+                };
             }
         }
 
@@ -275,7 +279,7 @@ impl Step3Parser {
                 }
 
                 // Update current state
-                self.current_parameters = new_params.clone();
+                self.current_parameters.clone_from(&new_params);
                 let tool_id = self.current_tool_id as usize;
                 if tool_id < self.prev_tool_call_arr.len() {
                     if let Some(obj) = self.prev_tool_call_arr[tool_id].as_object_mut() {
@@ -311,17 +315,14 @@ impl Step3Parser {
             }
         }
 
-        Ok(StreamingParseResult {
+        StreamingParseResult {
             normal_text: String::new(),
             calls,
-        })
+        }
     }
 
     /// Parse parameters from steptml format
-    fn parse_steptml_parameters(
-        &self,
-        params_text: &str,
-    ) -> ParserResult<serde_json::Map<String, Value>> {
+    fn parse_steptml_parameters(&self, params_text: &str) -> serde_json::Map<String, Value> {
         let mut parameters = serde_json::Map::new();
 
         for capture in self.param_extractor.captures_iter(params_text) {
@@ -355,7 +356,7 @@ impl Step3Parser {
             parameters.insert(param_name.to_string(), param_value);
         }
 
-        Ok(parameters)
+        parameters
     }
 
     /// Parse a single tool call block
@@ -390,7 +391,7 @@ impl Step3Parser {
             let params_text = captures.get(2).map_or("", |m| m.as_str());
 
             // Parse parameters
-            let parameters = self.parse_steptml_parameters(params_text)?;
+            let parameters = self.parse_steptml_parameters(params_text);
 
             let arguments_str = serde_json::to_string(&parameters)
                 .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
@@ -421,7 +422,10 @@ impl ToolParser for Step3Parser {
         }
 
         // Find where tool calls begin
-        let idx = text.find("<｜tool_calls_begin｜>").unwrap();
+        // Safe: has_tool_markers() already confirmed the marker exists
+        let idx = text
+            .find("<｜tool_calls_begin｜>")
+            .ok_or_else(|| ParserError::ParsingFailed("tool call marker not found".to_string()))?;
         let normal_text = text[..idx].to_string();
 
         // Extract tool calls
@@ -467,7 +471,10 @@ impl ToolParser for Step3Parser {
         // Stage 2: Check if tool block hasn't started yet
         if !self.in_tool_block {
             if self.buffer.contains(self.bot_token) {
-                let idx = self.buffer.find(self.bot_token).unwrap();
+                // Safe: contains() confirmed the token exists
+                let idx = self.buffer.find(self.bot_token).ok_or_else(|| {
+                    ParserError::ParsingFailed("token not found in buffer".to_string())
+                })?;
                 let normal_text = self.buffer[..idx].to_string();
                 self.buffer = self.buffer[idx + self.bot_token.len()..].to_string();
                 self.in_tool_block = true;
@@ -494,7 +501,10 @@ impl ToolParser for Step3Parser {
 
         // Stage 3: Check if tool block is ending
         if self.buffer.contains(self.eot_token) {
-            let idx = self.buffer.find(self.eot_token).unwrap();
+            // Safe: contains() confirmed the token exists
+            let idx = self.buffer.find(self.eot_token).ok_or_else(|| {
+                ParserError::ParsingFailed("token not found in buffer".to_string())
+            })?;
 
             // If we're in the middle of a tool call, we need to handle it
             if self.in_tool_call {
@@ -502,7 +512,7 @@ impl ToolParser for Step3Parser {
                 let before_eot = &self.buffer[..idx];
                 if before_eot.contains(self.tool_call_end) {
                     // Parse this final tool call
-                    let result = self.parse_partial_tool_call(&tool_indices)?;
+                    let result = self.parse_partial_tool_call(&tool_indices);
                     calls.extend(result.calls);
                 } else {
                     // Incomplete tool call - log warning
@@ -526,7 +536,10 @@ impl ToolParser for Step3Parser {
         // Stage 4: Check if we're in a tool call or need to start one
         if !self.in_tool_call {
             if self.buffer.contains(self.tool_call_begin) {
-                let idx = self.buffer.find(self.tool_call_begin).unwrap();
+                // Safe: contains() confirmed the token exists
+                let idx = self.buffer.find(self.tool_call_begin).ok_or_else(|| {
+                    ParserError::ParsingFailed("token not found in buffer".to_string())
+                })?;
                 // Remove any content before tool call begin (shouldn't happen but be safe)
                 self.buffer = self.buffer[idx + self.tool_call_begin.len()..].to_string();
                 self.in_tool_call = true;
@@ -542,7 +555,7 @@ impl ToolParser for Step3Parser {
 
         // Stage 5: Parse partial tool call
         if self.in_tool_call {
-            return self.parse_partial_tool_call(&tool_indices);
+            return Ok(self.parse_partial_tool_call(&tool_indices));
         }
 
         Ok(StreamingParseResult::default())

@@ -13,6 +13,7 @@ keywords = ["llm", "reasoning", "parser", "chain-of-thought"]
 categories = ["parsing", "text-processing"]
 
 [dependencies]
+parking_lot = { workspace = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 

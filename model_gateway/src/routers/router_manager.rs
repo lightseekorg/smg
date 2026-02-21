@@ -104,7 +104,7 @@ impl RouterManager {
             let single_router = Arc::from(RouterFactory::create_router(app_context).await?);
             let router_id = Self::determine_router_id(
                 &config.router_config.mode,
-                &config.router_config.connection_mode,
+                config.router_config.connection_mode,
             );
 
             info!("Created single router with ID: {}", router_id.as_str());
@@ -121,7 +121,7 @@ impl RouterManager {
 
     pub fn determine_router_id(
         routing_mode: &RoutingMode,
-        connection_mode: &ConnectionMode,
+        connection_mode: ConnectionMode,
     ) -> RouterId {
         match (connection_mode, routing_mode) {
             (ConnectionMode::Http, RoutingMode::Regular { .. }) => router_ids::HTTP_REGULAR,
@@ -615,7 +615,7 @@ impl RouterTrait for RouterManager {
         } else {
             (
                 StatusCode::NOT_FOUND,
-                format!("No router available to get response '{}'", response_id),
+                format!("No router available to get response '{response_id}'"),
             )
                 .into_response()
         }
@@ -628,7 +628,7 @@ impl RouterTrait for RouterManager {
         } else {
             (
                 StatusCode::NOT_FOUND,
-                format!("No router available to cancel response '{}'", response_id),
+                format!("No router available to cancel response '{response_id}'"),
             )
                 .into_response()
         }

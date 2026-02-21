@@ -196,9 +196,9 @@ mod tests {
 
         for i in 0..10 {
             log.record_decision(
-                &QualifiedToolName::new("server", format!("tool-{}", i)),
+                &QualifiedToolName::new("server", format!("tool-{i}")),
                 &tenant,
-                &format!("req-{}", i),
+                &format!("req-{i}"),
                 DecisionResult::Approved,
                 DecisionSource::PolicyEngine,
             );

@@ -123,7 +123,7 @@ impl ResponseStreamEventEmitter {
     pub(crate) fn update_mcp_call_outputs(&mut self, tool_results: &[ToolResult]) {
         for tool_result in tool_results {
             // Find the output item with matching call_id
-            for item_state in self.output_items.iter_mut() {
+            for item_state in &mut self.output_items {
                 if let Some(ref mut item_data) = item_state.item_data {
                     // Check if this is a tool call item with matching call_id
                     let item_type = item_data.get("type").and_then(|t| t.as_str());
@@ -306,28 +306,34 @@ impl ResponseStreamEventEmitter {
 
         // Add all original request fields if available
         if let Some(ref req) = self.original_request {
-            Self::add_optional_field(&mut response_obj, "instructions", &req.instructions);
+            Self::add_optional_field(&mut response_obj, "instructions", req.instructions.as_ref());
             Self::add_optional_field(
                 &mut response_obj,
                 "max_output_tokens",
-                &req.max_output_tokens,
+                req.max_output_tokens.as_ref(),
             );
-            Self::add_optional_field(&mut response_obj, "max_tool_calls", &req.max_tool_calls);
+            Self::add_optional_field(
+                &mut response_obj,
+                "max_tool_calls",
+                req.max_tool_calls.as_ref(),
+            );
             Self::add_optional_field(
                 &mut response_obj,
                 "previous_response_id",
-                &req.previous_response_id,
+                req.previous_response_id.as_ref(),
             );
-            Self::add_optional_field(&mut response_obj, "reasoning", &req.reasoning);
-            Self::add_optional_field(&mut response_obj, "temperature", &req.temperature);
-            Self::add_optional_field(&mut response_obj, "top_p", &req.top_p);
-            Self::add_optional_field(&mut response_obj, "truncation", &req.truncation);
-            Self::add_optional_field(&mut response_obj, "user", &req.user);
+            Self::add_optional_field(&mut response_obj, "reasoning", req.reasoning.as_ref());
+            Self::add_optional_field(&mut response_obj, "temperature", req.temperature.as_ref());
+            Self::add_optional_field(&mut response_obj, "top_p", req.top_p.as_ref());
+            Self::add_optional_field(&mut response_obj, "truncation", req.truncation.as_ref());
+            Self::add_optional_field(&mut response_obj, "user", req.user.as_ref());
 
             response_obj["parallel_tool_calls"] = json!(req.parallel_tool_calls.unwrap_or(true));
             response_obj["store"] = json!(req.store.unwrap_or(true));
-            response_obj["tools"] = json!(req.tools.as_ref().unwrap_or(&vec![]));
-            response_obj["metadata"] = json!(req.metadata.as_ref().unwrap_or(&Default::default()));
+            let empty_tools = vec![];
+            let empty_metadata = Default::default();
+            response_obj["tools"] = json!(req.tools.as_ref().unwrap_or(&empty_tools));
+            response_obj["metadata"] = json!(req.metadata.as_ref().unwrap_or(&empty_metadata));
 
             // tool_choice: serialize if present, otherwise use "auto"
             if let Some(ref tc) = req.tool_choice {
@@ -348,7 +354,7 @@ impl ResponseStreamEventEmitter {
     fn add_optional_field<T: serde::Serialize>(
         obj: &mut serde_json::Value,
         key: &str,
-        value: &Option<T>,
+        value: Option<&T>,
     ) {
         if let Some(val) = value {
             obj[key] = json!(val);
@@ -763,58 +769,66 @@ impl ResponseStreamEventEmitter {
                         self.current_message_output_index = Some(output_index);
                     }
 
-                    let output_index = self.current_message_output_index.unwrap();
-                    let item_id = self.current_item_id.clone().unwrap(); // Clone to avoid borrow checker issues
-                    let content_index = 0; // Single content part for now
+                    // output_index and item_id are always set in the block above
+                    // when current_item_id was None and we allocated new ones
+                    if let (Some(output_index), Some(item_id)) = (
+                        self.current_message_output_index,
+                        self.current_item_id.clone(),
+                    ) {
+                        let content_index = 0; // Single content part for now
 
-                    // Emit content_part.added before first delta
-                    if !self.has_emitted_content_part_added {
+                        // Emit content_part.added before first delta
+                        if !self.has_emitted_content_part_added {
+                            let event =
+                                self.emit_content_part_added(output_index, &item_id, content_index);
+                            self.send_event(&event, tx)?;
+                            self.has_emitted_content_part_added = true;
+                        }
+
+                        // Emit text delta
                         let event =
-                            self.emit_content_part_added(output_index, &item_id, content_index);
+                            self.emit_text_delta(content, output_index, &item_id, content_index);
                         self.send_event(&event, tx)?;
-                        self.has_emitted_content_part_added = true;
                     }
-
-                    // Emit text delta
-                    let event =
-                        self.emit_text_delta(content, output_index, &item_id, content_index);
-                    self.send_event(&event, tx)?;
                 }
             }
 
             // Check for finish_reason to emit completion events
             if let Some(reason) = &choice.finish_reason {
                 if reason == "stop" || reason == "length" {
-                    let output_index = self.current_message_output_index.unwrap();
-                    let item_id = self.current_item_id.clone().unwrap(); // Clone to avoid borrow checker issues
-                    let content_index = 0;
+                    if let (Some(output_index), Some(item_id)) = (
+                        self.current_message_output_index,
+                        self.current_item_id.clone(),
+                    ) {
+                        let content_index = 0;
 
-                    // Emit closing events
-                    if self.has_emitted_content_part_added {
-                        let event = self.emit_text_done(output_index, &item_id, content_index);
-                        self.send_event(&event, tx)?;
-                        let event =
-                            self.emit_content_part_done(output_index, &item_id, content_index);
-                        self.send_event(&event, tx)?;
+                        // Emit closing events
+                        if self.has_emitted_content_part_added {
+                            let event = self.emit_text_done(output_index, &item_id, content_index);
+                            self.send_event(&event, tx)?;
+                            let event =
+                                self.emit_content_part_done(output_index, &item_id, content_index);
+                            self.send_event(&event, tx)?;
+                        }
+
+                        if self.has_emitted_output_item_added {
+                            // Build complete message item for output_item.done
+                            let item = json!({
+                                "id": item_id,
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{
+                                    "type": "output_text",
+                                    "text": self.accumulated_text.clone()
+                                }]
+                            });
+                            let event = self.emit_output_item_done(output_index, &item);
+                            self.send_event(&event, tx)?;
+                        }
+
+                        // Mark item as completed
+                        self.complete_output_item(output_index);
                     }
-
-                    if self.has_emitted_output_item_added {
-                        // Build complete message item for output_item.done
-                        let item = json!({
-                            "id": item_id,
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [{
-                                "type": "output_text",
-                                "text": self.accumulated_text.clone()
-                            }]
-                        });
-                        let event = self.emit_output_item_done(output_index, &item);
-                        self.send_event(&event, tx)?;
-                    }
-
-                    // Mark item as completed
-                    self.complete_output_item(output_index);
                 }
             }
         }
@@ -822,13 +836,17 @@ impl ResponseStreamEventEmitter {
         Ok(())
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "method on emitter for API consistency with send_event_best_effort"
+    )]
     pub fn send_event(
         &self,
         event: &serde_json::Value,
         tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
     ) -> Result<(), String> {
-        let event_json = serde_json::to_string(event)
-            .map_err(|e| format!("Failed to serialize event: {}", e))?;
+        let event_json =
+            serde_json::to_string(event).map_err(|e| format!("Failed to serialize event: {e}"))?;
 
         // Extract event type from the JSON for SSE event field
         let event_type = event
@@ -837,7 +855,7 @@ impl ResponseStreamEventEmitter {
             .unwrap_or("message");
 
         // Format as SSE with event: field
-        let sse_message = format!("event: {}\ndata: {}\n\n", event_type, event_json);
+        let sse_message = format!("event: {event_type}\ndata: {event_json}\n\n");
 
         if tx.send(Ok(Bytes::from(sse_message))).is_err() {
             return Err("Client disconnected".to_string());
@@ -883,7 +901,10 @@ impl ResponseStreamEventEmitter {
             "param": null,
             "sequence_number": self.next_sequence()
         });
-        let sse_data = format!("data: {}\n\n", serde_json::to_string(&event).unwrap());
+        let sse_data = match serde_json::to_string(&event) {
+            Ok(json) => format!("data: {json}\n\n"),
+            Err(_) => "data: {\"type\":\"error\",\"code\":\"internal_error\",\"message\":\"serialization failed\",\"param\":null}\n\n".to_string(),
+        };
         let _ = tx.send(Ok(Bytes::from(sse_data)));
     }
 
@@ -958,6 +979,10 @@ impl ResponseStreamEventEmitter {
 /// Build a Server-Sent Events (SSE) response
 ///
 /// Creates a Response with proper SSE headers and streaming body.
+#[expect(
+    clippy::expect_used,
+    reason = "Response::builder with static headers and valid status code is infallible"
+)]
 pub(crate) fn build_sse_response(
     rx: mpsc::UnboundedReceiver<Result<Bytes, std::io::Error>>,
 ) -> Response {
@@ -971,7 +996,7 @@ pub(crate) fn build_sse_response(
         .header("Cache-Control", HeaderValue::from_static("no-cache"))
         .header("Connection", HeaderValue::from_static("keep-alive"))
         .body(Body::from_stream(stream))
-        .unwrap()
+        .expect("infallible: static headers and valid status code")
 }
 
 /// Attach `server_label` to an MCP tool-call JSON item.

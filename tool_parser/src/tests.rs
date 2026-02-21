@@ -70,7 +70,7 @@ fn test_partial_json_parser() {
     let (value, _consumed) = parser.parse_value(input, true).unwrap();
     assert_eq!(value["name"], "tes");
 
-    let input = r#"[1, 2, "#;
+    let input = r"[1, 2, ";
     let (value, _consumed) = parser.parse_value(input, true).unwrap();
     assert!(value.is_array());
     assert_eq!(value[0], 1);
@@ -371,7 +371,7 @@ mod edge_cases {
         // Large arguments object
         let mut large_args = r#"{"name": "process", "arguments": {"#.to_string();
         for i in 0..1000 {
-            large_args.push_str(&format!(r#""field_{}": "value_{}","#, i, i));
+            large_args.push_str(&format!(r#""field_{i}": "value_{i}","#));
         }
         large_args.push_str(r#""final": "value"}}"#);
 
@@ -386,7 +386,7 @@ mod edge_cases {
             if i > 0 {
                 large_array.push(',');
             }
-            large_array.push_str(&format!(r#"{{"name": "func_{}", "arguments": {{}}}}"#, i));
+            large_array.push_str(&format!(r#"{{"name": "func_{i}", "arguments": {{}}}}"#));
         }
         large_array.push(']');
 
@@ -547,6 +547,10 @@ mod stress_tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "tokio::spawn is fine in unit tests"
+    )]
     async fn test_concurrent_parser_usage() {
         let parser = std::sync::Arc::new(JsonParser::new());
 
@@ -555,10 +559,10 @@ mod stress_tests {
         for i in 0..10 {
             let parser_clone = parser.clone();
             let handle = tokio::spawn(async move {
-                let input = format!(r#"{{"name": "func_{}", "arguments": {{}}}}"#, i);
+                let input = format!(r#"{{"name": "func_{i}", "arguments": {{}}}}"#);
                 let (_normal_text, tools) = parser_clone.parse_complete(&input).await.unwrap();
                 assert_eq!(tools.len(), 1);
-                assert_eq!(tools[0].function.name, format!("func_{}", i));
+                assert_eq!(tools[0].function.name, format!("func_{i}"));
             });
             handles.push(handle);
         }
@@ -598,20 +602,17 @@ mod qwen_coder_tests {
 
         let chunks = [
             "<tool_call>",
-            r#"<function=get_weather>"#,
-            r#"<parameter=city>Paris</parameter>"#,
-            r#"<parameter=units>metric</parameter>"#,
+            r"<function=get_weather>",
+            r"<parameter=city>Paris</parameter>",
+            r"<parameter=units>metric</parameter>",
             "</function></tool_call>",
         ];
 
         let mut all_calls = Vec::new();
 
         // Process each chunk
-        for (i, chunk) in chunks.iter().enumerate() {
+        for chunk in &chunks {
             let result = parser.parse_incremental(chunk, &tools).await.unwrap();
-            println!("Chunk {}: {:?}", i, chunk);
-            println!("  Calls: {:?}", result.calls);
-            println!("  Normal text: {:?}", result.normal_text);
 
             for call in &result.calls {
                 all_calls.push(call.clone());
@@ -638,7 +639,6 @@ mod qwen_coder_tests {
 
         // Verify final arguments format by concatenating all parameter fragments
         let params_str: String = param_calls.iter().map(|c| c.parameters.as_str()).collect();
-        println!("Final streamed args: {}", params_str);
 
         // Should contain both city and units parameters
         assert!(params_str.contains("city"), "Should contain city parameter");
@@ -659,18 +659,16 @@ mod qwen_coder_tests {
         // This tests the buffering logic for partial XML tags
         let chunks = [
             "<tool_call><function=get_weather>",
-            r#"<parameter=city>Paris</parameter>"#,
-            r#"<parameter=units>metric</parameter>"#,
+            r"<parameter=city>Paris</parameter>",
+            r"<parameter=units>metric</parameter>",
             "</function></tool_call>",
         ];
 
         let mut all_calls = Vec::new();
 
         // Process each chunk
-        for (i, chunk) in chunks.iter().enumerate() {
+        for chunk in &chunks {
             let result = parser.parse_incremental(chunk, &tools).await.unwrap();
-            println!("Chunk {}: {:?}", i, chunk);
-            println!("  Calls: {:?}", result.calls);
 
             for call in &result.calls {
                 all_calls.push(call.clone());
@@ -712,7 +710,7 @@ mod qwen_coder_tests {
 
         let chunks = vec![
             "<tool_call>",
-            r#"<function=test_function>"#,
+            r"<function=test_function>",
             r#"<parameter=nested>{"key": "value"}</parameter>"#,
             "</function></tool_call>",
         ];

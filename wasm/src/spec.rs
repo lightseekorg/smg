@@ -17,7 +17,7 @@ pub fn build_wasm_headers_from_axum_headers(
     headers: &HeaderMap,
 ) -> Vec<smg::gateway::middleware_types::Header> {
     let mut wasm_headers = Vec::new();
-    for (name, value) in headers.iter() {
+    for (name, value) in headers {
         if let Ok(value_str) = value.to_str() {
             wasm_headers.push(smg::gateway::middleware_types::Header {
                 name: name.as_str().to_string(),

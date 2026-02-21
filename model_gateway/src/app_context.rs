@@ -96,14 +96,19 @@ impl AppContext {
 
     /// Create AppContext from config with all components initialized
     /// This is the main entry point that replaces ~194 lines of initialization in server.rs
-    pub async fn from_config(
+    pub fn from_config(
         router_config: RouterConfig,
         request_timeout_secs: u64,
-    ) -> Result<Self, String> {
-        AppContextBuilder::from_config(router_config, request_timeout_secs)
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self, String>> + Send>> {
+        Box::pin(async move {
+            Box::pin(AppContextBuilder::from_config(
+                router_config,
+                request_timeout_secs,
+            ))
             .await?
             .build()
             .map_err(|e| e.to_string())
+        })
     }
 }
 
@@ -293,23 +298,22 @@ impl AppContextBuilder {
         router_config: RouterConfig,
         request_timeout_secs: u64,
     ) -> Result<Self, String> {
-        let ctx = Self::new()
+        Ok(Self::new()
             .with_client(&router_config, request_timeout_secs)?
             .maybe_rate_limiter(&router_config)
-            .with_tokenizer_registry(&router_config)?
+            .with_tokenizer_registry()
             .with_reasoning_parser_factory()
             .with_tool_parser_factory()
             .with_worker_registry()
             .with_policy_registry(&router_config)
             .with_storage(&router_config)
-            .await?;
-        Ok(ctx
-            .with_load_monitor(&router_config)
+            .await?
+            .with_load_monitor(&router_config)?
             .with_worker_job_queue()
             .with_workflow_engines()
             .with_mcp_orchestrator(&router_config)
             .await?
-            .with_wasm_manager(&router_config)?
+            .with_wasm_manager(&router_config)
             .router_config(router_config))
     }
 
@@ -350,7 +354,7 @@ impl AppContextBuilder {
         // Configure mTLS client identity if provided (certificates already loaded during config creation)
         if let Some(identity_pem) = &config.client_identity {
             let identity = reqwest::Identity::from_pem(identity_pem)
-                .map_err(|e| format!("Failed to create client identity: {}", e))?;
+                .map_err(|e| format!("Failed to create client identity: {e}"))?;
             client_builder = client_builder.identity(identity);
             debug!("mTLS client authentication enabled");
         }
@@ -358,7 +362,7 @@ impl AppContextBuilder {
         // Add CA certificates for verifying worker TLS (certificates already loaded during config creation)
         for ca_cert in &config.ca_certificates {
             let cert = reqwest::Certificate::from_pem(ca_cert)
-                .map_err(|e| format!("Failed to add CA certificate: {}", e))?;
+                .map_err(|e| format!("Failed to add CA certificate: {e}"))?;
             client_builder = client_builder.add_root_certificate(cert);
         }
         if !config.ca_certificates.is_empty() {
@@ -370,7 +374,7 @@ impl AppContextBuilder {
 
         let client = client_builder
             .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+            .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
         self.client = Some(client);
         Ok(self)
@@ -416,9 +420,9 @@ impl AppContextBuilder {
     /// - Via POST /v1/tokenizers API (registers under user-specified name)
     ///
     /// This unified approach ensures consistent behavior (caching, validation) across all paths.
-    fn with_tokenizer_registry(mut self, _config: &RouterConfig) -> Result<Self, String> {
+    fn with_tokenizer_registry(mut self) -> Self {
         self.tokenizer_registry = Some(Arc::new(TokenizerRegistry::new()));
-        Ok(self)
+        self
     }
 
     /// Create worker registry
@@ -452,24 +456,24 @@ impl AppContextBuilder {
     }
 
     /// Create load monitor
-    fn with_load_monitor(mut self, config: &RouterConfig) -> Self {
+    fn with_load_monitor(mut self, config: &RouterConfig) -> Result<Self, String> {
         let client = self
             .client
             .as_ref()
-            .expect("client must be set before load monitor");
+            .ok_or_else(|| "client must be set before load monitor".to_string())?;
         self.load_monitor = Some(Arc::new(LoadMonitor::new(
             self.worker_registry
                 .as_ref()
-                .expect("worker_registry must be set")
+                .ok_or_else(|| "worker_registry must be set before load monitor".to_string())?
                 .clone(),
             self.policy_registry
                 .as_ref()
-                .expect("policy_registry must be set")
+                .ok_or_else(|| "policy_registry must be set before load monitor".to_string())?
                 .clone(),
             client.clone(),
             config.worker_startup_check_interval_secs,
         )));
-        self
+        Ok(self)
     }
 
     /// Create worker job queue OnceLock container
@@ -509,7 +513,7 @@ impl AppContextBuilder {
 
         let orchestrator = McpOrchestrator::new(empty_config)
             .await
-            .map_err(|e| format!("Failed to initialize MCP orchestrator: {}", e))?;
+            .map_err(|e| format!("Failed to initialize MCP orchestrator: {e}"))?;
 
         // Store the initialized orchestrator in the OnceLock
         mcp_orchestrator_lock
@@ -521,16 +525,15 @@ impl AppContextBuilder {
     }
 
     /// Create wasm manager if enabled in config
-    fn with_wasm_manager(mut self, config: &RouterConfig) -> Result<Self, String> {
+    fn with_wasm_manager(mut self, config: &RouterConfig) -> Self {
         self.wasm_manager = if config.enable_wasm {
-            Some(Arc::new(
-                WasmModuleManager::new(WasmRuntimeConfig::default())
-                    .map_err(|e| format!("Failed to initialize WASM module manager: {}", e))?,
-            ))
+            Some(Arc::new(WasmModuleManager::new(
+                WasmRuntimeConfig::default(),
+            )))
         } else {
             None
         };
-        Ok(self)
+        self
     }
 }
 

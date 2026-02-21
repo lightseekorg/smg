@@ -48,7 +48,7 @@ mod payload_size_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "Small payload test",
@@ -100,7 +100,7 @@ mod payload_size_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Create a ~100KB payload (well within 1MB limit)
         let large_text = "x".repeat(100 * 1024);
@@ -154,7 +154,7 @@ mod payload_size_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Create a payload larger than 1KB limit
         let large_text = "x".repeat(2048);
@@ -213,7 +213,7 @@ mod payload_size_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Create a payload slightly under the limit (accounting for JSON overhead)
         let text_size = limit_bytes - 100; // Leave room for JSON structure
@@ -269,7 +269,7 @@ mod payload_size_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Create a 1MB payload (well within 256MB)
         let large_text = "x".repeat(1024 * 1024);

@@ -31,7 +31,7 @@ mod power_of_two_tests {
             AppTestContext::new_with_config(config, TestWorkerConfig::healthy_workers(19600, 2))
                 .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
         let num_requests = 20;
         let mut success_count = 0;
 
@@ -64,6 +64,7 @@ mod power_of_two_tests {
     }
 
     /// Test that power of two prefers less loaded workers
+    #[expect(clippy::disallowed_methods, reason = "test infrastructure")]
     #[tokio::test]
     async fn test_power_of_two_prefers_less_loaded() {
         let config = TestRouterConfig::power_of_two(3601);
@@ -77,7 +78,7 @@ mod power_of_two_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Send concurrent requests to create load imbalance
         let mut handles = Vec::new();
@@ -164,7 +165,7 @@ mod power_of_two_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Requests should succeed via retry to healthy worker
         for i in 0..10 {

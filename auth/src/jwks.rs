@@ -66,9 +66,9 @@ fn is_private_ip(ip: &IpAddr) -> bool {
                 || ipv4.is_link_local()                 // 169.254.0.0/16
                 || ipv4.is_broadcast()                  // 255.255.255.255
                 || ipv4.is_unspecified()                // 0.0.0.0
-                || is_shared_address(ipv4)              // 100.64.0.0/10 (CGNAT)
-                || is_documentation_v4(ipv4)            // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
-                || is_cloud_metadata(ipv4) // 169.254.169.254
+                || is_shared_address(*ipv4)              // 100.64.0.0/10 (CGNAT)
+                || is_documentation_v4(*ipv4)            // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+                || is_cloud_metadata(*ipv4) // 169.254.169.254
         }
         IpAddr::V6(ipv6) => {
             ipv6.is_loopback()                          // ::1
@@ -80,13 +80,13 @@ fn is_private_ip(ip: &IpAddr) -> bool {
 }
 
 /// Check for CGNAT shared address space (100.64.0.0/10)
-fn is_shared_address(ip: &Ipv4Addr) -> bool {
+fn is_shared_address(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
     octets[0] == 100 && (octets[1] & 0xC0) == 64
 }
 
 /// Check for IPv4 documentation addresses
-fn is_documentation_v4(ip: &Ipv4Addr) -> bool {
+fn is_documentation_v4(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
     // 192.0.2.0/24 (TEST-NET-1)
     (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
@@ -97,7 +97,7 @@ fn is_documentation_v4(ip: &Ipv4Addr) -> bool {
 }
 
 /// Check for cloud metadata endpoint (169.254.169.254)
-fn is_cloud_metadata(ip: &Ipv4Addr) -> bool {
+fn is_cloud_metadata(ip: Ipv4Addr) -> bool {
     ip.octets() == [169, 254, 169, 254]
 }
 
@@ -120,7 +120,7 @@ fn is_link_local_v6(ip: &Ipv6Addr) -> bool {
 /// In production, only HTTPS should be used.
 pub(crate) fn validate_url(url_str: &str) -> Result<Url, JwksError> {
     let url = Url::parse(url_str)
-        .map_err(|e| JwksError::InvalidUrl(format!("Failed to parse URL: {}", e)))?;
+        .map_err(|e| JwksError::InvalidUrl(format!("Failed to parse URL: {e}")))?;
 
     // Check if this is a localhost URL (allowed for testing with HTTP)
     let is_localhost = match url.host_str() {
@@ -143,8 +143,7 @@ pub(crate) fn validate_url(url_str: &str) -> Result<Url, JwksError> {
         }
         scheme => {
             return Err(JwksError::SsrfBlocked(format!(
-                "Invalid URL scheme '{}'. Only HTTPS is allowed",
-                scheme
+                "Invalid URL scheme '{scheme}'. Only HTTPS is allowed"
             )));
         }
     }
@@ -155,16 +154,14 @@ pub(crate) fn validate_url(url_str: &str) -> Result<Url, JwksError> {
             url::Host::Ipv4(ip) => {
                 if is_private_ip(&IpAddr::V4(ip)) {
                     return Err(JwksError::SsrfBlocked(format!(
-                        "Private/internal IP addresses are not allowed: {}",
-                        ip
+                        "Private/internal IP addresses are not allowed: {ip}"
                     )));
                 }
             }
             url::Host::Ipv6(ip) => {
                 if is_private_ip(&IpAddr::V6(ip)) {
                     return Err(JwksError::SsrfBlocked(format!(
-                        "Private/internal IP addresses are not allowed: {}",
-                        ip
+                        "Private/internal IP addresses are not allowed: {ip}"
                     )));
                 }
             }
@@ -177,8 +174,7 @@ pub(crate) fn validate_url(url_str: &str) -> Result<Url, JwksError> {
                     || lower.ends_with(".local")
                 {
                     return Err(JwksError::SsrfBlocked(format!(
-                        "Internal hostnames are not allowed: {}",
-                        domain
+                        "Internal hostnames are not allowed: {domain}"
                     )));
                 }
             }
@@ -192,7 +188,7 @@ pub(crate) fn validate_url(url_str: &str) -> Result<Url, JwksError> {
 #[derive(Debug, serde::Deserialize)]
 struct OidcDiscovery {
     jwks_uri: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     issuer: String,
 }
 
@@ -249,7 +245,7 @@ impl JwksProvider {
     pub async fn from_issuer(issuer: &str, ttl: Duration) -> Result<Self, JwksError> {
         // Normalize and validate issuer URL
         let issuer = issuer.trim_end_matches('/');
-        let discovery_url = format!("{}/.well-known/openid-configuration", issuer);
+        let discovery_url = format!("{issuer}/.well-known/openid-configuration");
 
         // Validate discovery URL for SSRF protection
         validate_url(&discovery_url)?;
@@ -304,7 +300,7 @@ impl JwksProvider {
     }
 
     /// Get the JWKS URI.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn jwks_uri(&self) -> &str {
         &self.jwks_uri
     }
@@ -412,7 +408,7 @@ impl JwksProvider {
     }
 
     /// Force refresh the JWKS cache.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub async fn refresh(&self) -> Result<(), JwksError> {
         let jwks = self.fetch_jwks().await?;
         let mut cache = self.cache.write();

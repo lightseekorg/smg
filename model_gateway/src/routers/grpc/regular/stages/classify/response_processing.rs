@@ -49,7 +49,7 @@ impl ClassifyResponseProcessingStage {
         }
 
         // Find max for numerical stability
-        let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
         // Compute exp(x - max) for each element
         let exp_vals: Vec<f32> = logits.iter().map(|&x| (x - max_logit).exp()).collect();
@@ -84,7 +84,7 @@ impl ClassifyResponseProcessingStage {
         id2label
             .get(&class_idx)
             .cloned()
-            .unwrap_or_else(|| format!("LABEL_{}", class_idx))
+            .unwrap_or_else(|| format!("LABEL_{class_idx}"))
     }
 
     /// Extract id2label mapping from the selected worker's model card.

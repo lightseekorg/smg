@@ -39,6 +39,7 @@ use crate::{
         },
         context,
         proto_wrapper::{ProtoResponseVariant, ProtoStream},
+        utils,
     },
 };
 
@@ -60,6 +61,14 @@ impl HarmonyStreamingProcessor {
     ///
     /// Note: Caller should attach load guards to the returned response using
     /// `WorkerLoadGuard::attach_to_response()` for proper RAII lifecycle management.
+    #[expect(
+        clippy::unused_self,
+        reason = "takes Arc<Self> for API consistency with other streaming processors"
+    )]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "streaming tasks are fire-and-forget by design; client disconnect terminates them"
+    )]
     pub fn process_streaming_chat_response(
         self: Arc<Self>,
         execution_result: context::ExecutionResult,
@@ -78,16 +87,7 @@ impl HarmonyStreamingProcessor {
 
                     if let Err(e) = result {
                         error!("Harmony streaming error: {}", e);
-                        let error_chunk = format!(
-                            "data: {}\n\n",
-                            json!({
-                                "error": {
-                                    "message": e,
-                                    "type": "internal_error"
-                                }
-                            })
-                        );
-                        let _ = tx.send(Ok(Bytes::from(error_chunk)));
+                        utils::send_error_sse(&tx, &e, "internal_error");
                     }
 
                     let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
@@ -101,16 +101,7 @@ impl HarmonyStreamingProcessor {
 
                     if let Err(e) = result {
                         error!("Harmony dual streaming error: {}", e);
-                        let error_chunk = format!(
-                            "data: {}\n\n",
-                            json!({
-                                "error": {
-                                    "message": e,
-                                    "type": "internal_error"
-                                }
-                            })
-                        );
-                        let _ = tx.send(Ok(Bytes::from(error_chunk)));
+                        utils::send_error_sse(&tx, &e, "internal_error");
                     }
 
                     let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
@@ -118,16 +109,11 @@ impl HarmonyStreamingProcessor {
             }
             context::ExecutionResult::Embedding { .. } => {
                 error!("Harmony streaming not supported for embeddings");
-                let error_chunk = format!(
-                    "data: {}\n\n",
-                    json!({
-                        "error": {
-                            "message": "Embeddings not supported in Harmony streaming",
-                            "type": "invalid_request_error"
-                        }
-                    })
+                utils::send_error_sse(
+                    &tx,
+                    "Embeddings not supported in Harmony streaming",
+                    "invalid_request_error",
                 );
-                let _ = tx.send(Ok(Bytes::from(error_chunk)));
             }
         }
 
@@ -158,7 +144,7 @@ impl HarmonyStreamingProcessor {
 
         // Process stream
         while let Some(result) = grpc_stream.next().await {
-            let response = result.map_err(|e| format!("Stream error: {}", e))?;
+            let response = result.map_err(|e| format!("Stream error: {e}"))?;
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
@@ -173,7 +159,7 @@ impl HarmonyStreamingProcessor {
                     if let Vacant(e) = parsers.entry(index) {
                         e.insert(
                             HarmonyParserAdapter::new()
-                                .map_err(|e| format!("Failed to create parser: {}", e))?,
+                                .map_err(|e| format!("Failed to create parser: {e}"))?,
                         );
                         is_firsts.insert(index, true);
                     }
@@ -182,11 +168,9 @@ impl HarmonyStreamingProcessor {
 
                     // Convert logprobs if present and requested
                     let chunk_logprobs = if original_request.logprobs {
-                        chunk_wrapper.output_logprobs().and_then(|lp| {
-                            convert_harmony_logprobs(&lp)
-                                .map_err(|e| error!("Failed to convert streaming logprobs: {}", e))
-                                .ok()
-                        })
+                        chunk_wrapper
+                            .output_logprobs()
+                            .map(|lp| convert_harmony_logprobs(&lp))
                     } else {
                         None
                     };
@@ -198,7 +182,7 @@ impl HarmonyStreamingProcessor {
 
                     let delta_result = parser
                         .parse_chunk(chunk_wrapper.token_ids())
-                        .map_err(|e| format!("Parse error: {}", e))?;
+                        .map_err(|e| format!("Parse error: {e}"))?;
 
                     // Emit SSE event if there's a delta
                     if let Some(delta) = delta_result {
@@ -231,12 +215,10 @@ impl HarmonyStreamingProcessor {
                     // Finalize parser and emit final chunk
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
-                        let final_output = parser
-                            .finalize(
-                                complete_wrapper.finish_reason().to_string(),
-                                matched_stop.clone(),
-                            )
-                            .map_err(|e| format!("Finalize error: {}", e))?;
+                        let final_output = parser.finalize(
+                            complete_wrapper.finish_reason().to_string(),
+                            matched_stop.clone(),
+                        );
 
                         Self::emit_final_chunk(
                             index,
@@ -304,7 +286,7 @@ impl HarmonyStreamingProcessor {
         let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
 
         while let Some(result) = prefill_stream.next().await {
-            let response = result.map_err(|e| format!("Prefill stream error: {}", e))?;
+            let response = result.map_err(|e| format!("Prefill stream error: {e}"))?;
 
             if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
                 prompt_tokens.insert(complete_wrapper.index(), complete_wrapper.prompt_tokens());
@@ -321,7 +303,7 @@ impl HarmonyStreamingProcessor {
         let stream_options = &original_request.stream_options;
 
         while let Some(result) = decode_stream.next().await {
-            let response = result.map_err(|e| format!("Decode stream error: {}", e))?;
+            let response = result.map_err(|e| format!("Decode stream error: {e}"))?;
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
@@ -336,7 +318,7 @@ impl HarmonyStreamingProcessor {
                     if let Vacant(e) = parsers.entry(index) {
                         e.insert(
                             HarmonyParserAdapter::new()
-                                .map_err(|e| format!("Failed to create parser: {}", e))?,
+                                .map_err(|e| format!("Failed to create parser: {e}"))?,
                         );
                         is_firsts.insert(index, true);
                     }
@@ -345,11 +327,9 @@ impl HarmonyStreamingProcessor {
 
                     // Convert logprobs if present and requested
                     let chunk_logprobs = if original_request.logprobs {
-                        chunk_wrapper.output_logprobs().and_then(|lp| {
-                            convert_harmony_logprobs(&lp)
-                                .map_err(|e| error!("Failed to convert streaming logprobs: {}", e))
-                                .ok()
-                        })
+                        chunk_wrapper
+                            .output_logprobs()
+                            .map(|lp| convert_harmony_logprobs(&lp))
                     } else {
                         None
                     };
@@ -360,7 +340,7 @@ impl HarmonyStreamingProcessor {
 
                     let delta_result = parser
                         .parse_chunk(chunk_wrapper.token_ids())
-                        .map_err(|e| format!("Parse error: {}", e))?;
+                        .map_err(|e| format!("Parse error: {e}"))?;
 
                     if let Some(delta) = delta_result {
                         let is_first = is_firsts.get(&index).copied().unwrap_or(false);
@@ -389,12 +369,10 @@ impl HarmonyStreamingProcessor {
 
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
-                        let final_output = parser
-                            .finalize(
-                                complete_wrapper.finish_reason().to_string(),
-                                matched_stop.clone(),
-                            )
-                            .map_err(|e| format!("Finalize error: {}", e))?;
+                        let final_output = parser.finalize(
+                            complete_wrapper.finish_reason().to_string(),
+                            matched_stop.clone(),
+                        );
 
                         Self::emit_final_chunk(
                             index,
@@ -471,8 +449,8 @@ impl HarmonyStreamingProcessor {
             .build();
 
             let chunk_json = serde_json::to_string(&role_chunk)
-                .map_err(|e| format!("JSON serialization error: {}", e))?;
-            let sse_data = format!("data: {}\n\n", chunk_json);
+                .map_err(|e| format!("JSON serialization error: {e}"))?;
+            let sse_data = format!("data: {chunk_json}\n\n");
 
             tx.send(Ok(Bytes::from(sse_data)))
                 .map_err(|_| "Failed to send role chunk".to_string())?;
@@ -510,9 +488,9 @@ impl HarmonyStreamingProcessor {
                 .maybe_system_fingerprint(dispatch.weight_version.as_deref())
                 .build();
 
-        let chunk_json = serde_json::to_string(&chunk)
-            .map_err(|e| format!("JSON serialization error: {}", e))?;
-        let sse_data = format!("data: {}\n\n", chunk_json);
+        let chunk_json =
+            serde_json::to_string(&chunk).map_err(|e| format!("JSON serialization error: {e}"))?;
+        let sse_data = format!("data: {chunk_json}\n\n");
 
         tx.send(Ok(Bytes::from(sse_data)))
             .map_err(|_| "Failed to send chunk".to_string())?;
@@ -536,9 +514,9 @@ impl HarmonyStreamingProcessor {
                 .maybe_system_fingerprint(dispatch.weight_version.as_deref())
                 .build();
 
-        let chunk_json = serde_json::to_string(&chunk)
-            .map_err(|e| format!("JSON serialization error: {}", e))?;
-        let sse_data = format!("data: {}\n\n", chunk_json);
+        let chunk_json =
+            serde_json::to_string(&chunk).map_err(|e| format!("JSON serialization error: {e}"))?;
+        let sse_data = format!("data: {chunk_json}\n\n");
 
         tx.send(Ok(Bytes::from(sse_data)))
             .map_err(|_| "Failed to send final chunk".to_string())?;
@@ -562,8 +540,8 @@ impl HarmonyStreamingProcessor {
                 .build();
 
         let chunk_json = serde_json::to_string(&usage_chunk)
-            .map_err(|e| format!("JSON serialization error: {}", e))?;
-        let sse_data = format!("data: {}\n\n", chunk_json);
+            .map_err(|e| format!("JSON serialization error: {e}"))?;
+        let sse_data = format!("data: {chunk_json}\n\n");
 
         tx.send(Ok(Bytes::from(sse_data)))
             .map_err(|_| "Failed to send usage chunk".to_string())?;
@@ -619,7 +597,7 @@ impl HarmonyStreamingProcessor {
     ) -> Result<ResponsesIterationResult, String> {
         // Phase 1: Drain prefill stream
         while let Some(result) = prefill_stream.next().await {
-            let _response = result.map_err(|e| format!("Prefill stream error: {}", e))?;
+            let _response = result.map_err(|e| format!("Prefill stream error: {e}"))?;
         }
 
         // Phase 2: Process decode stream
@@ -639,7 +617,7 @@ impl HarmonyStreamingProcessor {
         mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         let mut parser =
-            HarmonyParserAdapter::new().map_err(|e| format!("Failed to create parser: {}", e))?;
+            HarmonyParserAdapter::new().map_err(|e| format!("Failed to create parser: {e}"))?;
 
         let mut has_analysis = false;
         let mut accumulated_final_text = String::new();
@@ -665,7 +643,7 @@ impl HarmonyStreamingProcessor {
         let mut chunk_count = 0;
         while let Some(result) = decode_stream.next().await {
             chunk_count += 1;
-            let response = result.map_err(|e| format!("Decode stream error: {}", e))?;
+            let response = result.map_err(|e| format!("Decode stream error: {e}"))?;
 
             match response.into_response() {
                 ProtoResponseVariant::Chunk(chunk_wrapper) => {
@@ -678,7 +656,7 @@ impl HarmonyStreamingProcessor {
                     // Parse chunk via Harmony parser
                     let delta_result = parser
                         .parse_chunk(chunk_wrapper.token_ids())
-                        .map_err(|e| format!("Parse error: {}", e))?;
+                        .map_err(|e| format!("Parse error: {e}"))?;
 
                     // Emit SSE events if there's a delta
                     if let Some(delta) = delta_result {
@@ -689,7 +667,7 @@ impl HarmonyStreamingProcessor {
                                 // Note: reasoning_content will be provided at finalize
                                 emitter
                                     .emit_reasoning_item(tx, None)
-                                    .map_err(|e| format!("Failed to emit reasoning item: {}", e))?;
+                                    .map_err(|e| format!("Failed to emit reasoning item: {e}"))?;
 
                                 has_emitted_reasoning = true;
                                 has_analysis = true;
@@ -719,8 +697,12 @@ impl HarmonyStreamingProcessor {
                                     emitter.send_event_best_effort(&event, tx);
                                 }
 
-                                let output_index = message_output_index.unwrap();
-                                let item_id = message_item_id.as_ref().unwrap();
+                                let Some(output_index) = message_output_index else {
+                                    continue;
+                                };
+                                let Some(item_id) = message_item_id.as_ref() else {
+                                    continue;
+                                };
                                 let content_index = 0; // Single content part
 
                                 // Emit content_part.added before first delta
@@ -902,12 +884,10 @@ impl HarmonyStreamingProcessor {
                     }
 
                     // Finalize parser and get complete output
-                    let final_output = parser
-                        .finalize(finish_reason.clone(), matched_stop.clone())
-                        .map_err(|e| format!("Finalize error: {}", e))?;
+                    let final_output = parser.finalize(finish_reason.clone(), matched_stop.clone());
 
                     // Store finalized tool calls and reasoning token count
-                    accumulated_tool_calls = final_output.commentary.clone();
+                    accumulated_tool_calls.clone_from(&final_output.commentary);
                     reasoning_token_count = final_output.reasoning_token_count;
 
                     // Complete all tool calls if we have commentary
@@ -981,8 +961,9 @@ impl HarmonyStreamingProcessor {
                     }
 
                     // Close message item if we opened one
-                    if let Some(output_index) = message_output_index {
-                        let item_id = message_item_id.as_ref().unwrap();
+                    if let (Some(output_index), Some(item_id)) =
+                        (message_output_index, message_item_id.as_ref())
+                    {
                         let content_index = 0;
 
                         // Emit text_done
@@ -1034,7 +1015,7 @@ impl HarmonyStreamingProcessor {
             // Try extracting from completed messages first
             let (analysis_opt, commentary_opt, final_text_extracted) =
                 HarmonyParserAdapter::parse_messages(&messages);
-            accumulated_tool_calls = commentary_opt.clone();
+            accumulated_tool_calls.clone_from(&commentary_opt);
 
             // If no tool calls found, check for incomplete commentary in parser state
             if accumulated_tool_calls.is_none() {
@@ -1121,7 +1102,7 @@ impl HarmonyStreamingProcessor {
                 let analysis_content = if has_analysis {
                     // Get analysis from finalized parser output by calling finalize again
                     // This is safe because finalize can be called multiple times
-                    let output = parser.finalize(finish_reason.clone(), matched_stop.clone())?;
+                    let output = parser.finalize(finish_reason.clone(), matched_stop.clone());
                     output.analysis
                 } else {
                     None

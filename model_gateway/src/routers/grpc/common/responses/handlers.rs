@@ -20,11 +20,11 @@ pub(crate) async fn get_response_impl(ctx: &ResponsesContext, response_id: &str)
         Ok(Some(stored_response)) => axum::Json(stored_response.raw_response).into_response(),
         Ok(None) => error::not_found(
             "response_not_found",
-            format!("Response with id '{}' not found", response_id),
+            format!("Response with id '{response_id}' not found"),
         ),
         Err(e) => error::internal_error(
             "retrieve_response_failed",
-            format!("Failed to retrieve response: {}", e),
+            format!("Failed to retrieve response: {e}"),
         ),
     }
 }
@@ -64,11 +64,11 @@ pub(crate) async fn cancel_response_impl(ctx: &ResponsesContext, response_id: &s
         }
         Ok(None) => error::not_found(
             "response_not_found",
-            format!("Response with id '{}' not found", response_id),
+            format!("Response with id '{response_id}' not found"),
         ),
         Err(e) => error::internal_error(
             "retrieve_response_failed",
-            format!("Failed to retrieve response: {}", e),
+            format!("Failed to retrieve response: {e}"),
         ),
     }
 }

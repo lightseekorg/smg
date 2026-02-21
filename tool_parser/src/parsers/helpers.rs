@@ -213,7 +213,7 @@ pub fn normalize_tool_call_fields(obj: Value) -> Value {
 /// # Returns
 /// - `Ok(StreamingParseResult)` with any tool call items to stream
 /// - `Err(ParserError)` if JSON parsing or serialization fails
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn handle_json_tool_streaming(
     current_text: &str,
     start_idx: usize,

@@ -17,7 +17,7 @@ fn setup_registry(count: usize) -> Arc<WorkerRegistry> {
             WorkerType::Decode
         };
 
-        let worker = BasicWorkerBuilder::new(format!("http://worker-{}:8000", i))
+        let worker = BasicWorkerBuilder::new(format!("http://worker-{i}:8000"))
             .worker_type(worker_type)
             .labels(labels)
             .circuit_breaker_config(CircuitBreakerConfig::default())

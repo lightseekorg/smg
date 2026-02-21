@@ -101,45 +101,45 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_create(
     let tokenizer = Arc::clone(&handle_ref.tokenizer);
 
     // Parse tools if provided
-    let tools: Option<Vec<Tool>> = if !tools_json.is_null() {
+    let tools: Option<Vec<Tool>> = if tools_json.is_null() {
+        None
+    } else {
         match CStr::from_ptr(tools_json).to_str() {
             Ok(s) => serde_json::from_str::<Vec<Tool>>(s).ok(),
             Err(_) => None,
         }
-    } else {
-        None
     };
 
     // Parse tool_choice if provided
-    let tool_choice: Option<ToolChoice> = if !tool_choice_json.is_null() {
+    let tool_choice: Option<ToolChoice> = if tool_choice_json.is_null() {
+        None
+    } else {
         match CStr::from_ptr(tool_choice_json).to_str() {
             Ok(s) => serde_json::from_str::<ToolChoice>(s).ok(),
             Err(_) => None,
         }
-    } else {
-        None
     };
 
     // Parse stop sequences
-    let stop: Option<StringOrArray> = if !stop.is_null() {
+    let stop: Option<StringOrArray> = if stop.is_null() {
+        None
+    } else {
         let stop_str = match CStr::from_ptr(stop).to_str() {
             Ok(s) => s,
             Err(_) => return ptr::null_mut(),
         };
         serde_json::from_str::<StringOrArray>(stop_str).ok()
-    } else {
-        None
     };
 
     // Parse stop token IDs
-    let stop_token_ids: Option<Vec<u32>> = if !stop_token_ids.is_null() {
+    let stop_token_ids: Option<Vec<u32>> = if stop_token_ids.is_null() {
+        None
+    } else {
         let ids_str = match CStr::from_ptr(stop_token_ids).to_str() {
             Ok(s) => s,
             Err(_) => return ptr::null_mut(),
         };
         serde_json::from_str::<Vec<u32>>(ids_str).ok()
-    } else {
-        None
     };
 
     // Create stop decoder if needed
@@ -176,9 +176,12 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_create(
         stop_decoder,
         model: model_str.to_string(),
         request_id: request_id_str.to_string(),
+        // unwrap_or_default is acceptable here: if the clock is before UNIX epoch,
+        // the `created` field in the API response will be 0, which is cosmetic
+        // and does not cause data corruption or silent data loss.
         created: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs(),
         system_fingerprint,
         tools,
@@ -231,7 +234,7 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_convert_chunk(
     let json_value: Value = match serde_json::from_str(response_str) {
         Ok(v) => v,
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to parse response JSON: {}", e));
+            set_error_message(error_out, &format!("Failed to parse response JSON: {e}"));
             return SglErrorCode::ParsingError;
         }
     };
@@ -258,7 +261,7 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_convert_chunk(
             let result_str = match serde_json::to_string(&openai_response) {
                 Ok(s) => s,
                 Err(e) => {
-                    set_error_message(error_out, &format!("Failed to serialize response: {}", e));
+                    set_error_message(error_out, &format!("Failed to serialize response: {e}"));
                     return SglErrorCode::ParsingError;
                 }
             };
@@ -266,7 +269,7 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_convert_chunk(
             let result_cstr = match CString::new(result_str) {
                 Ok(s) => s,
                 Err(e) => {
-                    set_error_message(error_out, &format!("Failed to create result string: {}", e));
+                    set_error_message(error_out, &format!("Failed to create result string: {e}"));
                     return SglErrorCode::MemoryError;
                 }
             };
@@ -277,13 +280,13 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_convert_chunk(
         }
         Ok(None) => {
             // No response to send (e.g., empty chunk)
-            let empty = CString::new("").unwrap();
+            let empty = CString::default();
             *result_json_out = empty.into_raw();
             clear_error_message(error_out);
             SglErrorCode::Success
         }
         Err(e) => {
-            set_error_message(error_out, &format!("Conversion error: {}", e));
+            set_error_message(error_out, &format!("Conversion error: {e}"));
             SglErrorCode::ParsingError
         }
     }
@@ -438,10 +441,10 @@ pub(crate) async fn convert_proto_chunk_to_openai(
                                             },
                                             function: Some(FunctionCallDelta {
                                                 name: item.name,
-                                                arguments: if !item.parameters.is_empty() {
-                                                    Some(item.parameters)
-                                                } else {
+                                                arguments: if item.parameters.is_empty() {
                                                     None
+                                                } else {
+                                                    Some(item.parameters)
                                                 },
                                             }),
                                         }
@@ -594,10 +597,10 @@ pub(crate) async fn convert_proto_chunk_to_openai(
                     index,
                     delta: ChatMessageDelta {
                         role: Some("assistant".to_string()),
-                        content: if !final_text.is_empty() {
-                            Some(final_text)
-                        } else {
+                        content: if final_text.is_empty() {
                             None
+                        } else {
+                            Some(final_text)
                         },
                         tool_calls: None,
                         reasoning_content: None,

@@ -123,7 +123,13 @@ pub(crate) enum Audience {
 }
 
 impl Audience {
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "public API reserved for production use; currently only exercised by tests"
+        )
+    )]
     pub fn contains(&self, aud: &str) -> bool {
         match self {
             Audience::Single(s) => s == aud,
@@ -152,7 +158,7 @@ pub struct ValidatedToken {
     pub name: Option<String>,
 
     /// Full claims for additional processing
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) claims: StandardClaims,
 }
 
@@ -183,7 +189,7 @@ pub struct JwtValidator {
 
 impl JwtValidator {
     /// Create a new JWT validator with explicit JWKS URI.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn new(config: JwtConfig, jwks_provider: Arc<JwksProvider>) -> Self {
         Self::new_with_options(config, jwks_provider, false)
     }
@@ -215,9 +221,8 @@ impl JwtValidator {
         ];
 
         let jti_cache = if enable_jti_check {
-            Some(Mutex::new(LruCache::new(
-                NonZeroUsize::new(DEFAULT_JTI_CACHE_SIZE).unwrap(),
-            )))
+            let cache_size = NonZeroUsize::new(DEFAULT_JTI_CACHE_SIZE).unwrap_or(NonZeroUsize::MIN);
+            Some(Mutex::new(LruCache::new(cache_size)))
         } else {
             None
         };
@@ -321,7 +326,7 @@ impl JwtValidator {
             .unwrap_or_else(|| self.config.issuer.clone());
 
         // Extract role
-        let role = self.extract_role(&claims)?;
+        let role = self.extract_role(&claims);
 
         debug!(
             "JWT validated: subject={}, issuer={}, role={:?}",
@@ -389,7 +394,7 @@ impl JwtValidator {
     }
 
     /// Extract role from claims using configured role claim and mapping.
-    fn extract_role(&self, claims: &StandardClaims) -> Result<Role, JwtValidatorError> {
+    fn extract_role(&self, claims: &StandardClaims) -> Role {
         // Try to get the role claim value
         let role_value = claims.extra.get(&self.config.role_claim);
 
@@ -422,18 +427,18 @@ impl JwtValidator {
         if self.config.role_mapping.is_empty() {
             for role_str in &role_strings {
                 if let Ok(role) = role_str.parse::<Role>() {
-                    return Ok(role);
+                    return role;
                 }
             }
             // Default to User if no explicit role found
             warn!("No role found in JWT claims, defaulting to User");
-            return Ok(Role::User);
+            return Role::User;
         }
 
         // Use role mapping
         for role_str in &role_strings {
             if let Some(role) = self.config.role_mapping.get(role_str) {
-                return Ok(*role);
+                return *role;
             }
         }
 
@@ -443,7 +448,7 @@ impl JwtValidator {
             "No matching role mapping found for {:?}, defaulting to User",
             role_strings
         );
-        Ok(Role::User)
+        Role::User
     }
 
     /// Convert a JWK to a DecodingKey.
@@ -474,8 +479,7 @@ impl JwtValidator {
                 jsonwebtoken::jwk::KeyAlgorithm::ES384 => Algorithm::ES384,
                 other => {
                     return Err(JwtValidatorError::ValidationFailed(format!(
-                        "Unsupported key algorithm: {:?}",
-                        other
+                        "Unsupported key algorithm: {other:?}"
                     )))
                 }
             });
@@ -503,7 +507,7 @@ impl JwtValidator {
     }
 
     /// Get a reference to the JWKS provider.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn jwks_provider(&self) -> &Arc<JwksProvider> {
         &self.jwks_provider
     }

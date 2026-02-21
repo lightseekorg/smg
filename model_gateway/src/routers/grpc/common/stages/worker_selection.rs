@@ -98,7 +98,7 @@ impl PipelineStage for WorkerSelectionStage {
                         );
                         return Err(error::service_unavailable(
                             "no_available_workers",
-                            format!("No available workers for model: {}", model),
+                            format!("No available workers for model: {model}"),
                         ));
                     }
                 }
@@ -120,7 +120,7 @@ impl PipelineStage for WorkerSelectionStage {
                         );
                         return Err(error::service_unavailable(
                             "no_available_pd_worker_pairs",
-                            format!("No available PD worker pairs for model: {}", model),
+                            format!("No available PD worker pairs for model: {model}"),
                         ));
                     }
                 }
@@ -218,7 +218,7 @@ impl WorkerSelectionStage {
                         match w.metadata().spec.worker_type {
                             WorkerType::Prefill => acc.0.push(w),
                             WorkerType::Decode => acc.1.push(w),
-                            _ => {}
+                            WorkerType::Regular => {}
                         }
                     }
                     acc

@@ -29,6 +29,7 @@ const LONG_TEST_PROMPTS: [(&str, &str); 6] = [
     ("Tell me about the following text.", "😀😃😄😁😆🥹😅😂🤣🥲☺️😊😇🙂🙃😉🤩😎 🤪🥳🤓🙄🤪😵👻")
 ];
 
+#[expect(clippy::expect_used, reason = "test helper — panics are intentional")]
 fn compute_hashes_for_tokenizer<E: Encoder>(tokenizer: &E, prompts: &[&str]) -> Vec<u64> {
     prompts
         .iter()
@@ -42,6 +43,7 @@ fn compute_hashes_for_tokenizer<E: Encoder>(tokenizer: &E, prompts: &[&str]) -> 
 }
 
 #[test]
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 fn test_huggingface_tokenizer_hashes() {
     let tokenizer_path = ensure_tokenizer_cached();
     let tokenizer = HuggingFaceTokenizer::from_file(tokenizer_path.to_str().unwrap())
@@ -50,8 +52,7 @@ fn test_huggingface_tokenizer_hashes() {
     let prompt_hashes = compute_hashes_for_tokenizer(&tokenizer, &TEST_PROMPTS);
 
     println!(
-        "HF Tokenizer: {:?}\nComputed Hashes: {:?}\nExpected Hashes: {:?}",
-        tokenizer_path, prompt_hashes, EXPECTED_HASHES
+        "HF Tokenizer: {tokenizer_path:?}\nComputed Hashes: {prompt_hashes:?}\nExpected Hashes: {EXPECTED_HASHES:?}"
     );
 
     assert_eq!(prompt_hashes, EXPECTED_HASHES);
@@ -63,7 +64,7 @@ fn test_tokenizer_encode_decode_lifecycle() {
     let tokenizer = HuggingFaceTokenizer::from_file(tokenizer_path.to_str().unwrap())
         .expect("Failed to load HuggingFace tokenizer");
 
-    for prompt in TEST_PROMPTS.iter() {
+    for prompt in &TEST_PROMPTS {
         let encoding = tokenizer
             .encode(prompt, false)
             .expect("Failed to encode prompt");
@@ -72,7 +73,7 @@ fn test_tokenizer_encode_decode_lifecycle() {
             .decode(encoding.token_ids(), false)
             .expect("Failed to decode token_ids");
 
-        assert_eq!(decoded, *prompt, "Encode-decode mismatch for: {}", prompt);
+        assert_eq!(decoded, *prompt, "Encode-decode mismatch for: {prompt}");
     }
 }
 
@@ -84,7 +85,7 @@ fn test_sequence_operations() {
             .expect("Failed to load tokenizer"),
     );
 
-    for prompt in TEST_PROMPTS.iter() {
+    for prompt in &TEST_PROMPTS {
         let encoding = tokenizer
             .encode(prompt, false)
             .expect("Failed to encode prompt");
@@ -129,7 +130,7 @@ fn test_decode_stream() {
             .expect("Failed to load tokenizer"),
     );
 
-    for prompt in TEST_PROMPTS.iter() {
+    for prompt in &TEST_PROMPTS {
         let encoding = tokenizer
             .encode(prompt, false)
             .expect("Failed to encode prompt");
@@ -155,7 +156,7 @@ fn test_long_sequence_incremental_decode_with_prefill() {
             .expect("Failed to load tokenizer"),
     );
 
-    for (input_text, output_text) in LONG_TEST_PROMPTS.iter() {
+    for (input_text, output_text) in &LONG_TEST_PROMPTS {
         let input_encoding = tokenizer
             .encode(input_text, false)
             .expect("Failed to encode input");
@@ -178,6 +179,7 @@ fn test_long_sequence_incremental_decode_with_prefill() {
 }
 
 #[test]
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 fn test_stop_sequence_decoder() {
     let tokenizer_path = ensure_tokenizer_cached();
     let tokenizer = Arc::new(
@@ -228,8 +230,7 @@ fn test_stop_sequence_decoder() {
         }
 
         println!(
-            "Input: '{}', Stop: '{}', Output: '{}', Expected: '{}'",
-            input, stop_seq, output, expected
+            "Input: '{input}', Stop: '{stop_seq}', Output: '{output}', Expected: '{expected}'"
         );
 
         // The test should check if output starts with expected
@@ -279,6 +280,7 @@ fn test_batch_encoding() {
 }
 
 #[test]
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 fn test_special_tokens() {
     use llm_tokenizer::traits::Tokenizer as TokenizerTrait;
 
@@ -292,7 +294,7 @@ fn test_special_tokens() {
     assert!(special_tokens.bos_token.is_some());
     assert!(special_tokens.eos_token.is_some());
 
-    println!("Special tokens: {:?}", special_tokens);
+    println!("Special tokens: {special_tokens:?}");
 }
 
 #[test]
@@ -392,8 +394,8 @@ fn test_load_chat_template_from_local_file() {
 
     // Create a chat template file
     let template_path = dir_path.join("my_template.jinja");
-    let template_content = r#"{% for message in messages %}{{ message.role }}: {{ message.content }}
-{% endfor %}"#;
+    let template_content = r"{% for message in messages %}{{ message.role }}: {{ message.content }}
+{% endfor %}";
     fs::write(&template_path, template_content).expect("Failed to write template");
 
     // Load tokenizer with explicit template path
@@ -408,6 +410,7 @@ fn test_load_chat_template_from_local_file() {
 }
 
 #[tokio::test]
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 async fn test_tinyllama_embedded_template() {
     use llm_tokenizer::hub::download_tokenizer_from_hf;
 
@@ -438,12 +441,13 @@ async fn test_tinyllama_embedded_template() {
             );
         }
         Err(e) => {
-            println!("Download test skipped due to error: {}", e);
+            println!("Download test skipped due to error: {e}");
         }
     }
 }
 
 #[tokio::test]
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 async fn test_qwen3_next_embedded_template() {
     use llm_tokenizer::hub::download_tokenizer_from_hf;
 
@@ -470,12 +474,13 @@ async fn test_qwen3_next_embedded_template() {
             }
         }
         Err(e) => {
-            println!("Download test skipped due to error: {}", e);
+            println!("Download test skipped due to error: {e}");
         }
     }
 }
 
 #[tokio::test]
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 async fn test_qwen3_vl_json_template_priority() {
     use llm_tokenizer::hub::download_tokenizer_from_hf;
 
@@ -512,12 +517,13 @@ async fn test_qwen3_vl_json_template_priority() {
             }
         }
         Err(e) => {
-            println!("Download test skipped due to error: {}", e);
+            println!("Download test skipped due to error: {e}");
         }
     }
 }
 
 #[tokio::test]
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 async fn test_llava_separate_jinja_template() {
     use llm_tokenizer::hub::download_tokenizer_from_hf;
 
@@ -565,7 +571,7 @@ async fn test_llava_separate_jinja_template() {
             }
         }
         Err(e) => {
-            println!("Download test skipped due to error: {}", e);
+            println!("Download test skipped due to error: {e}");
         }
     }
 }

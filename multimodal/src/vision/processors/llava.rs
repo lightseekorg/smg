@@ -184,11 +184,7 @@ impl LlavaProcessor {
     /// The processing flow depends on `self.aspect_ratio`:
     /// - `Square`: Standard CLIP (resize shortest edge, center crop)
     /// - `Pad`: Expand to square with mean padding, then resize
-    fn process_one_image(
-        &self,
-        image: &DynamicImage,
-        config: &PreProcessorConfig,
-    ) -> Result<Array3<f32>, TransformError> {
+    fn process_one_image(&self, image: &DynamicImage, config: &PreProcessorConfig) -> Array3<f32> {
         let mean = config.get_image_mean();
         let std = config.get_image_std();
         let filter = pil_to_filter(config.resampling);
@@ -254,7 +250,7 @@ impl LlavaProcessor {
             normalize(&mut tensor, &mean, &std);
         }
 
-        Ok(tensor)
+        tensor
     }
 }
 
@@ -283,7 +279,7 @@ impl ImagePreProcessor for LlavaProcessor {
         let tensors: Vec<Array3<f32>> = images
             .iter()
             .map(|img| self.process_one_image(img, config))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
 
         // Stack into batch
         let pixel_values = stack_batch(&tensors)?;
@@ -431,26 +427,34 @@ impl LlavaNextProcessor {
     }
 
     /// Calculate unpad dimensions based on original aspect ratio.
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the processor; keeps API consistent"
+    )]
     pub fn calculate_unpad(&self, grid_shape: (u32, u32), original_size: (u32, u32)) -> (u32, u32) {
         calculate_unpad(grid_shape, original_size)
     }
 
     /// Resize and pad image to target resolution, maintaining aspect ratio.
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the processor; keeps API consistent"
+    )]
     fn resize_and_pad_image(&self, image: &DynamicImage, target: (u32, u32)) -> DynamicImage {
         resize_and_pad_image(image, target)
     }
 
     /// Divide image into crops of specified size.
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the processor; keeps API consistent"
+    )]
     fn divide_to_samples(&self, image: &DynamicImage, crop_size: (u32, u32)) -> Vec<DynamicImage> {
         divide_to_samples(image, crop_size)
     }
 
     /// Process a single patch/crop.
-    fn process_patch(
-        &self,
-        image: &DynamicImage,
-        config: &PreProcessorConfig,
-    ) -> Result<Array3<f32>, TransformError> {
+    fn process_patch(&self, image: &DynamicImage, config: &PreProcessorConfig) -> Array3<f32> {
         let mean = config.get_image_mean();
         let std = config.get_image_std();
         let filter = pil_to_filter(config.resampling);
@@ -487,7 +491,7 @@ impl LlavaNextProcessor {
             normalize(&mut tensor, &mean, &std);
         }
 
-        Ok(tensor)
+        tensor
     }
 }
 
@@ -532,7 +536,7 @@ impl ImagePreProcessor for LlavaNextProcessor {
             samples.extend(self.divide_to_samples(&image_padded, crop_size));
 
             for sample in samples {
-                all_patches.push(self.process_patch(&sample, config)?);
+                all_patches.push(self.process_patch(&sample, config));
             }
 
             num_img_tokens.push(self.calculate_num_tokens(
@@ -749,8 +753,8 @@ mod tests {
         let result = processor.preprocess(&[image], &config).unwrap();
 
         assert_eq!(result.batch_size(), 1);
-        assert_eq!(result.height(), 336);
-        assert_eq!(result.width(), 336);
+        assert_eq!(result.height().unwrap(), 336);
+        assert_eq!(result.width().unwrap(), 336);
         assert_eq!(result.num_img_tokens[0], 576);
     }
 
@@ -776,8 +780,8 @@ mod tests {
         let result = processor.preprocess(&[image], &config).unwrap();
 
         assert_eq!(result.batch_size(), 1);
-        assert_eq!(result.height(), 336);
-        assert_eq!(result.width(), 336);
+        assert_eq!(result.height().unwrap(), 336);
+        assert_eq!(result.width().unwrap(), 336);
     }
 
     #[test]
@@ -797,8 +801,8 @@ mod tests {
 
         assert_eq!(result.batch_size(), 1);
         // After expand_to_square: 400x400, then resize to 336x336
-        assert_eq!(result.height(), 336);
-        assert_eq!(result.width(), 336);
+        assert_eq!(result.height().unwrap(), 336);
+        assert_eq!(result.width().unwrap(), 336);
     }
 
     #[test]

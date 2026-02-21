@@ -64,7 +64,7 @@ pub struct CachedTokenizer {
     /// L1 cache (prefix matching at fixed boundaries)
     l1: Option<L1Cache>,
     /// Configuration
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     config: CacheConfig,
     /// Fingerprint for cache invalidation
     fingerprint: TokenizerFingerprint,

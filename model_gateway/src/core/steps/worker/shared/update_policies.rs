@@ -18,7 +18,7 @@ pub struct UpdatePoliciesStep;
 
 impl UpdatePoliciesStep {
     /// Check for conflicts between prefill and decode worker configurations for a model.
-    fn check_worker_conflicts(&self, model_id: &str, workers: &[Arc<dyn Worker>]) {
+    fn check_worker_conflicts(model_id: &str, workers: &[Arc<dyn Worker>]) {
         let prefill_workers: Vec<_> = workers
             .iter()
             .filter(|w| {
@@ -106,7 +106,7 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for UpdatePolicie
         // Track unique model IDs we've updated policies for
         let mut updated_models = Vec::new();
 
-        for worker in workers.iter() {
+        for worker in workers {
             let model_id = worker.model_id().to_string();
 
             // Notify policy registry
@@ -118,7 +118,7 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for UpdatePolicie
             let all_workers = app_context.worker_registry.get_by_model(&model_id);
 
             // Check for configuration conflicts between prefill and decode
-            self.check_worker_conflicts(&model_id, &all_workers);
+            Self::check_worker_conflicts(&model_id, &all_workers);
             if let Some(policy) = app_context.policy_registry.get_policy(&model_id) {
                 if policy.name() == "cache_aware" {
                     app_context

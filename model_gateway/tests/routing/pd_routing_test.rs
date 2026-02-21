@@ -60,7 +60,7 @@ mod pd_routing_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Send requests and verify they succeed
         for i in 0..10 {
@@ -119,7 +119,7 @@ mod pd_routing_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
         let mut success_count = 0;
 
         for i in 0..20 {
@@ -195,7 +195,7 @@ mod pd_routing_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Request should succeed via retry to healthy decode worker
         let payload = json!({

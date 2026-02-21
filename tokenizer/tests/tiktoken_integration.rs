@@ -40,14 +40,15 @@ static DOWNLOAD_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 fn kimi_k2_base_url() -> String {
     let rev =
         std::env::var("KIMI_K2_REVISION").unwrap_or_else(|_| KIMI_K2_DEFAULT_REVISION.to_string());
-    format!(
-        "https://huggingface.co/{}/resolve/{}",
-        KIMI_K2_MODEL_ID, rev
-    )
+    format!("https://huggingface.co/{KIMI_K2_MODEL_ID}/resolve/{rev}")
 }
 
 /// Downloads the Kimi-K2-Instruct tokenizer files from HuggingFace if not already cached.
 /// Returns the path to the cached directory containing all tokenizer files.
+#[expect(clippy::unwrap_used, reason = "test helper — panics are intentional")]
+#[expect(clippy::expect_used, reason = "test helper — panics are intentional")]
+#[expect(clippy::panic, reason = "test helper — panics are intentional")]
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 fn ensure_kimi_k2_cached() -> PathBuf {
     let mutex = DOWNLOAD_MUTEX.get_or_init(|| Mutex::new(()));
     let _guard = mutex.lock().unwrap();
@@ -70,32 +71,29 @@ fn ensure_kimi_k2_cached() -> PathBuf {
             continue;
         }
 
-        let url = format!("{}/{}", base_url, filename);
-        println!("Downloading Kimi-K2 {}...", filename);
+        let url = format!("{base_url}/{filename}");
+        println!("Downloading Kimi-K2 {filename}...");
 
         let response = client
             .get(&url)
             .send()
-            .unwrap_or_else(|e| panic!("Failed to download {}: {}", filename, e));
+            .unwrap_or_else(|e| panic!("Failed to download {filename}: {e}"));
 
-        if !response.status().is_success() {
-            panic!(
-                "Failed to download {}: HTTP {}",
-                filename,
-                response.status()
-            );
-        }
+        assert!(
+            response.status().is_success(),
+            "Failed to download {filename}: HTTP {}",
+            response.status()
+        );
 
         let content = response
             .bytes()
-            .unwrap_or_else(|e| panic!("Failed to read {} content: {}", filename, e));
+            .unwrap_or_else(|e| panic!("Failed to read {filename} content: {e}"));
 
         fs::write(&file_path, &content)
-            .unwrap_or_else(|e| panic!("Failed to write {} to cache: {}", filename, e));
+            .unwrap_or_else(|e| panic!("Failed to write {filename} to cache: {e}"));
 
         println!(
-            "  {} cached ({} bytes)",
-            filename,
+            "  {filename} cached ({} bytes)",
             file_path.metadata().unwrap().len()
         );
     }
@@ -115,10 +113,12 @@ fn test_tiktoken_from_dir_loads_kimi_k2() {
     let vocab_size = tokenizer.vocab_size();
     assert!(
         vocab_size > 100_000,
-        "vocab_size {} too small for Kimi K2",
-        vocab_size
+        "vocab_size {vocab_size} too small for Kimi K2"
     );
-    println!("Kimi K2 vocab size: {}", vocab_size);
+    #[expect(clippy::print_stdout, reason = "test diagnostic output")]
+    {
+        println!("Kimi K2 vocab size: {vocab_size}");
+    }
 }
 
 #[test]
@@ -157,8 +157,7 @@ fn test_tiktoken_kimi_k2_encode_decode_roundtrip() {
 
         assert!(
             !token_ids.is_empty(),
-            "Encoding '{}' produced no tokens",
-            prompt
+            "Encoding '{prompt}' produced no tokens"
         );
 
         let decoded = tokenizer
@@ -167,8 +166,7 @@ fn test_tiktoken_kimi_k2_encode_decode_roundtrip() {
 
         assert_eq!(
             &decoded, prompt,
-            "Encode-decode roundtrip failed for: '{}'",
-            prompt
+            "Encode-decode roundtrip failed for: '{prompt}'"
         );
     }
 }
@@ -223,17 +221,18 @@ fn test_tiktoken_kimi_k2_chat_template() {
     // Should contain the user message
     assert!(
         result.contains("Hello, who are you?"),
-        "Chat template output missing user message: {}",
-        result
+        "Chat template output missing user message: {result}"
     );
     // Should have assistant generation prompt at the end
     assert!(
         result.contains("<|im_assistant|>"),
-        "Chat template output missing assistant prompt: {}",
-        result
+        "Chat template output missing assistant prompt: {result}"
     );
 
-    println!("Chat template output:\n{}", result);
+    #[expect(clippy::print_stdout, reason = "test diagnostic output")]
+    {
+        println!("Chat template output:\n{result}");
+    }
 }
 
 #[test]
@@ -263,7 +262,10 @@ fn test_tiktoken_kimi_k2_chat_template_multi_turn() {
     assert!(result.contains("2+2 equals 4."));
     assert!(result.contains("And 3+3?"));
 
-    println!("Multi-turn chat template output:\n{}", result);
+    #[expect(clippy::print_stdout, reason = "test diagnostic output")]
+    {
+        println!("Multi-turn chat template output:\n{result}");
+    }
 }
 
 #[test]
@@ -323,12 +325,13 @@ fn test_tiktoken_kimi_k2_batch_encode() {
         let decoded = tokenizer
             .decode(encoding.token_ids(), false)
             .expect("Decode failed");
-        assert_eq!(decoded, texts[i], "Batch roundtrip failed for index {}", i);
+        assert_eq!(decoded, texts[i], "Batch roundtrip failed for index {i}");
     }
 }
 
 #[test]
 #[ignore]
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 fn test_factory_creates_tiktoken_from_hf_model_id() {
     // This test exercises the full HF download → tiktoken detection path.
     // create_tokenizer("moonshotai/Kimi-K2-Instruct") should:
@@ -348,7 +351,7 @@ fn test_factory_creates_tiktoken_from_hf_model_id() {
         Ok(t) => t,
         Err(e) => {
             // Network failures shouldn't break the test suite
-            println!("HF download failed (may be expected): {}", e);
+            println!("HF download failed (may be expected): {e}");
             return;
         }
     };
@@ -357,8 +360,7 @@ fn test_factory_creates_tiktoken_from_hf_model_id() {
     let vocab_size = tokenizer.vocab_size();
     assert!(
         vocab_size > 100_000,
-        "vocab_size {} too small for Kimi K2",
-        vocab_size
+        "vocab_size {vocab_size} too small for Kimi K2"
     );
 
     // Verify encode/decode roundtrip
@@ -382,10 +384,7 @@ fn test_factory_creates_tiktoken_from_hf_model_id() {
         result.err()
     );
 
-    println!(
-        "HF model ID → tiktoken factory test passed (vocab_size={})",
-        vocab_size
-    );
+    println!("HF model ID → tiktoken factory test passed (vocab_size={vocab_size})");
 }
 
 #[test]

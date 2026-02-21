@@ -15,6 +15,10 @@ use crate::{
     routers::grpc::client::{flat_labels, GrpcClient},
 };
 
+#[expect(
+    clippy::expect_used,
+    reason = "Lazy static initialization — reqwest::Client::build() only fails on TLS backend misconfiguration which is unrecoverable"
+)]
 static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
         .timeout(Duration::from_secs(10))
@@ -89,7 +93,7 @@ async fn get_json_with_fallback<T: serde::de::DeserializeOwned>(
     endpoint: &str,
     api_key: Option<&str>,
 ) -> Result<T, String> {
-    let url = format!("{}/{}", base_url, endpoint);
+    let url = format!("{base_url}/{endpoint}");
     let mut req = HTTP_CLIENT.get(&url);
     if let Some(key) = api_key {
         req = req.bearer_auth(key);
@@ -98,12 +102,12 @@ async fn get_json_with_fallback<T: serde::de::DeserializeOwned>(
     let response = req
         .send()
         .await
-        .map_err(|e| format!("Failed to connect to {}: {}", url, e))?;
+        .map_err(|e| format!("Failed to connect to {url}: {e}"))?;
 
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         // Fallback to deprecated /get_<endpoint> prefix
         warn!("'/{endpoint}' returned 404, falling back to deprecated '/get_{endpoint}'");
-        let old_url = format!("{}/get_{}", base_url, endpoint);
+        let old_url = format!("{base_url}/get_{endpoint}");
         let mut req = HTTP_CLIENT.get(&old_url);
         if let Some(key) = api_key {
             req = req.bearer_auth(key);
@@ -111,14 +115,14 @@ async fn get_json_with_fallback<T: serde::de::DeserializeOwned>(
         let resp = req
             .send()
             .await
-            .map_err(|e| format!("Failed to connect to {}: {}", old_url, e))?;
+            .map_err(|e| format!("Failed to connect to {old_url}: {e}"))?;
         if !resp.status().is_success() {
             return Err(format!("status {} from {}", resp.status(), old_url));
         }
         return resp
             .json::<T>()
             .await
-            .map_err(|e| format!("Failed to parse {}: {}", old_url, e));
+            .map_err(|e| format!("Failed to parse {old_url}: {e}"));
     }
 
     if !response.status().is_success() {
@@ -128,7 +132,7 @@ async fn get_json_with_fallback<T: serde::de::DeserializeOwned>(
     response
         .json::<T>()
         .await
-        .map_err(|e| format!("Failed to parse {}: {}", url, e))
+        .map_err(|e| format!("Failed to parse {url}: {e}"))
 }
 
 /// GET JSON (no fallback).
@@ -143,13 +147,13 @@ async fn http_get_json<T: serde::de::DeserializeOwned>(
     let resp = req
         .send()
         .await
-        .map_err(|e| format!("Failed to connect to {}: {}", url, e))?;
+        .map_err(|e| format!("Failed to connect to {url}: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("status {} from {}", resp.status(), url));
     }
     resp.json::<T>()
         .await
-        .map_err(|e| format!("Failed to parse {}: {}", url, e))
+        .map_err(|e| format!("Failed to parse {url}: {e}"))
 }
 
 pub async fn get_server_info(url: &str, api_key: Option<&str>) -> Result<ServerInfo, String> {
@@ -176,8 +180,7 @@ async fn fetch_sglang_http_metadata(url: &str, api_key: Option<&str>) -> HashMap
     }
 
     // /v1/models gives us max_model_len (fills context_length when /server_info returns null)
-    if let Ok(models) =
-        http_get_json::<ModelsResponse>(&format!("{}/v1/models", base), api_key).await
+    if let Ok(models) = http_get_json::<ModelsResponse>(&format!("{base}/v1/models"), api_key).await
     {
         if let Some(m) = models.data.first() {
             if let Some(len) = m.max_model_len.filter(|&n| n > 0) {
@@ -196,8 +199,7 @@ async fn fetch_vllm_http_metadata(url: &str, api_key: Option<&str>) -> HashMap<S
     let mut labels = HashMap::new();
 
     // /v1/models — vLLM uses `root` as model_path, `id` as served_model_name
-    if let Ok(models) =
-        http_get_json::<ModelsResponse>(&format!("{}/v1/models", base), api_key).await
+    if let Ok(models) = http_get_json::<ModelsResponse>(&format!("{base}/v1/models"), api_key).await
     {
         if let Some(m) = models.data.first() {
             if let Some(ref root) = m.root {
@@ -213,7 +215,7 @@ async fn fetch_vllm_http_metadata(url: &str, api_key: Option<&str>) -> HashMap<S
     }
 
     // /version
-    if let Ok(v) = http_get_json::<VersionResponse>(&format!("{}/version", base), api_key).await {
+    if let Ok(v) = http_get_json::<VersionResponse>(&format!("{base}/version"), api_key).await {
         if !v.version.is_empty() {
             labels.insert("version".to_string(), v.version);
         }
@@ -230,12 +232,12 @@ async fn fetch_grpc_metadata(
 
     let client = GrpcClient::connect(&grpc_url, runtime_type)
         .await
-        .map_err(|e| format!("Failed to connect to gRPC: {}", e))?;
+        .map_err(|e| format!("Failed to connect to gRPC: {e}"))?;
 
     let mut labels = client
         .get_model_info()
         .await
-        .map_err(|e| format!("Failed to fetch gRPC model info: {}", e))?
+        .map_err(|e| format!("Failed to fetch gRPC model info: {e}"))?
         .to_labels();
 
     match client.get_server_info().await {
@@ -352,12 +354,13 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverMetadataStep {
 mod tests {
     use super::*;
 
+    #[expect(clippy::print_stderr)]
     fn dump_labels(title: &str, labels: &HashMap<String, String>) {
-        println!("\n=== {} ({} labels) ===", title, labels.len());
+        eprintln!("\n=== {title} ({} labels) ===", labels.len());
         let mut keys: Vec<_> = labels.keys().collect();
         keys.sort();
         for key in keys {
-            println!("  {}: {}", key, labels[key]);
+            eprintln!("  {key}: {}", labels[key]);
         }
     }
 
