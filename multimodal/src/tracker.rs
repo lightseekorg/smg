@@ -71,7 +71,12 @@ impl AsyncMultiModalTracker {
                 Ok(())
             }
             ChatContentPart::ImageUrl { url, detail, uuid } => {
-                self.enqueue_image(MediaSource::Url(url), detail.unwrap_or_default(), uuid)
+                let source = if url.starts_with("data:") {
+                    MediaSource::DataUrl(url)
+                } else {
+                    MediaSource::Url(url)
+                };
+                self.enqueue_image(source, detail.unwrap_or_default(), uuid)
             }
             ChatContentPart::ImageData {
                 data,
