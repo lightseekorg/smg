@@ -83,12 +83,24 @@ impl PipelineStage for ChatRequestBuildingStage {
         {
             let model_id = ctx.input.model_id.as_deref().unwrap_or(&chat_request.model);
             let tokenizer = ctx.state.tokenizer.as_deref().ok_or_else(|| {
-                error!(function = "ChatRequestBuildingStage::execute", "tokenizer not set");
-                error::internal_error("tokenizer_missing", "tokenizer not set for multimodal processing")
+                error!(
+                    function = "ChatRequestBuildingStage::execute",
+                    "tokenizer not set"
+                );
+                error::internal_error(
+                    "tokenizer_missing",
+                    "tokenizer not set for multimodal processing",
+                )
             })?;
             let mm_components = ctx.components.multimodal.as_ref().ok_or_else(|| {
-                error!(function = "ChatRequestBuildingStage::execute", "multimodal components not initialized");
-                error::internal_error("multimodal_not_configured", "multimodal components not initialized")
+                error!(
+                    function = "ChatRequestBuildingStage::execute",
+                    "multimodal components not initialized"
+                );
+                error::internal_error(
+                    "multimodal_not_configured",
+                    "multimodal components not initialized",
+                )
             })?;
             let tokenizer_source = ctx
                 .components
