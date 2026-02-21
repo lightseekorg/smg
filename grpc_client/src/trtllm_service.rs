@@ -20,7 +20,12 @@ use crate::{BoxedTraceInjector, NoopTraceInjector};
 // Include the generated protobuf code
 #[expect(clippy::allow_attributes)]
 pub mod proto {
-    #![allow(clippy::all, clippy::trivially_copy_pass_by_ref, unused_qualifications)]
+    #![allow(
+        clippy::all,
+        clippy::absolute_paths,
+        clippy::trivially_copy_pass_by_ref,
+        unused_qualifications
+    )]
     tonic::include_proto!("trtllm");
 }
 

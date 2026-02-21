@@ -25,8 +25,8 @@ use openai_protocol::{
 };
 use serde_json::json;
 use smg::{
-    config::{ConfigError, HistoryBackend, OracleConfig, RouterConfig, RoutingMode},
-    routers::{openai::OpenAIRouter, RouterTrait},
+    config::{ConfigError, HistoryBackend, OracleConfig, PolicyConfig, RouterConfig, RoutingMode},
+    routers::{openai::OpenAIRouter, RouterFactory, RouterTrait},
 };
 use smg_data_connector::{ResponseId, StoredResponse};
 use tokio::{
@@ -35,7 +35,10 @@ use tokio::{
 };
 use tower::ServiceExt;
 
-use crate::common::mock_openai_server::MockOpenAIServer;
+use crate::common::{
+    mock_openai_server::MockOpenAIServer,
+    test_app::{create_test_app_context, register_external_worker},
+};
 
 /// Helper function to create a minimal chat completion request for testing
 #[expect(clippy::unwrap_used, reason = "test helper with known-valid input")]
@@ -93,9 +96,9 @@ fn create_minimal_completion_request() -> CompletionRequest {
 /// Test basic OpenAI router creation and configuration
 #[tokio::test]
 async fn test_openai_router_creation() {
-    let ctx = crate::common::test_app::create_test_app_context().await;
+    let ctx = create_test_app_context().await;
     // Register an external worker before creating the router
-    crate::common::test_app::register_external_worker(&ctx, "https://api.openai.com", None);
+    register_external_worker(&ctx, "https://api.openai.com", None);
     let router = OpenAIRouter::new(&ctx).await;
 
     assert!(router.is_ok(), "Router creation should succeed");
@@ -108,8 +111,8 @@ async fn test_openai_router_creation() {
 /// Test server info endpoint
 #[tokio::test]
 async fn test_openai_router_server_info() {
-    let ctx = crate::common::test_app::create_test_app_context().await;
-    crate::common::test_app::register_external_worker(&ctx, "https://api.openai.com", None);
+    let ctx = create_test_app_context().await;
+    register_external_worker(&ctx, "https://api.openai.com", None);
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
     let req = Request::builder()
@@ -133,8 +136,8 @@ async fn test_openai_router_server_info() {
 async fn test_openai_router_models() {
     // Use mock server for deterministic models response
     let mock_server = MockOpenAIServer::new().await;
-    let ctx = crate::common::test_app::create_test_app_context().await;
-    crate::common::test_app::register_external_worker(&ctx, &mock_server.base_url(), None);
+    let ctx = create_test_app_context().await;
+    register_external_worker(&ctx, &mock_server.base_url(), None);
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
     let req = Request::builder()
@@ -207,8 +210,8 @@ async fn test_openai_router_responses_with_mock() {
 
     let base_url = format!("http://{addr}");
 
-    let ctx = crate::common::test_app::create_test_app_context().await;
-    crate::common::test_app::register_external_worker(&ctx, &base_url, Some(vec!["gpt-4o-mini"]));
+    let ctx = create_test_app_context().await;
+    register_external_worker(&ctx, &base_url, Some(vec!["gpt-4o-mini"]));
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
     // Get storage from context (router uses this, not a separate storage)
@@ -473,8 +476,8 @@ async fn test_openai_router_responses_streaming_with_mock() {
 
     let base_url = format!("http://{addr}");
 
-    let ctx = crate::common::test_app::create_test_app_context().await;
-    crate::common::test_app::register_external_worker(&ctx, &base_url, Some(vec!["gpt-5-nano"]));
+    let ctx = create_test_app_context().await;
+    register_external_worker(&ctx, &base_url, Some(vec!["gpt-5-nano"]));
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
     // Get storage from context and seed a previous response
@@ -579,11 +582,11 @@ async fn test_router_factory_openai_mode() {
         worker_urls: vec!["https://api.openai.com".to_string()],
     };
 
-    let router_config = RouterConfig::new(routing_mode, smg::config::PolicyConfig::Random);
+    let router_config = RouterConfig::new(routing_mode, PolicyConfig::Random);
 
     let app_context = crate::common::create_test_context(router_config).await;
 
-    let router = smg::routers::RouterFactory::create_router(&app_context).await;
+    let router = RouterFactory::create_router(&app_context).await;
     assert!(
         router.is_ok(),
         "Router factory should create OpenAI router successfully"
@@ -596,8 +599,8 @@ async fn test_router_factory_openai_mode() {
 /// Test that unsupported endpoints return proper error codes
 #[tokio::test]
 async fn test_unsupported_endpoints() {
-    let ctx = crate::common::test_app::create_test_app_context().await;
-    crate::common::test_app::register_external_worker(&ctx, "https://api.openai.com", None);
+    let ctx = create_test_app_context().await;
+    register_external_worker(&ctx, "https://api.openai.com", None);
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
     let generate_request = GenerateRequest {
@@ -655,9 +658,9 @@ async fn test_openai_router_chat_completion_with_mock() {
     let mock_server = MockOpenAIServer::new().await;
     let base_url = mock_server.base_url();
 
-    let ctx = crate::common::test_app::create_test_app_context().await;
+    let ctx = create_test_app_context().await;
     // Register the mock server worker and create router
-    crate::common::test_app::register_external_worker(&ctx, &base_url, None);
+    register_external_worker(&ctx, &base_url, None);
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
     // Create a minimal chat completion request
@@ -691,9 +694,9 @@ async fn test_openai_e2e_with_server() {
     let mock_server = MockOpenAIServer::new().await;
     let base_url = mock_server.base_url();
 
-    let ctx = crate::common::test_app::create_test_app_context().await;
+    let ctx = create_test_app_context().await;
     // Register the mock server worker and create router
-    crate::common::test_app::register_external_worker(&ctx, &base_url, None);
+    register_external_worker(&ctx, &base_url, None);
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
     // Create Axum app with chat completions endpoint
@@ -757,8 +760,8 @@ async fn test_openai_e2e_with_server() {
 async fn test_openai_router_chat_streaming_with_mock() {
     let mock_server = MockOpenAIServer::new().await;
     let base_url = mock_server.base_url();
-    let ctx = crate::common::test_app::create_test_app_context().await;
-    crate::common::test_app::register_external_worker(&ctx, &base_url, None);
+    let ctx = create_test_app_context().await;
+    register_external_worker(&ctx, &base_url, None);
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
     // Build a streaming chat request
@@ -797,12 +800,8 @@ async fn test_openai_router_chat_streaming_with_mock() {
 /// Test circuit breaker functionality
 #[tokio::test]
 async fn test_openai_router_circuit_breaker() {
-    let ctx = crate::common::test_app::create_test_app_context().await;
-    crate::common::test_app::register_external_worker(
-        &ctx,
-        "http://invalid-url-that-will-fail",
-        None,
-    );
+    let ctx = create_test_app_context().await;
+    register_external_worker(&ctx, "http://invalid-url-that-will-fail", None);
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
     let chat_request = create_minimal_chat_request();
@@ -825,9 +824,9 @@ async fn test_openai_router_circuit_breaker() {
 /// requests to workers, not for the models endpoint.
 #[tokio::test]
 async fn test_openai_router_models_from_registry() {
-    let ctx = crate::common::test_app::create_test_app_context().await;
+    let ctx = create_test_app_context().await;
     // Register a worker with the default model
-    crate::common::test_app::register_external_worker(&ctx, "https://api.example.com", None);
+    register_external_worker(&ctx, "https://api.example.com", None);
     let router = OpenAIRouter::new(&ctx).await.unwrap();
 
     // Get models - should return the registered model

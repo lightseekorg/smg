@@ -25,15 +25,19 @@ use smg::{
     core::{
         circuit_breaker::CircuitBreaker,
         worker::{RuntimeType, WorkerMetadata, WorkerRoutingKeyLoad},
-        ConnectionMode, Worker, WorkerType,
+        ConnectionMode, Worker, WorkerResult, WorkerType,
     },
     policies::{
         BucketPolicy, CacheAwarePolicy, LoadBalancingPolicy, PowerOfTwoPolicy, RandomPolicy,
         RoundRobinPolicy, SelectWorkerInfo,
     },
-    routers::grpc::utils::{generate_tool_constraints, process_chat_messages},
+    routers::grpc::{
+        client::GrpcClient,
+        utils::{generate_tool_constraints, process_chat_messages},
+    },
 };
 use smg_grpc_client::sglang_scheduler::SglangSchedulerClient;
+use tokio::sync::Mutex as TokioMutex;
 use uuid::Uuid;
 
 use super::{
@@ -118,7 +122,7 @@ impl Worker for GrpcWorker {
         self.healthy.store(healthy, Ordering::Relaxed);
     }
 
-    async fn check_health_async(&self) -> smg::core::WorkerResult<()> {
+    async fn check_health_async(&self) -> WorkerResult<()> {
         // FFI workers don't do their own health checks
         Ok(())
     }
@@ -155,18 +159,16 @@ impl Worker for GrpcWorker {
         &self.circuit_breaker
     }
 
-    async fn get_grpc_client(
-        &self,
-    ) -> smg::core::WorkerResult<Option<Arc<smg::routers::grpc::client::GrpcClient>>> {
+    async fn get_grpc_client(&self) -> WorkerResult<Option<Arc<GrpcClient>>> {
         // Not used by policies — the FFI layer handles gRPC directly
         Ok(None)
     }
 
-    async fn grpc_health_check(&self) -> smg::core::WorkerResult<bool> {
+    async fn grpc_health_check(&self) -> WorkerResult<bool> {
         Ok(self.healthy.load(Ordering::Relaxed))
     }
 
-    async fn http_health_check(&self) -> smg::core::WorkerResult<bool> {
+    async fn http_health_check(&self) -> WorkerResult<bool> {
         Ok(self.healthy.load(Ordering::Relaxed))
     }
 }
@@ -662,8 +664,8 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
 
     // Create stream handle with worker reference for load tracking
     *stream_handle_out = Box::into_raw(Box::new(SglangStreamHandle {
-        stream: Arc::new(tokio::sync::Mutex::new(stream)),
-        converter: Arc::new(tokio::sync::Mutex::new(converter_handle)),
+        stream: Arc::new(TokioMutex::new(stream)),
+        converter: Arc::new(TokioMutex::new(converter_handle)),
         client: Arc::clone(&client),
         prompt_tokens,
         worker: Some(Arc::clone(&worker)),

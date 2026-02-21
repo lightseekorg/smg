@@ -21,9 +21,11 @@ use crate::common::{
 // Ensure crypto provider is installed
 fn ensure_crypto_provider() {
     use std::sync::Once;
+
+    use rustls::crypto::ring::default_provider;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = default_provider().install_default();
     });
 }
 

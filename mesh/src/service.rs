@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::Result;
 use parking_lot::RwLock;
+use tokio::sync::watch;
 use tonic::{
     transport::{ClientTlsConfig, Endpoint},
     Request,
@@ -15,7 +16,7 @@ use tonic::{
 use tracing as log;
 
 pub mod gossip {
-    #![allow(unused_qualifications)]
+    #![allow(unused_qualifications, clippy::absolute_paths)]
     #![allow(clippy::trivially_copy_pass_by_ref, clippy::allow_attributes)]
     tonic::include_proto!("mesh.gossip");
 }
@@ -54,7 +55,7 @@ pub struct MeshServerHandler {
     pub sync_manager: Arc<MeshSyncManager>,
     pub self_name: String,
     _self_addr: SocketAddr,
-    signal_tx: tokio::sync::watch::Sender<bool>,
+    signal_tx: watch::Sender<bool>,
     partition_detector: Option<Arc<PartitionDetector>>,
     state_machine: Option<Arc<NodeStateMachine>>,
     rate_limit_task_handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -298,7 +299,7 @@ impl MeshServerBuilder {
     }
 
     pub fn build(&self) -> (MeshServer, MeshServerHandler) {
-        let (signal_tx, signal_rx) = tokio::sync::watch::channel(false);
+        let (signal_tx, signal_rx) = watch::channel(false);
         let partition_detector = Arc::new(PartitionDetector::default());
         let sync_manager = Arc::new(MeshSyncManager::new(
             self.stores.clone(),
@@ -355,7 +356,7 @@ pub struct MeshServer {
     self_name: String,
     self_addr: SocketAddr,
     init_peer: Option<SocketAddr>,
-    signal_rx: tokio::sync::watch::Receiver<bool>,
+    signal_rx: watch::Receiver<bool>,
     partition_detector: Option<Arc<PartitionDetector>>,
     mtls_manager: Option<Arc<MTLSManager>>,
 }

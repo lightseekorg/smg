@@ -15,6 +15,7 @@ use crate::{
     errors::{Result, WasmError, WasmManagerError, WasmModuleError},
     module::{WasmModule, WasmModuleAttachPoint},
     runtime::WasmRuntime,
+    spec::smg::gateway::middleware_types::Action as MiddlewareAction,
     types::{WasmComponentInput, WasmComponentOutput},
 };
 
@@ -235,7 +236,7 @@ impl WasmModuleManager {
         module: &WasmModule,
         attach_point: WasmModuleAttachPoint,
         input: WasmComponentInput,
-    ) -> Option<crate::spec::smg::gateway::middleware_types::Action> {
+    ) -> Option<MiddlewareAction> {
         use tracing::error;
 
         let action_result = self

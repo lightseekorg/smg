@@ -14,7 +14,10 @@ use smg::{
 };
 use tower::ServiceExt;
 
-use crate::common::mock_worker::{MockWorker, MockWorkerConfig};
+use crate::common::{
+    mock_worker::{MockWorker, MockWorkerConfig},
+    test_app::create_test_app_with_context,
+};
 
 /// Test context that manages mock workers and app
 struct ParserTestContext {
@@ -105,10 +108,7 @@ impl ParserTestContext {
     }
 
     fn create_app(&self) -> axum::Router {
-        crate::common::test_app::create_test_app_with_context(
-            Arc::clone(&self.router),
-            Arc::clone(&self.app_context),
-        )
+        create_test_app_with_context(Arc::clone(&self.router), Arc::clone(&self.app_context))
     }
 
     async fn shutdown(mut self) {

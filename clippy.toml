@@ -22,3 +22,6 @@ type-complexity-threshold = 250
 
 # Enforce API discipline during refactors
 avoid-breaking-exported-api = false
+
+# Warn on paths with 4+ segments — encourages use statements over deep inline paths
+absolute-paths-max-segments = 3

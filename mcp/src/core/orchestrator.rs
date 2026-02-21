@@ -58,8 +58,8 @@ use super::{
 };
 use crate::{
     approval::{
-        ApprovalDecision, ApprovalManager, ApprovalMode, ApprovalOutcome, ApprovalParams,
-        McpApprovalRequest,
+        audit::AuditLog, policy::PolicyEngine, ApprovalDecision, ApprovalManager, ApprovalMode,
+        ApprovalOutcome, ApprovalParams, McpApprovalRequest,
     },
     error::{McpError, McpResult},
     inventory::{
@@ -324,8 +324,8 @@ impl McpOrchestrator {
         let metrics = Arc::new(McpMetrics::new());
 
         // Build approval manager from config
-        let audit_log = Arc::new(crate::approval::audit::AuditLog::new());
-        let policy_engine = Arc::new(crate::approval::policy::PolicyEngine::from_yaml_config(
+        let audit_log = Arc::new(AuditLog::new());
+        let policy_engine = Arc::new(PolicyEngine::from_yaml_config(
             &config.policy,
             Arc::clone(&audit_log),
         ));
@@ -2197,11 +2197,12 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
+    use crate::core::config::Tool as McpTool;
 
-    fn create_test_tool(name: &str) -> crate::core::config::Tool {
+    fn create_test_tool(name: &str) -> McpTool {
         use std::sync::Arc;
 
-        crate::core::config::Tool {
+        McpTool {
             name: Cow::Owned(name.to_string()),
             title: None,
             description: Some(Cow::Owned(format!("Test tool: {name}"))),

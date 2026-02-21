@@ -4,7 +4,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use tokio::time::interval;
+use tokio::{sync::watch, time::interval};
 use tracing::{debug, info};
 
 use super::sync::MeshSyncManager;
@@ -29,7 +29,7 @@ impl RateLimitWindow {
     ///
     /// # Arguments
     /// * `shutdown_rx` - A watch receiver that signals when to stop the task
-    pub async fn start_reset_task(self, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
+    pub async fn start_reset_task(self, mut shutdown_rx: watch::Receiver<bool>) {
         let mut interval_timer = interval(Duration::from_secs(self.window_seconds));
         info!(
             "Starting rate limit window reset task with {}s interval",
@@ -95,7 +95,7 @@ mod tests {
         let window = RateLimitWindow::new(sync_manager, 1);
 
         // Create shutdown channel
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         // Spawn the reset task
         #[expect(
@@ -157,7 +157,7 @@ mod tests {
             let window = RateLimitWindow::new(sync_manager.clone(), 1); // 1 second
 
             // Create shutdown channel
-            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
             // Start reset task in background
             #[expect(

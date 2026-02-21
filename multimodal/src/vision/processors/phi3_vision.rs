@@ -23,7 +23,7 @@ use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage}
 use ndarray::{s, Array3, Array4, IxDyn};
 
 use crate::vision::{
-    image_processor::{ImagePreProcessor, PreprocessedImages},
+    image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
     transforms::{self, TransformError},
 };
@@ -353,7 +353,7 @@ impl ImagePreProcessor for Phi3VisionProcessor {
             .collect();
         model_specific.insert(
             "image_sizes".to_string(),
-            crate::vision::image_processor::ModelSpecificValue::UintTensor {
+            ModelSpecificValue::UintTensor {
                 data: image_sizes_data,
                 shape: vec![batch_size, 2],
             },
@@ -362,9 +362,7 @@ impl ImagePreProcessor for Phi3VisionProcessor {
         // num_img_tokens as list
         model_specific.insert(
             "num_img_tokens".to_string(),
-            crate::vision::image_processor::ModelSpecificValue::UintVec(
-                all_num_tokens.iter().map(|&t| t as u32).collect(),
-            ),
+            ModelSpecificValue::UintVec(all_num_tokens.iter().map(|&t| t as u32).collect()),
         );
 
         // Convert 5D tensor to appropriate format

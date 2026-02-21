@@ -104,6 +104,10 @@ ignored_unit_patterns = "warn"
 ref_option = "warn"
 large_futures = "warn"
 
+# Import hygiene
+single_component_path_imports = "warn"
+absolute_paths = "warn"
+
 # These pedantic lints are explicitly allowed to give authors discretion
 default_trait_access = "allow"
 match_same_arms = "allow"

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 // Re-export storage config types from data_connector
 pub use smg_data_connector::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
 
-use super::ConfigResult;
+use super::{validation::ConfigValidator, ConfigResult};
 use crate::core::ConnectionMode;
 
 /// Main router configuration
@@ -553,7 +553,7 @@ impl RouterConfig {
 
     /// Validate the configuration
     pub fn validate(&self) -> ConfigResult<()> {
-        crate::config::validation::ConfigValidator::validate(self)
+        ConfigValidator::validate(self)
     }
 
     /// Get the routing mode type as a string

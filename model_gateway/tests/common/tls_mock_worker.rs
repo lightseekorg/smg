@@ -16,16 +16,16 @@ use axum::{
     Router,
 };
 use axum_server::tls_rustls::RustlsConfig;
-use rustls::{server::WebPkiClientVerifier, RootCertStore};
+use rustls::{crypto::ring::default_provider, server::WebPkiClientVerifier, RootCertStore};
 use serde_json::json;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
 
 // Ensure crypto provider is installed exactly once
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
 
 fn ensure_crypto_provider() {
     CRYPTO_PROVIDER_INIT.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = default_provider().install_default();
     });
 }
 
@@ -56,7 +56,7 @@ impl Default for TlsMockWorkerConfig {
 pub struct TlsMockWorker {
     config: Arc<RwLock<TlsMockWorkerConfig>>,
     shutdown_handle: Option<tokio::task::JoinHandle<()>>,
-    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
 impl TlsMockWorker {
@@ -111,7 +111,7 @@ impl TlsMockWorker {
             .route("/v1/chat/completions", post(chat_completions_handler))
             .with_state(config);
 
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
         self.shutdown_tx = Some(shutdown_tx);
 
         // Build TLS configuration

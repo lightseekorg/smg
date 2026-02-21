@@ -1,7 +1,7 @@
 //! MCP Connection Pool for dynamic servers.
 
 use std::{
-    collections::HashMap,
+    collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -64,7 +64,7 @@ impl PoolKey {
             return 0;
         }
 
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher = DefaultHasher::new();
 
         if let Some(t) = token {
             t.hash(&mut hasher);

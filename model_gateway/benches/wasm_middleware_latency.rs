@@ -14,7 +14,7 @@ use smg::{
     app_context::AppContext, config::RouterConfig, middleware::wasm_middleware,
     routers::RouterTrait, server::AppState,
 };
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, sync::mpsc};
 use tower::{Layer, Service};
 
 #[derive(Debug)]
@@ -40,7 +40,7 @@ impl RouterTrait for MockRouter {
 
 /// Mock service that simulates a streaming response with a 500ms delay.
 fn mock_next_streaming(_req: Request<Body>) -> Response<Body> {
-    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let (tx, rx) = mpsc::channel(16);
 
     tokio::spawn(async move {
         // Send first chunk immediately

@@ -10,7 +10,7 @@ use axum::{
     routing::get,
     Router,
 };
-use rmcp::transport::auth::OAuthState;
+use rmcp::transport::auth::{AuthClient, AuthorizationManager, OAuthState};
 use serde::Deserialize;
 use tokio::sync::{oneshot, Mutex};
 
@@ -86,10 +86,7 @@ impl OAuthHelper {
     }
 
     /// Perform OAuth authentication flow
-    pub async fn authenticate(
-        &self,
-        scopes: &[&str],
-    ) -> McpResult<rmcp::transport::auth::AuthorizationManager> {
+    pub async fn authenticate(&self, scopes: &[&str]) -> McpResult<AuthorizationManager> {
         // Initialize OAuth state machine
         let mut oauth_state = OAuthState::new(&self.server_url, None)
             .await
@@ -188,11 +185,11 @@ pub async fn create_oauth_client(
     redirect_uri: String,
     callback_port: u16,
     scopes: &[&str],
-) -> McpResult<rmcp::transport::auth::AuthClient<reqwest::Client>> {
+) -> McpResult<AuthClient<reqwest::Client>> {
     let helper = OAuthHelper::new(server_url, redirect_uri, callback_port);
     let auth_manager = helper.authenticate(scopes).await?;
 
-    let client = rmcp::transport::auth::AuthClient::new(reqwest::Client::default(), auth_manager);
+    let client = AuthClient::new(reqwest::Client::default(), auth_manager);
 
     Ok(client)
 }

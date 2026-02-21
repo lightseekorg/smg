@@ -20,7 +20,7 @@ use axum::{
 };
 use futures_util::stream::{self, StreamExt};
 use serde_json::json;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
 use uuid::Uuid;
 
 /// Configuration for mock worker behavior
@@ -51,7 +51,7 @@ pub enum HealthStatus {
 pub struct MockWorker {
     config: Arc<RwLock<MockWorkerConfig>>,
     shutdown_handle: Option<tokio::task::JoinHandle<()>>,
-    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
 impl MockWorker {
@@ -103,7 +103,7 @@ impl MockWorker {
             .route("/v1/models", get(v1_models_handler))
             .with_state(config);
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         self.shutdown_tx = Some(shutdown_tx);
 
         // Spawn the server in a separate task

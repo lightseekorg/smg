@@ -19,7 +19,10 @@ use tokio::{
 use tracing::{debug, info, warn};
 
 use crate::{
-    core::{metrics_aggregator::MetricPack, ConnectionMode, Worker, WorkerRegistry, WorkerType},
+    core::{
+        metrics_aggregator::{self, MetricPack},
+        ConnectionMode, Worker, WorkerRegistry, WorkerType,
+    },
     policies::PolicyRegistry,
 };
 
@@ -257,7 +260,7 @@ impl WorkerManager {
             return EngineMetricsResult::Err("All backend requests failed".to_string());
         }
 
-        match crate::core::metrics_aggregator::aggregate_metrics(metric_packs) {
+        match metrics_aggregator::aggregate_metrics(metric_packs) {
             Ok(text) => EngineMetricsResult::Ok(text),
             Err(e) => EngineMetricsResult::Err(format!("Failed to aggregate metrics: {e}")),
         }

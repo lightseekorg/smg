@@ -15,7 +15,9 @@ use super::{
     detect_connection::do_grpc_health_check, discover_metadata::ModelsResponse, grpc_base_url,
     http_base_url,
 };
-use crate::core::{steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode};
+use crate::core::{
+    steps::workflow_data::LocalWorkerWorkflowData, worker::RuntimeType, ConnectionMode,
+};
 
 // ─── gRPC backend detection ────────────────────────────────────────────────
 
@@ -248,7 +250,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for DetectBackendStep {
 
         // If runtime_type is explicitly configured (non-default), use it and skip detection
         let config_runtime = config.runtime_type;
-        if config_runtime != crate::core::worker::RuntimeType::default() {
+        if config_runtime != RuntimeType::default() {
             debug!(
                 "Using explicitly configured runtime type: {} for {}",
                 config_runtime, config.url
