@@ -46,6 +46,28 @@ cp grpc_client/proto/*.proto grpc_client/python/smg_grpc_proto/proto/
 pip install -e grpc_client/python/
 ```
 
+### Testing proto changes on a remote GPU machine
+
+After editing `.proto` files locally, build a wheel and install it in the remote environment (e.g. vLLM):
+
+```bash
+# 1. Build wheel (regenerates Python stubs from latest .proto files)
+cd grpc_client/python
+# Copy proto files into the package tree (the repo uses a symlink which
+# won't survive wheel packaging)
+mkdir -p smg_grpc_proto/proto
+cp ../proto/*.proto smg_grpc_proto/proto/
+pip wheel . --no-deps -w dist/
+
+# 2. Copy to remote
+scp dist/smg_grpc_proto-*.whl remote-gpu:/tmp/
+
+# 3. Install on remote (into vLLM's env or whichever env needs it)
+pip install --force-reinstall /tmp/smg_grpc_proto-*.whl
+```
+
+No import changes are needed on the remote side — vLLM already imports from `smg_grpc_proto`.
+
 ## License
 
 Apache-2.0
