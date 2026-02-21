@@ -331,6 +331,7 @@ impl Llama4Spec {
     fn tile_size(metadata: &ModelMetadata) -> u32 {
         metadata
             .config_u32(&["vision_config", "image_size"])
+            .filter(|v| *v > 0)
             .unwrap_or(336)
     }
 
