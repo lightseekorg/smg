@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Result;
 use rand::seq::{IndexedRandom, SliceRandom};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, watch, Mutex};
 use tonic::transport::{ClientTlsConfig, Endpoint};
 use tracing as log;
 use tracing::{instrument, Instrument};
@@ -66,7 +66,7 @@ impl MeshController {
     }
 
     #[instrument(fields(name = %self.self_name), skip(self, signal))]
-    pub async fn event_loop(self, mut signal: tokio::sync::watch::Receiver<bool>) -> Result<()> {
+    pub async fn event_loop(self, mut signal: watch::Receiver<bool>) -> Result<()> {
         let init_state = self.state.clone();
         let read_state = self.state.clone();
         let mut cnt: u64 = 0;
@@ -328,7 +328,7 @@ impl MeshController {
     fn spawn_sync_stream_handler(
         &self,
         mut incoming_stream: tonic::Streaming<StreamMessage>,
-        tx: tokio::sync::mpsc::Sender<StreamMessage>,
+        tx: mpsc::Sender<StreamMessage>,
         self_name: String,
         peer_name: String,
     ) -> tokio::task::JoinHandle<()> {
@@ -436,13 +436,13 @@ impl MeshController {
                                             // Mark as sent after successful transmission
                                             collector.mark_sent(store_type, &updates);
                                         }
-                                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                        Err(mpsc::error::TrySendError::Full(_)) => {
                                             log::debug!(
                                                 "Backpressure: channel full, skipping send (will retry next interval)"
                                             );
                                             continue;
                                         }
-                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                        Err(mpsc::error::TrySendError::Closed(_)) => {
                                             log::warn!(
                                                 "Channel closed, stopping incremental update sender"
                                             );
@@ -801,7 +801,7 @@ impl MeshController {
         let mut client = GossipClient::new(channel);
 
         // Create bidirectional stream
-        let (tx, rx) = tokio::sync::mpsc::channel::<StreamMessage>(128);
+        let (tx, rx) = mpsc::channel::<StreamMessage>(128);
         let outgoing_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
         let response = client.sync_stream(outgoing_stream).await.map_err(|e| {

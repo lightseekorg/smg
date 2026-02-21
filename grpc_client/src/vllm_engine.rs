@@ -23,7 +23,7 @@ use crate::{BoxedTraceInjector, NoopTraceInjector};
 // Include the generated protobuf code
 #[expect(clippy::allow_attributes)]
 pub mod proto {
-    #![allow(clippy::all, unused_qualifications)]
+    #![allow(clippy::all, clippy::absolute_paths, unused_qualifications)]
     tonic::include_proto!("vllm.grpc.engine");
 }
 

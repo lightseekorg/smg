@@ -424,6 +424,7 @@ fn sanitize_tool_token(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::config::Tool as McpTool;
 
     #[test]
     fn test_session_creation_keeps_servers() {
@@ -491,10 +492,10 @@ mod tests {
         assert!(matches!(format, ResponseFormat::Passthrough));
     }
 
-    fn create_test_tool(name: &str) -> crate::core::config::Tool {
+    fn create_test_tool(name: &str) -> McpTool {
         use std::{borrow::Cow, sync::Arc};
 
-        crate::core::config::Tool {
+        McpTool {
             name: Cow::Owned(name.to_string()),
             title: None,
             description: Some(Cow::Owned(format!("Test tool: {name}"))),

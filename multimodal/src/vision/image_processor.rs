@@ -410,6 +410,7 @@ mod tests {
     use ndarray::Array4;
 
     use super::*;
+    use crate::vision::processors::LlavaProcessor;
 
     #[test]
     fn test_preprocessed_images_accessors() {
@@ -495,10 +496,7 @@ mod tests {
         let mut registry = ImageProcessorRegistry::new();
 
         // Create a mock processor using LlavaProcessor
-        registry.register(
-            "test-model",
-            Box::new(crate::vision::processors::LlavaProcessor::new()),
-        );
+        registry.register("test-model", Box::new(LlavaProcessor::new()));
 
         assert!(registry.has_processor("test-model-7b"));
         assert!(registry.has_processor("TEST-MODEL"));

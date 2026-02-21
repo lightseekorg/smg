@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{
     app_context::AppContext,
-    routers::{mcp_utils, RouterTrait},
+    routers::{error::bad_gateway, mcp_utils, RouterTrait},
 };
 
 /// Router for Anthropic-specific APIs
@@ -117,7 +117,7 @@ impl RouterTrait for AnthropicRouter {
                 }
                 None => {
                     error!("Failed to connect to any MCP servers");
-                    return crate::routers::error::bad_gateway(
+                    return bad_gateway(
                         "mcp_connection_failed",
                         "Failed to connect to MCP servers. Check server URLs and authorization.",
                     );

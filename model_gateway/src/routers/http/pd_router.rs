@@ -19,6 +19,7 @@ use openai_protocol::{
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, warn};
 
@@ -849,7 +850,7 @@ impl PDRouter {
     ) -> Response {
         use crate::core::AttachedBody;
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
 
         #[expect(
             clippy::disallowed_methods,
@@ -1395,12 +1396,14 @@ impl RouterTrait for PDRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::{
+        config::PolicyConfig,
+        core::{BasicWorkerBuilder, WorkerType},
+    };
 
     fn create_test_pd_router() -> PDRouter {
         let worker_registry = Arc::new(WorkerRegistry::new());
-        let policy_registry =
-            Arc::new(PolicyRegistry::new(crate::config::PolicyConfig::RoundRobin));
+        let policy_registry = Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin));
 
         PDRouter {
             worker_registry,
@@ -1504,7 +1507,7 @@ mod tests {
         assert_eq!(prefill_ref.load(), 0);
         assert_eq!(decode_ref.load(), 0);
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
         let stream = UnboundedReceiverStream::new(rx);
 
         {

@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::Result;
 use futures::Stream;
+use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tonic::{transport::Server, Response, Status};
 use tracing as log;
@@ -209,8 +210,11 @@ impl GossipService {
                 .collect();
 
             // Calculate checksum for integrity verification
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            use std::{
+                collections::hash_map::DefaultHasher,
+                hash::{Hash, Hasher},
+            };
+            let mut hasher = DefaultHasher::new();
             for update in &state_updates {
                 update.key.hash(&mut hasher);
                 update.value.hash(&mut hasher);
@@ -372,8 +376,7 @@ impl Gossip for GossipService {
 
         // Create output stream with flow control
         const CHANNEL_CAPACITY: usize = 128;
-        let (tx, rx) =
-            tokio::sync::mpsc::channel::<Result<StreamMessage, Status>>(CHANNEL_CAPACITY);
+        let (tx, rx) = mpsc::channel::<Result<StreamMessage, Status>>(CHANNEL_CAPACITY);
         let size_validator = MessageSizeValidator::default();
 
         // Create incremental update collector if stores are available
@@ -449,14 +452,14 @@ impl Gossip for GossipService {
                                     // Mark as sent after successful transmission
                                     collector.mark_sent(store_type, &updates);
                                 }
-                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                Err(mpsc::error::TrySendError::Full(_)) => {
                                     log::debug!(
                                         "Backpressure: channel full, skipping send (will retry next interval)"
                                     );
                                     // Don't mark as sent, will retry next interval
                                     continue;
                                 }
-                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
                                     log::warn!(
                                         "Channel closed, stopping incremental update sender"
                                     );
@@ -786,9 +789,7 @@ impl Gossip for GossipService {
                                             Ok(()) => {
                                                 // Successfully queued
                                             }
-                                            Err(tokio::sync::mpsc::error::TrySendError::Full(
-                                                msg,
-                                            )) => {
+                                            Err(mpsc::error::TrySendError::Full(msg)) => {
                                                 log::debug!(
                                                     "Backpressure: channel full, waiting for drain"
                                                 );
@@ -800,9 +801,7 @@ impl Gossip for GossipService {
                                                     break;
                                                 }
                                             }
-                                            Err(
-                                                tokio::sync::mpsc::error::TrySendError::Closed(_),
-                                            ) => {
+                                            Err(mpsc::error::TrySendError::Closed(_)) => {
                                                 log::warn!("Channel closed, stopping snapshot");
                                                 break;
                                             }

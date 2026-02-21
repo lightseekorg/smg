@@ -4,7 +4,7 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use tokio::sync::Notify;
+use tokio::{sync::Notify, time::error::Elapsed};
 use tracing::{debug, trace};
 
 /// Token bucket for rate limiting.
@@ -96,7 +96,7 @@ impl TokenBucket {
     ///
     /// When `refill_rate=0`, waits indefinitely for tokens to be returned via `return_tokens()`.
     /// Use `acquire_timeout()` to set an appropriate timeout.
-    pub async fn acquire(&self, tokens: f64) -> Result<(), tokio::time::error::Elapsed> {
+    pub async fn acquire(&self, tokens: f64) -> Result<(), Elapsed> {
         if self.try_acquire(tokens).is_ok() {
             return Ok(());
         }
@@ -148,11 +148,7 @@ impl TokenBucket {
     }
 
     /// Acquire tokens with custom timeout.
-    pub async fn acquire_timeout(
-        &self,
-        tokens: f64,
-        timeout: Duration,
-    ) -> Result<(), tokio::time::error::Elapsed> {
+    pub async fn acquire_timeout(&self, tokens: f64, timeout: Duration) -> Result<(), Elapsed> {
         tokio::time::timeout(timeout, self.acquire(tokens)).await?
     }
 

@@ -32,7 +32,7 @@ use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
-use tokio::{signal, spawn};
+use tokio::{signal, spawn, sync::mpsc};
 use tracing::{debug, error, info, warn, Level};
 use wfaas::LoggingSubscriber;
 
@@ -70,7 +70,7 @@ use crate::{
 pub struct AppState {
     pub router: Arc<dyn RouterTrait>,
     pub context: Arc<AppContext>,
-    pub concurrency_queue_tx: Option<tokio::sync::mpsc::Sender<QueuedRequest>>,
+    pub concurrency_queue_tx: Option<mpsc::Sender<QueuedRequest>>,
     pub router_manager: Option<Arc<RouterManager>>,
     pub mesh_handler: Option<Arc<MeshServerHandler>>,
 }

@@ -25,8 +25,9 @@ use smg::{
     server::{build_app, AppState},
     wasm::{
         module::{
-            WasmModuleAddRequest, WasmModuleAddResponse, WasmModuleAttachPoint,
-            WasmModuleDescriptor, WasmModuleListResponse, WasmModuleType,
+            MiddlewareAttachPoint, WasmModuleAddRequest, WasmModuleAddResponse,
+            WasmModuleAddResult, WasmModuleAttachPoint, WasmModuleDescriptor,
+            WasmModuleListResponse, WasmModuleType,
         },
         module_manager::WasmModuleManager,
     },
@@ -213,7 +214,7 @@ async fn test_wasm_api_add_module() {
             file_path: wasm_file_path.clone(),
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -240,10 +241,7 @@ async fn test_wasm_api_add_module() {
 
     // Assert module didn't fail with error
     assert!(
-        !matches!(
-            module_result,
-            Some(smg::wasm::module::WasmModuleAddResult::Error(_))
-        ),
+        !matches!(module_result, Some(WasmModuleAddResult::Error(_))),
         "Module registration failed: {module_result:?}"
     );
 
@@ -262,7 +260,7 @@ async fn test_wasm_api_add_module() {
         let modules = wasm_manager.get_modules().expect("Failed to get modules");
         assert!(!modules.is_empty(), "Module should be registered");
 
-        if let Some(smg::wasm::module::WasmModuleAddResult::Success(uuid)) = module_result {
+        if let Some(WasmModuleAddResult::Success(uuid)) = module_result {
             let module = wasm_manager
                 .get_module(*uuid)
                 .expect("Failed to get module");
@@ -281,7 +279,7 @@ async fn test_wasm_api_add_module_invalid_file() {
             file_path: "/nonexistent/path/to/module.component.wasm".to_string(),
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -313,7 +311,7 @@ async fn test_wasm_api_add_module_invalid_file() {
     assert!(module_result.is_some());
 
     // Verify it's an error result
-    if let Some(smg::wasm::module::WasmModuleAddResult::Error(_)) = module_result {
+    if let Some(WasmModuleAddResult::Error(_)) = module_result {
         // Expected error
     } else {
         panic!("Expected error result for invalid file path");
@@ -336,7 +334,7 @@ async fn test_wasm_api_add_module_invalid_wasm() {
             file_path: invalid_wasm_path.to_str().unwrap().to_string(),
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -368,7 +366,7 @@ async fn test_wasm_api_add_module_invalid_wasm() {
     assert!(module_result.is_some());
 
     // Verify it's an error result
-    if let Some(smg::wasm::module::WasmModuleAddResult::Error(_)) = module_result {
+    if let Some(WasmModuleAddResult::Error(_)) = module_result {
         // Expected error
     } else {
         panic!("Expected error result for invalid WASM file");
@@ -387,7 +385,7 @@ async fn test_wasm_api_list_modules() {
             file_path: wasm_file_path.clone(),
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -455,7 +453,7 @@ async fn test_wasm_api_remove_module() {
             file_path: wasm_file_path.clone(),
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -485,23 +483,22 @@ async fn test_wasm_api_remove_module() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Get the module UUID
-    let module_uuid = if let Some(smg::wasm::module::WasmModuleAddResult::Success(uuid)) =
-        &response_json.modules[0].add_result
-    {
-        *uuid
-    } else {
-        // If we can't get UUID from response, try to find it from manager
-        if let Some(wasm_manager) = app_context.wasm_manager.as_ref() {
-            let modules = wasm_manager.get_modules().expect("Failed to get modules");
-            modules
-                .iter()
-                .find(|m| m.module_meta.name == "test_module_remove")
-                .map(|m| m.module_uuid)
-                .expect("Module should be registered")
+    let module_uuid =
+        if let Some(WasmModuleAddResult::Success(uuid)) = &response_json.modules[0].add_result {
+            *uuid
         } else {
-            panic!("WASM manager not available");
-        }
-    };
+            // If we can't get UUID from response, try to find it from manager
+            if let Some(wasm_manager) = app_context.wasm_manager.as_ref() {
+                let modules = wasm_manager.get_modules().expect("Failed to get modules");
+                modules
+                    .iter()
+                    .find(|m| m.module_meta.name == "test_module_remove")
+                    .map(|m| m.module_uuid)
+                    .expect("Module should be registered")
+            } else {
+                panic!("WASM manager not available");
+            }
+        };
 
     // Now remove the module
     let remove_response = app
@@ -574,7 +571,7 @@ async fn test_wasm_module_duplicate_sha256() {
             file_path: wasm_file_path.clone(),
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -605,7 +602,7 @@ async fn test_wasm_module_duplicate_sha256() {
             file_path: wasm_file_path.clone(), // Same file
             module_type: WasmModuleType::Middleware,
             attach_points: vec![WasmModuleAttachPoint::Middleware(
-                smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+                MiddlewareAttachPoint::OnRequest,
             )],
             add_result: None,
         }],
@@ -637,7 +634,7 @@ async fn test_wasm_module_duplicate_sha256() {
     assert!(module_result.is_some());
 
     // Verify it's an error result (duplicate)
-    if let Some(smg::wasm::module::WasmModuleAddResult::Error(err_msg)) = module_result {
+    if let Some(WasmModuleAddResult::Error(err_msg)) = module_result {
         assert!(
             err_msg.contains("duplicate")
                 || err_msg.contains("Duplicate")
@@ -673,7 +670,7 @@ async fn test_wasm_module_execution() {
         file_path: wasm_file_path.clone(),
         module_type: WasmModuleType::Middleware,
         attach_points: vec![WasmModuleAttachPoint::Middleware(
-            smg::wasm::module::MiddlewareAttachPoint::OnRequest,
+            MiddlewareAttachPoint::OnRequest,
         )],
         add_result: None,
     };
@@ -752,8 +749,7 @@ async fn test_wasm_module_execution() {
     };
 
     let input = WasmComponentInput::MiddlewareRequest(request);
-    let attach_point =
-        WasmModuleAttachPoint::Middleware(smg::wasm::module::MiddlewareAttachPoint::OnRequest);
+    let attach_point = WasmModuleAttachPoint::Middleware(MiddlewareAttachPoint::OnRequest);
 
     // Execute the module
     let result = wasm_manager

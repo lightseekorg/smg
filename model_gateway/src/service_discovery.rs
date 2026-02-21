@@ -18,7 +18,7 @@ use kube::{
     Client,
 };
 use openai_protocol::worker::{WorkerSpec, WorkerType};
-use rustls;
+use rustls::crypto::ring;
 use smg_mesh::{
     gossip::{NodeState, NodeStatus},
     ClusterState,
@@ -220,7 +220,7 @@ pub async fn start_service_discovery(
         ));
     }
 
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = ring::default_provider().install_default();
 
     let client = Client::try_default().await?;
 

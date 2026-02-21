@@ -15,7 +15,10 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
-    core::{job_queue::Job, steps::WasmModuleConfigRequest},
+    core::{
+        job_queue::{Job, JobQueue},
+        steps::WasmModuleConfigRequest,
+    },
     server::AppState,
     wasm::{
         WasmMetrics, WasmModuleAddRequest, WasmModuleAddResponse, WasmModuleAddResult,
@@ -26,7 +29,7 @@ use crate::{
 /// Wait for job completion by polling job status
 /// Returns the job result message if successful
 async fn wait_for_job_completion(
-    job_queue: &crate::core::job_queue::JobQueue,
+    job_queue: &JobQueue,
     status_key: &str,
     timeout_duration: Duration,
 ) -> Result<String, String> {

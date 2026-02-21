@@ -21,7 +21,7 @@ use std::{
     },
 };
 
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use once_cell::sync::Lazy;
 use parking_lot::RwLock as ParkingLotRwLock;
 use tracing::debug;
@@ -438,7 +438,7 @@ impl TokenTree {
             let page_key = make_page_key(remaining);
 
             let step = match current.children.entry(page_key) {
-                dashmap::mapref::entry::Entry::Vacant(entry) => {
+                Entry::Vacant(entry) => {
                     // No child with this page key - create new node
                     let new_node = Arc::new(Node::new(remaining.to_vec()));
                     new_node.set_parent(&current, page_key);
@@ -446,7 +446,7 @@ impl TokenTree {
                     entry.insert(new_node);
                     InsertStep::Done(remaining.len())
                 }
-                dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                Entry::Occupied(mut entry) => {
                     let child = Arc::clone(entry.get());
                     let child_tokens = child.tokens.read();
                     let child_len = child_tokens.len();

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use hf_hub::api::tokio::ApiBuilder;
+use hf_hub::api::tokio::{Api, ApiBuilder};
 
 /// Environment variable for HuggingFace token
 /// Note: The hf-hub crate's from_env() doesn't read HF_TOKEN directly,
@@ -9,7 +9,7 @@ use hf_hub::api::tokio::ApiBuilder;
 const HF_TOKEN_ENV: &str = "HF_TOKEN";
 
 /// Build an ApiBuilder with token from HF_TOKEN environment variable if set
-fn build_api() -> anyhow::Result<hf_hub::api::tokio::Api> {
+fn build_api() -> anyhow::Result<Api> {
     let mut builder = ApiBuilder::from_env().with_progress(true);
 
     // Only override token if HF_TOKEN env var is set and non-empty

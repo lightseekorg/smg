@@ -19,6 +19,7 @@ use openai_protocol::{
     responses::{ResponsesGetParams, ResponsesRequest},
 };
 use reqwest::Client;
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::error;
 
@@ -523,7 +524,7 @@ impl Router {
             response_headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
 
             let stream = res.bytes_stream();
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::unbounded_channel();
 
             // Spawn task to forward stream
             #[expect(
@@ -786,14 +787,12 @@ impl RouterTrait for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::BasicWorkerBuilder;
+    use crate::{config::types::PolicyConfig, core::BasicWorkerBuilder};
 
     fn create_test_regular_router() -> Router {
         // Create registries
         let worker_registry = Arc::new(WorkerRegistry::new());
-        let policy_registry = Arc::new(PolicyRegistry::new(
-            crate::config::types::PolicyConfig::RoundRobin,
-        ));
+        let policy_registry = Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin));
 
         // Register test workers
         let worker1 = BasicWorkerBuilder::new("http://worker1:8080")

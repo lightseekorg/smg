@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 use super::mcp::{IterationResult, McpToolCall};
+use crate::routers::error::internal_error;
 
 // ============================================================================
 // Constants
@@ -80,7 +81,7 @@ pub(crate) fn build_sse_response(
 
     builder.body(body).unwrap_or_else(|e| {
         error!("Failed to build streaming response: {}", e);
-        crate::routers::error::internal_error("response_build_failed", "Failed to build response")
+        internal_error("response_build_failed", "Failed to build response")
     })
 }
 

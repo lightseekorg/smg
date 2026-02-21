@@ -43,7 +43,7 @@
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{mapref::one::Ref, DashMap};
 use metrics::{gauge, Label};
 
 // =============================================================================
@@ -352,7 +352,7 @@ impl<const N: usize> CachedGaugeHistogram<N> {
     pub fn get_or_register(
         &self,
         label_value: &str,
-    ) -> dashmap::mapref::one::Ref<'_, Arc<str>, (GaugeHistogramHandle, Vec<usize>)> {
+    ) -> Ref<'_, Arc<str>, (GaugeHistogramHandle, Vec<usize>)> {
         // Fast path: already cached
         if let Some(entry) = self.cache.get(label_value) {
             return entry;

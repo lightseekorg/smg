@@ -7,12 +7,18 @@ use std::{
     sync::Arc,
 };
 
-use llm_tokenizer::{stop::StopSequenceDecoder, stream::DecodeStream, traits::Tokenizer};
+use llm_tokenizer::{
+    stop::{SequenceDecoderOutput, StopSequenceDecoder},
+    stream::DecodeStream,
+    traits::Tokenizer,
+};
 use openai_protocol::common::{
     FunctionCallDelta, StringOrArray, Tool, ToolCallDelta, ToolChoice, ToolChoiceValue, Usage,
 };
 use serde_json::Value;
+use smg::routers::grpc::utils::create_stop_decoder;
 use smg_grpc_client::sglang_proto as proto;
+use tokio::sync::Mutex as TokioMutex;
 use tool_parser::ToolParser;
 
 use super::{
@@ -28,8 +34,8 @@ use super::{
 #[repr(C)]
 pub struct GrpcResponseConverterHandle {
     pub(crate) tokenizer: Arc<dyn Tokenizer>,
-    pub(crate) tool_parser: Option<Arc<tokio::sync::Mutex<Box<dyn ToolParser>>>>,
-    pub(crate) stop_decoder: Option<Arc<tokio::sync::Mutex<StopSequenceDecoder>>>,
+    pub(crate) tool_parser: Option<Arc<TokioMutex<Box<dyn ToolParser>>>>,
+    pub(crate) stop_decoder: Option<Arc<TokioMutex<StopSequenceDecoder>>>,
     pub(crate) model: String,
     pub(crate) request_id: String,
     pub(crate) created: u64,
@@ -144,15 +150,13 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_create(
 
     // Create stop decoder if needed
     let stop_decoder = if stop.is_some() || stop_token_ids.is_some() {
-        Some(Arc::new(tokio::sync::Mutex::new(
-            smg::routers::grpc::utils::create_stop_decoder(
-                &tokenizer,
-                stop.as_ref(),
-                stop_token_ids.as_ref(),
-                skip_special_tokens != 0,
-                false, // no_stop_trim
-            ),
-        )))
+        Some(Arc::new(TokioMutex::new(create_stop_decoder(
+            &tokenizer,
+            stop.as_ref(),
+            stop_token_ids.as_ref(),
+            skip_special_tokens != 0,
+            false, // no_stop_trim
+        ))))
     } else {
         None
     };
@@ -162,7 +166,7 @@ pub unsafe extern "C" fn sgl_grpc_response_converter_create(
         PARSER_FACTORY
             .registry()
             .create_for_model(model_str)
-            .map(|p| Arc::new(tokio::sync::Mutex::new(p)))
+            .map(|p| Arc::new(TokioMutex::new(p)))
     } else {
         None
     };
@@ -327,19 +331,19 @@ pub(crate) async fn convert_proto_chunk_to_openai(
                 for &token_id in &chunk.token_ids {
                     match decoder_guard
                         .process_token(token_id)
-                        .unwrap_or(llm_tokenizer::stop::SequenceDecoderOutput::Held)
+                        .unwrap_or(SequenceDecoderOutput::Held)
                     {
-                        llm_tokenizer::stop::SequenceDecoderOutput::Text(t) => {
+                        SequenceDecoderOutput::Text(t) => {
                             text.push_str(&t);
                         }
-                        llm_tokenizer::stop::SequenceDecoderOutput::StoppedWithText(t) => {
+                        SequenceDecoderOutput::StoppedWithText(t) => {
                             text.push_str(&t);
                             break;
                         }
-                        llm_tokenizer::stop::SequenceDecoderOutput::Stopped => {
+                        SequenceDecoderOutput::Stopped => {
                             break;
                         }
-                        llm_tokenizer::stop::SequenceDecoderOutput::Held => {}
+                        SequenceDecoderOutput::Held => {}
                     }
                 }
                 text
