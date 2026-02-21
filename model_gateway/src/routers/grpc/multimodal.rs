@@ -373,7 +373,9 @@ fn build_vllm_multimodal_data(images: &[Arc<ImageFrame>]) -> MultimodalData {
 /// Phase 2: Backend-specific multimodal processing.
 ///
 /// For SGLang: preprocesses images, expands placeholder tokens, builds full MultimodalData.
-/// For vLLM/others: extracts raw image bytes only, returns original token IDs unchanged.
+/// For vLLM: extracts raw image bytes only, returns original token IDs unchanged.
+///
+/// TRT-LLM does not support multimodal — callers must reject it before calling this.
 pub(crate) fn process_for_backend(
     images: &[Arc<ImageFrame>],
     is_sglang: bool,

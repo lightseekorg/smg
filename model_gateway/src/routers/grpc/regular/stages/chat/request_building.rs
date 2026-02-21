@@ -112,6 +112,13 @@ impl PipelineStage for ChatRequestBuildingStage {
                 .map(|e| e.source)
                 .unwrap_or_default();
 
+            if builder_client.is_trtllm() {
+                return Err(error::bad_request(
+                    "multimodal_unsupported",
+                    "multimodal input is not supported for TensorRT-LLM backend",
+                ));
+            }
+
             let (ids, data) = multimodal::process_for_backend(
                     images,
                     builder_client.is_sglang(),
