@@ -346,6 +346,9 @@ impl Llama4Spec {
     fn tokens_per_tile(metadata: &ModelMetadata) -> usize {
         let tile = Self::tile_size(metadata) as usize;
         let patch = Self::patch_size(metadata) as usize;
+        if patch == 0 {
+            return 0;
+        }
         let patches = (tile / patch).pow(2);
         // Pixel shuffle reduces spatial dims by ratio, so token count by ratio^2
         let ratio = Self::pixel_shuffle_ratio(metadata);
@@ -395,11 +398,11 @@ impl ModelProcessorSpec for Llama4Spec {
         let token_id = self.placeholder_token_id(metadata)?;
         let token = self.placeholder_token(metadata)?;
         let tokens_per_tile = Self::tokens_per_tile(metadata);
+        let tile_size = Self::tile_size(metadata) as usize;
 
         Ok(image_sizes
             .iter()
             .map(|size| {
-                let tile_size = Self::tile_size(metadata) as usize;
                 let h_tiles = size.height.div_ceil(tile_size as u32) as usize;
                 let w_tiles = size.width.div_ceil(tile_size as u32) as usize;
                 let num_tiles = h_tiles * w_tiles;
