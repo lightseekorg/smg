@@ -353,7 +353,7 @@ pub(crate) fn preprocess_for_sglang(
         .or(search_token_id);
 
     let (expanded_token_ids, mm_placeholders) =
-        expand_tokens(token_ids, search_token_id, &prompt_replacements);
+        expand_tokens(&token_ids, search_token_id, &prompt_replacements);
 
     debug!(
         original_len = token_ids.len(),

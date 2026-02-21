@@ -64,7 +64,16 @@ impl PipelineStage for ChatRequestBuildingStage {
         let body_ref = prep.filtered_request.as_ref().unwrap_or(&chat_request);
 
         // Build proto request using centralized dispatch
-        let processed_messages = prep.processed_messages.as_ref().unwrap();
+        let processed_messages = prep.processed_messages.as_ref().ok_or_else(|| {
+            error!(
+                function = "ChatRequestBuildingStage::execute",
+                "processed_messages not set in preparation state"
+            );
+            error::internal_error(
+                "processed_messages_missing",
+                "processed_messages not set - this is a bug in the pipeline",
+            )
+        })?;
 
         // Backend-specific multimodal processing (images were fetched in preparation stage).
         // SGLang: full pixel preprocessing + token expansion.
@@ -73,8 +82,14 @@ impl PipelineStage for ChatRequestBuildingStage {
             processed_messages.multimodal_images
         {
             let model_id = ctx.input.model_id.as_deref().unwrap_or(&chat_request.model);
-            let tokenizer = ctx.state.tokenizer.as_deref().unwrap();
-            let mm_components = ctx.components.multimodal.as_ref().unwrap();
+            let tokenizer = ctx.state.tokenizer.as_deref().ok_or_else(|| {
+                error!(function = "ChatRequestBuildingStage::execute", "tokenizer not set");
+                error::internal_error("tokenizer_missing", "tokenizer not set for multimodal processing")
+            })?;
+            let mm_components = ctx.components.multimodal.as_ref().ok_or_else(|| {
+                error!(function = "ChatRequestBuildingStage::execute", "multimodal components not initialized");
+                error::internal_error("multimodal_not_configured", "multimodal components not initialized")
+            })?;
             let tokenizer_source = ctx
                 .components
                 .tokenizer_registry
