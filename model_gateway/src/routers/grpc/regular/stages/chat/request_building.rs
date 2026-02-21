@@ -63,22 +63,25 @@ impl PipelineStage for ChatRequestBuildingStage {
         let body_ref = prep.filtered_request.as_ref().unwrap_or(&chat_request);
 
         // Build proto request using centralized dispatch
-        let processed_messages = prep.processed_messages.as_ref().ok_or_else(|| {
-            error!(
-                function = "ChatRequestBuildingStage::execute",
-                "processed_messages not set in preparation state"
-            );
-            error::internal_error(
-                "processed_messages_missing",
-                "processed_messages not set - this is a bug in the pipeline",
-            )
-        })?;
+        let processed_messages = prep.processed_messages.as_ref().unwrap();
+
+        // For vLLM with multimodal: use original (unexpanded) token IDs.
+        // vLLM handles its own placeholder expansion internally.
+        let token_ids = if builder_client.is_vllm() {
+            prep.original_token_ids
+                .as_ref()
+                .unwrap_or(&prep.token_ids)
+                .clone()
+        } else {
+            prep.token_ids.clone()
+        };
+
         let mut proto_request = builder_client
             .build_chat_request(
                 request_id,
                 body_ref,
                 processed_messages.text.clone(),
-                prep.token_ids.clone(),
+                token_ids,
                 processed_messages.multimodal_inputs.clone(),
                 prep.tool_constraints.clone(),
             )

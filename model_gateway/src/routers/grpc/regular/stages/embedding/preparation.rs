@@ -76,6 +76,7 @@ impl PipelineStage for EmbeddingPreparationStage {
         ctx.state.preparation = Some(PreparationOutput {
             original_text: Some(text),
             token_ids,
+            original_token_ids: None,
             processed_messages: None,
             tool_constraints: None,
             filtered_request: None,

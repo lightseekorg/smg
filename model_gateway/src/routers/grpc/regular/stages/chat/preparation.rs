@@ -70,6 +70,7 @@ impl ChatPreparationStage {
         };
 
         let mut token_ids = encoding.token_ids().to_vec();
+        let mut original_token_ids: Option<Vec<u32>> = None;
 
         // Step 3.5: Multimodal processing (if images detected in messages)
         let mut multimodal_inputs = None;
@@ -115,6 +116,7 @@ impl ChatPreparationStage {
                             expanded_tokens = mm_output.expanded_token_ids.len(),
                             "Multimodal processing complete"
                         );
+                        original_token_ids = Some(token_ids.clone());
                         token_ids = mm_output.expanded_token_ids;
                         multimodal_inputs = Some(mm_output.multimodal_data);
                     }
@@ -170,6 +172,7 @@ impl ChatPreparationStage {
         ctx.state.preparation = Some(PreparationOutput {
             original_text: Some(processed_messages.text.clone()),
             token_ids,
+            original_token_ids,
             processed_messages: Some(processed_messages),
             tool_constraints: tool_call_constraint,
             filtered_request: if matches!(body_ref, Cow::Owned(_)) {

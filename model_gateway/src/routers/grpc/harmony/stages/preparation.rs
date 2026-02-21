@@ -112,6 +112,7 @@ impl HarmonyPreparationStage {
         ctx.state.preparation = Some(PreparationOutput {
             original_text: None,
             token_ids: build_output.input_ids,
+            original_token_ids: None,
             processed_messages: None,
             tool_constraints,
             filtered_request: if matches!(body_ref, std::borrow::Cow::Owned(_)) {
@@ -193,6 +194,7 @@ impl HarmonyPreparationStage {
         ctx.state.preparation = Some(PreparationOutput {
             original_text: None,
             token_ids: build_output.input_ids,
+            original_token_ids: None,
             processed_messages: None,
             tool_constraints: constraint,
             filtered_request: None,
