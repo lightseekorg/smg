@@ -767,12 +767,13 @@ impl PDRouter {
                         result.push_str(&text);
                     }
                 }
-                ChatMessage::Assistant { content, .. } => {
-                    if let Some(content) = content {
-                        let text = content.to_simple_string();
-                        if !text.is_empty() {
-                            result.push_str(&text);
-                        }
+                ChatMessage::Assistant {
+                    content: Some(content),
+                    ..
+                } => {
+                    let text = content.to_simple_string();
+                    if !text.is_empty() {
+                        result.push_str(&text);
                     }
                 }
                 _ => {}
