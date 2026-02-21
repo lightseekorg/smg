@@ -424,7 +424,7 @@ impl QueueProcessor {
                 // Spawn task only when we actually need to wait
                 #[expect(
                     clippy::disallowed_methods,
-                    reason = "Fire-and-forget permit acquisition: the spawned task sends a result on a oneshot channel that the request is already waiting on, so it cannot outlive the request"
+                    reason = "fire-and-forget permit acquisition: task is bounded by remaining_timeout and communicates via oneshot; dropping the JoinHandle detaches the task but it self-terminates"
                 )]
                 tokio::spawn(async move {
                     if token_bucket

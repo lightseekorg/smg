@@ -248,7 +248,7 @@ async fn test_router_with_tracing() {
     if otel_initialized_by_this_test {
         assert!(
             span_count == 2,
-            "Expected to receive at least 2 span, but got {span_count}. \
+            "Expected to receive exactly 2 spans, but got {span_count}. \
             This indicates that tracing data is not being exported to the OTLP collector."
         );
         println!("Test passed! Collector received {span_count} spans");

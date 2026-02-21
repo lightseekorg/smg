@@ -258,7 +258,7 @@ sglang_gen_throughput{model_name="meta-llama/Llama-3.1-8B-Instruct",source="work
 sglang_prompt_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct",source="worker1"} 8128902
 sglang_prompt_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct",source="worker2"} 8128902"#;
     // result output intentionally omitted for clippy compliance
-    assert_eq_sorted(result.trim(), expected.trim());
+    assert_eq_sorted(&result, expected);
 }
 
 fn assert_eq_sorted(result: &str, expected: &str) {

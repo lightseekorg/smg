@@ -925,7 +925,7 @@ fn validate_tool_choice_with_tools(request: &ResponsesRequest) -> Result<(), Val
     }
 
     // Extract function tool names from ResponseTools
-    // SAFETY: has_tools is true here, so tools is Some and non-empty
+    // INVARIANT: has_tools is true here, so tools is Some and non-empty
     let Some(tools) = request.tools.as_ref() else {
         return Ok(());
     };
