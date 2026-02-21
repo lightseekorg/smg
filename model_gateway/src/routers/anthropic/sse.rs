@@ -23,6 +23,9 @@ use super::mcp::{IterationResult, McpToolCall};
 // Constants
 // ============================================================================
 
+/// Sentinel error string returned when the downstream SSE client disconnects.
+pub(crate) const CLIENT_DISCONNECTED_ERROR: &str = "Client disconnected";
+
 /// Maximum SSE buffer size (1 MB) to prevent DoS from upstream workers
 /// that send data without frame delimiters.
 const MAX_SSE_BUFFER_SIZE: usize = 1024 * 1024;
@@ -212,37 +215,47 @@ where
     F: Fn(&str) -> String,
 {
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer = Vec::<u8>::new();
     let mut processor =
         EventProcessor::new(tx, global_index, is_first_iteration, resolve_server_name);
 
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
-        let text = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&text);
 
-        // Guard against unbounded buffer growth (DoS protection)
-        if buffer.len() > MAX_SSE_BUFFER_SIZE {
+        // Guard against unbounded buffer growth (DoS protection).
+        // Check *before* extending so a single oversized chunk never
+        // causes an allocation beyond the cap.
+        if buffer.len() + chunk.len() > MAX_SSE_BUFFER_SIZE {
             return Err(format!(
                 "SSE buffer exceeded maximum size ({MAX_SSE_BUFFER_SIZE} bytes) — possible malformed upstream stream"
             ));
         }
 
-        // Process complete SSE frames (delimited by double newline)
-        while let Some(frame_end) = buffer.find("\n\n") {
-            let frame: String = buffer.drain(..frame_end + 2).collect();
-            let frame = &frame[..frame.len() - 2]; // strip trailing \n\n
+        buffer.extend_from_slice(&chunk);
 
+        // Process complete SSE frames (delimited by double newline).
+        // UTF-8 validation is deferred to complete frames so that multi-byte
+        // characters split across network chunks don't cause spurious errors.
+        while let Some(pos) = find_double_newline(&buffer) {
+            let frame_bytes = &buffer[..pos];
+            let frame = std::str::from_utf8(frame_bytes)
+                .map_err(|e| format!("Invalid UTF-8 in SSE frame: {e}"))?;
             if let Some((event_type, data)) = parse_sse_frame(frame) {
                 processor.process(&event_type, &data).await?;
             }
+            buffer.drain(..pos + 2);
         }
     }
 
     // Process any remaining data in buffer
-    if !buffer.trim().is_empty() {
-        if let Some((event_type, data)) = parse_sse_frame(&buffer) {
-            processor.process(&event_type, &data).await?;
+    if !buffer.is_empty() {
+        let remaining = std::str::from_utf8(&buffer)
+            .map_err(|e| format!("Invalid UTF-8 in final SSE data: {e}"))?;
+        let trimmed = remaining.trim();
+        if !trimmed.is_empty() {
+            if let Some((event_type, data)) = parse_sse_frame(trimmed) {
+                processor.process(&event_type, &data).await?;
+            }
         }
     }
 
@@ -430,6 +443,14 @@ where
         }
     }
 
+    /// Send an SSE event to the client, returning `Err` on disconnect.
+    async fn send(&self, event_type: &str, data: &Value) -> Result<(), String> {
+        if !send_event(self.tx, event_type, data).await {
+            return Err(CLIENT_DISCONNECTED_ERROR.into());
+        }
+        Ok(())
+    }
+
     /// Process a single SSE event from the upstream worker.
     async fn process(&mut self, event_type: &str, data: &str) -> Result<(), String> {
         let mut parsed: Value =
@@ -438,23 +459,24 @@ where
         match event_type {
             "message_start" => {
                 if self.is_first_iteration {
-                    send_event(self.tx, "message_start", &parsed).await;
+                    self.send("message_start", &parsed).await?;
                 }
             }
             "content_block_start" => self.handle_block_start(&mut parsed).await?,
-            "content_block_delta" => self.handle_block_delta(&mut parsed).await,
-            "content_block_stop" => self.handle_block_stop(&parsed).await,
+            "content_block_delta" => self.handle_block_delta(&mut parsed).await?,
+            "content_block_stop" => self.handle_block_stop(&parsed).await?,
             "message_delta" => self.handle_message_delta(&parsed),
             "message_stop" => { /* Don't forward — we emit our own at the end */ }
             "ping" => {
-                send_event(self.tx, "ping", &serde_json::json!({"type": "ping"})).await;
+                self.send("ping", &serde_json::json!({"type": "ping"}))
+                    .await?;
             }
             "error" => {
-                send_event(self.tx, "error", &parsed).await;
+                self.send("error", &parsed).await?;
             }
             _ => {
                 debug!(event_type = %event_type, "Forwarding unknown SSE event type");
-                send_event(self.tx, event_type, &parsed).await;
+                self.send(event_type, &parsed).await?;
             }
         }
 
@@ -488,12 +510,12 @@ where
         if block_type == "tool_use" {
             let content_block = parsed.get("content_block").cloned().unwrap_or(Value::Null);
             self.emit_mcp_tool_use_start(&content_block, upstream_index, client_index)
-                .await;
+                .await?;
         } else {
             // Initialize accumulator before mutating parsed (block_type borrows parsed)
             self.upstream_blocks[upstream_index as usize] = BlockAccumulator::for_type(block_type);
             parsed["index"] = Value::from(client_index);
-            send_event(self.tx, "content_block_start", parsed).await;
+            self.send("content_block_start", parsed).await?;
         }
 
         Ok(())
@@ -505,7 +527,7 @@ where
         content_block: &Value,
         upstream_index: u32,
         client_index: u32,
-    ) {
+    ) -> Result<(), String> {
         let id = content_block
             .get("id")
             .and_then(|v| v.as_str())
@@ -530,18 +552,19 @@ where
                 "input": {}
             }
         });
-        send_event(self.tx, "content_block_start", &event).await;
+        self.send("content_block_start", &event).await?;
 
         self.upstream_blocks[upstream_index as usize] = BlockAccumulator::ToolUse {
             id,
             name,
             input_json: String::new(),
         };
+        Ok(())
     }
 
     /// Handle a `content_block_delta` event: accumulate content and forward
     /// with remapped index.
-    async fn handle_block_delta(&mut self, parsed: &mut Value) {
+    async fn handle_block_delta(&mut self, parsed: &mut Value) -> Result<(), String> {
         let upstream_index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let client_index = self.index_base + upstream_index;
 
@@ -553,12 +576,12 @@ where
         }
 
         parsed["index"] = Value::from(client_index);
-        send_event(self.tx, "content_block_delta", parsed).await;
+        self.send("content_block_delta", parsed).await
     }
 
     /// Handle a `content_block_stop` event: finalize the accumulated block
     /// and update the global index.
-    async fn handle_block_stop(&mut self, parsed: &Value) {
+    async fn handle_block_stop(&mut self, parsed: &Value) -> Result<(), String> {
         let upstream_index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let client_index = self.index_base + upstream_index;
 
@@ -566,7 +589,7 @@ where
             "type": "content_block_stop",
             "index": client_index
         });
-        send_event(self.tx, "content_block_stop", &event).await;
+        self.send("content_block_stop", &event).await?;
 
         if let Some(block) = self.upstream_blocks.get(upstream_index as usize) {
             let (content_block, tool_use) = block.finalize();
@@ -577,6 +600,7 @@ where
         }
 
         *self.global_index = (*self.global_index).max(client_index + 1);
+        Ok(())
     }
 
     /// Handle a `message_delta` event: capture stop_reason and usage
@@ -597,6 +621,11 @@ where
 // ============================================================================
 // SSE frame parsing
 // ============================================================================
+
+/// Find the position of `\n\n` in a byte buffer.
+fn find_double_newline(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\n\n")
+}
 
 /// Parse a raw SSE frame into `(event_type, data)`.
 ///
