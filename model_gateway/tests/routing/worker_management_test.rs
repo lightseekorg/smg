@@ -34,7 +34,7 @@ mod worker_management_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // List workers via GET /workers
         let req = Request::builder()
@@ -67,7 +67,7 @@ mod worker_management_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
         let mut success_count = 0;
 
         // Verify routing distributes across workers
@@ -106,7 +106,7 @@ mod worker_management_tests {
         let ctx =
             AppTestContext::new_with_config(config, vec![TestWorkerConfig::healthy(19904)]).await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Send requests and verify they succeed
         let mut success_count = 0;

@@ -54,7 +54,7 @@ fn merge_exposition(
     b: PrometheusExposition,
 ) -> anyhow::Result<PrometheusExposition> {
     let mut ans = a;
-    for (name, family_b) in b.families.into_iter() {
+    for (name, family_b) in b.families {
         let family_merged = if let Some(family_a) = ans.families.remove(&name) {
             merge_family(family_a, family_b)?
         } else {

@@ -67,7 +67,7 @@ fn test_rerank_request_validation_success() {
 #[test]
 fn test_rerank_request_validation_empty_query() {
     let request = RerankRequest {
-        query: "".to_string(),
+        query: String::new(),
         documents: vec!["doc1".to_string()],
         model: "test-model".to_string(),
         top_k: None,
@@ -415,7 +415,7 @@ fn test_rerank_request_very_long_query() {
 
 #[test]
 fn test_rerank_request_many_documents() {
-    let documents: Vec<String> = (0..1000).map(|i| format!("doc{}", i)).collect();
+    let documents: Vec<String> = (0..1000).map(|i| format!("doc{i}")).collect();
     let request = RerankRequest {
         query: "test query".to_string(),
         documents,

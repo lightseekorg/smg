@@ -74,7 +74,7 @@ pub(crate) fn resolve_tokenizer(
             );
             Box::new(error::internal_error(
                 "tokenizer_not_found",
-                format!("Tokenizer not found for model: {}", model_id),
+                format!("Tokenizer not found for model: {model_id}"),
             ))
         })?;
 
@@ -100,7 +100,7 @@ pub(crate) async fn get_grpc_client_from_worker(
             );
             error::internal_error(
                 "get_grpc_client_failed",
-                format!("Failed to get gRPC client: {}", e),
+                format!("Failed to get gRPC client: {e}"),
             )
         })?
         .ok_or_else(|| {
@@ -146,8 +146,7 @@ fn process_tool_call_arguments(messages: &mut [Value]) -> Result<(), String> {
                 Ok(parsed) => *args = parsed,
                 Err(e) => {
                     return Err(format!(
-                        "Failed to parse tool call arguments as JSON: '{}'. Error: {}",
-                        args_str, e
+                        "Failed to parse tool call arguments as JSON: '{args_str}'. Error: {e}"
                     ))
                 }
             }
@@ -165,7 +164,7 @@ pub(crate) fn process_content_format(
         .iter()
         .map(|message| {
             let mut message_json = serde_json::to_value(message)
-                .map_err(|e| format!("Failed to serialize message: {}", e))?;
+                .map_err(|e| format!("Failed to serialize message: {e}"))?;
 
             if let Some(obj) = message_json.as_object_mut() {
                 if let Some(content_value) = obj.get_mut("content") {
@@ -229,10 +228,10 @@ fn transform_content_field(content_value: &mut Value, content_format: ChatTempla
 /// Note: tools should already be filtered if needed (by allowed_tools or specific function)
 pub fn generate_tool_constraints(
     tools: &[Tool],
-    tool_choice: &Option<ToolChoice>,
+    tool_choice: Option<&ToolChoice>,
     _model: &str,
 ) -> Result<Option<(String, String)>, String> {
-    let Some(choice) = tool_choice.as_ref() else {
+    let Some(choice) = tool_choice else {
         return Ok(None);
     };
 
@@ -247,7 +246,7 @@ pub fn generate_tool_constraints(
 
             // Return the tool's parameters schema directly (not wrapped in array)
             let params_schema = serde_json::to_string(&tool.function.parameters)
-                .map_err(|e| format!("Failed to serialize tool parameters: {}", e))?;
+                .map_err(|e| format!("Failed to serialize tool parameters: {e}"))?;
             Ok(Some((String::from("json_schema"), params_schema)))
         }
 
@@ -272,7 +271,7 @@ pub fn generate_tool_constraints(
         }
 
         // "auto" or "none" - no constraint
-        _ => Ok(None),
+        ToolChoice::Value(_) => Ok(None),
     }
 }
 
@@ -304,8 +303,7 @@ fn build_required_array_schema(tools: &[Tool]) -> Result<String, String> {
                         // Check for conflicts
                         if existing != def_schema {
                             let error_msg = format!(
-                                "Tool definition '{}' has multiple conflicting schemas, which is not supported",
-                                def_name
+                                "Tool definition '{def_name}' has multiple conflicting schemas, which is not supported"
                             );
                             error!("{}", error_msg);
                             return Err(error_msg);
@@ -336,7 +334,7 @@ fn build_required_array_schema(tools: &[Tool]) -> Result<String, String> {
     }
 
     serde_json::to_string(&array_schema)
-        .map_err(|e| format!("Failed to serialize tool schema: {}", e))
+        .map_err(|e| format!("Failed to serialize tool schema: {e}"))
 }
 
 /// Filter tools based on tool_choice (generic helper)
@@ -345,7 +343,7 @@ fn build_required_array_schema(tools: &[Tool]) -> Result<String, String> {
 /// Used by both Chat API and Responses API (Harmony) for constraint generation.
 pub(crate) fn filter_tools_by_tool_choice(
     tools: &[Tool],
-    tool_choice: &Option<ToolChoice>,
+    tool_choice: Option<&ToolChoice>,
 ) -> Option<Vec<Tool>> {
     match tool_choice {
         Some(ToolChoice::AllowedTools { tools: allowed, .. }) => {
@@ -381,7 +379,8 @@ pub(crate) fn filter_chat_request_by_tool_choice(
     body: &ChatCompletionRequest,
 ) -> std::borrow::Cow<'_, ChatCompletionRequest> {
     if let Some(tools) = &body.tools {
-        if let Some(filtered_tools) = filter_tools_by_tool_choice(tools, &body.tool_choice) {
+        if let Some(filtered_tools) = filter_tools_by_tool_choice(tools, body.tool_choice.as_ref())
+        {
             let mut filtered_body = body.clone();
             filtered_body.tools = Some(filtered_tools);
             return std::borrow::Cow::Owned(filtered_body);
@@ -417,7 +416,7 @@ pub fn process_chat_messages(
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()
-            .map_err(|e| format!("Failed to serialize tools: {}", e))?;
+            .map_err(|e| format!("Failed to serialize tools: {e}"))?;
 
         let kwargs_capacity = 1 + request.chat_template_kwargs.as_ref().map_or(0, |k| k.len());
         let mut combined_template_kwargs = HashMap::with_capacity(kwargs_capacity);
@@ -459,8 +458,14 @@ pub fn process_chat_messages(
                 .and_then(|v| v.as_str())
                 == Some("assistant")
         {
-            // Pop the last message to handle it separately
-            let last_msg = transformed_messages.pop().unwrap();
+            // Pop the last message to handle it separately — guarded by !is_empty() check above
+            let Some(last_msg) = transformed_messages.pop() else {
+                return Ok(ProcessedMessages {
+                    text: String::new(),
+                    multimodal_inputs: None,
+                    stop_sequences: request.stop.clone(),
+                });
+            };
             last_msg
                 .get("content")
                 .and_then(|v| v.as_str())
@@ -472,11 +477,11 @@ pub fn process_chat_messages(
         // Apply chat template with the (now possibly shorter) list of messages
         let rendered = tokenizer
             .apply_chat_template(&transformed_messages, params)
-            .map_err(|e| format!("Failed to apply chat template: {}", e))?;
+            .map_err(|e| format!("Failed to apply chat template: {e}"))?;
 
         // Append assistant prefix if we have one
         if let Some(prefix) = assistant_prefix {
-            format!("{}{}", rendered, prefix)
+            format!("{rendered}{prefix}")
         } else {
             rendered
         }
@@ -537,7 +542,7 @@ pub fn create_stop_decoder(
 /// Parse tool calls from JSON schema constrained response
 pub(crate) fn parse_json_schema_response(
     processed_text: &str,
-    tool_choice: &Option<ToolChoice>,
+    tool_choice: Option<&ToolChoice>,
     model: &str,
     history_tool_calls_count: usize,
 ) -> (Option<Vec<ToolCall>>, String) {
@@ -658,7 +663,7 @@ pub(crate) async fn collect_stream_responses(
                 // Don't mark as completed - let Drop send abort for error cases
                 return Err(error::internal_error(
                     "worker_stream_failed",
-                    format!("{} stream failed: {}", worker_name, e),
+                    format!("{worker_name} stream failed: {e}"),
                 ));
             }
         }
@@ -928,12 +933,12 @@ pub(crate) fn convert_proto_logprobs(
 pub(crate) fn convert_proto_to_openai_logprobs(
     proto_logprobs: &ProtoOutputLogProbs,
     tokenizer: &Arc<dyn Tokenizer>,
-) -> Result<ChatLogProbs, String> {
-    Ok(convert_proto_logprobs(proto_logprobs, |token_id| {
+) -> ChatLogProbs {
+    convert_proto_logprobs(proto_logprobs, |token_id| {
         tokenizer
             .decode(&[token_id], false)
-            .unwrap_or_else(|_| format!("<token_{}>", token_id))
-    }))
+            .unwrap_or_else(|_| format!("<token_{token_id}>"))
+    })
 }
 
 /// Convert OutputLogProbs to Generate format Vec<Vec<Option<f64>>>

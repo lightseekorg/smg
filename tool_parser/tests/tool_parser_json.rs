@@ -358,8 +358,7 @@ async fn test_json_array_closing_bracket_separate_chunk() {
     // Should emit only the third chunk as normal text, NOT the ]
     assert_eq!(
         all_normal_text, " Here's the weather info",
-        "Should emit only normal text without ], got: '{}'",
-        all_normal_text
+        "Should emit only normal text without ], got: '{all_normal_text}'",
     );
 }
 
@@ -412,8 +411,7 @@ async fn test_json_single_object_with_trailing_text() {
     // Should emit the trailing text as normal_text (no ] to strip for single object)
     assert_eq!(
         all_normal_text, " Here's the weather",
-        "Should emit normal text for single object format, got: '{}'",
-        all_normal_text
+        "Should emit normal text for single object format, got: '{all_normal_text}'",
     );
 }
 
@@ -464,8 +462,7 @@ async fn test_json_single_object_with_bracket_in_text() {
     // For single object format, ] should NOT be stripped (it's part of normal text)
     assert_eq!(
         all_normal_text, "] Here's the weather",
-        "Should preserve ] in normal text for single object format, got: '{}'",
-        all_normal_text
+        "Should preserve ] in normal text for single object format, got: '{all_normal_text}'",
     );
 }
 
@@ -520,8 +517,7 @@ async fn test_json_array_bracket_in_text_after_tools() {
     // Should preserve ] in normal text after array tools complete
     assert_eq!(
         all_normal_text, " Array notation: arr[0]",
-        "Should preserve ] in normal text after array tools, got: '{}'",
-        all_normal_text
+        "Should preserve ] in normal text after array tools, got: '{all_normal_text}'",
     );
 }
 // =============================================================================
@@ -536,36 +532,36 @@ async fn test_json_bug_incomplete_tool_name_string() {
     // This exact sequence triggered the bug:
     // Parser receives {"name": " and must NOT parse it as empty name
     let chunks = vec![
-        r#"{"#,
+        r"{",
         r#"""#,
-        r#"name"#,
+        r"name",
         r#"""#,
-        r#":"#,
-        r#" "#,
+        r":",
+        r" ",
         r#"""#, // ← Critical moment: parser has {"name": "
         // At this point, partial_json should NOT allow incomplete strings
         // when current_tool_name_sent=false
-        r#"search"#, // Use valid tool name from create_test_tools()
+        r"search", // Use valid tool name from create_test_tools()
         r#"""#,
-        r#", "#,
+        r", ",
         r#"""#,
-        r#"arguments"#,
+        r"arguments",
         r#"""#,
-        r#": {"#,
+        r": {",
         r#"""#,
-        r#"query"#,
+        r"query",
         r#"""#,
-        r#": "#,
+        r": ",
         r#"""#,
-        r#"rust programming"#,
+        r"rust programming",
         r#"""#,
-        r#"}}"#,
+        r"}}",
     ];
 
     let mut got_tool_name = false;
     let mut saw_empty_name = false;
 
-    for chunk in chunks.iter() {
+    for chunk in &chunks {
         let result = parser.parse_incremental(chunk, &tools).await.unwrap();
 
         for call in result.calls {
@@ -671,10 +667,7 @@ async fn test_json_very_long_url_in_arguments() {
 
     // Simulate long URL arriving in many chunks
     let long_url = "https://example.com/very/long/path/".to_string() + &"segment/".repeat(50);
-    let input = format!(
-        r#"{{"name": "search", "arguments": {{"query": "{}"}}}}"#,
-        long_url
-    );
+    let input = format!(r#"{{"name": "search", "arguments": {{"query": "{long_url}"}}}}"#,);
     let chunks = streaming_helpers::create_realistic_chunks(&input);
 
     assert!(chunks.len() > 100, "Long URL should create many chunks");

@@ -145,6 +145,10 @@ impl Phi4VisionProcessor {
     ///
     /// Returns sorted list of (width_crops, height_crops) tuples where
     /// min_num <= w * h <= max_num.
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the processor; keeps API consistent"
+    )]
     fn compute_target_ratios(&self, min_num: usize, max_num: usize) -> Vec<(usize, usize)> {
         let mut ratios: HashSet<(usize, usize)> = HashSet::new();
         for n in min_num..=max_num {
@@ -201,7 +205,7 @@ impl Phi4VisionProcessor {
     fn dynamic_preprocess(
         &self,
         image: &DynamicImage,
-    ) -> Result<(DynamicImage, Array2<u32>, usize, usize), TransformError> {
+    ) -> (DynamicImage, Array2<u32>, usize, usize) {
         let (orig_w, orig_h) = image.dimensions();
         let base_res = self.base_resolution as f64;
 
@@ -274,10 +278,14 @@ impl Phi4VisionProcessor {
         // Pad to target dimensions (white padding on right/bottom)
         let padded = self.pad_image(&resized, target_width, target_height);
 
-        Ok((padded, attention_mask, target_h_crops, target_w_crops))
+        (padded, attention_mask, target_h_crops, target_w_crops)
     }
 
     /// Pad image to target dimensions with white padding.
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the processor; keeps API consistent"
+    )]
     fn pad_image(&self, image: &DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
         let (w, h) = image.dimensions();
         if w == target_w && h == target_h {
@@ -359,6 +367,10 @@ impl Phi4VisionProcessor {
     /// - mask_sum: sum of downsampled attention mask (valid HD tokens)
     /// - mask_col0_sum: sum of first column (row separators)
     /// - 16: additional fixed tokens
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the processor; keeps API consistent"
+    )]
     fn calculate_num_tokens(&self, downsampled_mask: &Array2<u32>) -> usize {
         let mask_sum: u32 = downsampled_mask.iter().sum();
         let mask_col0_sum: u32 = downsampled_mask.column(0).iter().sum();
@@ -366,12 +378,9 @@ impl Phi4VisionProcessor {
     }
 
     /// Process a single image.
-    fn process_single_image(
-        &self,
-        image: &DynamicImage,
-    ) -> Result<SingleImageResult, TransformError> {
+    fn process_single_image(&self, image: &DynamicImage) -> SingleImageResult {
         // Step 1: Dynamic preprocess (resize, pad, create attention mask)
-        let (hd_image, attention_mask, h_crops, w_crops) = self.dynamic_preprocess(image)?;
+        let (hd_image, attention_mask, h_crops, w_crops) = self.dynamic_preprocess(image);
 
         let hd_h = hd_image.height();
         let hd_w = hd_image.width();
@@ -429,7 +438,7 @@ impl Phi4VisionProcessor {
         let downsampled = self.downsample_mask(&attention_mask, h_crops, w_crops);
         let num_tokens = self.calculate_num_tokens(&downsampled);
 
-        Ok((output, combined_mask, (hd_h, hd_w), num_tokens))
+        (output, combined_mask, (hd_h, hd_w), num_tokens)
     }
 }
 
@@ -466,7 +475,7 @@ impl ImagePreProcessor for Phi4VisionProcessor {
         let mut num_img_tokens = Vec::new();
 
         for image in images {
-            let (output, mask, size, tokens) = processor.process_single_image(image)?;
+            let (output, mask, size, tokens) = processor.process_single_image(image);
             all_outputs.push(output);
             all_masks.push(mask);
             image_sizes.push(size);
@@ -474,7 +483,11 @@ impl ImagePreProcessor for Phi4VisionProcessor {
         }
 
         // Find max crops across batch for padding
-        let max_crops = all_outputs.iter().map(|o| o.shape()[0]).max().unwrap();
+        let max_crops = all_outputs
+            .iter()
+            .map(|o| o.shape()[0])
+            .max()
+            .ok_or(TransformError::EmptyBatch)?;
         let base = self.base_resolution as usize;
         let mask_res = self.mask_resolution;
 

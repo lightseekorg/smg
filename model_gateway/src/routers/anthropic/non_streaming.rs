@@ -44,8 +44,8 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
     );
 
     // Inject MCP tools into the request as regular tools
-    let allowed_tools = mcp::collect_allowed_tools_from_toolsets(&req_ctx.request.tools);
-    mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session, &allowed_tools);
+    let allowed_tools = mcp::collect_allowed_tools_from_toolsets(req_ctx.request.tools.as_deref());
+    mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session, allowed_tools.as_deref());
 
     let mut all_mcp_calls: Vec<mcp::McpToolCall> = Vec::new();
 
@@ -98,10 +98,7 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
     );
     error::bad_gateway(
         "mcp_max_iterations",
-        format!(
-            "MCP tool loop exceeded maximum iterations ({})",
-            DEFAULT_MAX_ITERATIONS
-        ),
+        format!("MCP tool loop exceeded maximum iterations ({DEFAULT_MAX_ITERATIONS})"),
     )
 }
 

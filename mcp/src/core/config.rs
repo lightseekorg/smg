@@ -255,15 +255,13 @@ impl fmt::Display for ConfigValidationError {
             ConfigValidationError::MissingBuiltinToolName { server } => {
                 write!(
                     f,
-                    "server '{}': builtin_type is set but builtin_tool_name is missing",
-                    server
+                    "server '{server}': builtin_type is set but builtin_tool_name is missing"
                 )
             }
             ConfigValidationError::MissingBuiltinType { server, tool_name } => {
                 write!(
                     f,
-                    "server '{}': builtin_tool_name '{}' is set but builtin_type is missing",
-                    server, tool_name
+                    "server '{server}': builtin_tool_name '{tool_name}' is set but builtin_type is missing"
                 )
             }
             ConfigValidationError::DuplicateBuiltinType {
@@ -273,8 +271,7 @@ impl fmt::Display for ConfigValidationError {
             } => {
                 write!(
                     f,
-                    "duplicate builtin_type '{}': configured on both '{}' and '{}'",
-                    builtin_type, first_server, second_server
+                    "duplicate builtin_type '{builtin_type}': configured on both '{first_server}' and '{second_server}'"
                 )
             }
         }
@@ -301,7 +298,7 @@ pub enum BuiltinToolType {
 
 impl BuiltinToolType {
     /// Get the corresponding response format for this built-in type.
-    pub fn response_format(&self) -> ResponseFormatConfig {
+    pub fn response_format(self) -> ResponseFormatConfig {
         match self {
             BuiltinToolType::WebSearchPreview => ResponseFormatConfig::WebSearchCall,
             BuiltinToolType::CodeInterpreter => ResponseFormatConfig::CodeInterpreterCall,
@@ -606,7 +603,7 @@ impl McpConfig {
                 if let Some(first_server) = builtin_types.get(builtin_type) {
                     return Err(ConfigValidationError::DuplicateBuiltinType {
                         builtin_type: *builtin_type,
-                        first_server: first_server.to_string(),
+                        first_server: (*first_server).to_string(),
                         second_server: server.name.clone(),
                     });
                 }
@@ -1036,9 +1033,9 @@ tools:
 
     #[test]
     fn test_policy_config_yaml_minimal() {
-        let yaml = r#"
+        let yaml = r"
 servers: []
-"#;
+";
 
         let config: McpConfig = serde_yaml::from_str(yaml).expect("Failed to parse");
         assert_eq!(config.policy.default, PolicyDecisionConfig::Allow);

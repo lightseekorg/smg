@@ -288,9 +288,8 @@ impl ToolChoice {
     /// Serialize tool_choice to string for ResponsesResponse
     ///
     /// Returns the JSON-serialized tool_choice or "auto" as default
-    pub fn serialize_to_string(tool_choice: &Option<ToolChoice>) -> String {
+    pub fn serialize_to_string(tool_choice: Option<&ToolChoice>) -> String {
         tool_choice
-            .as_ref()
             .map(|tc| serde_json::to_string(tc).unwrap_or_else(|_| "auto".to_string()))
             .unwrap_or_else(|| "auto".to_string())
     }
@@ -347,12 +346,12 @@ impl ToolReference {
     /// Get a unique identifier for this tool reference
     pub fn identifier(&self) -> String {
         match self {
-            ToolReference::Function { name } => format!("function:{}", name),
+            ToolReference::Function { name } => format!("function:{name}"),
             ToolReference::Mcp { server_label, name } => {
                 if let Some(n) = name {
-                    format!("mcp:{}:{}", server_label, n)
+                    format!("mcp:{server_label}:{n}")
                 } else {
-                    format!("mcp:{}", server_label)
+                    format!("mcp:{server_label}")
                 }
             }
             ToolReference::FileSearch => "file_search".to_string(),
@@ -429,8 +428,7 @@ impl<'de> Deserialize<'de> for FunctionCall {
                 "none" => Ok(FunctionCall::None),
                 "auto" => Ok(FunctionCall::Auto),
                 other => Err(serde::de::Error::custom(format!(
-                    "unknown function_call value: \"{}\"",
-                    other
+                    "unknown function_call value: \"{other}\""
                 ))),
             },
             Value::Object(map) => {
@@ -623,6 +621,10 @@ pub enum PromptVariable {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "variant names match OpenAI API spec"
+)]
 pub enum PromptVariableTyped {
     #[serde(rename = "input_text")]
     ResponseInputText { text: String },

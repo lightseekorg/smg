@@ -137,15 +137,13 @@ pub(crate) fn configure_oracle_env(config: &OracleConfig) -> Result<(), String> 
 
         if !path.is_dir() {
             return Err(format!(
-                "Oracle wallet path '{}' is not a directory",
-                wallet_path
+                "Oracle wallet path '{wallet_path}' is not a directory"
             ));
         }
 
         if !path.join("tnsnames.ora").exists() && !path.join("sqlnet.ora").exists() {
             return Err(format!(
-                "Oracle wallet path '{}' is missing tnsnames.ora or sqlnet.ora",
-                wallet_path
+                "Oracle wallet path '{wallet_path}' is missing tnsnames.ora or sqlnet.ora"
             ));
         }
 
@@ -220,7 +218,7 @@ impl Manager for OracleConnectionManager {
         }
     }
 
-    #[allow(clippy::manual_async_fn)]
+    #[expect(clippy::manual_async_fn)]
     fn recycle(
         &self,
         conn: &mut Connection,
@@ -993,7 +991,7 @@ impl ResponseStorage for OracleResponseStorage {
         self.store
             .execute(move |conn| {
                 let mut stmt = conn
-                    .statement(&format!("{} WHERE id = :1", SELECT_BASE))
+                    .statement(&format!("{SELECT_BASE} WHERE id = :1"))
                     .build()
                     .map_err(map_oracle_error)?;
                 let mut rows = stmt.query(&[&id]).map_err(map_oracle_error)?;
@@ -1040,7 +1038,7 @@ impl ResponseStorage for OracleResponseStorage {
             let fetched = self.get_response(lookup_id).await?;
             match fetched {
                 Some(response) => {
-                    current_id = response.previous_response_id.clone();
+                    current_id.clone_from(&response.previous_response_id);
                     chain.responses.push(response);
                     visited += 1;
                 }
@@ -1063,11 +1061,10 @@ impl ResponseStorage for OracleResponseStorage {
             .execute(move |conn| {
                 let sql = if let Some(limit) = limit {
                     format!(
-                        "SELECT * FROM ({} WHERE safety_identifier = :1 ORDER BY created_at DESC) WHERE ROWNUM <= {}",
-                        SELECT_BASE, limit
+                        "SELECT * FROM ({SELECT_BASE} WHERE safety_identifier = :1 ORDER BY created_at DESC) WHERE ROWNUM <= {limit}"
                     )
                 } else {
-                    format!("{} WHERE safety_identifier = :1 ORDER BY created_at DESC", SELECT_BASE)
+                    format!("{SELECT_BASE} WHERE safety_identifier = :1 ORDER BY created_at DESC")
                 };
 
                 let mut stmt = conn.statement(&sql).build().map_err(map_oracle_error)?;

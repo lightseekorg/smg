@@ -84,10 +84,11 @@ impl ResponsesResponseBuilder {
     /// Note: `safety_identifier` is intentionally NOT copied as it is for content moderation
     /// and should be set independently from the request's `user` field (which is for billing/tracking).
     pub fn copy_from_request(mut self, request: &ResponsesRequest) -> Self {
-        self.instructions = request.instructions.clone();
+        self.instructions.clone_from(&request.instructions);
         self.max_output_tokens = request.max_output_tokens;
         self.parallel_tool_calls = request.parallel_tool_calls.unwrap_or(true);
-        self.previous_response_id = request.previous_response_id.clone();
+        self.previous_response_id
+            .clone_from(&request.previous_response_id);
         self.store = request.store.unwrap_or(true);
         self.temperature = request.temperature;
         self.tool_choice = if let Some(ref tc) = request.tool_choice {
@@ -97,7 +98,7 @@ impl ResponsesResponseBuilder {
         };
         self.tools = request.tools.clone().unwrap_or_default();
         self.top_p = request.top_p;
-        self.user = request.user.clone();
+        self.user.clone_from(&request.user);
         self.metadata = request.metadata.clone().unwrap_or_default();
         self
     }

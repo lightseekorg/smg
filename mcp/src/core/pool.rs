@@ -41,12 +41,12 @@ impl PoolKey {
                 url,
                 token,
                 headers,
-            } => (url.clone(), Self::hash_auth(token, headers)),
+            } => (url.clone(), Self::hash_auth(token.as_ref(), headers)),
             McpTransport::Sse {
                 url,
                 token,
                 headers,
-            } => (url.clone(), Self::hash_auth(token, headers)),
+            } => (url.clone(), Self::hash_auth(token.as_ref(), headers)),
             McpTransport::Stdio { command, args, .. } => {
                 (format!("{}:{}", command, args.join(" ")), 0)
             }
@@ -59,7 +59,7 @@ impl PoolKey {
     }
 
     /// Hash token and headers. Returns 0 if no auth info.
-    fn hash_auth(token: &Option<String>, headers: &HashMap<String, String>) -> u64 {
+    fn hash_auth(token: Option<&String>, headers: &HashMap<String, String>) -> u64 {
         if token.is_none() && headers.is_empty() {
             return 0;
         }
@@ -113,10 +113,10 @@ impl McpConnectionPool {
 
     /// Create pool with defaults (200 connections, proxy from env).
     pub fn new() -> Self {
+        let cache_cap = std::num::NonZeroUsize::new(Self::DEFAULT_MAX_CONNECTIONS)
+            .unwrap_or(std::num::NonZeroUsize::MIN);
         Self {
-            connections: Arc::new(Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(Self::DEFAULT_MAX_CONNECTIONS).unwrap(),
-            ))),
+            connections: Arc::new(Mutex::new(LruCache::new(cache_cap))),
             max_connections: Self::DEFAULT_MAX_CONNECTIONS,
             global_proxy: McpProxyConfig::from_env(),
             eviction_callback: None,
@@ -124,10 +124,11 @@ impl McpConnectionPool {
     }
 
     pub fn with_capacity(max_connections: usize) -> Self {
+        let max_connections = max_connections.max(1);
+        let cache_cap =
+            std::num::NonZeroUsize::new(max_connections).unwrap_or(std::num::NonZeroUsize::MIN);
         Self {
-            connections: Arc::new(Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(max_connections).unwrap(),
-            ))),
+            connections: Arc::new(Mutex::new(LruCache::new(cache_cap))),
             max_connections,
             global_proxy: McpProxyConfig::from_env(),
             eviction_callback: None,
@@ -135,10 +136,11 @@ impl McpConnectionPool {
     }
 
     pub fn with_full_config(max_connections: usize, global_proxy: Option<McpProxyConfig>) -> Self {
+        let max_connections = max_connections.max(1);
+        let cache_cap =
+            std::num::NonZeroUsize::new(max_connections).unwrap_or(std::num::NonZeroUsize::MIN);
         Self {
-            connections: Arc::new(Mutex::new(LruCache::new(
-                std::num::NonZeroUsize::new(max_connections).unwrap(),
-            ))),
+            connections: Arc::new(Mutex::new(LruCache::new(cache_cap))),
             max_connections,
             global_proxy,
             eviction_callback: None,

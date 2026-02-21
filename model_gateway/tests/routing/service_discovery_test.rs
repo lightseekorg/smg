@@ -48,7 +48,7 @@ mod service_discovery_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Check if service discovery endpoint exists
         let req = Request::builder()
@@ -96,7 +96,7 @@ mod service_discovery_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Register a new worker via discovery endpoint
         let register_payload = json!({
@@ -163,7 +163,7 @@ mod service_discovery_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Deregister a worker via discovery endpoint
         let deregister_payload = json!({
@@ -239,7 +239,7 @@ mod service_discovery_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Check health endpoint
         let req = Request::builder()

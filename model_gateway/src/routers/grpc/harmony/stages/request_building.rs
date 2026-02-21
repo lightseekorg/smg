@@ -102,7 +102,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
             GrpcClient::Sglang(sglang_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
-                        let body = prep.filtered_request.as_ref().unwrap_or(request.as_ref());
+                        let body = prep.filtered_request.as_ref().unwrap_or_else(|| request.as_ref());
                         sglang_client
                             .build_generate_request_from_chat(
                                 request_id,
@@ -114,7 +114,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build SGLang generate request");
-                                error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {}", e))
+                                error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
                             })?
                     }
                     RequestType::Responses(request) => sglang_client
@@ -128,7 +128,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                         )
                         .map_err(|e| {
                             error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build SGLang generate request from responses");
-                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {}", e))
+                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
                         })?,
                     RequestType::Embedding(_) => {
                         return Err(error::bad_request(
@@ -136,14 +136,19 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             "Embedding requests are not supported with Harmony models".to_string(),
                         ));
                     }
-                    _ => unreachable!(),
+                    _ => {
+                        return Err(error::bad_request(
+                            "unsupported_request_type",
+                            "Unsupported request type for Harmony models".to_string(),
+                        ));
+                    }
                 };
                 ProtoGenerateRequest::Sglang(Box::new(req))
             }
             GrpcClient::Vllm(vllm_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
-                        let body = prep.filtered_request.as_ref().unwrap_or(request.as_ref());
+                        let body = prep.filtered_request.as_ref().unwrap_or_else(|| request.as_ref());
                         vllm_client
                             .build_generate_request_from_chat(
                                 request_id,
@@ -154,7 +159,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build vLLM generate request");
-                                error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {}", e))
+                                error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
                             })?
                     }
                     RequestType::Responses(request) => vllm_client
@@ -168,7 +173,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                         )
                         .map_err(|e| {
                             error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build vLLM generate request from responses");
-                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {}", e))
+                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
                         })?,
                     RequestType::Embedding(_) => {
                         return Err(error::bad_request(
@@ -176,14 +181,19 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             "Embedding requests are not supported with Harmony models".to_string(),
                         ));
                     }
-                    _ => unreachable!(),
+                    _ => {
+                        return Err(error::bad_request(
+                            "unsupported_request_type",
+                            "Unsupported request type for Harmony models".to_string(),
+                        ));
+                    }
                 };
                 ProtoGenerateRequest::Vllm(Box::new(req))
             }
             GrpcClient::Trtllm(trtllm_client) => {
                 let req = match &ctx.input.request_type {
                     RequestType::Chat(request) => {
-                        let body = prep.filtered_request.as_ref().unwrap_or(request.as_ref());
+                        let body = prep.filtered_request.as_ref().unwrap_or_else(|| request.as_ref());
                         trtllm_client
                             .build_generate_request_from_chat(
                                 request_id,
@@ -194,7 +204,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             )
                             .map_err(|e| {
                                 error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request");
-                                error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {}", e))
+                                error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
                             })?
                     }
                     RequestType::Responses(request) => trtllm_client
@@ -208,7 +218,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                         )
                         .map_err(|e| {
                             error!(function = "HarmonyRequestBuildingStage::execute", error = %e, "Failed to build TensorRT-LLM generate request from responses");
-                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {}", e))
+                            error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
                         })?,
                     RequestType::Embedding(_) => {
                         return Err(error::bad_request(
@@ -216,7 +226,12 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             "Embedding requests are not supported with Harmony models".to_string(),
                         ));
                     }
-                    _ => unreachable!(),
+                    _ => {
+                        return Err(error::bad_request(
+                            "unsupported_request_type",
+                            "Unsupported request type for Harmony models".to_string(),
+                        ));
+                    }
                 };
                 ProtoGenerateRequest::Trtllm(Box::new(req))
             }

@@ -1069,33 +1069,33 @@ pub enum ResponseModality {
     Audio,
 }
 
-fn is_option_blank(v: &Option<String>) -> bool {
-    v.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true)
+fn is_option_blank(v: Option<&String>) -> bool {
+    v.map(|s| s.trim().is_empty()).unwrap_or(true)
 }
 
 fn validate_interactions_request(req: &InteractionsRequest) -> Result<(), ValidationError> {
     // Exactly one of model or agent must be provided
-    if is_option_blank(&req.model) && is_option_blank(&req.agent) {
+    if is_option_blank(req.model.as_ref()) && is_option_blank(req.agent.as_ref()) {
         return Err(ValidationError::new("model_or_agent_required"));
     }
-    if !is_option_blank(&req.model) && !is_option_blank(&req.agent) {
+    if !is_option_blank(req.model.as_ref()) && !is_option_blank(req.agent.as_ref()) {
         let mut e = ValidationError::new("model_and_agent_mutually_exclusive");
         e.message = Some("Cannot set both model and agent. Provide exactly one.".into());
         return Err(e);
     }
 
     // response_mime_type is required when response_format is set
-    if req.response_format.is_some() && is_option_blank(&req.response_mime_type) {
+    if req.response_format.is_some() && is_option_blank(req.response_mime_type.as_ref()) {
         return Err(ValidationError::new("response_mime_type_required"));
     }
 
     // background mode is required for agent interactions, and only for agents
-    if !is_option_blank(&req.agent) && !req.background {
+    if !is_option_blank(req.agent.as_ref()) && !req.background {
         let mut e = ValidationError::new("agent_requires_background");
         e.message = Some("Agent interactions require background mode to be enabled.".into());
         return Err(e);
     }
-    if !is_option_blank(&req.model) && req.background {
+    if !is_option_blank(req.model.as_ref()) && req.background {
         let mut e = ValidationError::new("background_requires_agent");
         e.message = Some("Background mode is only supported for agent interactions.".into());
         return Err(e);
@@ -1182,17 +1182,19 @@ fn validate_input(input: &InteractionsInput) -> Result<(), ValidationError> {
 
 fn is_content_empty(content: &Content) -> bool {
     match content {
-        Content::Text { text, .. } => is_option_blank(text),
+        Content::Text { text, .. } => is_option_blank(text.as_ref()),
         Content::Image { data, uri, .. }
         | Content::Audio { data, uri, .. }
         | Content::Document { data, uri, .. }
-        | Content::Video { data, uri, .. } => is_option_blank(data) && is_option_blank(uri),
+        | Content::Video { data, uri, .. } => {
+            is_option_blank(data.as_ref()) && is_option_blank(uri.as_ref())
+        }
         Content::CodeExecutionCall { id, .. }
         | Content::UrlContextCall { id, .. }
-        | Content::GoogleSearchCall { id, .. } => is_option_blank(id),
+        | Content::GoogleSearchCall { id, .. } => is_option_blank(id.as_ref()),
         Content::CodeExecutionResult { call_id, .. }
         | Content::UrlContextResult { call_id, .. }
-        | Content::GoogleSearchResult { call_id, .. } => is_option_blank(call_id),
+        | Content::GoogleSearchResult { call_id, .. } => is_option_blank(call_id.as_ref()),
         _ => false,
     }
 }

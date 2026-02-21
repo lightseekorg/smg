@@ -60,15 +60,15 @@ where
                 .map_err(|err: JsonRejection| {
                     let error_message = match err {
                         JsonRejection::JsonDataError(e) => {
-                            format!("Invalid JSON data: {}", e)
+                            format!("Invalid JSON data: {e}")
                         }
                         JsonRejection::JsonSyntaxError(e) => {
-                            format!("JSON syntax error: {}", e)
+                            format!("JSON syntax error: {e}")
                         }
                         JsonRejection::MissingJsonContentType(_) => {
                             "Missing Content-Type: application/json header".to_string()
                         }
-                        _ => format!("Failed to parse JSON: {}", err),
+                        _ => format!("Failed to parse JSON: {err}"),
                     };
 
                     (
@@ -165,7 +165,7 @@ mod tests {
     async fn test_validated_json_invalid_length() {
         let request = TestRequest {
             value: 0.5,
-            name: "".to_string(), // Empty name
+            name: String::new(), // Empty name
         };
         assert!(request.validate().is_err());
     }

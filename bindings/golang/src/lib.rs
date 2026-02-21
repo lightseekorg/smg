@@ -1,3 +1,6 @@
+// FFI bindings require unsafe for extern "C" functions, raw pointer handling, and #[no_mangle].
+#![allow(unsafe_code)]
+
 //! FFI module for exposing Shepherd Model Gateway preprocessing and postprocessing functions
 //! to C-compatible languages (e.g., Golang via cgo)
 //!

@@ -18,7 +18,7 @@ fn normalize_external_url(url: &str) -> String {
     if url.starts_with("http://") || url.starts_with("https://") {
         url.to_string()
     } else {
-        format!("https://{}", url)
+        format!("https://{url}")
     }
 }
 
@@ -116,7 +116,7 @@ impl StepExecutor<ExternalWorkerWorkflowData> for CreateExternalWorkersStep {
             );
 
             // Create a worker for each model
-            for model_card in model_cards.iter() {
+            for model_card in model_cards {
                 let mut builder = BasicWorkerBuilder::new(normalized_url.clone())
                     .model(model_card.clone())
                     .worker_type(WorkerType::Regular)

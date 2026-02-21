@@ -13,7 +13,7 @@ use validator::Validate;
 
 #[test]
 fn test_max_tokens_normalizes_to_max_completion_tokens() {
-    #[allow(deprecated)]
+    #[expect(deprecated)]
     let mut req = ChatCompletionRequest {
         model: "test-model".to_string(),
         messages: vec![ChatMessage::User {
@@ -31,7 +31,7 @@ fn test_max_tokens_normalizes_to_max_completion_tokens() {
         Some(100),
         "max_tokens should be copied to max_completion_tokens"
     );
-    #[allow(deprecated)]
+    #[expect(deprecated)]
     {
         assert!(
             req.max_tokens.is_none(),
@@ -46,7 +46,7 @@ fn test_max_tokens_normalizes_to_max_completion_tokens() {
 
 #[test]
 fn test_max_completion_tokens_takes_precedence() {
-    #[allow(deprecated)]
+    #[expect(deprecated)]
     let mut req = ChatCompletionRequest {
         model: "test-model".to_string(),
         messages: vec![ChatMessage::User {
@@ -72,7 +72,7 @@ fn test_max_completion_tokens_takes_precedence() {
 
 #[test]
 fn test_functions_normalizes_to_tools() {
-    #[allow(deprecated)]
+    #[expect(deprecated)]
     let mut req = ChatCompletionRequest {
         model: "test-model".to_string(),
         messages: vec![ChatMessage::User {
@@ -93,7 +93,7 @@ fn test_functions_normalizes_to_tools() {
     assert!(req.tools.is_some(), "functions should be migrated to tools");
     assert_eq!(req.tools.as_ref().unwrap().len(), 1);
     assert_eq!(req.tools.as_ref().unwrap()[0].function.name, "test_func");
-    #[allow(deprecated)]
+    #[expect(deprecated)]
     {
         assert!(
             req.functions.is_none(),
@@ -108,7 +108,7 @@ fn test_functions_normalizes_to_tools() {
 
 #[test]
 fn test_function_call_normalizes_to_tool_choice() {
-    #[allow(deprecated)]
+    #[expect(deprecated)]
     let mut req = ChatCompletionRequest {
         model: "test-model".to_string(),
         messages: vec![ChatMessage::User {
@@ -129,7 +129,7 @@ fn test_function_call_normalizes_to_tool_choice() {
         req.tool_choice,
         Some(ToolChoice::Value(ToolChoiceValue::None))
     ));
-    #[allow(deprecated)]
+    #[expect(deprecated)]
     {
         assert!(
             req.function_call.is_none(),
@@ -144,7 +144,7 @@ fn test_function_call_normalizes_to_tool_choice() {
 
 #[test]
 fn test_function_call_function_variant_normalizes() {
-    #[allow(deprecated)]
+    #[expect(deprecated)]
     let mut req = ChatCompletionRequest {
         model: "test-model".to_string(),
         messages: vec![ChatMessage::User {
@@ -178,7 +178,7 @@ fn test_function_call_function_variant_normalizes() {
         }
         _ => panic!("Expected ToolChoice::Function variant"),
     }
-    #[allow(deprecated)]
+    #[expect(deprecated)]
     {
         assert!(
             req.function_call.is_none(),
@@ -216,8 +216,7 @@ fn test_stream_options_requires_stream_enabled() {
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("stream_options") && err.contains("stream") && err.contains("enabled"),
-        "Error should mention stream dependency: {}",
-        err
+        "Error should mention stream dependency: {err}"
     );
 }
 
@@ -295,8 +294,7 @@ fn test_tool_choice_function_not_found() {
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("function 'nonexistent_function' not found"),
-        "Error should mention the missing function: {}",
-        err
+        "Error should mention the missing function: {err}"
     );
 }
 
@@ -362,8 +360,7 @@ fn test_tool_choice_allowed_tools_invalid_mode() {
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("must be 'auto' or 'required'"),
-        "Error should mention valid modes: {}",
-        err
+        "Error should mention valid modes: {err}"
     );
 }
 
@@ -461,8 +458,7 @@ fn test_tool_choice_allowed_tools_tool_not_found() {
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("tool 'nonexistent_tool' not found"),
-        "Error should mention the missing tool: {}",
-        err
+        "Error should mention the missing tool: {err}"
     );
 }
 
@@ -564,7 +560,6 @@ fn test_tool_choice_allowed_tools_one_invalid_among_valid() {
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("tool 'nonexistent_tool' not found"),
-        "Error should mention the missing tool: {}",
-        err
+        "Error should mention the missing tool: {err}"
     );
 }

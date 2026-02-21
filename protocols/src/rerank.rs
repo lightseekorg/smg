@@ -95,6 +95,10 @@ fn validate_documents(documents: &[String]) -> Result<(), validator::ValidationE
 }
 
 /// Schema-level validation for cross-field dependencies
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "validator crate requires Result return type"
+)]
 fn validate_rerank_request(req: &RerankRequest) -> Result<(), validator::ValidationError> {
     // Validate top_k if specified
     if let Some(k) = req.top_k {

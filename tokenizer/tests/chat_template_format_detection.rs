@@ -7,7 +7,7 @@ use openai_protocol::chat::{ChatMessage, MessageContent};
 #[test]
 fn test_detect_string_format_deepseek() {
     // DeepSeek style template - expects string content
-    let template = r#"
+    let template = r"
         {%- for message in messages %}
         {%- if message['role'] == 'user' %}
         User: {{ message['content'] }}
@@ -15,7 +15,7 @@ fn test_detect_string_format_deepseek() {
         Assistant: {{ message['content'] }}
         {%- endif %}
         {%- endfor %}
-        "#;
+        ";
 
     assert_eq!(
         detect_chat_template_content_format(template),
@@ -26,7 +26,7 @@ fn test_detect_string_format_deepseek() {
 #[test]
 fn test_detect_openai_format_llama4() {
     // Llama4 style template - expects structured content
-    let template = r#"
+    let template = r"
         {%- for message in messages %}
         {%- if message['content'] is iterable %}
         {%- for content in message['content'] %}
@@ -40,7 +40,7 @@ fn test_detect_openai_format_llama4() {
         {{ message['content'] }}
         {%- endif %}
         {%- endfor %}
-        "#;
+        ";
 
     assert_eq!(
         detect_chat_template_content_format(template),
@@ -51,7 +51,7 @@ fn test_detect_openai_format_llama4() {
 #[test]
 fn test_detect_openai_format_dot_notation() {
     // Template using dot notation
-    let template = r#"
+    let template = r"
         {%- for message in messages %}
         {%- for part in message.content %}
         {%- if part.type == 'text' %}
@@ -59,7 +59,7 @@ fn test_detect_openai_format_dot_notation() {
         {%- endif %}
         {%- endfor %}
         {%- endfor %}
-        "#;
+        ";
 
     assert_eq!(
         detect_chat_template_content_format(template),
@@ -70,7 +70,7 @@ fn test_detect_openai_format_dot_notation() {
 #[test]
 fn test_detect_openai_format_variable_assignment() {
     // Template that assigns content to variable then iterates
-    let template = r#"
+    let template = r"
         {%- for message in messages %}
         {%- set content = message['content'] %}
         {%- if content is sequence %}
@@ -79,7 +79,7 @@ fn test_detect_openai_format_variable_assignment() {
         {%- endfor %}
         {%- endif %}
         {%- endfor %}
-        "#;
+        ";
 
     assert_eq!(
         detect_chat_template_content_format(template),
@@ -90,14 +90,14 @@ fn test_detect_openai_format_variable_assignment() {
 #[test]
 fn test_detect_openai_format_glm4v_style() {
     // GLM4V uses 'msg' instead of 'message'
-    let template = r#"
+    let template = r"
         {%- for msg in messages %}
         {%- for part in msg.content %}
         {%- if part.type == 'text' %}{{ part.text }}{%- endif %}
         {%- if part.type == 'image' %}<image>{%- endif %}
         {%- endfor %}
         {%- endfor %}
-        "#;
+        ";
 
     assert_eq!(
         detect_chat_template_content_format(template),
@@ -108,7 +108,7 @@ fn test_detect_openai_format_glm4v_style() {
 #[test]
 fn test_detect_openai_format_with_length_check() {
     // Template that checks content length
-    let template = r#"
+    let template = r"
         {%- for message in messages %}
         {%- if message.content|length > 0 %}
         {%- for item in message.content %}
@@ -116,7 +116,7 @@ fn test_detect_openai_format_with_length_check() {
         {%- endfor %}
         {%- endif %}
         {%- endfor %}
-        "#;
+        ";
 
     assert_eq!(
         detect_chat_template_content_format(template),
@@ -127,13 +127,13 @@ fn test_detect_openai_format_with_length_check() {
 #[test]
 fn test_detect_openai_format_with_index_access() {
     // Template that accesses content by index
-    let template = r#"
+    let template = r"
         {%- for message in messages %}
         {%- if message.content[0] %}
         First item: {{ message.content[0].text }}
         {%- endif %}
         {%- endfor %}
-        "#;
+        ";
 
     assert_eq!(
         detect_chat_template_content_format(template),
@@ -161,14 +161,14 @@ fn test_empty_template_defaults_to_string() {
 
 #[test]
 fn test_simple_chat_template_unit_test() {
-    let template = r#"
+    let template = r"
 {%- for message in messages %}
 {{ message.role }}: {{ message.content }}
 {% endfor -%}
 {%- if add_generation_prompt %}
 assistant:
 {%- endif %}
-"#;
+";
 
     let processor = ChatTemplateProcessor::new(template.to_string());
 
@@ -204,12 +204,12 @@ assistant:
 #[test]
 fn test_chat_template_with_tokens_unit_test() {
     // Template that uses template kwargs for tokens (more realistic)
-    let template = r#"
+    let template = r"
 {%- if start_token -%}{{ start_token }}{%- endif -%}
 {%- for message in messages -%}
 {{ message.role }}: {{ message.content }}{%- if end_token -%}{{ end_token }}{%- endif -%}
 {% endfor -%}
-"#;
+";
 
     let processor = ChatTemplateProcessor::new(template.to_string());
 
@@ -251,7 +251,7 @@ fn test_chat_template_with_tokens_unit_test() {
 fn test_detect_openai_format_qwen3vl_macro_style() {
     // Qwen3-VL style template using macros to handle multimodal content
     // This tests the macro-based detection pattern
-    let template = r#"{%- set image_count = namespace(value=0) %}
+    let template = r"{%- set image_count = namespace(value=0) %}
 {%- set video_count = namespace(value=0) %}
 {%- macro render_content(content, do_vision_count) %}
     {%- if content is string %}
@@ -282,7 +282,7 @@ fn test_detect_openai_format_qwen3vl_macro_style() {
 {%- endfor %}
 {%- if add_generation_prompt %}
     {{- '<|im_start|>assistant\n' }}
-{%- endif %}"#;
+{%- endif %}";
 
     assert_eq!(
         detect_chat_template_content_format(template),
@@ -294,14 +294,14 @@ fn test_detect_openai_format_qwen3vl_macro_style() {
 fn test_detect_openai_format_arbitrary_variable_names() {
     // Test that detection works with any variable name, not just "message", "msg", "m"
     // Uses "chat_msg" and "x" as loop variables
-    let template = r#"
+    let template = r"
         {%- for chat_msg in messages %}
         {%- for x in chat_msg.content %}
         {%- if x.type == 'text' %}{{ x.text }}{%- endif %}
         {%- if x.type == 'image' %}<image>{%- endif %}
         {%- endfor %}
         {%- endfor %}
-        "#;
+        ";
 
     assert_eq!(
         detect_chat_template_content_format(template),

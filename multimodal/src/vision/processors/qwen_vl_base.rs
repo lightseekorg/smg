@@ -149,7 +149,7 @@ impl QwenVLProcessorBase {
         // Validate minimum dimensions
         if height < factor || width < factor {
             return Err(TransformError::InvalidShape {
-                expected: format!("dimensions >= {} (patch_size * merge_size)", factor),
+                expected: format!("dimensions >= {factor} (patch_size * merge_size)"),
                 actual: vec![height, width],
             });
         }
@@ -252,7 +252,7 @@ impl QwenVLProcessorBase {
         grid_t: usize,
         grid_h: usize,
         grid_w: usize,
-    ) -> Vec<f32> {
+    ) -> Result<Vec<f32>, TransformError> {
         use ndarray::IxDyn;
 
         let channel = tensor.shape()[0];
@@ -281,7 +281,9 @@ impl QwenVLProcessorBase {
             .view()
             .insert_axis(ndarray::Axis(0))
             .broadcast((temporal_patch_size, channel, height, width))
-            .expect("Broadcast failed")
+            .ok_or_else(|| TransformError::ShapeError(
+                format!("Broadcast failed: cannot broadcast [1, {channel}, {height}, {width}] to [{temporal_patch_size}, {channel}, {height}, {width}]")
+            ))?
             .to_owned();
 
         // Step 2: Reshape to split spatial dimensions into grid and patch components
@@ -304,7 +306,7 @@ impl QwenVLProcessorBase {
 
         let reshaped = expanded
             .into_shape_with_order(shape_9d)
-            .expect("Reshape failed");
+            .map_err(|e| TransformError::ShapeError(format!("Reshape to 9D failed: {e}")))?;
 
         // Step 3: Permute axes to match HuggingFace output order
         // From: [grid_t, temporal, C, grid_h/merge, merge, patch, grid_w/merge, merge, patch]
@@ -321,10 +323,14 @@ impl QwenVLProcessorBase {
         let contiguous = permuted.as_standard_layout().into_owned();
         let flat = contiguous
             .into_shape_with_order(IxDyn(&[num_patches, patch_features]))
-            .expect("Final reshape failed");
+            .map_err(|e| {
+                TransformError::ShapeError(format!(
+                    "Final reshape to [{num_patches}, {patch_features}] failed: {e}"
+                ))
+            })?;
 
         let (vec, _offset) = flat.into_raw_vec_and_offset();
-        vec
+        Ok(vec)
     }
 }
 

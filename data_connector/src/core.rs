@@ -31,8 +31,8 @@ impl ConversationId {
         let mut rng = rand::rng();
         let mut bytes = [0u8; 25];
         rng.fill_bytes(&mut bytes);
-        let hex_string: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-        Self(format!("conv_{}", hex_string))
+        let hex_string: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        Self(format!("conv_{hex_string}"))
     }
 }
 
@@ -261,7 +261,7 @@ pub fn make_item_id(item_type: &str) -> ConversationItemId {
     let mut rng = rand::rng();
     let mut bytes = [0u8; 25];
     rng.fill_bytes(&mut bytes);
-    let hex_string: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    let hex_string: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
 
     let prefix: String = match item_type {
         "message" => "msg".to_string(),
@@ -278,7 +278,7 @@ pub fn make_item_id(item_type: &str) -> ConversationItemId {
             p
         }
     };
-    ConversationItemId(format!("{}_{}", prefix, hex_string))
+    ConversationItemId(format!("{prefix}_{hex_string}"))
 }
 
 // ============================================================================

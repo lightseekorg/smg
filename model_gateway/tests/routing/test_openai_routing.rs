@@ -38,6 +38,7 @@ use tower::ServiceExt;
 use crate::common::mock_openai_server::MockOpenAIServer;
 
 /// Helper function to create a minimal chat completion request for testing
+#[expect(clippy::unwrap_used, reason = "test helper with known-valid input")]
 fn create_minimal_chat_request() -> ChatCompletionRequest {
     let val = json!({
         "model": "gpt-3.5-turbo",
@@ -154,6 +155,7 @@ async fn test_openai_router_models() {
     assert!(models["data"].is_array());
 }
 
+#[expect(clippy::disallowed_methods, reason = "test infrastructure")]
 #[tokio::test]
 async fn test_openai_router_responses_with_mock() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -203,7 +205,7 @@ async fn test_openai_router_responses_with_mock() {
         axum::serve(listener, app).await.unwrap();
     });
 
-    let base_url = format!("http://{}", addr);
+    let base_url = format!("http://{addr}");
 
     let ctx = crate::common::test_app::create_test_app_context().await;
     crate::common::test_app::register_external_worker(&ctx, &base_url, Some(vec!["gpt-4o-mini"]));
@@ -305,6 +307,7 @@ async fn test_openai_router_responses_with_mock() {
     server.abort();
 }
 
+#[expect(clippy::disallowed_methods, reason = "test infrastructure")]
 #[tokio::test]
 async fn test_openai_router_responses_streaming_with_mock() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -452,7 +455,7 @@ async fn test_openai_router_responses_streaming_with_mock() {
 
         let sse_payload = events
             .into_iter()
-            .map(|(event, data)| format!("event: {}\ndata: {}\n\n", event, data))
+            .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
             .collect::<String>();
 
         Response::builder()
@@ -468,7 +471,7 @@ async fn test_openai_router_responses_streaming_with_mock() {
         axum::serve(listener, app).await.unwrap();
     });
 
-    let base_url = format!("http://{}", addr);
+    let base_url = format!("http://{addr}");
 
     let ctx = crate::common::test_app::create_test_app_context().await;
     crate::common::test_app::register_external_worker(&ctx, &base_url, Some(vec!["gpt-5-nano"]));
@@ -863,7 +866,7 @@ fn oracle_config_validation_requires_config_when_enabled() {
         ConfigError::MissingRequired { field } => {
             assert_eq!(field, "oracle");
         }
-        other => panic!("unexpected error: {:?}", other),
+        other => panic!("unexpected error: {other:?}"),
     }
 }
 
@@ -915,8 +918,8 @@ fn oracle_config_validation_for_external_auth() {
             wallet_path: None,
             connect_descriptor: "db_high".to_string(),
             external_auth: true,
-            username: "".to_string(),
-            password: "".to_string(),
+            username: String::new(),
+            password: String::new(),
             pool_min: 1,
             pool_max: 4,
             pool_timeout_secs: 30,
@@ -934,7 +937,7 @@ fn oracle_config_validation_for_external_auth() {
             connect_descriptor: "db_high".to_string(),
             external_auth: true,
             username: "some_user".to_string(),
-            password: "".to_string(),
+            password: String::new(),
             pool_min: 1,
             pool_max: 4,
             pool_timeout_secs: 30,

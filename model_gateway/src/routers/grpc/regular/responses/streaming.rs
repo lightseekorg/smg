@@ -101,6 +101,10 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
     let conversation_storage = ctx.conversation_storage.clone();
     let conversation_item_storage = ctx.conversation_item_storage.clone();
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "streaming task is fire-and-forget; client disconnect terminates it"
+    )]
     tokio::spawn(async move {
         if let Err(e) = process_and_transform_sse_stream(
             body,
@@ -119,7 +123,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
                     "type": "stream_error"
                 }
             });
-            let _ = tx.send(Ok(Bytes::from(format!("data: {}\n\n", error_event))));
+            let _ = tx.send(Ok(Bytes::from(format!("data: {error_event}\n\n"))));
         }
 
         // Send final [DONE] event
@@ -165,7 +169,7 @@ async fn process_and_transform_sse_stream(
 
     // Process stream chunks (each chunk is a complete SSE event)
     while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
+        let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
 
         // Convert chunk to string
         let event_str = String::from_utf8_lossy(&chunk);
@@ -192,7 +196,7 @@ async fn process_and_transform_sse_stream(
                 Err(_) => {
                     // Not a valid chat chunk - might be error event, pass through
                     debug!("Non-chunk SSE event, passing through: {}", event);
-                    if tx.send(Ok(Bytes::from(format!("{}\n\n", event)))).is_err() {
+                    if tx.send(Ok(Bytes::from(format!("{event}\n\n")))).is_err() {
                         return Err("Client disconnected".to_string());
                     }
                 }
@@ -274,8 +278,8 @@ impl StreamingResponseAccumulator {
     fn process_chunk(&mut self, chunk: &ChatCompletionStreamResponse) {
         // Initialize metadata on first chunk
         if self.response_id.is_empty() {
-            self.response_id = chunk.id.clone();
-            self.model = chunk.model.clone();
+            self.response_id.clone_from(&chunk.id);
+            self.model.clone_from(&chunk.model);
             self.created_at = chunk.created as i64;
         }
 
@@ -418,7 +422,7 @@ impl StreamingResponseAccumulator {
 /// This streams each iteration's response to the client while accumulating
 /// to check for tool calls. If tool calls are found, executes them and
 /// continues with the next streaming iteration.
-pub(super) async fn execute_tool_loop_streaming(
+pub(super) fn execute_tool_loop_streaming(
     ctx: &ResponsesContext,
     current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
@@ -433,6 +437,10 @@ pub(super) async fn execute_tool_loop_streaming(
     let original_request_clone = original_request.clone();
 
     // Spawn background task for tool loop
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "streaming task is fire-and-forget; client disconnect terminates it"
+    )]
     tokio::spawn(async move {
         let result = execute_tool_loop_streaming_internal(
             &ctx_clone,
@@ -452,7 +460,7 @@ pub(super) async fn execute_tool_loop_streaming(
                     "type": "tool_loop_error"
                 }
             });
-            let _ = tx.send(Ok(Bytes::from(format!("data: {}\n\n", error_event))));
+            let _ = tx.send(Ok(Bytes::from(format!("data: {error_event}\n\n"))));
         }
 
         // Send [DONE]
@@ -463,10 +471,14 @@ pub(super) async fn execute_tool_loop_streaming(
     let stream = UnboundedReceiverStream::new(rx);
     let body = Body::from_stream(stream);
 
+    #[expect(
+        clippy::expect_used,
+        reason = "Response::builder with valid status and no invalid headers is infallible"
+    )]
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .body(body)
-        .unwrap();
+        .expect("infallible: valid status code, no invalid headers");
 
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -513,7 +525,7 @@ async fn execute_tool_loop_streaming_internal(
     let model = current_request.model.clone();
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
     let mut emitter = ResponseStreamEventEmitter::new(response_id, model.clone(), created_at);
     emitter.set_original_request(original_request.clone());
@@ -542,8 +554,7 @@ async fn execute_tool_loop_streaming_internal(
 
         if state.iteration > DEFAULT_MAX_ITERATIONS {
             return Err(format!(
-                "Tool loop exceeded maximum iterations ({})",
-                DEFAULT_MAX_ITERATIONS
+                "Tool loop exceeded maximum iterations ({DEFAULT_MAX_ITERATIONS})"
             ));
         }
 
@@ -551,7 +562,7 @@ async fn execute_tool_loop_streaming_internal(
 
         // Emit mcp_list_tools as first output item (only once, on first iteration)
         if !mcp_list_tools_emitted {
-            for binding in session.mcp_servers().iter() {
+            for binding in session.mcp_servers() {
                 let tools_for_server = session.list_tools_for_server(&binding.server_key);
 
                 emitter.emit_mcp_list_tools_sequence(&binding.label, &tools_for_server, &tx)?;
@@ -561,7 +572,7 @@ async fn execute_tool_loop_streaming_internal(
 
         // Convert to chat request
         let mut chat_request = conversions::responses_to_chat(&current_request)
-            .map_err(|e| format!("Failed to convert request: {}", e))?;
+            .map_err(|e| format!("Failed to convert request: {e}"))?;
 
         // Prepare tools and tool_choice for this iteration (same logic as non-streaming)
         prepare_chat_tools_and_choice(&mut chat_request, &mcp_chat_tools, state.iteration);
@@ -922,7 +933,7 @@ async fn convert_and_accumulate_stream(
     let mut stream = body.into_data_stream();
 
     while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
+        let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
 
         // Parse chunk
         let event_str = String::from_utf8_lossy(&chunk);
@@ -973,10 +984,10 @@ impl ChatResponseAccumulator {
 
     fn process_chunk(&mut self, chunk: &ChatCompletionStreamResponse) {
         if !chunk.id.is_empty() {
-            self.id = chunk.id.clone();
+            self.id.clone_from(&chunk.id);
         }
         if !chunk.model.is_empty() {
-            self.model = chunk.model.clone();
+            self.model.clone_from(&chunk.model);
         }
 
         if let Some(choice) = chunk.choices.first() {
@@ -1006,11 +1017,11 @@ impl ChatResponseAccumulator {
                     });
 
                     if let Some(id) = &delta.id {
-                        entry.id = id.clone();
+                        entry.id.clone_from(id);
                     }
                     if let Some(function) = &delta.function {
                         if let Some(name) = &function.name {
-                            entry.function.name = name.clone();
+                            entry.function.name.clone_from(name);
                         }
                         if let Some(args) = &function.arguments {
                             if let Some(ref mut existing_args) = entry.function.arguments {

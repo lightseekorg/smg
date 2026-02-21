@@ -52,7 +52,7 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
             .collect();
 
         let mut removed_count = 0;
-        for worker_url in worker_urls.iter() {
+        for worker_url in worker_urls {
             if app_context
                 .worker_registry
                 .remove_by_url(worker_url)
@@ -63,14 +63,14 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
         }
 
         // Log if some workers were already removed (e.g., by another process)
-        if removed_count != worker_urls.len() {
+        if removed_count == worker_urls.len() {
+            debug!("Removed {} worker(s) from registry", removed_count);
+        } else {
             warn!(
                 "Removed {} of {} workers (some may have been removed by another process)",
                 removed_count,
                 worker_urls.len()
             );
-        } else {
-            debug!("Removed {} worker(s) from registry", removed_count);
         }
 
         // Update Layer 3 worker pool size metrics for unique configurations

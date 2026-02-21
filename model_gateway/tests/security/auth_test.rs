@@ -26,7 +26,7 @@ mod auth_tests {
         let ctx =
             AppTestContext::new_with_config(config, vec![TestWorkerConfig::healthy(20300)]).await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Request without auth header should succeed when no auth required
         let payload = json!({
@@ -59,7 +59,7 @@ mod auth_tests {
         let ctx =
             AppTestContext::new_with_config(config, vec![TestWorkerConfig::healthy(20301)]).await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Request with Bearer token header
         let payload = json!({
@@ -94,7 +94,7 @@ mod auth_tests {
         let ctx =
             AppTestContext::new_with_config(config, vec![TestWorkerConfig::healthy(20302)]).await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Health endpoint should be accessible without auth
         let req = Request::builder()
@@ -121,7 +121,7 @@ mod auth_tests {
         let ctx =
             AppTestContext::new_with_config(config, vec![TestWorkerConfig::healthy(20303)]).await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Request with X-API-Key header (OpenAI style)
         let payload = json!({
@@ -149,6 +149,7 @@ mod auth_tests {
 
     /// Test multiple concurrent authenticated requests
     #[tokio::test]
+    #[expect(clippy::disallowed_methods)]
     async fn test_concurrent_authenticated_requests() {
         use std::sync::{
             atomic::{AtomicUsize, Ordering},
@@ -160,7 +161,7 @@ mod auth_tests {
         let ctx =
             AppTestContext::new_with_config(config, vec![TestWorkerConfig::healthy(20304)]).await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
         let success_count = Arc::new(AtomicUsize::new(0));
         let mut handles = Vec::new();
 
@@ -170,7 +171,7 @@ mod auth_tests {
 
             let handle = tokio::spawn(async move {
                 let payload = json!({
-                    "text": format!("Concurrent auth test {}", i),
+                    "text": format!("Concurrent auth test {i}"),
                     "stream": false
                 });
 
@@ -178,7 +179,7 @@ mod auth_tests {
                     .method("POST")
                     .uri("/generate")
                     .header(CONTENT_TYPE, "application/json")
-                    .header(AUTH_HEADER, format!("Bearer test-key-{}", i))
+                    .header(AUTH_HEADER, format!("Bearer test-key-{i}"))
                     .body(Body::from(serde_json::to_string(&payload).unwrap()))
                     .unwrap();
 
@@ -220,7 +221,7 @@ mod mtls_tests {
         let ctx =
             AppTestContext::new_with_config(config, vec![TestWorkerConfig::healthy(20305)]).await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Basic request should work (no TLS in test mode)
         let payload = json!({

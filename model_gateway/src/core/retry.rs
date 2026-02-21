@@ -70,7 +70,7 @@ impl RetryExecutor {
         loop {
             match operation(attempt).await {
                 Ok(val) => return Ok(val),
-                Err(_) => {
+                Err(()) => {
                     let is_last = attempt + 1 >= max;
                     if is_last {
                         return Err(RetryError::MaxRetriesExceeded);

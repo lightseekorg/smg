@@ -184,8 +184,8 @@ mod tests {
 
         for i in 0..5 {
             let insert_op = TreeInsertOp {
-                text: format!("text_{}", i),
-                tenant: format!("http://worker{}:8000", i),
+                text: format!("text_{i}"),
+                tenant: format!("http://worker{i}:8000"),
             };
             state.add_operation(TreeOperation::Insert(insert_op));
         }

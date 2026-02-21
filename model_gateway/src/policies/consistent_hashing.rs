@@ -39,7 +39,7 @@ enum Branch {
 
 impl Branch {
     #[inline]
-    const fn as_str(&self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::NoHealthyWorkers => "no_healthy_workers",
             Self::TargetWorkerHit => "target_worker_hit",
@@ -96,11 +96,23 @@ impl ConsistentHashingPolicy {
 
         // Use blake3 for consistent hashing in fallback too
         let hash = blake3::hash(key.as_bytes());
-        let hash_val = u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap());
+        #[expect(
+            clippy::expect_used,
+            reason = "blake3 hash is always 32 bytes; slicing first 8 is infallible"
+        )]
+        let hash_val = u64::from_le_bytes(
+            hash.as_bytes()[..8]
+                .try_into()
+                .expect("blake3 hash is always 32 bytes, slicing first 8 is infallible"),
+        );
         let idx = (hash_val as usize) % healthy_indices.len();
         Some(healthy_indices[idx])
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "consistent with LoadBalancingPolicy trait pattern; may use self in future"
+    )]
     fn select_worker_impl(
         &self,
         workers: &[Arc<dyn Worker>],
@@ -160,10 +172,9 @@ impl ConsistentHashingPolicy {
             .enumerate()
             .filter(|(_, w)| w.is_healthy())
             .nth(random_healthy_idx)
-            .map(|(i, _)| i)
-            .unwrap();
+            .map(|(i, _)| i);
 
-        (Some(idx), Branch::RandomFallback)
+        (idx, Branch::RandomFallback)
     }
 }
 
@@ -243,7 +254,7 @@ mod tests {
 
         let mut distribution = HashMap::new();
         for i in 0..100 {
-            let headers = headers_with_routing_key(&format!("user-{}", i));
+            let headers = headers_with_routing_key(&format!("user-{i}"));
             let info = SelectWorkerInfo {
                 headers: Some(&headers),
                 ..Default::default()
@@ -388,7 +399,7 @@ mod tests {
         // Record which worker each key routes to with all workers healthy
         let mut key_to_worker_before: HashMap<String, usize> = HashMap::new();
         for i in 0..100 {
-            let key = format!("user-{}", i);
+            let key = format!("user-{i}");
             let headers = headers_with_routing_key(&key);
             let info = SelectWorkerInfo {
                 headers: Some(&headers),
@@ -405,7 +416,7 @@ mod tests {
         // Record new routing and count how many keys moved
         let mut moved_count = 0;
         for i in 0..100 {
-            let key = format!("user-{}", i);
+            let key = format!("user-{i}");
             let headers = headers_with_routing_key(&key);
             let info = SelectWorkerInfo {
                 headers: Some(&headers),
@@ -428,14 +439,11 @@ mod tests {
         assert!(
             moved_count <= keys_on_failed_worker + 5,
             "Consistent hashing should only move keys from failed worker (+small variance). \
-             Expected ~{}, got {}",
-            keys_on_failed_worker,
-            moved_count
+             Expected ~{keys_on_failed_worker}, got {moved_count}",
         );
         assert!(
             moved_count < 50,
-            "Consistent hashing should move fewer than 50% of keys (random would move ~75%), got {}%",
-            moved_count
+            "Consistent hashing should move fewer than 50% of keys (random would move ~75%), got {moved_count}%",
         );
     }
 

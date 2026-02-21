@@ -21,7 +21,7 @@ use tracing::{debug, warn};
 use crate::{BoxedTraceInjector, NoopTraceInjector};
 
 // Include the generated protobuf code
-#[allow(clippy::all)]
+#[expect(clippy::allow_attributes)]
 pub mod proto {
     #![allow(clippy::all, unused_qualifications)]
     tonic::include_proto!("sglang.grpc.scheduler");
@@ -86,6 +86,10 @@ impl Drop for AbortOnDropStream {
         let request_id = self.request_id.clone();
 
         // Spawn a background task to send abort (since Drop is sync but abort_request is async)
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "fire-and-forget abort on Drop is intentional"
+        )]
         tokio::spawn(async move {
             debug!(
                 "Stream dropped without completion for request {}, sending abort",
@@ -138,7 +142,7 @@ impl SglangSchedulerClient {
 
         // Convert grpc:// to http:// for tonic
         let http_endpoint = if let Some(addr) = endpoint.strip_prefix("grpc://") {
-            format!("http://{}", addr)
+            format!("http://{addr}")
         } else {
             endpoint.to_string()
         };
@@ -282,6 +286,10 @@ impl SglangSchedulerClient {
     }
 
     /// Build a single SGLang EmbedRequest
+    #[expect(
+        clippy::unused_self,
+        reason = "method receiver kept for consistent public API"
+    )]
     pub fn build_embed_request(
         &self,
         request_id: String,
@@ -301,6 +309,10 @@ impl SglangSchedulerClient {
     }
 
     /// Build a single SGLang GenerateRequest from OpenAI ChatCompletionRequest
+    #[expect(
+        clippy::unused_self,
+        reason = "method receiver kept for consistent public API"
+    )]
     pub fn build_generate_request_from_chat(
         &self,
         request_id: String,
@@ -312,7 +324,7 @@ impl SglangSchedulerClient {
     ) -> Result<proto::GenerateRequest, String> {
         // Build sampling params
         let sampling_params =
-            self.build_grpc_sampling_params_from_chat(body, tool_call_constraint)?;
+            Self::build_grpc_sampling_params_from_chat(body, tool_call_constraint)?;
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -334,6 +346,10 @@ impl SglangSchedulerClient {
     }
 
     /// Build a basic GenerateRequest from the SGLang spec GenerateRequest
+    #[expect(
+        clippy::unused_self,
+        reason = "method receiver kept for consistent public API"
+    )]
     pub fn build_plain_generate_request(
         &self,
         request_id: String,
@@ -368,6 +384,10 @@ impl SglangSchedulerClient {
     ///
     /// NOTE: This is used by the Harmony router only. The Regular router uses
     /// responses_to_chat() conversion and goes through the chat pipeline.
+    #[expect(
+        clippy::unused_self,
+        reason = "method receiver kept for consistent public API"
+    )]
     pub fn build_generate_request_from_responses(
         &self,
         request_id: String,
@@ -379,7 +399,7 @@ impl SglangSchedulerClient {
     ) -> Result<proto::GenerateRequest, String> {
         // Build sampling params from ResponsesRequest
         let mut sampling_params =
-            self.build_grpc_sampling_params_from_responses(body, constraint)?;
+            Self::build_grpc_sampling_params_from_responses(body, constraint)?;
 
         // Inject Harmony stop token IDs if provided
         if let Some(stop_ids) = harmony_stop_ids {
@@ -408,11 +428,10 @@ impl SglangSchedulerClient {
 
     /// Build gRPC SamplingParams from ChatCompletionRequest
     fn build_grpc_sampling_params_from_chat(
-        &self,
         request: &ChatCompletionRequest,
         tool_call_constraint: Option<(String, String)>,
     ) -> Result<proto::SamplingParams, String> {
-        let stop_sequences = self.extract_stop_strings(request);
+        let stop_sequences = Self::extract_stop_strings(request);
 
         let max_new_tokens = request.max_completion_tokens;
 
@@ -443,13 +462,13 @@ impl SglangSchedulerClient {
             ignore_eos: request.ignore_eos,
             no_stop_trim: request.no_stop_trim,
             n: request.n.unwrap_or(1),
-            constraint: self.build_constraint_for_chat(request, tool_call_constraint)?,
+            constraint: Self::build_constraint_for_chat(request, tool_call_constraint)?,
             ..Default::default()
         })
     }
 
     /// Extract stop strings from request
-    fn extract_stop_strings(&self, request: &ChatCompletionRequest) -> Vec<String> {
+    fn extract_stop_strings(request: &ChatCompletionRequest) -> Vec<String> {
         match &request.stop {
             Some(StringOrArray::String(s)) => vec![s.clone()],
             Some(StringOrArray::Array(arr)) => arr.clone(),
@@ -459,7 +478,6 @@ impl SglangSchedulerClient {
 
     /// Build constraint for structured generation
     fn build_constraint_for_chat(
-        &self,
         request: &ChatCompletionRequest,
         tool_call_constraint: Option<(String, String)>,
     ) -> Result<Option<proto::sampling_params::Constraint>, String> {
@@ -471,12 +489,12 @@ impl SglangSchedulerClient {
                 // json_object mode - constrain to valid JSON object
                 let schema = serde_json::json!({"type": "object"});
                 let schema_str = serde_json::to_string(&schema)
-                    .map_err(|e| format!("Failed to serialize JSON schema: {}", e))?;
+                    .map_err(|e| format!("Failed to serialize JSON schema: {e}"))?;
                 constraints.push(proto::sampling_params::Constraint::JsonSchema(schema_str));
             }
             Some(ResponseFormat::JsonSchema { json_schema }) => {
                 let schema_str = serde_json::to_string(&json_schema.schema)
-                    .map_err(|e| format!("Failed to serialize JSON schema: {}", e))?;
+                    .map_err(|e| format!("Failed to serialize JSON schema: {e}"))?;
                 constraints.push(proto::sampling_params::Constraint::JsonSchema(schema_str));
             }
             Some(ResponseFormat::Text) | None => {
@@ -506,7 +524,7 @@ impl SglangSchedulerClient {
                 "json_schema" => proto::sampling_params::Constraint::JsonSchema(constraint_value),
                 "ebnf" => proto::sampling_params::Constraint::EbnfGrammar(constraint_value),
                 "regex" => proto::sampling_params::Constraint::Regex(constraint_value),
-                _ => return Err(format!("Unknown constraint type: {}", constraint_type)),
+                _ => return Err(format!("Unknown constraint type: {constraint_type}")),
             };
             constraints.push(tool_constraint);
         }
@@ -520,7 +538,6 @@ impl SglangSchedulerClient {
 
     /// Build gRPC SamplingParams from ResponsesRequest
     fn build_grpc_sampling_params_from_responses(
-        &self,
         request: &ResponsesRequest,
         constraint: Option<(String, String)>,
     ) -> Result<proto::SamplingParams, String> {
@@ -545,7 +562,7 @@ impl SglangSchedulerClient {
             ignore_eos: false,
             no_stop_trim: false,
             n: 1, // Responses API doesn't support n>1
-            constraint: self.build_constraint_for_responses(constraint)?,
+            constraint: Self::build_constraint_for_responses(constraint)?,
             ..Default::default()
         })
     }
@@ -557,7 +574,6 @@ impl SglangSchedulerClient {
     ///
     /// Note: Regular gRPC models use Chat API path with response_format, not this function.
     fn build_constraint_for_responses(
-        &self,
         constraint: Option<(String, String)>,
     ) -> Result<Option<proto::sampling_params::Constraint>, String> {
         if let Some((constraint_type, constraint_value)) = constraint {
@@ -569,7 +585,7 @@ impl SglangSchedulerClient {
                 "json_schema" => proto::sampling_params::Constraint::JsonSchema(constraint_value),
                 "ebnf" => proto::sampling_params::Constraint::EbnfGrammar(constraint_value),
                 "regex" => proto::sampling_params::Constraint::Regex(constraint_value),
-                _ => return Err(format!("Unknown constraint type: {}", constraint_type)),
+                _ => return Err(format!("Unknown constraint type: {constraint_type}")),
             };
             Ok(Some(parsed_constraint))
         } else {
@@ -650,7 +666,7 @@ impl SglangSchedulerClient {
 
         // Handle stop token IDs
         if let Some(stop_token_ids) = &p.stop_token_ids {
-            sampling.stop_token_ids = stop_token_ids.clone();
+            sampling.stop_token_ids.clone_from(stop_token_ids);
         }
 
         // Handle max_new_tokens

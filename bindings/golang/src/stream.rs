@@ -35,9 +35,9 @@ use super::{
 pub struct SglangStreamHandle {
     pub(crate) stream: Arc<tokio::sync::Mutex<AbortOnDropStream>>,
     pub(crate) converter: Arc<tokio::sync::Mutex<GrpcResponseConverterHandle>>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) client: Arc<SglangSchedulerClient>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) prompt_tokens: u32, // Number of prompt tokens for this request
     /// Worker that owns this stream (for load tracking). None for single-client streams.
     pub(crate) worker: Option<Arc<GrpcWorker>>,
@@ -124,7 +124,7 @@ pub unsafe extern "C" fn sgl_stream_read_next(
                         Err(e) => {
                             set_error_message(
                                 error_out,
-                                &format!("Failed to serialize response: {}", e),
+                                &format!("Failed to serialize response: {e}"),
                             );
                             return SglErrorCode::ParsingError;
                         }
@@ -135,7 +135,7 @@ pub unsafe extern "C" fn sgl_stream_read_next(
                         Err(e) => {
                             set_error_message(
                                 error_out,
-                                &format!("Failed to create result string: {}", e),
+                                &format!("Failed to create result string: {e}"),
                             );
                             return SglErrorCode::MemoryError;
                         }
@@ -171,7 +171,7 @@ pub unsafe extern "C" fn sgl_stream_read_next(
                 Err(e) => {
                     // Conversion error - don't mark as completed
                     // Let the stream end naturally or return error without stopping stream
-                    set_error_message(error_out, &format!("Conversion error: {}", e));
+                    set_error_message(error_out, &format!("Conversion error: {e}"));
                     *response_json_out = ptr::null_mut();
                     *is_done_out = 0; // Don't mark as done - let caller decide
                     SglErrorCode::ParsingError
@@ -184,7 +184,7 @@ pub unsafe extern "C" fn sgl_stream_read_next(
                 stream.lock().await.mark_completed();
             });
 
-            set_error_message(error_out, &format!("Stream error: {}", e));
+            set_error_message(error_out, &format!("Stream error: {e}"));
             *is_done_out = 1;
             SglErrorCode::UnknownError
         }

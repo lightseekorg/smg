@@ -145,10 +145,7 @@ async fn execute_with_mcp_loop(
             );
             return Err(error::internal_error(
                 "tool_iterations_exceeded",
-                format!(
-                    "Maximum tool iterations ({}) exceeded",
-                    DEFAULT_MAX_ITERATIONS
-                ),
+                format!("Maximum tool iterations ({DEFAULT_MAX_ITERATIONS}) exceeded"),
             ));
         }
 
@@ -218,7 +215,7 @@ async fn execute_with_mcp_loop(
                     // Build response with incomplete status - no tools executed due to limit
                     // Use original_tools for response (hide internal MCP tools)
                     let mut response_request = current_request.clone();
-                    response_request.tools = original_tools.clone();
+                    response_request.tools.clone_from(&original_tools);
                     let mut response = build_tool_response(
                         vec![],         // No MCP tools executed
                         vec![],         // No MCP results
@@ -243,7 +240,9 @@ async fn execute_with_mcp_loop(
                 }
 
                 // Execute MCP tools (if any)
-                let mcp_results = if !mcp_tool_calls.is_empty() {
+                let mcp_results = if mcp_tool_calls.is_empty() {
+                    Vec::new()
+                } else {
                     execute_mcp_tools(
                         &session,
                         &mcp_tool_calls,
@@ -251,8 +250,6 @@ async fn execute_with_mcp_loop(
                         &current_request.model,
                     )
                     .await?
-                } else {
-                    Vec::new()
                 };
 
                 // If there are function tools, exit MCP loop and return response
@@ -267,7 +264,7 @@ async fn execute_with_mcp_loop(
                     // 3. Function tools as completed (without output) - need caller execution
                     // Use original_tools for response (hide internal MCP tools)
                     let mut response_request = current_request.clone();
-                    response_request.tools = original_tools.clone();
+                    response_request.tools.clone_from(&original_tools);
                     let mut response = build_tool_response(
                         mcp_tool_calls,
                         mcp_results,
@@ -297,8 +294,7 @@ async fn execute_with_mcp_loop(
                     mcp_results,
                     analysis,
                     partial_text,
-                )
-                .map_err(|e| *e)?;
+                );
 
                 // Continue loop - next iteration will select workers and execute
             }
@@ -381,7 +377,7 @@ async fn execute_without_mcp_loop(
 }
 
 /// Build ResponsesResponse with tool calls (MCP and/or function tools)
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn build_tool_response(
     mcp_tool_calls: Vec<ToolCall>,
     mcp_results: Vec<ToolResult>,
@@ -397,7 +393,7 @@ fn build_tool_response(
     // Add reasoning output item if analysis exists
     if let Some(analysis_text) = analysis {
         output.push(ResponseOutputItem::Reasoning {
-            id: format!("reasoning_{}", request_id),
+            id: format!("reasoning_{request_id}"),
             summary: vec![],
             content: vec![ResponseReasoningContent::ReasoningText {
                 text: analysis_text,
@@ -409,7 +405,7 @@ fn build_tool_response(
     // Add message output item if partial text exists
     if !partial_text.is_empty() {
         output.push(ResponseOutputItem::Message {
-            id: format!("msg_{}", request_id),
+            id: format!("msg_{request_id}"),
             role: "assistant".to_string(),
             content: vec![ResponseContentPart::OutputText {
                 text: partial_text,
@@ -422,9 +418,8 @@ fn build_tool_response(
 
     // Add MCP tool calls WITH output (these were executed)
     for (tool_call, result) in mcp_tool_calls.iter().zip(mcp_results.iter()) {
-        let output_str = to_string(&result.output).unwrap_or_else(|e| {
-            format!("{{\"error\": \"Failed to serialize tool output: {}\"}}", e)
-        });
+        let output_str = to_string(&result.output)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize tool output: {e}\"}}"));
 
         output.push(ResponseOutputItem::FunctionToolCall {
             id: tool_call.id.clone(),
@@ -456,7 +451,7 @@ fn build_tool_response(
     // Build ResponsesResponse with Completed status
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs() as i64;
 
     ResponsesResponse::builder(&request_id, &responses_request.model)

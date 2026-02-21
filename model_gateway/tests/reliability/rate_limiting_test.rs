@@ -24,13 +24,14 @@ mod rate_limiting_tests {
 
     /// Test that concurrent requests are handled within limits
     #[tokio::test]
+    #[expect(clippy::disallowed_methods)]
     async fn test_concurrent_requests_within_limit() {
         let config = TestRouterConfig::with_concurrency(3400, 10);
 
         let ctx =
             AppTestContext::new_with_config(config, vec![TestWorkerConfig::slow(19300, 50)]).await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Send 5 concurrent requests (within limit of 10)
         let mut handles = Vec::new();
@@ -42,7 +43,7 @@ mod rate_limiting_tests {
 
             let handle = tokio::spawn(async move {
                 let payload = json!({
-                    "text": format!("Concurrent request {}", i),
+                    "text": format!("Concurrent request {i}"),
                     "stream": false
                 });
 
@@ -97,13 +98,13 @@ mod rate_limiting_tests {
         let ctx =
             AppTestContext::new_with_config(config, vec![TestWorkerConfig::healthy(19301)]).await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Send requests and verify they succeed
         let mut success_count = 0;
         for i in 0..10 {
             let payload = json!({
-                "text": format!("Rate limited request {}", i),
+                "text": format!("Rate limited request {i}"),
                 "stream": false
             });
 
@@ -123,8 +124,7 @@ mod rate_limiting_tests {
         // Most requests should succeed (some might be rate limited)
         assert!(
             success_count >= 5,
-            "At least half of requests should succeed, got {}",
-            success_count
+            "At least half of requests should succeed, got {success_count}"
         );
 
         ctx.shutdown().await;
@@ -132,13 +132,14 @@ mod rate_limiting_tests {
 
     /// Test unlimited concurrent requests when set to 0
     #[tokio::test]
+    #[expect(clippy::disallowed_methods)]
     async fn test_unlimited_concurrent_requests() {
         let config = TestRouterConfig::with_concurrency(3402, 0); // Unlimited
 
         let ctx =
             AppTestContext::new_with_config(config, vec![TestWorkerConfig::slow(19302, 10)]).await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Send many concurrent requests
         let mut handles = Vec::new();
@@ -150,7 +151,7 @@ mod rate_limiting_tests {
 
             let handle = tokio::spawn(async move {
                 let payload = json!({
-                    "text": format!("Unlimited request {}", i),
+                    "text": format!("Unlimited request {i}"),
                     "stream": false
                 });
 
@@ -186,6 +187,7 @@ mod rate_limiting_tests {
 
     /// Test queue behavior when requests exceed capacity
     #[tokio::test]
+    #[expect(clippy::disallowed_methods)]
     async fn test_queue_behavior() {
         let config = RouterConfig::builder()
             .regular_mode(vec![])
@@ -207,7 +209,7 @@ mod rate_limiting_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Send requests that will exceed capacity
         let mut handles = Vec::new();
@@ -221,7 +223,7 @@ mod rate_limiting_tests {
 
             let handle = tokio::spawn(async move {
                 let payload = json!({
-                    "text": format!("Queue test {}", i),
+                    "text": format!("Queue test {i}"),
                     "stream": false
                 });
 
@@ -253,9 +255,7 @@ mod rate_limiting_tests {
 
         assert!(
             successes > 0,
-            "At least some requests should succeed, got {} successes and {} errors",
-            successes,
-            errors
+            "At least some requests should succeed, got {successes} successes and {errors} errors"
         );
 
         ctx.shutdown().await;

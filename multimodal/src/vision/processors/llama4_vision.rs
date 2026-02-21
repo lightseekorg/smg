@@ -216,30 +216,28 @@ impl Llama4VisionProcessor {
         let upscaling: Vec<_> = scales_and_resolutions
             .iter()
             .filter(|(s, _)| *s >= 1.0)
-            .cloned()
+            .copied()
             .collect();
 
-        let selected_scale = if !upscaling.is_empty() {
-            if self.resize_to_max_canvas {
-                // Pick largest upscaling
-                upscaling
-                    .iter()
-                    .map(|(s, _)| *s)
-                    .fold(f64::NEG_INFINITY, f64::max)
-            } else {
-                // Pick smallest upscaling (minimum distortion)
-                upscaling
-                    .iter()
-                    .map(|(s, _)| *s)
-                    .fold(f64::INFINITY, f64::min)
-            }
-        } else {
+        let selected_scale = if upscaling.is_empty() {
             // No upscaling possible, pick largest downscaling (minimum reduction)
             scales_and_resolutions
                 .iter()
                 .filter(|(s, _)| *s < 1.0)
                 .map(|(s, _)| *s)
                 .fold(f64::NEG_INFINITY, f64::max)
+        } else if self.resize_to_max_canvas {
+            // Pick largest upscaling
+            upscaling
+                .iter()
+                .map(|(s, _)| *s)
+                .fold(f64::NEG_INFINITY, f64::max)
+        } else {
+            // Pick smallest upscaling (minimum distortion)
+            upscaling
+                .iter()
+                .map(|(s, _)| *s)
+                .fold(f64::INFINITY, f64::min)
         };
 
         // Get all resolutions with the selected scale
@@ -261,6 +259,10 @@ impl Llama4VisionProcessor {
     }
 
     /// Pad image to target dimensions with black padding.
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the processor; keeps API consistent"
+    )]
     fn pad_image(&self, image: &DynamicImage, target_w: u32, target_h: u32) -> DynamicImage {
         let (w, h) = image.dimensions();
         if w == target_w && h == target_h {
@@ -314,10 +316,7 @@ impl Llama4VisionProcessor {
     }
 
     /// Process a single image.
-    fn process_single_image(
-        &self,
-        image: &DynamicImage,
-    ) -> Result<(Array4<f32>, (usize, usize)), TransformError> {
+    fn process_single_image(&self, image: &DynamicImage) -> (Array4<f32>, (usize, usize)) {
         let (orig_w, orig_h) = image.dimensions();
         let image_size = (orig_h, orig_w);
 
@@ -327,13 +326,13 @@ impl Llama4VisionProcessor {
 
         // Step 2: Compute resize target - limit upscaling if not resize_to_max_canvas
         // This limits how much we resize the image, but we still pad to target_size
-        let resize_target = if !self.resize_to_max_canvas {
+        let resize_target = if self.resize_to_max_canvas {
+            target_size
+        } else {
             let tile = self.tile_size;
             let new_target_h = target_h.min(orig_h.max(tile));
             let new_target_w = target_w.min(orig_w.max(tile));
             (new_target_h, new_target_w)
-        } else {
-            target_size
         };
 
         // Step 3: Resize preserving aspect ratio to fit within resize_target
@@ -373,7 +372,7 @@ impl Llama4VisionProcessor {
             tiles
         };
 
-        Ok((output, (num_tiles_h, num_tiles_w)))
+        (output, (num_tiles_h, num_tiles_w))
     }
 
     /// Calculate number of image tokens for a given aspect ratio.
@@ -428,7 +427,7 @@ impl ImagePreProcessor for Llama4VisionProcessor {
         let mut num_img_tokens = Vec::new();
 
         for image in images {
-            let (output, aspect_ratio) = processor.process_single_image(image)?;
+            let (output, aspect_ratio) = processor.process_single_image(image);
             let tokens = processor.calculate_num_tokens_for_aspect_ratio(aspect_ratio);
 
             all_outputs.push(output);
@@ -438,7 +437,11 @@ impl ImagePreProcessor for Llama4VisionProcessor {
         }
 
         // Find max tiles across batch for padding
-        let max_tiles = all_outputs.iter().map(|o| o.shape()[0]).max().unwrap();
+        let max_tiles = all_outputs
+            .iter()
+            .map(|o| o.shape()[0])
+            .max()
+            .ok_or(TransformError::EmptyBatch)?;
         let tile = self.tile_size as usize;
 
         // Pad all outputs to max_tiles
@@ -552,8 +555,7 @@ mod tests {
         for exp in expected {
             assert!(
                 resolutions.contains(&exp),
-                "Expected resolution {:?} not found",
-                exp
+                "Expected resolution {exp:?} not found"
             );
         }
     }

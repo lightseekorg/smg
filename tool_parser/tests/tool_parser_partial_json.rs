@@ -24,8 +24,7 @@ fn test_partial_string_flag_disallows_incomplete_strings() {
     // Should have empty object (stopped before parsing incomplete "name" key)
     assert!(
         obj_map.is_empty() || !obj_map.contains_key("name"),
-        "Should not parse incomplete string key, got: {:?}",
-        obj_map
+        "Should not parse incomplete string key, got: {obj_map:?}",
     );
 
     // Should consume characters up to the incomplete string
@@ -148,8 +147,7 @@ fn test_bug_fix_exact_scenario() {
     let obj_map = obj.as_object().unwrap();
     assert!(
         obj_map.is_empty(),
-        "Expected empty object, got: {:?}. This matches Python behavior with Allow.ALL & ~Allow.STR",
-        obj_map
+        "Expected empty object, got: {obj_map:?}. This matches Python behavior with Allow.ALL & ~Allow.STR",
     );
 
     // Should consume all characters (10 bytes)

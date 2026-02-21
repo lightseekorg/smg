@@ -16,6 +16,7 @@ use tracing as log;
 
 pub mod gossip {
     #![allow(unused_qualifications)]
+    #![allow(clippy::trivially_copy_pass_by_ref, clippy::allow_attributes)]
     tonic::include_proto!("mesh.gossip");
 }
 use gossip::{
@@ -94,6 +95,10 @@ impl MeshServerHandler {
         let window_manager = RateLimitWindow::new(self.sync_manager.clone(), window_seconds);
         let shutdown_rx = self.signal_tx.subscribe();
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "handle is stored in rate_limit_task_handle and awaited on shutdown via stop_rate_limit_task"
+        )]
         let handle = tokio::spawn(async move {
             window_manager.start_reset_task(shutdown_rx).await;
         });
@@ -108,6 +113,10 @@ impl MeshServerHandler {
         self.signal_tx.send(true).ok();
         if let Ok(mut task_handle) = self.rate_limit_task_handle.lock() {
             if let Some(handle) = task_handle.take() {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "short-lived join task that awaits the rate_limit_task handle during shutdown; completes when the inner task finishes"
+                )]
                 tokio::spawn(async move {
                     if let Err(err) = handle.await {
                         log::warn!("Rate limit task shutdown failed: {}", err);
@@ -373,6 +382,10 @@ impl MeshServer {
         let self_name = self.self_name.clone();
         let self_address = self.self_addr;
 
+        #[expect(
+            clippy::expect_used,
+            reason = "partition_detector is always set to Some by MeshServerBuilder::build() before start() is called"
+        )]
         let partition_detector = self
             .partition_detector
             .clone()
@@ -394,10 +407,18 @@ impl MeshServer {
 
         let mut service_shutdown = self.signal_rx.clone();
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "handle is awaited immediately below via tokio::select!, bounded by shutdown signal"
+        )]
         let listener = tokio::spawn(service.serve_ping_with_shutdown(async move {
             _ = service_shutdown.changed().await;
         }));
         tokio::time::sleep(Duration::from_secs(1)).await;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "handle is awaited immediately below via tokio::select!, bounded by shutdown signal"
+        )]
         let app_handle = tokio::spawn(controller.event_loop(self.signal_rx.clone()));
 
         tokio::select! {
@@ -434,6 +455,10 @@ pub async fn broadcast_node_states(
     for target_node in &target_nodes {
         let target_node_clone = target_node.clone();
         let nodes_for_task = nodes_to_broadcast.clone();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "broadcast tasks are collected and awaited via join_all with a timeout immediately below"
+        )]
         let task = tokio::spawn(async move {
             let state_sync = StateSync {
                 nodes: nodes_for_task,
@@ -463,7 +488,7 @@ pub async fn broadcast_node_states(
 
     match broadcast_result {
         Ok(results) => {
-            let success_count = results.iter().filter(|r| matches!(r, Ok(Ok(_)))).count();
+            let success_count = results.iter().filter(|r| matches!(r, Ok(Ok(())))).count();
             let total_count = target_nodes.len();
             log::info!(
                 "Broadcast completed: {}/{} successful",
@@ -497,23 +522,21 @@ pub async fn try_ping(
     })?;
 
     let connect_url = if mtls_manager.is_some() {
-        format!("https://{}", peer_addr)
+        format!("https://{peer_addr}")
     } else {
-        format!("http://{}", peer_addr)
+        format!("http://{peer_addr}")
     };
 
     let mut endpoint = Endpoint::from_shared(connect_url.clone()).map_err(|e| {
         tonic::Status::invalid_argument(format!(
-            "Invalid endpoint for node {}: {}, {}",
-            peer_name, connect_url, e
+            "Invalid endpoint for node {peer_name}: {connect_url}, {e}"
         ))
     })?;
 
     if let Some(mtls_manager) = mtls_manager {
         mtls_manager.load_client_config().await.map_err(|e| {
             tonic::Status::unavailable(format!(
-                "Failed to load mTLS client config for {}: {}",
-                peer_name, e
+                "Failed to load mTLS client config for {peer_name}: {e}"
             ))
         })?;
 
@@ -524,8 +547,7 @@ pub async fn try_ping(
             .unwrap_or_else(|| peer_name.clone());
         let ca_certificate = mtls_manager.load_ca_certificate().await.map_err(|e| {
             tonic::Status::unavailable(format!(
-                "Failed to load mTLS CA certificate for {}: {}",
-                peer_name, e
+                "Failed to load mTLS CA certificate for {peer_name}: {e}"
             ))
         })?;
 
@@ -537,8 +559,7 @@ pub async fn try_ping(
             )
             .map_err(|e| {
                 tonic::Status::unavailable(format!(
-                    "Failed to configure TLS endpoint for {}: {}",
-                    peer_name, e
+                    "Failed to configure TLS endpoint for {peer_name}: {e}"
                 ))
             })?;
     }
@@ -571,6 +592,7 @@ macro_rules! mesh_run {
         use $crate::MeshServerBuilder;
         let (server, handler) =
             MeshServerBuilder::new($name.to_string(), $addr, $init_peer).build();
+        #[expect(clippy::disallowed_methods, reason = "test macro: spawned server runs for the test lifetime and handler is returned for assertions")]
         tokio::spawn(async move {
             if let Err(e) = server.start().await {
                 tracing::error!("Mesh server failed: {}", e);
@@ -613,7 +635,7 @@ mod tests {
 
     async fn get_node() -> SocketAddr {
         let (_listener, port) = find_free_port().await;
-        format!("127.0.0.1:{}", port).parse().unwrap()
+        format!("127.0.0.1:{port}").parse().unwrap()
     }
 
     fn print_state(handler: &MeshServerHandler) -> String {
@@ -693,8 +715,7 @@ mod tests {
             if start.elapsed() > max_wait {
                 log::info!("================================================");
                 panic!(
-                    "Timeout waiting for state convergence.\nExpected: {:?}\nState A: {:?}\nState B: {:?}\nState C: {:?}",
-                    final_state, state_a, state_b, state_c
+                    "Timeout waiting for state convergence.\nExpected: {final_state:?}\nState A: {state_a:?}\nState B: {state_b:?}\nState C: {state_c:?}"
                 );
             }
 

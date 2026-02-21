@@ -25,7 +25,7 @@ mod round_robin_tests {
             AppTestContext::new_with_config(config, TestWorkerConfig::healthy_workers(19001, 3))
                 .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
         let num_requests = 30;
         let mut success_count = 0;
 
@@ -78,7 +78,7 @@ mod round_robin_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // With retries enabled, requests should eventually succeed
         // by being retried on the healthy worker
@@ -117,7 +117,7 @@ mod random_tests {
             AppTestContext::new_with_config(config, TestWorkerConfig::healthy_workers(19010, 2))
                 .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
         let num_requests = 20;
         let mut success_count = 0;
 
@@ -162,7 +162,7 @@ mod cache_aware_tests {
             AppTestContext::new_with_config(config, TestWorkerConfig::healthy_workers(19020, 2))
                 .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Same prompt should route to same worker (consistent hashing)
         let same_prompt = "Hello, cache-aware routing test!";
@@ -206,7 +206,7 @@ mod cache_aware_tests {
             AppTestContext::new_with_config(config, TestWorkerConfig::healthy_workers(19022, 2))
                 .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
         let prompts = vec![
             "First unique prompt",
             "Second unique prompt",
@@ -272,7 +272,7 @@ mod worker_health_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Requests should succeed by retrying on healthy worker
         // or by circuit breaker opening on failing worker
@@ -301,7 +301,7 @@ mod worker_health_tests {
     async fn test_all_workers_unhealthy() {
         let ctx = AppTestContext::new(vec![]).await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "Test with no workers",
@@ -342,7 +342,7 @@ mod worker_response_delay_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let start = std::time::Instant::now();
         let payload = json!({

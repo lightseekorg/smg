@@ -7,6 +7,11 @@
 //! Run with: cargo bench --bench radix_tree_benchmark
 //!
 //! For quick validation: cargo bench --bench radix_tree_benchmark -- benchmark_summary --exact
+#![expect(
+    clippy::unwrap_used,
+    clippy::print_stderr,
+    reason = "benchmark code: panicking on setup failure is expected, eprintln used for benchmark output"
+)]
 
 use std::{
     collections::BTreeMap,
@@ -34,7 +39,7 @@ lazy_static::lazy_static! {
 fn add_result(category: &str, result: String) {
     let mut results = BENCHMARK_RESULTS.lock().unwrap();
     let index = results.len();
-    let key = format!("{:03}_{}", index, category);
+    let key = format!("{index:03}_{category}");
     results.insert(key, result);
 }
 
@@ -82,9 +87,9 @@ fn generate_worker_endpoints(count: usize) -> Vec<String> {
     (0..count)
         .map(|i| {
             if i % 4 == 0 {
-                format!("grpc://worker-{}.sglang.svc.cluster.local:50051", i)
+                format!("grpc://worker-{i}.sglang.svc.cluster.local:50051")
             } else {
-                format!("http://worker-{}.sglang.svc.cluster.local:8000", i)
+                format!("http://worker-{i}.sglang.svc.cluster.local:8000")
             }
         })
         .collect()
@@ -521,7 +526,7 @@ fn print_summary() {
     );
     eprintln!("{}", "-".repeat(90));
     for v in &string_results {
-        eprintln!("{}", v);
+        eprintln!("{v}");
     }
 
     eprintln!("\n{}", "=".repeat(90));
@@ -533,7 +538,7 @@ fn print_summary() {
     );
     eprintln!("{}", "-".repeat(90));
     for v in &token_results {
-        eprintln!("{}", v);
+        eprintln!("{v}");
     }
 
     eprintln!("\n{}", "=".repeat(90));

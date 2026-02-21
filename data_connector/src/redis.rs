@@ -62,7 +62,7 @@ impl RedisConversationStorage {
     }
 
     fn conversation_key(id: &str) -> String {
-        format!("conversation:{}", id)
+        format!("conversation:{id}")
     }
 
     fn parse_metadata(
@@ -220,7 +220,7 @@ impl ConversationStorage for RedisConversationStorage {
         let id_str = id.0.as_str();
         let key = Self::conversation_key(id_str);
         // Also delete the items list for this conversation
-        let items_key = format!("{}:items", key);
+        let items_key = format!("{key}:items");
 
         let mut conn = self
             .store
@@ -250,11 +250,11 @@ impl RedisConversationItemStorage {
     }
 
     fn item_key(id: &str) -> String {
-        format!("item:{}", id)
+        format!("item:{id}")
     }
 
     fn conv_items_key(conv_id: &str) -> String {
-        format!("conversation:{}:items", conv_id)
+        format!("conversation:{conv_id}:items")
     }
 }
 
@@ -368,8 +368,8 @@ impl ConversationItemStorage for RedisConversationItemStorage {
                 .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
             if let Some(s) = score {
                 match params.order {
-                    SortOrder::Asc => min = format!("({}", s),
-                    SortOrder::Desc => max = format!("({}", s),
+                    SortOrder::Asc => min = format!("({s}"),
+                    SortOrder::Desc => max = format!("({s}"),
                 }
             }
         }
@@ -558,11 +558,11 @@ impl RedisResponseStorage {
     }
 
     fn response_key(id: &str) -> String {
-        format!("response:{}", id)
+        format!("response:{id}")
     }
 
     fn safety_key(identifier: &str) -> String {
-        format!("safety:{}:responses", identifier)
+        format!("safety:{identifier}:responses")
     }
 }
 
@@ -757,7 +757,7 @@ impl ResponseStorage for RedisResponseStorage {
             let fetched = self.get_response(lookup_id).await?;
             match fetched {
                 Some(response) => {
-                    current_id = response.previous_response_id.clone();
+                    current_id.clone_from(&response.previous_response_id);
                     chain.responses.push(response);
                     visited += 1;
                 }

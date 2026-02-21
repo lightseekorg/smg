@@ -98,8 +98,8 @@ impl Worker for GrpcWorker {
         &self.endpoint
     }
 
-    fn api_key(&self) -> &Option<String> {
-        &self.api_key
+    fn api_key(&self) -> Option<&String> {
+        self.api_key.as_ref()
     }
 
     fn worker_type(&self) -> &WorkerType {
@@ -278,10 +278,9 @@ pub unsafe extern "C" fn sgl_multi_client_create(
             set_error_message(
                 error_out,
                 &format!(
-                    "Policy '{}' is not supported in the SDK. It requires HTTP headers \
+                    "Policy '{policy_name_str}' is not supported in the SDK. It requires HTTP headers \
                      and/or a hash ring which are not available at the FFI layer. \
-                     Supported policies: round_robin, random, power_of_two, cache_aware, bucket",
-                    policy_name_str
+                     Supported policies: round_robin, random, power_of_two, cache_aware, bucket"
                 ),
             );
             return ptr::null_mut();
@@ -290,9 +289,8 @@ pub unsafe extern "C" fn sgl_multi_client_create(
             set_error_message(
                 error_out,
                 &format!(
-                    "Unknown policy: '{}'. \
-                     Supported policies: round_robin, random, power_of_two, cache_aware, bucket",
-                    policy_name_str
+                    "Unknown policy: '{policy_name_str}'. \
+                     Supported policies: round_robin, random, power_of_two, cache_aware, bucket"
                 ),
             );
             return ptr::null_mut();
@@ -307,10 +305,7 @@ pub unsafe extern "C" fn sgl_multi_client_create(
             match RUNTIME.block_on(async { SglangSchedulerClient::connect(endpoint).await }) {
                 Ok(c) => Arc::new(c),
                 Err(e) => {
-                    set_error_message(
-                        error_out,
-                        &format!("Failed to connect to {}: {}", endpoint, e),
-                    );
+                    set_error_message(error_out, &format!("Failed to connect to {endpoint}: {e}"));
                     return ptr::null_mut();
                 }
             };
@@ -474,7 +469,7 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
         match create_tokenizer_from_file(&multi_client.tokenizer_path) {
             Ok(t) => t,
             Err(e) => {
-                set_error_message(error_out, &format!("Failed to create tokenizer: {}", e));
+                set_error_message(error_out, &format!("Failed to create tokenizer: {e}"));
                 return SglErrorCode::TokenizationError;
             }
         };
@@ -483,7 +478,7 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
     let chat_request: ChatCompletionRequest = match serde_json::from_str(request_str) {
         Ok(req) => req,
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to parse request JSON: {}", e));
+            set_error_message(error_out, &format!("Failed to parse request JSON: {e}"));
             return SglErrorCode::ParsingError;
         }
     };
@@ -492,7 +487,7 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
     let processed_messages = match process_chat_messages(&chat_request, tokenizer.as_ref()) {
         Ok(msgs) => msgs,
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to process messages: {}", e));
+            set_error_message(error_out, &format!("Failed to process messages: {e}"));
             return SglErrorCode::TokenizationError;
         }
     };
@@ -501,7 +496,7 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
     let token_ids = match tokenizer.encode(&processed_messages.text, false) {
         Ok(encoding) => encoding.token_ids().to_vec(),
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to tokenize: {}", e));
+            set_error_message(error_out, &format!("Failed to tokenize: {e}"));
             return SglErrorCode::TokenizationError;
         }
     };
@@ -528,7 +523,11 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
 
     // Generate tool constraints if needed
     let tool_constraint = if let Some(tools) = chat_request.tools.as_ref() {
-        match generate_tool_constraints(tools, &chat_request.tool_choice, &chat_request.model) {
+        match generate_tool_constraints(
+            tools,
+            chat_request.tool_choice.as_ref(),
+            &chat_request.model,
+        ) {
             Ok(Some((constraint_type, constraint_value))) => {
                 Some((constraint_type, constraint_value))
             }
@@ -536,7 +535,7 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
             Err(e) => {
                 set_error_message(
                     error_out,
-                    &format!("Failed to generate tool constraints: {}", e),
+                    &format!("Failed to generate tool constraints: {e}"),
                 );
                 return SglErrorCode::ParsingError;
             }
@@ -557,10 +556,7 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
     ) {
         Ok(req) => req,
         Err(e) => {
-            set_error_message(
-                error_out,
-                &format!("Failed to build generate request: {}", e),
-            );
+            set_error_message(error_out, &format!("Failed to build generate request: {e}"));
             return SglErrorCode::ParsingError;
         }
     };
@@ -569,7 +565,7 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
     let stream = match RUNTIME.block_on(async { client.generate(proto_request).await }) {
         Ok(s) => s,
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to send request: {}", e));
+            set_error_message(error_out, &format!("Failed to send request: {e}"));
             return SglErrorCode::UnknownError;
         }
     };

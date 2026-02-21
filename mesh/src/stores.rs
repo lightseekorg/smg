@@ -28,7 +28,7 @@ pub enum StoreType {
 }
 
 impl StoreType {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             StoreType::Membership => "membership",
             StoreType::App => "app",
@@ -124,7 +124,7 @@ pub struct PolicyState {
 
 /// Helper function to get tree state key for a model
 pub fn tree_state_key(model_id: &str) -> String {
-    format!("tree:{}", model_id)
+    format!("tree:{model_id}")
 }
 
 /// Membership store
@@ -388,7 +388,7 @@ impl RateLimitStore {
     }
 
     /// Get or create counter (only if this node is an owner)
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     fn get_or_create_counter_internal(&self, key: String) -> Option<SyncPNCounter> {
         if !self.is_owner(&key) {
             return None;

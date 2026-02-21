@@ -169,7 +169,7 @@ pub(super) async fn load_conversation_history(
         {
             Ok(chain) => {
                 let mut items = Vec::new();
-                for stored in chain.responses.iter() {
+                for stored in &chain.responses {
                     // Convert input items from stored input (which is now a JSON array)
                     if let Some(input_arr) = stored.input.as_array() {
                         for item in input_arr {
@@ -228,7 +228,7 @@ pub(super) async fn load_conversation_history(
             .map_err(|e| {
                 error::internal_error(
                     "check_conversation_failed",
-                    format!("Failed to check conversation: {}", e),
+                    format!("Failed to check conversation: {e}"),
                 )
             })?;
 
@@ -236,8 +236,7 @@ pub(super) async fn load_conversation_history(
             return Err(error::not_found(
                 "conversation_not_found",
                 format!(
-                    "Conversation '{}' not found. Please create the conversation first using the conversations API.",
-                    conv_id_str
+                    "Conversation '{conv_id_str}' not found. Please create the conversation first using the conversations API."
                 )
             ));
         }
@@ -257,7 +256,7 @@ pub(super) async fn load_conversation_history(
         {
             Ok(stored_items) => {
                 let mut items: Vec<ResponseInputOutputItem> = Vec::new();
-                for item in stored_items.into_iter() {
+                for item in stored_items {
                     if item.item_type == "message" {
                         if let Ok(content_parts) =
                             serde_json::from_value::<Vec<ResponseContentPart>>(item.content.clone())
@@ -284,7 +283,7 @@ pub(super) async fn load_conversation_history(
                     }
                     ResponseInput::Items(current_items) => {
                         // Process all item types, converting SimpleInputMessage to Message
-                        for item in current_items.iter() {
+                        for item in current_items {
                             let normalized = responses::normalize_input_item(item);
                             items.push(normalized);
                         }
@@ -307,10 +306,7 @@ pub(super) async fn load_conversation_history(
                 items.push(ResponseInputOutputItem::Message {
                     id: format!(
                         "msg_u_{}",
-                        request
-                            .previous_response_id
-                            .as_ref()
-                            .unwrap_or(&"new".to_string())
+                        request.previous_response_id.as_deref().unwrap_or("new")
                     ),
                     role: "user".to_string(),
                     content: vec![ResponseContentPart::InputText { text: text.clone() }],
@@ -319,7 +315,7 @@ pub(super) async fn load_conversation_history(
             }
             ResponseInput::Items(current_items) => {
                 // Process all item types, converting SimpleInputMessage to Message
-                for item in current_items.iter() {
+                for item in current_items {
                     let normalized = responses::normalize_input_item(item);
                     items.push(normalized);
                 }

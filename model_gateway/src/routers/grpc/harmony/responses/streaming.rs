@@ -36,6 +36,10 @@ use crate::{
 ///
 /// This is the streaming equivalent of `serve_harmony_responses()`.
 /// Emits SSE events for lifecycle, MCP list_tools, and per-iteration streaming.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "streaming task is fire-and-forget; client disconnect terminates it"
+)]
 pub(crate) async fn serve_harmony_responses_stream(
     ctx: &ResponsesContext,
     request: ResponsesRequest,
@@ -65,7 +69,7 @@ pub(crate) async fn serve_harmony_responses_stream(
     let model = current_request.model.clone();
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
     let mut emitter = ResponseStreamEventEmitter::new(response_id.clone(), model, created_at);
 
@@ -172,7 +176,7 @@ async fn execute_mcp_tool_loop_streaming(
     let mut mcp_tracking = McpCallTracking::new();
 
     // Emit mcp_list_tools on first iteration
-    for binding in session.mcp_servers().iter() {
+    for binding in session.mcp_servers() {
         let tools_for_server = session.list_tools_for_server(&binding.server_key);
 
         if emitter
@@ -199,10 +203,7 @@ async fn execute_mcp_tool_loop_streaming(
         // Safety check: prevent infinite loops
         if iteration_count > DEFAULT_MAX_ITERATIONS {
             emitter.emit_error(
-                &format!(
-                    "Maximum tool iterations ({}) exceeded",
-                    DEFAULT_MAX_ITERATIONS
-                ),
+                &format!("Maximum tool iterations ({DEFAULT_MAX_ITERATIONS}) exceeded"),
                 Some("max_iterations_exceeded"),
                 tx,
             );
@@ -223,7 +224,7 @@ async fn execute_mcp_tool_loop_streaming(
             Ok(result) => result,
             Err(err_response) => {
                 emitter.emit_error(
-                    &format!("Pipeline execution failed: {:?}", err_response),
+                    &format!("Pipeline execution failed: {err_response:?}"),
                     Some("pipeline_error"),
                     tx,
                 );
@@ -309,7 +310,9 @@ async fn execute_mcp_tool_loop_streaming(
                 }
 
                 // Execute MCP tools (if any)
-                let mcp_results = if !mcp_tool_calls.is_empty() {
+                let mcp_results = if mcp_tool_calls.is_empty() {
+                    Vec::new()
+                } else {
                     match execute_mcp_tools(
                         &session,
                         &mcp_tool_calls,
@@ -321,15 +324,13 @@ async fn execute_mcp_tool_loop_streaming(
                         Ok(results) => results,
                         Err(err_response) => {
                             emitter.emit_error(
-                                &format!("MCP tool execution failed: {:?}", err_response),
+                                &format!("MCP tool execution failed: {err_response:?}"),
                                 Some("mcp_tool_error"),
                                 tx,
                             );
                             return;
                         }
                     }
-                } else {
-                    Vec::new()
                 };
 
                 // Update mcp_call output items with execution results (if any MCP tools were executed)
@@ -359,23 +360,13 @@ async fn execute_mcp_tool_loop_streaming(
                 debug!("Only MCP tools - continuing loop with results");
 
                 // Build next request with appended history
-                current_request = match build_next_request_with_tools(
+                current_request = build_next_request_with_tools(
                     current_request,
                     mcp_tool_calls,
                     mcp_results,
                     analysis,
                     partial_text,
-                ) {
-                    Ok(req) => req,
-                    Err(e) => {
-                        emitter.emit_error(
-                            &format!("Failed to build next request: {:?}", e),
-                            Some("request_building_error"),
-                            tx,
-                        );
-                        return;
-                    }
-                };
+                );
 
                 // Continue loop
             }
@@ -436,7 +427,7 @@ async fn execute_without_mcp_streaming(
         Ok(result) => result,
         Err(err_response) => {
             emitter.emit_error(
-                &format!("Pipeline execution failed: {:?}", err_response),
+                &format!("Pipeline execution failed: {err_response:?}"),
                 Some("pipeline_error"),
                 tx,
             );

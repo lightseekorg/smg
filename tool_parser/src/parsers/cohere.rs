@@ -105,9 +105,9 @@ impl CohereParser {
     }
 
     /// Convert a Cohere tool call JSON object to our ToolCall format
-    fn convert_tool_call(&self, json_str: &str) -> ParserResult<Vec<ToolCall>> {
+    fn convert_tool_call(json_str: &str) -> ParserResult<Vec<ToolCall>> {
         let value: Value = serde_json::from_str(json_str.trim())
-            .map_err(|e| ParserError::ParsingFailed(format!("Invalid JSON: {}", e)))?;
+            .map_err(|e| ParserError::ParsingFailed(format!("Invalid JSON: {e}")))?;
 
         let tools = match value {
             Value::Array(arr) => arr,
@@ -141,7 +141,7 @@ impl CohereParser {
     }
 
     /// Extract JSON content between START_ACTION and END_ACTION
-    fn extract_action_json<'a>(&self, text: &'a str) -> Option<(usize, &'a str, usize)> {
+    fn extract_action_json(text: &str) -> Option<(usize, &str, usize)> {
         let start_idx = text.find(START_ACTION)?;
         let json_start = start_idx + START_ACTION.len();
 
@@ -178,12 +178,12 @@ impl ToolParser for CohereParser {
         let mut tool_calls = Vec::new();
         let mut remaining = text;
 
-        while let Some((start_idx, json_str, end_idx)) = self.extract_action_json(remaining) {
+        while let Some((start_idx, json_str, end_idx)) = Self::extract_action_json(remaining) {
             // Text before action
             normal_text.push_str(&remaining[..start_idx]);
 
             // Parse tool calls from this action block
-            match self.convert_tool_call(json_str) {
+            match Self::convert_tool_call(json_str) {
                 Ok(calls) => tool_calls.extend(calls),
                 Err(e) => {
                     tracing::debug!("Failed to parse Cohere tool call: {}", e);

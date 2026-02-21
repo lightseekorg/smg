@@ -1,4 +1,8 @@
 //! Common test utilities for tool-parser tests
+#![allow(
+    clippy::allow_attributes,
+    reason = "dead_code must use #[allow] not #[expect] in shared test modules because the lint only fires in some compilation units"
+)]
 
 use openai_protocol::common::{Function, Tool};
 use serde_json::json;
@@ -10,7 +14,10 @@ pub mod streaming_helpers {
     //! how LLM tokens actually arrive (1-5 characters at a time).
 
     /// Split input into realistic char-level chunks (2-3 chars each for determinism)
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "shared test utility not used by all test binaries"
+    )]
     pub fn create_realistic_chunks(input: &str) -> Vec<String> {
         let mut chunks = Vec::new();
         let chars: Vec<char> = input.chars().collect();
@@ -35,7 +42,10 @@ pub mod streaming_helpers {
 
     /// Split input at strategic positions to test edge cases
     /// This creates chunks that break at critical positions like after quotes, colons, etc.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "shared test utility not used by all test binaries"
+    )]
     pub fn create_strategic_chunks(input: &str) -> Vec<String> {
         let mut chunks = Vec::new();
         let mut current = String::new();
@@ -63,42 +73,45 @@ pub mod streaming_helpers {
     }
 
     /// Create the bug scenario chunks: `{"name": "` arrives in parts
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "shared test utility not used by all test files")]
     pub fn create_bug_scenario_chunks() -> Vec<&'static str> {
         vec![
-            r#"{"#,
+            r"{",
             r#"""#,
-            r#"name"#,
+            r"name",
             r#"""#,
-            r#":"#,
-            r#" "#,
-            r#"""#,      // Bug occurs here: parser has {"name": "
-            r#"search"#, // Use valid tool name
+            r":",
+            r" ",
+            r#"""#,    // Bug occurs here: parser has {"name": "
+            r"search", // Use valid tool name
             r#"""#,
-            r#","#,
-            r#" "#,
+            r",",
+            r" ",
             r#"""#,
-            r#"arguments"#,
+            r"arguments",
             r#"""#,
-            r#":"#,
-            r#" "#,
-            r#"{"#,
+            r":",
+            r" ",
+            r"{",
             r#"""#,
-            r#"query"#,
+            r"query",
             r#"""#,
-            r#":"#,
-            r#" "#,
+            r":",
+            r" ",
             r#"""#,
-            r#"test query"#,
+            r"test query",
             r#"""#,
-            r#"}"#,
-            r#"}"#,
+            r"}",
+            r"}",
         ]
     }
 }
 
 /// Create a comprehensive set of test tools covering all parser test scenarios
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "shared test utility not used by all test binaries"
+)]
 pub fn create_test_tools() -> Vec<Tool> {
     vec![
         Tool {

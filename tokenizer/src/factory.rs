@@ -42,7 +42,7 @@ pub fn create_tokenizer_with_chat_template(
 
     // Check if file exists
     if !path.exists() {
-        return Err(Error::msg(format!("File not found: {}", file_path)));
+        return Err(Error::msg(format!("File not found: {file_path}")));
     }
 
     // If path is a directory, search for tokenizer files
@@ -54,8 +54,7 @@ pub fn create_tokenizer_with_chat_template(
                 resolve_and_log_chat_template(chat_template_path, path, file_path);
             let tokenizer_path_str = tokenizer_json.to_str().ok_or_else(|| {
                 Error::msg(format!(
-                    "Tokenizer path is not valid UTF-8: {:?}",
-                    tokenizer_json
+                    "Tokenizer path is not valid UTF-8: {tokenizer_json:?}"
                 ))
             })?;
             return create_tokenizer_with_chat_template(
@@ -75,8 +74,7 @@ pub fn create_tokenizer_with_chat_template(
         }
 
         return Err(Error::msg(format!(
-            "Directory '{}' does not contain a valid tokenizer file (tokenizer.json, tiktoken.model, *.tiktoken, or vocab.json)",
-            file_path
+            "Directory '{file_path}' does not contain a valid tokenizer file (tokenizer.json, tiktoken.model, *.tiktoken, or vocab.json)"
         )));
     }
 
@@ -143,8 +141,7 @@ fn auto_detect_tokenizer(file_path: &str) -> Result<Arc<dyn traits::Tokenizer>> 
     }
 
     Err(Error::msg(format!(
-        "Unable to determine tokenizer type for file: {}",
-        file_path
+        "Unable to determine tokenizer type for file: {file_path}"
     )))
 }
 
@@ -319,8 +316,7 @@ pub async fn create_tokenizer_async_with_chat_template(
 
                 let tokenizer_path_str = tokenizer_path.to_str().ok_or_else(|| {
                     Error::msg(format!(
-                        "Tokenizer path is not valid UTF-8: {:?}",
-                        tokenizer_path
+                        "Tokenizer path is not valid UTF-8: {tokenizer_path:?}"
                     ))
                 })?;
                 create_tokenizer_with_chat_template(
@@ -346,7 +342,7 @@ pub async fn create_tokenizer_async_with_chat_template(
                         );
 
                         let file_path_str = file_path.to_str().ok_or_else(|| {
-                            Error::msg(format!("File path is not valid UTF-8: {:?}", file_path))
+                            Error::msg(format!("File path is not valid UTF-8: {file_path:?}"))
                         })?;
                         return create_tokenizer_with_chat_template(
                             file_path_str,
@@ -355,14 +351,12 @@ pub async fn create_tokenizer_async_with_chat_template(
                     }
                 }
                 Err(Error::msg(format!(
-                    "Downloaded model '{}' but couldn't find a suitable tokenizer file",
-                    model_name_or_path
+                    "Downloaded model '{model_name_or_path}' but couldn't find a suitable tokenizer file"
                 )))
             }
         }
         Err(e) => Err(Error::msg(format!(
-            "Failed to download tokenizer from HuggingFace: {}",
-            e
+            "Failed to download tokenizer from HuggingFace: {e}"
         ))),
     }
 }
@@ -422,7 +416,7 @@ pub fn get_tokenizer_info(file_path: &str) -> Result<TokenizerType> {
     let path = Path::new(file_path);
 
     if !path.exists() {
-        return Err(Error::msg(format!("File not found: {}", file_path)));
+        return Err(Error::msg(format!("File not found: {file_path}")));
     }
 
     let extension = path
@@ -451,6 +445,10 @@ pub fn get_tokenizer_info(file_path: &str) -> Result<TokenizerType> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::print_stdout,
+    reason = "diagnostic output in tests for CI skip messages and download results"
+)]
 mod tests {
     use super::{
         create_tokenizer, create_tokenizer_async, create_tokenizer_from_file, is_likely_json,
@@ -510,7 +508,7 @@ mod tests {
                 println!("Successfully downloaded and created tokenizer");
             }
             Err(e) => {
-                println!("Download failed (this might be expected): {}", e);
+                println!("Download failed (this might be expected): {e}");
                 // Don't fail the test - network issues shouldn't break CI
             }
         }

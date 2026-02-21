@@ -163,6 +163,10 @@ impl AsyncMultiModalTracker {
         self.record_uuid(modality, uuid);
 
         let connector = Arc::clone(&self.media_connector);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "spawn handle is stored in self.pending and awaited in resolve(); fire-and-forget is intentional for concurrent media fetching"
+        )]
         let handle = tokio::spawn(async move {
             let frame = connector
                 .fetch_image(source, ImageFetchConfig { detail })

@@ -72,6 +72,10 @@ impl PipelineStage for EmbeddingResponseProcessingStage {
 }
 
 impl EmbeddingResponseProcessingStage {
+    #[expect(
+        clippy::unused_self,
+        reason = "method on stage struct for consistency with other stage convert_response methods"
+    )]
     fn convert_response(
         &self,
         ctx: &RequestContext,

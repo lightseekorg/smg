@@ -44,10 +44,14 @@ impl IncrementalUpdateCollector {
     }
 
     /// Get current timestamp in nanoseconds
+    #[expect(
+        clippy::expect_used,
+        reason = "system clock before UNIX epoch is a fatal misconfiguration that must not silently produce timestamp=0"
+    )]
     fn current_timestamp() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("system clock before UNIX_EPOCH; cannot generate valid timestamps")
             .as_nanos() as u64
     }
 

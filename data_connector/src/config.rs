@@ -95,11 +95,11 @@ impl PostgresConfig {
             return Err("is it db-url should be not empty".to_string());
         }
 
-        let url = Url::parse(s).map_err(|e| format!("invalid db_url: {}", e))?;
+        let url = Url::parse(s).map_err(|e| format!("invalid db_url: {e}"))?;
 
         let scheme = url.scheme();
         if scheme != "postgres" && scheme != "postgresql" {
-            return Err(format!("don't support URL scheme: {}", scheme));
+            return Err(format!("don't support URL scheme: {scheme}"));
         }
 
         if url.host().is_none() {
@@ -140,6 +140,10 @@ fn default_redis_pool_max() -> usize {
     16
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde default function must match field type Option<u64>"
+)]
 fn default_redis_retention_days() -> Option<u64> {
     Some(30)
 }
@@ -151,11 +155,11 @@ impl RedisConfig {
             return Err("redis url should not be empty".to_string());
         }
 
-        let url = Url::parse(s).map_err(|e| format!("invalid redis url: {}", e))?;
+        let url = Url::parse(s).map_err(|e| format!("invalid redis url: {e}"))?;
 
         let scheme = url.scheme();
         if scheme != "redis" && scheme != "rediss" {
-            return Err(format!("unsupported URL scheme: {}", scheme));
+            return Err(format!("unsupported URL scheme: {scheme}"));
         }
 
         if url.host().is_none() {

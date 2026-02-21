@@ -98,6 +98,10 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         // Spawn the reset task
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test: handle is awaited with timeout below"
+        )]
         let task_handle = tokio::spawn(async move {
             window.start_reset_task(shutdown_rx).await;
         });
@@ -156,6 +160,10 @@ mod tests {
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
             // Start reset task in background
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "test: handle is awaited with timeout below"
+            )]
             let reset_handle = tokio::spawn(async move {
                 window.start_reset_task(shutdown_rx).await;
             });
@@ -237,8 +245,7 @@ mod tests {
         // After reset, value should be <= 0 (since we decrement by current count)
         assert!(
             reset_value <= 0,
-            "Counter should be reset to 0 or less, got: {}",
-            reset_value
+            "Counter should be reset to 0 or less, got: {reset_value}"
         );
     }
 

@@ -63,7 +63,16 @@ impl PipelineStage for ChatRequestBuildingStage {
         let body_ref = prep.filtered_request.as_ref().unwrap_or(&chat_request);
 
         // Build proto request using centralized dispatch
-        let processed_messages = prep.processed_messages.as_ref().unwrap();
+        let processed_messages = prep.processed_messages.as_ref().ok_or_else(|| {
+            error!(
+                function = "ChatRequestBuildingStage::execute",
+                "processed_messages not set in preparation state"
+            );
+            error::internal_error(
+                "processed_messages_missing",
+                "processed_messages not set - this is a bug in the pipeline",
+            )
+        })?;
         let mut proto_request = builder_client
             .build_chat_request(
                 request_id,
@@ -75,7 +84,7 @@ impl PipelineStage for ChatRequestBuildingStage {
             )
             .map_err(|e| {
                 error!(function = "ChatRequestBuildingStage::execute", error = %e, "Failed to build generate request");
-                error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {}", e))
+                error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
             })?;
 
         // Inject tokenized stop sequences for TRT-LLM requests

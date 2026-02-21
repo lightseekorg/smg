@@ -60,7 +60,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for SubmitTokenizerJobStep {
         // Get cache config from router config
         let cache_config = app_context.router_config.tokenizer_cache.to_option();
 
-        for worker in workers.iter() {
+        for worker in workers {
             let model_id = worker.model_id().to_string();
 
             // Get tokenizer path with fallback chain:

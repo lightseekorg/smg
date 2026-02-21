@@ -19,6 +19,5 @@ pub mod utils; // Used by routers/http and bindings/golang
 pub struct ProcessedMessages {
     pub text: String,
     pub multimodal_inputs: Option<MultimodalInputs>,
-    #[allow(dead_code)]
     pub stop_sequences: Option<StringOrArray>,
 }

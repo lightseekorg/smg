@@ -153,7 +153,7 @@ impl CacheAwarePolicy {
 
     /// Set mesh sync manager (can be called after construction)
     pub fn set_mesh_sync(&mut self, mesh_sync: OptionalMeshSyncManager) {
-        self.mesh_sync = mesh_sync.clone();
+        self.mesh_sync.clone_from(&mesh_sync);
         if mesh_sync.is_some() {
             self.restore_tree_state_from_mesh();
         }
@@ -232,6 +232,10 @@ impl CacheAwarePolicy {
     /// Note: Currently a no-op. Stale entries are cleaned up by LRU eviction.
     /// Worker registry removes workers first, so routing will skip them anyway.
     /// TODO: Implement efficient remove_tenant in kv_index with reverse index.
+    #[expect(
+        clippy::unused_self,
+        reason = "no-op stub; will use self once remove_tenant is implemented"
+    )]
     pub fn remove_worker(&self, _worker: &dyn Worker) {
         // No-op: rely on LRU eviction to clean up stale entries
     }
@@ -240,6 +244,10 @@ impl CacheAwarePolicy {
     ///
     /// Note: Currently a no-op. Stale entries are cleaned up by LRU eviction.
     /// TODO: Implement efficient remove_tenant in kv_index with reverse index.
+    #[expect(
+        clippy::unused_self,
+        reason = "no-op stub; will use self once remove_tenant is implemented"
+    )]
     pub fn remove_worker_by_url(&self, _url: &str) {
         // No-op: rely on LRU eviction to clean up stale entries
     }

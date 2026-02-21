@@ -20,6 +20,9 @@ static DOWNLOAD_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 ///
 /// This function is thread-safe and will only download the tokenizer once
 /// even if called from multiple threads concurrently.
+#[expect(clippy::unwrap_used, reason = "test helper — panics are intentional")]
+#[expect(clippy::expect_used, reason = "test helper — panics are intentional")]
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 pub fn ensure_tokenizer_cached() -> PathBuf {
     // Get or initialize the mutex
     let mutex = DOWNLOAD_MUTEX.get_or_init(|| Mutex::new(()));
@@ -46,15 +49,19 @@ pub fn ensure_tokenizer_cached() -> PathBuf {
             .send()
             .expect("Failed to download tokenizer");
 
-        if !response.status().is_success() {
-            panic!("Failed to download tokenizer: HTTP {}", response.status());
-        }
+        assert!(
+            response.status().is_success(),
+            "Failed to download tokenizer: HTTP {}",
+            response.status()
+        );
 
         let content = response.bytes().expect("Failed to read tokenizer content");
 
-        if content.len() < 100 {
-            panic!("Downloaded content too small: {} bytes", content.len());
-        }
+        assert!(
+            content.len() >= 100,
+            "Downloaded content too small: {} bytes",
+            content.len()
+        );
 
         fs::write(&tokenizer_path, content).expect("Failed to write tokenizer to cache");
         println!(

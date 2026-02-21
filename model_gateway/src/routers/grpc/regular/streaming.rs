@@ -104,6 +104,10 @@ impl StreamingProcessor {
                 let processor = self.clone();
                 let dispatch_clone = dispatch.clone();
                 let tokenizer_clone = tokenizer.clone();
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "streaming task is fire-and-forget; client disconnect terminates it"
+                )]
                 tokio::spawn(async move {
                     let result = processor
                         .process_streaming_chunks(
@@ -135,6 +139,10 @@ impl StreamingProcessor {
             context::ExecutionResult::Dual { prefill, decode } => {
                 let processor = self.clone();
                 let tokenizer_clone = tokenizer.clone();
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "streaming task is fire-and-forget; client disconnect terminates it"
+                )]
                 tokio::spawn(async move {
                     let result = processor
                         .process_dual_streaming_chunks(
@@ -274,7 +282,7 @@ impl StreamingProcessor {
 
         // Phase 2: Main streaming loop
         while let Some(response) = grpc_stream.next().await {
-            let gen_response = response.map_err(|e| format!("Stream error: {}", e))?;
+            let gen_response = response.map_err(|e| format!("Stream error: {e}"))?;
 
             match gen_response.into_response() {
                 ProtoResponseVariant::Chunk(chunk) => {
@@ -309,18 +317,9 @@ impl StreamingProcessor {
                     }
 
                     // Process logprobs if present
-                    let choice_logprobs = if let Some(ref proto_logprobs) = chunk.output_logprobs()
-                    {
-                        match utils::convert_proto_to_openai_logprobs(proto_logprobs, &tokenizer) {
-                            Ok(logprobs) => Some(logprobs),
-                            Err(e) => {
-                                warn!("Failed to process logprobs: {}", e);
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
+                    let choice_logprobs = chunk.output_logprobs().map(|ref proto_logprobs| {
+                        utils::convert_proto_to_openai_logprobs(proto_logprobs, &tokenizer)
+                    });
 
                     // Initialize stream buffer if first time
                     let stream_buffer = stream_buffers.entry(index).or_default();
@@ -370,51 +369,52 @@ impl StreamingProcessor {
                     let tool_choice_enabled =
                         !matches!(tool_choice, Some(ToolChoice::Value(ToolChoiceValue::None)));
 
-                    if !in_reasoning
-                        && tool_choice_enabled
-                        && tools.is_some()
-                        && (tool_parser_available || used_json_schema)
-                    {
-                        let tool_chunks = if is_specific_function {
-                            // Handle specific function case - emit tool call deltas with arguments
-                            Self::process_specific_function_stream(
-                                &delta,
-                                index,
-                                &mut has_tool_calls,
-                                tool_choice,
-                                request_id,
-                                model,
-                                created,
-                                system_fingerprint,
-                                history_tool_calls_count,
-                            )
-                        } else {
-                            // Use incremental parser for regular/required modes
-                            self.process_tool_calls_stream(
-                                &delta,
-                                index,
-                                &mut tool_parsers,
-                                &mut has_tool_calls,
-                                tools.as_ref().unwrap(),
-                                request_id,
-                                model,
-                                created,
-                                system_fingerprint,
-                                history_tool_calls_count,
-                                used_json_schema,
-                            )
-                            .await
-                        };
+                    if let Some(tools_ref) = tools.as_ref() {
+                        if !in_reasoning
+                            && tool_choice_enabled
+                            && (tool_parser_available || used_json_schema)
+                        {
+                            let tool_chunks = if is_specific_function {
+                                // Handle specific function case - emit tool call deltas with arguments
+                                Self::process_specific_function_stream(
+                                    &delta,
+                                    index,
+                                    &mut has_tool_calls,
+                                    tool_choice.as_ref(),
+                                    request_id,
+                                    model,
+                                    created,
+                                    system_fingerprint,
+                                    history_tool_calls_count,
+                                )
+                            } else {
+                                // Use incremental parser for regular/required modes
+                                self.process_tool_calls_stream(
+                                    &delta,
+                                    index,
+                                    &mut tool_parsers,
+                                    &mut has_tool_calls,
+                                    tools_ref,
+                                    request_id,
+                                    model,
+                                    created,
+                                    system_fingerprint,
+                                    history_tool_calls_count,
+                                    used_json_schema,
+                                )
+                                .await
+                            };
 
-                        for chunk in tool_chunks {
-                            Self::format_sse_chunk_into(&mut sse_buffer, &chunk);
-                            tx.send(Ok(Bytes::from(sse_buffer.clone())))
-                                .map_err(|_| "Failed to send tool call chunk".to_string())?;
+                            for chunk in tool_chunks {
+                                Self::format_sse_chunk_into(&mut sse_buffer, &chunk);
+                                tx.send(Ok(Bytes::from(sse_buffer.clone())))
+                                    .map_err(|_| "Failed to send tool call chunk".to_string())?;
+                            }
+
+                            // Always skip regular content when tool parsing is active
+                            // Parser either emitted chunks or buffered content
+                            continue;
                         }
-
-                        // Always skip regular content when tool parsing is active
-                        // Parser either emitted chunks or buffered content
-                        continue;
                     }
 
                     // Regular content emission
@@ -454,9 +454,9 @@ impl StreamingProcessor {
 
                                 let sse_chunk =
                                     serde_json::to_string(&content_chunk).map_err(|e| {
-                                        format!("Failed to serialize content chunk: {}", e)
+                                        format!("Failed to serialize content chunk: {e}")
                                     })?;
-                                tx.send(Ok(Bytes::from(format!("data: {}\n\n", sse_chunk))))
+                                tx.send(Ok(Bytes::from(format!("data: {sse_chunk}\n\n"))))
                                     .map_err(|_| "Failed to send flushed content".to_string())?;
                             }
                         }
@@ -492,10 +492,10 @@ impl StreamingProcessor {
                         tool_type: None,
                         function: Some(FunctionCallDelta {
                             name: None,
-                            arguments: if !tool_call_item.parameters.is_empty() {
-                                Some(tool_call_item.parameters)
-                            } else {
+                            arguments: if tool_call_item.parameters.is_empty() {
                                 None
+                            } else {
+                                Some(tool_call_item.parameters)
                             },
                         }),
                     };
@@ -507,15 +507,15 @@ impl StreamingProcessor {
                         .build();
 
                     let sse_chunk = serde_json::to_string(&tool_chunk)
-                        .map_err(|e| format!("Failed to serialize tool chunk: {}", e))?;
-                    tx.send(Ok(Bytes::from(format!("data: {}\n\n", sse_chunk))))
+                        .map_err(|e| format!("Failed to serialize tool chunk: {e}"))?;
+                    tx.send(Ok(Bytes::from(format!("data: {sse_chunk}\n\n"))))
                         .map_err(|_| "Failed to send unstreamed tool args".to_string())?;
                 }
             }
         }
 
         // Phase 4: Finish reason chunks
-        for (index, finish_reason) in finish_reasons.iter() {
+        for (index, finish_reason) in &finish_reasons {
             let final_finish_reason =
                 if has_tool_calls.get(index).copied().unwrap_or(false) && finish_reason == "stop" {
                     "tool_calls".to_string()
@@ -532,8 +532,8 @@ impl StreamingProcessor {
                 .build();
 
             let sse_chunk = serde_json::to_string(&finish_chunk)
-                .map_err(|e| format!("Failed to serialize finish chunk: {}", e))?;
-            tx.send(Ok(Bytes::from(format!("data: {}\n\n", sse_chunk))))
+                .map_err(|e| format!("Failed to serialize finish chunk: {e}"))?;
+            tx.send(Ok(Bytes::from(format!("data: {sse_chunk}\n\n"))))
                 .map_err(|_| "Failed to send finish chunk".to_string())?;
         }
 
@@ -550,8 +550,8 @@ impl StreamingProcessor {
                     .build();
 
                 let sse_chunk = serde_json::to_string(&usage_chunk)
-                    .map_err(|e| format!("Failed to serialize usage chunk: {}", e))?;
-                tx.send(Ok(Bytes::from(format!("data: {}\n\n", sse_chunk))))
+                    .map_err(|e| format!("Failed to serialize usage chunk: {e}"))?;
+                tx.send(Ok(Bytes::from(format!("data: {sse_chunk}\n\n"))))
                     .map_err(|_| "Failed to send usage chunk".to_string())?;
             }
         }
@@ -577,7 +577,7 @@ impl StreamingProcessor {
     }
 
     /// Process dual streaming chunks (prefill + decode) - PD mode
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn process_dual_streaming_chunks(
         &self,
         mut prefill_stream: ProtoStream,
@@ -591,7 +591,7 @@ impl StreamingProcessor {
         // Phase 1.5: Collect input_logprobs from prefill stream if requested
         if original_request.logprobs {
             while let Some(response) = prefill_stream.next().await {
-                let gen_response = response.map_err(|e| format!("Prefill stream error: {}", e))?;
+                let gen_response = response.map_err(|e| format!("Prefill stream error: {e}"))?;
                 match gen_response.into_response() {
                     ProtoResponseVariant::Complete(_complete) => {
                         // Input logprobs collected but not yet used in streaming
@@ -660,12 +660,16 @@ impl StreamingProcessor {
         match execution_result {
             context::ExecutionResult::Single { stream } => {
                 let tokenizer = tokenizer.clone();
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "streaming task is fire-and-forget; client disconnect terminates it"
+                )]
                 tokio::spawn(async move {
                     let result =
                         Self::process_generate_streaming(tokenizer, stream, ctx, &tx).await;
 
                     if let Err(e) = result {
-                        let error_chunk = format!("data: {{\"error\": \"{}\"}}\n\n", e);
+                        let error_chunk = format!("data: {{\"error\": \"{e}\"}}\n\n");
                         let _ = tx.send(Ok(Bytes::from(error_chunk)));
                     }
 
@@ -675,6 +679,10 @@ impl StreamingProcessor {
             context::ExecutionResult::Dual { prefill, decode } => {
                 // For PD mode, need to handle prefill stream for input_logprobs
                 let tokenizer = tokenizer.clone();
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "streaming task is fire-and-forget; client disconnect terminates it"
+                )]
                 tokio::spawn(async move {
                     let result = Self::process_generate_streaming_dual(
                         tokenizer, prefill, *decode, ctx, &tx,
@@ -682,7 +690,7 @@ impl StreamingProcessor {
                     .await;
 
                     if let Err(e) = result {
-                        let error_chunk = format!("data: {{\"error\": \"{}\"}}\n\n", e);
+                        let error_chunk = format!("data: {{\"error\": \"{e}\"}}\n\n");
                         let _ = tx.send(Ok(Bytes::from(error_chunk)));
                     }
 
@@ -716,7 +724,7 @@ impl StreamingProcessor {
         let mut completion_tokens_map: HashMap<u32, u32> = HashMap::new();
 
         while let Some(response) = stream.next().await {
-            let gen_response = response.map_err(|e| format!("Stream error: {}", e))?;
+            let gen_response = response.map_err(|e| format!("Stream error: {e}"))?;
 
             match gen_response.into_response() {
                 ProtoResponseVariant::Chunk(chunk) => {
@@ -759,11 +767,9 @@ impl StreamingProcessor {
                         "index": index
                     });
 
-                    let sse_chunk = format!(
-                        "data: {}\n\n",
-                        serde_json::to_string(&chunk_response).unwrap()
-                    );
-                    tx.send(Ok(Bytes::from(sse_chunk)))
+                    let sse_data = serde_json::to_string(&chunk_response)
+                        .map_err(|e| format!("Failed to serialize generate chunk: {e}"))?;
+                    tx.send(Ok(Bytes::from(format!("data: {sse_data}\n\n"))))
                         .map_err(|_| "Failed to send chunk".to_string())?;
                 }
                 ProtoResponseVariant::Complete(complete) => {
@@ -790,11 +796,9 @@ impl StreamingProcessor {
                         "index": index
                     });
 
-                    let sse_chunk = format!(
-                        "data: {}\n\n",
-                        serde_json::to_string(&finish_response).unwrap()
-                    );
-                    tx.send(Ok(Bytes::from(sse_chunk)))
+                    let sse_data = serde_json::to_string(&finish_response)
+                        .map_err(|e| format!("Failed to serialize generate finish: {e}"))?;
+                    tx.send(Ok(Bytes::from(format!("data: {sse_data}\n\n"))))
                         .map_err(|_| "Failed to send finish chunk".to_string())?;
 
                     // Continue to process all completions if n>1
@@ -828,7 +832,7 @@ impl StreamingProcessor {
         let input_token_logprobs = if ctx.return_logprob {
             let mut input_logprobs = None;
             while let Some(response) = prefill_stream.next().await {
-                let gen_response = response.map_err(|e| format!("Prefill stream error: {}", e))?;
+                let gen_response = response.map_err(|e| format!("Prefill stream error: {e}"))?;
                 match gen_response.into_response() {
                     ProtoResponseVariant::Complete(complete) => {
                         // Extract input_logprobs from prefill Complete message (convert proto to SGLang format)
@@ -887,7 +891,7 @@ impl StreamingProcessor {
         let mut completion_tokens_map: HashMap<u32, u32> = HashMap::new();
 
         while let Some(response) = stream.next().await {
-            let gen_response = response.map_err(|e| format!("Stream error: {}", e))?;
+            let gen_response = response.map_err(|e| format!("Stream error: {e}"))?;
 
             match gen_response.into_response() {
                 ProtoResponseVariant::Chunk(chunk) => {
@@ -956,11 +960,9 @@ impl StreamingProcessor {
                         "index": index
                     });
 
-                    let sse_chunk = format!(
-                        "data: {}\n\n",
-                        serde_json::to_string(&chunk_response).unwrap()
-                    );
-                    tx.send(Ok(Bytes::from(sse_chunk)))
+                    let sse_data = serde_json::to_string(&chunk_response)
+                        .map_err(|e| format!("Failed to serialize generate chunk: {e}"))?;
+                    tx.send(Ok(Bytes::from(format!("data: {sse_data}\n\n"))))
                         .map_err(|_| "Failed to send chunk".to_string())?;
                 }
                 ProtoResponseVariant::Complete(complete) => {
@@ -1001,11 +1003,9 @@ impl StreamingProcessor {
                         "index": index
                     });
 
-                    let sse_chunk = format!(
-                        "data: {}\n\n",
-                        serde_json::to_string(&finish_response).unwrap()
-                    );
-                    tx.send(Ok(Bytes::from(sse_chunk)))
+                    let sse_data = serde_json::to_string(&finish_response)
+                        .map_err(|e| format!("Failed to serialize generate finish: {e}"))?;
+                    tx.send(Ok(Bytes::from(format!("data: {sse_data}\n\n"))))
                         .map_err(|_| "Failed to send finish chunk".to_string())?;
 
                     // Continue to process all completions if n>1
@@ -1082,7 +1082,7 @@ impl StreamingProcessor {
     }
 
     /// Helper: Process reasoning content in streaming mode
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn process_reasoning_stream(
         &self,
         delta: &str,
@@ -1094,6 +1094,10 @@ impl StreamingProcessor {
         system_fingerprint: Option<&str>,
     ) -> (String, Option<ChatCompletionStreamResponse>, bool) {
         // Create fresh parser for this index (not pooled, to avoid state pollution)
+        #[expect(
+            clippy::expect_used,
+            reason = "parser availability is checked upfront before streaming begins"
+        )]
         reasoning_parsers.entry(index).or_insert_with(|| {
             let parser = utils::create_reasoning_parser(
                 &self.reasoning_parser_factory,
@@ -1117,7 +1121,9 @@ impl StreamingProcessor {
                     reasoning_text,
                     normal_text,
                 }) => {
-                    let chunk = if !reasoning_text.is_empty() {
+                    let chunk = if reasoning_text.is_empty() {
+                        None
+                    } else {
                         Some(
                             ChatCompletionStreamResponse::builder(request_id, model)
                                 .created(created)
@@ -1125,8 +1131,6 @@ impl StreamingProcessor {
                                 .maybe_system_fingerprint(system_fingerprint)
                                 .build(),
                         )
-                    } else {
-                        None
                     };
                     return (normal_text, chunk, in_reasoning);
                 }
@@ -1140,12 +1144,12 @@ impl StreamingProcessor {
     }
 
     /// Helper: Process specific function case - emit tool call deltas with arguments
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn process_specific_function_stream(
         delta: &str,
         index: u32,
         has_tool_calls: &mut HashMap<u32, bool>,
-        tool_choice: &Option<ToolChoice>,
+        tool_choice: Option<&ToolChoice>,
         request_id: &str,
         model: &str,
         created: u64,
@@ -1193,7 +1197,7 @@ impl StreamingProcessor {
     }
 
     /// Helper: Process tool calls in streaming mode
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn process_tool_calls_stream(
         &self,
         delta: &str,
@@ -1211,6 +1215,10 @@ impl StreamingProcessor {
         let mut chunks = Vec::new();
 
         // Create fresh parser for this index (not pooled, to avoid state pollution)
+        #[expect(
+            clippy::expect_used,
+            reason = "parser availability is checked upfront before streaming begins"
+        )]
         tool_parsers.entry(index).or_insert_with(|| {
             let parser = if use_json_parser {
                 utils::create_tool_parser(&self.tool_parser_factory, Some("json"), model)
@@ -1267,10 +1275,10 @@ impl StreamingProcessor {
                             },
                             function: Some(FunctionCallDelta {
                                 name: tool_call_item.name,
-                                arguments: if !tool_call_item.parameters.is_empty() {
-                                    Some(tool_call_item.parameters)
-                                } else {
+                                arguments: if tool_call_item.parameters.is_empty() {
                                     None
+                                } else {
+                                    Some(tool_call_item.parameters)
                                 },
                             }),
                         };

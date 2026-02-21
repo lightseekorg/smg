@@ -11,12 +11,20 @@ use tempfile::tempdir;
 const TINY_PNG_BASE64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
 
+#[expect(
+    clippy::expect_used,
+    reason = "test helper: panic on failure is intentional"
+)]
 fn tiny_png_bytes() -> Vec<u8> {
     BASE64_STANDARD
         .decode(TINY_PNG_BASE64)
         .expect("decode tiny png fixture")
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "test helper: panic on failure is intentional"
+)]
 fn test_connector(allowed_path: Option<PathBuf>) -> MediaConnector {
     let client = Client::builder()
         .timeout(Duration::from_secs(5))
@@ -86,7 +94,7 @@ async fn fetch_image_from_file() {
     let expected = std::fs::canonicalize(&file_path).expect("canonical path");
     match frame.source() {
         ImageSource::File { path } => assert_eq!(path, &expected),
-        other => panic!("expected file source, got {:?}", other),
+        other => panic!("expected file source, got {other:?}"),
     }
 }
 

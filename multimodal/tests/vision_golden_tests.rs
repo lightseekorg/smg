@@ -14,6 +14,24 @@
 //! python multimodal/scripts/generate_vision_golden.py
 //! ```
 
+#![expect(
+    clippy::expect_used,
+    reason = "integration test helpers: panic on failure is intentional"
+)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration test helpers: panic on failure is intentional"
+)]
+#![expect(clippy::print_stdout, reason = "integration tests: diagnostic output")]
+#![expect(
+    clippy::print_stderr,
+    reason = "integration tests: diagnostic output for missing fixtures"
+)]
+#![expect(
+    clippy::panic,
+    reason = "integration test helpers: assertion-like panics"
+)]
+
 use std::{fs::File, io::Read, path::Path};
 
 use llm_multimodal::vision::{
@@ -119,18 +137,15 @@ fn load_golden_num_tokens(path: &Path) -> usize {
 fn run_golden_test(mode: &str, image_name: &str) {
     let golden_dir = Path::new("multimodal/tests/fixtures/golden").join(mode);
     let image_path =
-        Path::new("multimodal/tests/fixtures/images").join(format!("{}.jpg", image_name));
+        Path::new("multimodal/tests/fixtures/images").join(format!("{image_name}.jpg"));
 
     if !golden_dir.exists() || !image_path.exists() {
-        eprintln!(
-            "Golden test fixtures for {}/{} not found, skipping test",
-            mode, image_name
-        );
+        eprintln!("Golden test fixtures for {mode}/{image_name} not found, skipping test");
         eprintln!("Run: python multimodal/scripts/generate_vision_golden.py");
         return;
     }
 
-    let golden = load_golden_npz(&golden_dir.join(format!("golden_{}.npz", image_name)));
+    let golden = load_golden_npz(&golden_dir.join(format!("golden_{image_name}.npz")));
     let config = load_config(&golden_dir.join("preprocessor_config.json"));
 
     let image = image::open(&image_path).expect("Failed to open image");
@@ -138,7 +153,7 @@ fn run_golden_test(mode: &str, image_name: &str) {
     let processor: Box<dyn ImagePreProcessor> = match mode {
         "llava" => Box::new(LlavaProcessor::new()),
         "llava_pad" => Box::new(LlavaProcessor::new_with_pad()),
-        _ => panic!("Unknown test mode: {}", mode),
+        _ => panic!("Unknown test mode: {mode}"),
     };
 
     let result = processor
@@ -146,10 +161,7 @@ fn run_golden_test(mode: &str, image_name: &str) {
         .expect("Processing failed");
 
     let diff = max_diff(&golden, &result.pixel_values);
-    println!(
-        "{} - {} image - Max difference: {:.6}",
-        mode, image_name, diff
-    );
+    println!("{mode} - {image_name} image - Max difference: {diff:.6}");
     println!("Golden shape: {:?}", golden.shape());
     println!("Rust shape: {:?}", result.pixel_values.shape());
 
@@ -157,7 +169,7 @@ fn run_golden_test(mode: &str, image_name: &str) {
     // Different interpolation implementations (Rust vs Python/PIL) can produce
     // small numerical differences, especially for edge cases like tiny or extreme
     // aspect ratio images
-    assert!(diff < 0.1, "Max difference {} exceeds tolerance 0.1", diff);
+    assert!(diff < 0.1, "Max difference {diff} exceeds tolerance 0.1");
 }
 
 // ============================================================================
@@ -323,18 +335,15 @@ fn load_golden_qwen2_vl_pixels(path: &Path) -> (Vec<f32>, (usize, usize)) {
 fn run_qwen2_vl_golden_test(image_name: &str) {
     let golden_dir = Path::new("multimodal/tests/fixtures/golden/qwen2_vl");
     let image_path =
-        Path::new("multimodal/tests/fixtures/images").join(format!("{}.jpg", image_name));
+        Path::new("multimodal/tests/fixtures/images").join(format!("{image_name}.jpg"));
 
     if !golden_dir.exists() || !image_path.exists() {
-        eprintln!(
-            "Golden test fixtures for qwen2_vl/{} not found, skipping test",
-            image_name
-        );
+        eprintln!("Golden test fixtures for qwen2_vl/{image_name} not found, skipping test");
         eprintln!("Run: python multimodal/scripts/generate_vision_golden.py --model qwen2_vl");
         return;
     }
 
-    let npz_path = golden_dir.join(format!("golden_{}.npz", image_name));
+    let npz_path = golden_dir.join(format!("golden_{image_name}.npz"));
     let config = load_config(&golden_dir.join("preprocessor_config.json"));
 
     // Load golden values
@@ -360,25 +369,21 @@ fn run_qwen2_vl_golden_test(image_name: &str) {
 
     // Compare grid dimensions
     println!(
-        "qwen2_vl - {} image - Grid T H W: golden={:?}, rust={:?}",
-        image_name, golden_grid_thw, rust_grid_thw
+        "qwen2_vl - {image_name} image - Grid T H W: golden={golden_grid_thw:?}, rust={rust_grid_thw:?}"
     );
     assert_eq!(
         golden_grid_thw, rust_grid_thw,
-        "image_grid_thw mismatch for {}",
-        image_name
+        "image_grid_thw mismatch for {image_name}"
     );
 
     // Compare token counts
     let rust_num_tokens = result.num_img_tokens[0];
     println!(
-        "qwen2_vl - {} image - Tokens: golden={}, rust={}",
-        image_name, golden_num_tokens, rust_num_tokens
+        "qwen2_vl - {image_name} image - Tokens: golden={golden_num_tokens}, rust={rust_num_tokens}"
     );
     assert_eq!(
         golden_num_tokens, rust_num_tokens,
-        "num_tokens mismatch for {}",
-        image_name
+        "num_tokens mismatch for {image_name}"
     );
 
     // Compare pixel values by reshaping our output to patch format
@@ -394,7 +399,9 @@ fn run_qwen2_vl_golden_test(image_name: &str) {
         .expect("Expected 3D tensor for Qwen2-VL");
 
     // Reshape to patches format
-    let rust_patches = processor.reshape_to_patches(&tensor_3d, grid_t, grid_h, grid_w);
+    let rust_patches = processor
+        .reshape_to_patches(&tensor_3d, grid_t, grid_h, grid_w)
+        .unwrap();
 
     // Verify shapes match
     let expected_num_patches = grid_t * grid_h * grid_w;
@@ -403,8 +410,7 @@ fn run_qwen2_vl_golden_test(image_name: &str) {
     let expected_patch_features = 3 * temporal_patch_size * patch_size * patch_size;
 
     println!(
-        "qwen2_vl - {} image - Patch shape: golden={:?}, rust=({}, {})",
-        image_name, golden_shape, expected_num_patches, expected_patch_features
+        "qwen2_vl - {image_name} image - Patch shape: golden={golden_shape:?}, rust=({expected_num_patches}, {expected_patch_features})"
     );
     assert_eq!(
         golden_shape,
@@ -424,19 +430,14 @@ fn run_qwen2_vl_golden_test(image_name: &str) {
         .map(|(r, g)| (r - g).abs())
         .fold(0.0f32, f32::max);
 
-    println!(
-        "qwen2_vl - {} image - Max pixel diff: {:.6}",
-        image_name, max_diff
-    );
+    println!("qwen2_vl - {image_name} image - Max pixel diff: {max_diff:.6}");
 
     // Allow tolerance for floating point and interpolation differences
     // Different interpolation implementations (Rust vs Python/PIL) can produce
     // small numerical differences, especially for edge cases
     assert!(
         max_diff < 0.1,
-        "Max pixel difference {} exceeds tolerance 0.1 for {}",
-        max_diff,
-        image_name
+        "Max pixel difference {max_diff} exceeds tolerance 0.1 for {image_name}"
     );
 }
 
@@ -508,18 +509,15 @@ fn test_qwen2_vl_golden_grayscale() {
 fn run_qwen3_vl_golden_test(image_name: &str) {
     let golden_dir = Path::new("multimodal/tests/fixtures/golden/qwen3_vl");
     let image_path =
-        Path::new("multimodal/tests/fixtures/images").join(format!("{}.jpg", image_name));
+        Path::new("multimodal/tests/fixtures/images").join(format!("{image_name}.jpg"));
 
     if !golden_dir.exists() || !image_path.exists() {
-        eprintln!(
-            "Golden test fixtures for qwen3_vl/{} not found, skipping test",
-            image_name
-        );
+        eprintln!("Golden test fixtures for qwen3_vl/{image_name} not found, skipping test");
         eprintln!("Run: python multimodal/scripts/generate_vision_golden.py --model qwen3_vl");
         return;
     }
 
-    let npz_path = golden_dir.join(format!("golden_{}.npz", image_name));
+    let npz_path = golden_dir.join(format!("golden_{image_name}.npz"));
     let config = load_config(&golden_dir.join("preprocessor_config.json"));
 
     // Load golden values
@@ -545,25 +543,21 @@ fn run_qwen3_vl_golden_test(image_name: &str) {
 
     // Compare grid dimensions
     println!(
-        "qwen3_vl - {} image - Grid T H W: golden={:?}, rust={:?}",
-        image_name, golden_grid_thw, rust_grid_thw
+        "qwen3_vl - {image_name} image - Grid T H W: golden={golden_grid_thw:?}, rust={rust_grid_thw:?}"
     );
     assert_eq!(
         golden_grid_thw, rust_grid_thw,
-        "image_grid_thw mismatch for {}",
-        image_name
+        "image_grid_thw mismatch for {image_name}"
     );
 
     // Compare token counts
     let rust_num_tokens = result.num_img_tokens[0];
     println!(
-        "qwen3_vl - {} image - Tokens: golden={}, rust={}",
-        image_name, golden_num_tokens, rust_num_tokens
+        "qwen3_vl - {image_name} image - Tokens: golden={golden_num_tokens}, rust={rust_num_tokens}"
     );
     assert_eq!(
         golden_num_tokens, rust_num_tokens,
-        "num_tokens mismatch for {}",
-        image_name
+        "num_tokens mismatch for {image_name}"
     );
 
     // Compare pixel values by reshaping our output to patch format
@@ -579,7 +573,9 @@ fn run_qwen3_vl_golden_test(image_name: &str) {
         .expect("Expected 3D tensor for Qwen3-VL");
 
     // Reshape to patches format
-    let rust_patches = processor.reshape_to_patches(&tensor_3d, grid_t, grid_h, grid_w);
+    let rust_patches = processor
+        .reshape_to_patches(&tensor_3d, grid_t, grid_h, grid_w)
+        .unwrap();
 
     // Verify shapes match (Qwen3-VL has patch_size=16)
     let expected_num_patches = grid_t * grid_h * grid_w;
@@ -588,8 +584,7 @@ fn run_qwen3_vl_golden_test(image_name: &str) {
     let expected_patch_features = 3 * temporal_patch_size * patch_size * patch_size;
 
     println!(
-        "qwen3_vl - {} image - Patch shape: golden={:?}, rust=({}, {})",
-        image_name, golden_shape, expected_num_patches, expected_patch_features
+        "qwen3_vl - {image_name} image - Patch shape: golden={golden_shape:?}, rust=({expected_num_patches}, {expected_patch_features})"
     );
     assert_eq!(
         golden_shape,
@@ -609,18 +604,13 @@ fn run_qwen3_vl_golden_test(image_name: &str) {
         .map(|(r, g)| (r - g).abs())
         .fold(0.0f32, f32::max);
 
-    println!(
-        "qwen3_vl - {} image - Max pixel diff: {:.6}",
-        image_name, max_diff
-    );
+    println!("qwen3_vl - {image_name} image - Max pixel diff: {max_diff:.6}");
 
     // Allow tolerance for floating point and interpolation differences
     // Max diff is ~0.03 due to resize interpolation differences between Rust and HuggingFace
     assert!(
         max_diff < 0.05,
-        "Max pixel difference {} exceeds tolerance 0.05 for {}",
-        max_diff,
-        image_name
+        "Max pixel difference {max_diff} exceeds tolerance 0.05 for {image_name}"
     );
 }
 
@@ -747,7 +737,6 @@ fn max_diff_5d(a: &Array5<f32>, b: &Array5<f32>) -> f32 {
 }
 
 /// Find the location and value of max difference between two 5D tensors
-#[allow(dead_code)]
 fn find_max_diff_location_5d(
     golden: &Array5<f32>,
     rust: &Array5<f32>,
@@ -768,8 +757,7 @@ fn find_max_diff_location_5d(
                 let golden_tile = golden.slice(ndarray::s![b, t, .., .., ..]);
                 let rust_tile = rust.slice(ndarray::s![b, t, .., .., ..]);
                 println!(
-                    "  {} tile {}: diff={:.4}, golden_range=[{:.4}, {:.4}], rust_range=[{:.4}, {:.4}]",
-                    image_name, t, tile_max,
+                    "  {image_name} tile {t}: diff={tile_max:.4}, golden_range=[{:.4}, {:.4}], rust_range=[{:.4}, {:.4}]",
                     golden_tile.fold(f32::MAX, |a, &v| a.min(v)),
                     golden_tile.fold(f32::MIN, |a, &v| a.max(v)),
                     rust_tile.fold(f32::MAX, |a, &v| a.min(v)),
@@ -806,18 +794,15 @@ fn find_max_diff_location_5d(
 fn run_phi3_vision_golden_test(image_name: &str) {
     let golden_dir = Path::new("multimodal/tests/fixtures/golden/phi3_vision");
     let image_path =
-        Path::new("multimodal/tests/fixtures/images").join(format!("{}.jpg", image_name));
+        Path::new("multimodal/tests/fixtures/images").join(format!("{image_name}.jpg"));
 
     if !golden_dir.exists() || !image_path.exists() {
-        eprintln!(
-            "Golden test fixtures for phi3_vision/{} not found, skipping test",
-            image_name
-        );
+        eprintln!("Golden test fixtures for phi3_vision/{image_name} not found, skipping test");
         eprintln!("Run: python multimodal/scripts/generate_vision_golden.py --model phi3_vision");
         return;
     }
 
-    let npz_path = golden_dir.join(format!("golden_{}.npz", image_name));
+    let npz_path = golden_dir.join(format!("golden_{image_name}.npz"));
     let config = load_config(&golden_dir.join("preprocessor_config.json"));
 
     // Load golden values
@@ -836,13 +821,11 @@ fn run_phi3_vision_golden_test(image_name: &str) {
     let rust_shape = result.pixel_values.shape();
     let golden_shape = golden_pixels.shape();
     println!(
-        "phi3_vision - {} image - Shape: golden={:?}, rust={:?}",
-        image_name, golden_shape, rust_shape
+        "phi3_vision - {image_name} image - Shape: golden={golden_shape:?}, rust={rust_shape:?}"
     );
     assert_eq!(
         rust_shape, golden_shape,
-        "Shape mismatch for phi3_vision/{}",
-        image_name
+        "Shape mismatch for phi3_vision/{image_name}"
     );
 
     // Check image_sizes
@@ -858,24 +841,21 @@ fn run_phi3_vision_golden_test(image_name: &str) {
     };
 
     println!(
-        "phi3_vision - {} image - Image sizes (h, w): golden={:?}, rust={:?}",
-        image_name, golden_image_sizes, rust_image_sizes
+        "phi3_vision - {image_name} image - Image sizes (h, w): golden={golden_image_sizes:?}, rust={rust_image_sizes:?}"
     );
     assert_eq!(
         golden_image_sizes, rust_image_sizes,
-        "image_sizes mismatch for {}",
-        image_name
+        "image_sizes mismatch for {image_name}"
     );
 
     // Check num_img_tokens
     println!(
-        "phi3_vision - {} image - Num tokens: golden={:?}, rust={:?}",
-        image_name, golden_num_tokens, result.num_img_tokens
+        "phi3_vision - {image_name} image - Num tokens: golden={golden_num_tokens:?}, rust={:?}",
+        result.num_img_tokens
     );
     assert_eq!(
         golden_num_tokens, result.num_img_tokens,
-        "num_img_tokens mismatch for {}",
-        image_name
+        "num_img_tokens mismatch for {image_name}"
     );
 
     // Compare pixel values
@@ -887,18 +867,14 @@ fn run_phi3_vision_golden_test(image_name: &str) {
         .expect("Failed to convert to Ix5");
 
     let pixel_diff = max_diff_5d(&golden_pixels, &rust_pixels);
-    println!(
-        "phi3_vision - {} image - Max pixel diff: {:.6}",
-        image_name, pixel_diff
-    );
+    println!("phi3_vision - {image_name} image - Max pixel diff: {pixel_diff:.6}");
 
     // If there's a large difference, print detailed info
     if pixel_diff > 0.1 {
         let (max_diff, max_pos) =
             find_max_diff_location_5d(&golden_pixels, &rust_pixels, image_name);
         println!(
-            "phi3_vision - {} image - Max diff {:.4} at position {:?}",
-            image_name, max_diff, max_pos
+            "phi3_vision - {image_name} image - Max diff {max_diff:.4} at position {max_pos:?}"
         );
         let (b, t, c, h, w) = max_pos;
         println!(
@@ -912,9 +888,7 @@ fn run_phi3_vision_golden_test(image_name: &str) {
     // Using bicubic for global image and bilinear for HD resize to match HuggingFace.
     assert!(
         pixel_diff < 0.08,
-        "Max pixel difference {} exceeds tolerance 0.08 for {}",
-        pixel_diff,
-        image_name
+        "Max pixel difference {pixel_diff} exceeds tolerance 0.08 for {image_name}"
     );
 }
 
@@ -1021,18 +995,15 @@ fn load_phi4_image_sizes(path: &Path) -> Vec<(u32, u32)> {
 fn run_phi4_vision_golden_test(image_name: &str) {
     let golden_dir = Path::new("multimodal/tests/fixtures/golden/phi4_vision");
     let image_path =
-        Path::new("multimodal/tests/fixtures/images").join(format!("{}.jpg", image_name));
+        Path::new("multimodal/tests/fixtures/images").join(format!("{image_name}.jpg"));
 
     if !golden_dir.exists() || !image_path.exists() {
-        eprintln!(
-            "Golden test fixtures for phi4_vision/{} not found, skipping test",
-            image_name
-        );
+        eprintln!("Golden test fixtures for phi4_vision/{image_name} not found, skipping test");
         eprintln!("Run: python multimodal/scripts/generate_vision_golden.py --model phi4_vision");
         return;
     }
 
-    let npz_path = golden_dir.join(format!("golden_{}.npz", image_name));
+    let npz_path = golden_dir.join(format!("golden_{image_name}.npz"));
     let config = load_config(&golden_dir.join("preprocessor_config.json"));
 
     // Load golden values
@@ -1051,13 +1022,11 @@ fn run_phi4_vision_golden_test(image_name: &str) {
     let rust_shape = result.pixel_values.shape();
     let golden_shape = golden_pixels.shape();
     println!(
-        "phi4_vision - {} image - Shape: golden={:?}, rust={:?}",
-        image_name, golden_shape, rust_shape
+        "phi4_vision - {image_name} image - Shape: golden={golden_shape:?}, rust={rust_shape:?}"
     );
     assert_eq!(
         rust_shape, golden_shape,
-        "Shape mismatch for phi4_vision/{}",
-        image_name
+        "Shape mismatch for phi4_vision/{image_name}"
     );
 
     // Check image_sizes
@@ -1072,24 +1041,21 @@ fn run_phi4_vision_golden_test(image_name: &str) {
     };
 
     println!(
-        "phi4_vision - {} image - Image sizes (h, w): golden={:?}, rust={:?}",
-        image_name, golden_image_sizes, rust_image_sizes
+        "phi4_vision - {image_name} image - Image sizes (h, w): golden={golden_image_sizes:?}, rust={rust_image_sizes:?}"
     );
     assert_eq!(
         golden_image_sizes, rust_image_sizes,
-        "image_sizes mismatch for {}",
-        image_name
+        "image_sizes mismatch for {image_name}"
     );
 
     // Check num_img_tokens
     println!(
-        "phi4_vision - {} image - Num tokens: golden={:?}, rust={:?}",
-        image_name, golden_num_tokens, result.num_img_tokens
+        "phi4_vision - {image_name} image - Num tokens: golden={golden_num_tokens:?}, rust={:?}",
+        result.num_img_tokens
     );
     assert_eq!(
         golden_num_tokens, result.num_img_tokens,
-        "num_img_tokens mismatch for {}",
-        image_name
+        "num_img_tokens mismatch for {image_name}"
     );
 
     // Compare pixel values
@@ -1100,18 +1066,14 @@ fn run_phi4_vision_golden_test(image_name: &str) {
         .expect("Failed to convert to Ix5");
 
     let pixel_diff = max_diff_5d(&golden_pixels, &rust_pixels);
-    println!(
-        "phi4_vision - {} image - Max pixel diff: {:.6}",
-        image_name, pixel_diff
-    );
+    println!("phi4_vision - {image_name} image - Max pixel diff: {pixel_diff:.6}");
 
     // If there's a large difference, print detailed info
     if pixel_diff > 0.1 {
         let (max_diff, max_pos) =
             find_max_diff_location_5d(&golden_pixels, &rust_pixels, image_name);
         println!(
-            "phi4_vision - {} image - Max diff {:.4} at position {:?}",
-            image_name, max_diff, max_pos
+            "phi4_vision - {image_name} image - Max diff {max_diff:.4} at position {max_pos:?}"
         );
         let (b, t, c, h, w) = max_pos;
         println!(
@@ -1125,9 +1087,7 @@ fn run_phi4_vision_golden_test(image_name: &str) {
     // Using bilinear for HD resize and bicubic for global image to match HuggingFace.
     assert!(
         pixel_diff < 0.05,
-        "Max pixel difference {} exceeds tolerance 0.05 for {}",
-        pixel_diff,
-        image_name
+        "Max pixel difference {pixel_diff} exceeds tolerance 0.05 for {image_name}"
     );
 }
 
@@ -1239,18 +1199,15 @@ fn load_llama4_pixels(path: &Path) -> (Vec<f32>, Vec<usize>) {
 fn run_llama4_vision_golden_test(image_name: &str) {
     let golden_dir = Path::new("multimodal/tests/fixtures/golden/llama4_vision");
     let image_path =
-        Path::new("multimodal/tests/fixtures/images").join(format!("{}.jpg", image_name));
+        Path::new("multimodal/tests/fixtures/images").join(format!("{image_name}.jpg"));
 
     if !golden_dir.exists() || !image_path.exists() {
-        eprintln!(
-            "Golden test fixtures for llama4_vision/{} not found, skipping test",
-            image_name
-        );
+        eprintln!("Golden test fixtures for llama4_vision/{image_name} not found, skipping test");
         eprintln!("Run: python multimodal/scripts/generate_vision_golden.py --model llama4_vision");
         return;
     }
 
-    let npz_path = golden_dir.join(format!("golden_{}.npz", image_name));
+    let npz_path = golden_dir.join(format!("golden_{image_name}.npz"));
     let config = load_config(&golden_dir.join("preprocessor_config.json"));
 
     // Load golden values
@@ -1277,33 +1234,28 @@ fn run_llama4_vision_golden_test(image_name: &str) {
     };
 
     println!(
-        "llama4_vision - {} image - Aspect ratios: golden={:?}, rust={:?}",
-        image_name, golden_aspect_ratios, rust_aspect_ratios
+        "llama4_vision - {image_name} image - Aspect ratios: golden={golden_aspect_ratios:?}, rust={rust_aspect_ratios:?}"
     );
     assert_eq!(
         golden_aspect_ratios, rust_aspect_ratios,
-        "aspect_ratios mismatch for {}",
-        image_name
+        "aspect_ratios mismatch for {image_name}"
     );
 
     // Check num_tokens
     let rust_num_tokens = result.num_img_tokens[0];
     println!(
-        "llama4_vision - {} image - Tokens: golden={}, rust={}",
-        image_name, golden_num_tokens, rust_num_tokens
+        "llama4_vision - {image_name} image - Tokens: golden={golden_num_tokens}, rust={rust_num_tokens}"
     );
     assert_eq!(
         golden_num_tokens, rust_num_tokens,
-        "num_tokens mismatch for {}",
-        image_name
+        "num_tokens mismatch for {image_name}"
     );
 
     // Check output shape - HuggingFace outputs (num_tiles, 3, 336, 336) without batch
     // Our Rust outputs (batch, num_tiles, 3, 336, 336) with batch dimension
     let rust_shape = result.pixel_values.shape();
     println!(
-        "llama4_vision - {} image - Shape: golden={:?}, rust={:?}",
-        image_name, golden_shape, rust_shape
+        "llama4_vision - {image_name} image - Shape: golden={golden_shape:?}, rust={rust_shape:?}"
     );
 
     // HuggingFace returns without batch dim, we add batch=1
@@ -1330,18 +1282,13 @@ fn run_llama4_vision_golden_test(image_name: &str) {
         max_diff = max_diff.max(diff);
     }
 
-    println!(
-        "llama4_vision - {} image - Max pixel diff: {:.6}",
-        image_name, max_diff
-    );
+    println!("llama4_vision - {image_name} image - Max pixel diff: {max_diff:.6}");
 
     // Allow tolerance for floating point and interpolation differences
     // LLaMA 4 uses bfloat16 internally which may cause small differences
     assert!(
         max_diff < 0.03,
-        "Max pixel difference {} exceeds tolerance 0.03 for {}",
-        max_diff,
-        image_name
+        "Max pixel difference {max_diff} exceeds tolerance 0.03 for {image_name}"
     );
 }
 
@@ -1437,18 +1384,15 @@ fn load_pixtral_image_sizes(path: &Path) -> Vec<(usize, usize)> {
 fn run_pixtral_golden_test(image_name: &str) {
     let golden_dir = Path::new("multimodal/tests/fixtures/golden/pixtral");
     let image_path =
-        Path::new("multimodal/tests/fixtures/images").join(format!("{}.jpg", image_name));
+        Path::new("multimodal/tests/fixtures/images").join(format!("{image_name}.jpg"));
 
     if !golden_dir.exists() || !image_path.exists() {
-        eprintln!(
-            "Golden test fixtures for pixtral/{} not found, skipping test",
-            image_name
-        );
+        eprintln!("Golden test fixtures for pixtral/{image_name} not found, skipping test");
         eprintln!("Run: python multimodal/scripts/generate_vision_golden.py --model pixtral");
         return;
     }
 
-    let npz_path = golden_dir.join(format!("golden_{}.npz", image_name));
+    let npz_path = golden_dir.join(format!("golden_{image_name}.npz"));
     let config = load_config(&golden_dir.join("preprocessor_config.json"));
 
     // Load golden values
@@ -1476,33 +1420,26 @@ fn run_pixtral_golden_test(image_name: &str) {
     };
 
     println!(
-        "pixtral - {} image - Image sizes: golden={:?}, rust={:?}",
-        image_name, golden_image_sizes, rust_image_sizes
+        "pixtral - {image_name} image - Image sizes: golden={golden_image_sizes:?}, rust={rust_image_sizes:?}"
     );
     assert_eq!(
         golden_image_sizes, rust_image_sizes,
-        "image_sizes mismatch for {}",
-        image_name
+        "image_sizes mismatch for {image_name}"
     );
 
     // Check num_tokens
     let rust_num_tokens = result.num_img_tokens[0];
     println!(
-        "pixtral - {} image - Tokens: golden={}, rust={}",
-        image_name, golden_num_tokens, rust_num_tokens
+        "pixtral - {image_name} image - Tokens: golden={golden_num_tokens}, rust={rust_num_tokens}"
     );
     assert_eq!(
         golden_num_tokens, rust_num_tokens,
-        "num_tokens mismatch for {}",
-        image_name
+        "num_tokens mismatch for {image_name}"
     );
 
     // Check output shape
     let rust_shape = result.pixel_values.shape();
-    println!(
-        "pixtral - {} image - Shape: golden={:?}, rust={:?}",
-        image_name, golden_shape, rust_shape
-    );
+    println!("pixtral - {image_name} image - Shape: golden={golden_shape:?}, rust={rust_shape:?}");
 
     // Pixtral outputs [batch, C, H, W] with padding to max size in batch
     // Single image should match golden shape exactly
@@ -1542,18 +1479,13 @@ fn run_pixtral_golden_test(image_name: &str) {
         }
     }
 
-    println!(
-        "pixtral - {} image - Max pixel diff: {:.6}",
-        image_name, max_diff
-    );
+    println!("pixtral - {image_name} image - Max pixel diff: {max_diff:.6}");
 
     // Allow tolerance for bicubic interpolation differences between PIL and Rust image library
     // Pixtral uses bicubic which has larger differences than bilinear
     assert!(
         max_diff < 0.06,
-        "Max pixel difference {} exceeds tolerance 0.06 for {}",
-        max_diff,
-        image_name
+        "Max pixel difference {max_diff} exceeds tolerance 0.06 for {image_name}"
     );
 }
 

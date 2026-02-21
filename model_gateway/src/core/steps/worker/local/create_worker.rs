@@ -72,7 +72,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
         };
 
         // Normalize URL
-        let url = normalize_url(&config.url, connection_mode);
+        let url = normalize_url(&config.url, *connection_mode);
 
         // Build workers
         let cb_cfg = app_context.router_config.effective_circuit_breaker_config();
@@ -191,7 +191,7 @@ fn build_model_card(
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|&n| n > 0)
     {
-        let id2label: HashMap<u32, String> = (0..n).map(|i| (i, format!("LABEL_{}", i))).collect();
+        let id2label: HashMap<u32, String> = (0..n).map(|i| (i, format!("LABEL_{i}"))).collect();
         card = card.with_id2label(id2label);
     }
 
@@ -221,7 +221,7 @@ fn build_model_card(
     // Infer model_type capabilities from discovered signals
     let has_vision = labels
         .get("supports_vision")
-        .or(labels.get("has_image_understanding"))
+        .or_else(|| labels.get("has_image_understanding"))
         .map(|s| s == "true")
         .unwrap_or(false);
 
@@ -259,13 +259,13 @@ fn infer_non_generation_type(labels: &HashMap<String, String>) -> ModelType {
     ModelType::EMBEDDINGS
 }
 
-fn normalize_url(url: &str, connection_mode: &ConnectionMode) -> String {
+fn normalize_url(url: &str, connection_mode: ConnectionMode) -> String {
     if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("grpc://") {
         url.to_string()
     } else {
         match connection_mode {
-            ConnectionMode::Http => format!("http://{}", url),
-            ConnectionMode::Grpc => format!("grpc://{}", url),
+            ConnectionMode::Http => format!("http://{url}"),
+            ConnectionMode::Grpc => format!("grpc://{url}"),
         }
     }
 }

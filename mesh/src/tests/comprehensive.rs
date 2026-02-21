@@ -70,7 +70,7 @@ async fn find_free_port() -> (TcpListener, u16) {
 /// Test utility: Get a free socket address
 async fn get_node_addr() -> SocketAddr {
     let (_listener, port) = find_free_port().await;
-    format!("127.0.0.1:{}", port).parse().unwrap()
+    format!("127.0.0.1:{port}").parse().unwrap()
 }
 
 /// Test utility: Print cluster state for debugging
@@ -79,7 +79,7 @@ fn print_cluster_state(handler: &MeshServerHandler) -> String {
     let mut res = vec![];
     for (k, v) in state.iter() {
         let status = NodeStatus::try_from(v.status)
-            .map(|s| format!("{:?}", s))
+            .map(|s| format!("{s:?}"))
             .unwrap_or_else(|_| format!("Unknown({})", v.status));
         res.push(format!("{}: {} v={}", k, status, v.version));
     }

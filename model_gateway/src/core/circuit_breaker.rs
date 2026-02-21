@@ -58,7 +58,7 @@ impl std::fmt::Display for CircuitState {
 }
 
 impl CircuitState {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             CircuitState::Closed => "closed",
             CircuitState::Open => "open",
@@ -66,7 +66,7 @@ impl CircuitState {
         }
     }
 
-    pub fn to_int(&self) -> u8 {
+    pub fn as_int(self) -> u8 {
         match self {
             CircuitState::Closed => STATE_CLOSED,
             CircuitState::Open => STATE_OPEN,
@@ -124,7 +124,7 @@ impl CircuitBreaker {
     /// Create a new circuit breaker with custom configuration and metric label
     pub fn with_config_and_label(config: CircuitBreakerConfig, metric_label: String) -> Self {
         let init_state = CircuitState::Closed;
-        Metrics::set_worker_cb_state(&metric_label, init_state.to_int());
+        Metrics::set_worker_cb_state(&metric_label, init_state.as_int());
         Self {
             state: AtomicU8::new(STATE_CLOSED),
             consecutive_failures: AtomicU32::new(0),
@@ -260,7 +260,7 @@ impl CircuitBreaker {
 
     /// Transition to a new state (uses CAS for lock-free operation)
     fn transition_to(&self, new_state: CircuitState) {
-        let new_state_int = new_state.to_int();
+        let new_state_int = new_state.as_int();
         let old_state_int = self.state.swap(new_state_int, Ordering::AcqRel);
         let old_state = CircuitState::from_int(old_state_int);
 
@@ -285,7 +285,7 @@ impl CircuitBreaker {
             let to = new_state.as_str();
             info!("Circuit breaker state transition: {} -> {}", from, to);
             Metrics::record_worker_cb_transition(&self.metric_label, from, to);
-            Metrics::set_worker_cb_state(&self.metric_label, new_state.to_int());
+            Metrics::set_worker_cb_state(&self.metric_label, new_state.as_int());
             self.publish_gauge_metrics();
         }
     }

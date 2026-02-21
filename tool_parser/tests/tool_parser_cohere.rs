@@ -244,8 +244,7 @@ async fn test_cohere_streaming_basic() {
 
     assert!(
         all_normal_text.contains("Let me check that."),
-        "Should capture normal text, got: '{}'",
-        all_normal_text
+        "Should capture normal text, got: '{all_normal_text}'",
     );
     assert_eq!(tool_names.len(), 1, "Should have one tool call");
     assert_eq!(tool_names[0], "get_weather");

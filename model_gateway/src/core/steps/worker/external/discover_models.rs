@@ -14,6 +14,10 @@ use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, Wo
 use crate::core::steps::workflow_data::ExternalWorkerWorkflowData;
 
 // HTTP client for API calls
+#[expect(
+    clippy::expect_used,
+    reason = "Lazy static initialization — reqwest::Client::build() only fails on TLS backend misconfiguration which is unrecoverable"
+)]
 static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
         .timeout(Duration::from_secs(30))
@@ -22,6 +26,10 @@ static HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
 });
 
 // Regex to strip date suffix: -YYYY-MM-DD or -YYYY-MM
+#[expect(
+    clippy::expect_used,
+    reason = "Lazy static initialization — compile-time constant regex pattern cannot fail"
+)]
 static DATE_SUFFIX_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"-\d{4}-\d{2}(-\d{2})?$").expect("Invalid date regex"));
 
@@ -175,7 +183,7 @@ fn infer_provider_from_id(id: &str) -> Option<ProviderType> {
 /// Fetch models from /v1/models endpoint.
 async fn fetch_models(url: &str, api_key: Option<&str>) -> Result<Vec<ModelCard>, String> {
     let base_url = url.trim_end_matches('/');
-    let models_url = format!("{}/v1/models", base_url);
+    let models_url = format!("{base_url}/v1/models");
 
     let mut req = HTTP_CLIENT.get(&models_url);
     if let Some(key) = api_key {
@@ -185,7 +193,7 @@ async fn fetch_models(url: &str, api_key: Option<&str>) -> Result<Vec<ModelCard>
     let response = req
         .send()
         .await
-        .map_err(|e| format!("Failed to connect to {}: {}", models_url, e))?;
+        .map_err(|e| format!("Failed to connect to {models_url}: {e}"))?;
 
     if !response.status().is_success() {
         return Err(format!(
@@ -198,7 +206,7 @@ async fn fetch_models(url: &str, api_key: Option<&str>) -> Result<Vec<ModelCard>
     let models_response: ModelsResponse = response
         .json()
         .await
-        .map_err(|e| format!("Failed to parse models response: {}", e))?;
+        .map_err(|e| format!("Failed to parse models response: {e}"))?;
 
     debug!(
         "Fetched {} raw models from {}",

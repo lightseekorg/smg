@@ -35,7 +35,7 @@ pub unsafe fn set_error_message(error_out: *mut *mut c_char, message: &str) {
 /// - `error_out` may be null; if non-null, must point to valid writable memory
 pub unsafe fn set_error_message_fmt(error_out: *mut *mut c_char, fmt: std::fmt::Arguments) {
     if !error_out.is_null() {
-        let msg = format!("{}", fmt);
+        let msg = format!("{fmt}");
         set_error_message(error_out, &msg);
     }
 }

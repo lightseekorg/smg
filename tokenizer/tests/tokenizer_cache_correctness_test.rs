@@ -20,6 +20,7 @@ use llm_tokenizer::{
 static TOKENIZER_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Download Qwen3-4B-Instruct-2507 tokenizer once and cache the path
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 async fn get_tokenizer_path() -> Option<PathBuf> {
     // Check if already downloaded
     if let Some(cached) = TOKENIZER_PATH.get() {
@@ -38,7 +39,7 @@ async fn get_tokenizer_path() -> Option<PathBuf> {
             }
         }
         Err(e) => {
-            println!("Failed to download tokenizer: {}", e);
+            println!("Failed to download tokenizer: {e}");
             None
         }
     };
@@ -122,6 +123,7 @@ const CHAT_TURNS: [&str; 29] = [
 ];
 
 #[tokio::test]
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 async fn test_cache_produces_identical_tokens() {
     // Get tokenizer path (download once, cached across tests)
     let tokenizer_path = match get_tokenizer_path().await {
@@ -235,31 +237,22 @@ async fn test_cache_produces_identical_tokens() {
             assert_eq!(
                 base_token,
                 l0_token,
-                "Turn {}, token {}: L0 mismatch (base: {}, L0: {})",
+                "Turn {}, token {token_idx}: L0 mismatch (base: {base_token}, L0: {l0_token})",
                 turn_idx + 1,
-                token_idx,
-                base_token,
-                l0_token
             );
 
             assert_eq!(
                 base_token,
                 l1_token,
-                "Turn {}, token {}: L1 mismatch (base: {}, L1: {})",
+                "Turn {}, token {token_idx}: L1 mismatch (base: {base_token}, L1: {l1_token})",
                 turn_idx + 1,
-                token_idx,
-                base_token,
-                l1_token
             );
 
             assert_eq!(
                 base_token,
                 l0_l1_token,
-                "Turn {}, token {}: L0+L1 mismatch (base: {}, L0+L1: {})",
+                "Turn {}, token {token_idx}: L0+L1 mismatch (base: {base_token}, L0+L1: {l0_l1_token})",
                 turn_idx + 1,
-                token_idx,
-                base_token,
-                l0_l1_token
             );
         }
 
@@ -323,6 +316,7 @@ async fn test_cache_produces_identical_tokens() {
 }
 
 #[tokio::test]
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 async fn test_cache_correctness_with_edge_cases() {
     // Get tokenizer path (download once, cached across tests)
     let tokenizer_path = match get_tokenizer_path().await {
@@ -397,7 +391,7 @@ async fn test_cache_correctness_with_edge_cases() {
     let mut test_count = 0;
     let mut mismatch_count = 0;
 
-    for (query, description) in edge_cases.iter() {
+    for (query, description) in &edge_cases {
         test_count += 1;
 
         let base_tokens = base_tokenizer
@@ -412,9 +406,11 @@ async fn test_cache_correctness_with_edge_cases() {
             .token_ids()
             .to_vec();
 
-        if base_tokens != cached_tokens {
+        if base_tokens == cached_tokens {
+            println!("  ✓ {description}: {} tokens", base_tokens.len());
+        } else {
             mismatch_count += 1;
-            println!("  ✗ {}: Token mismatch!", description);
+            println!("  ✗ {description}: Token mismatch!");
             println!(
                 "    Base length: {}, Cached length: {}",
                 base_tokens.len(),
@@ -424,21 +420,18 @@ async fn test_cache_correctness_with_edge_cases() {
             // Show first few mismatching tokens for debugging
             for (i, (base, cached)) in base_tokens.iter().zip(cached_tokens.iter()).enumerate() {
                 if base != cached {
-                    println!("    Token {}: base={}, cached={}", i, base, cached);
+                    println!("    Token {i}: base={base}, cached={cached}");
                     if i >= 5 {
                         break;
                     }
                 }
             }
-        } else {
-            println!("  ✓ {}: {} tokens", description, base_tokens.len());
         }
     }
 
     assert_eq!(
         mismatch_count, 0,
-        "{} out of {} edge cases failed!",
-        mismatch_count, test_count
+        "{mismatch_count} out of {test_count} edge cases failed!"
     );
 
     // Print cache statistics
@@ -467,5 +460,5 @@ async fn test_cache_correctness_with_edge_cases() {
         );
     }
 
-    println!("\n✓ All {} edge cases passed!", test_count);
+    println!("\n✓ All {test_count} edge cases passed!");
 }

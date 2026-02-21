@@ -59,7 +59,7 @@ impl std::str::FromStr for WorkerType {
         } else if s.eq_ignore_ascii_case("decode") {
             Ok(WorkerType::Decode)
         } else {
-            Err(format!("Unknown worker type: {}", s))
+            Err(format!("Unknown worker type: {s}"))
         }
     }
 }
@@ -123,7 +123,7 @@ impl std::str::FromStr for RuntimeType {
         } else if s.eq_ignore_ascii_case("external") {
             Ok(RuntimeType::External)
         } else {
-            Err(format!("Unknown runtime type: {}", s))
+            Err(format!("Unknown runtime type: {s}"))
         }
     }
 }
@@ -141,6 +141,10 @@ pub enum ProviderType {
     OpenAI,
     /// xAI/Grok — special handling for input items.
     #[serde(alias = "xai", alias = "grok")]
+    #[expect(
+        clippy::upper_case_acronyms,
+        reason = "xAI is a proper company name; XAI matches industry convention and existing serde aliases"
+    )]
     XAI,
     /// Anthropic Claude — different API format.
     #[serde(alias = "anthropic", alias = "claude")]
@@ -331,7 +335,12 @@ impl From<Vec<ModelCard>> for WorkerModels {
     fn from(models: Vec<ModelCard>) -> Self {
         match models.len() {
             0 => Self::Wildcard,
-            1 => Self::Single(Box::new(models.into_iter().next().unwrap())),
+            1 => {
+                let Some(model) = models.into_iter().next() else {
+                    return Self::Wildcard;
+                };
+                Self::Single(Box::new(model))
+            }
             _ => Self::Multi(models),
         }
     }

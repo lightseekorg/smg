@@ -49,7 +49,7 @@ pub struct GrpcRouter {
 
 impl GrpcRouter {
     /// Create a new gRPC router
-    pub async fn new(ctx: &Arc<AppContext>) -> Result<Self, String> {
+    pub fn new(ctx: &Arc<AppContext>) -> Result<Self, String> {
         // Get tokenizer registry (no longer requires pre-loaded tokenizer)
         let tokenizer_registry = ctx.tokenizer_registry.clone();
 

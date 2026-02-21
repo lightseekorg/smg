@@ -18,6 +18,10 @@ fn find_stop_sequence_aho(text: &str, ac: &AhoCorasick) -> Option<(usize, usize)
     ac.find(text).map(|mat| (mat.start(), mat.end()))
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "benchmark setup - pattern construction cannot fail with valid string inputs"
+)]
 fn bench_stop_sequence_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("stop_sequence_search");
 
@@ -27,17 +31,18 @@ fn bench_stop_sequence_search(c: &mut Criterion) {
 
     for token_count in [5, 20, 50] {
         let stop_sequences: Vec<String> = (0..token_count)
-            .map(|i| format!("<|stop_sequence_{}|>", i))
+            .map(|i| format!("<|stop_sequence_{i}|>"))
             .collect();
 
-        let ac = AhoCorasick::new(&stop_sequences).unwrap();
+        let ac = AhoCorasick::new(&stop_sequences)
+            .expect("Aho-Corasick construction cannot fail with valid UTF-8 stop sequences");
 
-        group.bench_function(format!("naive_{}_sequences", token_count), |b| {
-            b.iter(|| find_stop_sequence_naive(black_box(&text), black_box(&stop_sequences)))
+        group.bench_function(format!("naive_{token_count}_sequences"), |b| {
+            b.iter(|| find_stop_sequence_naive(black_box(&text), black_box(&stop_sequences)));
         });
 
-        group.bench_function(format!("aho_corasick_{}_sequences", token_count), |b| {
-            b.iter(|| find_stop_sequence_aho(black_box(&text), black_box(&ac)))
+        group.bench_function(format!("aho_corasick_{token_count}_sequences"), |b| {
+            b.iter(|| find_stop_sequence_aho(black_box(&text), black_box(&ac)));
         });
     }
 

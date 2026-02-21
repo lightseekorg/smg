@@ -31,6 +31,7 @@ struct TestKeyPair {
 }
 
 impl TestKeyPair {
+    #[expect(clippy::expect_used)]
     fn generate() -> Self {
         // Generate a new 2048-bit RSA key pair for testing
         use rsa::{pkcs8::EncodePrivateKey, rand_core::OsRng};
@@ -81,6 +82,7 @@ struct TestClaims {
 }
 
 /// Create a test JWT token using the generated test key pair
+#[expect(clippy::expect_used)]
 fn create_test_token(claims: &TestClaims) -> String {
     let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
     header.kid = Some(TEST_KEY_ID.to_string());
@@ -92,6 +94,7 @@ fn create_test_token(claims: &TestClaims) -> String {
 }
 
 /// Create claims with default values
+#[expect(clippy::unwrap_used)]
 fn create_claims(sub: &str, roles: Vec<&str>) -> TestClaims {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -111,6 +114,7 @@ fn create_claims(sub: &str, roles: Vec<&str>) -> TestClaims {
 }
 
 /// Start a mock JWKS server using the generated test key pair
+#[expect(clippy::unwrap_used, clippy::disallowed_methods)]
 async fn start_mock_jwks_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     // Use the generated key pair components
     let jwks_response = json!({
@@ -267,8 +271,7 @@ async fn test_jwt_expired_token() {
     let err = result.unwrap_err();
     assert!(
         err.to_string().contains("exp") || err.to_string().contains("ExpiredSignature"),
-        "Error should mention expiration: {}",
-        err
+        "Error should mention expiration: {err}"
     );
 }
 
@@ -603,8 +606,7 @@ async fn test_jwt_jti_replay_protection() {
     let err = result2.unwrap_err();
     assert!(
         err.to_string().contains("replay") || err.to_string().contains("already been used"),
-        "Error should mention replay: {}",
-        err
+        "Error should mention replay: {err}"
     );
 }
 
@@ -683,8 +685,7 @@ async fn test_jwt_malformed_token() {
         let result = jwt_validator.validate(token).await;
         assert!(
             result.is_err(),
-            "Malformed token '{}' should fail validation",
-            token
+            "Malformed token '{token}' should fail validation"
         );
     }
 }
@@ -725,8 +726,7 @@ async fn test_jwt_missing_kid_in_header() {
     let err = result.unwrap_err();
     assert!(
         err.to_string().contains("kid") || err.to_string().contains("Missing"),
-        "Error should mention missing kid: {}",
-        err
+        "Error should mention missing kid: {err}"
     );
 }
 

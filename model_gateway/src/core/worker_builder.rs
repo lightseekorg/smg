@@ -172,7 +172,7 @@ impl BasicWorkerBuilder {
     /// Captures the current URL as the base URL, then formats it as `{base}@{rank}`.
     pub fn dp_config(mut self, rank: usize, size: usize) -> Self {
         let base_url = self.spec.url.clone();
-        self.spec.url = format!("{}@{}", base_url, rank);
+        self.spec.url = format!("{base_url}@{rank}");
         self.spec.dp_base_url = Some(base_url);
         self.spec.dp_rank = Some(rank);
         self.spec.dp_size = Some(size);
@@ -264,7 +264,7 @@ fn parse_bootstrap_host(url: &str) -> String {
     if let Some(host) = try_parse(clean_url) {
         host
     } else if !clean_url.contains("://") {
-        try_parse(&format!("http://{}", clean_url)).unwrap_or_else(|| {
+        try_parse(&format!("http://{clean_url}")).unwrap_or_else(|| {
             tracing::warn!("Failed to parse URL '{}', defaulting to localhost", url);
             "localhost".to_string()
         })

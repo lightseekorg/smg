@@ -30,6 +30,10 @@ use crate::{
 static PYTHONIC_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
 
 /// Lazily compiled regex that locates pythonic tool call blocks.
+#[expect(
+    clippy::expect_used,
+    reason = "regex pattern is a compile-time string literal"
+)]
 fn pythonic_block_regex() -> &'static Regex {
     PYTHONIC_BLOCK_REGEX.get_or_init(|| {
         // Matches one or more function calls inside a list. The `(?s)` flag allows
@@ -63,7 +67,7 @@ impl PythonicParser {
 
     /// Extract the first pythonic tool call block and return it along with the
     /// surrounding "normal" content.
-    fn extract_tool_calls(&self, text: &str) -> Option<(String, String)> {
+    fn extract_tool_calls(text: &str) -> Option<(String, String)> {
         pythonic_block_regex().find(text).map(|mat| {
             let block = mat.as_str().to_string();
             let normal = format!("{}{}", &text[..mat.start()], &text[mat.end()..]);
@@ -77,7 +81,7 @@ impl PythonicParser {
             .replace("<|python_end|>", "")
     }
 
-    fn parse_tool_call_block(&self, block: &str) -> ParserResult<Vec<ToolCall>> {
+    fn parse_tool_call_block(block: &str) -> ParserResult<Vec<ToolCall>> {
         let expr = parse_python_expression(block)?;
         match expr {
             Expr::List(list_expr) => list_expr
@@ -98,8 +102,8 @@ impl ToolParser for PythonicParser {
     async fn parse_complete(&self, text: &str) -> ParserResult<(String, Vec<ToolCall>)> {
         let cleaned = Self::strip_special_tokens(text);
 
-        if let Some((tool_calls_text, normal_text)) = self.extract_tool_calls(&cleaned) {
-            match self.parse_tool_call_block(&tool_calls_text) {
+        if let Some((tool_calls_text, normal_text)) = Self::extract_tool_calls(&cleaned) {
+            match Self::parse_tool_call_block(&tool_calls_text) {
                 Ok(calls) => {
                     if calls.is_empty() {
                         // No tools successfully parsed despite having markers
@@ -315,8 +319,7 @@ fn expression_to_json(expr: &Expr) -> ParserResult<Value> {
         },
         Expr::Name(name_expr) => Ok(Value::String(name_expr.id.to_string())),
         _ => Err(ParserError::ParsingFailed(format!(
-            "Unsupported expression in pythonic tool call: {:?}",
-            expr
+            "Unsupported expression in pythonic tool call: {expr:?}"
         ))),
     }
 }
@@ -357,8 +360,7 @@ fn value_to_key_string(value: Value) -> ParserResult<String> {
         Value::Bool(b) => Ok(b.to_string()),
         Value::Null => Ok("null".to_string()),
         other => Err(ParserError::ParsingFailed(format!(
-            "Unsupported key type in pythonic tool call: {:?}",
-            other
+            "Unsupported key type in pythonic tool call: {other:?}"
         ))),
     }
 }
@@ -401,9 +403,9 @@ where
             if u <= i64::MAX as u64 {
                 return Value::Number(Number::from(-(u as i64)));
             }
-            return Value::String(format!("-{}", value));
+            return Value::String(format!("-{value}"));
         }
-        Value::String(format!("-{}", value))
+        Value::String(format!("-{value}"))
     } else if let Some(u) = value.to_u64() {
         Value::Number(Number::from(u))
     } else {

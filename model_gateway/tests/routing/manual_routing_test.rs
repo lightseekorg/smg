@@ -29,17 +29,17 @@ mod manual_routing_tests {
             AppTestContext::new_with_config(config, TestWorkerConfig::healthy_workers(19700, 2))
                 .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Send requests with different routing keys
         let mut key_workers: HashMap<String, HashSet<String>> = HashMap::new();
 
         for key_id in 0..5 {
-            let routing_key = format!("user-{}", key_id);
+            let routing_key = format!("user-{key_id}");
 
             for _ in 0..4 {
                 let payload = json!({
-                    "text": format!("Request for {}", routing_key),
+                    "text": format!("Request for {routing_key}"),
                     "stream": false
                 });
 
@@ -70,9 +70,7 @@ mod manual_routing_tests {
             assert_eq!(
                 workers.len(),
                 1,
-                "Routing key {} should route to exactly one worker, got {:?}",
-                key,
-                workers
+                "Routing key {key} should route to exactly one worker, got {workers:?}"
             );
         }
 
@@ -88,13 +86,13 @@ mod manual_routing_tests {
             AppTestContext::new_with_config(config, TestWorkerConfig::healthy_workers(19702, 2))
                 .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
         let mut success_count = 0;
 
         // Send requests without routing key - should fall back to random selection
         for i in 0..20 {
             let payload = json!({
-                "text": format!("Request without key {}", i),
+                "text": format!("Request without key {i}"),
                 "stream": false
             });
 
@@ -130,7 +128,7 @@ mod manual_routing_tests {
             AppTestContext::new_with_config(config, TestWorkerConfig::healthy_workers(19704, 3))
                 .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let routing_key = "consistent-user-123";
         let mut seen_workers: Vec<String> = Vec::new();
@@ -138,7 +136,7 @@ mod manual_routing_tests {
         // Send multiple requests with same routing key
         for i in 0..10 {
             let payload = json!({
-                "text": format!("Consistent request {}", i),
+                "text": format!("Consistent request {i}"),
                 "stream": false
             });
 
@@ -179,7 +177,7 @@ mod manual_min_group_tests {
 
     async fn send_request(app: axum::Router, routing_key: &str) -> (String, String) {
         let payload = json!({
-            "text": format!("Request for {}", routing_key),
+            "text": format!("Request for {routing_key}"),
             "stream": false
         });
 
@@ -205,6 +203,7 @@ mod manual_min_group_tests {
         (routing_key.to_string(), worker_id)
     }
 
+    #[expect(clippy::disallowed_methods, reason = "test infrastructure")]
     #[tokio::test]
     async fn test_min_group_concurrent_distribution() {
         let config = TestRouterConfig::manual_min_group(3910);
@@ -213,11 +212,11 @@ mod manual_min_group_tests {
             AppTestContext::new_with_config(config, TestWorkerConfig::slow_workers(29910, 3, 500))
                 .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let mut handles = Vec::new();
         for i in 0..9 {
-            let routing_key = format!("key-{}", i);
+            let routing_key = format!("key-{i}");
             let app_clone = app.clone();
             let handle = tokio::spawn(async move { send_request(app_clone, &routing_key).await });
             handles.push(handle);
@@ -240,20 +239,19 @@ mod manual_min_group_tests {
         assert_eq!(
             worker_counts.len(),
             3,
-            "min_group should distribute keys across all 3 workers, got {:?}",
-            worker_counts
+            "min_group should distribute keys across all 3 workers, got {worker_counts:?}"
         );
         for (worker, count) in &worker_counts {
             assert_eq!(
                 *count, 3,
-                "Worker {} should have exactly 3 keys, got {}. Distribution: {:?}",
-                worker, count, key_to_worker
+                "Worker {worker} should have exactly 3 keys, got {count}. Distribution: {key_to_worker:?}"
             );
         }
 
         ctx.shutdown().await;
     }
 
+    #[expect(clippy::disallowed_methods, reason = "test infrastructure")]
     #[tokio::test]
     async fn test_min_group_sticky_routing() {
         let config = TestRouterConfig::manual_min_group(3911);
@@ -262,7 +260,7 @@ mod manual_min_group_tests {
             AppTestContext::new_with_config(config, TestWorkerConfig::slow_workers(29920, 3, 200))
                 .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let routing_key = "sticky-key-123";
 
@@ -285,13 +283,13 @@ mod manual_min_group_tests {
         assert_eq!(
             unique_workers.len(),
             1,
-            "All requests with same routing key should route to same worker, got {:?}",
-            unique_workers
+            "All requests with same routing key should route to same worker, got {unique_workers:?}"
         );
 
         ctx.shutdown().await;
     }
 
+    #[expect(clippy::disallowed_methods, reason = "test infrastructure")]
     #[tokio::test]
     async fn test_min_group_mixed_concurrent_routing() {
         let config = TestRouterConfig::manual_min_group(3912);
@@ -300,11 +298,11 @@ mod manual_min_group_tests {
             AppTestContext::new_with_config(config, TestWorkerConfig::slow_workers(29930, 2, 300))
                 .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let mut handles = Vec::new();
         for i in 0..4 {
-            let routing_key = format!("key-{}", i);
+            let routing_key = format!("key-{i}");
             for _ in 0..3 {
                 let app_clone = app.clone();
                 let key = routing_key.clone();
@@ -328,9 +326,7 @@ mod manual_min_group_tests {
             assert_eq!(
                 workers.len(),
                 1,
-                "Key {} should route to exactly one worker (sticky), but got {:?}",
-                key,
-                workers
+                "Key {key} should route to exactly one worker (sticky), but got {workers:?}"
             );
         }
 

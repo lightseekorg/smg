@@ -1,3 +1,9 @@
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    clippy::uninlined_format_args
+)]
 //! Comprehensive tokenizer benchmark with clean summary output
 //! Each test adds a row to the final summary table
 
@@ -581,7 +587,14 @@ fn bench_latency_distribution(c: &mut Criterion) {
 
             b.iter_custom(|iters| {
                 // Only collect detailed latency on first iteration
-                let total_duration = if !printed_clone.load(Ordering::Relaxed) {
+                let total_duration = if printed_clone.load(Ordering::Relaxed) {
+                    // Regular benchmark iterations
+                    let start = Instant::now();
+                    for _ in 0..iters {
+                        black_box(tokenizer.encode(prompt, false).unwrap());
+                    }
+                    start.elapsed()
+                } else {
                     let mut latencies = Vec::new();
 
                     // Warm up
@@ -618,13 +631,6 @@ fn bench_latency_distribution(c: &mut Criterion) {
 
                     // Return median for consistency
                     p50 * iters as u32
-                } else {
-                    // Regular benchmark iterations
-                    let start = Instant::now();
-                    for _ in 0..iters {
-                        black_box(tokenizer.encode(prompt, false).unwrap());
-                    }
-                    start.elapsed()
                 };
 
                 total_duration
@@ -640,7 +646,17 @@ fn bench_latency_distribution(c: &mut Criterion) {
         let tokens = sample_tokens.clone();
 
         b.iter_custom(|iters| {
-            let total_duration = if !printed_clone.load(Ordering::Relaxed) {
+            let total_duration = if printed_clone.load(Ordering::Relaxed) {
+                // Regular benchmark iterations
+                let start = Instant::now();
+                for _ in 0..iters {
+                    let mut decoder = DecodeStream::new(tokenizer.clone(), &[], false);
+                    for token in tokens.iter().take(10) {
+                        black_box(decoder.step(*token).unwrap());
+                    }
+                }
+                start.elapsed()
+            } else {
                 let mut latencies = Vec::new();
                 let mut decoder = DecodeStream::new(tokenizer.clone(), &[], false);
 
@@ -682,16 +698,6 @@ fn bench_latency_distribution(c: &mut Criterion) {
 
                 // Return approximate time for consistency
                 p50 * iters as u32
-            } else {
-                // Regular benchmark iterations
-                let start = Instant::now();
-                for _ in 0..iters {
-                    let mut decoder = DecodeStream::new(tokenizer.clone(), &[], false);
-                    for token in tokens.iter().take(10) {
-                        black_box(decoder.step(*token).unwrap());
-                    }
-                }
-                start.elapsed()
             };
 
             total_duration
@@ -1742,7 +1748,7 @@ fn print_summary() {
         let category = key.split('_').skip(1).collect::<Vec<_>>().join("_");
 
         if category != current_category {
-            current_category = category.clone();
+            current_category.clone_from(&category);
 
             // Print section header based on category
             println!("\n{}", "-".repeat(120));

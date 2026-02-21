@@ -22,7 +22,7 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for ActivateWorke
             .get_actual_workers()
             .ok_or_else(|| WorkflowError::ContextValueNotFound("workers".to_string()))?;
 
-        for worker in workers.iter() {
+        for worker in workers {
             worker.set_healthy(true);
         }
 

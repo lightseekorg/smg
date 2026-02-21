@@ -341,6 +341,10 @@ impl Default for TokenizerRegistry {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tokio::spawn is fine in unit tests that await all handles"
+)]
 mod tests {
     use std::{sync::Arc, time::Duration};
 
@@ -457,7 +461,7 @@ mod tests {
         for i in 0..10 {
             let registry = registry.clone();
             let load_count = load_count.clone();
-            let id = format!("id-{}", i);
+            let id = format!("id-{i}");
             let handle = tokio::spawn(async move {
                 registry
                     .load(&id, "model1", "source", || async {
@@ -491,7 +495,7 @@ mod tests {
 
         // Load multiple tokenizers
         for i in 1..=5 {
-            let model_name = format!("model{}", i);
+            let model_name = format!("model{i}");
             let id = TokenizerRegistry::generate_id();
             registry
                 .load(&id, &model_name, "source", || async {

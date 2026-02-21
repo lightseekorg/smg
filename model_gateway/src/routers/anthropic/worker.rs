@@ -27,7 +27,7 @@ use crate::{
 const MAX_ERROR_RESPONSE_SIZE: usize = 1024 * 1024;
 
 /// Select the best worker for the given model.
-#[allow(clippy::result_large_err)]
+#[expect(clippy::result_large_err)]
 pub(crate) fn select_worker(
     worker_registry: &WorkerRegistry,
     model_id: &str,
@@ -48,7 +48,7 @@ pub(crate) fn select_worker(
             warn!(model = %model_id, "No healthy workers available for model");
             Err(error::service_unavailable(
                 "no_workers",
-                format!("No healthy workers available for model '{}'", model_id),
+                format!("No healthy workers available for model '{model_id}'"),
             ))
         }
     }
@@ -98,17 +98,17 @@ pub(crate) async fn send_request(
             if e.is_timeout() {
                 Err(error::gateway_timeout(
                     "timeout",
-                    format!("Request timeout: {}", e),
+                    format!("Request timeout: {e}"),
                 ))
             } else if e.is_connect() {
                 Err(error::bad_gateway(
                     "connection_failed",
-                    format!("Connection failed: {}", e),
+                    format!("Connection failed: {e}"),
                 ))
             } else {
                 Err(error::bad_gateway(
                     "request_failed",
-                    format!("Request failed: {}", e),
+                    format!("Request failed: {e}"),
                 ))
             }
         }
@@ -173,7 +173,7 @@ pub(crate) async fn handle_error_response(
     let status = response.status();
 
     let body = match read_response_body_limited(response, MAX_ERROR_RESPONSE_SIZE).await {
-        ReadBodyResult::Ok(b) if b.is_empty() => format!("Backend returned error: {}", status),
+        ReadBodyResult::Ok(b) if b.is_empty() => format!("Backend returned error: {status}"),
         ReadBodyResult::Ok(b) => b,
         ReadBodyResult::TooLarge => {
             warn!(
@@ -181,11 +181,11 @@ pub(crate) async fn handle_error_response(
                 max_size = %MAX_ERROR_RESPONSE_SIZE,
                 "Error response body too large"
             );
-            format!("Backend returned error: {} (response too large)", status)
+            format!("Backend returned error: {status} (response too large)")
         }
         ReadBodyResult::Error(e) => {
             warn!(model = %model_id, error = %e, "Failed to read error response body");
-            format!("Backend returned error: {}", status)
+            format!("Backend returned error: {status}")
         }
     };
 

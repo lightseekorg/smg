@@ -48,7 +48,7 @@ pub(super) fn apply_proxy_to_builder(
     // Configure HTTP proxy
     if let Some(ref http_proxy) = proxy_cfg.http {
         let mut proxy = reqwest::Proxy::http(http_proxy)
-            .map_err(|e| McpError::Config(format!("Invalid HTTP proxy: {}", e)))?;
+            .map_err(|e| McpError::Config(format!("Invalid HTTP proxy: {e}")))?;
 
         // Apply no_proxy exclusions
         if let Some(ref no_proxy) = proxy_cfg.no_proxy {
@@ -67,7 +67,7 @@ pub(super) fn apply_proxy_to_builder(
     // Configure HTTPS proxy
     if let Some(ref https_proxy) = proxy_cfg.https {
         let mut proxy = reqwest::Proxy::https(https_proxy)
-            .map_err(|e| McpError::Config(format!("Invalid HTTPS proxy: {}", e)))?;
+            .map_err(|e| McpError::Config(format!("Invalid HTTPS proxy: {e}")))?;
 
         // Apply no_proxy exclusions
         if let Some(ref no_proxy) = proxy_cfg.no_proxy {

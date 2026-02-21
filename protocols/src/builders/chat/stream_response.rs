@@ -46,7 +46,7 @@ impl ChatCompletionStreamResponseBuilder {
     ///
     /// This populates the model field from the request.
     pub fn copy_from_request(mut self, request: &ChatCompletionRequest) -> Self {
-        self.model = request.model.clone();
+        self.model.clone_from(&request.model);
         self
     }
 

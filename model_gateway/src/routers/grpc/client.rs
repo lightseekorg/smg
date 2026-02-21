@@ -27,6 +27,10 @@ pub enum GrpcClient {
 }
 
 impl GrpcClient {
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang(&self) -> &SglangSchedulerClient {
         match self {
             Self::Sglang(client) => client,
@@ -34,6 +38,10 @@ impl GrpcClient {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang_mut(&mut self) -> &mut SglangSchedulerClient {
         match self {
             Self::Sglang(client) => client,
@@ -41,6 +49,10 @@ impl GrpcClient {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm(&self) -> &VllmEngineClient {
         match self {
             Self::Vllm(client) => client,
@@ -48,6 +60,10 @@ impl GrpcClient {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm_mut(&mut self) -> &mut VllmEngineClient {
         match self {
             Self::Vllm(client) => client,
@@ -55,6 +71,10 @@ impl GrpcClient {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm(&self) -> &TrtllmServiceClient {
         match self {
             Self::Trtllm(client) => client,
@@ -62,6 +82,10 @@ impl GrpcClient {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm_mut(&mut self) -> &mut TrtllmServiceClient {
         match self {
             Self::Trtllm(client) => client,
@@ -89,7 +113,7 @@ impl GrpcClient {
             "sglang" => Ok(Self::Sglang(SglangSchedulerClient::connect(url).await?)),
             "vllm" => Ok(Self::Vllm(VllmEngineClient::connect(url).await?)),
             "trtllm" | "tensorrt-llm" => Ok(Self::Trtllm(TrtllmServiceClient::connect(url).await?)),
-            _ => Err(format!("Unknown runtime type: {}", runtime_type).into()),
+            _ => Err(format!("Unknown runtime type: {runtime_type}").into()),
         }
     }
 
@@ -162,6 +186,10 @@ impl GrpcClient {
                 let stream = client.generate(*boxed_req).await?;
                 Ok(ProtoStream::Trtllm(stream))
             }
+            #[expect(
+                clippy::panic,
+                reason = "client and request types are always matched by construction in the pipeline"
+            )]
             _ => panic!("Mismatched client and request types"),
         }
     }
@@ -175,6 +203,10 @@ impl GrpcClient {
                 let resp = client.embed(*boxed_req).await?;
                 Ok(ProtoEmbedResponse::Sglang(resp))
             }
+            #[expect(
+                clippy::panic,
+                reason = "client and request types are always matched by construction in the pipeline"
+            )]
             _ => panic!("Mismatched client and request types or unsupported embedding backend"),
         }
     }
@@ -373,7 +405,7 @@ fn pick_prost_fields(labels: &mut HashMap<String, String>, s: &prost_types::Stru
             if let Some(ref kind) = val.kind {
                 match kind {
                     prost_types::value::Kind::StringValue(s) if !s.is_empty() && s != "null" => {
-                        labels.insert(key.to_string(), s.clone());
+                        labels.insert((*key).to_string(), s.clone());
                     }
                     prost_types::value::Kind::NumberValue(n) if *n != 0.0 => {
                         let formatted = if *n == (*n as i64) as f64 {
@@ -381,10 +413,10 @@ fn pick_prost_fields(labels: &mut HashMap<String, String>, s: &prost_types::Stru
                         } else {
                             n.to_string()
                         };
-                        labels.insert(key.to_string(), formatted);
+                        labels.insert((*key).to_string(), formatted);
                     }
                     prost_types::value::Kind::BoolValue(b) => {
-                        labels.insert(key.to_string(), b.to_string());
+                        labels.insert((*key).to_string(), b.to_string());
                     }
                     _ => {}
                 }

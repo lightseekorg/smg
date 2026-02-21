@@ -144,7 +144,7 @@ impl StepExecutor<WasmRegistrationWorkflowData> for ValidateDescriptorStep {
             );
             return Err(WorkflowError::StepFailed {
                 step_id: StepId::new("validate_descriptor"),
-                message: format!("Access to {} directory is not allowed", prefix),
+                message: format!("Access to {prefix} directory is not allowed"),
             });
         }
 
@@ -183,10 +183,7 @@ impl StepExecutor<WasmRegistrationWorkflowData> for ValidateDescriptorStep {
             );
             return Err(WorkflowError::StepFailed {
                 step_id: StepId::new("validate_descriptor"),
-                message: format!(
-                    "Path resolves to blocked directory {} (via symlink)",
-                    prefix
-                ),
+                message: format!("Path resolves to blocked directory {prefix} (via symlink)"),
             });
         }
 
@@ -242,7 +239,7 @@ impl StepExecutor<WasmRegistrationWorkflowData> for CalculateHashStep {
                 .await
                 .map_err(|e| WorkflowError::StepFailed {
                     step_id: StepId::new("calculate_hash"),
-                    message: format!("Failed to open file {}: {}", file_path, e),
+                    message: format!("Failed to open file {file_path}: {e}"),
                 })?;
 
         let mut hasher = Sha256::new();
@@ -255,7 +252,7 @@ impl StepExecutor<WasmRegistrationWorkflowData> for CalculateHashStep {
                     .await
                     .map_err(|e| WorkflowError::StepFailed {
                         step_id: StepId::new("calculate_hash"),
-                        message: format!("Failed to read file {}: {}", file_path, e),
+                        message: format!("Failed to read file {file_path}: {e}"),
                     })?;
 
             if bytes_read == 0 {
@@ -325,7 +322,7 @@ impl StepExecutor<WasmRegistrationWorkflowData> for CheckDuplicateStep {
             .check_duplicate_sha256_hash(sha256_hash)
             .map_err(|e| WorkflowError::StepFailed {
                 step_id: StepId::new("check_duplicate"),
-                message: format!("Duplicate SHA256 hash detected: {}", e),
+                message: format!("Duplicate SHA256 hash detected: {e}"),
             })?;
 
         info!(
@@ -364,7 +361,7 @@ impl StepExecutor<WasmRegistrationWorkflowData> for LoadWasmBytesStep {
                 .await
                 .map_err(|e| WorkflowError::StepFailed {
                     step_id: StepId::new("load_wasm_bytes"),
-                    message: format!("Failed to read WASM file {}: {}", file_path, e),
+                    message: format!("Failed to read WASM file {file_path}: {e}"),
                 })?;
 
         // Store WASM bytes in typed data (wrapped in Arc for cheap cloning during execution)
@@ -409,7 +406,7 @@ impl StepExecutor<WasmRegistrationWorkflowData> for ValidateWasmComponentStep {
 
         let engine = Engine::new(&config).map_err(|e| WorkflowError::StepFailed {
             step_id: StepId::new("validate_wasm_component"),
-            message: format!("Failed to create WASM engine: {}", e),
+            message: format!("Failed to create WASM engine: {e}"),
         })?;
 
         // Attempt to compile the component to validate it
@@ -417,10 +414,9 @@ impl StepExecutor<WasmRegistrationWorkflowData> for ValidateWasmComponentStep {
             .map_err(|e| WorkflowError::StepFailed {
                 step_id: StepId::new("validate_wasm_component"),
                 message: format!(
-                    "Invalid WASM component: {}. \
+                    "Invalid WASM component: {e}. \
                      Hint: The WASM file must be in component format. \
-                     If you're using wit-bindgen, use 'wasm-tools component new' to wrap the WASM module into a component.",
-                    e
+                     If you're using wit-bindgen, use 'wasm-tools component new' to wrap the WASM module into a component."
                 ),
             })?;
 
@@ -513,7 +509,7 @@ impl StepExecutor<WasmRegistrationWorkflowData> for RegisterModuleStep {
             .register_module_internal(module)
             .map_err(|e| WorkflowError::StepFailed {
                 step_id: StepId::new("register_module"),
-                message: format!("Failed to register module: {}", e),
+                message: format!("Failed to register module: {e}"),
             })?;
 
         // Store module UUID in typed data

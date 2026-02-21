@@ -210,6 +210,10 @@ pub enum OutputModality {
     Audio,
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "must return Option to match serde default field type"
+)]
 fn audio() -> Option<Vec<OutputModality>> {
     Some(vec![OutputModality::Audio])
 }
@@ -247,6 +251,10 @@ pub enum RealtimeTracingConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "variant names match OpenAI Realtime API spec"
+)]
 pub enum ConnectorId {
     ConnectorDropbox,
     ConnectorGmail,

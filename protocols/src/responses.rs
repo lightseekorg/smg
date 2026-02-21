@@ -77,6 +77,10 @@ pub struct ResponseReasoningParam {
     pub summary: Option<ReasoningSummary>,
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde default function must match field type Option<T>"
+)]
 fn default_reasoning_effort() -> Option<ReasoningEffort> {
     Some(ReasoningEffort::Medium)
 }
@@ -555,10 +559,18 @@ fn default_repetition_penalty() -> f32 {
     1.0
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde default function must match field type Option<T>"
+)]
 fn default_temperature() -> Option<f32> {
     Some(1.0)
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde default function must match field type Option<T>"
+)]
 fn default_top_p() -> Option<f32> {
     Some(1.0)
 }
@@ -766,10 +778,10 @@ impl Normalizable for ResponsesRequest {
         // 1. Apply tool_choice defaults
         if self.tool_choice.is_none() {
             if let Some(tools) = &self.tools {
-                let choice_value = if !tools.is_empty() {
-                    ToolChoiceValue::Auto
-                } else {
+                let choice_value = if tools.is_empty() {
                     ToolChoiceValue::None
+                } else {
+                    ToolChoiceValue::Auto
                 };
                 self.tool_choice = Some(ToolChoice::Value(choice_value));
             }
@@ -871,8 +883,7 @@ pub fn validate_conversation_id(conv_id: &str) -> Result<(), ValidationError> {
     if !conv_id.starts_with("conv_") {
         let mut error = ValidationError::new("invalid_conversation_id");
         error.message = Some(std::borrow::Cow::Owned(format!(
-            "Invalid 'conversation': '{}'. Expected an ID that begins with 'conv_'.",
-            conv_id
+            "Invalid 'conversation': '{conv_id}'. Expected an ID that begins with 'conv_'."
         )));
         return Err(error);
     }
@@ -885,8 +896,7 @@ pub fn validate_conversation_id(conv_id: &str) -> Result<(), ValidationError> {
     if !is_valid {
         let mut error = ValidationError::new("invalid_conversation_id");
         error.message = Some(std::borrow::Cow::Owned(format!(
-            "Invalid 'conversation': '{}'. Expected an ID that contains letters, numbers, underscores, or dashes, but this value contained additional characters.",
-            conv_id
+            "Invalid 'conversation': '{conv_id}'. Expected an ID that contains letters, numbers, underscores, or dashes, but this value contained additional characters."
         )));
         return Err(error);
     }
@@ -915,7 +925,10 @@ fn validate_tool_choice_with_tools(request: &ResponsesRequest) -> Result<(), Val
     }
 
     // Extract function tool names from ResponseTools
-    let tools = request.tools.as_ref().unwrap();
+    // SAFETY: has_tools is true here, so tools is Some and non-empty
+    let Some(tools) = request.tools.as_ref() else {
+        return Ok(());
+    };
     let function_tool_names: Vec<&str> = tools
         .iter()
         .filter_map(|t| match t.r#type {
@@ -949,8 +962,7 @@ fn validate_tool_choice_with_tools(request: &ResponsesRequest) -> Result<(), Val
                 let mut e = ValidationError::new("tool_choice_invalid_mode");
                 e.message = Some(
                     format!(
-                        "Invalid value for 'tool_choice.mode': must be 'auto' or 'required', got '{}'.",
-                        mode
+                        "Invalid value for 'tool_choice.mode': must be 'auto' or 'required', got '{mode}'."
                     )
                     .into(),
                 );
@@ -964,8 +976,7 @@ fn validate_tool_choice_with_tools(request: &ResponsesRequest) -> Result<(), Val
                         let mut e = ValidationError::new("tool_choice_tool_not_found");
                         e.message = Some(
                             format!(
-                                "Invalid value for 'tool_choice.tools': tool '{}' not found in 'tools'.",
-                                name
+                                "Invalid value for 'tool_choice.tools': tool '{name}' not found in 'tools'."
                             )
                             .into(),
                         );
@@ -976,7 +987,7 @@ fn validate_tool_choice_with_tools(request: &ResponsesRequest) -> Result<(), Val
                 // as they are resolved dynamically at runtime
             }
         }
-        _ => {}
+        ToolChoice::Value(_) => {}
     }
 
     Ok(())
@@ -1104,7 +1115,7 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationE
                 return Err(e);
             }
         }
-        _ => {}
+        ResponseInputOutputItem::FunctionToolCall { .. } => {}
     }
     Ok(())
 }
@@ -1127,17 +1138,14 @@ fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), ValidationError
                 let Some(raw_label) = tool.server_label.as_deref().filter(|s| !s.is_empty()) else {
                     let mut e = ValidationError::new("missing_required_parameter");
                     e.message = Some(
-                        format!("Missing required parameter: 'tools[{}].server_label'.", idx)
-                            .into(),
+                        format!("Missing required parameter: 'tools[{idx}].server_label'.").into(),
                     );
                     return Err(e);
                 };
 
                 // OpenAI spec-compatible validation: require a non-empty label that starts with a
                 // letter and contains only letters, digits, '-' and '_'.
-                let mut chars = raw_label.chars();
-                let first = chars.next().unwrap();
-                let valid = first.is_ascii_alphabetic()
+                let valid = raw_label.starts_with(|c: char| c.is_ascii_alphabetic())
                     && raw_label
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
@@ -1145,8 +1153,7 @@ fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), ValidationError
                     let mut e = ValidationError::new("invalid_server_label");
                     e.message = Some(
                         format!(
-                            "Invalid input {}: 'server_label' must start with a letter and consist of only letters, digits, '-' and '_'",
-                            raw_label
+                            "Invalid input {raw_label}: 'server_label' must start with a letter and consist of only letters, digits, '-' and '_'"
                         )
                         .into(),
                     );
@@ -1158,8 +1165,7 @@ fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), ValidationError
                     let mut e = ValidationError::new("mcp_tool_duplicate_server_label");
                     e.message = Some(
                         format!(
-                            "Duplicate MCP server_label '{}' found in 'tools' parameter.",
-                            raw_label
+                            "Duplicate MCP server_label '{raw_label}' found in 'tools' parameter."
                         )
                         .into(),
                     );
@@ -1224,8 +1230,8 @@ pub fn generate_id(prefix: &str) -> String {
     // Generate exactly 50 hex characters (25 bytes) for the part after the underscore
     let mut bytes = [0u8; 25];
     rng.fill_bytes(&mut bytes);
-    let hex_string: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("{}_{}", prefix, hex_string)
+    let hex_string: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{prefix}_{hex_string}")
 }
 
 #[serde_with::skip_serializing_none]

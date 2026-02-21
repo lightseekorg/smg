@@ -51,7 +51,7 @@ impl ReasoningParser for Qwen3Parser {
     }
 
     fn reset(&mut self) {
-        self.base.reset()
+        self.base.reset();
     }
 
     fn model_type(&self) -> &str {
@@ -106,7 +106,7 @@ impl ReasoningParser for QwenThinkingParser {
     }
 
     fn reset(&mut self) {
-        self.base.reset()
+        self.base.reset();
     }
 
     fn model_type(&self) -> &str {

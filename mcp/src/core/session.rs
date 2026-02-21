@@ -199,10 +199,7 @@ impl<'a> McpToolSession<'a> {
                 .first()
                 .map(|b| b.label.clone())
                 .unwrap_or_else(|| "mcp".to_string());
-            let err = format!(
-                "Tool '{}' is not in this session's exposed tool map",
-                invoked_name
-            );
+            let err = format!("Tool '{invoked_name}' is not in this session's exposed tool map");
             ToolExecutionOutput {
                 call_id: input.call_id,
                 tool_name: invoked_name.clone(),
@@ -372,11 +369,11 @@ impl<'a> McpToolSession<'a> {
             let mut exposed_name = if *suffix == 0 {
                 base_exposed_name.clone()
             } else {
-                format!("{}_{}", base_exposed_name, suffix)
+                format!("{base_exposed_name}_{suffix}")
             };
             while used_exposed_names.contains(&exposed_name) {
                 *suffix += 1;
-                exposed_name = format!("{}_{}", base_exposed_name, suffix);
+                exposed_name = format!("{base_exposed_name}_{suffix}");
             }
             used_exposed_names.insert(exposed_name.clone());
 
@@ -563,7 +560,7 @@ mod tests {
         crate::core::config::Tool {
             name: Cow::Owned(name.to_string()),
             title: None,
-            description: Some(Cow::Owned(format!("Test tool: {}", name))),
+            description: Some(Cow::Owned(format!("Test tool: {name}"))),
             input_schema: Arc::new(serde_json::Map::new()),
             output_schema: None,
             annotations: None,

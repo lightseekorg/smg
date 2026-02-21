@@ -129,7 +129,7 @@ impl RequestPipeline {
     }
 
     /// Create a Harmony PD (prefill-decode) pipeline
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn new_harmony_pd(
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,

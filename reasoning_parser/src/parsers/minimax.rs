@@ -43,7 +43,7 @@ impl Default for MiniMaxParser {
 impl ReasoningParser for MiniMaxParser {
     fn detect_and_parse_reasoning(&mut self, text: &str) -> Result<ParserResult, ParseError> {
         // For one-shot parsing, prepend <think> token to the text
-        let modified_text = format!("<think>{}", text);
+        let modified_text = format!("<think>{text}");
         self.base.detect_and_parse_reasoning(&modified_text)
     }
 
@@ -54,7 +54,7 @@ impl ReasoningParser for MiniMaxParser {
         // For the first chunk, prepend <think> token
         let modified_text = if self.is_first_chunk {
             self.is_first_chunk = false;
-            format!("<think>{}", text)
+            format!("<think>{text}")
         } else {
             text.to_string()
         };

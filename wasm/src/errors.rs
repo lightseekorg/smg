@@ -15,8 +15,8 @@ pub struct Sha256Hash(pub [u8; 32]);
 
 impl fmt::Display for Sha256Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let hex_string: String = self.0.iter().map(|b| format!("{:02x}", b)).collect();
-        write!(f, "{}", hex_string)
+        let hex_string: String = self.0.iter().map(|b| format!("{b:02x}")).collect();
+        write!(f, "{hex_string}")
     }
 }
 

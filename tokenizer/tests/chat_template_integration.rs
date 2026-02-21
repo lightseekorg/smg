@@ -9,14 +9,14 @@ use openai_protocol::{
 
 #[test]
 fn test_simple_chat_template() {
-    let template = r#"
+    let template = r"
 {%- for message in messages %}
 <|{{ message.role }}|>{{ message.content }}<|end|>
 {% endfor -%}
 {%- if add_generation_prompt %}
 <|assistant|>
 {%- endif %}
-"#;
+";
 
     let processor = ChatTemplateProcessor::new(template.to_string());
 
@@ -45,12 +45,12 @@ fn test_simple_chat_template() {
 #[test]
 fn test_chat_template_with_tokens() {
     // Template that uses template kwargs for tokens
-    let template = r#"
+    let template = r"
 {%- if bos_token -%}{{ bos_token }}{%- endif -%}
 {%- for message in messages -%}
 {{ message.role }}: {{ message.content }}{%- if eos_token -%}{{ eos_token }}{%- endif -%}
 {% endfor -%}
-"#;
+";
 
     let processor = ChatTemplateProcessor::new(template.to_string());
 
@@ -90,7 +90,7 @@ fn test_chat_template_with_tokens() {
 
 #[test]
 fn test_llama_style_template() {
-    let template = r#"
+    let template = r"
 {%- if messages[0]['role'] == 'system' -%}
     {%- set system_message = messages[0]['content'] -%}
     {%- set messages = messages[1:] -%}
@@ -110,7 +110,7 @@ fn test_llama_style_template() {
 {%- if add_generation_prompt %}
     {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' }}
 {%- endif %}
-"#;
+";
 
     let processor = ChatTemplateProcessor::new(template.to_string());
 
@@ -158,14 +158,14 @@ fn test_llama_style_template() {
 
 #[test]
 fn test_chatml_template() {
-    let template = r#"
+    let template = r"
 {%- for message in messages %}
     {{- '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n' }}
 {%- endfor %}
 {%- if add_generation_prompt %}
     {{- '<|im_start|>assistant\n' }}
 {%- endif %}
-"#;
+";
 
     let processor = ChatTemplateProcessor::new(template.to_string());
 
@@ -211,14 +211,14 @@ fn test_chatml_template() {
 
 #[test]
 fn test_template_without_generation_prompt() {
-    let template = r#"
+    let template = r"
 {%- for message in messages -%}
 {{ message.role }}: {{ message.content }}
 {% endfor -%}
 {%- if add_generation_prompt -%}
 assistant:
 {%- endif -%}
-"#;
+";
 
     let processor = ChatTemplateProcessor::new(template.to_string());
 
@@ -252,7 +252,7 @@ assistant:
 
 #[test]
 fn test_empty_messages_template() {
-    let template = r#"{% for msg in messages %}{{ msg.role }}: {{ msg.content }}\n{% endfor %}"#;
+    let template = r"{% for msg in messages %}{{ msg.role }}: {{ msg.content }}\n{% endfor %}";
 
     let processor = ChatTemplateProcessor::new(template.to_string());
 
@@ -268,14 +268,14 @@ fn test_empty_messages_template() {
 #[test]
 fn test_tojson_with_ensure_ascii() {
     // Template that uses tojson(ensure_ascii=False) like HuggingFace templates do
-    let template = r#"
+    let template = r"
 {%- for message in messages -%}
 {{ message.role }}: {{ message.content }}
 {%- if message.tool_calls is defined and message.tool_calls -%}
 Tools: {{ message.tool_calls|tojson(ensure_ascii=False) }}
 {%- endif -%}
 {% endfor -%}
-"#;
+";
 
     let processor = ChatTemplateProcessor::new(template.to_string());
 
@@ -336,23 +336,23 @@ All: {{ data|tojson(ensure_ascii=False, sort_keys=True, indent=2) }}
 
 #[test]
 fn test_content_format_detection() {
-    let string_template = r#"
+    let string_template = r"
 {%- for message in messages -%}
 {{ message.role }}: {{ message.content }}
 {%- endfor -%}
-"#;
+";
     assert_eq!(
         detect_chat_template_content_format(string_template),
         ChatTemplateContentFormat::String
     );
 
-    let openai_template = r#"
+    let openai_template = r"
 {%- for message in messages -%}
   {%- for content in message.content -%}
     {{ content.type }}: {{ content.text }}
   {%- endfor -%}
 {%- endfor -%}
-"#;
+";
     assert_eq!(
         detect_chat_template_content_format(openai_template),
         ChatTemplateContentFormat::OpenAI
