@@ -90,7 +90,7 @@ impl RouterTrait for AnthropicRouter {
 
         let mcp_servers = if request.has_mcp_toolset() {
             // Build per-server allowed tools from McpToolset entries in tools array.
-            let toolset_allowed = mcp::collect_allowed_tools_per_server(&request.tools);
+            let toolset_allowed = mcp::collect_allowed_tools_per_server(request.tools.as_ref());
 
             let inputs: Vec<mcp_utils::McpServerInput> = request
                 .mcp_server_configs()

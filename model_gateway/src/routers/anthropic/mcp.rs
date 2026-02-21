@@ -300,9 +300,9 @@ pub(crate) fn rebuild_response_with_mcp_blocks(
 /// - `None` → all tools allowed for that server
 /// - `Some(names)` → only these tools allowed
 pub(crate) fn collect_allowed_tools_per_server(
-    tools: &Option<Vec<Tool>>,
+    tools: Option<&Vec<Tool>>,
 ) -> HashMap<String, Option<Vec<String>>> {
-    let Some(tools) = tools.as_ref() else {
+    let Some(tools) = tools else {
         return HashMap::new();
     };
 
