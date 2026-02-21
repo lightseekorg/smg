@@ -1,9 +1,9 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use llm_multimodal::{
-    AsyncMultiModalTracker, ChatContentPart, ConversationSegment, ImageFetchConfig, ImageSource,
-    MediaConnector, MediaConnectorConfig, MediaSource, Modality, TrackerConfig,
+    AsyncMultiModalTracker, ChatContentPart, ImageFetchConfig, ImageSource, MediaConnector,
+    MediaConnectorConfig, MediaSource, Modality,
 };
 use reqwest::Client;
 use tempfile::tempdir;
@@ -99,15 +99,9 @@ async fn fetch_image_from_file() {
 }
 
 #[tokio::test]
-async fn tracker_collects_conversation_and_placeholders() {
+async fn tracker_fetches_images_and_records_uuids() {
     let connector = Arc::new(test_connector(None));
-    let mut tracker = AsyncMultiModalTracker::new(
-        connector,
-        TrackerConfig {
-            placeholder_tokens: Default::default(),
-            modality_limits: HashMap::from([(Modality::Image, 2)]),
-        },
-    );
+    let mut tracker = AsyncMultiModalTracker::new(connector);
 
     tracker
         .push_part(ChatContentPart::Text {
@@ -129,31 +123,10 @@ async fn tracker_collects_conversation_and_placeholders() {
         .expect("text part");
 
     let output = tracker.finalize().await.expect("tracker finalize");
-    assert_eq!(output.conversation.len(), 3);
-    assert!(matches!(
-        &output.conversation[0],
-        ConversationSegment::Text(text) if text == "before"
-    ));
-    assert!(matches!(
-        &output.conversation[1],
-        ConversationSegment::Placeholder { token } if token == "<image>"
-    ));
-    assert!(matches!(
-        &output.conversation[2],
-        ConversationSegment::Text(text) if text == "after"
-    ));
 
     let images = output.data.get(&Modality::Image).expect("image entry");
     assert_eq!(images.len(), 1);
 
     let uuids = output.uuids.get(&Modality::Image).expect("uuid entry");
     assert_eq!(uuids, &vec![Some("img-1".into())]);
-
-    let placeholders = output
-        .placeholders
-        .get("<image>")
-        .expect("placeholder entry");
-    assert_eq!(placeholders.len(), 1);
-    assert_eq!(placeholders[0].text_position, 1);
-    assert_eq!(placeholders[0].item_index, 0);
 }

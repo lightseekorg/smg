@@ -8,12 +8,11 @@ pub mod vision;
 pub use error::{MediaConnectorError, MultiModalError, MultiModalResult};
 pub use media::{ImageFetchConfig, MediaConnector, MediaConnectorConfig, MediaSource};
 pub use registry::{ModelMetadata, ModelProcessorSpec, ModelRegistry};
-pub use tracker::{AsyncMultiModalTracker, TrackerConfig, TrackerOutput};
+pub use tracker::{AsyncMultiModalTracker, TrackerOutput};
 pub use types::{
-    ChatContentPart, ConversationSegment, ImageDetail, ImageFrame, ImageSize, ImageSource,
-    Modality, MultiModalData, MultiModalInputs, MultiModalTensor, MultiModalUUIDs, MultiModalValue,
-    PlaceholderHandle, PlaceholderMap, PlaceholderRange, PromptReplacement, TokenId, TrackedMedia,
-    DEFAULT_PLACEHOLDERS,
+    ChatContentPart, ImageDetail, ImageFrame, ImageSize, ImageSource, Modality, MultiModalData,
+    MultiModalInputs, MultiModalTensor, MultiModalUUIDs, MultiModalValue, PlaceholderRange,
+    PromptReplacement, TokenId, TrackedMedia,
 };
 // Re-export vision processing components
 pub use vision::{

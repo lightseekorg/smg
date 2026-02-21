@@ -77,40 +77,10 @@ impl ChatPreparationStage {
         let mut multimodal_images = None;
         if multimodal::has_multimodal_content(&request.messages) {
             if let Some(mm_components) = ctx.components.multimodal.as_ref() {
-                let model_id = ctx.input.model_id.as_deref().unwrap_or(&request.model);
-
-                let tokenizer_source = ctx
-                    .components
-                    .tokenizer_registry
-                    .get_by_name(model_id)
-                    .map(|entry| entry.source)
-                    .unwrap_or_default();
-
-                if tokenizer_source.is_empty() {
-                    error!(
-                        function = "ChatPreparationStage::execute",
-                        model = %model_id,
-                        "Tokenizer source path not found for multimodal processing"
-                    );
-                    return Err(error::bad_request(
-                        "multimodal_config_missing",
-                        format!("Tokenizer source path not found for model: {model_id}"),
-                    ));
-                }
-
-                match multimodal::fetch_images(
-                    &request.messages,
-                    model_id,
-                    &*tokenizer,
-                    mm_components,
-                    &tokenizer_source,
-                )
-                .await
-                {
+                match multimodal::fetch_images(&request.messages, mm_components).await {
                     Ok(images) => {
                         debug!(
                             function = "ChatPreparationStage::execute",
-                            model = %model_id,
                             image_count = images.len(),
                             "Multimodal images fetched"
                         );

@@ -12,7 +12,7 @@ use llm_multimodal::{
     AsyncMultiModalTracker, ChatContentPart, ImageDetail, ImageFrame, ImageProcessorRegistry,
     ImageSize, MediaConnector, MediaConnectorConfig, Modality, ModelMetadata, ModelProcessorSpec,
     ModelRegistry, ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
-    PromptReplacement, TrackedMedia, TrackerConfig, TrackerOutput,
+    PromptReplacement, TrackedMedia, TrackerOutput,
 };
 use llm_tokenizer::TokenizerTrait;
 use openai_protocol::{
@@ -204,51 +204,16 @@ fn parse_detail(detail: &str) -> Option<ImageDetail> {
 
 /// Phase 1: Fetch images from chat messages (backend-agnostic).
 ///
-/// Uses the multimodal tracker to extract image URLs, fetch them, and enforce
-/// modality limits. No pixel preprocessing or token expansion — those are
-/// deferred to Phase 2 where the backend type is known.
+/// Uses the multimodal tracker to extract image URLs and fetch them concurrently.
+/// No pixel preprocessing or token expansion — those are deferred to Phase 2
+/// where the backend type is known.
 pub(crate) async fn fetch_images(
     messages: &[ChatMessage],
-    model_id: &str,
-    tokenizer: &dyn TokenizerTrait,
     components: &MultimodalComponents,
-    tokenizer_source: &str,
 ) -> Result<Vec<Arc<ImageFrame>>> {
-    let (model_config, spec) =
-        resolve_model_spec(components, model_id, tokenizer, tokenizer_source)?;
-
-    debug!(
-        model_id,
-        spec_name = spec.name(),
-        "Found multimodal model spec"
-    );
-
-    // Build tracker config from spec (for modality limits)
-    let metadata = ModelMetadata {
-        model_id,
-        tokenizer,
-        config: &model_config.config,
-    };
-    let placeholder_token = spec
-        .placeholder_token(&metadata)
-        .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {e}"))?;
-    let modality_limits = spec
-        .modality_limits(&metadata)
-        .map_err(|e| anyhow::anyhow!("Failed to get modality limits: {e}"))?;
-
-    let tracker_config = TrackerConfig {
-        placeholder_tokens: {
-            let mut m = HashMap::new();
-            m.insert(Modality::Image, placeholder_token);
-            m
-        },
-        modality_limits,
-    };
-
     // Extract content parts and run tracker
     let content_parts = extract_content_parts(messages);
-    let mut tracker =
-        AsyncMultiModalTracker::new(components.media_connector.clone(), tracker_config);
+    let mut tracker = AsyncMultiModalTracker::new(components.media_connector.clone());
 
     for part in content_parts {
         tracker
@@ -578,22 +543,9 @@ fn model_specific_to_tensor_bytes(value: &ModelSpecificValue) -> Option<TensorBy
 
 #[cfg(test)]
 mod tests {
-    use llm_multimodal::ConversationSegment;
     use openai_protocol::common::ImageUrl;
 
     use super::*;
-
-    /// Reconstruct the text content from tracker conversation segments.
-    fn reconstruct_text_from_segments(segments: &[ConversationSegment]) -> String {
-        let mut text = String::new();
-        for segment in segments {
-            match segment {
-                ConversationSegment::Text(s) => text.push_str(s),
-                ConversationSegment::Placeholder { token } => text.push_str(token),
-            }
-        }
-        text
-    }
 
     #[test]
     fn test_has_multimodal_content_with_images() {
@@ -736,19 +688,5 @@ mod tests {
         assert_eq!(parse_detail("LOW"), Some(ImageDetail::Low));
         assert_eq!(parse_detail("high"), Some(ImageDetail::High));
         assert_eq!(parse_detail("unknown"), None);
-    }
-
-    #[test]
-    fn test_reconstruct_text_from_segments() {
-        let segments = vec![
-            ConversationSegment::Text("Hello ".to_string()),
-            ConversationSegment::Placeholder {
-                token: "<image>".to_string(),
-            },
-            ConversationSegment::Text(" world".to_string()),
-        ];
-
-        let text = reconstruct_text_from_segments(&segments);
-        assert_eq!(text, "Hello <image> world");
     }
 }
