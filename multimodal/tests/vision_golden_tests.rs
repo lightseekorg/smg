@@ -1261,11 +1261,9 @@ fn run_llama4_vision_golden_test(image_name: &str) {
         rust_shape.len()
     );
     assert_eq!(
-        rust_shape[0],
-        golden_shape[0],
+        rust_shape[0], golden_shape[0],
         "Expected {} tiles, got {}",
-        golden_shape[0],
-        rust_shape[0]
+        golden_shape[0], rust_shape[0]
     );
 
     // Compare pixel values
