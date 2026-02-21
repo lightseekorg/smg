@@ -143,6 +143,13 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                             tool_call_id: call_id.clone(),
                         });
                     }
+                    ResponseInputOutputItem::McpApprovalResponse { .. }
+                    | ResponseInputOutputItem::McpApprovalRequest { .. } => {
+                        return Err(
+                            "mcp_approval_request/mcp_approval_response must be handled by the responses router before chat conversion"
+                                .to_string(),
+                        );
+                    }
                 }
             }
         }

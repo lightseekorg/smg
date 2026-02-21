@@ -683,6 +683,16 @@ impl HarmonyBuilder {
                     content_type: None,
                 })
             }
+
+            ResponseInputOutputItem::McpApprovalResponse { .. } => Err(
+                "mcp_approval_response must be handled by the responses router before Harmony conversion"
+                    .to_string(),
+            ),
+
+            ResponseInputOutputItem::McpApprovalRequest { .. } => Err(
+                "mcp_approval_request must be handled by the responses router before Harmony conversion"
+                    .to_string(),
+            ),
         }
     }
 
