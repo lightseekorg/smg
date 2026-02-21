@@ -21,6 +21,8 @@ use openai_protocol::{
 };
 use tracing::{debug, warn};
 
+use super::{MultimodalData, TensorBytes};
+
 /// Cached model configuration files loaded from the tokenizer directory.
 #[derive(Debug, Clone)]
 pub(crate) struct MultimodalModelConfig {
@@ -113,7 +115,7 @@ pub(crate) struct MultimodalOutput {
     /// Token IDs with placeholder tokens expanded to the correct count per image.
     pub expanded_token_ids: Vec<u32>,
     /// Backend-agnostic multimodal data.
-    pub multimodal_data: super::MultimodalData,
+    pub multimodal_data: MultimodalData,
 }
 
 /// Check if any messages in the request contain multimodal content (images).
@@ -377,8 +379,8 @@ pub(crate) fn preprocess_for_sglang(
 ///
 /// vLLM handles image preprocessing and token expansion internally,
 /// so we only send the raw JPEG/PNG bytes.
-fn build_vllm_multimodal_data(images: &[Arc<ImageFrame>]) -> super::MultimodalData {
-    super::MultimodalData {
+fn build_vllm_multimodal_data(images: &[Arc<ImageFrame>]) -> MultimodalData {
+    MultimodalData {
         image_data: images
             .iter()
             .map(|frame| frame.raw_bytes.to_vec())
@@ -403,7 +405,7 @@ pub(crate) fn process_for_backend(
     token_ids: Vec<u32>,
     components: &MultimodalComponents,
     tokenizer_source: &str,
-) -> Result<(Vec<u32>, super::MultimodalData)> {
+) -> Result<(Vec<u32>, MultimodalData)> {
     if is_sglang {
         let output = preprocess_for_sglang(
             images,
@@ -471,7 +473,7 @@ fn build_multimodal_data(
     im_token_id: Option<u32>,
     placeholders: &[PlaceholderRange],
     images: &[Arc<ImageFrame>],
-) -> super::MultimodalData {
+) -> MultimodalData {
     // Serialize pixel values as raw little-endian f32 bytes
     let pixel_bytes: Vec<u8> = if let Some(pixel_slice) = preprocessed
         .pixel_values
@@ -514,7 +516,7 @@ fn build_multimodal_data(
         .map(|p| (p.offset as u32, p.length as u32))
         .collect();
 
-    super::MultimodalData {
+    MultimodalData {
         image_data,
         pixel_values: pixel_bytes,
         pixel_values_shape: pixel_shape,
@@ -524,41 +526,35 @@ fn build_multimodal_data(
     }
 }
 
-/// Convert a model-specific value to a proto TensorData.
-fn model_specific_to_tensor_bytes(value: &ModelSpecificValue) -> Option<super::TensorBytes> {
+/// Convert a model-specific value to backend-agnostic TensorBytes.
+fn model_specific_to_tensor_bytes(value: &ModelSpecificValue) -> Option<TensorBytes> {
     match value {
-        ModelSpecificValue::Tensor { data, shape } => Some(super::TensorBytes {
+        ModelSpecificValue::Tensor { data, shape } => Some(TensorBytes {
             data: data.iter().flat_map(|v| v.to_le_bytes()).collect(),
             shape: shape.iter().map(|&d| d as u32).collect(),
             dtype: "float32".to_string(),
         }),
-        ModelSpecificValue::IntTensor { data, shape } => Some(super::TensorBytes {
+        ModelSpecificValue::IntTensor { data, shape } => Some(TensorBytes {
             data: data.iter().flat_map(|v| v.to_le_bytes()).collect(),
             shape: shape.iter().map(|&d| d as u32).collect(),
             dtype: "int64".to_string(),
         }),
-        ModelSpecificValue::UintTensor { data, shape } => Some(super::TensorBytes {
-            data: data
-                .iter()
-                .flat_map(|v| (*v as i64).to_le_bytes())
-                .collect(),
+        ModelSpecificValue::UintTensor { data, shape } => Some(TensorBytes {
+            data: data.iter().flat_map(|v| v.to_le_bytes()).collect(),
             shape: shape.iter().map(|&d| d as u32).collect(),
-            dtype: "int64".to_string(),
+            dtype: "uint32".to_string(),
         }),
-        ModelSpecificValue::UintVec(v) => Some(super::TensorBytes {
-            data: v
-                .iter()
-                .flat_map(|val| (*val as i64).to_le_bytes())
-                .collect(),
+        ModelSpecificValue::UintVec(v) => Some(TensorBytes {
+            data: v.iter().flat_map(|val| val.to_le_bytes()).collect(),
             shape: vec![v.len() as u32],
-            dtype: "int64".to_string(),
+            dtype: "uint32".to_string(),
         }),
-        ModelSpecificValue::IntVec(v) => Some(super::TensorBytes {
+        ModelSpecificValue::IntVec(v) => Some(TensorBytes {
             data: v.iter().flat_map(|val| val.to_le_bytes()).collect(),
             shape: vec![v.len() as u32],
             dtype: "int64".to_string(),
         }),
-        ModelSpecificValue::FloatVec(v) => Some(super::TensorBytes {
+        ModelSpecificValue::FloatVec(v) => Some(TensorBytes {
             data: v.iter().flat_map(|val| val.to_le_bytes()).collect(),
             shape: vec![v.len() as u32],
             dtype: "float32".to_string(),
