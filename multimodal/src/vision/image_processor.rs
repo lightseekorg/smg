@@ -391,6 +391,16 @@ impl ImageProcessorRegistry {
             Box::new(super::processors::Phi3VisionProcessor::new()),
         );
 
+        // Register LLaMA 4 Vision
+        registry.register(
+            "llama-4",
+            Box::new(super::processors::Llama4VisionProcessor::new()),
+        );
+        registry.register(
+            "llama4",
+            Box::new(super::processors::Llama4VisionProcessor::new()),
+        );
+
         registry
     }
 }
