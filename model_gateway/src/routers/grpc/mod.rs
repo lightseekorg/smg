@@ -1,7 +1,6 @@
 //! gRPC router implementations
 
 use openai_protocol::common::StringOrArray;
-use smg_grpc_client::sglang_proto::MultimodalInputs;
 
 pub mod client; // Used by core/
 pub(crate) mod common;
@@ -15,10 +14,14 @@ pub(crate) mod regular;
 pub(crate) mod router; // Used by routers/factory
 pub mod utils; // Used by routers/http and bindings/golang
 
+// Re-export for convenience
+pub use proto_wrapper::{MultimodalData, TensorBytes};
+
 /// Processed chat messages ready for gRPC generation
 #[derive(Debug)]
 pub struct ProcessedMessages {
     pub text: String,
-    pub multimodal_inputs: Option<MultimodalInputs>,
+    pub multimodal_inputs: Option<MultimodalData>,
+    #[allow(dead_code)]
     pub stop_sequences: Option<StringOrArray>,
 }

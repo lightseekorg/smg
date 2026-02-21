@@ -3,6 +3,8 @@
 //! This module provides unified enums that wrap proto types from SGLang, vLLM, and TensorRT-LLM,
 //! allowing the router to work with any backend transparently.
 
+use std::collections::HashMap;
+
 use futures_util::StreamExt;
 use smg_grpc_client::{
     sglang_proto::{self as sglang, generate_complete::MatchedStop},
@@ -12,6 +14,90 @@ use smg_grpc_client::{
     vllm_engine::AbortOnDropStream as VllmStream,
     vllm_proto as vllm,
 };
+
+// =====================
+// Multimodal Data
+// =====================
+
+/// Backend-agnostic multimodal data produced by the processing pipeline.
+///
+/// Each backend client converts this into its own proto format:
+/// - SGLang: full pixel_values + model_specific_tensors + placeholders
+/// - vLLM: raw image bytes only (vLLM handles preprocessing internally)
+#[derive(Debug, Clone)]
+pub struct MultimodalData {
+    /// Raw image bytes (JPEG/PNG) for each image
+    pub image_data: Vec<Vec<u8>>,
+    /// Preprocessed pixel values as raw little-endian f32 bytes
+    pub pixel_values: Vec<u8>,
+    /// Shape of the pixel_values tensor
+    pub pixel_values_shape: Vec<u32>,
+    /// Model-specific tensors (aspect_ratios, image_grid_thw, etc.)
+    pub model_specific_tensors: HashMap<String, TensorBytes>,
+    /// Image token ID for downstream pad_input_ids_func
+    pub im_token_id: Option<u32>,
+    /// Placeholder offsets: where each image's tokens are in input_ids
+    pub mm_placeholders: Vec<(u32, u32)>, // (offset, length)
+}
+
+/// Raw tensor bytes with shape and dtype metadata.
+#[derive(Debug, Clone)]
+pub struct TensorBytes {
+    pub data: Vec<u8>,
+    pub shape: Vec<u32>,
+    pub dtype: String,
+}
+
+impl MultimodalData {
+    /// Convert to SGLang proto MultimodalInputs, consuming self to avoid clones.
+    pub fn into_sglang_proto(self) -> sglang::MultimodalInputs {
+        let model_specific_tensors = self
+            .model_specific_tensors
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    sglang::TensorData {
+                        data: v.data,
+                        shape: v.shape,
+                        dtype: v.dtype,
+                    },
+                )
+            })
+            .collect();
+
+        let mm_placeholders = self
+            .mm_placeholders
+            .into_iter()
+            .map(|(offset, length)| sglang::PlaceholderRange { offset, length })
+            .collect();
+
+        sglang::MultimodalInputs {
+            image_urls: vec![],
+            video_urls: vec![],
+            audio_urls: vec![],
+            image_data: self.image_data,
+            video_data: vec![],
+            audio_data: vec![],
+            modalities: vec!["image".to_string()],
+            pixel_values: Some(sglang::TensorData {
+                data: self.pixel_values,
+                shape: self.pixel_values_shape,
+                dtype: "float32".to_string(),
+            }),
+            model_specific_tensors,
+            im_token_id: self.im_token_id,
+            mm_placeholders,
+        }
+    }
+
+    /// Convert to vLLM proto MultimodalInputs, consuming self to avoid clones.
+    pub fn into_vllm_proto(self) -> vllm::MultimodalInputs {
+        vllm::MultimodalInputs {
+            image_data: self.image_data,
+        }
+    }
+}
 
 // =====================
 // Unified Logprobs Types

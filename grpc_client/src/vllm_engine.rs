@@ -270,11 +270,14 @@ impl VllmEngineClient {
         body: &ChatCompletionRequest,
         processed_text: String,
         token_ids: Vec<u32>,
+        multimodal_inputs: Option<proto::MultimodalInputs>,
         tool_call_constraint: Option<(String, String)>, // (constraint_type, constraint_value)
     ) -> Result<proto::GenerateRequest, String> {
         // Build sampling params
         let sampling_params =
             Self::build_grpc_sampling_params_from_chat(body, tool_call_constraint)?;
+
+        let mm_inputs = multimodal_inputs;
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -287,6 +290,7 @@ impl VllmEngineClient {
             sampling_params: Some(sampling_params),
             stream: body.stream,
             kv_transfer_params: None,
+            mm_inputs,
         };
 
         Ok(grpc_request)
@@ -318,6 +322,7 @@ impl VllmEngineClient {
             sampling_params: Some(sampling_params),
             stream: body.stream,
             kv_transfer_params: None,
+            mm_inputs: None,
         };
 
         Ok(grpc_request)
@@ -360,6 +365,7 @@ impl VllmEngineClient {
             sampling_params: Some(sampling_params),
             stream: body.stream.unwrap_or(false),
             kv_transfer_params: None,
+            mm_inputs: None,
         };
 
         Ok(grpc_request)
@@ -677,6 +683,7 @@ mod tests {
             sampling_params: Some(sampling_params),
             stream: false,
             kv_transfer_params: None,
+            mm_inputs: None,
         };
 
         assert_eq!(gen_req.request_id, "test-req-123");

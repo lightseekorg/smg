@@ -19,7 +19,6 @@ use openai_protocol::{
     chat::{ChatMessage, MessageContent},
     common::ContentPart,
 };
-use smg_grpc_client::sglang_proto;
 use tracing::{debug, warn};
 
 /// Cached model configuration files loaded from the tokenizer directory.
@@ -113,8 +112,8 @@ impl MultimodalComponents {
 pub(crate) struct MultimodalOutput {
     /// Token IDs with placeholder tokens expanded to the correct count per image.
     pub expanded_token_ids: Vec<u32>,
-    /// Proto-ready multimodal inputs for the SGLang GenerateRequest.
-    pub proto_mm_inputs: sglang_proto::MultimodalInputs,
+    /// Backend-agnostic multimodal data.
+    pub multimodal_data: super::MultimodalData,
 }
 
 /// Check if any messages in the request contain multimodal content (images).
@@ -340,13 +339,13 @@ pub(crate) async fn process_multimodal(
         "Token expansion complete"
     );
 
-    // Build proto MultimodalInputs
-    let proto_mm_inputs =
-        build_proto_multimodal_inputs(&preprocessed, im_token_id, &mm_placeholders, &images);
+    // Build backend-agnostic multimodal data
+    let multimodal_data =
+        build_multimodal_data(&preprocessed, im_token_id, &mm_placeholders, &images);
 
     Ok(MultimodalOutput {
         expanded_token_ids,
-        proto_mm_inputs,
+        multimodal_data,
     })
 }
 
@@ -396,13 +395,13 @@ fn expand_tokens(
     (expanded, placeholders)
 }
 
-/// Build proto `MultimodalInputs` from preprocessed images.
-fn build_proto_multimodal_inputs(
+/// Build backend-agnostic `MultimodalData` from preprocessed images.
+fn build_multimodal_data(
     preprocessed: &PreprocessedImages,
     im_token_id: Option<u32>,
     placeholders: &[PlaceholderRange],
     images: &[Arc<ImageFrame>],
-) -> sglang_proto::MultimodalInputs {
+) -> super::MultimodalData {
     // Serialize pixel values as raw little-endian f32 bytes
     let pixel_bytes: Vec<u8> = if let Some(pixel_slice) = preprocessed
         .pixel_values
@@ -428,7 +427,7 @@ fn build_proto_multimodal_inputs(
     // Build model-specific tensors
     let mut model_specific_tensors = HashMap::new();
     for (key, value) in &preprocessed.model_specific {
-        if let Some(tensor) = model_specific_to_tensor_data(value) {
+        if let Some(tensor) = model_specific_to_tensor_bytes(value) {
             model_specific_tensors.insert(key.clone(), tensor);
         }
     }
@@ -439,28 +438,16 @@ fn build_proto_multimodal_inputs(
         .map(|frame| frame.raw_bytes.to_vec())
         .collect();
 
-    // Convert placeholder ranges to proto
+    // Convert placeholder ranges
     let mm_placeholders = placeholders
         .iter()
-        .map(|p| sglang_proto::PlaceholderRange {
-            offset: p.offset as u32,
-            length: p.length as u32,
-        })
+        .map(|p| (p.offset as u32, p.length as u32))
         .collect();
 
-    sglang_proto::MultimodalInputs {
-        image_urls: vec![],
-        video_urls: vec![],
-        audio_urls: vec![],
+    super::MultimodalData {
         image_data,
-        video_data: vec![],
-        audio_data: vec![],
-        modalities: vec!["image".to_string()],
-        pixel_values: Some(sglang_proto::TensorData {
-            data: pixel_bytes,
-            shape: pixel_shape,
-            dtype: "float32".to_string(),
-        }),
+        pixel_values: pixel_bytes,
+        pixel_values_shape: pixel_shape,
         model_specific_tensors,
         im_token_id,
         mm_placeholders,
@@ -468,19 +455,19 @@ fn build_proto_multimodal_inputs(
 }
 
 /// Convert a model-specific value to a proto TensorData.
-fn model_specific_to_tensor_data(value: &ModelSpecificValue) -> Option<sglang_proto::TensorData> {
+fn model_specific_to_tensor_bytes(value: &ModelSpecificValue) -> Option<super::TensorBytes> {
     match value {
-        ModelSpecificValue::Tensor { data, shape } => Some(sglang_proto::TensorData {
+        ModelSpecificValue::Tensor { data, shape } => Some(super::TensorBytes {
             data: data.iter().flat_map(|v| v.to_le_bytes()).collect(),
             shape: shape.iter().map(|&d| d as u32).collect(),
             dtype: "float32".to_string(),
         }),
-        ModelSpecificValue::IntTensor { data, shape } => Some(sglang_proto::TensorData {
+        ModelSpecificValue::IntTensor { data, shape } => Some(super::TensorBytes {
             data: data.iter().flat_map(|v| v.to_le_bytes()).collect(),
             shape: shape.iter().map(|&d| d as u32).collect(),
             dtype: "int64".to_string(),
         }),
-        ModelSpecificValue::UintTensor { data, shape } => Some(sglang_proto::TensorData {
+        ModelSpecificValue::UintTensor { data, shape } => Some(super::TensorBytes {
             data: data
                 .iter()
                 .flat_map(|v| (*v as i64).to_le_bytes())
@@ -488,7 +475,7 @@ fn model_specific_to_tensor_data(value: &ModelSpecificValue) -> Option<sglang_pr
             shape: shape.iter().map(|&d| d as u32).collect(),
             dtype: "int64".to_string(),
         }),
-        ModelSpecificValue::UintVec(v) => Some(sglang_proto::TensorData {
+        ModelSpecificValue::UintVec(v) => Some(super::TensorBytes {
             data: v
                 .iter()
                 .flat_map(|val| (*val as i64).to_le_bytes())
@@ -496,12 +483,12 @@ fn model_specific_to_tensor_data(value: &ModelSpecificValue) -> Option<sglang_pr
             shape: vec![v.len() as u32],
             dtype: "int64".to_string(),
         }),
-        ModelSpecificValue::IntVec(v) => Some(sglang_proto::TensorData {
+        ModelSpecificValue::IntVec(v) => Some(super::TensorBytes {
             data: v.iter().flat_map(|val| val.to_le_bytes()).collect(),
             shape: vec![v.len() as u32],
             dtype: "int64".to_string(),
         }),
-        ModelSpecificValue::FloatVec(v) => Some(sglang_proto::TensorData {
+        ModelSpecificValue::FloatVec(v) => Some(super::TensorBytes {
             data: v.iter().flat_map(|val| val.to_le_bytes()).collect(),
             shape: vec![v.len() as u32],
             dtype: "float32".to_string(),

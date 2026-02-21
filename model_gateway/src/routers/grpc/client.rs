@@ -3,12 +3,11 @@
 use std::collections::HashMap;
 
 use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
-use smg_grpc_client::{
-    sglang_proto::MultimodalInputs, SglangSchedulerClient, TrtllmServiceClient, VllmEngineClient,
-};
+use smg_grpc_client::{SglangSchedulerClient, TrtllmServiceClient, VllmEngineClient};
 
-use crate::routers::grpc::proto_wrapper::{
-    ProtoEmbedRequest, ProtoEmbedResponse, ProtoGenerateRequest, ProtoStream,
+use crate::routers::grpc::{
+    proto_wrapper::{ProtoEmbedRequest, ProtoEmbedResponse, ProtoGenerateRequest, ProtoStream},
+    MultimodalData,
 };
 
 /// Health check response (common across backends)
@@ -217,27 +216,30 @@ impl GrpcClient {
         body: &ChatCompletionRequest,
         processed_text: String,
         token_ids: Vec<u32>,
-        multimodal_inputs: Option<MultimodalInputs>,
+        multimodal_inputs: Option<MultimodalData>,
         tool_constraints: Option<(String, String)>,
     ) -> Result<ProtoGenerateRequest, String> {
         match self {
             Self::Sglang(client) => {
+                let sglang_mm = multimodal_inputs.map(|mm| mm.into_sglang_proto());
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
                     processed_text,
                     token_ids,
-                    multimodal_inputs,
+                    sglang_mm,
                     tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
             }
             Self::Vllm(client) => {
+                let vllm_mm = multimodal_inputs.map(|mm| mm.into_vllm_proto());
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
                     processed_text,
                     token_ids,
+                    vllm_mm,
                     tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Vllm(Box::new(req)))

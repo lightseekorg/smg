@@ -155,6 +155,7 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                                 body,
                                 placeholder_processed_text,
                                 prep.token_ids.clone(),
+                                None, // No multimodal in Harmony pipeline
                                 prep.tool_constraints.clone(),
                             )
                             .map_err(|e| {

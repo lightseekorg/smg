@@ -116,7 +116,7 @@ impl ChatPreparationStage {
                             "Multimodal processing complete"
                         );
                         token_ids = mm_output.expanded_token_ids;
-                        multimodal_inputs = Some(mm_output.proto_mm_inputs);
+                        multimodal_inputs = Some(mm_output.multimodal_data);
                     }
                     Err(e) => {
                         error!(
