@@ -1143,7 +1143,7 @@ fn test_phi4_vision_golden_grayscale() {
 // ============================================================================
 
 /// Load aspect_ratios from npz file for LLaMA 4
-fn load_llama4_aspect_ratios(path: &Path) -> Vec<(u32, u32)> {
+fn load_llama4_aspect_ratios(path: &Path) -> Vec<(i64, i64)> {
     let file = File::open(path).expect("Failed to open golden file");
     let mut npz = npyz::npz::NpzArchive::new(file).expect("Failed to parse npz");
 
@@ -1157,10 +1157,10 @@ fn load_llama4_aspect_ratios(path: &Path) -> Vec<(u32, u32)> {
     // Read data as i64 vec (numpy default for int)
     let data: Vec<i64> = reader.into_vec().expect("Failed to read array");
 
-    // Convert to Vec<(u32, u32)>
+    // Convert to Vec<(i64, i64)>
     let num_images = shape[0] as usize;
     (0..num_images)
-        .map(|i| (data[i * 2] as u32, data[i * 2 + 1] as u32))
+        .map(|i| (data[i * 2], data[i * 2 + 1]))
         .collect()
 }
 
@@ -1220,11 +1220,11 @@ fn run_llama4_vision_golden_test(image_name: &str) {
         .expect("Processing failed");
 
     // Check aspect_ratios
-    let rust_aspect_ratios: Vec<(u32, u32)> = match result.model_specific.get("aspect_ratios") {
+    let rust_aspect_ratios: Vec<(i64, i64)> = match result.model_specific.get("aspect_ratios") {
         Some(ModelSpecificValue::IntTensor { data, shape }) => {
             let num_images = shape[0];
             (0..num_images)
-                .map(|i| (data[i * 2] as u32, data[i * 2 + 1] as u32))
+                .map(|i| (data[i * 2], data[i * 2 + 1]))
                 .collect()
         }
         _ => panic!("Expected aspect_ratios in model_specific"),
