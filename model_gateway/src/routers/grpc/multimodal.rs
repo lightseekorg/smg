@@ -296,7 +296,7 @@ pub(crate) fn preprocess_for_sglang(
     let spec = components
         .model_registry
         .lookup(&metadata)
-        .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {}", model_id))?;
+        .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {model_id}"))?;
 
     // Find image processor for this model
     let image_processor = components
@@ -344,7 +344,7 @@ pub(crate) fn preprocess_for_sglang(
     // in the *expanded* output.
     let placeholder_token = spec
         .placeholder_token(&metadata)
-        .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {e}"))?;
     let search_token_id = tokenizer.token_to_id(&placeholder_token);
     let im_token_id: Option<u32> = spec
         .placeholder_token_id(&metadata)
