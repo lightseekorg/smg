@@ -72,6 +72,7 @@ impl ModelRegistry {
     pub fn new() -> Self {
         Self {
             specs: vec![
+                LazySpec::new("llama4", || Box::new(Llama4Spec)),
                 LazySpec::new("llava", || Box::new(LlavaSpec)),
                 LazySpec::new("qwen_vl", || Box::new(QwenVLVisionSpec)),
                 LazySpec::new("phi3_v", || Box::new(Phi3VisionSpec)),
@@ -318,6 +319,107 @@ impl ModelProcessorSpec for Phi3VisionSpec {
     }
 }
 
+struct Llama4Spec;
+
+impl Llama4Spec {
+    fn patch_size(metadata: &ModelMetadata) -> u32 {
+        metadata
+            .config_u32(&["vision_config", "patch_size"])
+            .unwrap_or(14)
+    }
+
+    fn tile_size(metadata: &ModelMetadata) -> u32 {
+        metadata
+            .config_u32(&["vision_config", "image_size"])
+            .filter(|v| *v > 0)
+            .unwrap_or(336)
+    }
+
+    fn pixel_shuffle_ratio(metadata: &ModelMetadata) -> f64 {
+        metadata
+            .config
+            .get("vision_config")
+            .and_then(|v| v.get("pixel_shuffle_ratio"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.5)
+    }
+
+    fn tokens_per_tile(metadata: &ModelMetadata) -> usize {
+        let tile = Self::tile_size(metadata) as usize;
+        let patch = Self::patch_size(metadata) as usize;
+        if patch == 0 {
+            return 0;
+        }
+        let patches = (tile / patch).pow(2);
+        // Pixel shuffle reduces spatial dims by ratio, so token count by ratio^2
+        let ratio = Self::pixel_shuffle_ratio(metadata);
+        let downsample = (1.0 / (ratio * ratio)).round().max(1.0) as usize;
+        patches / downsample
+    }
+}
+
+impl ModelProcessorSpec for Llama4Spec {
+    fn name(&self) -> &'static str {
+        "llama4"
+    }
+
+    fn matches(&self, metadata: &ModelMetadata) -> bool {
+        let id = metadata.model_id.to_ascii_lowercase();
+        // Match "llama-4", "llama4", "Llama-4-Maverick", "Llama-4-Scout", etc.
+        id.contains("llama-4") || id.contains("llama4")
+    }
+
+    fn placeholder_token(&self, _metadata: &ModelMetadata) -> RegistryResult<String> {
+        Ok("<|image|>".to_string())
+    }
+
+    fn placeholder_token_id(&self, metadata: &ModelMetadata) -> RegistryResult<TokenId> {
+        if let Some(value) = metadata.config_u32(&["image_token_index"]) {
+            return Ok(value as TokenId);
+        }
+        metadata.token_id("<|image|>")
+    }
+
+    fn modality_limits(
+        &self,
+        _metadata: &ModelMetadata,
+    ) -> RegistryResult<HashMap<Modality, usize>> {
+        Ok(HashMap::from([(Modality::Image, 8)]))
+    }
+
+    fn processor_kwargs(&self, _metadata: &ModelMetadata) -> RegistryResult<Value> {
+        Ok(json!({}))
+    }
+
+    fn prompt_replacements(
+        &self,
+        metadata: &ModelMetadata,
+        image_sizes: &[ImageSize],
+    ) -> RegistryResult<Vec<PromptReplacement>> {
+        let token_id = self.placeholder_token_id(metadata)?;
+        let token = self.placeholder_token(metadata)?;
+        let tokens_per_tile = Self::tokens_per_tile(metadata);
+        let tile_size = Self::tile_size(metadata) as usize;
+
+        Ok(image_sizes
+            .iter()
+            .map(|size| {
+                let h_tiles = size.height.div_ceil(tile_size as u32) as usize;
+                let w_tiles = size.width.div_ceil(tile_size as u32) as usize;
+                let num_tiles = h_tiles * w_tiles;
+                // Global tile added when multiple tiles
+                let total_tiles = if num_tiles > 1 {
+                    num_tiles + 1
+                } else {
+                    num_tiles
+                };
+                let count = total_tiles * tokens_per_tile;
+                PromptReplacement::repeated(Modality::Image, &token, token_id, count)
+            })
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -462,5 +564,54 @@ mod tests {
             .unwrap();
         assert_eq!(replacements[0].tokens.len(), 144);
         assert_eq!(replacements[0].tokens[0], 555);
+    }
+
+    #[test]
+    fn llama4_single_tile_token_count() {
+        let tokenizer = TestTokenizer::new(&[("<|image|>", 200092)]);
+        let config = json!({
+            "model_type": "llama4",
+            "image_token_index": 200092,
+            "vision_config": {"image_size": 336, "patch_size": 14}
+        });
+        let metadata = ModelMetadata {
+            model_id: "/models/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).expect("llama4 spec");
+        assert_eq!(spec.name(), "llama4");
+
+        // Single tile (336x336): 1 tile * (336/14)^2 / pixel_shuffle_downsample
+        // patches = (336/14)^2 = 576, ratio=0.5 → downsample=4, tokens = 576/4 = 144
+        let replacements = spec
+            .prompt_replacements(&metadata, &[ImageSize::new(336, 336)])
+            .unwrap();
+        assert_eq!(replacements[0].tokens.len(), 144);
+        assert_eq!(replacements[0].tokens[0], 200092);
+    }
+
+    #[test]
+    fn llama4_multi_tile_adds_global() {
+        let tokenizer = TestTokenizer::new(&[("<|image|>", 200092)]);
+        let config = json!({
+            "model_type": "llama4",
+            "image_token_index": 200092,
+            "vision_config": {"image_size": 336, "patch_size": 14}
+        });
+        let metadata = ModelMetadata {
+            model_id: "Llama-4-Scout-Vision",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).expect("llama4 spec");
+
+        // 672x672 = 2x2 tiles = 4 tiles + 1 global = 5 * 144 = 720 tokens
+        let replacements = spec
+            .prompt_replacements(&metadata, &[ImageSize::new(672, 672)])
+            .unwrap();
+        assert_eq!(replacements[0].tokens.len(), 720);
     }
 }
