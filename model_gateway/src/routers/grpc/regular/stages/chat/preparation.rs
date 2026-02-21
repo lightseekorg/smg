@@ -5,14 +5,14 @@ use std::borrow::Cow;
 use async_trait::async_trait;
 use axum::response::Response;
 use openai_protocol::chat::ChatCompletionRequest;
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::routers::{
     error,
     grpc::{
         common::stages::PipelineStage,
         context::{PreparationOutput, RequestContext},
-        utils,
+        multimodal, utils,
     },
 };
 
@@ -26,7 +26,7 @@ pub(crate) struct ChatPreparationStage;
 impl PipelineStage for ChatPreparationStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
         let request = ctx.chat_request_arc();
-        self.prepare_chat(ctx, &request)?;
+        self.prepare_chat(ctx, &request).await?;
         Ok(None)
     }
 
@@ -36,15 +36,7 @@ impl PipelineStage for ChatPreparationStage {
 }
 
 impl ChatPreparationStage {
-    #[expect(
-        clippy::unused_self,
-        reason = "method on stage struct for consistency with PipelineStage pattern"
-    )]
-    #[expect(
-        clippy::result_large_err,
-        reason = "Response is the standard error type in the pipeline stage pattern"
-    )]
-    fn prepare_chat(
+    async fn prepare_chat(
         &self,
         ctx: &mut RequestContext,
         request: &ChatCompletionRequest,
@@ -77,7 +69,78 @@ impl ChatPreparationStage {
             }
         };
 
-        let token_ids = encoding.token_ids().to_vec();
+        let mut token_ids = encoding.token_ids().to_vec();
+
+        // Step 3.5: Multimodal processing (if images detected in messages)
+        let mut multimodal_inputs = None;
+        if multimodal::has_multimodal_content(&request.messages) {
+            if let Some(mm_components) = ctx.components.multimodal.as_ref() {
+                let model_id = ctx.input.model_id.as_deref().unwrap_or(&request.model);
+
+                // Resolve tokenizer source path for loading config files
+                let tokenizer_source = ctx
+                    .components
+                    .tokenizer_registry
+                    .get_by_name(model_id)
+                    .map(|entry| entry.source)
+                    .unwrap_or_default();
+
+                if tokenizer_source.is_empty() {
+                    error!(
+                        function = "ChatPreparationStage::execute",
+                        model = %model_id,
+                        "Tokenizer source path not found for multimodal processing"
+                    );
+                    return Err(error::bad_request(
+                        "multimodal_config_missing",
+                        format!("Tokenizer source path not found for model: {model_id}"),
+                    ));
+                }
+
+                match multimodal::process_multimodal(
+                    &request.messages,
+                    model_id,
+                    &*tokenizer,
+                    &token_ids,
+                    mm_components,
+                    &tokenizer_source,
+                )
+                .await
+                {
+                    Ok(mm_output) => {
+                        debug!(
+                            function = "ChatPreparationStage::execute",
+                            model = %model_id,
+                            original_tokens = token_ids.len(),
+                            expanded_tokens = mm_output.expanded_token_ids.len(),
+                            "Multimodal processing complete"
+                        );
+                        token_ids = mm_output.expanded_token_ids;
+                        multimodal_inputs = Some(mm_output.proto_mm_inputs);
+                    }
+                    Err(e) => {
+                        error!(
+                            function = "ChatPreparationStage::execute",
+                            error = %e,
+                            "Multimodal processing failed"
+                        );
+                        return Err(error::bad_request(
+                            "multimodal_processing_failed",
+                            format!("Multimodal processing failed: {e}"),
+                        ));
+                    }
+                }
+            } else {
+                error!(
+                    function = "ChatPreparationStage::execute",
+                    "Multimodal content detected but multimodal components not initialized"
+                );
+                return Err(error::bad_request(
+                    "multimodal_not_supported",
+                    "Multimodal content detected but multimodal processing is not available",
+                ));
+            }
+        }
 
         // Step 4: Build tool constraints if needed
         let tool_call_constraint = if let Some(tools) = body_ref.tools.as_ref() {
@@ -98,6 +161,10 @@ impl ChatPreparationStage {
             request.skip_special_tokens,
             request.no_stop_trim,
         );
+
+        // Update multimodal inputs on processed messages if we have them
+        let mut processed_messages = processed_messages;
+        processed_messages.multimodal_inputs = multimodal_inputs;
 
         // Store results in context
         ctx.state.preparation = Some(PreparationOutput {

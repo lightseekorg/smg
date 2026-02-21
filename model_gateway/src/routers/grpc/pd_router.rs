@@ -5,7 +5,9 @@ use axum::{http::HeaderMap, response::Response};
 use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
 use tracing::debug;
 
-use super::{context::SharedComponents, pipeline::RequestPipeline};
+use super::{
+    context::SharedComponents, multimodal::MultimodalComponents, pipeline::RequestPipeline,
+};
 use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
@@ -47,11 +49,21 @@ impl GrpcPDRouter {
             .ok_or_else(|| "gRPC PD router requires tool parser factory".to_string())?
             .clone();
 
+        // Create multimodal components (best-effort; non-fatal if initialization fails)
+        let multimodal = match MultimodalComponents::new() {
+            Ok(mc) => Some(Arc::new(mc)),
+            Err(e) => {
+                tracing::warn!("Multimodal components initialization failed (non-fatal): {e}");
+                None
+            }
+        };
+
         // Create shared components for pipeline
         let shared_components = Arc::new(SharedComponents {
             tokenizer_registry: tokenizer_registry.clone(),
             tool_parser_factory: tool_parser_factory.clone(),
             reasoning_parser_factory: reasoning_parser_factory.clone(),
+            multimodal,
         });
 
         // Create PD pipeline
