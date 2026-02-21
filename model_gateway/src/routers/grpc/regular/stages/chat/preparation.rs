@@ -101,7 +101,7 @@ impl ChatPreparationStage {
                     &request.messages,
                     model_id,
                     &*tokenizer,
-                    token_ids.clone(),
+                    &token_ids,
                     mm_components,
                     &tokenizer_source,
                 )
@@ -164,9 +164,7 @@ impl ChatPreparationStage {
 
         // Update multimodal inputs on processed messages if we have them
         let mut processed_messages = processed_messages;
-        if multimodal_inputs.is_some() {
-            processed_messages.multimodal_inputs = multimodal_inputs;
-        }
+        processed_messages.multimodal_inputs = multimodal_inputs;
 
         // Store results in context
         ctx.state.preparation = Some(PreparationOutput {

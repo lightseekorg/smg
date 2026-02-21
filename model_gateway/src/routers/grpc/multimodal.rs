@@ -43,7 +43,10 @@ pub(crate) struct MultimodalComponents {
 impl MultimodalComponents {
     /// Create multimodal components with default registries.
     pub fn new() -> Result<Self> {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .context("Failed to create reqwest client")?;
         let media_connector = MediaConnector::new(client, MediaConnectorConfig::default())
             .context("Failed to create MediaConnector")?;
 
@@ -191,7 +194,7 @@ pub(crate) async fn process_multimodal(
     messages: &[ChatMessage],
     model_id: &str,
     tokenizer: &dyn TokenizerTrait,
-    token_ids: Vec<u32>,
+    token_ids: &[u32],
     components: &MultimodalComponents,
     tokenizer_source: &str,
 ) -> Result<MultimodalOutput> {
@@ -326,7 +329,7 @@ pub(crate) async fn process_multimodal(
         .map(|id| id as u32)
         .or(search_token_id);
     let (expanded_token_ids, mm_placeholders) =
-        expand_tokens(&token_ids, search_token_id, &prompt_replacements);
+        expand_tokens(token_ids, search_token_id, &prompt_replacements);
 
     debug!(
         original_len = token_ids.len(),
@@ -371,9 +374,7 @@ fn expand_tokens(
             let repl = &replacements[replacement_idx];
             let offset = expanded.len();
             // PromptReplacement uses TokenId = i32, convert to u32
-            for &t in &repl.tokens {
-                expanded.push(t as u32);
-            }
+            expanded.extend(repl.tokens.iter().map(|&t| t as u32));
             placeholders.push(PlaceholderRange {
                 offset,
                 length: repl.tokens.len(),
