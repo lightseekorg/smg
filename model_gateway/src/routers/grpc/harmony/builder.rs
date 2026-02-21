@@ -21,7 +21,7 @@ use openai_protocol::{
         ResponsesRequest, StringOrContentParts,
     },
 };
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use super::types::HarmonyBuildOutput;
 use crate::routers::grpc::{proto_wrapper::ProtoOutputLogProbs, utils};
@@ -682,6 +682,15 @@ impl HarmonyBuilder {
                     channel: None,
                     content_type: None,
                 })
+            }
+
+            ResponseInputOutputItem::McpApprovalResponse { .. }
+            | ResponseInputOutputItem::McpApprovalRequest { .. } => {
+                warn!(
+                    function = "parse_response_item_to_harmony_message",
+                    "Approval item reached Harmony conversion"
+                );
+                Err("Unsupported input item type".to_string())
             }
         }
     }

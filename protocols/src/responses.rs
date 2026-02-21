@@ -36,7 +36,8 @@ pub struct ResponseTool {
     pub headers: Option<HashMap<String, String>>,
     pub server_label: Option<String>,
     pub server_description: Option<String>,
-    pub require_approval: Option<String>,
+    /// Approval requirement configuration for MCP tools.
+    pub require_approval: Option<RequireApproval>,
     pub allowed_tools: Option<Vec<String>>,
 }
 
@@ -54,6 +55,14 @@ impl Default for ResponseTool {
             allowed_tools: None,
         }
     }
+}
+
+/// `require_approval` values.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RequireApproval {
+    Always,
+    Never,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -151,6 +160,24 @@ pub enum ResponseInputOutputItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
     },
+    #[serde(rename = "mcp_approval_request")]
+    McpApprovalRequest {
+        id: String,
+        server_label: String,
+        name: String,
+        arguments: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+    },
+    #[serde(rename = "mcp_approval_response")]
+    McpApprovalResponse {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        approval_request_id: String,
+        approve: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     #[serde(untagged)]
     SimpleInputMessage {
         content: StringOrContentParts,
@@ -242,6 +269,13 @@ pub enum ResponseOutputItem {
         name: String,
         output: String,
         server_label: String,
+    },
+    #[serde(rename = "mcp_approval_request")]
+    McpApprovalRequest {
+        id: String,
+        server_label: String,
+        name: String,
+        arguments: String,
     },
     #[serde(rename = "web_search_call")]
     WebSearchCall {
@@ -859,6 +893,8 @@ impl GenerationRequest for ResponsesRequest {
                     ResponseInputOutputItem::FunctionCallOutput { output, .. } => {
                         Some(output.clone())
                     }
+                    ResponseInputOutputItem::McpApprovalRequest { .. } => None,
+                    ResponseInputOutputItem::McpApprovalResponse { .. } => None,
                 })
                 .collect::<Vec<String>>()
                 .join(" "),

@@ -4,8 +4,8 @@ use axum::http::StatusCode;
 use openai_protocol::{
     common::{GenerationRequest, ToolChoice, ToolChoiceValue, UsageInfo},
     responses::{
-        ReasoningEffort, ResponseInput, ResponseReasoningParam, ResponseTool, ResponseToolType,
-        ResponsesRequest, ServiceTier, Truncation,
+        ReasoningEffort, RequireApproval, ResponseInput, ResponseReasoningParam, ResponseTool,
+        ResponseToolType, ResponsesRequest, ServiceTier, Truncation,
     },
 };
 use smg::{
@@ -577,7 +577,7 @@ async fn test_multi_turn_loop_with_mcp() {
             server_url: Some(mcp.url()),
             server_label: Some("mock".to_string()),
             server_description: Some("Mock MCP server for testing".to_string()),
-            require_approval: Some("never".to_string()),
+            require_approval: Some(RequireApproval::Never),
             ..Default::default()
         }]),
         top_logprobs: Some(0),
@@ -899,7 +899,7 @@ async fn test_streaming_with_mcp_tool_calls() {
             server_url: Some(mcp.url()),
             server_label: Some("mock".to_string()),
             server_description: Some("Mock MCP for streaming test".to_string()),
-            require_approval: Some("never".to_string()),
+            require_approval: Some(RequireApproval::Never),
             ..Default::default()
         }]),
         top_logprobs: Some(0),
