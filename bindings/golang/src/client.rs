@@ -203,9 +203,7 @@ pub unsafe extern "C" fn sgl_client_chat_completion_stream(
         &chat_request,
         processed_messages.text,
         token_ids,
-        processed_messages
-            .multimodal_inputs
-            .map(|mm| mm.into_sglang_proto()),
+        None, // multimodal not supported in golang bindings
         tool_constraint,
     ) {
         Ok(req) => req,

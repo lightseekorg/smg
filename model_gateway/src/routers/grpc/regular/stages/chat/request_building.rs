@@ -10,6 +10,7 @@ use crate::routers::{
     grpc::{
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, RequestContext},
+        multimodal,
         proto_wrapper::{ProtoGenerateRequest, ProtoRequest},
         utils,
     },
@@ -65,15 +66,38 @@ impl PipelineStage for ChatRequestBuildingStage {
         // Build proto request using centralized dispatch
         let processed_messages = prep.processed_messages.as_ref().unwrap();
 
-        // For vLLM with multimodal: use original (unexpanded) token IDs.
-        // vLLM handles its own placeholder expansion internally.
-        let token_ids = if builder_client.is_vllm() {
-            prep.original_token_ids
-                .as_ref()
-                .unwrap_or(&prep.token_ids)
-                .clone()
+        // Backend-specific multimodal processing (images were fetched in preparation stage).
+        // SGLang: full pixel preprocessing + token expansion.
+        // vLLM: raw image bytes only — it handles preprocessing internally.
+        let (token_ids, multimodal_data) = if let Some(ref images) =
+            processed_messages.multimodal_images
+        {
+            let model_id = ctx.input.model_id.as_deref().unwrap_or(&chat_request.model);
+            let tokenizer = ctx.state.tokenizer.as_deref().unwrap();
+            let mm_components = ctx.components.multimodal.as_ref().unwrap();
+            let tokenizer_source = ctx
+                .components
+                .tokenizer_registry
+                .get_by_name(model_id)
+                .map(|e| e.source)
+                .unwrap_or_default();
+
+            let (ids, data) = multimodal::process_for_backend(
+                    images,
+                    builder_client.is_sglang(),
+                    model_id,
+                    tokenizer,
+                    prep.token_ids.clone(),
+                    mm_components,
+                    &tokenizer_source,
+                )
+                .map_err(|e| {
+                    error!(function = "ChatRequestBuildingStage::execute", error = %e, "Multimodal processing failed");
+                    error::bad_request("multimodal_failed", e.to_string())
+                })?;
+            (ids, Some(data))
         } else {
-            prep.token_ids.clone()
+            (prep.token_ids.clone(), None)
         };
 
         let mut proto_request = builder_client
@@ -82,7 +106,7 @@ impl PipelineStage for ChatRequestBuildingStage {
                 body_ref,
                 processed_messages.text.clone(),
                 token_ids,
-                processed_messages.multimodal_inputs.clone(),
+                multimodal_data,
                 prep.tool_constraints.clone(),
             )
             .map_err(|e| {

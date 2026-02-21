@@ -99,12 +99,8 @@ pub(crate) struct PreparationOutput {
     /// Original text (for chat) or resolved text (for generate)
     pub original_text: Option<String>,
 
-    /// Tokenized input (may be expanded for multimodal)
+    /// Tokenized input
     pub token_ids: Vec<u32>,
-
-    /// Original token IDs before multimodal expansion.
-    /// Used by backends like vLLM that handle their own placeholder expansion.
-    pub original_token_ids: Option<Vec<u32>>,
 
     /// Processed messages (chat only)
     pub processed_messages: Option<super::ProcessedMessages>,

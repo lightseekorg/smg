@@ -180,24 +180,18 @@ fn parse_detail(detail: &str) -> Option<ImageDetail> {
     }
 }
 
-/// Full multimodal processing pipeline.
+/// Phase 1: Fetch images from chat messages (backend-agnostic).
 ///
-/// This function:
-/// 1. Extracts image content parts from messages
-/// 2. Uses AsyncMultiModalTracker to fetch images + insert placeholders
-/// 3. Preprocesses images via ImagePreProcessor (pixel values)
-/// 4. Computes prompt replacements (token expansion rules)
-/// 5. Expands placeholder tokens in token_ids
-/// 6. Builds proto MultimodalInputs
-pub(crate) async fn process_multimodal(
+/// Uses the multimodal tracker to extract image URLs, fetch them, and enforce
+/// modality limits. No pixel preprocessing or token expansion — those are
+/// deferred to Phase 2 where the backend type is known.
+pub(crate) async fn fetch_images(
     messages: &[ChatMessage],
     model_id: &str,
     tokenizer: &dyn TokenizerTrait,
-    token_ids: &[u32],
     components: &MultimodalComponents,
     tokenizer_source: &str,
-) -> Result<MultimodalOutput> {
-    // Load model configs (config.json + preprocessor_config.json)
+) -> Result<Vec<Arc<ImageFrame>>> {
     let model_config = components.get_or_load_config(model_id, tokenizer_source)?;
 
     let metadata = ModelMetadata {
@@ -206,7 +200,6 @@ pub(crate) async fn process_multimodal(
         config: &model_config.config,
     };
 
-    // Look up model spec in registry
     let spec = components
         .model_registry
         .lookup(&metadata)
@@ -218,7 +211,7 @@ pub(crate) async fn process_multimodal(
         "Found multimodal model spec"
     );
 
-    // Build tracker config from spec
+    // Build tracker config from spec (for modality limits)
     let placeholder_token = spec
         .placeholder_token(&metadata)
         .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {e}"))?;
@@ -229,7 +222,7 @@ pub(crate) async fn process_multimodal(
     let tracker_config = TrackerConfig {
         placeholder_tokens: {
             let mut m = HashMap::new();
-            m.insert(Modality::Image, placeholder_token.clone());
+            m.insert(Modality::Image, placeholder_token);
             m
         },
         modality_limits,
@@ -251,7 +244,7 @@ pub(crate) async fn process_multimodal(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to finalize multimodal tracker: {e}"))?;
 
-    // Collect fetched images from tracker output
+    // Collect fetched images
     let images: Vec<Arc<ImageFrame>> = tracker_output
         .data
         .get(&Modality::Image)
@@ -276,6 +269,34 @@ pub(crate) async fn process_multimodal(
         image_count = images.len(),
         "Fetched images for multimodal processing"
     );
+
+    Ok(images)
+}
+
+/// Phase 2 (SGLang): Preprocess images and expand placeholder tokens.
+///
+/// Takes raw fetched images and produces the full `MultimodalOutput` with
+/// preprocessed pixel values, model-specific tensors, and expanded token IDs.
+pub(crate) fn preprocess_for_sglang(
+    images: &[Arc<ImageFrame>],
+    model_id: &str,
+    tokenizer: &dyn TokenizerTrait,
+    token_ids: Vec<u32>,
+    components: &MultimodalComponents,
+    tokenizer_source: &str,
+) -> Result<MultimodalOutput> {
+    let model_config = components.get_or_load_config(model_id, tokenizer_source)?;
+
+    let metadata = ModelMetadata {
+        model_id,
+        tokenizer,
+        config: &model_config.config,
+    };
+
+    let spec = components
+        .model_registry
+        .lookup(&metadata)
+        .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {}", model_id))?;
 
     // Find image processor for this model
     let image_processor = components
@@ -321,12 +342,16 @@ pub(crate) async fn process_multimodal(
     // the replacement sequence from prompt_replacements (which uses im_token_id).
     // The proto im_token_id tells sglang's pad_input_tokens what to look for
     // in the *expanded* output.
+    let placeholder_token = spec
+        .placeholder_token(&metadata)
+        .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {}", e))?;
     let search_token_id = tokenizer.token_to_id(&placeholder_token);
     let im_token_id: Option<u32> = spec
         .placeholder_token_id(&metadata)
         .ok()
         .map(|id| id as u32)
         .or(search_token_id);
+
     let (expanded_token_ids, mm_placeholders) =
         expand_tokens(token_ids, search_token_id, &prompt_replacements);
 
@@ -339,14 +364,59 @@ pub(crate) async fn process_multimodal(
         "Token expansion complete"
     );
 
-    // Build backend-agnostic multimodal data
     let multimodal_data =
-        build_multimodal_data(&preprocessed, im_token_id, &mm_placeholders, &images);
+        build_multimodal_data(&preprocessed, im_token_id, &mm_placeholders, images);
 
     Ok(MultimodalOutput {
         expanded_token_ids,
         multimodal_data,
     })
+}
+
+/// Phase 2 (vLLM): Build minimal multimodal data with raw image bytes only.
+///
+/// vLLM handles image preprocessing and token expansion internally,
+/// so we only send the raw JPEG/PNG bytes.
+fn build_vllm_multimodal_data(images: &[Arc<ImageFrame>]) -> super::MultimodalData {
+    super::MultimodalData {
+        image_data: images
+            .iter()
+            .map(|frame| frame.raw_bytes.to_vec())
+            .collect(),
+        pixel_values: Vec::new(),
+        pixel_values_shape: Vec::new(),
+        model_specific_tensors: HashMap::new(),
+        im_token_id: None,
+        mm_placeholders: Vec::new(),
+    }
+}
+
+/// Phase 2: Backend-specific multimodal processing.
+///
+/// For SGLang: preprocesses images, expands placeholder tokens, builds full MultimodalData.
+/// For vLLM/others: extracts raw image bytes only, returns original token IDs unchanged.
+pub(crate) fn process_for_backend(
+    images: &[Arc<ImageFrame>],
+    is_sglang: bool,
+    model_id: &str,
+    tokenizer: &dyn TokenizerTrait,
+    token_ids: Vec<u32>,
+    components: &MultimodalComponents,
+    tokenizer_source: &str,
+) -> Result<(Vec<u32>, super::MultimodalData)> {
+    if is_sglang {
+        let output = preprocess_for_sglang(
+            images,
+            model_id,
+            tokenizer,
+            token_ids,
+            components,
+            tokenizer_source,
+        )?;
+        Ok((output.expanded_token_ids, output.multimodal_data))
+    } else {
+        Ok((token_ids, build_vllm_multimodal_data(images)))
+    }
 }
 
 /// Expand placeholder tokens in the token ID sequence.
