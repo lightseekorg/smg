@@ -78,6 +78,9 @@ impl PipelineStage for ChatRequestBuildingStage {
         // Backend-specific multimodal processing (images were fetched in preparation stage).
         // SGLang: full pixel preprocessing + token expansion.
         // vLLM: raw image bytes only — it handles preprocessing internally.
+        // TODO: Token expansion here means WorkerSelectionStage runs on unexpanded tokens.
+        // For PrefixHash routing, this reduces KV-cache locality on image-heavy traffic.
+        // Consider lifting expansion earlier or passing expanded IDs to the routing policy.
         let (token_ids, multimodal_data) = if let Some(ref images) =
             processed_messages.multimodal_images
         {

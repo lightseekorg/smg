@@ -122,6 +122,8 @@ impl ChatPreparationStage {
                             error = %e,
                             "Multimodal image fetching failed"
                         );
+                        // TODO: Distinguish 4xx (invalid URL, unsupported format) from 5xx
+                        // (fetch timeout, backend failure) once error types are refined.
                         return Err(error::bad_request(
                             "multimodal_processing_failed",
                             format!("Multimodal processing failed: {e}"),

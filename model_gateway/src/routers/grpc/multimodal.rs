@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use dashmap::DashMap;
 use llm_multimodal::{
     AsyncMultiModalTracker, ChatContentPart, ImageDetail, ImageFrame, ImageProcessorRegistry,
-    ImageSize, MediaConnector, MediaConnectorConfig, Modality, ModelMetadata, ModelRegistry,
-    ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
+    ImageSize, MediaConnector, MediaConnectorConfig, Modality, ModelMetadata, ModelProcessorSpec,
+    ModelRegistry, ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
     PromptReplacement, TrackedMedia, TrackerConfig, TrackerOutput,
 };
 use llm_tokenizer::TokenizerTrait;
@@ -21,7 +21,7 @@ use openai_protocol::{
 };
 use tracing::{debug, warn};
 
-use super::{MultimodalData, TensorBytes};
+use crate::routers::grpc::{MultimodalData, TensorBytes};
 
 /// Cached model configuration files loaded from the tokenizer directory.
 #[derive(Debug, Clone)]
@@ -110,6 +110,26 @@ impl MultimodalComponents {
     }
 }
 
+/// Load model config and look up the multimodal model spec for the given model.
+fn resolve_model_spec<'a>(
+    components: &'a MultimodalComponents,
+    model_id: &str,
+    tokenizer: &dyn TokenizerTrait,
+    tokenizer_source: &str,
+) -> Result<(Arc<MultimodalModelConfig>, &'a dyn ModelProcessorSpec)> {
+    let model_config = components.get_or_load_config(model_id, tokenizer_source)?;
+    let metadata = ModelMetadata {
+        model_id,
+        tokenizer,
+        config: &model_config.config,
+    };
+    let spec = components
+        .model_registry
+        .lookup(&metadata)
+        .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {model_id}"))?;
+    Ok((model_config, spec))
+}
+
 /// Output of the multimodal processing pipeline.
 pub(crate) struct MultimodalOutput {
     /// Token IDs with placeholder tokens expanded to the correct count per image.
@@ -194,18 +214,8 @@ pub(crate) async fn fetch_images(
     components: &MultimodalComponents,
     tokenizer_source: &str,
 ) -> Result<Vec<Arc<ImageFrame>>> {
-    let model_config = components.get_or_load_config(model_id, tokenizer_source)?;
-
-    let metadata = ModelMetadata {
-        model_id,
-        tokenizer,
-        config: &model_config.config,
-    };
-
-    let spec = components
-        .model_registry
-        .lookup(&metadata)
-        .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {model_id}"))?;
+    let (model_config, spec) =
+        resolve_model_spec(components, model_id, tokenizer, tokenizer_source)?;
 
     debug!(
         model_id,
@@ -214,6 +224,11 @@ pub(crate) async fn fetch_images(
     );
 
     // Build tracker config from spec (for modality limits)
+    let metadata = ModelMetadata {
+        model_id,
+        tokenizer,
+        config: &model_config.config,
+    };
     let placeholder_token = spec
         .placeholder_token(&metadata)
         .map_err(|e| anyhow::anyhow!("Failed to get placeholder token: {e}"))?;
@@ -287,18 +302,8 @@ pub(crate) fn preprocess_for_sglang(
     components: &MultimodalComponents,
     tokenizer_source: &str,
 ) -> Result<MultimodalOutput> {
-    let model_config = components.get_or_load_config(model_id, tokenizer_source)?;
-
-    let metadata = ModelMetadata {
-        model_id,
-        tokenizer,
-        config: &model_config.config,
-    };
-
-    let spec = components
-        .model_registry
-        .lookup(&metadata)
-        .ok_or_else(|| anyhow::anyhow!("Multimodal not supported for model: {model_id}"))?;
+    let (model_config, spec) =
+        resolve_model_spec(components, model_id, tokenizer, tokenizer_source)?;
 
     // Find image processor for this model
     let image_processor = components
@@ -330,6 +335,13 @@ pub(crate) fn preprocess_for_sglang(
             height: h,
         })
         .collect();
+
+    // Reconstruct metadata for spec calls that need it
+    let metadata = ModelMetadata {
+        model_id,
+        tokenizer,
+        config: &model_config.config,
+    };
 
     // Get prompt replacements (token expansion rules) from spec
     let prompt_replacements = spec
