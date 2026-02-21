@@ -16,7 +16,7 @@
 //! - `remove(name)`: Removes by name
 //! - `remove_by_id(id)`: Removes by ID
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use dashmap::DashMap;
 use thiserror::Error;
@@ -88,6 +88,8 @@ pub struct TokenizerRegistry {
     tokenizers: DashMap<String, TokenizerEntry>,
     /// Secondary index: name -> UUID for lookup
     name_to_id: DashMap<String, String>,
+    /// Default tokenizer ID (optional)
+    default_id: RwLock<Option<String>>,
     /// Per-key locks to prevent duplicate loading
     loading_locks: DashMap<String, Arc<Mutex<()>>>,
 }
@@ -111,8 +113,62 @@ impl TokenizerRegistry {
         Self {
             tokenizers: DashMap::new(),
             name_to_id: DashMap::new(),
+            default_id: RwLock::new(None),
             loading_locks: DashMap::new(),
         }
+    }
+
+    /// Unified lookup: tries id -> name -> default -> first available
+    pub fn resolve(&self, key: Option<&str>) -> Option<Arc<dyn Tokenizer>> {
+        match key {
+            Some(k) => self
+                .get_by_id(k)
+                .or_else(|| self.get_by_name(k))
+                .map(|e| e.tokenizer),
+            None => {
+                // 1. Try explicit default
+                if let Ok(guard) = self.default_id.read() {
+                    if let Some(def_id) = guard.as_ref() {
+                        if let Some(entry) = self.get_by_id(def_id) {
+                            return Some(entry.tokenizer);
+                        }
+                    }
+                }
+
+                // 2. Try "default" name
+                if let Some(entry) = self.get_by_name("default") {
+                    return Some(entry.tokenizer);
+                }
+
+                // 3. Fallback to first available
+                self.first()
+            }
+        }
+    }
+
+    /// Get first available tokenizer
+    pub fn first(&self) -> Option<Arc<dyn Tokenizer>> {
+        self.tokenizers
+            .iter()
+            .next()
+            .map(|r| r.value().tokenizer.clone())
+    }
+
+    /// Set default tokenizer by id
+    pub fn set_default(&self, id: &str) -> Result<(), String> {
+        // Acquire lock first to ensure atomicity
+        let mut guard = self
+            .default_id
+            .write()
+            .map_err(|e| format!("Failed to acquire write lock: {}", e))?;
+
+        // Check existence while holding lock to prevent race where it's removed concurrently
+        if !self.contains_id(id) {
+            return Err(format!("Tokenizer with id {} not found", id));
+        }
+
+        *guard = Some(id.to_string());
+        Ok(())
     }
 
     /// Generate a new UUID for a tokenizer
@@ -676,5 +732,52 @@ mod tests {
 
         assert!(!outcome.is_newly_loaded());
         assert_eq!(outcome.id(), id1); // Returns original ID
+    }
+
+    #[tokio::test]
+    async fn test_resolve_and_defaults() {
+        let registry = TokenizerRegistry::new();
+
+        // 1. Empty registry
+        assert!(registry.first().is_none());
+        assert!(registry.resolve(None).is_none());
+        assert!(registry.resolve(Some("missing")).is_none());
+
+        // 2. Load "model1"
+        let id1 = TokenizerRegistry::generate_id();
+        registry
+            .load(&id1, "model1", "src1", || async {
+                Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
+            })
+            .await
+            .unwrap();
+
+        // 3. Resolve by name and ID
+        assert!(registry.resolve(Some("model1")).is_some());
+        assert!(registry.resolve(Some(&id1)).is_some());
+
+        // 4. Resolve default (fallback to first)
+        assert!(registry.resolve(None).is_some());
+
+        // 5. Load "default" model
+        let id_def = TokenizerRegistry::generate_id();
+        registry
+            .load(&id_def, "default", "src_def", || async {
+                Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
+            })
+            .await
+            .unwrap();
+
+        // 6. Set explicit default
+        registry.set_default(&id1).expect("Should set default");
+
+        // Verify invalid ID error
+        assert!(registry.set_default("bad_id").is_err());
+
+        // Verify resolve finds something
+        assert!(registry.resolve(None).is_some());
+
+        // 7. Verify first() returns something
+        assert!(registry.first().is_some());
     }
 }
