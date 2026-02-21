@@ -1260,9 +1260,10 @@ fn run_llama4_vision_golden_test(image_name: &str) {
         "Expected 4D tensor [total_tiles, C, H, W], got {}D",
         rust_shape.len()
     );
-    assert!(
-        rust_shape[0] >= golden_shape[0],
-        "Expected at least {} tiles, got {}",
+    assert_eq!(
+        rust_shape[0],
+        golden_shape[0],
+        "Expected {} tiles, got {}",
         golden_shape[0],
         rust_shape[0]
     );
