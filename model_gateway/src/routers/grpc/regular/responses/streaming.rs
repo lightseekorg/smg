@@ -49,10 +49,13 @@ use super::{
 use crate::{
     observability::metrics::{metrics_labels, Metrics},
     routers::{
-        grpc::common::responses::{
-            build_sse_response, persist_response_if_needed,
-            streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
-            ResponsesContext,
+        grpc::{
+            common::responses::{
+                build_sse_response, persist_response_if_needed,
+                streaming::{attach_mcp_server_label, OutputItemType, ResponseStreamEventEmitter},
+                ResponsesContext,
+            },
+            utils,
         },
         mcp_utils::DEFAULT_MAX_ITERATIONS,
     },
@@ -117,13 +120,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
         .await
         {
             warn!("Error transforming SSE stream: {}", e);
-            let error_event = json!({
-                "error": {
-                    "message": e,
-                    "type": "stream_error"
-                }
-            });
-            let _ = tx.send(Ok(Bytes::from(format!("data: {error_event}\n\n"))));
+            utils::send_error_sse(&tx, &e, "stream_error");
         }
 
         // Send final [DONE] event
@@ -454,13 +451,7 @@ pub(super) fn execute_tool_loop_streaming(
 
         if let Err(e) = result {
             warn!("Streaming tool loop error: {}", e);
-            let error_event = json!({
-                "error": {
-                    "message": e,
-                    "type": "tool_loop_error"
-                }
-            });
-            let _ = tx.send(Ok(Bytes::from(format!("data: {error_event}\n\n"))));
+            utils::send_error_sse(&tx, &e, "tool_loop_error");
         }
 
         // Send [DONE]

@@ -39,6 +39,7 @@ use crate::{
         },
         context,
         proto_wrapper::{ProtoResponseVariant, ProtoStream},
+        utils,
     },
 };
 
@@ -86,16 +87,7 @@ impl HarmonyStreamingProcessor {
 
                     if let Err(e) = result {
                         error!("Harmony streaming error: {}", e);
-                        let error_chunk = format!(
-                            "data: {}\n\n",
-                            json!({
-                                "error": {
-                                    "message": e,
-                                    "type": "internal_error"
-                                }
-                            })
-                        );
-                        let _ = tx.send(Ok(Bytes::from(error_chunk)));
+                        utils::send_error_sse(&tx, &e, "internal_error");
                     }
 
                     let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
@@ -109,16 +101,7 @@ impl HarmonyStreamingProcessor {
 
                     if let Err(e) = result {
                         error!("Harmony dual streaming error: {}", e);
-                        let error_chunk = format!(
-                            "data: {}\n\n",
-                            json!({
-                                "error": {
-                                    "message": e,
-                                    "type": "internal_error"
-                                }
-                            })
-                        );
-                        let _ = tx.send(Ok(Bytes::from(error_chunk)));
+                        utils::send_error_sse(&tx, &e, "internal_error");
                     }
 
                     let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
@@ -126,16 +109,11 @@ impl HarmonyStreamingProcessor {
             }
             context::ExecutionResult::Embedding { .. } => {
                 error!("Harmony streaming not supported for embeddings");
-                let error_chunk = format!(
-                    "data: {}\n\n",
-                    json!({
-                        "error": {
-                            "message": "Embeddings not supported in Harmony streaming",
-                            "type": "invalid_request_error"
-                        }
-                    })
+                utils::send_error_sse(
+                    &tx,
+                    "Embeddings not supported in Harmony streaming",
+                    "invalid_request_error",
                 );
-                let _ = tx.send(Ok(Bytes::from(error_chunk)));
             }
         }
 

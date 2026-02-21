@@ -1,8 +1,9 @@
 //! Shared utilities for gRPC routers
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, io, sync::Arc};
 
 use axum::response::Response;
+use bytes::Bytes;
 use http::StatusCode;
 use llm_tokenizer::{
     chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
@@ -23,6 +24,7 @@ use reasoning_parser::{
 };
 use serde_json::{json, Map, Value};
 use smg_grpc_client::trtllm_proto::{GenerateRequest as TrtllmGenerateRequest, TokenSequence};
+use tokio::sync::mpsc;
 use tool_parser::{
     ParserFactory as ToolParserFactory, PooledParser as ToolPooledParser, ToolParser,
 };
@@ -40,6 +42,27 @@ use crate::{
     observability::metrics::metrics_labels,
     routers::{error, grpc::proto_wrapper::ProtoResponseVariant},
 };
+
+/// Type alias for the SSE channel sender used across streaming endpoints.
+pub(crate) type SseSender = mpsc::UnboundedSender<Result<Bytes, io::Error>>;
+
+/// Send an SSE error event with a typed error body.
+///
+/// Produces `data: {"error":{"message":"...","type":"..."}}\n\n` using
+/// `serde_json` so that quotes, newlines, and other special characters in the
+/// error message are properly escaped.
+pub(crate) fn send_error_sse(tx: &SseSender, message: impl ToString, error_type: &str) {
+    let chunk = format!(
+        "data: {}\n\n",
+        json!({
+            "error": {
+                "message": message.to_string(),
+                "type": error_type,
+            }
+        })
+    );
+    let _ = tx.send(Ok(Bytes::from(chunk)));
+}
 
 /// Resolve tokenizer from registry and cache it in request context.
 ///
