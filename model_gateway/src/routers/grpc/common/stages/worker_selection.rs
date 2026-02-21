@@ -218,7 +218,7 @@ impl WorkerSelectionStage {
                         match w.metadata().spec.worker_type {
                             WorkerType::Prefill | WorkerType::PrePrefill => acc.0.push(w),
                             WorkerType::Decode | WorkerType::PrePrefillDecode => acc.1.push(w),
-                            _ => {}
+                            WorkerType::Regular => {}
                         }
                     }
                     acc

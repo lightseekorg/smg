@@ -772,12 +772,13 @@ impl PDRouter {
                         result.push_str(&text);
                     }
                 }
-                ChatMessage::Assistant { content, .. } => {
-                    if let Some(content) = content {
-                        let text = content.to_simple_string();
-                        if !text.is_empty() {
-                            result.push_str(&text);
-                        }
+                ChatMessage::Assistant {
+                    content: Some(content),
+                    ..
+                } => {
+                    let text = content.to_simple_string();
+                    if !text.is_empty() {
+                        result.push_str(&text);
                     }
                 }
                 _ => {}
@@ -1796,7 +1797,7 @@ mod tests {
     ) -> PDRouter {
         use crate::policies::PolicyFactory;
 
-        let cache_aware_config = crate::config::PolicyConfig::CacheAware {
+        let cache_aware_config = PolicyConfig::CacheAware {
             cache_threshold: 0.3,
             balance_abs_threshold: 64,
             balance_rel_threshold: 1.5,

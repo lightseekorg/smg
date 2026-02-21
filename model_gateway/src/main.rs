@@ -940,7 +940,7 @@ impl CliArgs {
                 decode_urls: self.decode.clone(),
                 prefill_policy: self.prefill_policy.as_ref().map(|p| self.parse_policy(p)),
                 decode_policy: self.decode_policy.as_ref().map(|p| self.parse_policy(p)),
-                pre_prefill_urls: pre_prefill_urls,
+                pre_prefill_urls,
                 pre_prefill_decode_urls: self.pre_prefill_decode.clone(),
                 pre_prefill_match_threshold: self.pre_prefill_match_threshold,
                 pre_prefill_unmatched_chars_threshold: self.pre_prefill_unmatched_chars_threshold,
