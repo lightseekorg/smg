@@ -441,12 +441,8 @@ impl ImagePreProcessor for Llama4VisionProcessor {
         // This matches what sglang and vLLM vision models expect.
         let tile_views: Vec<ndarray::ArrayView4<f32>> =
             all_outputs.iter().map(|o| o.view()).collect();
-        let pixel_values = ndarray::concatenate(ndarray::Axis(0), &tile_views).map_err(|e| {
-            TransformError::InvalidShape {
-                expected: "concatenatable tile arrays".to_string(),
-                actual: vec![e.to_string().len()],
-            }
-        })?;
+        let pixel_values = ndarray::concatenate(ndarray::Axis(0), &tile_views)
+            .map_err(|e| TransformError::ShapeError(format!("Failed to concatenate tiles: {e}")))?;
 
         // Store aspect ratios as model-specific data
         let mut model_specific = std::collections::HashMap::new();
