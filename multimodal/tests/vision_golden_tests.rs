@@ -1224,10 +1224,10 @@ fn run_llama4_vision_golden_test(image_name: &str) {
 
     // Check aspect_ratios
     let rust_aspect_ratios: Vec<(u32, u32)> = match result.model_specific.get("aspect_ratios") {
-        Some(ModelSpecificValue::UintTensor { data, shape }) => {
+        Some(ModelSpecificValue::IntTensor { data, shape }) => {
             let num_images = shape[0];
             (0..num_images)
-                .map(|i| (data[i * 2], data[i * 2 + 1]))
+                .map(|i| (data[i * 2] as u32, data[i * 2 + 1] as u32))
                 .collect()
         }
         _ => panic!("Expected aspect_ratios in model_specific"),
@@ -1251,24 +1251,23 @@ fn run_llama4_vision_golden_test(image_name: &str) {
         "num_tokens mismatch for {image_name}"
     );
 
-    // Check output shape - HuggingFace outputs (num_tiles, 3, 336, 336) without batch
-    // Our Rust outputs (batch, num_tiles, 3, 336, 336) with batch dimension
+    // Check output shape - both HuggingFace and Rust output 4D (total_tiles, C, H, W)
     let rust_shape = result.pixel_values.shape();
     println!(
         "llama4_vision - {image_name} image - Shape: golden={golden_shape:?}, rust={rust_shape:?}"
     );
 
-    // HuggingFace returns without batch dim, we add batch=1
-    assert!(
-        rust_shape[0] == 1,
-        "Expected batch dim to be 1, got {}",
-        rust_shape[0]
+    assert_eq!(
+        rust_shape.len(),
+        4,
+        "Expected 4D tensor [total_tiles, C, H, W], got {}D",
+        rust_shape.len()
     );
     assert!(
-        rust_shape[1] >= golden_shape[0],
+        rust_shape[0] >= golden_shape[0],
         "Expected at least {} tiles, got {}",
         golden_shape[0],
-        rust_shape[1]
+        rust_shape[0]
     );
 
     // Compare pixel values
