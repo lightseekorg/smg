@@ -349,7 +349,7 @@ impl Llama4Spec {
         let patches = (tile / patch).pow(2);
         // Pixel shuffle reduces spatial dims by ratio, so token count by ratio^2
         let ratio = Self::pixel_shuffle_ratio(metadata);
-        let downsample = (1.0 / (ratio * ratio)).round() as usize;
+        let downsample = (1.0 / (ratio * ratio)).round().max(1.0) as usize;
         patches / downsample
     }
 }
