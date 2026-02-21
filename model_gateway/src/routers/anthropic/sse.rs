@@ -220,7 +220,7 @@ where
         EventProcessor::new(tx, global_index, is_first_iteration, resolve_server_name);
 
     while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
+        let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
 
         // Guard against unbounded buffer growth (DoS protection).
         // Check *before* extending so a single oversized chunk never
@@ -239,7 +239,7 @@ where
         while let Some(pos) = find_double_newline(&buffer) {
             let frame_bytes = &buffer[..pos];
             let frame = std::str::from_utf8(frame_bytes)
-                .map_err(|e| format!("Invalid UTF-8 in SSE frame: {}", e))?;
+                .map_err(|e| format!("Invalid UTF-8 in SSE frame: {e}"))?;
             if let Some((event_type, data)) = parse_sse_frame(frame) {
                 processor.process(&event_type, &data).await?;
             }
@@ -250,7 +250,7 @@ where
     // Process any remaining data in buffer
     if !buffer.is_empty() {
         let remaining = std::str::from_utf8(&buffer)
-            .map_err(|e| format!("Invalid UTF-8 in final SSE data: {}", e))?;
+            .map_err(|e| format!("Invalid UTF-8 in final SSE data: {e}"))?;
         let trimmed = remaining.trim();
         if !trimmed.is_empty() {
             if let Some((event_type, data)) = parse_sse_frame(trimmed) {
