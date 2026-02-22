@@ -114,6 +114,7 @@ impl HarmonyStreamingProcessor {
                     "Embeddings not supported in Harmony streaming",
                     "invalid_request_error",
                 );
+                let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
             }
         }
 
