@@ -109,6 +109,7 @@ impl PipelineStage for ChatRequestBuildingStage {
                 .components
                 .tokenizer_registry
                 .get_by_name(model_id)
+                .or_else(|| ctx.components.tokenizer_registry.get_by_id(model_id))
                 .map(|e| e.source)
                 .unwrap_or_default();
 
