@@ -49,9 +49,12 @@ pub trait Tokenizer: Encoder + Decoder {
 
     /// Set or override the chat template.
     ///
-    /// Returns an error if the template fails to parse.
+    /// Returns an error if the template fails to parse or the tokenizer
+    /// does not support chat templates.
     fn set_chat_template(&mut self, _template: String) -> Result<()> {
-        Ok(()) // no-op by default
+        Err(anyhow::anyhow!(
+            "set_chat_template is not supported by this tokenizer"
+        ))
     }
 }
 

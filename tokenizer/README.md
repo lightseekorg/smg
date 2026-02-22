@@ -126,7 +126,7 @@ as of `tokenizer/src/*`.
 
 ## Caching (`cache/`)
 The caching subsystem provides multi-level caching for tokenizer results:
-- `L0Cache`: In-memory exact-match cache with simple eviction for token ID lookups
+- `L0Cache`: In-memory exact-match cache with approximate LRU eviction for token ID lookups
 - `L1Cache`: Prefix-based cache that can reuse partial encoding results
 - `CachedTokenizer`: Wrapper that adds caching to any tokenizer implementation
 - `TokenizerFingerprint`: Content-based fingerprinting for cache key generation

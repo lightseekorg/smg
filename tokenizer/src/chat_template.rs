@@ -637,8 +637,10 @@ impl ChatTemplateState {
     }
 
     pub fn set(&mut self, template: String) -> Result<()> {
-        self.content_format = detect_chat_template_content_format(&template);
-        self.env = Some(build_environment(template)?);
+        let content_format = detect_chat_template_content_format(&template);
+        let env = build_environment(template)?;
+        self.content_format = content_format;
+        self.env = Some(env);
         Ok(())
     }
 
