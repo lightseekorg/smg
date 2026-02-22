@@ -356,7 +356,7 @@ pub(crate) fn preprocess_for_sglang(
 ///
 /// vLLM handles image preprocessing and token expansion internally,
 /// so we only send the raw JPEG/PNG bytes.
-fn build_vllm_multimodal_data(images: &[Arc<ImageFrame>]) -> MultimodalData {
+fn build_raw_multimodal_data(images: &[Arc<ImageFrame>]) -> MultimodalData {
     MultimodalData {
         image_data: images
             .iter()
@@ -373,9 +373,8 @@ fn build_vllm_multimodal_data(images: &[Arc<ImageFrame>]) -> MultimodalData {
 /// Phase 2: Backend-specific multimodal processing.
 ///
 /// For SGLang: preprocesses images, expands placeholder tokens, builds full MultimodalData.
-/// For vLLM: extracts raw image bytes only, returns original token IDs unchanged.
-///
-/// TRT-LLM does not support multimodal — callers must reject it before calling this.
+/// For vLLM/TRT-LLM: extracts raw image bytes only, returns original token IDs unchanged.
+/// Both vLLM and TRT-LLM handle image preprocessing and token expansion internally.
 pub(crate) fn process_for_backend(
     images: &[Arc<ImageFrame>],
     is_sglang: bool,
@@ -396,7 +395,7 @@ pub(crate) fn process_for_backend(
         )?;
         Ok((output.expanded_token_ids, output.multimodal_data))
     } else {
-        Ok((token_ids, build_vllm_multimodal_data(images)))
+        Ok((token_ids, build_raw_multimodal_data(images)))
     }
 }
 

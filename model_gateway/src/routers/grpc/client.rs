@@ -245,11 +245,13 @@ impl GrpcClient {
                 Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
             }
             Self::Trtllm(client) => {
+                let trtllm_mm = multimodal_inputs.map(|mm| mm.into_trtllm_proto());
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
                     processed_text,
                     token_ids,
+                    trtllm_mm,
                     tool_constraints,
                 )?;
                 Ok(ProtoGenerateRequest::Trtllm(Box::new(req)))

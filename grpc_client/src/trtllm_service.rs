@@ -269,6 +269,7 @@ impl TrtllmServiceClient {
         body: &ChatCompletionRequest,
         processed_text: String,
         token_ids: Vec<u32>,
+        multimodal_input: Option<proto::MultimodalInput>,
         tool_call_constraint: Option<(String, String)>, // (constraint_type, constraint_value)
     ) -> Result<proto::GenerateRequest, String> {
         // Build sampling config
@@ -305,7 +306,7 @@ impl TrtllmServiceClient {
             embedding_bias: vec![],
             lora_config: None,
             prompt_tuning_config: None,
-            multimodal_input: None,
+            multimodal_input,
             kv_cache_retention: None,
             disaggregated_params: None,
             lookahead_config: None,
