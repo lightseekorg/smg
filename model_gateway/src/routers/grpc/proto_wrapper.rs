@@ -97,6 +97,16 @@ impl MultimodalData {
             image_data: self.image_data,
         }
     }
+
+    /// Convert to TensorRT-LLM proto MultimodalInput, consuming self to avoid clones.
+    ///
+    /// Only sends raw image bytes — TRT-LLM's input processor handles hashing,
+    /// position tracking, and vision encoding server-side.
+    pub fn into_trtllm_proto(self) -> trtllm::MultimodalInput {
+        trtllm::MultimodalInput {
+            image_data: self.image_data,
+        }
+    }
 }
 
 // =====================
