@@ -502,13 +502,14 @@ pub struct ChatTemplateProcessor {
 }
 
 impl ChatTemplateProcessor {
-    /// Create a new chat template processor
-    pub fn new(template: String) -> Self {
-        // Build the environment eagerly; if the template is invalid the error
-        // will surface on the first `apply_chat_template` call, matching the
-        // previous behaviour where `add_template` could fail.
-        let env = build_environment(template).unwrap_or_else(|_| Environment::new());
-        ChatTemplateProcessor { env }
+    /// Create a new chat template processor.
+    ///
+    /// Returns an error if the template fails to parse, so callers get an
+    /// actionable message immediately rather than a confusing "template not
+    /// found" error on the first render.
+    pub fn new(template: String) -> Result<Self> {
+        let env = build_environment(template)?;
+        Ok(ChatTemplateProcessor { env })
     }
 
     /// Apply the chat template to a list of messages
@@ -586,16 +587,36 @@ pub struct ChatTemplateState {
     content_format: ChatTemplateContentFormat,
 }
 
+impl std::fmt::Debug for ChatTemplateState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatTemplateState")
+            .field("has_template", &self.env.is_some())
+            .field("content_format", &self.content_format)
+            .finish()
+    }
+}
+
 impl ChatTemplateState {
-    pub fn new(template: Option<String>) -> Self {
+    pub fn new(template: Option<String>) -> Result<Self> {
         let content_format = template
             .as_ref()
             .map(|t| detect_chat_template_content_format(t))
             .unwrap_or_default();
-        let env = template.and_then(|t| build_environment(t).ok());
-        Self {
+        let env = template.map(build_environment).transpose()?;
+        Ok(Self {
             env,
             content_format,
+        })
+    }
+
+    /// Create a `ChatTemplateState` with no template set.
+    ///
+    /// Unlike `new(None)`, this is infallible since there is no template to
+    /// parse — useful in constructors that don't return `Result`.
+    pub fn empty() -> Self {
+        Self {
+            env: None,
+            content_format: ChatTemplateContentFormat::default(),
         }
     }
 
@@ -615,10 +636,10 @@ impl ChatTemplateState {
         render_chat_template(env, messages, params)
     }
 
-    pub fn set(&mut self, template: String) {
+    pub fn set(&mut self, template: String) -> Result<()> {
         self.content_format = detect_chat_template_content_format(&template);
-        // Rebuild the cached environment with the new template
-        self.env = build_environment(template).ok();
+        self.env = Some(build_environment(template)?);
+        Ok(())
     }
 
     pub fn content_format(&self) -> ChatTemplateContentFormat {
@@ -632,7 +653,7 @@ mod tests {
 
     #[test]
     fn test_chat_template_state_no_template() {
-        let state = ChatTemplateState::new(None);
+        let state = ChatTemplateState::new(None).unwrap();
         assert_eq!(state.content_format(), ChatTemplateContentFormat::String);
         let result = state.apply(&[], ChatTemplateParams::default());
         assert!(result.is_err());
@@ -640,8 +661,25 @@ mod tests {
 
     #[test]
     fn test_chat_template_state_set() {
-        let mut state = ChatTemplateState::new(None);
-        state.set("{{ messages }}".to_string());
+        let mut state = ChatTemplateState::new(None).unwrap();
+        state.set("{{ messages }}".to_string()).unwrap();
         assert_eq!(state.content_format(), ChatTemplateContentFormat::String);
+    }
+
+    #[test]
+    fn test_chat_template_state_invalid_template() {
+        let result = ChatTemplateState::new(Some("{% invalid".to_string()));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Failed to add template"),
+            "Error should explain parse failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_chat_template_processor_invalid_template() {
+        let result = ChatTemplateProcessor::new("{% invalid".to_string());
+        assert!(result.is_err());
     }
 }

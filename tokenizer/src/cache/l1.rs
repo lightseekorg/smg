@@ -539,14 +539,11 @@ mod tests {
 
     #[test]
     fn test_concurrent_access() {
-        use std::sync::Arc;
-        use std::thread;
+        use std::{sync::Arc, thread};
 
         let cache = Arc::new(L1Cache::new(1024 * 1024));
-        let special_tokens_owned: Vec<String> = vec![
-            "<|im_start|>".to_string(),
-            "<|im_end|>".to_string(),
-        ];
+        let special_tokens_owned: Vec<String> =
+            vec!["<|im_start|>".to_string(), "<|im_end|>".to_string()];
         let special_tokens_arc = Arc::new(special_tokens_owned);
 
         let mut handles = vec![];
@@ -583,10 +580,7 @@ mod tests {
                     !tokens.is_empty(),
                     "Thread {i} expected non-empty cached tokens"
                 );
-                assert!(
-                    offset > 0,
-                    "Thread {i} expected positive byte offset"
-                );
+                assert!(offset > 0, "Thread {i} expected positive byte offset");
                 assert!(
                     offset <= input.len(),
                     "Thread {i}: offset {offset} exceeds input length {}",

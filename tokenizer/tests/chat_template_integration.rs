@@ -18,7 +18,7 @@ fn test_simple_chat_template() {
 {%- endif %}
 ";
 
-    let processor = ChatTemplateProcessor::new(template.to_string());
+    let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
 
     let messages = [ChatMessage::User {
         content: MessageContent::Text("Test".to_string()),
@@ -52,7 +52,7 @@ fn test_chat_template_with_tokens() {
 {% endfor -%}
 ";
 
-    let processor = ChatTemplateProcessor::new(template.to_string());
+    let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
 
     let messages = [ChatMessage::User {
         content: MessageContent::Text("Test".to_string()),
@@ -112,7 +112,7 @@ fn test_llama_style_template() {
 {%- endif %}
 ";
 
-    let processor = ChatTemplateProcessor::new(template.to_string());
+    let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
 
     let messages = [
         ChatMessage::System {
@@ -167,7 +167,7 @@ fn test_chatml_template() {
 {%- endif %}
 ";
 
-    let processor = ChatTemplateProcessor::new(template.to_string());
+    let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
 
     let messages = [
         ChatMessage::User {
@@ -220,7 +220,7 @@ assistant:
 {%- endif -%}
 ";
 
-    let processor = ChatTemplateProcessor::new(template.to_string());
+    let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
 
     let messages = [ChatMessage::User {
         content: MessageContent::Text("Test".to_string()),
@@ -254,7 +254,7 @@ assistant:
 fn test_empty_messages_template() {
     let template = r"{% for msg in messages %}{{ msg.role }}: {{ msg.content }}\n{% endfor %}";
 
-    let processor = ChatTemplateProcessor::new(template.to_string());
+    let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
 
     let messages: Vec<serde_json::Value> = vec![];
     let result = processor
@@ -277,7 +277,7 @@ Tools: {{ message.tool_calls|tojson(ensure_ascii=False) }}
 {% endfor -%}
 ";
 
-    let processor = ChatTemplateProcessor::new(template.to_string());
+    let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
 
     let messages = [ChatMessage::User {
         content: MessageContent::Text("Test with Unicode: 日本語".to_string()),
@@ -310,7 +310,7 @@ Indented: {{ data|tojson(indent=2) }}
 All: {{ data|tojson(ensure_ascii=False, sort_keys=True, indent=2) }}
 "#;
 
-    let processor = ChatTemplateProcessor::new(template.to_string());
+    let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
     let messages: Vec<serde_json::Value> = vec![];
 
     // This should NOT fail - all kwargs should be accepted
@@ -378,7 +378,7 @@ fn test_template_with_multimodal_content() {
 {% endfor %}
 "#;
 
-    let processor = ChatTemplateProcessor::new(template.to_string());
+    let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
 
     let messages = [ChatMessage::User {
         content: MessageContent::Parts(vec![

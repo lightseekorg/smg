@@ -83,7 +83,7 @@ impl HuggingFaceTokenizer {
             special_tokens,
             vocab,
             reverse_vocab,
-            chat_template: ChatTemplateState::new(chat_template_str),
+            chat_template: ChatTemplateState::new(chat_template_str)?,
         })
     }
 
@@ -149,7 +149,7 @@ impl HuggingFaceTokenizer {
             special_tokens,
             vocab,
             reverse_vocab,
-            chat_template: ChatTemplateState::new(None),
+            chat_template: ChatTemplateState::empty(),
         }
     }
 
@@ -279,7 +279,7 @@ impl TokenizerTrait for HuggingFaceTokenizer {
         self.chat_template.content_format()
     }
 
-    fn set_chat_template(&mut self, template: String) {
-        self.chat_template.set(template);
+    fn set_chat_template(&mut self, template: String) -> Result<()> {
+        self.chat_template.set(template)
     }
 }

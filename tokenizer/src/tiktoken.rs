@@ -177,7 +177,7 @@ impl TiktokenTokenizer {
             vocab: HashMap::new(),
             reverse_vocab: HashMap::new(),
             vocab_size,
-            chat_template: ChatTemplateState::new(None),
+            chat_template: ChatTemplateState::empty(),
         })
     }
 
@@ -265,7 +265,7 @@ impl TiktokenTokenizer {
             vocab,
             reverse_vocab,
             vocab_size,
-            chat_template: ChatTemplateState::new(chat_template),
+            chat_template: ChatTemplateState::new(chat_template)?,
         })
     }
 
@@ -490,8 +490,8 @@ impl TokenizerTrait for TiktokenTokenizer {
         self.chat_template.content_format()
     }
 
-    fn set_chat_template(&mut self, template: String) {
-        self.chat_template.set(template);
+    fn set_chat_template(&mut self, template: String) -> Result<()> {
+        self.chat_template.set(template)
     }
 }
 

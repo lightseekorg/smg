@@ -198,7 +198,9 @@ mod tests {
         // Set a template after creation (mimics Python's behavior)
         let new_template =
             "NEW: {% for msg in messages %}{{ msg.role }}: {{ msg.content }}; {% endfor %}";
-        tokenizer.set_chat_template(new_template.to_string());
+        tokenizer
+            .set_chat_template(new_template.to_string())
+            .unwrap();
 
         let messages = [
             ChatMessage::User {

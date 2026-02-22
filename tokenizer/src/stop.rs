@@ -635,9 +635,7 @@ mod tests {
             SequenceDecoderOutput::Held => {
                 // Also acceptable if the entire chunk is held (implementation detail)
             }
-            other => panic!(
-                "Expected Text (prefix before partial match) or Held, got {other:?}"
-            ),
+            other => panic!("Expected Text (prefix before partial match) or Held, got {other:?}"),
         }
 
         // Token 2 ("world"): completes the stop sequence
