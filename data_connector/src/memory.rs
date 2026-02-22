@@ -370,45 +370,35 @@ impl ResponseStorage for MemoryResponseStorage {
         let mut chain = ResponseChain::new();
         let max_depth = max_depth.unwrap_or(100); // Default max depth to prevent infinite loops
 
-        // Collect all response IDs first
-        let mut response_ids = Vec::new();
+        // Single lock acquisition: walk the chain and collect responses atomically
+        // to prevent concurrent writers from causing silent data loss between reads.
+        let store = self.store.read();
         let mut current_id = Some(response_id.clone());
         let mut depth = 0;
 
-        // Single lock acquisition to collect the chain
-        {
-            let store = self.store.read();
-            while let Some(id) = current_id {
-                if depth >= max_depth {
-                    break;
-                }
+        while let Some(id) = current_id {
+            if depth >= max_depth {
+                break;
+            }
 
-                if let Some(response) = store.responses.get(&id) {
-                    response_ids.push(id);
-                    #[expect(
-                        clippy::assigning_clones,
-                        reason = "false positive: while-let moves out of current_id, making clone_from invalid"
-                    )]
-                    {
-                        current_id = response.previous_response_id.clone();
-                    }
-                    depth += 1;
-                } else {
-                    break;
+            if let Some(response) = store.responses.get(&id) {
+                #[expect(
+                    clippy::assigning_clones,
+                    reason = "false positive: while-let moves out of current_id, making clone_from invalid"
+                )]
+                {
+                    current_id = response.previous_response_id.clone();
                 }
+                chain.add_response(response.clone());
+                depth += 1;
+            } else {
+                break;
             }
         }
+        drop(store);
 
         // Reverse to get chronological order (oldest first)
-        response_ids.reverse();
-
-        // Now collect the actual responses
-        let store = self.store.read();
-        for id in response_ids {
-            if let Some(response) = store.responses.get(&id) {
-                chain.add_response(response.clone());
-            }
-        }
+        chain.responses.reverse();
 
         Ok(chain)
     }

@@ -83,18 +83,8 @@ impl PostgresConversationStorage {
     fn parse_metadata(
         metadata: Option<String>,
     ) -> Result<Option<ConversationMetadata>, ConversationStorageError> {
-        match metadata {
-            None => Ok(None),
-            Some(s) => {
-                let s = s.trim();
-                if s.is_empty() || s.eq_ignore_ascii_case("null") {
-                    return Ok(None);
-                }
-                serde_json::from_str::<ConversationMetadata>(s)
-                    .map(Some)
-                    .map_err(|e| ConversationStorageError::StorageError(e.to_string()))
-            }
-        }
+        crate::common::parse_conversation_metadata(metadata)
+            .map_err(ConversationStorageError::StorageError)
     }
 }
 

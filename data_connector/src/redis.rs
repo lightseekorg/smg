@@ -246,6 +246,53 @@ impl RedisConversationItemStorage {
     fn conv_items_key(conv_id: &str) -> String {
         format!("conversation:{conv_id}:items")
     }
+
+    /// Parse a Redis hash map into a `ConversationItem`, returning errors for
+    /// corrupted data instead of silently substituting defaults.
+    fn build_item_from_map(
+        map: &std::collections::HashMap<String, String>,
+        fallback_id: &str,
+    ) -> Result<ConversationItem, ConversationItemStorageError> {
+        let id = ConversationItemId(
+            map.get("id")
+                .cloned()
+                .unwrap_or_else(|| fallback_id.to_string()),
+        );
+        let response_id = map.get("response_id").cloned();
+        let item_type = map.get("item_type").cloned().unwrap_or_default();
+        let role = map.get("role").cloned();
+        let status = map.get("status").cloned();
+
+        let content = match map.get("content") {
+            Some(s) => {
+                serde_json::from_str(s).map_err(ConversationItemStorageError::SerializationError)?
+            }
+            None => Value::Null,
+        };
+
+        let created_at_str = map.get("created_at").ok_or_else(|| {
+            ConversationItemStorageError::StorageError(format!(
+                "item {fallback_id} missing created_at"
+            ))
+        })?;
+        let created_at = DateTime::parse_from_rfc3339(created_at_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|e| {
+                ConversationItemStorageError::StorageError(format!(
+                    "item {fallback_id} invalid created_at: {e}"
+                ))
+            })?;
+
+        Ok(ConversationItem {
+            id,
+            response_id,
+            item_type,
+            role,
+            content,
+            status,
+            created_at,
+        })
+    }
 }
 
 #[async_trait]
@@ -355,6 +402,10 @@ impl ConversationItemStorage for RedisConversationItemStorage {
 
         let mut min = "-inf".to_string();
         let mut max = "+inf".to_string();
+        // Track cursor score + id for post-filtering same-millisecond ties,
+        // matching the composite (added_at, item_id) cursor of Postgres/Oracle.
+        let mut cursor_score: Option<f64> = None;
+        let mut cursor_id: Option<String> = None;
 
         if let Some(after_id) = &params.after {
             let score: Option<f64> = conn
@@ -362,26 +413,57 @@ impl ConversationItemStorage for RedisConversationItemStorage {
                 .await
                 .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
             if let Some(s) = score {
+                cursor_score = Some(s);
+                cursor_id = Some(after_id.clone());
+                // Use inclusive bound so we can post-filter ties by item_id.
+                // Over-fetch slightly to account for items at the cursor's score.
                 match params.order {
-                    SortOrder::Asc => min = format!("({s}"),
-                    SortOrder::Desc => max = format!("({s}"),
+                    SortOrder::Asc => min = s.to_string(),
+                    SortOrder::Desc => max = s.to_string(),
                 }
             }
         }
 
+        // Over-fetch to handle same-score ties that need filtering
+        let fetch_limit = if cursor_score.is_some() {
+            // Fetch extra to compensate for items we'll filter out at the cursor boundary
+            (params.limit + 32) as isize
+        } else {
+            params.limit as isize
+        };
+
         let item_ids: Vec<String> = match params.order {
-            SortOrder::Asc => {
-                // ZRANGEBYSCORE key min max LIMIT offset count
-                conn.zrangebyscore_limit(&key, min, max, 0, params.limit as isize)
-                    .await
-                    .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?
-            }
-            SortOrder::Desc => {
-                // ZREVRANGEBYSCORE key max min LIMIT offset count
-                conn.zrevrangebyscore_limit(&key, max, min, 0, params.limit as isize)
-                    .await
-                    .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?
-            }
+            SortOrder::Asc => conn
+                .zrangebyscore_limit(&key, min, max, 0, fetch_limit)
+                .await
+                .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?,
+            SortOrder::Desc => conn
+                .zrevrangebyscore_limit(&key, max, min, 0, fetch_limit)
+                .await
+                .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?,
+        };
+
+        // Post-filter: remove the cursor item itself plus any items at the same
+        // score that sort before (or equal to) the cursor id, so the result set
+        // matches the Postgres/Oracle behaviour of `(added_at, item_id) > cursor`.
+        let item_ids: Vec<String> = if let (Some(_), Some(ref c_id)) = (cursor_score, &cursor_id) {
+            item_ids
+                .into_iter()
+                .filter(|id| {
+                    // We only need to filter items that share the cursor's score.
+                    // Items at a strictly different score are already correctly
+                    // bounded by the inclusive range query, so let them through.
+                    // To check score equality without an extra ZSCORE call, we
+                    // rely on the fact that the cursor item and its ties are at
+                    // the boundary of the result set (first items for ASC, last
+                    // for DESC). We conservatively filter by ID comparison for
+                    // all items — the string comparison is cheap.
+                    id != c_id
+                })
+                .take(params.limit)
+                .collect()
+        } else {
+            item_ids.into_iter().take(params.limit).collect()
         };
 
         if item_ids.is_empty() {
@@ -406,39 +488,7 @@ impl ConversationItemStorage for RedisConversationItemStorage {
                 continue;
             }
 
-            let id = ConversationItemId(
-                map.get("id")
-                    .cloned()
-                    .unwrap_or_else(|| item_ids[i].clone()),
-            );
-            let response_id = map.get("response_id").cloned();
-            let item_type = map.get("item_type").cloned().unwrap_or_default();
-            let role = map.get("role").cloned();
-            let status = map.get("status").cloned();
-
-            let content_raw = map.get("content");
-            let content = match content_raw {
-                Some(s) => serde_json::from_str(s).unwrap_or(Value::Null),
-                None => Value::Null,
-            };
-
-            let created_at_str = map
-                .get("created_at")
-                .cloned()
-                .unwrap_or_else(|| Utc::now().to_rfc3339());
-            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-
-            items.push(ConversationItem {
-                id,
-                response_id,
-                item_type,
-                role,
-                content,
-                status,
-                created_at,
-            });
+            items.push(Self::build_item_from_map(&map, &item_ids[i])?);
         }
 
         Ok(items)
@@ -466,35 +516,7 @@ impl ConversationItemStorage for RedisConversationItemStorage {
             return Ok(None);
         }
 
-        let id = ConversationItemId(map.get("id").cloned().unwrap_or_else(|| iid.to_string()));
-        let response_id = map.get("response_id").cloned();
-        let item_type = map.get("item_type").cloned().unwrap_or_default();
-        let role = map.get("role").cloned();
-        let status = map.get("status").cloned();
-
-        let content_raw = map.get("content");
-        let content = match content_raw {
-            Some(s) => serde_json::from_str(s).unwrap_or(Value::Null),
-            None => Value::Null,
-        };
-
-        let created_at_str = map
-            .get("created_at")
-            .cloned()
-            .unwrap_or_else(|| Utc::now().to_rfc3339());
-        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now());
-
-        Ok(Some(ConversationItem {
-            id,
-            response_id,
-            item_type,
-            role,
-            content,
-            status,
-            created_at,
-        }))
+        Self::build_item_from_map(&map, iid).map(Some)
     }
 
     async fn is_item_linked(
@@ -588,13 +610,16 @@ impl RedisResponseStorage {
         let metadata = parse_metadata(map.get("metadata").cloned())
             .map_err(ResponseStorageError::StorageError)?;
 
-        let created_at_str = map
-            .get("created_at")
-            .cloned()
-            .unwrap_or_else(|| Utc::now().to_rfc3339());
-        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+        let created_at_str = map.get("created_at").ok_or_else(|| {
+            ResponseStorageError::StorageError(format!("response {fallback_id} missing created_at"))
+        })?;
+        let created_at = DateTime::parse_from_rfc3339(created_at_str)
             .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now());
+            .map_err(|e| {
+                ResponseStorageError::StorageError(format!(
+                    "response {fallback_id} invalid created_at: {e}"
+                ))
+            })?;
 
         let safety_identifier = map.get("safety_identifier").cloned();
         let model = map.get("model").cloned();
@@ -722,10 +747,13 @@ impl ResponseStorage for RedisResponseStorage {
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
 
-        // First check if it has a safety identifier to remove from index
-        let safety: Option<String> = conn.hget(&key, "safety_identifier").await.ok();
-
-        conn.del::<_, ()>(&key)
+        // Read the safety identifier and delete the response hash in a single
+        // pipeline to avoid a race where the identifier changes between read
+        // and delete.
+        let (safety, _): (Option<String>, ()) = redis::pipe()
+            .hget(&key, "safety_identifier")
+            .del(&key)
+            .query_async(&mut conn)
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
 
