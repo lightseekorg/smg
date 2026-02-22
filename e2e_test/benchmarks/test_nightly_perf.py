@@ -30,7 +30,7 @@ _MAX_REQUESTS = 300
 _MAX_TIME_PER_RUN = 10  # seconds per scenario×concurrency combo
 _TIMEOUT_SEC = 1440 * 60  # match workflow timeout-minutes
 
-_TEST_MODE = False
+_TEST_MODE = os.environ.get("BENCH_TEST_MODE", "0") == "1"
 _TEST_NUM_CONCURRENCY = 1
 _TEST_TRAFFIC_SCENARIO = "D(100,100)"
 _TEST_MAX_REQUESTS = 10
