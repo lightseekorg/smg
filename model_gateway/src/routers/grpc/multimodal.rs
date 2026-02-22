@@ -481,14 +481,20 @@ fn model_specific_to_tensor_data(value: &ModelSpecificValue) -> Option<sglang_pr
             dtype: "int64".to_string(),
         }),
         ModelSpecificValue::UintTensor { data, shape } => Some(sglang_proto::TensorData {
-            data: data.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            data: data
+                .iter()
+                .flat_map(|v| (*v as i64).to_le_bytes())
+                .collect(),
             shape: shape.iter().map(|&d| d as u32).collect(),
-            dtype: "uint32".to_string(),
+            dtype: "int64".to_string(),
         }),
         ModelSpecificValue::UintVec(v) => Some(sglang_proto::TensorData {
-            data: v.iter().flat_map(|val| val.to_le_bytes()).collect(),
+            data: v
+                .iter()
+                .flat_map(|val| (*val as i64).to_le_bytes())
+                .collect(),
             shape: vec![v.len() as u32],
-            dtype: "uint32".to_string(),
+            dtype: "int64".to_string(),
         }),
         ModelSpecificValue::IntVec(v) => Some(sglang_proto::TensorData {
             data: v.iter().flat_map(|val| val.to_le_bytes()).collect(),

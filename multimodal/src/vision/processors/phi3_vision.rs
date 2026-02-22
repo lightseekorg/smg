@@ -347,13 +347,13 @@ impl ImagePreProcessor for Phi3VisionProcessor {
         let mut model_specific = std::collections::HashMap::new();
 
         // image_sizes as [batch, 2] tensor (h, w for each image)
-        let image_sizes_data: Vec<u32> = all_image_sizes
+        let image_sizes_data: Vec<i64> = all_image_sizes
             .iter()
-            .flat_map(|(w, h)| [*h, *w]) // [h, w] for each image
+            .flat_map(|(w, h)| [*h as i64, *w as i64]) // [h, w] for each image
             .collect();
         model_specific.insert(
             "image_sizes".to_string(),
-            ModelSpecificValue::UintTensor {
+            ModelSpecificValue::IntTensor {
                 data: image_sizes_data,
                 shape: vec![batch_size, 2],
             },
@@ -362,7 +362,7 @@ impl ImagePreProcessor for Phi3VisionProcessor {
         // num_img_tokens as list
         model_specific.insert(
             "num_img_tokens".to_string(),
-            ModelSpecificValue::UintVec(all_num_tokens.iter().map(|&t| t as u32).collect()),
+            ModelSpecificValue::IntVec(all_num_tokens.iter().map(|&t| t as i64).collect()),
         );
 
         // Convert 5D tensor to appropriate format

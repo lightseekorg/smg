@@ -399,9 +399,9 @@ impl ImagePreProcessor for QwenVLProcessorBase {
 
             // Grid dimensions are based on the individual image's target size
             let (grid_t, grid_h, grid_w) = self.calculate_grid_thw(target_h, target_w, 1);
-            grid_thw_data.push(grid_t as u32);
-            grid_thw_data.push(grid_h as u32);
-            grid_thw_data.push(grid_w as u32);
+            grid_thw_data.push(grid_t as i64);
+            grid_thw_data.push(grid_h as i64);
+            grid_thw_data.push(grid_w as i64);
 
             // Token count is based on individual grid
             let tokens = self.calculate_tokens_from_grid(grid_t, grid_h, grid_w);
@@ -414,7 +414,7 @@ impl ImagePreProcessor for QwenVLProcessorBase {
         // Create result with model-specific image_grid_thw
         let result = PreprocessedImages::new(pixel_values, num_img_tokens, image_sizes).with_extra(
             "image_grid_thw",
-            ModelSpecificValue::uint_2d(grid_thw_data, images.len(), 3),
+            ModelSpecificValue::int_2d(grid_thw_data, images.len(), 3),
         );
 
         Ok(result)

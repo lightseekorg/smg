@@ -521,20 +521,23 @@ impl ImagePreProcessor for Phi4VisionProcessor {
         let mut model_specific = std::collections::HashMap::new();
 
         // Store attention mask as model-specific data
-        let mask_flat: Vec<u32> = attention_masks.iter().copied().collect();
+        let mask_flat: Vec<i64> = attention_masks.iter().map(|&v| v as i64).collect();
         model_specific.insert(
             "pixel_attention_mask".to_string(),
-            ModelSpecificValue::UintTensor {
+            ModelSpecificValue::IntTensor {
                 data: mask_flat,
                 shape: vec![batch_size, max_crops, mask_res, mask_res],
             },
         );
 
         // Store image sizes (H, W after HD transform)
-        let sizes_flat: Vec<u32> = image_sizes.iter().flat_map(|&(h, w)| vec![h, w]).collect();
+        let sizes_flat: Vec<i64> = image_sizes
+            .iter()
+            .flat_map(|&(h, w)| vec![h as i64, w as i64])
+            .collect();
         model_specific.insert(
             "image_sizes".to_string(),
-            ModelSpecificValue::UintTensor {
+            ModelSpecificValue::IntTensor {
                 data: sizes_flat,
                 shape: vec![batch_size, 2],
             },
