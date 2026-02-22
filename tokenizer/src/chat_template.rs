@@ -436,15 +436,80 @@ fn sort_json_keys(value: &JsonValue) -> JsonValue {
     }
 }
 
+/// Build a pre-configured `Environment<'static>` with the given template string,
+/// Python-compat method callback, and custom `tojson` filter already registered.
+/// The template is stored under the name `"chat"` using owned storage so the
+/// environment carries no borrows.
+fn build_environment(template: String) -> Result<Environment<'static>> {
+    let mut env = Environment::new();
+
+    // Register the template with owned storage (no lifetime dependency on caller)
+    env.add_template_owned("chat".to_owned(), template)
+        .map_err(|e| anyhow!("Failed to add template: {e}"))?;
+
+    // Enable Python method compatibility (e.g., str.startswith, str.endswith)
+    env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
+
+    // Register custom tojson filter compatible with HuggingFace transformers
+    // This overrides minijinja's built-in tojson to support additional kwargs
+    // like ensure_ascii, separators, and sort_keys that HuggingFace templates use
+    env.add_filter("tojson", tojson_filter);
+
+    Ok(env)
+}
+
+/// Render the `"chat"` template in the given environment against messages and params.
+fn render_chat_template(
+    env: &Environment<'_>,
+    messages: &[serde_json::Value],
+    params: ChatTemplateParams,
+) -> Result<String> {
+    let tmpl = env
+        .get_template("chat")
+        .map_err(|e| anyhow!("Failed to get template: {e}"))?;
+
+    // Convert messages to minijinja::Value (messages already processed by router)
+    let minijinja_messages: Vec<Value> = messages.iter().map(Value::from_serialize).collect();
+
+    let base_context = context! {
+        messages => &minijinja_messages,
+        add_generation_prompt => params.add_generation_prompt,
+        tools => params.tools,
+        documents => params.documents,
+    };
+
+    // Merge with template_kwargs if provided
+    let ctx = if let Some(kwargs) = params.template_kwargs {
+        context! {
+            ..base_context,
+            ..Value::from_serialize(kwargs)
+        }
+    } else {
+        base_context
+    };
+
+    // Render the template
+    let rendered = tmpl
+        .render(&ctx)
+        .map_err(|e| anyhow!("Failed to render template: {e}"))?;
+
+    Ok(rendered)
+}
+
 /// Chat template processor using Jinja2 - simple wrapper like HuggingFace
 pub struct ChatTemplateProcessor {
-    template: String,
+    env: Environment<'static>,
 }
 
 impl ChatTemplateProcessor {
-    /// Create a new chat template processor
-    pub fn new(template: String) -> Self {
-        ChatTemplateProcessor { template }
+    /// Create a new chat template processor.
+    ///
+    /// Returns an error if the template fails to parse, so callers get an
+    /// actionable message immediately rather than a confusing "template not
+    /// found" error on the first render.
+    pub fn new(template: String) -> Result<Self> {
+        let env = build_environment(template)?;
+        Ok(ChatTemplateProcessor { env })
     }
 
     /// Apply the chat template to a list of messages
@@ -457,51 +522,7 @@ impl ChatTemplateProcessor {
         messages: &[serde_json::Value],
         params: ChatTemplateParams,
     ) -> Result<String> {
-        let mut env = Environment::new();
-
-        // Register the template
-        env.add_template("chat", &self.template)
-            .map_err(|e| anyhow!("Failed to add template: {e}"))?;
-
-        // Enable Python method compatibility (e.g., str.startswith, str.endswith)
-        env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
-
-        // Register custom tojson filter compatible with HuggingFace transformers
-        // This overrides minijinja's built-in tojson to support additional kwargs
-        // like ensure_ascii, separators, and sort_keys that HuggingFace templates use
-        env.add_filter("tojson", tojson_filter);
-
-        // Get the template
-        let tmpl = env
-            .get_template("chat")
-            .map_err(|e| anyhow!("Failed to get template: {e}"))?;
-
-        // Convert messages to minijinja::Value (messages already processed by router)
-        let minijinja_messages: Vec<Value> = messages.iter().map(Value::from_serialize).collect();
-
-        let base_context = context! {
-            messages => &minijinja_messages,
-            add_generation_prompt => params.add_generation_prompt,
-            tools => params.tools,
-            documents => params.documents,
-        };
-
-        // Merge with template_kwargs if provided
-        let ctx = if let Some(kwargs) = params.template_kwargs {
-            context! {
-                ..base_context,
-                ..Value::from_serialize(kwargs)
-            }
-        } else {
-            base_context
-        };
-
-        // Render the template
-        let rendered = tmpl
-            .render(&ctx)
-            .map_err(|e| anyhow!("Failed to render template: {e}"))?;
-
-        Ok(rendered)
+        render_chat_template(&self.env, messages, params)
     }
 }
 
@@ -552,20 +573,50 @@ pub fn load_chat_template_from_file(template_path: &str) -> Result<Option<String
 
 /// Chat template state that can be embedded in any tokenizer struct.
 /// Eliminates duplicated apply/set/format methods across tokenizer backends.
+///
+/// The compiled `minijinja::Environment` (with the template parsed, filters
+/// registered, and Python-compat callback installed) is cached so that
+/// `apply()` only performs rendering -- no parsing or environment setup.
+/// The cache is rebuilt whenever `set()` is called.
+///
+/// `Environment<'static>` is both `Send` and `Sync`, so embedding this in
+/// tokenizer structs shared across threads is safe.
 pub struct ChatTemplateState {
-    template: Option<String>,
+    /// Cached, fully-configured environment. `None` when no template is set.
+    env: Option<Environment<'static>>,
     content_format: ChatTemplateContentFormat,
 }
 
+impl std::fmt::Debug for ChatTemplateState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatTemplateState")
+            .field("has_template", &self.env.is_some())
+            .field("content_format", &self.content_format)
+            .finish()
+    }
+}
+
 impl ChatTemplateState {
-    pub fn new(template: Option<String>) -> Self {
+    pub fn new(template: Option<String>) -> Result<Self> {
         let content_format = template
             .as_ref()
             .map(|t| detect_chat_template_content_format(t))
             .unwrap_or_default();
-        Self {
-            template,
+        let env = template.map(build_environment).transpose()?;
+        Ok(Self {
+            env,
             content_format,
+        })
+    }
+
+    /// Create a `ChatTemplateState` with no template set.
+    ///
+    /// Unlike `new(None)`, this is infallible since there is no template to
+    /// parse — useful in constructors that don't return `Result`.
+    pub fn empty() -> Self {
+        Self {
+            env: None,
+            content_format: ChatTemplateContentFormat::default(),
         }
     }
 
@@ -574,7 +625,7 @@ impl ChatTemplateState {
         messages: &[serde_json::Value],
         params: ChatTemplateParams,
     ) -> Result<String> {
-        let template = self.template.as_ref().ok_or_else(|| {
+        let env = self.env.as_ref().ok_or_else(|| {
             anyhow!(
                 "Cannot use chat template functions because tokenizer.chat_template is not set \
                  and no template argument was passed! For information about writing templates and \
@@ -582,12 +633,15 @@ impl ChatTemplateState {
                  https://huggingface.co/docs/transformers/main/en/chat_templating",
             )
         })?;
-        ChatTemplateProcessor::new(template.clone()).apply_chat_template(messages, params)
+        render_chat_template(env, messages, params)
     }
 
-    pub fn set(&mut self, template: String) {
-        self.content_format = detect_chat_template_content_format(&template);
-        self.template = Some(template);
+    pub fn set(&mut self, template: String) -> Result<()> {
+        let content_format = detect_chat_template_content_format(&template);
+        let env = build_environment(template)?;
+        self.content_format = content_format;
+        self.env = Some(env);
+        Ok(())
     }
 
     pub fn content_format(&self) -> ChatTemplateContentFormat {
@@ -601,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_chat_template_state_no_template() {
-        let state = ChatTemplateState::new(None);
+        let state = ChatTemplateState::new(None).unwrap();
         assert_eq!(state.content_format(), ChatTemplateContentFormat::String);
         let result = state.apply(&[], ChatTemplateParams::default());
         assert!(result.is_err());
@@ -609,8 +663,25 @@ mod tests {
 
     #[test]
     fn test_chat_template_state_set() {
-        let mut state = ChatTemplateState::new(None);
-        state.set("{{ messages }}".to_string());
+        let mut state = ChatTemplateState::new(None).unwrap();
+        state.set("{{ messages }}".to_string()).unwrap();
         assert_eq!(state.content_format(), ChatTemplateContentFormat::String);
+    }
+
+    #[test]
+    fn test_chat_template_state_invalid_template() {
+        let result = ChatTemplateState::new(Some("{% invalid".to_string()));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Failed to add template"),
+            "Error should explain parse failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_chat_template_processor_invalid_template() {
+        let result = ChatTemplateProcessor::new("{% invalid".to_string());
+        assert!(result.is_err());
     }
 }

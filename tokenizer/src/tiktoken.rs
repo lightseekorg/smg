@@ -125,8 +125,6 @@ fn parse_special_tokens(config: &serde_json::Value) -> SpecialTokens {
 /// Tiktoken tokenizer wrapper — supports both built-in OpenAI encodings and hub-loaded models.
 pub struct TiktokenTokenizer {
     tokenizer: CoreBPE,
-    #[expect(dead_code)]
-    model: Option<TiktokenModel>,
     special_tokens: SpecialTokens,
     vocab: HashMap<String, TokenIdType>,
     reverse_vocab: HashMap<TokenIdType, String>,
@@ -175,12 +173,11 @@ impl TiktokenTokenizer {
 
         Ok(TiktokenTokenizer {
             tokenizer,
-            model: Some(model),
             special_tokens,
             vocab: HashMap::new(),
             reverse_vocab: HashMap::new(),
             vocab_size,
-            chat_template: ChatTemplateState::new(None),
+            chat_template: ChatTemplateState::empty(),
         })
     }
 
@@ -264,12 +261,11 @@ impl TiktokenTokenizer {
 
         Ok(TiktokenTokenizer {
             tokenizer,
-            model: None,
             special_tokens: config.special_tokens,
             vocab,
             reverse_vocab,
             vocab_size,
-            chat_template: ChatTemplateState::new(chat_template),
+            chat_template: ChatTemplateState::new(chat_template)?,
         })
     }
 
@@ -494,8 +490,8 @@ impl TokenizerTrait for TiktokenTokenizer {
         self.chat_template.content_format()
     }
 
-    fn set_chat_template(&mut self, template: String) {
-        self.chat_template.set(template);
+    fn set_chat_template(&mut self, template: String) -> Result<()> {
+        self.chat_template.set(template)
     }
 }
 

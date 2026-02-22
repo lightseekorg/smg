@@ -516,6 +516,140 @@ mod tests {
         }
     }
 
+    /// Test that the jail buffer correctly handles a stop sequence that arrives
+    /// across 2+ tokens.  The MockTokenizer decodes token 1 as "Hello" and
+    /// token 2's incremental contribution as " world", so the jail buffer
+    /// progressively becomes "Hello" then "Hello world".
+    ///
+    /// With stop sequence "Hello world":
+    ///   - Token 1: jail = "Hello" — partial prefix match → Held (or Text of
+    ///     the portion before the potential match, which is empty here)
+    ///   - Token 2: jail = "Hello world" — full match → Stopped
+    #[test]
+    fn test_stop_sequence_spanning_multiple_tokens() {
+        let tokenizer = Arc::new(MockTokenizer::new());
+
+        // "Hello world" spans token 1 ("Hello") and token 2 (" world")
+        let config = StopSequenceConfig::default().with_stop_sequence("Hello world");
+        let mut decoder = StopSequenceDecoder::new(tokenizer, config, false);
+
+        // Token 1 ("Hello"): The jail buffer now contains "Hello".
+        // "Hello" is a prefix of stop sequence "Hello world", so the text
+        // must be held — we should NOT see it emitted as Text yet.
+        let result1 = decoder.process_token(1).unwrap();
+        assert!(
+            matches!(result1, SequenceDecoderOutput::Held),
+            "Expected Held while jail buffer is a prefix of the stop sequence, got {result1:?}"
+        );
+        assert!(
+            !decoder.is_stopped(),
+            "Decoder should not be stopped after a partial match"
+        );
+
+        // Token 2 (" world"): The jail buffer now contains "Hello world",
+        // which fully matches the stop sequence. The decoder should stop.
+        let result2 = decoder.process_token(2).unwrap();
+        assert_eq!(
+            result2,
+            SequenceDecoderOutput::Stopped,
+            "Expected Stopped when jail buffer matches the hidden stop sequence"
+        );
+        assert!(
+            decoder.is_stopped(),
+            "Decoder should be stopped after the full stop sequence match"
+        );
+
+        // Any further tokens should also return Stopped
+        let result3 = decoder.process_token(3).unwrap();
+        assert_eq!(result3, SequenceDecoderOutput::Stopped);
+    }
+
+    /// Same as above but with a *visible* stop sequence.  When the stop
+    /// sequence "Hello world" is visible, the matched text should be included
+    /// in the output via StoppedWithText.
+    #[test]
+    fn test_visible_stop_sequence_spanning_multiple_tokens() {
+        let tokenizer = Arc::new(MockTokenizer::new());
+
+        let config = StopSequenceConfig::default().with_visible_stop_sequence("Hello world");
+        let mut decoder = StopSequenceDecoder::new(tokenizer, config, false);
+
+        // Token 1 ("Hello"): partial match, should be held
+        let result1 = decoder.process_token(1).unwrap();
+        assert!(
+            matches!(result1, SequenceDecoderOutput::Held),
+            "Expected Held for partial visible stop sequence match, got {result1:?}"
+        );
+
+        // Token 2 (" world"): completes "Hello world" — visible stop
+        let result2 = decoder.process_token(2).unwrap();
+        match &result2 {
+            SequenceDecoderOutput::StoppedWithText(text) => {
+                assert!(
+                    text.contains("Hello world"),
+                    "Visible stop output should contain the full stop sequence, got: {text:?}"
+                );
+            }
+            other => panic!("Expected StoppedWithText for visible stop sequence, got {other:?}"),
+        }
+        assert!(decoder.is_stopped());
+    }
+
+    /// Test a stop sequence that spans 3 tokens, with preceding text that
+    /// should be emitted before the jailed portion.
+    ///
+    /// Tokens: 3 ("test"), 1 ("Hello"), 2 ("world")
+    /// Stop sequence: "Hello world"
+    ///
+    /// - Token 3: produces "test" — no overlap with "Hello world" → Text("test")
+    /// - Token 1: produces " Hello" — "Hello" is a prefix of "Hello world"
+    ///   so " " is flushed as Text and "Hello" is held
+    /// - Token 2: produces " world" — jail now "Hello world" → Stopped
+    #[test]
+    fn test_stop_sequence_spanning_tokens_with_preceding_text() {
+        let tokenizer = Arc::new(MockTokenizer::new());
+
+        let config = StopSequenceConfig::default().with_stop_sequence("Hello world");
+        let mut decoder = StopSequenceDecoder::new(tokenizer, config, false);
+
+        // Token 3 ("test"): no overlap with "Hello world" at all
+        let result1 = decoder.process_token(3).unwrap();
+        assert!(
+            matches!(result1, SequenceDecoderOutput::Text(_)),
+            "Expected Text for token with no stop sequence overlap, got {result1:?}"
+        );
+
+        // Token 1 ("Hello"): the incremental text is " Hello" (because mock
+        // tokenizer joins with spaces). The tail "Hello" is a prefix of the
+        // stop sequence, so the decoder should split: emit the non-matching
+        // prefix as Text (the space " ") and hold "Hello".
+        let result2 = decoder.process_token(1).unwrap();
+        match &result2 {
+            SequenceDecoderOutput::Text(text) => {
+                // The emitted text should be the portion before the partial match
+                assert!(
+                    !text.contains("Hello"),
+                    "Partially-matched 'Hello' should be jailed, not emitted. Got: {text:?}"
+                );
+            }
+            SequenceDecoderOutput::Held => {
+                // Also acceptable if the entire chunk is held (implementation detail)
+            }
+            other => panic!("Expected Text (prefix before partial match) or Held, got {other:?}"),
+        }
+
+        // Token 2 ("world"): completes the stop sequence
+        let result3 = decoder.process_token(2).unwrap();
+        assert!(
+            matches!(
+                result3,
+                SequenceDecoderOutput::Stopped | SequenceDecoderOutput::StoppedWithText(_)
+            ),
+            "Expected Stopped or StoppedWithText when stop sequence completes, got {result3:?}"
+        );
+        assert!(decoder.is_stopped());
+    }
+
     #[test]
     fn test_utf8_multibyte_character_boundaries() {
         // This test verifies the fix for the UTF-8 boundary panic

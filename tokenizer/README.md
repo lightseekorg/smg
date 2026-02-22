@@ -27,6 +27,7 @@ as of `tokenizer/src/*`.
 - `huggingface.rs` – wrapper over `tokenizers::Tokenizer`, chat template loading, vocab access
 - `tiktoken.rs` – wrapper over `tiktoken-rs` encoders for OpenAI model families and hub-loaded tiktoken models (includes `tokenizer_config.json` parsing for the tiktoken path)
 - `chat_template.rs` – AST-driven Jinja template inspection, rendering utilities, shared `ChatTemplateState`, and template file loading
+- `registry.rs` – thread-safe tokenizer registry with deduplication for IGW mode, supporting lookup by UUID or name
 - `sequence.rs` – stateful incremental decoding helper used by router sequences
 - `stream.rs` – stateless streaming decoder that yields textual chunks from token streams
 - `stop.rs` – stop-sequence detection with "jail" buffering and a builder API
@@ -39,7 +40,7 @@ as of `tokenizer/src/*`.
   threads. Concrete backends implement the minimal methods: `encode`, `encode_batch`, `decode`,
   `vocab_size`, special-token lookup, and optional token↔id conversions.
 - `Encoding` wraps backend-specific results: `Hf` holds the Hugging Face encoding object,
-  `Sp` is a plain ID vector reserved for future SentencePiece support, and `Tiktoken` stores u32 IDs
+  `Plain` is a general-purpose `Vec<u32>` container, and `Tiktoken` stores u32 IDs
   from `tiktoken-rs`. `Encoding::token_ids()` is the zero-copy accessor used everywhere.
 - `SpecialTokens` collects optional BOS/EOS/etc. markers so upstream code can make backend-agnostic
   decisions.
@@ -125,7 +126,7 @@ as of `tokenizer/src/*`.
 
 ## Caching (`cache/`)
 The caching subsystem provides multi-level caching for tokenizer results:
-- `L0Cache`: In-memory LRU cache for exact-match token ID lookups
+- `L0Cache`: In-memory exact-match cache with approximate LRU eviction for token ID lookups
 - `L1Cache`: Prefix-based cache that can reuse partial encoding results
 - `CachedTokenizer`: Wrapper that adds caching to any tokenizer implementation
 - `TokenizerFingerprint`: Content-based fingerprinting for cache key generation
@@ -135,11 +136,11 @@ The caching subsystem provides multi-level caching for tokenizer results:
   stop-sequence behaviour (`tests.rs`, `sequence.rs`, `stop.rs`, `tiktoken.rs`, `factory.rs`,
   `hub.rs`). Network-dependent Hugging Face downloads are exercised behind a best-effort async test
   that skips in CI without credentials.
-- Use `cargo test -p tokenizer` to run the crate's test suite.
+- Use `cargo test -p llm-tokenizer` to run the crate's test suite.
 
 ## Known Limitations & Future Work
 - SentencePiece (`.model`) and GGUF tokenizers are detected but deliberately unimplemented.
-- `Encoding::Sp` exists for future SentencePiece support but currently behaves as a simple `Vec<u32>`.
+- `Encoding::Plain` is a general-purpose `Vec<u32>` container used by mock tokenizers and cache merge logic.
 - Built-in `TiktokenTokenizer` models (via `from_model_name`) have empty vocab maps, so
   `token_to_id`/`id_to_token` return `None`. Hub-loaded models (via `from_dir`) have full mappings.
 - There is no metrics or batching layer inside this module; the router records metrics elsewhere.
@@ -149,21 +150,24 @@ The caching subsystem provides multi-level caching for tokenizer results:
 ```rust
 use std::sync::Arc;
 use llm_tokenizer::{
-    create_tokenizer, SequenceDecoderOutput, StopSequenceDecoderBuilder, Tokenizer,
+    create_tokenizer_from_file, create_tokenizer, SequenceDecoderOutput, Tokenizer,
+    stop::StopSequenceDecoderBuilder,
 };
 
 // Load a tokenizer from disk (Hugging Face JSON)
-let tokenizer = Tokenizer::from_file("/path/to/tokenizer.json")?;
+// create_tokenizer_from_file returns Arc<dyn Tokenizer>
+let inner = create_tokenizer_from_file("/path/to/tokenizer.json")?;
+let tokenizer = Tokenizer::from_arc(Arc::clone(&inner));
 let encoding = tokenizer.encode("Hello, world!", false)?;
 assert!(!encoding.token_ids().is_empty());
 
-// Auto-detect OpenAI GPT tokenizer
-let openai = create_tokenizer("gpt-4")?;
+// Auto-detect OpenAI GPT tokenizer (returns Arc<dyn Tokenizer>)
+let openai = Tokenizer::from_arc(create_tokenizer("gpt-4")?);
 let text = openai.decode(&[1, 2, 3], true)?;
 
 // Incremental decoding with stop sequences
 let mut stream = tokenizer.decode_stream(&[], true);
-let mut stop = StopSequenceDecoderBuilder::new(Arc::clone(&tokenizer))
+let mut stop = StopSequenceDecoderBuilder::new(Arc::clone(&inner))
     .stop_sequence("\nHuman:")
     .build();
 for &token in encoding.token_ids() {
@@ -184,7 +188,7 @@ for &token in encoding.token_ids() {
 // Apply a chat template when one is bundled with the tokenizer
 use llm_tokenizer::{chat_template::ChatTemplateParams, HuggingFaceTokenizer};
 
-let mut hf = HuggingFaceTokenizer::from_file_with_chat_template(
+let hf = HuggingFaceTokenizer::from_file_with_chat_template(
     "./tokenizer.json",
     Some("./chat_template.jinja"),
 )?;
@@ -196,7 +200,6 @@ let prompt = hf.apply_chat_template(
     &messages,
     ChatTemplateParams {
         add_generation_prompt: true,
-        continue_final_message: false,
         tools: None,
         documents: None,
         template_kwargs: None,

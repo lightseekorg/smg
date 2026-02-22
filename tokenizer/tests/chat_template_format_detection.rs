@@ -170,7 +170,7 @@ assistant:
 {%- endif %}
 ";
 
-    let processor = ChatTemplateProcessor::new(template.to_string());
+    let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
 
     let messages = [
         ChatMessage::System {
@@ -211,7 +211,7 @@ fn test_chat_template_with_tokens_unit_test() {
 {% endfor -%}
 ";
 
-    let processor = ChatTemplateProcessor::new(template.to_string());
+    let processor = ChatTemplateProcessor::new(template.to_string()).unwrap();
 
     let messages = [ChatMessage::User {
         content: MessageContent::Text("Test".to_string()),

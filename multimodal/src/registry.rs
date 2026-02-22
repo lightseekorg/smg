@@ -445,7 +445,7 @@ mod tests {
 
     impl Encoder for TestTokenizer {
         fn encode(&self, _input: &str, _add_special_tokens: bool) -> anyhow::Result<Encoding> {
-            Ok(Encoding::Sp(Vec::new()))
+            Ok(Encoding::Plain(Vec::new()))
         }
 
         fn encode_batch(

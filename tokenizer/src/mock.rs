@@ -75,7 +75,7 @@ impl Encoder for MockTokenizer {
             .filter_map(|word| self.vocab.get(word).copied())
             .collect();
 
-        Ok(Encoding::Sp(tokens))
+        Ok(Encoding::Plain(tokens))
     }
 
     fn encode_batch(&self, inputs: &[&str], add_special_tokens: bool) -> Result<Vec<Encoding>> {
