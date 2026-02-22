@@ -6,13 +6,17 @@ on:
     paths:
       - 'model_gateway/benches/radix_tree_benchmark.rs'
       - 'kv_index/**'
-      - 'model_gateway/src/policies/tree.rs'
+      - '!kv_index/**/tests/**'
+      - '!kv_index/**/*_test.rs'
+      - '!kv_index/**/test_*.rs'
   pull_request:
     branches: [ main ]
     paths:
       - 'model_gateway/benches/radix_tree_benchmark.rs'
       - 'kv_index/**'
-      - 'model_gateway/src/policies/tree.rs'
+      - '!kv_index/**/tests/**'
+      - '!kv_index/**/*_test.rs'
+      - '!kv_index/**/test_*.rs'
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * 0'
@@ -45,9 +49,7 @@ jobs:
     needs: check-ci
     if: |
       github.repository == 'lightseekorg/smg' &&
-      needs.check-ci.outputs.should_run == 'true' &&
-      (github.event_name != 'pull_request' ||
-       contains(github.event.pull_request.labels.*.name, 'router-benchmark'))
+      needs.check-ci.outputs.should_run == 'true'
     runs-on: k8s-runner-gpu
     steps:
       - uses: actions/checkout@v6
