@@ -125,8 +125,6 @@ fn parse_special_tokens(config: &serde_json::Value) -> SpecialTokens {
 /// Tiktoken tokenizer wrapper — supports both built-in OpenAI encodings and hub-loaded models.
 pub struct TiktokenTokenizer {
     tokenizer: CoreBPE,
-    #[expect(dead_code)]
-    model: Option<TiktokenModel>,
     special_tokens: SpecialTokens,
     vocab: HashMap<String, TokenIdType>,
     reverse_vocab: HashMap<TokenIdType, String>,
@@ -175,7 +173,6 @@ impl TiktokenTokenizer {
 
         Ok(TiktokenTokenizer {
             tokenizer,
-            model: Some(model),
             special_tokens,
             vocab: HashMap::new(),
             reverse_vocab: HashMap::new(),
@@ -264,7 +261,6 @@ impl TiktokenTokenizer {
 
         Ok(TiktokenTokenizer {
             tokenizer,
-            model: None,
             special_tokens: config.special_tokens,
             vocab,
             reverse_vocab,

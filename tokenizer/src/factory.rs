@@ -262,18 +262,36 @@ pub async fn create_tokenizer_async(
 
 /// Check if a model name looks like an OpenAI model that should use tiktoken.
 ///
-/// Uses targeted patterns to avoid false positives on HuggingFace models
-/// like "openai/gpt-oss-20b".
+/// Uses targeted patterns to minimise false positives.  False negatives are
+/// acceptable — the caller falls back to HuggingFace Hub download, which
+/// handles non-OpenAI models correctly.  False positives waste time by
+/// trying tiktoken for a model that doesn't support it.
+///
+/// Real OpenAI model names matched:
+///   gpt-4, gpt-4o, gpt-4-turbo, gpt-4-32k, gpt-4o-mini,
+///   gpt-3.5-turbo, gpt-3.5-turbo-16k, gpt-3.5-turbo-instruct,
+///   text-davinci-003, code-davinci-002, davinci,
+///   text-curie-001, curie, text-babbage-001, babbage,
+///   text-ada-001, text-embedding-ada-002, ada
 fn is_likely_openai_model(name: &str) -> bool {
-    name.contains("gpt-4")
-        || name.contains("gpt-3.5")
-        || name.contains("gpt-3")
-        || name.contains("turbo")
-        || name.contains("davinci")
-        || name.contains("curie")
-        || name.contains("babbage")
-        || name.contains("ada")
-        || name.contains("codex")
+    // GPT-4 family (gpt-4, gpt-4o, gpt-4-turbo, gpt-4-32k, …)
+    if name.contains("gpt-4") || name.contains("gpt-3.5") {
+        return true;
+    }
+
+    // Legacy completion / embedding / edit models.
+    // Use prefix-based checks ("text-", "code-") or exact-match for bare
+    // names to avoid matching unrelated models (e.g. "adapter-v2" for "ada",
+    // "turbo-llama" for "turbo").
+    let bare = name.rsplit('/').next().unwrap_or(name);
+    matches!(bare, "davinci" | "curie" | "babbage" | "ada")
+        || bare.starts_with("text-davinci")
+        || bare.starts_with("code-davinci")
+        || bare.starts_with("text-curie")
+        || bare.starts_with("text-babbage")
+        || bare.starts_with("text-ada")
+        || bare.starts_with("text-embedding-ada")
+        || bare.starts_with("code-cushman")
 }
 
 /// Factory function to create tokenizer with optional chat template (async version)

@@ -58,8 +58,8 @@ pub trait Tokenizer: Encoder + Decoder {
 pub enum Encoding {
     /// Hugging Face
     Hf(Box<tokenizers::tokenizer::Encoding>),
-    /// Sentence Piece
-    Sp(Vec<TokenIdType>),
+    /// Plain token ID vector
+    Plain(Vec<TokenIdType>),
     /// Tiktoken (for GPT models) - now uses u32 in tiktoken-rs 0.7.0
     Tiktoken(Vec<TokenIdType>),
 }
@@ -70,15 +70,9 @@ impl Encoding {
     pub fn token_ids(&self) -> &[TokenIdType] {
         match self {
             Encoding::Hf(inner) => inner.get_ids(),
-            Encoding::Sp(inner) => inner,
+            Encoding::Plain(inner) => inner,
             Encoding::Tiktoken(inner) => inner,
         }
-    }
-
-    /// Deprecated: Use token_ids() instead (kept for compatibility)
-    #[deprecated(since = "0.1.0", note = "Use token_ids() instead")]
-    pub fn token_ids_ref(&self) -> &[TokenIdType] {
-        self.token_ids()
     }
 
     /// Get a hash of the token IDs for caching purposes
@@ -94,7 +88,7 @@ impl Hash for Encoding {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             Encoding::Hf(inner) => inner.get_ids().hash(state),
-            Encoding::Sp(inner) => inner.hash(state),
+            Encoding::Plain(inner) => inner.hash(state),
             Encoding::Tiktoken(inner) => inner.hash(state),
         }
     }

@@ -63,9 +63,6 @@ pub struct CachedTokenizer {
     l0: Option<L0Cache>,
     /// L1 cache (prefix matching at fixed boundaries)
     l1: Option<L1Cache>,
-    /// Configuration
-    #[expect(dead_code)]
-    config: CacheConfig,
     /// Fingerprint for cache invalidation
     fingerprint: TokenizerFingerprint,
     /// Cached special token strings (extracted once at construction)
@@ -96,7 +93,6 @@ impl CachedTokenizer {
             inner,
             l0,
             l1,
-            config,
             fingerprint,
             special_token_strings,
         }
@@ -189,7 +185,7 @@ impl Encoder for CachedTokenizer {
                     let mut merged_tokens = prefix_tokens;
                     merged_tokens.extend_from_slice(suffix_encoding.token_ids());
 
-                    let merged_encoding = Encoding::Sp(merged_tokens);
+                    let merged_encoding = Encoding::Plain(merged_tokens);
 
                     if let Some(l0) = &self.l0 {
                         l0.insert(
