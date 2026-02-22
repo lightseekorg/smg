@@ -58,6 +58,13 @@ def _build_command(
         if os.environ.get(var):
             cmd.extend(["-e", var])
 
+    # Use local tokenizer path if model is available on disk (avoids slow HF download)
+    tokenizer_path = model_path
+    if local_model_path:
+        local_tokenizer = os.path.join(local_model_path, model_path)
+        if os.path.isdir(local_tokenizer):
+            tokenizer_path = local_tokenizer
+
     cmd.extend(
         [
             image,
@@ -71,7 +78,7 @@ def _build_command(
             "--api-model-name",
             model_path,
             "--model-tokenizer",
-            model_path,
+            tokenizer_path,
             "--task",
             task,
             "--max-requests-per-run",
