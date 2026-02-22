@@ -1,10 +1,14 @@
 #!/bin/bash
-# Pre-release version check for SMG workspace crates.
+# Pre-release version check for SMG workspace crates and PyPI proto package.
 #
 # For each workspace crate, verifies:
 #   1. Whether there are code changes since the latest git tag
 #   2. Whether the crate version was bumped in its own Cargo.toml
 #   3. Whether the workspace root Cargo.toml reflects the new version
+#
+# For the smg-grpc-proto PyPI package, verifies:
+#   4. Whether proto files changed since the latest git tag
+#   5. Whether the PyPI version was bumped in __init__.py
 #
 # Detects bump level from conventional commits:
 #   - feat!: or BREAKING CHANGE → major
@@ -291,6 +295,61 @@ for entry in "${CRATES[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
+# Phase 1b: Check gRPC proto / PyPI package version
+# ---------------------------------------------------------------------------
+PROTO_DIR="grpc_client/proto"
+PYPI_VERSION_FILE="grpc_client/python/smg_grpc_proto/__init__.py"
+PYPI_NEEDS_BUMP=""
+
+# Extract __version__ from __init__.py
+get_pypi_version() {
+    local file="$1"
+    grep -m1 '__version__' "$file" | sed 's/.*"\(.*\)".*/\1/'
+}
+
+# Extract __version__ at a specific git ref
+get_pypi_version_at_ref() {
+    local file="$1"
+    local ref="$2"
+    local content
+    content=$(git show "$ref:$file" 2>/dev/null) || return 0
+    echo "$content" | grep -m1 '__version__' | sed 's/.*"\(.*\)".*/\1/'
+}
+
+# Update __version__ in __init__.py
+set_pypi_version() {
+    local file="$1"
+    local new_version="$2"
+    sed_inplace "s/__version__ = \".*\"/__version__ = \"${new_version}\"/" "$file"
+    if ! grep -q "__version__ = \"${new_version}\"" "$file"; then
+        echo -e "    ${RED}FAILED to update $file${NC}" >&2
+        return 1
+    fi
+}
+
+echo ""
+echo -e "${BOLD}Checking PyPI proto package:${NC}"
+
+proto_diff_count=$(git diff --name-only "$TAG"..HEAD -- "$PROTO_DIR/" | wc -l | tr -d ' ')
+if [[ "$proto_diff_count" -eq 0 ]]; then
+    echo -e "  ${GREEN}✓${NC} ${BOLD}smg-grpc-proto${NC} ($PROTO_DIR/) — no proto changes"
+else
+    pypi_current=$(get_pypi_version "$PYPI_VERSION_FILE")
+    pypi_tag=$(get_pypi_version_at_ref "$PYPI_VERSION_FILE" "$TAG")
+
+    if [[ -z "$pypi_tag" ]]; then
+        echo -e "  ${GREEN}✓${NC} ${BOLD}smg-grpc-proto${NC} ($PROTO_DIR/) — new package (v$pypi_current), $proto_diff_count proto file(s) changed"
+    elif [[ "$pypi_current" == "$pypi_tag" ]]; then
+        level=$(detect_bump_level "$PROTO_DIR")
+        echo -e "  ${YELLOW}!${NC} ${BOLD}smg-grpc-proto${NC} ($PROTO_DIR/) — $proto_diff_count proto file(s) changed but PyPI version not bumped (v$pypi_current) [$(bump_label "$level")]"
+        PYPI_NEEDS_BUMP="$pypi_current|$level"
+        issues=$((issues + 1))
+    else
+        echo -e "  ${GREEN}✓${NC} ${BOLD}smg-grpc-proto${NC} ($PROTO_DIR/) — v$pypi_tag → v$pypi_current ($proto_diff_count proto file(s) changed)"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -306,7 +365,7 @@ echo -e "${RED}${BOLD}$issues issue(s) found.${NC}"
 # ---------------------------------------------------------------------------
 # Phase 2: Offer to fix
 # ---------------------------------------------------------------------------
-total_fixes=$(( ${#NEEDS_BUMP[@]} + ${#NEEDS_WS_SYNC[@]} ))
+total_fixes=$(( ${#NEEDS_BUMP[@]} + ${#NEEDS_WS_SYNC[@]} + (${#PYPI_NEEDS_BUMP} > 0 ? 1 : 0) ))
 if [[ "$total_fixes" -eq 0 ]]; then
     exit 1
 fi
@@ -328,6 +387,12 @@ if [[ ${#NEEDS_WS_SYNC[@]} -gt 0 ]]; then
         IFS='|' read -r name dep_key crate_version ws_version path <<< "$entry"
         echo -e "  ${BLUE}sync${NC} workspace Cargo.toml $dep_key v$ws_version → v$crate_version"
     done
+fi
+
+if [[ -n "$PYPI_NEEDS_BUMP" ]]; then
+    IFS='|' read -r pypi_ver pypi_level <<< "$PYPI_NEEDS_BUMP"
+    pypi_new=$(bump_version "$pypi_ver" "$pypi_level")
+    echo -e "  $(bump_label "$pypi_level") smg-grpc-proto v$pypi_ver → v$pypi_new ($PYPI_VERSION_FILE)"
 fi
 
 echo ""
@@ -374,6 +439,16 @@ if [[ ${#NEEDS_WS_SYNC[@]} -gt 0 ]]; then
             fix_failed=$((fix_failed + 1))
         fi
     done
+fi
+
+if [[ -n "$PYPI_NEEDS_BUMP" ]]; then
+    IFS='|' read -r pypi_ver pypi_level <<< "$PYPI_NEEDS_BUMP"
+    pypi_new=$(bump_version "$pypi_ver" "$pypi_level")
+    if set_pypi_version "$PYPI_VERSION_FILE" "$pypi_new"; then
+        echo -e "  ${GREEN}✓${NC} $PYPI_VERSION_FILE → v$pypi_new"
+    else
+        fix_failed=$((fix_failed + 1))
+    fi
 fi
 
 echo ""
