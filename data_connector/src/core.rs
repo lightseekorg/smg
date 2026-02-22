@@ -10,7 +10,7 @@
 
 use std::{
     collections::HashMap,
-    fmt::{Display, Formatter},
+    fmt::{Display, Formatter, Write},
 };
 
 use async_trait::async_trait;
@@ -31,7 +31,11 @@ impl ConversationId {
         let mut rng = rand::rng();
         let mut bytes = [0u8; 25];
         rng.fill_bytes(&mut bytes);
-        let hex_string: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let mut hex_string = String::with_capacity(50);
+        for b in &bytes {
+            // Writing to a String is infallible; discard the always-Ok result.
+            let _ = write!(hex_string, "{b:02x}");
+        }
         Self(format!("conv_{hex_string}"))
     }
 }
@@ -261,21 +265,25 @@ pub fn make_item_id(item_type: &str) -> ConversationItemId {
     let mut rng = rand::rng();
     let mut bytes = [0u8; 25];
     rng.fill_bytes(&mut bytes);
-    let hex_string: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let mut hex_string = String::with_capacity(50);
+    for b in &bytes {
+        // Writing to a String is infallible; discard the always-Ok result.
+        let _ = write!(hex_string, "{b:02x}");
+    }
 
-    let prefix: String = match item_type {
-        "message" => "msg".to_string(),
-        "reasoning" => "rs".to_string(),
-        "mcp_call" => "mcp".to_string(),
-        "mcp_list_tools" => "mcpl".to_string(),
-        "function_call" => "fc".to_string(),
+    let prefix = match item_type {
+        "message" => "msg",
+        "reasoning" => "rs",
+        "mcp_call" => "mcp",
+        "mcp_list_tools" => "mcpl",
+        "function_call" => "fc",
         other => {
             // Fallback: first 3 letters of type or "itm"
-            let mut p = other.chars().take(3).collect::<String>();
-            if p.is_empty() {
-                p = "itm".to_string();
+            let fallback: String = other.chars().take(3).collect();
+            if fallback.is_empty() {
+                return ConversationItemId(format!("itm_{hex_string}"));
             }
-            p
+            return ConversationItemId(format!("{fallback}_{hex_string}"));
         }
     };
     ConversationItemId(format!("{prefix}_{hex_string}"))
@@ -479,5 +487,437 @@ pub trait ResponseStorage: Send + Sync {
 impl Default for StoredResponse {
     fn default() -> Self {
         Self::new(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    // ========================================================================
+    // ConversationId tests
+    // ========================================================================
+
+    #[test]
+    fn conversation_id_new_has_conv_prefix() {
+        let id = ConversationId::new();
+        assert!(
+            id.0.starts_with("conv_"),
+            "ConversationId should start with 'conv_', got: {id}"
+        );
+    }
+
+    #[test]
+    fn conversation_id_new_generates_unique_ids() {
+        let ids: HashSet<String> = (0..100).map(|_| ConversationId::new().0).collect();
+        assert_eq!(ids.len(), 100, "all 100 ConversationIds should be unique");
+    }
+
+    #[test]
+    fn conversation_id_new_has_consistent_length() {
+        // "conv_" (5 chars) + 50 hex chars = 55 total
+        for _ in 0..10 {
+            let id = ConversationId::new();
+            assert_eq!(
+                id.0.len(),
+                55,
+                "ConversationId should be 55 chars (conv_ + 50 hex), got {} chars: {id}",
+                id.0.len()
+            );
+        }
+    }
+
+    #[test]
+    fn conversation_id_default_works_same_as_new() {
+        let id = ConversationId::default();
+        assert!(
+            id.0.starts_with("conv_"),
+            "Default ConversationId should start with 'conv_', got: {id}"
+        );
+        assert_eq!(id.0.len(), 55, "Default ConversationId should be 55 chars");
+    }
+
+    #[test]
+    fn conversation_id_from_string() {
+        let id = ConversationId::from("my_custom_id".to_string());
+        assert_eq!(id.0, "my_custom_id");
+    }
+
+    #[test]
+    fn conversation_id_from_str() {
+        let id = ConversationId::from("my_custom_id");
+        assert_eq!(id.0, "my_custom_id");
+    }
+
+    #[test]
+    fn conversation_id_display() {
+        let id = ConversationId::from("conv_abc123");
+        assert_eq!(format!("{id}"), "conv_abc123");
+    }
+
+    // ========================================================================
+    // ConversationItemId tests
+    // ========================================================================
+
+    #[test]
+    fn conversation_item_id_from_string() {
+        let id = ConversationItemId::from("item_123".to_string());
+        assert_eq!(id.0, "item_123");
+    }
+
+    #[test]
+    fn conversation_item_id_from_str() {
+        let id = ConversationItemId::from("item_456");
+        assert_eq!(id.0, "item_456");
+    }
+
+    #[test]
+    fn conversation_item_id_display() {
+        let id = ConversationItemId::from("msg_abc");
+        assert_eq!(format!("{id}"), "msg_abc");
+    }
+
+    // ========================================================================
+    // ResponseId tests
+    // ========================================================================
+
+    #[test]
+    fn response_id_new_generates_valid_ulid() {
+        let id = ResponseId::new();
+        // ULID strings are 26 characters, uppercase alphanumeric (Crockford Base32)
+        assert_eq!(
+            id.0.len(),
+            26,
+            "ULID string should be 26 chars, got {} chars: {}",
+            id.0.len(),
+            id.0
+        );
+        assert!(
+            id.0.chars().all(|c| c.is_ascii_alphanumeric()),
+            "ULID should contain only alphanumeric characters, got: {}",
+            id.0
+        );
+    }
+
+    #[test]
+    fn response_id_new_generates_unique_ids() {
+        let ids: HashSet<String> = (0..100).map(|_| ResponseId::new().0).collect();
+        assert_eq!(ids.len(), 100, "all 100 ResponseIds should be unique");
+    }
+
+    #[test]
+    fn response_id_default_works_same_as_new() {
+        let id = ResponseId::default();
+        assert_eq!(id.0.len(), 26, "Default ResponseId should be 26-char ULID");
+    }
+
+    #[test]
+    fn response_id_from_string() {
+        let id = ResponseId::from("resp_custom".to_string());
+        assert_eq!(id.0, "resp_custom");
+    }
+
+    #[test]
+    fn response_id_from_str() {
+        let id = ResponseId::from("resp_custom");
+        assert_eq!(id.0, "resp_custom");
+    }
+
+    // ========================================================================
+    // make_item_id() tests
+    // ========================================================================
+
+    #[test]
+    fn make_item_id_message_prefix() {
+        let id = make_item_id("message");
+        assert!(
+            id.0.starts_with("msg_"),
+            "message type should produce 'msg_' prefix, got: {id}"
+        );
+    }
+
+    #[test]
+    fn make_item_id_reasoning_prefix() {
+        let id = make_item_id("reasoning");
+        assert!(
+            id.0.starts_with("rs_"),
+            "reasoning type should produce 'rs_' prefix, got: {id}"
+        );
+    }
+
+    #[test]
+    fn make_item_id_mcp_call_prefix() {
+        let id = make_item_id("mcp_call");
+        assert!(
+            id.0.starts_with("mcp_"),
+            "mcp_call type should produce 'mcp_' prefix, got: {id}"
+        );
+    }
+
+    #[test]
+    fn make_item_id_mcp_list_tools_prefix() {
+        let id = make_item_id("mcp_list_tools");
+        assert!(
+            id.0.starts_with("mcpl_"),
+            "mcp_list_tools type should produce 'mcpl_' prefix, got: {id}"
+        );
+    }
+
+    #[test]
+    fn make_item_id_function_call_prefix() {
+        let id = make_item_id("function_call");
+        assert!(
+            id.0.starts_with("fc_"),
+            "function_call type should produce 'fc_' prefix, got: {id}"
+        );
+    }
+
+    #[test]
+    fn make_item_id_unknown_type_uses_first_3_chars() {
+        let id = make_item_id("custom_type");
+        assert!(
+            id.0.starts_with("cus_"),
+            "unknown type 'custom_type' should produce 'cus_' prefix, got: {id}"
+        );
+    }
+
+    #[test]
+    fn make_item_id_empty_type_uses_itm() {
+        let id = make_item_id("");
+        assert!(
+            id.0.starts_with("itm_"),
+            "empty type string should produce 'itm_' prefix, got: {id}"
+        );
+    }
+
+    #[test]
+    fn make_item_id_correct_length() {
+        // Each known prefix: prefix + "_" + 50 hex chars
+        let test_cases = vec![
+            ("message", "msg_"),
+            ("reasoning", "rs_"),
+            ("mcp_call", "mcp_"),
+            ("mcp_list_tools", "mcpl_"),
+            ("function_call", "fc_"),
+        ];
+
+        for (item_type, prefix) in test_cases {
+            let id = make_item_id(item_type);
+            let expected_len = prefix.len() + 50;
+            assert_eq!(
+                id.0.len(),
+                expected_len,
+                "make_item_id(\"{item_type}\") should be {expected_len} chars ('{prefix}' + 50 hex), got {} chars: {id}",
+                id.0.len()
+            );
+        }
+
+        // Unknown type: first 3 chars + "_" + 50 hex = 54 chars
+        let id = make_item_id("custom_type");
+        assert_eq!(
+            id.0.len(),
+            54,
+            "unknown type should be 54 chars (3 char prefix + '_' + 50 hex), got {} chars: {id}",
+            id.0.len()
+        );
+
+        // Empty type: "itm_" + 50 hex = 54 chars
+        let id = make_item_id("");
+        assert_eq!(
+            id.0.len(),
+            54,
+            "empty type should be 54 chars ('itm_' + 50 hex), got {} chars: {id}",
+            id.0.len()
+        );
+    }
+
+    // ========================================================================
+    // Conversation tests
+    // ========================================================================
+
+    #[test]
+    fn conversation_new_generates_id_if_none_provided() {
+        let conv = Conversation::new(NewConversation {
+            id: None,
+            metadata: None,
+        });
+        assert!(
+            conv.id.0.starts_with("conv_"),
+            "should generate a ConversationId when none provided, got: {}",
+            conv.id
+        );
+    }
+
+    #[test]
+    fn conversation_new_uses_provided_id() {
+        let custom_id = ConversationId::from("my_conv_id");
+        let conv = Conversation::new(NewConversation {
+            id: Some(custom_id.clone()),
+            metadata: None,
+        });
+        assert_eq!(conv.id, custom_id, "should use the provided ConversationId");
+    }
+
+    #[test]
+    fn conversation_with_parts_preserves_all_fields() {
+        let id = ConversationId::from("test_id");
+        let created_at = Utc::now();
+        let mut metadata = ConversationMetadata::new();
+        metadata.insert("key".to_string(), Value::String("value".to_string()));
+
+        let conv = Conversation::with_parts(id.clone(), created_at, Some(metadata.clone()));
+
+        assert_eq!(conv.id, id);
+        assert_eq!(conv.created_at, created_at);
+        assert_eq!(conv.metadata, Some(metadata));
+    }
+
+    // ========================================================================
+    // StoredResponse tests
+    // ========================================================================
+
+    #[test]
+    fn stored_response_new_none_has_no_previous() {
+        let resp = StoredResponse::new(None);
+        assert!(
+            resp.previous_response_id.is_none(),
+            "new(None) should have no previous_response_id"
+        );
+    }
+
+    #[test]
+    fn stored_response_new_some_has_correct_previous() {
+        let prev_id = ResponseId::from("prev_123");
+        let resp = StoredResponse::new(Some(prev_id.clone()));
+        assert_eq!(
+            resp.previous_response_id,
+            Some(prev_id),
+            "new(Some(id)) should set previous_response_id"
+        );
+    }
+
+    #[test]
+    fn stored_response_default_works() {
+        let resp = StoredResponse::default();
+        assert!(
+            resp.previous_response_id.is_none(),
+            "default() should have no previous_response_id"
+        );
+        assert_eq!(
+            resp.input,
+            Value::Array(vec![]),
+            "default input should be empty array"
+        );
+        assert_eq!(
+            resp.output,
+            Value::Array(vec![]),
+            "default output should be empty array"
+        );
+    }
+
+    // ========================================================================
+    // ResponseChain tests
+    // ========================================================================
+
+    #[test]
+    fn response_chain_new_creates_empty_chain() {
+        let chain = ResponseChain::new();
+        assert!(
+            chain.responses.is_empty(),
+            "new chain should have no responses"
+        );
+        assert!(
+            chain.metadata.is_empty(),
+            "new chain should have no metadata"
+        );
+    }
+
+    #[test]
+    fn response_chain_add_response_appends() {
+        let mut chain = ResponseChain::new();
+        let r1 = StoredResponse::new(None);
+        let r2 = StoredResponse::new(None);
+        let r1_id = r1.id.clone();
+        let r2_id = r2.id.clone();
+
+        chain.add_response(r1);
+        assert_eq!(chain.responses.len(), 1, "chain should have 1 response");
+
+        chain.add_response(r2);
+        assert_eq!(chain.responses.len(), 2, "chain should have 2 responses");
+        assert_eq!(chain.responses[0].id, r1_id, "first response should be r1");
+        assert_eq!(chain.responses[1].id, r2_id, "second response should be r2");
+    }
+
+    #[test]
+    fn response_chain_latest_response_id_returns_last() {
+        let mut chain = ResponseChain::new();
+        let r1 = StoredResponse::new(None);
+        let r2 = StoredResponse::new(None);
+        let r2_id = r2.id.clone();
+
+        chain.add_response(r1);
+        chain.add_response(r2);
+
+        assert_eq!(
+            chain.latest_response_id(),
+            Some(&r2_id),
+            "latest_response_id should return the last response's ID"
+        );
+    }
+
+    #[test]
+    fn response_chain_latest_response_id_returns_none_for_empty() {
+        let chain = ResponseChain::new();
+        assert_eq!(
+            chain.latest_response_id(),
+            None,
+            "latest_response_id should return None for empty chain"
+        );
+    }
+
+    #[test]
+    fn response_chain_build_context_returns_input_output_pairs() {
+        let mut chain = ResponseChain::new();
+
+        let mut r1 = StoredResponse::new(None);
+        r1.input = Value::String("input1".to_string());
+        r1.output = Value::String("output1".to_string());
+
+        let mut r2 = StoredResponse::new(None);
+        r2.input = Value::String("input2".to_string());
+        r2.output = Value::String("output2".to_string());
+
+        chain.add_response(r1);
+        chain.add_response(r2);
+
+        let context = chain.build_context(None);
+        assert_eq!(context.len(), 2, "should return 2 pairs");
+        assert_eq!(context[0].0, Value::String("input1".to_string()));
+        assert_eq!(context[0].1, Value::String("output1".to_string()));
+        assert_eq!(context[1].0, Value::String("input2".to_string()));
+        assert_eq!(context[1].1, Value::String("output2".to_string()));
+    }
+
+    #[test]
+    fn response_chain_build_context_with_max_responses_limits_output() {
+        let mut chain = ResponseChain::new();
+
+        for i in 0..5 {
+            let mut resp = StoredResponse::new(None);
+            resp.input = Value::String(format!("input{i}"));
+            resp.output = Value::String(format!("output{i}"));
+            chain.add_response(resp);
+        }
+
+        let context = chain.build_context(Some(2));
+        assert_eq!(context.len(), 2, "should return only 2 most recent pairs");
+        // Should be the last 2 responses (index 3 and 4)
+        assert_eq!(context[0].0, Value::String("input3".to_string()));
+        assert_eq!(context[0].1, Value::String("output3".to_string()));
+        assert_eq!(context[1].0, Value::String("input4".to_string()));
+        assert_eq!(context[1].1, Value::String("output4".to_string()));
     }
 }

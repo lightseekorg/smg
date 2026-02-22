@@ -750,6 +750,225 @@ mod tests {
         assert_eq!(found.unwrap().id, item.id);
     }
 
+    // ========================================================================
+    // MemoryConversationStorage Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_conversation_create_generates_id() {
+        let store = MemoryConversationStorage::new();
+        let conv = store
+            .create_conversation(NewConversation::default())
+            .await
+            .expect("create_conversation should succeed");
+        assert!(
+            conv.id.0.starts_with("conv_"),
+            "generated ID should have conv_ prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_conversation_create_with_custom_id() {
+        let store = MemoryConversationStorage::new();
+        let input = NewConversation {
+            id: Some(ConversationId::from("conv_my_custom")),
+            metadata: None,
+        };
+        let conv = store
+            .create_conversation(input)
+            .await
+            .expect("create_conversation should succeed");
+        assert_eq!(conv.id.0, "conv_my_custom");
+    }
+
+    #[tokio::test]
+    async fn test_conversation_create_preserves_metadata() {
+        let store = MemoryConversationStorage::new();
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("key".to_string(), json!("value"));
+        metadata.insert("count".to_string(), json!(42));
+
+        let input = NewConversation {
+            id: None,
+            metadata: Some(metadata.clone()),
+        };
+        let conv = store
+            .create_conversation(input)
+            .await
+            .expect("create_conversation should succeed");
+        let stored_metadata = conv.metadata.expect("metadata should be present");
+        assert_eq!(stored_metadata["key"], json!("value"));
+        assert_eq!(stored_metadata["count"], json!(42));
+    }
+
+    #[tokio::test]
+    async fn test_conversation_get_nonexistent_returns_none() {
+        let store = MemoryConversationStorage::new();
+        let result = store
+            .get_conversation(&ConversationId::from("conv_does_not_exist"))
+            .await
+            .expect("get_conversation should succeed");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_conversation_get_returns_stored() {
+        let store = MemoryConversationStorage::new();
+        let conv = store
+            .create_conversation(NewConversation {
+                id: Some(ConversationId::from("conv_stored")),
+                metadata: None,
+            })
+            .await
+            .expect("create_conversation should succeed");
+
+        let retrieved = store
+            .get_conversation(&conv.id)
+            .await
+            .expect("get_conversation should succeed")
+            .expect("conversation should exist");
+        assert_eq!(retrieved.id, conv.id);
+        assert_eq!(retrieved.created_at, conv.created_at);
+    }
+
+    #[tokio::test]
+    async fn test_conversation_update_metadata() {
+        let store = MemoryConversationStorage::new();
+        let conv = store
+            .create_conversation(NewConversation {
+                id: Some(ConversationId::from("conv_update")),
+                metadata: None,
+            })
+            .await
+            .expect("create_conversation should succeed");
+
+        // Update with new metadata
+        let mut new_metadata = serde_json::Map::new();
+        new_metadata.insert("updated".to_string(), json!(true));
+
+        let updated = store
+            .update_conversation(&conv.id, Some(new_metadata))
+            .await
+            .expect("update_conversation should succeed")
+            .expect("conversation should exist for update");
+        let meta = updated
+            .metadata
+            .expect("metadata should be present after update");
+        assert_eq!(meta["updated"], json!(true));
+
+        // Verify the update persists on subsequent get
+        let fetched = store
+            .get_conversation(&conv.id)
+            .await
+            .expect("get_conversation should succeed")
+            .expect("conversation should still exist");
+        let fetched_meta = fetched.metadata.expect("metadata should persist");
+        assert_eq!(fetched_meta["updated"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_conversation_update_nonexistent_returns_none() {
+        let store = MemoryConversationStorage::new();
+        let result = store
+            .update_conversation(&ConversationId::from("conv_ghost"), None)
+            .await
+            .expect("update_conversation should succeed");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_conversation_delete_removes() {
+        let store = MemoryConversationStorage::new();
+        let conv = store
+            .create_conversation(NewConversation {
+                id: Some(ConversationId::from("conv_to_delete")),
+                metadata: None,
+            })
+            .await
+            .expect("create_conversation should succeed");
+
+        let deleted = store
+            .delete_conversation(&conv.id)
+            .await
+            .expect("delete_conversation should succeed");
+        assert!(
+            deleted,
+            "delete should return true for existing conversation"
+        );
+
+        let after = store
+            .get_conversation(&conv.id)
+            .await
+            .expect("get_conversation should succeed");
+        assert!(after.is_none(), "conversation should be gone after delete");
+    }
+
+    #[tokio::test]
+    async fn test_conversation_delete_nonexistent_returns_false() {
+        let store = MemoryConversationStorage::new();
+        let deleted = store
+            .delete_conversation(&ConversationId::from("conv_never_existed"))
+            .await
+            .expect("delete_conversation should succeed");
+        assert!(
+            !deleted,
+            "delete should return false for non-existent conversation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multiple_conversations_coexist() {
+        let store = MemoryConversationStorage::new();
+
+        let conv1 = store
+            .create_conversation(NewConversation {
+                id: Some(ConversationId::from("conv_alpha")),
+                metadata: None,
+            })
+            .await
+            .expect("create conv1 should succeed");
+
+        let conv2 = store
+            .create_conversation(NewConversation {
+                id: Some(ConversationId::from("conv_beta")),
+                metadata: None,
+            })
+            .await
+            .expect("create conv2 should succeed");
+
+        // Both should be retrievable
+        let got1 = store
+            .get_conversation(&conv1.id)
+            .await
+            .expect("get conv1 should succeed")
+            .expect("conv1 should exist");
+        let got2 = store
+            .get_conversation(&conv2.id)
+            .await
+            .expect("get conv2 should succeed")
+            .expect("conv2 should exist");
+
+        assert_eq!(got1.id.0, "conv_alpha");
+        assert_eq!(got2.id.0, "conv_beta");
+
+        // Deleting one doesn't affect the other
+        store
+            .delete_conversation(&conv1.id)
+            .await
+            .expect("delete conv1 should succeed");
+
+        assert!(store
+            .get_conversation(&conv1.id)
+            .await
+            .expect("get should succeed")
+            .is_none());
+        assert!(store
+            .get_conversation(&conv2.id)
+            .await
+            .expect("get should succeed")
+            .is_some());
+    }
+
     #[tokio::test]
     async fn test_delete_item_unlinks_but_preserves_item() {
         let store = MemoryConversationItemStorage::new();

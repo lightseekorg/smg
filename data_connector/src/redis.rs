@@ -52,7 +52,7 @@ impl Clone for RedisStore {
     }
 }
 
-pub struct RedisConversationStorage {
+pub(super) struct RedisConversationStorage {
     store: RedisStore,
 }
 
@@ -68,18 +68,8 @@ impl RedisConversationStorage {
     fn parse_metadata(
         metadata: Option<String>,
     ) -> Result<Option<ConversationMetadata>, ConversationStorageError> {
-        match metadata {
-            None => Ok(None),
-            Some(s) => {
-                let s = s.trim();
-                if s.is_empty() || s.eq_ignore_ascii_case("null") {
-                    return Ok(None);
-                }
-                serde_json::from_str::<ConversationMetadata>(s)
-                    .map(Some)
-                    .map_err(|e| ConversationStorageError::StorageError(e.to_string()))
-            }
-        }
+        crate::common::parse_conversation_metadata(metadata)
+            .map_err(ConversationStorageError::StorageError)
     }
 }
 
@@ -240,7 +230,7 @@ impl ConversationStorage for RedisConversationStorage {
     }
 }
 
-pub struct RedisConversationItemStorage {
+pub(super) struct RedisConversationItemStorage {
     store: RedisStore,
 }
 
@@ -264,20 +254,25 @@ impl ConversationItemStorage for RedisConversationItemStorage {
         &self,
         item: NewConversationItem,
     ) -> Result<ConversationItem, ConversationItemStorageError> {
-        let id = item
-            .id
-            .clone()
-            .unwrap_or_else(|| make_item_id(&item.item_type));
+        let NewConversationItem {
+            id: opt_id,
+            response_id,
+            item_type,
+            role,
+            content,
+            status,
+        } = item;
+        let id = opt_id.unwrap_or_else(|| make_item_id(&item_type));
         let created_at = Utc::now();
-        let content_json = serde_json::to_string(&item.content)?;
+        let content_json = serde_json::to_string(&content)?;
 
         let conversation_item = ConversationItem {
-            id: id.clone(),
-            response_id: item.response_id.clone(),
-            item_type: item.item_type.clone(),
-            role: item.role.clone(),
-            content: item.content.clone(),
-            status: item.status.clone(),
+            id,
+            response_id,
+            item_type,
+            role,
+            content,
+            status,
             created_at,
         };
 
@@ -404,7 +399,7 @@ impl ConversationItemStorage for RedisConversationItemStorage {
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
 
-        let mut items: Vec<ConversationItem> = Vec::new();
+        let mut items: Vec<ConversationItem> = Vec::with_capacity(results.len());
         for (i, map) in results.into_iter().enumerate() {
             if map.is_empty() {
                 // Item might have been deleted or expired, skip
@@ -548,7 +543,7 @@ impl ConversationItemStorage for RedisConversationItemStorage {
     }
 }
 
-pub struct RedisResponseStorage {
+pub(super) struct RedisResponseStorage {
     store: RedisStore,
 }
 
@@ -563,6 +558,63 @@ impl RedisResponseStorage {
 
     fn safety_key(identifier: &str) -> String {
         format!("safety:{identifier}:responses")
+    }
+
+    /// Build a `StoredResponse` from the Redis hash map returned by `HGETALL`.
+    ///
+    /// `fallback_id` is used when the map lacks an explicit `"id"` entry
+    /// (e.g. when the key was derived from the sorted-set member).
+    fn build_response_from_map(
+        map: std::collections::HashMap<String, String>,
+        fallback_id: &str,
+    ) -> Result<StoredResponse, ResponseStorageError> {
+        let id = ResponseId(
+            map.get("id")
+                .cloned()
+                .unwrap_or_else(|| fallback_id.to_string()),
+        );
+        let previous_response_id = map
+            .get("previous_response_id")
+            .map(|s| ResponseId(s.clone()));
+        let conversation_id = map.get("conversation_id").cloned();
+
+        let input = parse_json_value(map.get("input").cloned())
+            .map_err(ResponseStorageError::StorageError)?;
+        let instructions = map.get("instructions").cloned();
+        let output = parse_json_value(map.get("output").cloned())
+            .map_err(ResponseStorageError::StorageError)?;
+        let tool_calls = parse_tool_calls(map.get("tool_calls").cloned())
+            .map_err(ResponseStorageError::StorageError)?;
+        let metadata = parse_metadata(map.get("metadata").cloned())
+            .map_err(ResponseStorageError::StorageError)?;
+
+        let created_at_str = map
+            .get("created_at")
+            .cloned()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now());
+
+        let safety_identifier = map.get("safety_identifier").cloned();
+        let model = map.get("model").cloned();
+        let raw_response = parse_raw_response(map.get("raw_response").cloned())
+            .map_err(ResponseStorageError::StorageError)?;
+
+        Ok(StoredResponse {
+            id,
+            previous_response_id,
+            input,
+            instructions,
+            output,
+            tool_calls,
+            metadata,
+            created_at,
+            safety_identifier,
+            model,
+            conversation_id,
+            raw_response,
+        })
     }
 }
 
@@ -657,59 +709,7 @@ impl ResponseStorage for RedisResponseStorage {
             return Ok(None);
         }
 
-        let id = ResponseId(map.get("id").cloned().unwrap_or_else(|| id.to_string()));
-        let previous_response_id = map
-            .get("previous_response_id")
-            .map(|s| ResponseId(s.clone()));
-        let conversation_id = map.get("conversation_id").cloned();
-
-        let input = match parse_json_value(map.get("input").cloned()) {
-            Ok(v) => v,
-            Err(e) => return Err(ResponseStorageError::StorageError(e)),
-        };
-        let instructions = map.get("instructions").cloned();
-        let output = match parse_json_value(map.get("output").cloned()) {
-            Ok(v) => v,
-            Err(e) => return Err(ResponseStorageError::StorageError(e)),
-        };
-        let tool_calls = match parse_tool_calls(map.get("tool_calls").cloned()) {
-            Ok(v) => v,
-            Err(e) => return Err(ResponseStorageError::StorageError(e)),
-        };
-        let metadata = match parse_metadata(map.get("metadata").cloned()) {
-            Ok(v) => v,
-            Err(e) => return Err(ResponseStorageError::StorageError(e)),
-        };
-
-        let created_at_str = map
-            .get("created_at")
-            .cloned()
-            .unwrap_or_else(|| Utc::now().to_rfc3339());
-        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now());
-
-        let safety_identifier = map.get("safety_identifier").cloned();
-        let model = map.get("model").cloned();
-        let raw_response = match parse_raw_response(map.get("raw_response").cloned()) {
-            Ok(v) => v,
-            Err(e) => return Err(ResponseStorageError::StorageError(e)),
-        };
-
-        Ok(Some(StoredResponse {
-            id,
-            previous_response_id,
-            input,
-            instructions,
-            output,
-            tool_calls,
-            metadata,
-            created_at,
-            safety_identifier,
-            model,
-            conversation_id,
-            raw_response,
-        }))
+        Self::build_response_from_map(map, id).map(Some)
     }
 
     async fn delete_response(&self, response_id: &ResponseId) -> ResponseResult<()> {
@@ -813,63 +813,7 @@ impl ResponseStorage for RedisResponseStorage {
                 continue;
             }
 
-            let id = ResponseId(
-                map.get("id")
-                    .cloned()
-                    .unwrap_or_else(|| response_ids[i].clone()),
-            );
-            let previous_response_id = map
-                .get("previous_response_id")
-                .map(|s| ResponseId(s.clone()));
-            let conversation_id = map.get("conversation_id").cloned();
-
-            let input = match parse_json_value(map.get("input").cloned()) {
-                Ok(v) => v,
-                Err(e) => return Err(ResponseStorageError::StorageError(e)),
-            };
-            let instructions = map.get("instructions").cloned();
-            let output = match parse_json_value(map.get("output").cloned()) {
-                Ok(v) => v,
-                Err(e) => return Err(ResponseStorageError::StorageError(e)),
-            };
-            let tool_calls = match parse_tool_calls(map.get("tool_calls").cloned()) {
-                Ok(v) => v,
-                Err(e) => return Err(ResponseStorageError::StorageError(e)),
-            };
-            let metadata = match parse_metadata(map.get("metadata").cloned()) {
-                Ok(v) => v,
-                Err(e) => return Err(ResponseStorageError::StorageError(e)),
-            };
-
-            let created_at_str = map
-                .get("created_at")
-                .cloned()
-                .unwrap_or_else(|| Utc::now().to_rfc3339());
-            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-
-            let safety_identifier = map.get("safety_identifier").cloned();
-            let model = map.get("model").cloned();
-            let raw_response = match parse_raw_response(map.get("raw_response").cloned()) {
-                Ok(v) => v,
-                Err(e) => return Err(ResponseStorageError::StorageError(e)),
-            };
-
-            out.push(StoredResponse {
-                id,
-                previous_response_id,
-                input,
-                instructions,
-                output,
-                tool_calls,
-                metadata,
-                created_at,
-                safety_identifier,
-                model,
-                conversation_id,
-                raw_response,
-            });
+            out.push(Self::build_response_from_map(map, &response_ids[i])?);
         }
 
         Ok(out)

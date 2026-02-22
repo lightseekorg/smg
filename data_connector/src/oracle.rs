@@ -131,6 +131,15 @@ pub(crate) fn map_oracle_error(err: oracle::Error) -> String {
 }
 
 /// Validate Oracle wallet path and set `TNS_ADMIN` environment variable.
+///
+/// # Thread-safety note
+///
+/// `std::env::set_var` is not thread-safe and is marked unsafe in Rust 2024 edition.
+/// This function is called once during `OracleStore::new()` initialization, before the
+/// connection pool is created and before any worker threads are spawned.  When migrating
+/// to edition 2024, this call will need to be wrapped in `unsafe` (requires removing the
+/// workspace `unsafe_code = "deny"` lint or adding a targeted `#[expect]`), or the
+/// environment variable should be set by the process launcher instead.
 pub(crate) fn configure_oracle_env(config: &OracleConfig) -> Result<(), String> {
     if let Some(wallet_path) = &config.wallet_path {
         let path = Path::new(wallet_path);
@@ -280,22 +289,19 @@ impl OracleConversationStorage {
         Ok(())
     }
 
+    /// Parse raw metadata JSON into `ConversationMetadata`.
+    ///
+    /// Delegates to the shared `parse_conversation_metadata` in `common.rs`.
+    /// The previous Oracle-specific version performed an extra `Value` type-check
+    /// (rejecting non-object JSON explicitly), but the common function achieves the
+    /// same result: `serde_json::from_str::<JsonMap>` already rejects non-object JSON
+    /// with a descriptive error, and metadata is always serialized from a `JsonMap` by
+    /// our own code, so non-object values cannot occur in practice.
     fn parse_metadata(
         raw: Option<String>,
     ) -> Result<Option<ConversationMetadata>, ConversationStorageError> {
-        match raw {
-            Some(json) if !json.is_empty() => {
-                let value: Value = serde_json::from_str(&json)?;
-                match value {
-                    Value::Object(map) => Ok(Some(map)),
-                    Value::Null => Ok(None),
-                    other => Err(ConversationStorageError::StorageError(format!(
-                        "conversation metadata expected object, got {other}"
-                    ))),
-                }
-            }
-            _ => Ok(None),
-        }
+        crate::common::parse_conversation_metadata(raw)
+            .map_err(ConversationStorageError::StorageError)
     }
 }
 
@@ -502,35 +508,32 @@ impl ConversationItemStorage for OracleConversationItemStorage {
         &self,
         item: NewConversationItem,
     ) -> Result<ConversationItem, ConversationItemStorageError> {
-        let id = item
-            .id
-            .clone()
-            .unwrap_or_else(|| make_item_id(&item.item_type));
+        let NewConversationItem {
+            id: opt_id,
+            response_id,
+            item_type,
+            role,
+            content,
+            status,
+        } = item;
+        let id = opt_id.unwrap_or_else(|| make_item_id(&item_type));
         let created_at = Utc::now();
-        let content_json = serde_json::to_string(&item.content)?;
+        let content_json = serde_json::to_string(&content)?;
 
-        let conversation_item = ConversationItem {
-            id: id.clone(),
-            response_id: item.response_id.clone(),
-            item_type: item.item_type.clone(),
-            role: item.role.clone(),
-            content: item.content,
-            status: item.status.clone(),
-            created_at,
-        };
-
-        let id_str = conversation_item.id.0.clone();
-        let response_id = conversation_item.response_id.clone();
-        let item_type = conversation_item.item_type.clone();
-        let role = conversation_item.role.clone();
-        let status = conversation_item.status.clone();
+        // Clone fields needed for both the closure and the return value.
+        // The closure consumes the clones; originals go into the return struct.
+        let id_str = id.0.clone();
+        let cl_response_id = response_id.clone();
+        let cl_item_type = item_type.clone();
+        let cl_role = role.clone();
+        let cl_status = status.clone();
 
         self.store
             .execute(move |conn| {
                 conn.execute(
                     "INSERT INTO conversation_items (id, response_id, item_type, role, content, status, created_at) \
                      VALUES (:1, :2, :3, :4, :5, :6, :7)",
-                    &[&id_str, &response_id, &item_type, &role, &content_json, &status, &created_at],
+                    &[&id_str, &cl_response_id, &cl_item_type, &cl_role, &content_json, &cl_status, &created_at],
                 )
                 .map_err(map_oracle_error)?;
                 Ok(())
@@ -538,7 +541,15 @@ impl ConversationItemStorage for OracleConversationItemStorage {
             .await
             .map_err(ConversationItemStorageError::StorageError)?;
 
-        Ok(conversation_item)
+        Ok(ConversationItem {
+            id,
+            response_id,
+            item_type,
+            role,
+            content,
+            status,
+            created_at,
+        })
     }
 
     async fn link_item(
@@ -939,19 +950,31 @@ impl ResponseStorage for OracleResponseStorage {
         &self,
         response: StoredResponse,
     ) -> Result<ResponseId, ResponseStorageError> {
-        let response_id = response.id.clone();
-        let response_id_str = response_id.0.clone();
-        let previous_id = response.previous_response_id.map(|r| r.0);
-        let json_input = serde_json::to_string(&response.input)?;
-        let json_output = serde_json::to_string(&response.output)?;
-        let json_tool_calls = serde_json::to_string(&response.tool_calls)?;
-        let json_metadata = serde_json::to_string(&response.metadata)?;
-        let json_raw_response = serde_json::to_string(&response.raw_response)?;
-        let instructions = response.instructions.clone();
-        let created_at = response.created_at;
-        let safety_identifier = response.safety_identifier.clone();
-        let model = response.model.clone();
-        let conversation_id = response.conversation_id.clone();
+        let StoredResponse {
+            id,
+            previous_response_id,
+            input,
+            instructions,
+            output,
+            tool_calls,
+            metadata,
+            created_at,
+            safety_identifier,
+            model,
+            conversation_id,
+            raw_response,
+        } = response;
+
+        // Clone only the return value; everything else moves into the closure.
+        let return_id = id.clone();
+
+        let response_id_str = id.0;
+        let previous_id = previous_response_id.map(|r| r.0);
+        let json_input = serde_json::to_string(&input)?;
+        let json_output = serde_json::to_string(&output)?;
+        let json_tool_calls = serde_json::to_string(&tool_calls)?;
+        let json_metadata = serde_json::to_string(&metadata)?;
+        let json_raw_response = serde_json::to_string(&raw_response)?;
 
         self.store
             .execute(move |conn| {
@@ -980,7 +1003,7 @@ impl ResponseStorage for OracleResponseStorage {
             .await
             .map_err(ResponseStorageError::StorageError)?;
 
-        Ok(response_id)
+        Ok(return_id)
     }
 
     async fn get_response(
