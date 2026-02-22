@@ -561,15 +561,19 @@ class ModelPool:
                 runtime,
             )
             spec = get_model_spec(model_id)
-            assert gpu_slot is not None
+            if gpu_slot is None:
+                raise RuntimeError(f"GPU slot required for vLLM HTTP worker {model_id}")
+            # Ensure instance key matches the canonical format used by _get_unlocked
+            effective_key = instance_key or f"{model_id}:{mode.value}"
             instance = self._launch_vllm_http_worker(
                 model_id=model_id,
                 model_spec=spec,
                 gpu_slot=gpu_slot,
                 startup_timeout=600,
-                instance_key=instance_key,
+                instance_key=effective_key,
             )
-            assert instance is not None
+            if instance is None:
+                raise RuntimeError(f"Failed to launch vLLM HTTP worker for {model_id}")
             return instance
 
         if mode == ConnectionMode.GRPC:
@@ -583,7 +587,10 @@ class ModelPool:
             )
             if is_vllm() or is_trtllm():
                 spec = get_model_spec(model_id)
-                assert gpu_slot is not None
+                if gpu_slot is None:
+                    raise RuntimeError(f"GPU slot required for gRPC worker {model_id}")
+                # Ensure instance key matches the canonical format used by _get_unlocked
+                effective_key = instance_key or f"{model_id}:{mode.value}"
                 instance = self._launch_grpc_worker(
                     runtime=get_runtime(),
                     model_id=model_id,
@@ -591,9 +598,10 @@ class ModelPool:
                     gpu_slot=gpu_slot,
                     startup_timeout=600,
                     worker_type=worker_type,
-                    instance_key=instance_key,
+                    instance_key=effective_key,
                 )
-                assert instance is not None
+                if instance is None:
+                    raise RuntimeError(f"Failed to launch gRPC worker for {model_id}")
                 return instance
 
         spec = get_model_spec(model_id)

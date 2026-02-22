@@ -19,7 +19,7 @@ on:
         default: 'all'
 
 concurrency:
-  group: nightly-benchmark
+  group: nightly-benchmark-${{ github.event_name }}
   cancel-in-progress: false
 
 permissions:
