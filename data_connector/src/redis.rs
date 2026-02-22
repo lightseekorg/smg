@@ -259,7 +259,15 @@ impl RedisConversationItemStorage {
                 .unwrap_or_else(|| fallback_id.to_string()),
         );
         let response_id = map.get("response_id").cloned();
-        let item_type = map.get("item_type").cloned().unwrap_or_default();
+        let item_type = map
+            .get("item_type")
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .ok_or_else(|| {
+                ConversationItemStorageError::StorageError(format!(
+                    "item {fallback_id} missing item_type"
+                ))
+            })?;
         let role = map.get("role").cloned();
         let status = map.get("status").cloned();
 
