@@ -65,6 +65,10 @@ impl TokenBucket {
 
     /// Sync version of try_acquire (for internal use).
     fn try_acquire_sync(&self, tokens: f64) -> Result<(), ()> {
+        debug_assert!(
+            tokens.is_finite() && tokens >= 0.0,
+            "token amount must be non-negative and finite, got {tokens}"
+        );
         let mut inner = self.inner.lock();
 
         let now = Instant::now();
@@ -157,6 +161,10 @@ impl TokenBucket {
     /// This is safe to call from sync contexts (e.g., Drop handlers).
     /// Uses `parking_lot::Mutex` which never blocks indefinitely.
     pub fn return_tokens_sync(&self, tokens: f64) {
+        debug_assert!(
+            tokens.is_finite() && tokens >= 0.0,
+            "token amount must be non-negative and finite, got {tokens}"
+        );
         {
             let mut inner = self.inner.lock();
             inner.tokens = (inner.tokens + tokens).min(self.capacity);

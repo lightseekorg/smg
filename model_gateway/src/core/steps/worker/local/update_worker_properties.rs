@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::core::{steps::workflow_data::WorkerUpdateWorkflowData, BasicWorkerBuilder, Worker};
@@ -89,6 +89,13 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
             if worker.is_dp_aware() {
                 if let (Some(rank), Some(size)) = (worker.dp_rank(), worker.dp_size()) {
                     builder = builder.dp_config(rank, size);
+                } else {
+                    warn!(
+                        worker_url = %worker.url(),
+                        dp_rank = ?worker.dp_rank(),
+                        dp_size = ?worker.dp_size(),
+                        "DP-aware worker is missing dp_rank or dp_size; skipping DP config"
+                    );
                 }
             }
 

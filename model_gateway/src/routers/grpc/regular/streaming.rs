@@ -160,6 +160,7 @@ impl StreamingProcessor {
                     "Embeddings not supported in streaming mode",
                     "invalid_request_error",
                 );
+                let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
             }
         }
 
@@ -678,6 +679,7 @@ impl StreamingProcessor {
                     "Embeddings not supported in streaming generate",
                     "invalid_request_error",
                 );
+                let _ = tx.send(Ok(Bytes::from("data: [DONE]\n\n")));
             }
         }
 

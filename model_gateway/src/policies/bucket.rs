@@ -116,11 +116,21 @@ impl BucketPolicy {
         let mut bucket_guard = bucket.write();
         let worker_url = worker.url().to_string();
 
+        // Check for duplicate before modifying state to avoid resetting load counters
+        {
+            let prefill_worker_urls = bucket_guard.prefill_worker_urls.lock();
+            if prefill_worker_urls.contains(&worker_url) {
+                debug!(
+                    "Worker {} already in bucket for model {}, skipping",
+                    worker_url, model_key
+                );
+                return;
+            }
+        }
+
         let prefill_worker_urls_clone = {
             let mut prefill_worker_urls = bucket_guard.prefill_worker_urls.lock();
-            if !prefill_worker_urls.contains(&worker_url) {
-                prefill_worker_urls.push(worker_url.clone());
-            }
+            prefill_worker_urls.push(worker_url.clone());
             let cloned = prefill_worker_urls.clone();
 
             let mut chars_per_url = bucket_guard.chars_per_url.lock();
@@ -158,10 +168,7 @@ impl BucketPolicy {
             };
 
             bucket_guard.bucket_cnt = updated_len;
-
-            if updated_len > 0 {
-                bucket_guard.init_prefill_worker_urls(updated_urls);
-            }
+            bucket_guard.init_prefill_worker_urls(updated_urls);
 
             info!(
                 "Removed worker {} from bucket for model {} (remaining workers: {})",
