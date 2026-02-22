@@ -31,7 +31,7 @@ use openai_protocol::{
 };
 use serde_json::{json, Value};
 use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
-use smg_mcp::{McpServerBinding, McpToolSession, ResponseFormat, ToolExecutionInput};
+use smg_mcp::{McpToolSession, ResponseFormat, ToolExecutionInput};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, trace, warn};
@@ -422,7 +422,8 @@ pub(super) fn execute_tool_loop_streaming(
     current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
     params: ResponsesCallContext,
-    mcp_servers: Vec<McpServerBinding>,
+    session: McpToolSession,
+    response_id: &str,
 ) -> Response {
     // Create SSE channel for client
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
@@ -430,6 +431,7 @@ pub(super) fn execute_tool_loop_streaming(
     // Clone data for background task
     let ctx_clone = ctx.clone();
     let original_request_clone = original_request.clone();
+    let response_id = response_id.to_string();
 
     // Spawn background task for tool loop
     #[expect(
@@ -442,7 +444,8 @@ pub(super) fn execute_tool_loop_streaming(
             current_request,
             &original_request_clone,
             params,
-            mcp_servers,
+            session,
+            &response_id,
             tx.clone(),
         )
         .await;
@@ -491,17 +494,12 @@ async fn execute_tool_loop_streaming_internal(
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
     params: ResponsesCallContext,
-    mcp_servers: Vec<McpServerBinding>,
+    session: McpToolSession,
+    response_id: &str,
     tx: mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) -> Result<(), String> {
     let mut state = ToolLoopState::new(original_request.input.clone());
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
-
-    // Generate response ID first so we can use it for both emitter and session
-    let response_id = format!("resp_{}", Uuid::new_v4());
-
-    // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
-    let session = McpToolSession::new(Arc::clone(&ctx.mcp_orchestrator), mcp_servers, &response_id);
 
     // Create response event emitter
     let model = current_request.model.clone();
@@ -509,7 +507,8 @@ async fn execute_tool_loop_streaming_internal(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let mut emitter = ResponseStreamEventEmitter::new(response_id, model.clone(), created_at);
+    let mut emitter =
+        ResponseStreamEventEmitter::new(response_id.to_string(), model.clone(), created_at);
     emitter.set_original_request(original_request.clone());
 
     // Emit initial response.created and response.in_progress events

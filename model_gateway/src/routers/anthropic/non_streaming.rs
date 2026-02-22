@@ -3,7 +3,7 @@
 //! Handles both plain (no MCP) and MCP tool loop paths for
 //! non-streaming requests, composing worker and mcp primitives.
 
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 
 use axum::{
     http::StatusCode,
@@ -11,7 +11,6 @@ use axum::{
     Json,
 };
 use openai_protocol::messages::{InputContent, InputMessage, Message, Role};
-use smg_mcp::McpToolSession;
 use tracing::warn;
 
 use super::{
@@ -26,17 +25,15 @@ use crate::{
 /// Execute a non-streaming Messages API request, handling both
 /// plain and MCP tool loop paths.
 pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext) -> Response {
-    if req_ctx.mcp_servers.is_none() {
-        return match send_one_request(router, &req_ctx).await {
-            Ok(message) => (StatusCode::OK, Json(message)).into_response(),
-            Err(response) => response,
-        };
-    }
-
-    // MCP tool loop path
-    let session_id = format!("msg_{}", uuid::Uuid::new_v4());
-    let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
-    let session = McpToolSession::new(Arc::clone(&router.mcp_orchestrator), mcp_servers, &session_id);
+    let session = match req_ctx.mcp_session.take() {
+        Some(s) => s,
+        None => {
+            return match send_one_request(router, &req_ctx).await {
+                Ok(message) => (StatusCode::OK, Json(message)).into_response(),
+                Err(response) => response,
+            };
+        }
+    };
 
     // Inject MCP tools into the request as regular tools
     mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session);

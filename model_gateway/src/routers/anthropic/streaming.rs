@@ -3,7 +3,7 @@
 //! Handles both passthrough (no MCP) and MCP tool loop streaming paths,
 //! composing worker, sse, and mcp primitives.
 
-use std::{io, sync::Arc, time::Instant};
+use std::{io, time::Instant};
 
 use axum::{
     body::Body,
@@ -12,7 +12,6 @@ use axum::{
 };
 use bytes::Bytes;
 use openai_protocol::messages::{InputContent, InputMessage, Role};
-use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
@@ -34,7 +33,7 @@ const SSE_CHANNEL_SIZE: usize = 128;
 /// Execute a streaming Messages API request, handling both
 /// passthrough (no MCP) and MCP tool loop paths.
 pub(crate) async fn execute(router: &RouterContext, req_ctx: RequestContext) -> Response {
-    if req_ctx.mcp_servers.is_some() {
+    if req_ctx.mcp_session.is_some() {
         return execute_mcp_streaming(router, req_ctx);
     }
     execute_passthrough(router, &req_ctx).await
@@ -189,9 +188,10 @@ async fn run_tool_loop(
     router: RouterContext,
     mut req_ctx: RequestContext,
 ) -> Result<(), String> {
-    let session_id = format!("msg_{}", uuid::Uuid::new_v4());
-    let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
-    let session = McpToolSession::new(Arc::clone(&router.mcp_orchestrator), mcp_servers, &session_id);
+    let session = req_ctx
+        .mcp_session
+        .take()
+        .expect("run_tool_loop called without MCP session");
 
     // Inject MCP tools into the request as regular tools
     mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session);

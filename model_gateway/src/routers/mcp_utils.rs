@@ -4,8 +4,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use openai_protocol::responses::{ResponseTool, ResponseToolType};
 use smg_mcp::{
-    BuiltinToolType, McpOrchestrator, McpServerBinding, McpServerConfig, McpTransport,
-    ResponseFormat,
+    BuiltinToolType, McpOrchestrator, McpServerBinding, McpServerConfig, McpToolSession,
+    McpTransport, ResponseFormat,
 };
 use tracing::{debug, warn};
 
@@ -210,7 +210,8 @@ pub async fn ensure_mcp_servers(
     orchestrator: &Arc<McpOrchestrator>,
     inputs: &[McpServerInput],
     builtin_types: &[BuiltinToolType],
-) -> Option<Vec<McpServerBinding>> {
+    request_id: &str,
+) -> Option<McpToolSession> {
     let mut mcp_servers = connect_mcp_servers(orchestrator, inputs).await;
 
     // Add builtin tool routing servers
@@ -240,7 +241,11 @@ pub async fn ensure_mcp_servers(
     if mcp_servers.is_empty() {
         None
     } else {
-        Some(mcp_servers)
+        Some(McpToolSession::new(
+            Arc::clone(orchestrator),
+            mcp_servers,
+            request_id,
+        ))
     }
 }
 
@@ -251,7 +256,8 @@ pub async fn ensure_mcp_servers(
 pub async fn ensure_request_mcp_client(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: &[ResponseTool],
-) -> Option<Vec<McpServerBinding>> {
+    request_id: &str,
+) -> Option<McpToolSession> {
     let inputs: Vec<McpServerInput> = tools
         .iter()
         .filter(|t| matches!(t.r#type, ResponseToolType::Mcp))
@@ -269,7 +275,7 @@ pub async fn ensure_request_mcp_client(
 
     let builtin_types = extract_builtin_types(tools);
 
-    ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types).await
+    ensure_mcp_servers(mcp_orchestrator, &inputs, &builtin_types, request_id).await
 }
 
 #[cfg(test)]
@@ -515,17 +521,18 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools, "test_req").await;
 
         // Should return Some because built-in routing is configured
         assert!(result.is_some());
 
-        let mcp_servers = result.unwrap();
-        assert_eq!(mcp_servers.len(), 1);
+        let session = result.unwrap();
+        let all_servers = session.all_mcp_servers();
+        assert_eq!(all_servers.len(), 1);
 
         // The server key should be the static server name
-        assert_eq!(mcp_servers[0].label, "search-server");
-        assert_eq!(mcp_servers[0].server_key, "search-server");
+        assert_eq!(all_servers[0].label, "search-server");
+        assert_eq!(all_servers[0].server_key, "search-server");
     }
 
     #[tokio::test]
@@ -539,7 +546,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools, "test_req").await;
 
         // Should return None because no MCP or built-in routing is available
         assert!(result.is_none());
@@ -555,7 +562,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools, "test_req").await;
 
         // Should return None - function tools don't need MCP processing
         assert!(result.is_none());
@@ -578,13 +585,14 @@ mod tests {
             },
         ];
 
-        let result = ensure_request_mcp_client(&orchestrator, &tools).await;
+        let result = ensure_request_mcp_client(&orchestrator, &tools, "test_req").await;
 
         // Should return Some because web_search_preview has built-in routing
         assert!(result.is_some());
 
-        let mcp_servers = result.unwrap();
-        assert_eq!(mcp_servers.len(), 1);
-        assert_eq!(mcp_servers[0].label, "search-server");
+        let session = result.unwrap();
+        let all_servers = session.all_mcp_servers();
+        assert_eq!(all_servers.len(), 1);
+        assert_eq!(all_servers[0].label, "search-server");
     }
 }

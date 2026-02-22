@@ -1,12 +1,12 @@
 //! Streaming Harmony Responses API implementation
 
-use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::Response;
 use bytes::Bytes;
 use openai_protocol::responses::{ResponseToolType, ResponsesRequest};
 use serde_json::json;
-use smg_mcp::{McpServerBinding, McpToolSession};
+use smg_mcp::McpToolSession;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -51,13 +51,15 @@ pub(crate) async fn serve_harmony_responses_stream(
     };
 
     // Check MCP connection BEFORE starting stream and get whether MCP tools are present
-    let (has_mcp_tools, mcp_servers) = match ensure_mcp_connection(
+    let session_request_id = format!("resp_{}", Uuid::new_v4());
+    let mcp_session = match ensure_mcp_connection(
         &ctx.mcp_orchestrator,
         current_request.tools.as_deref(),
+        &session_request_id,
     )
     .await
     {
-        Ok(result) => result,
+        Ok(session) => session,
         Err(response) => return response,
     };
 
@@ -93,12 +95,12 @@ pub(crate) async fn serve_harmony_responses_stream(
             return;
         }
 
-        if has_mcp_tools {
+        if let Some(session) = mcp_session {
             execute_mcp_tool_loop_streaming(
                 ctx,
                 current_request,
                 &request,
-                mcp_servers,
+                session,
                 &mut emitter,
                 &tx,
             )
@@ -124,7 +126,7 @@ async fn execute_mcp_tool_loop_streaming(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
     original_request: &ResponsesRequest,
-    mcp_servers: Vec<McpServerBinding>,
+    session: McpToolSession,
     emitter: &mut ResponseStreamEventEmitter,
     tx: &mpsc::UnboundedSender<Result<Bytes, std::io::Error>>,
 ) {
@@ -132,11 +134,6 @@ async fn execute_mcp_tool_loop_streaming(
 
     // Note: For streaming, the emitter's original_request (set before spawn) preserves
     // the original tools. MCP tools are only merged into current_request for model calls.
-
-    // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
-    let session_request_id = format!("resp_{}", Uuid::new_v4());
-
-    let session = McpToolSession::new(Arc::clone(&ctx.mcp_orchestrator), mcp_servers, &session_request_id);
 
     // Add filtered MCP tools (static + requested dynamic) to the request
     let mcp_tools = session.mcp_tools();

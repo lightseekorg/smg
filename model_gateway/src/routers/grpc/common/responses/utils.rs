@@ -9,7 +9,7 @@ use openai_protocol::{
 };
 use serde_json::to_value;
 use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
-use smg_mcp::{McpOrchestrator, McpServerBinding};
+use smg_mcp::{McpOrchestrator, McpToolSession};
 use tracing::{debug, error, warn};
 
 use crate::{
@@ -29,7 +29,8 @@ use crate::{
 pub(crate) async fn ensure_mcp_connection(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: Option<&[ResponseTool]>,
-) -> Result<(bool, Vec<McpServerBinding>), Response> {
+    request_id: &str,
+) -> Result<Option<McpToolSession>, Response> {
     // Check for explicit MCP tools (must error if connection fails)
     let has_explicit_mcp_tools = tools
         .map(|t| {
@@ -52,13 +53,13 @@ pub(crate) async fn ensure_mcp_connection(
 
     // Only process if we have MCP or builtin tools
     if !has_explicit_mcp_tools && !has_builtin_tools {
-        return Ok((false, Vec::new()));
+        return Ok(None);
     }
 
     if let Some(tools) = tools {
-        match ensure_request_mcp_client(mcp_orchestrator, tools).await {
-            Some(mcp_servers) => {
-                return Ok((true, mcp_servers));
+        match ensure_request_mcp_client(mcp_orchestrator, tools, request_id).await {
+            Some(session) => {
+                return Ok(Some(session));
             }
             None => {
                 // No MCP servers available
@@ -78,12 +79,12 @@ pub(crate) async fn ensure_mcp_connection(
                     function = "ensure_mcp_connection",
                     "No MCP routing configured for builtin tools, passing through to model"
                 );
-                return Ok((false, Vec::new()));
+                return Ok(None);
             }
         }
     }
 
-    Ok((false, Vec::new()))
+    Ok(None)
 }
 
 /// Validate that workers are available for the requested model

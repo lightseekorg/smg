@@ -88,7 +88,7 @@ impl RouterTrait for AnthropicRouter {
         let request = body.clone();
         let headers_owned = headers.cloned();
 
-        let mcp_servers = if request.has_mcp_toolset() {
+        let mcp_session = if request.has_mcp_toolset() {
             // Build per-server allowed tools from McpToolset entries in tools array.
             let toolset_allowed = mcp::collect_allowed_tools_per_server(request.tools.as_ref());
 
@@ -105,15 +105,21 @@ impl RouterTrait for AnthropicRouter {
                 })
                 .collect();
 
-            match mcp_utils::ensure_mcp_servers(&self.router_ctx.mcp_orchestrator, &inputs, &[])
-                .await
+            let session_id = format!("msg_{}", uuid::Uuid::new_v4());
+            match mcp_utils::ensure_mcp_servers(
+                &self.router_ctx.mcp_orchestrator,
+                &inputs,
+                &[],
+                &session_id,
+            )
+            .await
             {
-                Some(servers) => {
+                Some(session) => {
                     info!(
-                        server_count = servers.len(),
+                        server_count = session.mcp_servers().len(),
                         "MCP: connected to MCP servers"
                     );
-                    Some(servers)
+                    Some(session)
                 }
                 None => {
                     error!("Failed to connect to any MCP servers");
@@ -131,7 +137,7 @@ impl RouterTrait for AnthropicRouter {
         info!(
             model = %model_id,
             streaming = %is_streaming,
-            mcp = %mcp_servers.is_some(),
+            mcp = %mcp_session.is_some(),
             "Processing Messages API request"
         );
 
@@ -145,7 +151,7 @@ impl RouterTrait for AnthropicRouter {
             request,
             headers: headers_owned,
             model_id: model_id.to_string(),
-            mcp_servers,
+            mcp_session,
             worker: selected_worker,
         };
 

@@ -2,15 +2,12 @@
 //!
 //! This module handles non-streaming Responses API requests with MCP tool support.
 
-use std::sync::Arc;
-
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
 use serde_json::Value;
-use smg_mcp::McpToolSession;
 use tracing::warn;
 
 use super::{
@@ -60,20 +57,19 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
     };
 
     // Check for MCP tools and create session if needed
-    let mcp_servers = if let Some(tools) = original_body.tools.as_deref() {
-        ensure_request_mcp_client(mcp_orchestrator, tools).await
+    let session_request_id = original_body
+        .request_id
+        .clone()
+        .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
+    let mcp_session = if let Some(tools) = original_body.tools.as_deref() {
+        ensure_request_mcp_client(mcp_orchestrator, tools, &session_request_id).await
     } else {
         None
     };
 
     let mut response_json: Value;
 
-    if let Some(mcp_servers) = mcp_servers {
-        let session_request_id = original_body
-            .request_id
-            .clone()
-            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
-        let session = McpToolSession::new(Arc::clone(mcp_orchestrator), mcp_servers, &session_request_id);
+    if let Some(session) = mcp_session {
         prepare_mcp_tools_as_functions(&mut payload, &session);
 
         match execute_tool_loop(
