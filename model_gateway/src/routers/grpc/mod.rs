@@ -1,7 +1,9 @@
 //! gRPC router implementations
 
+use std::sync::Arc;
+
+use llm_multimodal::ImageFrame;
 use openai_protocol::common::StringOrArray;
-use smg_grpc_client::sglang_proto::MultimodalInputs;
 
 pub mod client; // Used by core/
 pub(crate) mod common;
@@ -15,10 +17,15 @@ pub(crate) mod regular;
 pub(crate) mod router; // Used by routers/factory
 pub mod utils; // Used by routers/http and bindings/golang
 
+// Re-export for convenience
+pub use proto_wrapper::{MultimodalData, TensorBytes};
+
 /// Processed chat messages ready for gRPC generation
 #[derive(Debug)]
 pub struct ProcessedMessages {
     pub text: String,
-    pub multimodal_inputs: Option<MultimodalInputs>,
+    /// Raw fetched images (Phase 1). Backend-specific preprocessing
+    /// happens in Phase 2 at request building time.
+    pub multimodal_images: Option<Vec<Arc<ImageFrame>>>,
     pub stop_sequences: Option<StringOrArray>,
 }

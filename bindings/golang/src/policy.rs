@@ -553,7 +553,7 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
         &chat_request,
         processed_messages.text,
         token_ids,
-        processed_messages.multimodal_inputs,
+        None, // multimodal not supported in golang bindings
         tool_constraint,
     ) {
         Ok(req) => req,

@@ -83,6 +83,12 @@ message TokenizedInput {
   repeated uint32 input_ids = 2;  // Actual token IDs to process
 }
 
+// Multimodal inputs for vision/audio models
+message MultimodalInputs {
+  // Raw image bytes (JPEG/PNG) — vLLM handles preprocessing internally
+  repeated bytes image_data = 1;
+}
+
 // =====================
 // Generate Request
 // =====================
@@ -105,6 +111,9 @@ message GenerateRequest {
   // KV transfer parameters for PD disaggregation (Mooncake)
   // Decode worker uses this to fetch KV cache from prefill worker
   KvTransferParams kv_transfer_params = 6;
+
+  // Optional multimodal data (images for vision models)
+  MultimodalInputs mm_inputs = 7;
 }
 
 // KV cache transfer parameters for Mooncake PD disaggregation
