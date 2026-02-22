@@ -562,7 +562,7 @@ impl HarmonyStreamingProcessor {
         execution_result: context::ExecutionResult,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        session: Option<&McpToolSession<'_>>,
+        session: Option<&McpToolSession>,
         mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         match execution_result {
@@ -593,7 +593,7 @@ impl HarmonyStreamingProcessor {
         decode_stream: ProtoStream,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        session: Option<&McpToolSession<'_>>,
+        session: Option<&McpToolSession>,
         mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         // Phase 1: Drain prefill stream
@@ -614,7 +614,7 @@ impl HarmonyStreamingProcessor {
         mut decode_stream: ProtoStream,
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-        session: Option<&McpToolSession<'_>>,
+        session: Option<&McpToolSession>,
         mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         let mut parser =

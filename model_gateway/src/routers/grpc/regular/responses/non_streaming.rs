@@ -152,7 +152,7 @@ pub(super) async fn execute_tool_loop(
         .clone()
         .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4()));
 
-    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
+    let session = McpToolSession::new(Arc::clone(&ctx.mcp_orchestrator), mcp_servers, &session_request_id);
 
     // Get MCP tools and convert to chat format (do this once before loop)
     let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&session);

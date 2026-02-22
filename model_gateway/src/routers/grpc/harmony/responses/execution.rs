@@ -32,7 +32,7 @@ pub(crate) struct ToolResult {
 ///
 /// Vector of tool results (one per tool call)
 pub(super) async fn execute_mcp_tools(
-    session: &McpToolSession<'_>,
+    session: &McpToolSession,
     tool_calls: &[ToolCall],
     tracking: &mut McpCallTracking,
     model_id: &str,
@@ -102,7 +102,7 @@ pub(super) async fn execute_mcp_tools(
 }
 
 pub(crate) fn convert_mcp_tools_to_response_tools(
-    session: &McpToolSession<'_>,
+    session: &McpToolSession,
 ) -> Vec<ResponseTool> {
     session.build_response_tools()
 }

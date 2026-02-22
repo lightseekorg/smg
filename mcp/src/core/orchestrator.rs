@@ -14,7 +14,7 @@
 //! let orchestrator = McpOrchestrator::new(config).await?;
 //!
 //! // Create per-request context
-//! let request_ctx = orchestrator.create_request_context(tenant_ctx);
+//! let request_ctx = McpOrchestrator::create_request_context(Arc::clone(&orchestrator), tenant_ctx);
 //!
 //! // Call a tool
 //! let result = orchestrator.call_tool(
@@ -805,7 +805,7 @@ impl McpOrchestrator {
         tool_name: &str,
         arguments: Value,
         server_label: &str,
-        request_ctx: &McpRequestContext<'_>,
+        request_ctx: &McpRequestContext,
     ) -> McpResult<ToolCallResult> {
         self.active_executions.fetch_add(1, Ordering::SeqCst);
         let _guard = scopeguard::guard(Arc::clone(&self.active_executions), |count| {
@@ -982,7 +982,7 @@ impl McpOrchestrator {
         input: ToolExecutionInput,
         server_key: &str,
         server_label: &str,
-        request_ctx: &McpRequestContext<'_>,
+        request_ctx: &McpRequestContext,
     ) -> ToolExecutionOutput {
         let start = Instant::now();
         let arguments_str = input.arguments.to_string();
@@ -1030,7 +1030,7 @@ impl McpOrchestrator {
         entry: &ToolEntry,
         qualified: QualifiedToolName,
         arguments: Value,
-        request_ctx: &McpRequestContext<'_>,
+        request_ctx: &McpRequestContext,
     ) -> (ResponseFormat, Value, bool, Option<String>) {
         self.active_executions.fetch_add(1, Ordering::SeqCst);
         let _guard = scopeguard::guard(Arc::clone(&self.active_executions), |count| {
@@ -1085,7 +1085,7 @@ impl McpOrchestrator {
         allowed_servers: &[String],
         server_label_map: &HashMap<&str, &str>,
         fallback_label: &str,
-        request_ctx: &McpRequestContext<'_>,
+        request_ctx: &McpRequestContext,
     ) -> ToolExecutionOutput {
         let start = Instant::now();
 
@@ -1174,7 +1174,7 @@ impl McpOrchestrator {
         inputs: Vec<ToolExecutionInput>,
         allowed_servers: &[String],
         mcp_servers: &[McpServerBinding],
-        request_ctx: &McpRequestContext<'_>,
+        request_ctx: &McpRequestContext,
     ) -> Vec<ToolExecutionOutput> {
         let fallback_label = mcp_servers
             .first()
@@ -1217,7 +1217,7 @@ impl McpOrchestrator {
         entry: &ToolEntry,
         arguments: Value,
         server_label: &str,
-        request_ctx: &McpRequestContext<'_>,
+        request_ctx: &McpRequestContext,
     ) -> McpResult<ToolCallResult> {
         // Delegate to raw implementation and transform result
         match self
@@ -1250,7 +1250,7 @@ impl McpOrchestrator {
         &self,
         entry: &ToolEntry,
         arguments: Value,
-        request_ctx: &McpRequestContext<'_>,
+        request_ctx: &McpRequestContext,
     ) -> McpResult<Option<CallToolResult>> {
         match self
             .execute_tool_with_approval_raw_internal(entry, arguments, request_ctx)
@@ -1269,7 +1269,7 @@ impl McpOrchestrator {
         &self,
         entry: &ToolEntry,
         arguments: Value,
-        request_ctx: &McpRequestContext<'_>,
+        request_ctx: &McpRequestContext,
     ) -> McpResult<ApprovalExecutionResult> {
         let approval_params = ApprovalParams {
             request_id: &request_ctx.request_id,
@@ -1602,13 +1602,16 @@ impl McpOrchestrator {
     // ========================================================================
 
     /// Create a per-request context for tool execution.
-    pub fn create_request_context<'a>(
-        &'a self,
+    ///
+    /// Takes an `Arc<Self>` so the context can own a shared reference to the
+    /// orchestrator without introducing a lifetime parameter.
+    pub fn create_request_context(
+        orchestrator: Arc<Self>,
         request_id: impl Into<String>,
         tenant_ctx: TenantContext,
         approval_mode: ApprovalMode,
-    ) -> McpRequestContext<'a> {
-        McpRequestContext::new(self, request_id.into(), tenant_ctx, approval_mode)
+    ) -> McpRequestContext {
+        McpRequestContext::new(orchestrator, request_id.into(), tenant_ctx, approval_mode)
     }
 
     /// Set request context on all static server handlers.
@@ -1896,7 +1899,7 @@ impl McpOrchestrator {
         server_key: &str,
         tool_name: &str,
         arguments: Value,
-        request_ctx: &McpRequestContext<'_>,
+        request_ctx: &McpRequestContext,
     ) -> McpResult<ToolCallResult> {
         // Get tool entry
         let entry = self
@@ -1963,8 +1966,8 @@ impl McpOrchestrator {
 ///
 /// Holds request-specific state and provides access to the orchestrator
 /// for tool execution with proper tenant isolation.
-pub struct McpRequestContext<'a> {
-    orchestrator: &'a McpOrchestrator,
+pub struct McpRequestContext {
+    orchestrator: Arc<McpOrchestrator>,
     pub request_id: String,
     pub tenant_ctx: TenantContext,
     pub approval_mode: ApprovalMode,
@@ -1974,9 +1977,9 @@ pub struct McpRequestContext<'a> {
     dynamic_clients: DashMap<String, Arc<McpClientWithHandler>>,
 }
 
-impl<'a> McpRequestContext<'a> {
+impl McpRequestContext {
     fn new(
-        orchestrator: &'a McpOrchestrator,
+        orchestrator: Arc<McpOrchestrator>,
         request_id: String,
         tenant_ctx: TenantContext,
         approval_mode: ApprovalMode,
@@ -2126,7 +2129,7 @@ impl<'a> McpRequestContext<'a> {
     }
 }
 
-impl<'a> Drop for McpRequestContext<'a> {
+impl Drop for McpRequestContext {
     fn drop(&mut self) {
         // Cleanup dynamic clients
         if !self.dynamic_clients.is_empty() {
@@ -2214,9 +2217,10 @@ mod tests {
     }
     #[tokio::test]
     async fn test_orchestrator_graceful_shutdown_flow() {
-        let orchestrator = McpOrchestrator::new_test();
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
         let tenant = TenantContext::new("test-tenant");
-        let ctx = orchestrator.create_request_context(
+        let ctx = McpOrchestrator::create_request_context(
+            Arc::clone(&orchestrator),
             "req-shutdown-test",
             tenant,
             ApprovalMode::Interactive,
@@ -2294,8 +2298,9 @@ mod tests {
 
     #[test]
     fn test_request_context_creation() {
-        let orchestrator = McpOrchestrator::new_test();
-        let ctx = orchestrator.create_request_context(
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
+        let ctx = McpOrchestrator::create_request_context(
+            Arc::clone(&orchestrator),
             "req-1",
             TenantContext::new("tenant-1"),
             ApprovalMode::PolicyOnly,
@@ -2307,8 +2312,9 @@ mod tests {
 
     #[test]
     fn test_handler_context() {
-        let orchestrator = McpOrchestrator::new_test();
-        let ctx = orchestrator.create_request_context(
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
+        let ctx = McpOrchestrator::create_request_context(
+            Arc::clone(&orchestrator),
             "req-1",
             TenantContext::new("tenant-1"),
             ApprovalMode::Interactive,

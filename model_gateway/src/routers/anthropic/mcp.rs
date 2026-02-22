@@ -80,7 +80,7 @@ pub(crate) struct McpToolCall {
 /// Returns `Continue` with executed tool results when the loop should proceed.
 pub(crate) async fn process_iteration(
     result: &IterationResult,
-    session: &McpToolSession<'_>,
+    session: &McpToolSession,
     model_id: &str,
 ) -> ToolLoopAction {
     if result.tool_use_blocks.is_empty() {
@@ -146,7 +146,7 @@ pub(crate) fn extract_tool_calls(content: &[ContentBlock]) -> Vec<ToolUseBlock> 
 /// session creation — this function just converts and injects.
 pub(crate) fn inject_mcp_tools_into_request(
     request: &mut CreateMessageRequest,
-    session: &McpToolSession<'_>,
+    session: &McpToolSession,
 ) {
     request.mcp_servers = None;
 
@@ -180,7 +180,7 @@ pub(crate) fn inject_mcp_tools_into_request(
 async fn execute_mcp_tool_calls(
     content: &[ContentBlock],
     tool_calls: &[ToolUseBlock],
-    session: &McpToolSession<'_>,
+    session: &McpToolSession,
     model_id: &str,
 ) -> (
     Vec<McpToolCall>,

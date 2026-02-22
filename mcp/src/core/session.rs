@@ -7,6 +7,7 @@
 //! router function signature.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use openai_protocol::responses::ResponseTool;
 
@@ -55,9 +56,9 @@ struct ExposedToolBinding {
 /// that needs MCP infrastructure. This eliminates repeated parameter
 /// threading of `orchestrator`, `request_ctx`, `mcp_servers`,
 /// and `mcp_tools`.
-pub struct McpToolSession<'a> {
-    orchestrator: &'a McpOrchestrator,
-    request_ctx: McpRequestContext<'a>,
+pub struct McpToolSession {
+    orchestrator: Arc<McpOrchestrator>,
+    request_ctx: McpRequestContext,
     /// All MCP servers in this session (including builtin).
     all_mcp_servers: Vec<McpServerBinding>,
     /// Non-builtin MCP servers only — used for `mcp_list_tools` output.
@@ -67,17 +68,18 @@ pub struct McpToolSession<'a> {
     exposed_name_by_qualified: HashMap<QualifiedToolName, String>,
 }
 
-impl<'a> McpToolSession<'a> {
+impl McpToolSession {
     /// Create a new session by performing the setup every path currently repeats:
     /// 1. Create request context with default tenant and policy-only approval
     /// 2. List tools for the selected servers
     /// 3. Apply per-server allowed_tools filtering from bindings
     pub fn new(
-        orchestrator: &'a McpOrchestrator,
+        orchestrator: Arc<McpOrchestrator>,
         mcp_servers: Vec<McpServerBinding>,
         request_id: impl Into<String>,
     ) -> Self {
-        let request_ctx = orchestrator.create_request_context(
+        let request_ctx = McpOrchestrator::create_request_context(
+            Arc::clone(&orchestrator),
             request_id,
             TenantContext::default(),
             ApprovalMode::PolicyOnly,
@@ -133,10 +135,10 @@ impl<'a> McpToolSession<'a> {
     // --- Accessors ---
 
     pub fn orchestrator(&self) -> &McpOrchestrator {
-        self.orchestrator
+        &self.orchestrator
     }
 
-    pub fn request_ctx(&self) -> &McpRequestContext<'a> {
+    pub fn request_ctx(&self) -> &McpRequestContext {
         &self.request_ctx
     }
 
@@ -428,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_session_creation_keeps_servers() {
-        let orchestrator = McpOrchestrator::new_test();
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
         let mcp_servers = vec![
             McpServerBinding {
                 label: "label1".to_string(),
@@ -442,7 +444,7 @@ mod tests {
             },
         ];
 
-        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
+        let session = McpToolSession::new(Arc::clone(&orchestrator), mcp_servers, "test-request");
 
         assert_eq!(session.mcp_servers().len(), 2);
         assert_eq!(session.mcp_servers()[0].label, "label1");
@@ -451,8 +453,8 @@ mod tests {
 
     #[test]
     fn test_session_empty_servers() {
-        let orchestrator = McpOrchestrator::new_test();
-        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
+        let session = McpToolSession::new(Arc::clone(&orchestrator), vec![], "test-request");
 
         assert!(session.mcp_servers().is_empty());
         assert!(session.mcp_tools().is_empty());
@@ -460,13 +462,13 @@ mod tests {
 
     #[test]
     fn test_resolve_tool_server_label_fallback() {
-        let orchestrator = McpOrchestrator::new_test();
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
         let mcp_servers = vec![McpServerBinding {
             label: "my_label".to_string(),
             server_key: "my_key".to_string(),
             allowed_tools: None,
         }];
-        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
+        let session = McpToolSession::new(Arc::clone(&orchestrator), mcp_servers, "test-request");
 
         // Tool doesn't exist, should fall back to first label
         let label = session.resolve_tool_server_label("nonexistent_tool");
@@ -475,8 +477,8 @@ mod tests {
 
     #[test]
     fn test_resolve_tool_server_label_no_servers() {
-        let orchestrator = McpOrchestrator::new_test();
-        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
+        let session = McpToolSession::new(Arc::clone(&orchestrator), vec![], "test-request");
 
         // No servers, should fall back to "mcp"
         let label = session.resolve_tool_server_label("nonexistent_tool");
@@ -485,8 +487,8 @@ mod tests {
 
     #[test]
     fn test_tool_response_format_default() {
-        let orchestrator = McpOrchestrator::new_test();
-        let session = McpToolSession::new(&orchestrator, vec![], "test-request");
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
+        let session = McpToolSession::new(Arc::clone(&orchestrator), vec![], "test-request");
 
         let format = session.tool_response_format("nonexistent");
         assert!(matches!(format, ResponseFormat::Passthrough));
@@ -508,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_has_exposed_tool_with_inventory() {
-        let orchestrator = McpOrchestrator::new_test();
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
 
         // Insert a tool into the inventory
         let tool = create_test_tool("test_tool");
@@ -520,7 +522,7 @@ mod tests {
             server_key: "server1".to_string(),
             allowed_tools: None,
         }];
-        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
+        let session = McpToolSession::new(Arc::clone(&orchestrator), mcp_servers, "test-request");
 
         assert!(session.has_exposed_tool("test_tool"));
         assert_eq!(session.mcp_tools().len(), 1);
@@ -528,7 +530,7 @@ mod tests {
 
     #[test]
     fn test_resolve_label_with_inventory() {
-        let orchestrator = McpOrchestrator::new_test();
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
 
         let tool = create_test_tool("test_tool");
         let entry = ToolEntry::from_server_tool("server1", tool);
@@ -539,7 +541,7 @@ mod tests {
             server_key: "server1".to_string(),
             allowed_tools: None,
         }];
-        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
+        let session = McpToolSession::new(Arc::clone(&orchestrator), mcp_servers, "test-request");
 
         let label = session.resolve_tool_server_label("test_tool");
         assert_eq!(label, "my_server");
@@ -547,7 +549,7 @@ mod tests {
 
     #[test]
     fn test_exposed_names_are_unique_for_tool_name_collisions() {
-        let orchestrator = McpOrchestrator::new_test();
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
 
         let tool_a = create_test_tool("shared_tool");
         let tool_b = create_test_tool("shared_tool");
@@ -559,7 +561,7 @@ mod tests {
             .insert_entry(ToolEntry::from_server_tool("server2", tool_b));
 
         let session = McpToolSession::new(
-            &orchestrator,
+            Arc::clone(&orchestrator),
             vec![
                 McpServerBinding {
                     label: "alpha".to_string(),
@@ -595,7 +597,7 @@ mod tests {
 
     #[test]
     fn test_exposed_names_handle_pre_suffixed_name_conflicts() {
-        let orchestrator = McpOrchestrator::new_test();
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
 
         let tool_base = create_test_tool("foo");
         let tool_suffixed = create_test_tool("foo_1");
@@ -612,7 +614,7 @@ mod tests {
             .insert_entry(ToolEntry::from_server_tool("s3", tool_dup));
 
         let session = McpToolSession::new(
-            &orchestrator,
+            Arc::clone(&orchestrator),
             vec![
                 McpServerBinding {
                     label: "a".to_string(),
@@ -683,7 +685,7 @@ mod tests {
 
     #[test]
     fn test_mcp_servers_filters_builtin() {
-        let orchestrator = create_builtin_orchestrator();
+        let orchestrator = Arc::new(create_builtin_orchestrator());
         let mcp_servers = vec![
             McpServerBinding {
                 label: "brave".to_string(),
@@ -697,7 +699,7 @@ mod tests {
             },
         ];
 
-        let session = McpToolSession::new(&orchestrator, mcp_servers, "test-request");
+        let session = McpToolSession::new(Arc::clone(&orchestrator), mcp_servers, "test-request");
 
         // mcp_servers() should only return non-builtin servers
         let visible = session.mcp_servers();
@@ -711,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_allowed_tools_filters_inventory_and_list_tools() {
-        let orchestrator = McpOrchestrator::new_test();
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
 
         orchestrator
             .tool_inventory()
@@ -727,7 +729,7 @@ mod tests {
             ));
 
         let session = McpToolSession::new(
-            &orchestrator,
+            Arc::clone(&orchestrator),
             vec![McpServerBinding {
                 label: "mock".to_string(),
                 server_key: "server1".to_string(),
@@ -747,7 +749,7 @@ mod tests {
 
     #[test]
     fn test_allowed_tools_filters_only_target_server() {
-        let orchestrator = McpOrchestrator::new_test();
+        let orchestrator = Arc::new(McpOrchestrator::new_test());
 
         // server1 has two tools
         orchestrator
@@ -778,7 +780,7 @@ mod tests {
             ));
 
         let session = McpToolSession::new(
-            &orchestrator,
+            Arc::clone(&orchestrator),
             vec![
                 McpServerBinding {
                     label: "brave".to_string(),

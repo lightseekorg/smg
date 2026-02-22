@@ -1,6 +1,6 @@
 //! Streaming Harmony Responses API implementation
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 
 use axum::response::Response;
 use bytes::Bytes;
@@ -136,7 +136,7 @@ async fn execute_mcp_tool_loop_streaming(
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
     let session_request_id = format!("resp_{}", Uuid::new_v4());
 
-    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
+    let session = McpToolSession::new(Arc::clone(&ctx.mcp_orchestrator), mcp_servers, &session_request_id);
 
     // Add filtered MCP tools (static + requested dynamic) to the request
     let mcp_tools = session.mcp_tools();

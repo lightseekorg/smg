@@ -2,6 +2,8 @@
 //!
 //! This module handles non-streaming Responses API requests with MCP tool support.
 
+use std::sync::Arc;
+
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -71,7 +73,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
             .request_id
             .clone()
             .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
-        let session = McpToolSession::new(mcp_orchestrator, mcp_servers, &session_request_id);
+        let session = McpToolSession::new(Arc::clone(mcp_orchestrator), mcp_servers, &session_request_id);
         prepare_mcp_tools_as_functions(&mut payload, &session);
 
         match execute_tool_loop(

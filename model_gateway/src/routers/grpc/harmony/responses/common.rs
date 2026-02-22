@@ -178,7 +178,7 @@ pub(super) fn build_next_request_with_tools(
 pub(super) fn inject_mcp_metadata(
     response: &mut ResponsesResponse,
     tracking: &McpCallTracking,
-    session: &McpToolSession<'_>,
+    session: &McpToolSession,
 ) {
     let tool_output_items: Vec<ResponseOutputItem> = tracking
         .tool_calls

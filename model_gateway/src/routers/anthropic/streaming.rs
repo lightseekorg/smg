@@ -3,7 +3,7 @@
 //! Handles both passthrough (no MCP) and MCP tool loop streaming paths,
 //! composing worker, sse, and mcp primitives.
 
-use std::{io, time::Instant};
+use std::{io, sync::Arc, time::Instant};
 
 use axum::{
     body::Body,
@@ -191,7 +191,7 @@ async fn run_tool_loop(
 ) -> Result<(), String> {
     let session_id = format!("msg_{}", uuid::Uuid::new_v4());
     let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
-    let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &session_id);
+    let session = McpToolSession::new(Arc::clone(&router.mcp_orchestrator), mcp_servers, &session_id);
 
     // Inject MCP tools into the request as regular tools
     mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session);

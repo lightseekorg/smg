@@ -237,7 +237,7 @@ impl RequestContext {
 pub struct StreamingEventContext<'a> {
     pub original_request: &'a ResponsesRequest,
     pub previous_response_id: Option<&'a str>,
-    pub session: Option<&'a McpToolSession<'a>>,
+    pub session: Option<&'a McpToolSession>,
 }
 
 pub type StreamingRequest = OwnedStreamingContext;

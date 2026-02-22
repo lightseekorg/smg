@@ -10,6 +10,7 @@
 mod common;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use common::mock_mcp_server::MockMCPServer;
 use openai_protocol::responses::ResponseOutputItem;
@@ -225,9 +226,10 @@ async fn test_tool_execution_with_mock() {
         policy: Default::default(),
     };
 
-    let manager = McpOrchestrator::new(config).await.unwrap();
+    let manager = Arc::new(McpOrchestrator::new(config).await.unwrap());
 
-    let request_ctx = manager.create_request_context(
+    let request_ctx = McpOrchestrator::create_request_context(
+        Arc::clone(&manager),
         "test-request-1",
         TenantContext::default(),
         ApprovalMode::PolicyOnly,
@@ -297,9 +299,10 @@ async fn test_concurrent_tool_execution() {
         policy: Default::default(),
     };
 
-    let manager = McpOrchestrator::new(config).await.unwrap();
+    let manager = Arc::new(McpOrchestrator::new(config).await.unwrap());
 
-    let request_ctx = manager.create_request_context(
+    let request_ctx = McpOrchestrator::create_request_context(
+        Arc::clone(&manager),
         "test-concurrent",
         TenantContext::default(),
         ApprovalMode::PolicyOnly,
@@ -363,9 +366,10 @@ async fn test_tool_execution_errors() {
         policy: Default::default(),
     };
 
-    let manager = McpOrchestrator::new(config).await.unwrap();
+    let manager = Arc::new(McpOrchestrator::new(config).await.unwrap());
 
-    let request_ctx = manager.create_request_context(
+    let request_ctx = McpOrchestrator::create_request_context(
+        Arc::clone(&manager),
         "test-error",
         TenantContext::default(),
         ApprovalMode::PolicyOnly,
@@ -596,9 +600,11 @@ async fn test_complete_workflow() {
     };
 
     // 2. Connect to server
-    let manager = McpOrchestrator::new(config)
-        .await
-        .expect("Should connect to mock server");
+    let manager = Arc::new(
+        McpOrchestrator::new(config)
+            .await
+            .expect("Should connect to mock server"),
+    );
 
     // 3. Verify server connection
     let servers = manager.list_servers();
@@ -615,7 +621,8 @@ async fn test_complete_workflow() {
     assert!(!manager.has_tool("integration_test", "nonexistent_tool"));
 
     // 6. Execute a tool
-    let request_ctx = manager.create_request_context(
+    let request_ctx = McpOrchestrator::create_request_context(
+        Arc::clone(&manager),
         "test-workflow",
         TenantContext::default(),
         ApprovalMode::PolicyOnly,

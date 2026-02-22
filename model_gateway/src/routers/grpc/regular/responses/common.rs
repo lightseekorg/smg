@@ -143,7 +143,7 @@ pub(super) fn extract_all_tool_calls_from_chat(
     }
 }
 
-pub(super) fn convert_mcp_tools_to_chat_tools(session: &McpToolSession<'_>) -> Vec<Tool> {
+pub(super) fn convert_mcp_tools_to_chat_tools(session: &McpToolSession) -> Vec<Tool> {
     session.build_chat_function_tools()
 }
 

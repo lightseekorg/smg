@@ -90,7 +90,7 @@ impl ToolLoopState {
 /// Returns false if client disconnected during execution
 pub(super) async fn execute_streaming_tool_calls(
     pending_calls: Vec<FunctionCallInProgress>,
-    session: &McpToolSession<'_>,
+    session: &McpToolSession,
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
     state: &mut ToolLoopState,
     sequence_number: &mut u64,
@@ -201,7 +201,7 @@ pub(super) async fn execute_streaming_tool_calls(
 ///
 /// Retains existing function tools from the request, removes non-function tools
 /// (MCP, builtin), and appends function tools for discovered MCP server tools.
-pub(super) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpToolSession<'_>) {
+pub(super) fn prepare_mcp_tools_as_functions(payload: &mut Value, session: &McpToolSession) {
     let Some(obj) = payload.as_object_mut() else {
         return;
     };
@@ -285,7 +285,7 @@ pub(super) fn build_resume_payload(
 /// Returns false if client disconnected
 pub(super) fn send_mcp_list_tools_events(
     tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-    session: &McpToolSession<'_>,
+    session: &McpToolSession,
     server_label: &str,
     output_index: usize,
     sequence_number: &mut u64,
@@ -471,7 +471,7 @@ pub(super) fn send_tool_call_completion_events(
 pub(super) fn inject_mcp_metadata_streaming(
     response: &mut Value,
     state: &ToolLoopState,
-    session: &McpToolSession<'_>,
+    session: &McpToolSession,
 ) {
     let mcp_servers = session.mcp_servers();
 
@@ -511,7 +511,7 @@ pub(super) async fn execute_tool_loop(
     headers: Option<&HeaderMap>,
     initial_payload: Value,
     original_body: &ResponsesRequest,
-    session: &McpToolSession<'_>,
+    session: &McpToolSession,
 ) -> Result<Value, String> {
     let mut state = ToolLoopState::new(original_body.input.clone());
     let max_tool_calls = original_body.max_tool_calls.map(|n| n as usize);
@@ -682,7 +682,7 @@ pub(super) fn build_incomplete_response(
     mut response: Value,
     state: ToolLoopState,
     reason: &str,
-    session: &McpToolSession<'_>,
+    session: &McpToolSession,
     _original_body: &ResponsesRequest,
 ) -> Result<Value, String> {
     let obj = response

@@ -702,7 +702,7 @@ pub(super) fn handle_streaming_with_tool_interception(
         // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)
         let session_request_id = format!("resp_{}", uuid::Uuid::new_v4());
         let session = McpToolSession::new(
-            &orchestrator_clone,
+            Arc::clone(&orchestrator_clone),
             mcp_servers.clone(),
             &session_request_id,
         );

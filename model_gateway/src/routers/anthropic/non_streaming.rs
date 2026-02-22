@@ -3,7 +3,7 @@
 //! Handles both plain (no MCP) and MCP tool loop paths for
 //! non-streaming requests, composing worker and mcp primitives.
 
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use axum::{
     http::StatusCode,
@@ -36,7 +36,7 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
     // MCP tool loop path
     let session_id = format!("msg_{}", uuid::Uuid::new_v4());
     let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
-    let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &session_id);
+    let session = McpToolSession::new(Arc::clone(&router.mcp_orchestrator), mcp_servers, &session_id);
 
     // Inject MCP tools into the request as regular tools
     mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session);
