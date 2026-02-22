@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import select
 import signal
 import subprocess
 import threading
@@ -475,6 +476,58 @@ class ModelPool:
         # Wait for all launched models to be healthy
         self._wait_all_healthy()
 
+    def _spawn_worker_process(
+        self,
+        cmd: list[str],
+        env: dict[str, str],
+        key: str,
+        port: int,
+    ) -> subprocess.Popen:
+        """Spawn a worker subprocess with output routing.
+
+        Configures stdout/stderr based on ENV_SHOW_WORKER_LOGS and log_dir,
+        then starts the process.  On launch failure the log file handle (if
+        any) is cleaned up before the exception propagates.
+
+        Args:
+            cmd: Command list for subprocess.Popen.
+            env: Environment variables dict.
+            key: Instance key (used for log file naming and registration).
+            port: Port number (included in log file name).
+
+        Returns:
+            The running subprocess.Popen handle.
+        """
+        show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
+
+        stdout_target: int | IO[Any] | None = None
+        stderr_target: int | IO[Any] | None = None
+        if not show_output:
+            if self.log_dir:
+                os.makedirs(self.log_dir, exist_ok=True)
+                safe_key = key.replace("/", "__").replace(":", "_")
+                log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
+                self._log_files[key] = log_file
+                stdout_target = log_file
+                stderr_target = subprocess.STDOUT
+            else:
+                stdout_target = subprocess.DEVNULL
+                stderr_target = subprocess.DEVNULL
+
+        try:
+            return subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=stdout_target,
+                stderr=stderr_target,
+                start_new_session=True,
+            )
+        except Exception:
+            lf = self._log_files.pop(key, None)
+            if lf is not None:
+                lf.close()
+            raise
+
     def _launch_model(
         self,
         model_id: str,
@@ -610,37 +663,7 @@ class ModelPool:
         gpu_info = gpu_slot.gpu_ids if gpu_slot else "auto"
         logger.info("Launching %s on GPUs %s port %d", key, gpu_info, port)
 
-        show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
-
-        # Determine output targets: terminal, log file, or devnull
-        stdout_target: int | IO[Any] | None = None
-        stderr_target: int | IO[Any] | None = None
-        if not show_output:
-            if self.log_dir:
-                os.makedirs(self.log_dir, exist_ok=True)
-                safe_key = key.replace("/", "__").replace(":", "_")
-                log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
-                self._log_files[key] = log_file
-                stdout_target = log_file
-                stderr_target = subprocess.STDOUT
-            else:
-                stdout_target = subprocess.DEVNULL
-                stderr_target = subprocess.DEVNULL
-
-        # Start the process
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=stdout_target,
-                stderr=stderr_target,
-                start_new_session=True,
-            )
-        except Exception:
-            lf = self._log_files.pop(key, None)
-            if lf is not None:
-                lf.close()
-            raise
+        proc = self._spawn_worker_process(cmd, env, key, port)
 
         base_url = f"http://{DEFAULT_HOST}:{port}"
         instance = ModelInstance(
@@ -706,9 +729,6 @@ class ModelPool:
                     # Read stderr for debugging (non-blocking to avoid hangs)
                     if instance.process.stderr:
                         try:
-                            import os
-                            import select
-
                             # Use select for non-blocking read with short timeout
                             # to avoid hanging if child processes keep stderr open
                             ready, _, _ = select.select([instance.process.stderr], [], [], 0.5)
@@ -766,9 +786,6 @@ class ModelPool:
                 inst = self.instances.get(key)
                 if inst and inst.process.stderr:
                     try:
-                        import os
-                        import select
-
                         # Use select for non-blocking read with short timeout
                         # to avoid hanging if worker is unresponsive
                         ready, _, _ = select.select([inst.process.stderr], [], [], 0.1)
@@ -1318,36 +1335,7 @@ class ModelPool:
             port,
         )
 
-        show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
-
-        # Determine output targets: terminal, log file, or devnull
-        stdout_target: int | IO[Any] | None = None
-        stderr_target: int | IO[Any] | None = None
-        if not show_output:
-            if self.log_dir:
-                os.makedirs(self.log_dir, exist_ok=True)
-                safe_key = key.replace("/", "__").replace(":", "_")
-                log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
-                self._log_files[key] = log_file
-                stdout_target = log_file
-                stderr_target = subprocess.STDOUT
-            else:
-                stdout_target = subprocess.DEVNULL
-                stderr_target = subprocess.DEVNULL
-
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=stdout_target,
-                stderr=stderr_target,
-                start_new_session=True,
-            )
-        except Exception:
-            lf = self._log_files.pop(key, None)
-            if lf is not None:
-                lf.close()
-            raise
+        proc = self._spawn_worker_process(cmd, env, key, port)
 
         base_url = f"grpc://{DEFAULT_HOST}:{port}"
         instance = ModelInstance(
@@ -1372,35 +1360,6 @@ class ModelPool:
             logger.error("Failed to start %s gRPC worker %s: %s", runtime_label, key, e)
             self._evict_instance(key)
             return None
-
-    @staticmethod
-    def _build_vllm_http_cmd(
-        model_path: str,
-        host: str,
-        port: int,
-        tp_size: int,
-        model_spec: dict,
-    ) -> list[str]:
-        """Build the vLLM OpenAI-compatible HTTP server launch command.
-
-        Args:
-            model_path: HuggingFace model path.
-            host: Host to bind to.
-            port: Port to bind to.
-            tp_size: Tensor parallel size.
-            model_spec: Model specification dict (for vllm_args).
-
-        Returns:
-            Command list for subprocess.Popen.
-        """
-        return ModelPool._build_vllm_cmd(
-            "vllm.entrypoints.openai.api_server",
-            model_path,
-            host,
-            port,
-            tp_size,
-            model_spec,
-        )
 
     def _launch_vllm_http_worker(
         self,
@@ -1430,7 +1389,14 @@ class ModelPool:
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = gpu_slot.cuda_visible_devices()
 
-        cmd = self._build_vllm_http_cmd(model_path, DEFAULT_HOST, port, tp_size, model_spec)
+        cmd = self._build_vllm_cmd(
+            "vllm.entrypoints.openai.api_server",
+            model_path,
+            DEFAULT_HOST,
+            port,
+            tp_size,
+            model_spec,
+        )
 
         key = instance_key or f"{model_id}:vllm-http"
         logger.info(
@@ -1440,35 +1406,7 @@ class ModelPool:
             port,
         )
 
-        show_output = os.environ.get(ENV_SHOW_WORKER_LOGS, "0") == "1"
-
-        stdout_target: int | IO[Any] | None = None
-        stderr_target: int | IO[Any] | None = None
-        if not show_output:
-            if self.log_dir:
-                os.makedirs(self.log_dir, exist_ok=True)
-                safe_key = key.replace("/", "__").replace(":", "_")
-                log_file = open(os.path.join(self.log_dir, f"worker-{safe_key}-{port}.log"), "w")
-                self._log_files[key] = log_file
-                stdout_target = log_file
-                stderr_target = subprocess.STDOUT
-            else:
-                stdout_target = subprocess.DEVNULL
-                stderr_target = subprocess.DEVNULL
-
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=stdout_target,
-                stderr=stderr_target,
-                start_new_session=True,
-            )
-        except Exception:
-            lf = self._log_files.pop(key, None)
-            if lf is not None:
-                lf.close()
-            raise
+        proc = self._spawn_worker_process(cmd, env, key, port)
 
         base_url = f"http://{DEFAULT_HOST}:{port}"
         instance = ModelInstance(
