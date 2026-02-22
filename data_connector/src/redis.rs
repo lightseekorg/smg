@@ -443,23 +443,15 @@ impl ConversationItemStorage for RedisConversationItemStorage {
                 .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?,
         };
 
-        // Post-filter: remove the cursor item itself plus any items at the same
-        // score that sort before (or equal to) the cursor id, so the result set
-        // matches the Postgres/Oracle behaviour of `(added_at, item_id) > cursor`.
+        // Post-filter: skip past the cursor item and all same-score predecessors.
+        // Redis returns same-score members in lexicographic order (ASC) or
+        // reverse-lex (DESC), so `skip_while` advances past items that appeared
+        // on the previous page, then `skip(1)` drops the cursor item itself.
         let item_ids: Vec<String> = if let (Some(_), Some(ref c_id)) = (cursor_score, &cursor_id) {
             item_ids
                 .into_iter()
-                .filter(|id| {
-                    // We only need to filter items that share the cursor's score.
-                    // Items at a strictly different score are already correctly
-                    // bounded by the inclusive range query, so let them through.
-                    // To check score equality without an extra ZSCORE call, we
-                    // rely on the fact that the cursor item and its ties are at
-                    // the boundary of the result set (first items for ASC, last
-                    // for DESC). We conservatively filter by ID comparison for
-                    // all items — the string comparison is cheap.
-                    id != c_id
-                })
+                .skip_while(|id| id != c_id)
+                .skip(1)
                 .take(params.limit)
                 .collect()
         } else {
@@ -747,10 +739,11 @@ impl ResponseStorage for RedisResponseStorage {
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
 
-        // Read the safety identifier and delete the response hash in a single
-        // pipeline to avoid a race where the identifier changes between read
-        // and delete.
-        let (safety, _): (Option<String>, ()) = redis::pipe()
+        // Atomic MULTI/EXEC: read the safety identifier and delete the hash
+        // in a single transaction so no other client can modify the key
+        // between the read and the delete.
+        let (safety, ()): (Option<String>, ()) = redis::pipe()
+            .atomic()
             .hget(&key, "safety_identifier")
             .del(&key)
             .query_async(&mut conn)
