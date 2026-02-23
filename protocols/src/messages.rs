@@ -992,6 +992,10 @@ pub struct ContainerConfig {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
+    /// Server type (always "url")
+    #[serde(rename = "type", default = "McpServerConfig::default_type")]
+    pub server_type: String,
+
     /// Name of the MCP server
     pub name: String,
 
@@ -1003,6 +1007,12 @@ pub struct McpServerConfig {
 
     /// Tool configuration for this server
     pub tool_configuration: Option<McpToolConfiguration>,
+}
+
+impl McpServerConfig {
+    fn default_type() -> String {
+        "url".to_string()
+    }
 }
 
 /// MCP tool configuration
