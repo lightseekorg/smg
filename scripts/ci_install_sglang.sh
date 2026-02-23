@@ -24,7 +24,7 @@ echo "Using uv version: $(uv --version)"
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 if [ ! -x "${CUDA_HOME}/bin/nvcc" ]; then
     echo "Installing CUDA toolkit (nvcc not found at ${CUDA_HOME}/bin/nvcc)..."
-    wget -qO /tmp/cuda-keyring.deb \
+    curl -fsSL -o /tmp/cuda-keyring.deb \
         https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
     sudo dpkg -i /tmp/cuda-keyring.deb
     rm /tmp/cuda-keyring.deb
