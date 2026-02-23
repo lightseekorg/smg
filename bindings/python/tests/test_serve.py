@@ -158,7 +158,9 @@ class TestImportBackendArgs:
     def test_trtllm_adds_model_arg(self):
         parser = argparse.ArgumentParser()
         _import_backend_args("trtllm", parser)
-        args, backend_args = parser.parse_known_args(["--model", "/path/to/model", "--config", "/path/to/config.yml"])
+        args, backend_args = parser.parse_known_args(
+            ["--model", "/path/to/model", "--config", "/path/to/config.yml"]
+        )
         assert args.model == "/path/to/model"
         assert "--config" in backend_args
         assert "/path/to/config.yml" in backend_args
