@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8001/sse")
 MCP_SERVER_NAME = os.environ.get("MCP_SERVER_NAME", "brave")
 
-MCP_EXTRA_HEADERS = {"anthropic-beta": "mcp-client-2025-11-20"}
+MCP_EXTRA_HEADERS = {
+    "anthropic-beta": "mcp-client-2025-11-20",
+    "x-smg-mcp": "enabled",
+}
 
 
 def _mcp_extra_body() -> dict:
@@ -216,6 +219,212 @@ class TestMcpToolStream:
 
         logger.info(
             "MCP stream: %d block_starts, %d tool calls, %d text deltas",
+            len(block_types),
+            len(mcp_tool_use_ids),
+            len(text_deltas),
+        )
+
+
+# =============================================================================
+# MCP Passthrough Tests (no X-SMG-MCP header — forwarded to Anthropic backend)
+# =============================================================================
+
+# DMCP server: a public D&D MCP server for dice rolling
+DMCP_SERVER_URL = "https://dmcp-server.deno.dev/sse"
+DMCP_SERVER_NAME = "dmcp"
+
+# No x-smg-mcp header — SMG should NOT intercept MCP fields
+PASSTHROUGH_HEADERS = {"anthropic-beta": "mcp-client-2025-11-20"}
+
+
+def _passthrough_extra_body() -> dict:
+    """Build extra_body for passthrough MCP requests using the DMCP server."""
+    return {
+        "mcp_servers": [
+            {
+                "type": "url",
+                "name": DMCP_SERVER_NAME,
+                "url": DMCP_SERVER_URL,
+            }
+        ],
+        "tools": [
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": DMCP_SERVER_NAME,
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("setup_backend", ["anthropic"], indirect=True)
+class TestMcpPassthroughNonStream:
+    """MCP passthrough tests without streaming.
+
+    Without X-SMG-MCP header, SMG forwards MCP fields to the Anthropic backend,
+    which handles MCP orchestration natively.
+    """
+
+    def test_mcp_passthrough_non_streaming(self, setup_backend):
+        """Test MCP passthrough in non-streaming mode.
+
+        Verifies that Anthropic handles MCP natively when SMG does not intercept:
+        - mcp_tool_use and mcp_tool_result blocks present
+        - Final text block with dice roll result
+        - Correct stop_reason
+        """
+        _, model, client, _ = setup_backend
+
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Roll 2d4+1",
+                }
+            ],
+            extra_headers=PASSTHROUGH_HEADERS,
+            extra_body=_passthrough_extra_body(),
+        )
+
+        assert response.id is not None
+        assert response.model == model
+        assert response.stop_reason == "end_turn"
+        assert response.role == "assistant"
+        assert len(response.content) > 0
+
+        # Collect block types
+        mcp_tool_use_blocks = [b for b in response.content if b.type == "mcp_tool_use"]
+        mcp_tool_result_blocks = [
+            b for b in response.content if b.type == "mcp_tool_result"
+        ]
+        text_blocks = [b for b in response.content if b.type == "text"]
+
+        assert len(mcp_tool_use_blocks) > 0, "Should have at least one mcp_tool_use block"
+        assert len(mcp_tool_result_blocks) > 0, (
+            "Should have at least one mcp_tool_result block"
+        )
+        assert len(text_blocks) > 0, "Should have a final text block"
+
+        # Validate mcp_tool_use structure
+        tool_use = mcp_tool_use_blocks[0]
+        assert tool_use.id.startswith("mcptoolu_")
+        assert tool_use.name is not None
+        assert tool_use.server_name == DMCP_SERVER_NAME
+        assert isinstance(tool_use.input, dict)
+
+        # Validate tool_use / tool_result pairing
+        assert len(mcp_tool_result_blocks) == len(mcp_tool_use_blocks)
+        for i, tool_result in enumerate(mcp_tool_result_blocks):
+            assert tool_result.tool_use_id == mcp_tool_use_blocks[i].id
+            assert tool_result.content is not None
+
+        # Validate usage
+        assert response.usage.input_tokens > 0
+        assert response.usage.output_tokens > 0
+
+        logger.info(
+            "MCP passthrough non-stream: %d tool_use, %d tool_result, %d text blocks",
+            len(mcp_tool_use_blocks),
+            len(mcp_tool_result_blocks),
+            len(text_blocks),
+        )
+
+
+@pytest.mark.parametrize("setup_backend", ["anthropic"], indirect=True)
+class TestMcpPassthroughStream:
+    """MCP passthrough tests with SSE streaming.
+
+    Without X-SMG-MCP header, SMG forwards MCP fields to the Anthropic backend,
+    which handles MCP orchestration natively via SSE.
+    """
+
+    def test_mcp_passthrough_streaming(self, setup_backend):
+        """Test MCP passthrough in streaming mode.
+
+        Verifies that Anthropic handles MCP natively when SMG does not intercept:
+        - SSE event lifecycle (message_start → content blocks → message_stop)
+        - mcp_tool_use and mcp_tool_result content blocks
+        - input_json_delta events form valid JSON
+        - text_delta events present
+        """
+        _, model, client, _ = setup_backend
+
+        event_types = set()
+        block_types = []
+        input_json_deltas_by_index: dict[int, list[str]] = {}
+        text_deltas = []
+        mcp_tool_use_ids = []
+
+        with client.messages.stream(
+            model=model,
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Roll 2d4+1",
+                }
+            ],
+            extra_headers=PASSTHROUGH_HEADERS,
+            extra_body=_passthrough_extra_body(),
+        ) as stream:
+            for event in stream:
+                event_types.add(event.type)
+
+                if event.type == "content_block_start":
+                    block_types.append(event.content_block.type)
+                    if event.content_block.type == "mcp_tool_use":
+                        mcp_tool_use_ids.append(event.content_block.id)
+
+                if event.type == "content_block_delta":
+                    if event.delta.type == "input_json_delta":
+                        idx = event.index
+                        input_json_deltas_by_index.setdefault(idx, []).append(
+                            event.delta.partial_json
+                        )
+                    elif event.delta.type == "text_delta":
+                        text_deltas.append(event.delta.text)
+
+        # Required SSE event types
+        assert "message_start" in event_types, "Missing message_start event"
+        assert "content_block_start" in event_types, "Missing content_block_start event"
+        assert "content_block_stop" in event_types, "Missing content_block_stop event"
+        assert "message_delta" in event_types, "Missing message_delta event"
+        assert "message_stop" in event_types, "Missing message_stop event"
+
+        # Should contain MCP tool blocks and text
+        assert "mcp_tool_use" in block_types, "Should have mcp_tool_use content block"
+        assert "mcp_tool_result" in block_types, (
+            "Should have mcp_tool_result content block"
+        )
+        assert "text" in block_types, "Should have text content block"
+
+        # Validate mcp_tool_use IDs
+        assert len(mcp_tool_use_ids) > 0
+        assert all(tid.startswith("mcptoolu_") for tid in mcp_tool_use_ids)
+
+        # Should have input_json_delta events for tool input
+        assert len(input_json_deltas_by_index) > 0, "Should have input_json_delta events"
+
+        # Verify each tool's partial JSON forms valid JSON
+        for idx, fragments in input_json_deltas_by_index.items():
+            full_json = "".join(fragments)
+            if full_json:
+                try:
+                    parsed = json.loads(full_json)
+                except json.JSONDecodeError as exc:
+                    pytest.fail(
+                        f"Failed to parse tool input at index {idx}: {full_json!r} -> {exc}"
+                    )
+                assert isinstance(parsed, dict), (
+                    f"Tool input at index {idx} should be a dict"
+                )
+
+        # Should have text_delta events
+        assert len(text_deltas) > 0, "Should have text_delta events"
+
+        logger.info(
+            "MCP passthrough stream: %d block_starts, %d tool calls, %d text deltas",
             len(block_types),
             len(mcp_tool_use_ids),
             len(text_deltas),
