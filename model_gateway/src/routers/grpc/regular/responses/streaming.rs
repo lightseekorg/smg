@@ -142,7 +142,7 @@ async fn process_and_transform_sse_stream(
     let mut accumulator = StreamingResponseAccumulator::new(&original_request);
 
     // Create event emitter for OpenAI-compatible streaming
-    let response_id = format!("resp_{}", Uuid::new_v4());
+    let response_id = format!("resp_{}", Uuid::now_v7());
     let model = original_request.model.clone();
     let created_at = chrono::Utc::now().timestamp() as u64;
     let mut event_emitter = ResponseStreamEventEmitter::new(response_id, model, created_at);
@@ -498,7 +498,7 @@ async fn execute_tool_loop_streaming_internal(
     let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
     // Generate response ID first so we can use it for both emitter and session
-    let response_id = format!("resp_{}", Uuid::new_v4());
+    let response_id = format!("resp_{}", Uuid::now_v7());
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &response_id);

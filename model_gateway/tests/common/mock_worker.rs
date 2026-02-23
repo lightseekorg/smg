@@ -457,7 +457,7 @@ async fn chat_completions_handler(
         .as_secs();
 
     if is_stream {
-        let request_id = format!("chatcmpl-{}", Uuid::new_v4());
+        let request_id = format!("chatcmpl-{}", Uuid::now_v7());
 
         let stream = stream::once(async move {
             let chunk = json!({
@@ -483,7 +483,7 @@ async fn chat_completions_handler(
             .into_response()
     } else {
         Json(json!({
-            "id": format!("chatcmpl-{}", Uuid::new_v4()),
+            "id": format!("chatcmpl-{}", Uuid::now_v7()),
             "object": "chat.completion",
             "created": timestamp,
             "model": "mock-model",
@@ -544,7 +544,7 @@ async fn completions_handler(
         .as_secs();
 
     if is_stream {
-        let request_id = format!("cmpl-{}", Uuid::new_v4());
+        let request_id = format!("cmpl-{}", Uuid::now_v7());
 
         let stream = stream::once(async move {
             let chunk = json!({
@@ -569,7 +569,7 @@ async fn completions_handler(
             .into_response()
     } else {
         Json(json!({
-            "id": format!("cmpl-{}", Uuid::new_v4()),
+            "id": format!("cmpl-{}", Uuid::now_v7()),
             "object": "text_completion",
             "created": timestamp,
             "model": "mock-model",
@@ -643,7 +643,7 @@ async fn responses_handler(
     }
 
     if is_stream {
-        let request_id = format!("resp-{}", Uuid::new_v4());
+        let request_id = format!("resp-{}", Uuid::now_v7());
 
         // Check if this is an MCP tool call scenario
         let has_tools = payload
@@ -675,7 +675,7 @@ async fn responses_handler(
             // First turn: emit streaming tool call events
             let call_id = format!(
                 "call_{}",
-                Uuid::new_v4().to_string().split('-').next().unwrap()
+                Uuid::now_v7().to_string().split('-').next().unwrap()
             );
             let rid = request_id.clone();
 
@@ -823,7 +823,7 @@ async fn responses_handler(
             let rid = request_id.clone();
             let msg_id = format!(
                 "msg_{}",
-                Uuid::new_v4().to_string().split('-').next().unwrap()
+                Uuid::now_v7().to_string().split('-').next().unwrap()
             );
 
             let events = vec![
@@ -993,7 +993,7 @@ async fn responses_handler(
                 .into_response()
         }
     } else if is_background {
-        let rid = req_id.unwrap_or_else(|| format!("resp-{}", Uuid::new_v4()));
+        let rid = req_id.unwrap_or_else(|| format!("resp-{}", Uuid::now_v7()));
         Json(json!({
             "id": rid,
             "object": "response",
@@ -1033,7 +1033,7 @@ async fn responses_handler(
             .unwrap_or(false);
 
         if has_tools && !has_function_output {
-            let rid = format!("resp-{}", Uuid::new_v4());
+            let rid = format!("resp-{}", Uuid::now_v7());
             Json(json!({
                 "id": rid,
                 "object": "response",
@@ -1052,7 +1052,7 @@ async fn responses_handler(
             .into_response()
         } else if has_tools && has_function_output {
             Json(json!({
-                "id": format!("resp-{}", Uuid::new_v4()),
+                "id": format!("resp-{}", Uuid::now_v7()),
                 "object": "response",
                 "created_at": timestamp,
                 "model": "mock-model",
@@ -1074,7 +1074,7 @@ async fn responses_handler(
             .into_response()
         } else {
             Json(json!({
-                "id": format!("resp-{}", Uuid::new_v4()),
+                "id": format!("resp-{}", Uuid::now_v7()),
                 "object": "response",
                 "created_at": timestamp,
                 "model": "mock-model",

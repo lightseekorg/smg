@@ -117,7 +117,7 @@ impl TokenizerRegistry {
 
     /// Generate a new UUID for a tokenizer
     pub fn generate_id() -> String {
-        Uuid::new_v4().to_string()
+        Uuid::now_v7().to_string()
     }
 
     /// Load and register a tokenizer

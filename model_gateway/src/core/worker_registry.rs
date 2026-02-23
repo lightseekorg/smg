@@ -154,7 +154,7 @@ pub struct WorkerId(String);
 impl WorkerId {
     /// Create a new worker ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4().to_string())
+        Self(Uuid::now_v7().to_string())
     }
 
     /// Create a worker ID from a string

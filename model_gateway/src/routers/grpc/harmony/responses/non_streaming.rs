@@ -102,7 +102,7 @@ async fn execute_with_mcp_loop(
     let original_tools = current_request.tools.clone();
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
-    let session_request_id = format!("resp_{}", uuid::Uuid::new_v4());
+    let session_request_id = format!("resp_{}", uuid::Uuid::now_v7());
 
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
 
