@@ -295,15 +295,11 @@ class TestMcpPassthroughNonStream:
 
         # Collect block types
         mcp_tool_use_blocks = [b for b in response.content if b.type == "mcp_tool_use"]
-        mcp_tool_result_blocks = [
-            b for b in response.content if b.type == "mcp_tool_result"
-        ]
+        mcp_tool_result_blocks = [b for b in response.content if b.type == "mcp_tool_result"]
         text_blocks = [b for b in response.content if b.type == "text"]
 
         assert len(mcp_tool_use_blocks) > 0, "Should have at least one mcp_tool_use block"
-        assert len(mcp_tool_result_blocks) > 0, (
-            "Should have at least one mcp_tool_result block"
-        )
+        assert len(mcp_tool_result_blocks) > 0, "Should have at least one mcp_tool_result block"
         assert len(text_blocks) > 0, "Should have a final text block"
 
         # Validate mcp_tool_use structure
@@ -394,9 +390,7 @@ class TestMcpPassthroughStream:
 
         # Should contain MCP tool blocks and text
         assert "mcp_tool_use" in block_types, "Should have mcp_tool_use content block"
-        assert "mcp_tool_result" in block_types, (
-            "Should have mcp_tool_result content block"
-        )
+        assert "mcp_tool_result" in block_types, "Should have mcp_tool_result content block"
         assert "text" in block_types, "Should have text content block"
 
         # Validate mcp_tool_use IDs
@@ -416,9 +410,7 @@ class TestMcpPassthroughStream:
                     pytest.fail(
                         f"Failed to parse tool input at index {idx}: {full_json!r} -> {exc}"
                     )
-                assert isinstance(parsed, dict), (
-                    f"Tool input at index {idx} should be a dict"
-                )
+                assert isinstance(parsed, dict), f"Tool input at index {idx} should be a dict"
 
         # Should have text_delta events
         assert len(text_deltas) > 0, "Should have text_delta events"
