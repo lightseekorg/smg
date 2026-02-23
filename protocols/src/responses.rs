@@ -516,6 +516,14 @@ pub struct InputTokensDetails {
     pub cached_tokens: u32,
 }
 
+impl From<&PromptTokenUsageInfo> for InputTokensDetails {
+    fn from(d: &PromptTokenUsageInfo) -> Self {
+        Self {
+            cached_tokens: d.cached_tokens,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct OutputTokensDetails {
     pub reasoning_tokens: u32,
@@ -528,11 +536,10 @@ impl UsageInfo {
             input_tokens: self.prompt_tokens,
             output_tokens: self.completion_tokens,
             total_tokens: self.total_tokens,
-            input_tokens_details: self.prompt_tokens_details.as_ref().map(|details| {
-                InputTokensDetails {
-                    cached_tokens: details.cached_tokens,
-                }
-            }),
+            input_tokens_details: self
+                .prompt_tokens_details
+                .as_ref()
+                .map(InputTokensDetails::from),
             output_tokens_details: self.reasoning_tokens.map(|tokens| OutputTokensDetails {
                 reasoning_tokens: tokens,
             }),

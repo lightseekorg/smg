@@ -520,10 +520,14 @@ impl StreamingProcessor {
             if stream_opts.include_usage.unwrap_or(false) {
                 let total_prompt: u32 = prompt_tokens.values().sum();
                 let total_completion: u32 = completion_tokens.total();
+                let total_cached: u32 = cached_tokens.values().sum();
 
                 let usage_chunk = ChatCompletionStreamResponse::builder(request_id, model)
                     .created(created)
-                    .usage(Usage::from_counts(total_prompt, total_completion))
+                    .usage(
+                        Usage::from_counts(total_prompt, total_completion)
+                            .with_cached_tokens(total_cached),
+                    )
                     .maybe_system_fingerprint(system_fingerprint)
                     .build();
 

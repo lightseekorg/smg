@@ -434,6 +434,32 @@ fn test_usage_conversion() {
 }
 
 #[test]
+fn test_harmony_usage_cached_tokens_propagated() {
+    use openai_protocol::responses::InputTokensDetails;
+
+    // Simulate the Harmony path: Usage (not UsageInfo) -> InputTokensDetails via From trait
+    let usage = openai_protocol::common::Usage::from_counts(100, 50).with_cached_tokens(30);
+    let details = usage
+        .prompt_tokens_details
+        .as_ref()
+        .map(InputTokensDetails::from)
+        .expect("input_tokens_details should be Some when cached tokens are set");
+    assert_eq!(details.cached_tokens, 30);
+}
+
+#[test]
+fn test_harmony_usage_no_cached_tokens() {
+    use openai_protocol::responses::InputTokensDetails;
+
+    let usage = openai_protocol::common::Usage::from_counts(100, 50);
+    let details = usage
+        .prompt_tokens_details
+        .as_ref()
+        .map(InputTokensDetails::from);
+    assert!(details.is_none());
+}
+
+#[test]
 fn test_reasoning_param_default() {
     let param = ResponseReasoningParam {
         effort: Some(ReasoningEffort::Medium),

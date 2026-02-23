@@ -9,8 +9,9 @@ use axum::response::Response;
 use openai_protocol::{
     common::{ToolCall, Usage},
     responses::{
-        OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
-        ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
+        InputTokensDetails, OutputTokensDetails, ResponseContentPart, ResponseOutputItem,
+        ResponseReasoningContent, ResponseStatus, ResponseUsage, ResponsesRequest,
+        ResponsesResponse, ResponsesUsage,
     },
 };
 use serde_json::{json, to_string};
@@ -455,7 +456,10 @@ fn build_tool_response(
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
-            input_tokens_details: None,
+            input_tokens_details: usage
+                .prompt_tokens_details
+                .as_ref()
+                .map(InputTokensDetails::from),
             output_tokens_details: usage.completion_tokens_details.as_ref().and_then(|d| {
                 d.reasoning_tokens.map(|tokens| OutputTokensDetails {
                     reasoning_tokens: tokens,

@@ -497,13 +497,13 @@ pub struct FunctionCallResponse {
 // ============================================================================
 // Usage and Logging
 // ============================================================================
-
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
     pub completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
@@ -514,8 +514,15 @@ impl Usage {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
+            prompt_tokens_details: None,
             completion_tokens_details: None,
         }
+    }
+
+    /// Add cached token details to this Usage
+    pub fn with_cached_tokens(mut self, cached_tokens: u32) -> Self {
+        self.prompt_tokens_details = Some(PromptTokenUsageInfo { cached_tokens });
+        self
     }
 
     /// Add reasoning token details to this Usage
@@ -523,15 +530,20 @@ impl Usage {
         if reasoning_tokens > 0 {
             self.completion_tokens_details = Some(CompletionTokensDetails {
                 reasoning_tokens: Some(reasoning_tokens),
+                accepted_prediction_tokens: None,
+                rejected_prediction_tokens: None,
             });
         }
         self
     }
 }
 
+#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct CompletionTokensDetails {
     pub reasoning_tokens: Option<u32>,
+    pub accepted_prediction_tokens: Option<u32>,
+    pub rejected_prediction_tokens: Option<u32>,
 }
 
 /// Usage information (used by rerank and other endpoints)
