@@ -112,8 +112,7 @@ _GLOSSARY_LINES = [
     "|-------|---------|",
     "| **gRPC X%** | gRPC is X% better than HTTP for this metric |",
     "| **HTTP X%** | HTTP is X% better than gRPC for this metric |",
-    "| **SGLang X%** | SGLang is X% better than vLLM for this metric |",
-    "| **vLLM X%** | vLLM is X% better than SGLang for this metric |",
+    "| **{Runtime} X%** | That runtime is X% better than the other for this metric (e.g. SGLang, vLLM, TRT-LLM) |",
     "| **~** | Difference is within 2% — essentially a tie |",
     "",
     "*Lower is better for latency metrics (TTFT, TPOT, E2E). Higher is better for throughput (tput, RPS).*",
@@ -664,39 +663,40 @@ def _section_key_findings(
                 )
         lines.append("")
 
-    # 2. Runtime verdict per key metric
+    # 2. Runtime verdict per key metric (one block per runtime pair)
     if runtime_comparisons:
-        rt_a = runtime_comparisons[0].runtime_a
-        rt_b = runtime_comparisons[0].runtime_b
-        rt_a_display = _RUNTIME_DISPLAY.get(rt_a, rt_a)
-        rt_b_display = _RUNTIME_DISPLAY.get(rt_b, rt_b)
+        by_pair = _group_by_runtime_pair(runtime_comparisons)
+        for (rt_a, rt_b), pair_rcps in sorted(by_pair.items()):
+            rt_a_display = _RUNTIME_DISPLAY.get(rt_a, rt_a)
+            rt_b_display = _RUNTIME_DISPLAY.get(rt_b, rt_b)
 
-        lines.append(f"**Runtime ({rt_a_display} vs {rt_b_display}):**")
-        lines.append("")
-        for label, fld, lower_better, _unit in CHART_METRICS:
-            advs = [
-                a
-                for rcp in runtime_comparisons
-                if (a := _rt_advantage(rcp, fld, lower_better)) is not None
-            ]
-            if not advs:
-                continue
-            avg_adv = sum(advs) / len(advs)
-            a_wins = sum(1 for a in advs if a > 2)
-            b_wins = sum(1 for a in advs if a < -2)
-            ties = len(advs) - a_wins - b_wins
-            if abs(avg_adv) < 1:
-                lines.append(
-                    f"- **{label}**: No clear winner — essentially tied across all scenarios"
-                )
-            else:
-                winner = rt_a_display if avg_adv > 0 else rt_b_display
-                lines.append(
-                    f"- **{label}**: {winner} wins {max(a_wins, b_wins)}/{len(advs)} "
-                    f"comparisons (avg {abs(avg_adv):.1f}% better), "
-                    f"{min(a_wins, b_wins)} losses, {ties} ties"
-                )
-        lines.append("")
+            lines.append(f"**Runtime ({rt_a_display} vs {rt_b_display}):**")
+            lines.append("")
+            for label, fld, lower_better, _unit in CHART_METRICS:
+                advs = [
+                    a
+                    for rcp in pair_rcps
+                    if (a := _rt_advantage(rcp, fld, lower_better)) is not None
+                ]
+                if not advs:
+                    continue
+                avg_adv = sum(advs) / len(advs)
+                a_wins = sum(1 for a in advs if a > 2)
+                b_wins = sum(1 for a in advs if a < -2)
+                ties = len(advs) - a_wins - b_wins
+                if abs(avg_adv) < 1:
+                    lines.append(
+                        f"- **{label}**: No clear winner — essentially tied across all scenarios"
+                    )
+                else:
+                    winner = rt_a_display if avg_adv > 0 else rt_b_display
+                    lines.append(
+                        f"- **{label}**: {winner} wins "
+                        f"{max(a_wins, b_wins)}/{len(advs)} "
+                        f"comparisons (avg {abs(avg_adv):.1f}% better), "
+                        f"{min(a_wins, b_wins)} losses, {ties} ties"
+                    )
+            lines.append("")
 
     # 3. Error rates
     total_runs = sum(len(e.runs) for e in experiments)
@@ -1073,33 +1073,28 @@ def _avg_rt_advantage(
     return sum(advs) / len(advs) if advs else None
 
 
-def _section_runtime_comparison(runtime_comparisons: list[RuntimeComparisonPoint]) -> list[str]:
-    """Cross-runtime comparison section (e.g. SGLang vs vLLM)."""
-    if not runtime_comparisons:
-        return []
+def _group_by_runtime_pair(
+    runtime_comparisons: list[RuntimeComparisonPoint],
+) -> dict[tuple[str, str], list[RuntimeComparisonPoint]]:
+    """Group runtime comparisons by (runtime_a, runtime_b) pair."""
+    by_pair: dict[tuple[str, str], list[RuntimeComparisonPoint]] = defaultdict(list)
+    for rcp in runtime_comparisons:
+        by_pair[(rcp.runtime_a, rcp.runtime_b)].append(rcp)
+    return by_pair
 
-    # Determine runtime labels from the data
-    rt_a = runtime_comparisons[0].runtime_a
-    rt_b = runtime_comparisons[0].runtime_b
-    rt_a_display = _RUNTIME_DISPLAY.get(rt_a, rt_a)
-    rt_b_display = _RUNTIME_DISPLAY.get(rt_b, rt_b)
 
+def _rt_aggregate_table(
+    rcps: list[RuntimeComparisonPoint],
+    rt_a_display: str,
+    rt_b_display: str,
+) -> list[str]:
+    """Render an aggregate runtime comparison table."""
     lines = [
-        f"### Runtime Comparison: {rt_a_display} vs {rt_b_display}",
-        "",
-        f"*{len(runtime_comparisons)} matched data points. "
-        f"Shows which runtime is better and by how much.*",
-        "",
         "| Metric | Avg | Median | Verdict |",
         "|--------|----:|-------:|---------|",
     ]
-
     for label, fld, lower_better in AGGREGATE_METRICS:
-        advs = [
-            a
-            for rcp in runtime_comparisons
-            if (a := _rt_advantage(rcp, fld, lower_better)) is not None
-        ]
+        advs = [a for rcp in rcps if (a := _rt_advantage(rcp, fld, lower_better)) is not None]
         if not advs:
             continue
         avg = sum(advs) / len(advs)
@@ -1110,69 +1105,78 @@ def _section_runtime_comparison(runtime_comparisons: list[RuntimeComparisonPoint
             f"| {_fmt_winner(med, label_a=rt_a_display, label_b=rt_b_display)} "
             f"| {_fmt_winner(avg, bold=True, label_a=rt_a_display, label_b=rt_b_display)} |"
         )
+    return lines
 
-    lines.append("")
 
-    # Per-protocol sub-tables
-    by_protocol: dict[str, list[RuntimeComparisonPoint]] = defaultdict(list)
-    for rcp in runtime_comparisons:
-        by_protocol[rcp.protocol].append(rcp)
+def _section_runtime_comparison(runtime_comparisons: list[RuntimeComparisonPoint]) -> list[str]:
+    """Cross-runtime comparison sections, one per runtime pair."""
+    if not runtime_comparisons:
+        return []
 
-    if len(by_protocol) > 1:
-        for protocol in sorted(by_protocol.keys()):
-            p_cps = by_protocol[protocol]
-            p_display = _PROTOCOL_DISPLAY.get(protocol, protocol.upper())
-            lines.extend(
-                [
-                    f"#### {p_display}: {rt_a_display} vs {rt_b_display} ({len(p_cps)} points)",
-                    "",
-                    "| Metric | Avg | Median | Verdict |",
-                    "|--------|----:|-------:|---------|",
-                ]
-            )
-            for label, fld, lower_better in AGGREGATE_METRICS:
-                advs = [
-                    a for rcp in p_cps if (a := _rt_advantage(rcp, fld, lower_better)) is not None
-                ]
-                if not advs:
-                    continue
-                avg = sum(advs) / len(advs)
-                med = median(advs)
-                lines.append(
-                    f"| {label} "
-                    f"| {_fmt_winner(avg, label_a=rt_a_display, label_b=rt_b_display)} "
-                    f"| {_fmt_winner(med, label_a=rt_a_display, label_b=rt_b_display)} "
-                    f"| {_fmt_winner(avg, bold=True, label_a=rt_a_display, label_b=rt_b_display)} |"
-                )
-            lines.append("")
+    by_pair = _group_by_runtime_pair(runtime_comparisons)
+    lines: list[str] = []
 
-    # Per-model runtime comparison
-    by_model: dict[str, list[RuntimeComparisonPoint]] = defaultdict(list)
-    for rcp in runtime_comparisons:
-        by_model[rcp.model].append(rcp)
+    for (rt_a, rt_b), pair_rcps in sorted(by_pair.items()):
+        rt_a_display = _RUNTIME_DISPLAY.get(rt_a, rt_a)
+        rt_b_display = _RUNTIME_DISPLAY.get(rt_b, rt_b)
 
-    if by_model:
-        headers = [m[0] for m in PER_MODEL_METRICS]
         lines.extend(
             [
-                f"#### Per-Model: {rt_a_display} vs {rt_b_display}",
+                f"### Runtime Comparison: {rt_a_display} vs {rt_b_display}",
                 "",
-                "| Model | " + " | ".join(headers) + " | N |",
-                "|-------" + "|--------:" * len(headers) + "|---:|",
+                f"*{len(pair_rcps)} matched data points. "
+                f"Shows which runtime is better and by how much.*",
+                "",
             ]
         )
-        for model in sorted(by_model.keys()):
-            rcps = by_model[model]
-            cells = [
-                _fmt_winner(
-                    _avg_rt_advantage(rcps, fld, lb),
-                    label_a=rt_a_display,
-                    label_b=rt_b_display,
-                )
-                for _, fld, lb in PER_MODEL_METRICS
-            ]
-            lines.append(f"| {model} | " + " | ".join(cells) + f" | {len(rcps)} |")
+        lines.extend(_rt_aggregate_table(pair_rcps, rt_a_display, rt_b_display))
         lines.append("")
+
+        # Per-protocol sub-tables
+        by_protocol: dict[str, list[RuntimeComparisonPoint]] = defaultdict(list)
+        for rcp in pair_rcps:
+            by_protocol[rcp.protocol].append(rcp)
+
+        if len(by_protocol) > 1:
+            for protocol in sorted(by_protocol.keys()):
+                p_cps = by_protocol[protocol]
+                p_display = _PROTOCOL_DISPLAY.get(protocol, protocol.upper())
+                lines.extend(
+                    [
+                        f"#### {p_display}: {rt_a_display} vs {rt_b_display} ({len(p_cps)} points)",
+                        "",
+                    ]
+                )
+                lines.extend(_rt_aggregate_table(p_cps, rt_a_display, rt_b_display))
+                lines.append("")
+
+        # Per-model runtime comparison
+        by_model: dict[str, list[RuntimeComparisonPoint]] = defaultdict(list)
+        for rcp in pair_rcps:
+            by_model[rcp.model].append(rcp)
+
+        if by_model:
+            headers = [m[0] for m in PER_MODEL_METRICS]
+            lines.extend(
+                [
+                    f"#### Per-Model: {rt_a_display} vs {rt_b_display}",
+                    "",
+                    "| Model | " + " | ".join(headers) + " | N |",
+                    "|-------" + "|--------:" * len(headers) + "|---:|",
+                ]
+            )
+            for model in sorted(by_model.keys()):
+                rcps = by_model[model]
+                cells = [
+                    _fmt_winner(
+                        _avg_rt_advantage(rcps, fld, lb),
+                        label_a=rt_a_display,
+                        label_b=rt_b_display,
+                    )
+                    for _, fld, lb in PER_MODEL_METRICS
+                ]
+                lines.append(f"| {model} | " + " | ".join(cells) + f" | {len(rcps)} |")
+            lines.append("")
 
     return lines
 
