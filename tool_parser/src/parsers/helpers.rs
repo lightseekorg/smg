@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use openai_protocol::common::Tool;
-use serde::de::IgnoredAny;
-use serde_json::Value;
+use serde::de::{Deserialize, IgnoredAny};
+use serde_json::{de::Deserializer, Value};
 
 use crate::{
     errors::{ParserError, ParserResult},
@@ -136,7 +136,11 @@ pub fn ensure_capacity(
 
 /// Check if a string contains complete, valid JSON
 pub fn is_complete_json(input: &str) -> bool {
-    serde_json::from_str::<IgnoredAny>(input).is_ok()
+    let mut de = Deserializer::from_str(input);
+    match IgnoredAny::deserialize(&mut de) {
+        Ok(_) => de.end().is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// Normalize the arguments/parameters field in a tool call object.
