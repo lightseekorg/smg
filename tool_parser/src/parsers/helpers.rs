@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use openai_protocol::common::Tool;
+use serde::de::IgnoredAny;
 use serde_json::Value;
 
 use crate::{
@@ -135,7 +136,7 @@ pub fn ensure_capacity(
 
 /// Check if a string contains complete, valid JSON
 pub fn is_complete_json(input: &str) -> bool {
-    serde_json::from_str::<Value>(input).is_ok()
+    serde_json::from_str::<IgnoredAny>(input).is_ok()
 }
 
 /// Normalize the arguments/parameters field in a tool call object.
@@ -256,7 +257,7 @@ pub(crate) fn handle_json_tool_streaming(
             .find(|&i| json_str.is_char_boundary(i))
             .unwrap_or(0)
     };
-    let is_complete = serde_json::from_str::<Value>(&json_str[..safe_end_idx]).is_ok();
+    let is_complete = is_complete_json(&json_str[..safe_end_idx]);
 
     // Normalize all tool call fields first (handles tool_name -> name, parameters -> arguments)
     // This must happen before validation since different LLMs use different field names

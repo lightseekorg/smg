@@ -178,10 +178,5 @@ name = "wasm_instantiation"
 harness = false
 path = "benches/wasm_instantiation.rs"
 
-[[bench]]
-name = "json_validation_bench"
-harness = false
-path = "benches/json_validation_bench.rs"
-
 [lints]
 workspace = true
