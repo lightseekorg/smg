@@ -327,21 +327,32 @@ pub async fn create_conversation_items(
         ));
     }
 
-    let mut created_items = Vec::new();
-    let mut warnings = Vec::new();
     let added_at = Utc::now();
 
-    for item_val in items_array {
-        match process_item(item_storage, &conversation_id, item_val, added_at).await {
-            Ok((item_json, warning)) => {
-                created_items.push(item_json);
-                if let Some(w) = warning {
-                    warnings.push(w);
+    let scope_result = smg_data_connector::CURRENT_CONVERSATION_ID
+        .scope(Some(conversation_id.clone()), async move {
+            let mut created_items = Vec::new();
+            let mut warnings = Vec::new();
+
+            for item_val in items_array {
+                match process_item(item_storage, &conversation_id, item_val, added_at).await {
+                    Ok((item_json, warning)) => {
+                        created_items.push(item_json);
+                        if let Some(w) = warning {
+                            warnings.push(w);
+                        }
+                    }
+                    Err(response) => return Err(response),
                 }
             }
-            Err(response) => return response,
-        }
-    }
+            Ok((created_items, warnings))
+        })
+        .await;
+
+    let (created_items, warnings) = match scope_result {
+        Ok(result) => result,
+        Err(response) => return response,
+    };
 
     let mut response = json!({
         "object": "list",
@@ -369,6 +380,7 @@ async fn process_item(
 ) -> Result<(Value, Option<String>), Response> {
     let item_type = item_val
         .get("type")
+        .or_else(|| item_val.get("item_type"))
         .and_then(|v| v.as_str())
         .unwrap_or("message");
 
@@ -517,7 +529,13 @@ pub async fn get_conversation_item(
         return not_found("Item not found in this conversation");
     }
 
-    match item_storage.get_item(&item_id).await {
+    let item_result = smg_data_connector::CURRENT_CONVERSATION_ID
+        .scope(Some(conversation_id.clone()), async move {
+            item_storage.get_item(&item_id).await
+        })
+        .await;
+
+    match item_result {
         Ok(Some(item)) => (StatusCode::OK, Json(item_to_json(&item))).into_response(),
         Ok(None) => not_found("Item not found"),
         Err(e) => internal_error(format!("Failed to get item: {e}")),
@@ -561,6 +579,7 @@ fn parse_item_from_value(
 ) -> Result<(NewConversationItem, Option<String>), String> {
     let item_type = item_val
         .get("type")
+        .or_else(|| item_val.get("item_type"))
         .and_then(|v| v.as_str())
         .unwrap_or("message");
 
@@ -602,10 +621,15 @@ fn parse_item_from_value(
         item_val.clone()
     };
 
+    let response_id = item_val
+        .get("response_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     Ok((
         NewConversationItem {
             id: None,
-            response_id: None,
+            response_id,
             item_type: item_type.to_string(),
             role,
             content,

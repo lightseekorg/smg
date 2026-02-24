@@ -27,7 +27,7 @@ mod redis;
 pub use core::{
     Conversation, ConversationId, ConversationItem, ConversationItemId, ConversationItemStorage,
     ConversationStorage, ListParams, NewConversation, NewConversationItem, ResponseId,
-    ResponseStorage, SortOrder, StoredResponse,
+    ResponseStorage, SortOrder, StoredResponse, CONVERSATION_STORE_ID, CURRENT_CONVERSATION_ID,
 };
 
 pub use config::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};

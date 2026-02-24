@@ -19,6 +19,15 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value};
 
+// Task-local storage for request-scoped IDs.
+//
+// This is used by the downstream Oracle backend to avoid passing internal IDs
+// through request/response payloads.
+tokio::task_local! {
+    pub static CONVERSATION_STORE_ID: Option<String>;
+    pub static CURRENT_CONVERSATION_ID: Option<ConversationId>;
+}
+
 // ============================================================================
 // PART 1: Conversation Storage
 // ============================================================================

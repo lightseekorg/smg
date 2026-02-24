@@ -11,10 +11,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use deadpool::managed::{Manager, Metrics, Pool, RecycleError, RecycleResult};
-use oracle::{
-    sql_type::{OracleType, ToSql},
-    Connection, Connector, Row,
-};
+use oracle::{Connection, Connector, Row};
 use serde_json::Value;
 
 use super::core::{
@@ -269,39 +266,35 @@ impl OracleConversationStorage {
     pub(crate) fn init_schema(conn: &Connection) -> Result<(), String> {
         let exists: i64 = conn
             .query_row_as(
-                "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATIONS'",
+                // Downstream expects tables to exist in ADMIN schema.
+                "SELECT COUNT(*) FROM all_tables WHERE owner = 'ADMIN' AND table_name = 'CONVERSATIONS'",
                 &[],
             )
             .map_err(map_oracle_error)?;
 
         if exists == 0 {
-            conn.execute(
-                "CREATE TABLE conversations (
-                    id VARCHAR2(64) PRIMARY KEY,
-                    created_at TIMESTAMP WITH TIME ZONE,
-                    metadata CLOB
-                )",
-                &[],
-            )
-            .map_err(map_oracle_error)?;
+            return Err("CONVERSATIONS table does not exist. Please create the table.".to_string());
         }
 
         Ok(())
     }
 
-    /// Parse raw metadata JSON into `ConversationMetadata`.
-    ///
-    /// Delegates to the shared `parse_conversation_metadata` in `common.rs`.
-    /// The previous Oracle-specific version performed an extra `Value` type-check
-    /// (rejecting non-object JSON explicitly), but the common function achieves the
-    /// same result: `serde_json::from_str::<JsonMap>` already rejects non-object JSON
-    /// with a descriptive error, and metadata is always serialized from a `JsonMap` by
-    /// our own code, so non-object values cannot occur in practice.
     fn parse_metadata(
         raw: Option<String>,
     ) -> Result<Option<ConversationMetadata>, ConversationStorageError> {
-        crate::common::parse_conversation_metadata(raw)
-            .map_err(ConversationStorageError::StorageError)
+        match raw {
+            Some(json) if !json.is_empty() => {
+                let value: Value = serde_json::from_str(&json)?;
+                match value {
+                    Value::Object(map) => Ok(Some(map)),
+                    Value::Null => Ok(None),
+                    other => Err(ConversationStorageError::StorageError(format!(
+                        "conversation metadata expected object, got {other}"
+                    ))),
+                }
+            }
+            _ => Ok(None),
+        }
     }
 }
 
@@ -311,20 +304,26 @@ impl ConversationStorage for OracleConversationStorage {
         &self,
         input: NewConversation,
     ) -> Result<Conversation, ConversationStorageError> {
-        let conversation = Conversation::new(input);
+        let conversation = Conversation::new(input.clone());
         let id_str = conversation.id.0.clone();
+        // Read conversation_store_id from task-local.
+        let conversation_store_id = super::core::CONVERSATION_STORE_ID
+            .try_with(|id| id.clone())
+            .ok()
+            .flatten();
         let created_at = conversation.created_at;
         let metadata_json = conversation
             .metadata
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
+        let expires_at = created_at + chrono::Duration::hours(24);
 
         self.store
             .execute(move |conn| {
                 conn.execute(
-                    "INSERT INTO conversations (id, created_at, metadata) VALUES (:1, :2, :3)",
-                    &[&id_str, &created_at, &metadata_json],
+                    "INSERT INTO ADMIN.\"CONVERSATIONS\" (\"CONVERSATION_ID\", \"CONVERSATION_STORE_ID\", \"GENERATIVE_AI_PROJECT_ID\", \"CREATED_AT\", \"METADATA\", \"ITEMS\", \"UPDATED_AT\", \"EXPIRES_AT\", \"VERSION\", \"SHORT_TERM_MEMORY\") VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)",
+                    &[&id_str, &conversation_store_id, &None::<String>, &created_at, &metadata_json, &"[]", &created_at, &expires_at, &0, &None::<String>],
                 )
                 .map(|_| ())
                 .map_err(map_oracle_error)
@@ -343,7 +342,9 @@ impl ConversationStorage for OracleConversationStorage {
         self.store
             .execute(move |conn| {
                 let mut stmt = conn
-                    .statement("SELECT id, created_at, metadata FROM conversations WHERE id = :1")
+                    .statement(
+                        "SELECT \"CONVERSATION_ID\", \"CREATED_AT\", \"METADATA\", \"GENERATIVE_AI_PROJECT_ID\", \"UPDATED_AT\", \"VERSION\", \"SHORT_TERM_MEMORY\", \"EXPIRES_AT\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                    )
                     .build()
                     .map_err(map_oracle_error)?;
                 let mut rows = stmt.query(&[&lookup]).map_err(map_oracle_error)?;
@@ -374,40 +375,30 @@ impl ConversationStorage for OracleConversationStorage {
     ) -> Result<Option<Conversation>, ConversationStorageError> {
         let id_str = id.0.clone();
         let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
+        let now = Utc::now();
         let conversation_id = id.clone();
 
         self.store
             .execute(move |conn| {
-                let mut stmt = conn
-                    .statement(
-                        "UPDATE conversations \
-                         SET metadata = :1 \
-                         WHERE id = :2 \
-                         RETURNING created_at INTO :3",
+                let res = conn
+                    .execute(
+                        "UPDATE ADMIN.\"CONVERSATIONS\" SET \"METADATA\" = :1, \"UPDATED_AT\" = :2, \"GENERATIVE_AI_PROJECT_ID\" = :3, \"SHORT_TERM_MEMORY\" = :4 WHERE \"CONVERSATION_ID\" = :5",
+                        &[&metadata_json, &now, &None::<String>, &None::<String>, &id_str],
                     )
-                    .build()
                     .map_err(map_oracle_error)?;
 
-                stmt.bind(3, &OracleType::TimestampTZ(6))
-                    .map_err(map_oracle_error)?;
-                stmt.execute(&[&metadata_json, &id_str])
-                    .map_err(map_oracle_error)?;
-
-                if stmt.row_count().map_err(map_oracle_error)? == 0 {
+                if res.row_count().map_err(map_oracle_error)? == 0 {
                     return Ok(None);
                 }
 
-                let mut created_at: Vec<DateTime<Utc>> =
-                    stmt.returned_values(3).map_err(map_oracle_error)?;
-                let created_at = created_at
-                    .pop()
-                    .ok_or_else(|| "Oracle update did not return created_at".to_string())?;
+                let created_at: DateTime<Utc> = conn
+                    .query_row_as(
+                        "SELECT \"CREATED_AT\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        &[&id_str],
+                    )
+                    .map_err(map_oracle_error)?;
 
-                Ok(Some(Conversation::with_parts(
-                    conversation_id,
-                    created_at,
-                    metadata,
-                )))
+                Ok(Some(Conversation::with_parts(conversation_id, created_at, metadata)))
             })
             .await
             .map_err(ConversationStorageError::StorageError)
@@ -421,8 +412,11 @@ impl ConversationStorage for OracleConversationStorage {
         let res = self
             .store
             .execute(move |conn| {
-                conn.execute("DELETE FROM conversations WHERE id = :1", &[&id_str])
-                    .map_err(map_oracle_error)
+                conn.execute(
+                    "DELETE FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                    &[&id_str],
+                )
+                .map_err(map_oracle_error)
             })
             .await
             .map_err(ConversationStorageError::StorageError)?;
@@ -449,53 +443,16 @@ impl OracleConversationItemStorage {
     }
 
     pub(crate) fn init_schema(conn: &Connection) -> Result<(), String> {
-        let exists_items: i64 = conn
+        // Items are embedded in ADMIN.CONVERSATIONS.ITEMS.
+        let exists: i64 = conn
             .query_row_as(
-                "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEMS'",
+                "SELECT COUNT(*) FROM all_tables WHERE owner = 'ADMIN' AND table_name = 'CONVERSATIONS'",
                 &[],
             )
             .map_err(map_oracle_error)?;
 
-        if exists_items == 0 {
-            conn.execute(
-                "CREATE TABLE conversation_items (
-                    id VARCHAR2(64) PRIMARY KEY,
-                    response_id VARCHAR2(64),
-                    item_type VARCHAR2(32) NOT NULL,
-                    role VARCHAR2(32),
-                    content CLOB,
-                    status VARCHAR2(32),
-                    created_at TIMESTAMP WITH TIME ZONE
-                )",
-                &[],
-            )
-            .map_err(map_oracle_error)?;
-        }
-
-        let exists_links: i64 = conn
-            .query_row_as(
-                "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEM_LINKS'",
-                &[],
-            )
-            .map_err(map_oracle_error)?;
-
-        if exists_links == 0 {
-            conn.execute(
-                "CREATE TABLE conversation_item_links (
-                    conversation_id VARCHAR2(64) NOT NULL,
-                    item_id VARCHAR2(64) NOT NULL,
-                    added_at TIMESTAMP WITH TIME ZONE,
-                    CONSTRAINT pk_conv_item_link PRIMARY KEY (conversation_id, item_id)
-                )",
-                &[],
-            )
-            .map_err(map_oracle_error)?;
-
-            conn.execute(
-                "CREATE INDEX conv_item_links_conv_idx ON conversation_item_links (conversation_id, added_at)",
-                &[],
-            )
-            .map_err(map_oracle_error)?;
+        if exists == 0 {
+            return Err("CONVERSATIONS table does not exist. Please create the table.".to_string());
         }
 
         Ok(())
@@ -508,69 +465,81 @@ impl ConversationItemStorage for OracleConversationItemStorage {
         &self,
         item: NewConversationItem,
     ) -> Result<ConversationItem, ConversationItemStorageError> {
-        let NewConversationItem {
-            id: opt_id,
-            response_id,
-            item_type,
-            role,
-            content,
-            status,
-        } = item;
-        let id = opt_id.unwrap_or_else(|| make_item_id(&item_type));
-        let created_at = Utc::now();
-        let content_json = serde_json::to_string(&content)?;
+        // Get conversation_id from task-local context.
+        let conversation_id = super::core::CURRENT_CONVERSATION_ID
+            .try_with(|id| id.clone())
+            .ok()
+            .flatten()
+            .ok_or_else(|| {
+                ConversationItemStorageError::StorageError(
+                    "conversation_id context required".to_string(),
+                )
+            })?;
 
-        // Clone fields needed for both the closure and the return value.
-        // The closure consumes the clones; originals go into the return struct.
-        let id_str = id.0.clone();
-        let cl_response_id = response_id.clone();
-        let cl_item_type = item_type.clone();
-        let cl_role = role.clone();
-        let cl_status = status.clone();
+        let id = item
+            .id
+            .clone()
+            .unwrap_or_else(|| make_item_id(&item.item_type));
+        let created_at = Utc::now();
+
+        let conversation_item = ConversationItem {
+            id: id.clone(),
+            response_id: item.response_id.clone(),
+            item_type: item.item_type.clone(),
+            role: item.role.clone(),
+            content: item.content,
+            status: item.status.clone(),
+            created_at,
+        };
+
+        let cid = conversation_id.0.clone();
+        let item_json = serde_json::to_value(&conversation_item)
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
 
         self.store
             .execute(move |conn| {
+                // First, get the current items.
+                let current_items_json: Option<String> = conn
+                    .query_row_as(
+                        "SELECT \"ITEMS\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        &[&cid],
+                    )
+                    .map_err(map_oracle_error)
+                    .map_err(|e| format!("Failed to get conversation: {e}"))?;
+
+                let mut items_array: Vec<Value> = if let Some(json_str) = current_items_json {
+                    serde_json::from_str(&json_str).map_err(|e| e.to_string())?
+                } else {
+                    Vec::new()
+                };
+
+                items_array.push(item_json);
+
+                let updated_items_json =
+                    serde_json::to_string(&items_array).map_err(|e| e.to_string())?;
+
                 conn.execute(
-                    "INSERT INTO conversation_items (id, response_id, item_type, role, content, status, created_at) \
-                     VALUES (:1, :2, :3, :4, :5, :6, :7)",
-                    &[&id_str, &cl_response_id, &cl_item_type, &cl_role, &content_json, &cl_status, &created_at],
+                    "UPDATE ADMIN.\"CONVERSATIONS\" SET \"ITEMS\" = :1, \"UPDATED_AT\" = :2, \"GENERATIVE_AI_PROJECT_ID\" = :3, \"SHORT_TERM_MEMORY\" = :4, \"VERSION\" = :5 WHERE \"CONVERSATION_ID\" = :6",
+                    &[&updated_items_json, &Utc::now(), &None::<String>, &None::<String>, &0, &cid],
                 )
                 .map_err(map_oracle_error)?;
+
                 Ok(())
             })
             .await
             .map_err(ConversationItemStorageError::StorageError)?;
 
-        Ok(ConversationItem {
-            id,
-            response_id,
-            item_type,
-            role,
-            content,
-            status,
-            created_at,
-        })
+        Ok(conversation_item)
     }
 
     async fn link_item(
         &self,
-        conversation_id: &ConversationId,
-        item_id: &ConversationItemId,
-        added_at: DateTime<Utc>,
+        _conversation_id: &ConversationId,
+        _item_id: &ConversationItemId,
+        _added_at: DateTime<Utc>,
     ) -> Result<(), ConversationItemStorageError> {
-        let cid = conversation_id.0.clone();
-        let iid = item_id.0.clone();
-        self.store
-            .execute(move |conn| {
-                conn.execute(
-                    "INSERT INTO conversation_item_links (conversation_id, item_id, added_at) VALUES (:1, :2, :3)",
-                    &[&cid, &iid, &added_at],
-                )
-                .map_err(map_oracle_error)?;
-                Ok(())
-            })
-            .await
-            .map_err(ConversationItemStorageError::StorageError)
+        // Items are embedded, so linking is implicit.
+        Ok(())
     }
 
     async fn list_items(
@@ -579,119 +548,63 @@ impl ConversationItemStorage for OracleConversationItemStorage {
         params: ListParams,
     ) -> Result<Vec<ConversationItem>, ConversationItemStorageError> {
         let cid = conversation_id.0.clone();
-        let limit: i64 = params.limit as i64;
-        let order_desc = matches!(params.order, SortOrder::Desc);
-        let after_id = params.after.clone();
+        self.store
+            .execute(move |conn| {
+                let items_json: Option<String> = conn
+                    .query_row_as(
+                        "SELECT \"ITEMS\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        &[&cid],
+                    )
+                    .map_err(map_oracle_error)
+                    .ok();
 
-        // Resolve the added_at of the after cursor if provided
-        let after_key: Option<(DateTime<Utc>, String)> = if let Some(ref aid) = after_id {
-            self.store
-                .execute({
-                    let cid = cid.clone();
-                    let aid = aid.clone();
-                    move |conn| {
-                        let mut stmt = conn
-                            .statement(
-                                "SELECT added_at FROM conversation_item_links WHERE conversation_id = :1 AND item_id = :2",
-                            )
-                            .build()
-                            .map_err(map_oracle_error)?;
-                        let mut rows = stmt.query(&[&cid, &aid]).map_err(map_oracle_error)?;
-                        if let Some(row_res) = rows.next() {
-                            let row = row_res.map_err(map_oracle_error)?;
-                            let ts: DateTime<Utc> = row.get(0).map_err(map_oracle_error)?;
-                            Ok(Some((ts, aid)))
-                        } else {
-                            Ok(None)
+                let items_array: Vec<Value> = if let Some(json_str) = items_json {
+                    serde_json::from_str(&json_str).map_err(|e| e.to_string())?
+                } else {
+                    Vec::new()
+                };
+
+                let mut conversation_items: Vec<ConversationItem> = Vec::new();
+                for item_value in items_array {
+                    let item: ConversationItem =
+                        serde_json::from_value(item_value).map_err(|e| e.to_string())?;
+                    conversation_items.push(item);
+                }
+
+                // Apply sorting and pagination
+                let order_desc = matches!(params.order, SortOrder::Desc);
+                if order_desc {
+                    conversation_items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                } else {
+                    conversation_items.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+                }
+
+                let mut result_items = Vec::new();
+                let mut skip = false;
+                if let Some(ref after_id) = params.after {
+                    for item in conversation_items {
+                        if skip {
+                            result_items.push(item);
+                        } else if item.id.0 == *after_id {
+                            skip = true;
+                        }
+                        if result_items.len() >= params.limit {
+                            break;
                         }
                     }
-                })
-                .await
-                .map_err(ConversationItemStorageError::StorageError)?
-        } else {
-            None
-        };
-
-        // Build the main list query
-        let rows: Vec<(String, Option<String>, String, Option<String>, Option<String>, Option<String>, DateTime<Utc>)> =
-            self.store
-                .execute({
-                    let cid = cid.clone();
-                    move |conn| {
-                        let mut sql = String::from(
-                            "SELECT i.id, i.response_id, i.item_type, i.role, i.content, i.status, i.created_at \
-                             FROM conversation_item_links l \
-                             JOIN conversation_items i ON i.id = l.item_id \
-                             WHERE l.conversation_id = :cid",
-                        );
-
-                        // Cursor predicate
-                        if let Some((_ts, _iid)) = &after_key {
-                            if order_desc {
-                                sql.push_str(" AND (l.added_at < :ats OR (l.added_at = :ats AND l.item_id < :iid))");
-                            } else {
-                                sql.push_str(" AND (l.added_at > :ats OR (l.added_at = :ats AND l.item_id > :iid))");
-                            }
+                } else {
+                    for item in conversation_items {
+                        result_items.push(item);
+                        if result_items.len() >= params.limit {
+                            break;
                         }
-
-                        // Order and limit
-                        if order_desc {
-                            sql.push_str(" ORDER BY l.added_at DESC, l.item_id DESC");
-                        } else {
-                            sql.push_str(" ORDER BY l.added_at ASC, l.item_id ASC");
-                        }
-                        sql.push_str(" FETCH NEXT :limit ROWS ONLY");
-
-                        // Build params and perform a named SELECT query
-                        let mut params_vec: Vec<(&str, &dyn ToSql)> = vec![("cid", &cid)];
-                        if let Some((ts, iid)) = &after_key {
-                            params_vec.push(("ats", ts));
-                            params_vec.push(("iid", iid));
-                        }
-                        params_vec.push(("limit", &limit));
-
-                        let rows_iter = conn.query_named(&sql, &params_vec).map_err(map_oracle_error)?;
-
-                        let mut out = Vec::new();
-                        for row_res in rows_iter {
-                            let row = row_res.map_err(map_oracle_error)?;
-                            let id: String = row.get(0).map_err(map_oracle_error)?;
-                            let resp_id: Option<String> = row.get(1).map_err(map_oracle_error)?;
-                            let item_type: String = row.get(2).map_err(map_oracle_error)?;
-                            let role: Option<String> = row.get(3).map_err(map_oracle_error)?;
-                            let content_raw: Option<String> = row.get(4).map_err(map_oracle_error)?;
-                            let status: Option<String> = row.get(5).map_err(map_oracle_error)?;
-                            let created_at: DateTime<Utc> = row.get(6).map_err(map_oracle_error)?;
-                            out.push((id, resp_id, item_type, role, content_raw, status, created_at));
-                        }
-                        Ok(out)
                     }
-                })
-                .await
-                .map_err(ConversationItemStorageError::StorageError)?;
+                }
 
-        // Map rows to ConversationItem
-        rows.into_iter()
-            .map(
-                |(id, resp_id, item_type, role, content_raw, status, created_at)| {
-                    let content = match content_raw {
-                        Some(s) => {
-                            serde_json::from_str(&s).map_err(ConversationItemStorageError::from)?
-                        }
-                        None => Value::Null,
-                    };
-                    Ok(ConversationItem {
-                        id: ConversationItemId(id),
-                        response_id: resp_id,
-                        item_type,
-                        role,
-                        content,
-                        status,
-                        created_at,
-                    })
-                },
-            )
-            .collect()
+                Ok(result_items)
+            })
+            .await
+            .map_err(ConversationItemStorageError::StorageError)
     }
 
     async fn get_item(
@@ -700,45 +613,41 @@ impl ConversationItemStorage for OracleConversationItemStorage {
     ) -> Result<Option<ConversationItem>, ConversationItemStorageError> {
         let iid = item_id.0.clone();
 
+        let conv_id = super::core::CURRENT_CONVERSATION_ID
+            .try_with(|id| id.clone())
+            .ok()
+            .flatten()
+            .ok_or_else(|| {
+                ConversationItemStorageError::StorageError(
+                    "conversation_id context required".to_string(),
+                )
+            })?;
+
+        let cid = conv_id.0;
+
         self.store
             .execute(move |conn| {
-                let mut stmt = conn
-                    .statement(
-                        "SELECT id, response_id, item_type, role, content, status, created_at \
-                         FROM conversation_items WHERE id = :1",
+                let items_json: Option<String> = conn
+                    .query_row_as(
+                        "SELECT \"ITEMS\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        &[&cid],
                     )
-                    .build()
-                    .map_err(map_oracle_error)?;
+                    .map_err(map_oracle_error)
+                    .ok();
 
-                let mut rows = stmt.query(&[&iid]).map_err(map_oracle_error)?;
-
-                if let Some(row_res) = rows.next() {
-                    let row = row_res.map_err(map_oracle_error)?;
-                    let id: String = row.get(0).map_err(map_oracle_error)?;
-                    let response_id: Option<String> = row.get(1).map_err(map_oracle_error)?;
-                    let item_type: String = row.get(2).map_err(map_oracle_error)?;
-                    let role: Option<String> = row.get(3).map_err(map_oracle_error)?;
-                    let content_raw: Option<String> = row.get(4).map_err(map_oracle_error)?;
-                    let status: Option<String> = row.get(5).map_err(map_oracle_error)?;
-                    let created_at: DateTime<Utc> = row.get(6).map_err(map_oracle_error)?;
-
-                    let content = match content_raw {
-                        Some(s) => serde_json::from_str(&s).map_err(|e| e.to_string())?,
-                        None => Value::Null,
-                    };
-
-                    Ok(Some(ConversationItem {
-                        id: ConversationItemId(id),
-                        response_id,
-                        item_type,
-                        role,
-                        content,
-                        status,
-                        created_at,
-                    }))
-                } else {
-                    Ok(None)
+                if let Some(json_str) = items_json {
+                    let items_array: Vec<Value> =
+                        serde_json::from_str(&json_str).map_err(|e| e.to_string())?;
+                    for item_value in items_array {
+                        let item: ConversationItem = serde_json::from_value(item_value)
+                            .map_err(|e| e.to_string())?;
+                        if item.id.0 == iid {
+                            return Ok(Some(item));
+                        }
+                    }
                 }
+
+                Ok(None)
             })
             .await
             .map_err(ConversationItemStorageError::StorageError)
@@ -754,13 +663,27 @@ impl ConversationItemStorage for OracleConversationItemStorage {
 
         self.store
             .execute(move |conn| {
-                let count: i64 = conn
+                let items_json: Option<String> = conn
                     .query_row_as(
-                        "SELECT COUNT(*) FROM conversation_item_links WHERE conversation_id = :1 AND item_id = :2",
-                        &[&cid, &iid],
+                        "SELECT \"ITEMS\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        &[&cid],
                     )
-                    .map_err(map_oracle_error)?;
-                Ok(count > 0)
+                    .map_err(map_oracle_error)
+                    .ok();
+
+                if let Some(json_str) = items_json {
+                    let items_array: Vec<Value> =
+                        serde_json::from_str(&json_str).map_err(|e| e.to_string())?;
+                    for item_value in items_array {
+                        let item: ConversationItem =
+                            serde_json::from_value(item_value).map_err(|e| e.to_string())?;
+                        if item.id.0 == iid {
+                            return Ok(true);
+                        }
+                    }
+                }
+
+                Ok(false)
             })
             .await
             .map_err(ConversationItemStorageError::StorageError)
@@ -776,9 +699,34 @@ impl ConversationItemStorage for OracleConversationItemStorage {
 
         self.store
             .execute(move |conn| {
+                let current_items_json: Option<String> = conn
+                    .query_row_as(
+                        "SELECT \"ITEMS\" FROM ADMIN.\"CONVERSATIONS\" WHERE \"CONVERSATION_ID\" = :1",
+                        &[&cid],
+                    )
+                    .map_err(map_oracle_error)
+                    .map_err(|e| format!("Failed to get conversation: {e}"))?;
+
+                let mut items_array: Vec<Value> = if let Some(json_str) = current_items_json {
+                    serde_json::from_str(&json_str).map_err(|e| e.to_string())?
+                } else {
+                    Vec::new()
+                };
+
+                items_array.retain(|item_value| {
+                    if let Ok(item) = serde_json::from_value::<ConversationItem>(item_value.clone()) {
+                        item.id.0 != iid
+                    } else {
+                        true
+                    }
+                });
+
+                let updated_items_json =
+                    serde_json::to_string(&items_array).map_err(|e| e.to_string())?;
+
                 conn.execute(
-                    "DELETE FROM conversation_item_links WHERE conversation_id = :1 AND item_id = :2",
-                    &[&cid, &iid],
+                    "UPDATE ADMIN.\"CONVERSATIONS\" SET \"ITEMS\" = :1, \"UPDATED_AT\" = :2, \"GENERATIVE_AI_PROJECT_ID\" = :3, \"SHORT_TERM_MEMORY\" = :4, \"VERSION\" = :5 WHERE \"CONVERSATION_ID\" = :6",
+                    &[&updated_items_json, &Utc::now(), &None::<String>, &None::<String>, &0, &cid],
                 )
                 .map_err(map_oracle_error)?;
                 Ok(())
@@ -792,8 +740,8 @@ impl ConversationItemStorage for OracleConversationItemStorage {
 // PART 4: OracleResponseStorage
 // ============================================================================
 
-const SELECT_BASE: &str = "SELECT id, previous_response_id, input, instructions, output, \
-    tool_calls, metadata, created_at, safety_identifier, model, conversation_id, raw_response FROM responses";
+const SELECT_BASE: &str = "SELECT \"RESPONSE_ID\", \"CONVERSATION_STORE_ID\", \"CONVERSATION_ID\", \"PREVIOUS_RESPONSE_ID\", \
+    \"INPUT_ITEMS\", \"RESPONSE_OBJECT\", \"MODEL\", \"CREATED_AT\", \"EXPIRES_AT\", \"SUBJECT_ID\", \"INPUT_EMBEDDING\", \"OUTPUT_EMBEDDING\", \"GENERATIVE_AI_PROJECT_ID\" FROM ADMIN.\"RESPONSES\"";
 
 #[derive(Clone)]
 pub(super) struct OracleResponseStorage {
@@ -806,101 +754,16 @@ impl OracleResponseStorage {
     }
 
     pub(crate) fn init_schema(conn: &Connection) -> Result<(), String> {
+        // Downstream expects tables to exist in ADMIN schema.
         let exists: i64 = conn
             .query_row_as(
-                "SELECT COUNT(*) FROM user_tables WHERE table_name = 'RESPONSES'",
+                "SELECT COUNT(*) FROM all_tables WHERE owner = 'ADMIN' AND table_name = 'RESPONSES'",
                 &[],
             )
             .map_err(map_oracle_error)?;
 
         if exists == 0 {
-            conn.execute(
-                "CREATE TABLE responses (
-                    id VARCHAR2(64) PRIMARY KEY,
-                    conversation_id VARCHAR2(64),
-                    previous_response_id VARCHAR2(64),
-                    input CLOB,
-                    instructions CLOB,
-                    output CLOB,
-                    tool_calls CLOB,
-                    metadata CLOB,
-                    created_at TIMESTAMP WITH TIME ZONE,
-                    safety_identifier VARCHAR2(128),
-                    model VARCHAR2(128),
-                    raw_response CLOB
-                )",
-                &[],
-            )
-            .map_err(map_oracle_error)?;
-        } else {
-            Self::alter_safety_identifier_column(conn)?;
-            Self::remove_user_id_column_if_exists(conn)?;
-        }
-
-        create_index_if_missing(
-            conn,
-            "RESPONSES_PREV_IDX",
-            "CREATE INDEX responses_prev_idx ON responses(previous_response_id)",
-        )?;
-        create_index_if_missing(
-            conn,
-            "RESPONSES_USER_IDX",
-            "CREATE INDEX responses_user_idx ON responses(safety_identifier)",
-        )?;
-
-        Ok(())
-    }
-
-    // Alter safety_identifier column if missing
-    fn alter_safety_identifier_column(conn: &Connection) -> Result<(), String> {
-        let present: i64 = conn
-            .query_row_as(
-                "SELECT COUNT(*) FROM user_tab_columns WHERE table_name = 'RESPONSES' AND column_name = 'SAFETY_IDENTIFIER'",
-                &[],
-            )
-            .map_err(map_oracle_error)?;
-
-        if present == 0 {
-            if let Err(err) = conn.execute(
-                "ALTER TABLE responses ADD (safety_identifier VARCHAR2(128))",
-                &[],
-            ) {
-                let present_after: i64 = conn
-                    .query_row_as(
-                        "SELECT COUNT(*) FROM user_tab_columns WHERE table_name = 'RESPONSES' AND column_name = 'SAFETY_IDENTIFIER'",
-                        &[],
-                    )
-                    .map_err(map_oracle_error)?;
-                if present_after == 0 {
-                    return Err(map_oracle_error(err));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    // Remove user_id column if exists
-    fn remove_user_id_column_if_exists(conn: &Connection) -> Result<(), String> {
-        let present: i64 = conn
-            .query_row_as(
-                "SELECT COUNT(*) FROM user_tab_columns WHERE table_name = 'RESPONSES' AND column_name = 'USER_ID'",
-                &[],
-            )
-            .map_err(map_oracle_error)?;
-
-        if present > 0 {
-            if let Err(err) = conn.execute("ALTER TABLE responses DROP COLUMN USER_ID", &[]) {
-                let present_after: i64 = conn
-                    .query_row_as(
-                        "SELECT COUNT(*) FROM user_tab_columns WHERE table_name = 'RESPONSES' AND column_name = 'USER_ID'",
-                        &[],
-                    )
-                    .map_err(map_oracle_error)?;
-                if present_after > 0 {
-                    return Err(map_oracle_error(err));
-                }
-            }
+            return Err("RESPONSES table does not exist. Please create the table.".to_string());
         }
 
         Ok(())
@@ -908,26 +771,29 @@ impl OracleResponseStorage {
 
     fn build_response_from_row(row: &Row) -> Result<StoredResponse, String> {
         let id: String = row.get(0).map_err(map_oracle_error)?;
-        let previous: Option<String> = row.get(1).map_err(map_oracle_error)?;
-        let input_json: Option<String> = row.get(2).map_err(map_oracle_error)?;
-        let instructions: Option<String> = row.get(3).map_err(map_oracle_error)?;
-        let output_json: Option<String> = row.get(4).map_err(map_oracle_error)?;
-        let tool_calls_json: Option<String> = row.get(5).map_err(map_oracle_error)?;
-        let metadata_json: Option<String> = row.get(6).map_err(map_oracle_error)?;
+        let conversation_store_id: Option<String> = row.get(1).map_err(map_oracle_error)?;
+        let conversation_id: Option<String> = row.get(2).map_err(map_oracle_error)?;
+        let previous: Option<String> = row.get(3).map_err(map_oracle_error)?;
+        let input_json: Option<String> = row.get(4).map_err(map_oracle_error)?;
+        let output_json: Option<String> = row.get(5).map_err(map_oracle_error)?;
+        let model: Option<String> = row.get(6).map_err(map_oracle_error)?;
         let created_at: DateTime<Utc> = row.get(7).map_err(map_oracle_error)?;
-        let safety_identifier: Option<String> = row.get(8).map_err(map_oracle_error)?;
-        let model: Option<String> = row.get(9).map_err(map_oracle_error)?;
-        let conversation_id: Option<String> = row.get(10).map_err(map_oracle_error)?;
-        let raw_response_json: Option<String> = row.get(11).map_err(map_oracle_error)?;
+        let _expires_at: Option<DateTime<Utc>> = row.get(8).map_err(map_oracle_error)?;
+        let _subject_id: Option<String> = row.get(9).map_err(map_oracle_error)?;
+        let _generative_ai_project_id: Option<String> = row.get(12).map_err(map_oracle_error)?;
 
         let previous_response_id = previous.map(ResponseId);
-        let tool_calls = parse_tool_calls(tool_calls_json)?;
-        let metadata = parse_metadata(metadata_json)?;
-        let raw_response = parse_raw_response(raw_response_json)?;
         let input = parse_json_value(input_json)?;
-        let output = parse_json_value(output_json)?;
+        let output = parse_json_value(output_json.clone())?;
 
-        Ok(StoredResponse {
+        // Set defaults for fields not in the ADMIN.RESPONSES schema.
+        let instructions = None;
+        let tool_calls = parse_tool_calls(None)?;
+        let metadata = parse_metadata(None)?;
+        let raw_response = parse_raw_response(output_json.clone())?;
+        let safety_identifier = None;
+
+        let mut response = StoredResponse {
             id: ResponseId(id),
             previous_response_id,
             input,
@@ -940,7 +806,16 @@ impl OracleResponseStorage {
             model,
             conversation_id,
             raw_response,
-        })
+        };
+
+        if let Some(store_id) = conversation_store_id {
+            response.metadata.insert(
+                "oci:conversation_store_id".to_string(),
+                serde_json::json!(store_id),
+            );
+        }
+
+        Ok(response)
     }
 }
 
@@ -950,51 +825,41 @@ impl ResponseStorage for OracleResponseStorage {
         &self,
         response: StoredResponse,
     ) -> Result<ResponseId, ResponseStorageError> {
-        let StoredResponse {
-            id,
-            previous_response_id,
-            input,
-            instructions,
-            output,
-            tool_calls,
-            metadata,
-            created_at,
-            safety_identifier,
-            model,
-            conversation_id,
-            raw_response,
-        } = response;
-
-        // Clone only the return value; everything else moves into the closure.
-        let return_id = id.clone();
-
-        let response_id_str = id.0;
-        let previous_id = previous_response_id.map(|r| r.0);
-        let json_input = serde_json::to_string(&input)?;
-        let json_output = serde_json::to_string(&output)?;
-        let json_tool_calls = serde_json::to_string(&tool_calls)?;
-        let json_metadata = serde_json::to_string(&metadata)?;
-        let json_raw_response = serde_json::to_string(&raw_response)?;
+        let response_id = response.id.clone();
+        let response_id_str = response_id.0.clone();
+        let previous_id = response.previous_response_id.map(|r| r.0);
+        let json_input = serde_json::to_string(&response.input)?;
+        let json_output = serde_json::to_string(&response.output)?;
+        let model = response.model.clone();
+        let created_at = response.created_at;
+        let conversation_id = response.conversation_id.clone();
+        let conversation_store_id = response
+            .metadata
+            .get("oci:conversation_store_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let expires_at = created_at + chrono::Duration::hours(24);
 
         self.store
             .execute(move |conn| {
+                // Work around rust-oracle option binding.
+                let conversation_store_id_ref = conversation_store_id.as_deref();
                 conn.execute(
-                    "INSERT INTO responses (id, previous_response_id, input, instructions, output, \
-                        tool_calls, metadata, created_at, safety_identifier, model, conversation_id, raw_response) \
-                     VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12)",
+                    "INSERT INTO ADMIN.\"RESPONSES\" (\"RESPONSE_ID\", \"CONVERSATION_STORE_ID\", \"CONVERSATION_ID\", \"PREVIOUS_RESPONSE_ID\", \
+                        \"INPUT_ITEMS\", \"RESPONSE_OBJECT\", \"MODEL\", \"CREATED_AT\", \"EXPIRES_AT\", \"SUBJECT_ID\", \"GENERATIVE_AI_PROJECT_ID\") \
+                     VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11)",
                     &[
                         &response_id_str,
+                        &conversation_store_id_ref,
+                        &conversation_id,
                         &previous_id,
                         &json_input,
-                        &instructions,
                         &json_output,
-                        &json_tool_calls,
-                        &json_metadata,
-                        &created_at,
-                        &safety_identifier,
                         &model,
-                        &conversation_id,
-                        &json_raw_response,
+                        &created_at,
+                        &expires_at,
+                        &None::<String>,
+                        &None::<String>,
                     ],
                 )
                 .map(|_| ())
@@ -1003,7 +868,7 @@ impl ResponseStorage for OracleResponseStorage {
             .await
             .map_err(ResponseStorageError::StorageError)?;
 
-        Ok(return_id)
+        Ok(response_id)
     }
 
     async fn get_response(
@@ -1014,7 +879,7 @@ impl ResponseStorage for OracleResponseStorage {
         self.store
             .execute(move |conn| {
                 let mut stmt = conn
-                    .statement(&format!("{SELECT_BASE} WHERE id = :1"))
+                    .statement(&format!("{SELECT_BASE} WHERE \"RESPONSE_ID\" = :1"))
                     .build()
                     .map_err(map_oracle_error)?;
                 let mut rows = stmt.query(&[&id]).map_err(map_oracle_error)?;
@@ -1034,9 +899,12 @@ impl ResponseStorage for OracleResponseStorage {
         let id = response_id.0.clone();
         self.store
             .execute(move |conn| {
-                conn.execute("DELETE FROM responses WHERE id = :1", &[&id])
-                    .map(|_| ())
-                    .map_err(map_oracle_error)
+                conn.execute(
+                    "DELETE FROM ADMIN.\"RESPONSES\" WHERE \"RESPONSE_ID\" = :1",
+                    &[&id],
+                )
+                .map(|_| ())
+                .map_err(map_oracle_error)
             })
             .await
             .map_err(ResponseStorageError::StorageError)
@@ -1075,85 +943,22 @@ impl ResponseStorage for OracleResponseStorage {
 
     async fn list_identifier_responses(
         &self,
-        identifier: &str,
-        limit: Option<usize>,
+        _identifier: &str,
+        _limit: Option<usize>,
     ) -> Result<Vec<StoredResponse>, ResponseStorageError> {
-        let identifier = identifier.to_string();
-
-        self.store
-            .execute(move |conn| {
-                let sql = if let Some(limit) = limit {
-                    format!(
-                        "SELECT * FROM ({SELECT_BASE} WHERE safety_identifier = :1 ORDER BY created_at DESC) WHERE ROWNUM <= {limit}"
-                    )
-                } else {
-                    format!("{SELECT_BASE} WHERE safety_identifier = :1 ORDER BY created_at DESC")
-                };
-
-                let mut stmt = conn.statement(&sql).build().map_err(map_oracle_error)?;
-                let mut rows = stmt.query(&[&identifier]).map_err(map_oracle_error)?;
-                let mut results = Vec::new();
-
-                for row in &mut rows {
-                    let row = row.map_err(map_oracle_error)?;
-                    results.push(Self::build_response_from_row(&row)?);
-                }
-
-                Ok(results)
-            })
-            .await
-            .map_err(ResponseStorageError::StorageError)
+        Err(ResponseStorageError::StorageError(
+            "list_identifier_responses not supported: RESPONSES table does not have safety_identifier column"
+                .to_string(),
+        ))
     }
 
     async fn delete_identifier_responses(
         &self,
-        identifier: &str,
+        _identifier: &str,
     ) -> Result<usize, ResponseStorageError> {
-        let identifier = identifier.to_string();
-        let affected = self
-            .store
-            .execute(move |conn| {
-                conn.execute(
-                    "DELETE FROM responses WHERE safety_identifier = :1",
-                    &[&identifier],
-                )
-                .map_err(map_oracle_error)
-            })
-            .await
-            .map_err(ResponseStorageError::StorageError)?;
-
-        let deleted = affected
-            .row_count()
-            .map_err(|e| ResponseStorageError::StorageError(map_oracle_error(e)))?
-            as usize;
-        Ok(deleted)
+        Err(ResponseStorageError::StorageError(
+            "delete_identifier_responses not supported: RESPONSES table does not have safety_identifier column"
+                .to_string(),
+        ))
     }
-}
-
-// Helper functions for response parsing
-
-fn create_index_if_missing(conn: &Connection, index_name: &str, ddl: &str) -> Result<(), String> {
-    let count: i64 = conn
-        .query_row_as(
-            "SELECT COUNT(*) FROM user_indexes WHERE table_name = 'RESPONSES' AND index_name = :1",
-            &[&index_name],
-        )
-        .map_err(map_oracle_error)?;
-
-    if count == 0 {
-        if let Err(err) = conn.execute(ddl, &[]) {
-            if let Some(db_err) = err.db_error() {
-                // ORA-00955: name is already used by an existing object
-                // ORA-01408: such column list already indexed
-                // Both errors indicate the index already exists (race condition)
-                if db_err.code() != 955 && db_err.code() != 1408 {
-                    return Err(map_oracle_error(err));
-                }
-            } else {
-                return Err(map_oracle_error(err));
-            }
-        }
-    }
-
-    Ok(())
 }

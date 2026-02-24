@@ -609,13 +609,13 @@ impl RouterTrait for RouterManager {
         response_id: &str,
         params: &ResponsesGetParams,
     ) -> Response {
-        let router = self.select_router_for_request(headers, None);
-        if let Some(router) = router {
+        // Always use OpenAI router for response retrieval (it has database storage).
+        if let Some(router) = self.routers.get(&router_ids::HTTP_OPENAI) {
             router.get_response(headers, response_id, params).await
         } else {
             (
                 StatusCode::NOT_FOUND,
-                format!("No router available to get response '{response_id}'"),
+                "Response storage not available - OpenAI router not found".to_string(),
             )
                 .into_response()
         }
@@ -647,15 +647,13 @@ impl RouterTrait for RouterManager {
         headers: Option<&HeaderMap>,
         response_id: &str,
     ) -> Response {
-        // Delegate to the default router (typically http-regular)
-        // Response storage is shared across all routers via AppContext
-        let router = self.select_router_for_request(headers, None);
-        if let Some(router) = router {
+        // Always use OpenAI router for response input items retrieval (it has database storage).
+        if let Some(router) = self.routers.get(&router_ids::HTTP_OPENAI) {
             router.list_response_input_items(headers, response_id).await
         } else {
             (
                 StatusCode::NOT_FOUND,
-                "No router available to list response input items",
+                "Response storage not available - OpenAI router not found",
             )
                 .into_response()
         }

@@ -21,6 +21,9 @@ use http_body::Frame;
 use rand::Rng;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+// Task-local storage for conversation store ID to avoid passing internal IDs through request
+// structures. Defined in smg_data_connector::core and re-exported at crate root.
+pub use smg_data_connector::CONVERSATION_STORE_ID;
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tower::{Layer, Service};
@@ -28,6 +31,49 @@ use tower_http::trace::{MakeSpan, OnRequest, OnResponse, TraceLayer};
 use tracing::{debug, error, field::Empty, info, info_span, warn, Span};
 
 pub use crate::core::token_bucket::TokenBucket;
+
+/// Header name used to pass Oracle conversation store id.
+pub const CONVERSATION_STORE_ID_HEADER: &str = "opc-conversation-store-id";
+
+/// Extract selected headers and store them in task-local storage.
+///
+/// Note: task-locals do not automatically propagate into `tokio::spawn` tasks; code that spawns
+/// should capture the values it needs before spawning.
+pub fn create_header_extraction_middleware(
+    headers_to_extract: Vec<String>,
+) -> impl Fn(Request<Body>, Next) -> Pin<Box<dyn std::future::Future<Output = Response> + Send>>
+       + Clone
+       + Send
+       + Sync
+       + 'static {
+    let headers = Arc::new(headers_to_extract);
+
+    move |request: Request<Body>, next: Next| {
+        let headers = headers.clone();
+        Box::pin(async move {
+            let want_store_id = headers
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(CONVERSATION_STORE_ID_HEADER));
+
+            let conversation_store_id = if want_store_id {
+                request
+                    .headers()
+                    .get(CONVERSATION_STORE_ID_HEADER)
+                    .and_then(|h| h.to_str().ok())
+                    .map(str::to_string)
+            } else {
+                None
+            };
+
+            CONVERSATION_STORE_ID
+                .scope(
+                    conversation_store_id,
+                    async move { next.run(request).await },
+                )
+                .await
+        })
+    }
+}
 use crate::{
     observability::{
         inflight_tracker::InFlightRequestTracker,

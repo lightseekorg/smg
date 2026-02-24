@@ -565,6 +565,12 @@ pub(super) async fn handle_simple_streaming_passthrough(
     let previous_response_id = req.previous_response_id;
     let storage = req.storage;
 
+    // Capture task-local context before spawning.
+    let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
+        .try_with(|id| id.clone())
+        .ok()
+        .flatten();
+
     #[expect(
         clippy::disallowed_methods,
         reason = "fire-and-forget stream processing; gateway shutdown need not wait for individual response streams"
@@ -638,6 +644,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                     storage.response.clone(),
                     &response_json,
                     &original_request,
+                    conversation_store_id.clone(),
                 )
                 .await
                 {
@@ -684,6 +691,12 @@ pub(super) fn handle_streaming_with_tool_interception(
     let previous_response_id = req.previous_response_id;
     let url = req.url;
     let storage = req.storage;
+
+    // Capture task-local context before spawning.
+    let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
+        .try_with(|id| id.clone())
+        .ok()
+        .flatten();
 
     let client_clone = client.clone();
     let url_clone = url.clone();
@@ -924,6 +937,7 @@ pub(super) fn handle_streaming_with_tool_interception(
                         storage.response.clone(),
                         &response_json,
                         &original_request,
+                        conversation_store_id.clone(),
                     )
                     .await
                     {

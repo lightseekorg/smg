@@ -149,12 +149,18 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         ctx.components.conversation_item_storage(),
         ctx.components.response_storage(),
     ) {
+        let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
+            .try_with(|id| id.clone())
+            .ok()
+            .flatten();
+
         if let Err(err) = persist_conversation_items(
             conv_storage.clone(),
             item_storage.clone(),
             resp_storage.clone(),
             &response_json,
             original_body,
+            conversation_store_id,
         )
         .await
         {
