@@ -57,8 +57,7 @@ impl PartialJsonParser for PartialJson {
     }
 
     fn is_complete(&self, input: &str) -> bool {
-        // Try to parse as complete JSON
-        serde_json::from_str::<Value>(input).is_ok()
+        crate::parsers::helpers::is_complete_json(input)
     }
 
     fn max_depth(&self) -> usize {
