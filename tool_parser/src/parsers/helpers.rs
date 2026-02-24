@@ -137,10 +137,7 @@ pub fn ensure_capacity(
 /// Check if a string contains complete, valid JSON
 pub fn is_complete_json(input: &str) -> bool {
     let mut de = Deserializer::from_str(input);
-    match IgnoredAny::deserialize(&mut de) {
-        Ok(_) => de.end().is_ok(),
-        Err(_) => false,
-    }
+    IgnoredAny::deserialize(&mut de).is_ok() && de.end().is_ok()
 }
 
 /// Normalize the arguments/parameters field in a tool call object.
