@@ -65,19 +65,26 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
             .or_else(|| labels.get("model_path").cloned())
             .unwrap_or_else(|| UNKNOWN_MODEL_ID.to_string());
 
-        // Apply router-level served_model_name: becomes primary ID; backend name kept as alias.
-        let (model_id, backend_alias) =
-            match app_context.router_config.served_model_name.as_deref() {
-                Some(sname) if !sname.is_empty() && sname != backend_model_id => {
-                    (sname.to_string(), Some(backend_model_id))
-                }
-                _ => (backend_model_id, None),
-            };
+        // Build the card from backend_model_id so any user-configured metadata
+        // (context_length, tokenizer_path, model_type, …) keyed by the backend ID is preserved.
+        let mut model_card = build_model_card(&backend_model_id, config, &labels);
 
-        let mut model_card = build_model_card(&model_id, config, &labels);
-        if let Some(alias) = backend_alias {
-            model_card = model_card.with_alias(alias);
-        }
+        // Apply router-level served_model_name: rename the card's primary ID and keep
+        // the backend-reported name as an alias so both names continue to work.
+        // Skip aliasing UNKNOWN_MODEL_ID to avoid a meaningless "unknown" alias.
+        let model_id =
+            match app_context.router_config.served_model_name.as_deref() {
+                Some(sname)
+                    if !sname.is_empty()
+                        && sname != backend_model_id
+                        && backend_model_id != UNKNOWN_MODEL_ID =>
+                {
+                    model_card.aliases.push(backend_model_id);
+                    model_card.id = sname.to_string();
+                    sname.to_string()
+                }
+                _ => backend_model_id,
+            };
 
         let runtime_type = match context.data.detected_runtime_type.as_deref() {
             Some(s) => s.parse::<RuntimeType>().unwrap_or(config.runtime_type),
