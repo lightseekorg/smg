@@ -303,6 +303,7 @@ impl AppContextBuilder {
     ) -> Result<Self, String> {
         let bus = Arc::new(metrics_service::EventBus::new(1024));
         let metrics_store = Arc::new(MetricsStore::new(
+            bus.clone(),
             // We'll keep snapshots valid for 60s
             Duration::from_secs(60),
         ));
