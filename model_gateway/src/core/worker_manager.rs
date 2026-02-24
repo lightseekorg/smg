@@ -2,7 +2,7 @@
 //!
 //! Provides worker lifecycle operations and fan-out request utilities.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use axum::response::{IntoResponse, Response};
 use futures::{
@@ -12,18 +12,11 @@ use futures::{
 use http::StatusCode;
 use openai_protocol::worker::{FlushCacheResult, WorkerLoadInfo, WorkerLoadsResult};
 use serde_json::Value;
-use tokio::{
-    sync::{watch, Mutex},
-    task::JoinHandle,
-};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
-use crate::{
-    core::{
-        metrics_aggregator::{self, MetricPack},
-        ConnectionMode, Worker, WorkerRegistry, WorkerType,
-    },
-    policies::PolicyRegistry,
+use crate::core::{
+    metrics_aggregator::{self, MetricPack},
+    ConnectionMode, Worker, WorkerRegistry, WorkerType,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);

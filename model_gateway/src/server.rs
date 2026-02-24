@@ -926,10 +926,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         Some(hc)
     };
 
-    if let Some(ref load_monitor) = app_context.load_monitor {
-        load_monitor.start().await;
-        debug!("Started LoadMonitor for PowerOfTwo policies");
-    }
+    // Load monitor has been removed in favor of event-driven metrics sync
 
     let (limiter, processor) = middleware::ConcurrencyLimiter::new(
         app_context.rate_limiter.clone(),

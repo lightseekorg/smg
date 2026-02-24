@@ -291,7 +291,7 @@ impl AppContextBuilder {
                 .ok_or(AppContextBuildError("mcp_orchestrator"))?,
             wasm_manager: self.wasm_manager,
             worker_service,
-            inflight_tracker: Arc::new(InFlightRequestTracker::new()),
+            inflight_tracker: InFlightRequestTracker::new(),
         })
     }
 
