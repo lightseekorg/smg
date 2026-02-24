@@ -36,24 +36,24 @@ ANSWER_FILES = [
 ]
 
 
+def _download_one(remote_path: str, local_name: str) -> None:
+    url = f"{HF_BASE}/{remote_path}"
+    dest = DATA_DIR / local_name
+    print(f"Downloading {local_name}...")
+    urllib.request.urlretrieve(url, dest)
+    with open(dest, encoding="utf-8") as f:
+        lines = sum(1 for _ in f)
+    print(f"  → {dest.name} ({lines} entries)")
+
+
 def download() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     for fname in FILES:
-        url = f"{HF_BASE}/{fname}"
-        dest = DATA_DIR / fname
-        print(f"Downloading {fname}...")
-        urllib.request.urlretrieve(url, dest)
-        lines = sum(1 for _ in open(dest))
-        print(f"  → {dest.name} ({lines} entries)")
+        _download_one(fname, fname)
 
     for remote_path, local_name in ANSWER_FILES:
-        url = f"{HF_BASE}/{remote_path}"
-        dest = DATA_DIR / local_name
-        print(f"Downloading {local_name}...")
-        urllib.request.urlretrieve(url, dest)
-        lines = sum(1 for _ in open(dest))
-        print(f"  → {dest.name} ({lines} entries)")
+        _download_one(remote_path, local_name)
 
     print("\nDone. All BFCL v3 data downloaded.")
 

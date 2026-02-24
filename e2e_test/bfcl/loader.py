@@ -63,7 +63,7 @@ def load_bfcl_category(
         )
 
     questions_by_id: dict[str, dict] = {}
-    with open(question_path) as f:
+    with open(question_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -75,7 +75,7 @@ def load_bfcl_category(
     answers_by_id: dict[str, list] = {}
     if answer_filename and (DATA_DIR / answer_filename).exists():
         answer_path = DATA_DIR / answer_filename
-        with open(answer_path) as f:
+        with open(answer_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -141,10 +141,3 @@ def bfcl_to_openai_tools(bfcl_functions: list[dict]) -> list[dict]:
     return tools
 
 
-def bfcl_messages(question: list[dict]) -> list[dict]:
-    """Ensure messages are in the correct format for the OpenAI API."""
-    if not question:
-        return []
-    if isinstance(question[0], list):
-        return question[0]
-    return question
