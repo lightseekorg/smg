@@ -2,6 +2,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     errors::{ParserError, ParserResult},
+    parsers::helpers::is_complete_json,
     traits::PartialJsonParser,
 };
 
@@ -57,7 +58,7 @@ impl PartialJsonParser for PartialJson {
     }
 
     fn is_complete(&self, input: &str) -> bool {
-        crate::parsers::helpers::is_complete_json(input)
+        is_complete_json(input)
     }
 
     fn max_depth(&self) -> usize {
