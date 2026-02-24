@@ -148,20 +148,10 @@ impl GenerateResponseProcessingStage {
                     metrics_service::MetricSource::Piggyback,
                 );
 
-                // Aggregate usage across all generated choices
-                let mut total_prompt = 0;
-                let mut total_completion = 0;
-                for res in &result_array {
-                    if let Some(usage) = &res.usage {
-                        total_prompt += usage.prompt_tokens;
-                        total_completion += usage.completion_tokens;
-                    }
-                }
-
-                if total_prompt > 0 || total_completion > 0 {
-                    snapshot.in_flight_requests = 0;
-                    snapshot.avg_tokens_per_req = (total_prompt + total_completion) as isize;
-                }
+                // GenerateResponse doesn't expose usage directly like ChatCompletionResponse.
+                // We emit a snapshot to trigger an event, but leave tokens at 0 so load
+                // balancing will fall back to in_flight * avg_tokens.
+                snapshot.in_flight_requests = 0;
                 metrics_store.update(snapshot);
             }
         }

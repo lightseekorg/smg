@@ -17,7 +17,7 @@ use tracing::debug;
 
 use crate::{
     config::RouterConfig,
-    core::{steps::WorkflowEngines, JobQueue, LoadMonitor, WorkerRegistry, WorkerService},
+    core::{steps::WorkflowEngines, JobQueue, WorkerRegistry, WorkerService},
     middleware::TokenBucket,
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
@@ -52,7 +52,6 @@ pub struct AppContext {
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
-    pub load_monitor: Option<Arc<LoadMonitor>>,
     pub configured_reasoning_parser: Option<String>,
     pub configured_tool_parser: Option<String>,
     pub worker_job_queue: Arc<OnceLock<Arc<JobQueue>>>,
@@ -85,7 +84,6 @@ pub struct AppContextBuilder {
     response_storage: Option<Arc<dyn ResponseStorage>>,
     conversation_storage: Option<Arc<dyn ConversationStorage>>,
     conversation_item_storage: Option<Arc<dyn ConversationItemStorage>>,
-    load_monitor: Option<Arc<LoadMonitor>>,
     worker_job_queue: Option<Arc<OnceLock<Arc<JobQueue>>>>,
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
     mcp_orchestrator: Option<Arc<OnceLock<Arc<McpOrchestrator>>>>,
@@ -131,7 +129,6 @@ impl AppContextBuilder {
             response_storage: None,
             conversation_storage: None,
             conversation_item_storage: None,
-            load_monitor: None,
             worker_job_queue: None,
             workflow_engines: None,
             mcp_orchestrator: None,
@@ -213,11 +210,6 @@ impl AppContextBuilder {
         self
     }
 
-    pub fn load_monitor(mut self, load_monitor: Option<Arc<LoadMonitor>>) -> Self {
-        self.load_monitor = load_monitor;
-        self
-    }
-
     pub fn worker_job_queue(mut self, worker_job_queue: Arc<OnceLock<Arc<JobQueue>>>) -> Self {
         self.worker_job_queue = Some(worker_job_queue);
         self
@@ -288,7 +280,6 @@ impl AppContextBuilder {
             conversation_item_storage: self
                 .conversation_item_storage
                 .ok_or(AppContextBuildError("conversation_item_storage"))?,
-            load_monitor: self.load_monitor,
             configured_reasoning_parser,
             configured_tool_parser,
             worker_job_queue,
@@ -300,7 +291,7 @@ impl AppContextBuilder {
                 .ok_or(AppContextBuildError("mcp_orchestrator"))?,
             wasm_manager: self.wasm_manager,
             worker_service,
-            inflight_tracker: InFlightRequestTracker::new(),
+            inflight_tracker: Arc::new(InFlightRequestTracker::new()),
         })
     }
 
@@ -318,9 +309,9 @@ impl AppContextBuilder {
 
         // Start background scrapers
         let prometheus_scraper = metrics_service::scrapers::prometheus::PrometheusScraper::new(
+            Arc::clone(&metrics_store),
             "http://prometheus:9090".to_string(), // In reality we'd load this from config
             std::time::Duration::from_secs(15),
-            Arc::clone(&metrics_store),
         );
         tokio::spawn(async move {
             prometheus_scraper.run().await;
@@ -342,7 +333,6 @@ impl AppContextBuilder {
             .with_policy_registry(&router_config)
             .with_storage(&router_config)
             .await?
-            .with_load_monitor(&router_config)?
             .with_worker_job_queue()
             .with_workflow_engines()
             .with_mcp_orchestrator(&router_config)
@@ -486,27 +476,6 @@ impl AppContextBuilder {
         self.conversation_storage = Some(conversation_storage);
         self.conversation_item_storage = Some(conversation_item_storage);
 
-        Ok(self)
-    }
-
-    /// Create load monitor
-    fn with_load_monitor(mut self, config: &RouterConfig) -> Result<Self, String> {
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| "client must be set before load monitor".to_string())?;
-        self.load_monitor = Some(Arc::new(LoadMonitor::new(
-            self.worker_registry
-                .as_ref()
-                .ok_or_else(|| "worker_registry must be set before load monitor".to_string())?
-                .clone(),
-            self.policy_registry
-                .as_ref()
-                .ok_or_else(|| "policy_registry must be set before load monitor".to_string())?
-                .clone(),
-            client.clone(),
-            config.worker_startup_check_interval_secs,
-        )));
         Ok(self)
     }
 

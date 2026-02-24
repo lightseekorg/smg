@@ -1583,14 +1583,10 @@ fn export_snapshot(snap: &metrics_service::WorkerSnapshot) {
     if let Some(v) = snap.kv_cache_tokens {
         metrics::gauge!("smg_worker_kv_cache_tokens", "worker" => worker.to_string()).set(v as f64);
     }
-    if let Some(v) = snap.in_flight_requests {
-        metrics::gauge!("smg_worker_in_flight_requests", "worker" => worker.to_string())
-            .set(v as f64);
-    }
-    if let Some(v) = snap.avg_tokens_per_req {
-        metrics::gauge!("smg_worker_avg_tokens_per_req", "worker" => worker.to_string())
-            .set(v as f64);
-    }
+    metrics::gauge!("smg_worker_in_flight_requests", "worker" => worker.to_string())
+        .set(snap.in_flight_requests as f64);
+    metrics::gauge!("smg_worker_avg_tokens_per_req", "worker" => worker.to_string())
+        .set(snap.avg_tokens_per_req as f64);
     // Export any additional custom metrics
     for (key, val) in &snap.custom_metrics {
         let metric_name = format!("smg_worker_{}", key.replace('-', "_"));
