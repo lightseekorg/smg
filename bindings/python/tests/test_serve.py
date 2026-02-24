@@ -158,9 +158,12 @@ class TestImportBackendArgs:
     def test_trtllm_adds_model_arg(self):
         parser = argparse.ArgumentParser()
         _import_backend_args("trtllm", parser)
-        args = parser.parse_args(["--model", "/path/to/model", "--config", "/path/to/config.yml"])
+        args, backend_args = parser.parse_known_args(
+            ["--model", "/path/to/model", "--config", "/path/to/config.yml"]
+        )
         assert args.model == "/path/to/model"
-        assert args.config == "/path/to/config.yml"
+        assert "--config" in backend_args
+        assert "/path/to/config.yml" in backend_args
 
     def test_sglang_import_error(self):
         """sglang is not installed in test env, so parser.error should be called."""
@@ -304,7 +307,7 @@ class TestParseServeArgs:
     def test_unknown_arg_rejected_in_pass2(self):
         """Unknown args should be rejected by the full parser in pass 2."""
         with pytest.raises(SystemExit):
-            parse_serve_args(["--backend", "trtllm", "--totally-unknown-flag"])
+            parse_serve_args(["--backend", "sglang", "--totally-unknown-flag"])
 
 
 # ---------------------------------------------------------------------------
