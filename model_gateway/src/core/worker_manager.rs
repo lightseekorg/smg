@@ -268,6 +268,18 @@ impl WorkerManager {
 }
 
 /// Load monitoring service that periodically fetches worker loads
+///
+/// # Deprecated
+/// This polling-based monitor is superseded by the event-driven architecture
+/// provided by `metrics_service::MetricsStore` + `EventBus`. New code should
+/// use `PowerOfTwoPolicy::with_metrics_store(metrics_store)` instead.
+///
+/// The `LoadMonitor` is kept for backward compatibility and will be removed in
+/// a future release.
+#[deprecated(
+    since = "0.2.0",
+    note = "Use MetricsStore + EventBus instead. See PowerOfTwoPolicy::with_metrics_store"
+)]
 pub struct LoadMonitor {
     worker_registry: Arc<WorkerRegistry>,
     policy_registry: Arc<PolicyRegistry>,

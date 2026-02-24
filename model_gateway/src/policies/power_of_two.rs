@@ -11,21 +11,85 @@ use tracing::debug;
 use super::{get_healthy_worker_indices, LoadBalancingPolicy, SelectWorkerInfo};
 use crate::core::Worker;
 
+/// Polls the `MetricsStore` on every load update and refreshes the local cache.
+pub fn start_metrics_sync_task(
+    metrics_store: Arc<metrics_service::MetricsStore>,
+    cached_loads: Arc<RwLock<HashMap<String, isize>>>,
+) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "background metrics sync task; lifecycle tied to router"
+    )]
+    tokio::spawn(async move {
+        let (mut rx, initial) = metrics_store.subscribe();
+
+        // Seed from current snapshots
+        {
+            let mut map = cached_loads.write().unwrap_or_else(|e| e.into_inner());
+            for snap in &initial {
+                let load = snap.kv_cache_tokens.unwrap_or_else(|| {
+                    let avg = if snap.avg_tokens_per_req > 0 {
+                        snap.avg_tokens_per_req
+                    } else {
+                        1024
+                    };
+                    snap.in_flight_requests * avg
+                });
+                map.insert(snap.url.clone(), load);
+            }
+        }
+
+        // Update on every new snapshot from the bus
+        loop {
+            match rx.recv().await {
+                Ok(snap) => {
+                    let load = snap.kv_cache_tokens.unwrap_or_else(|| {
+                        let avg = if snap.avg_tokens_per_req > 0 {
+                            snap.avg_tokens_per_req
+                        } else {
+                            1024
+                        };
+                        snap.in_flight_requests * avg
+                    });
+                    let mut map = cached_loads.write().unwrap_or_else(|e| e.into_inner());
+                    map.insert(snap.url.clone(), load);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("PowerOfTwoPolicy metrics sync lagged by {} messages", n);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::warn!("PowerOfTwoPolicy metrics sync channel closed");
+                    break;
+                }
+            }
+        }
+    });
+}
+
 /// Power-of-two choices policy
 ///
 /// Randomly selects two workers and routes to the one with lower load.
-/// This provides good load distribution with minimal coordination overhead.
+/// Load information is driven by `MetricsStore` events (event-driven)
+/// and can also be seeded via the legacy `update_loads` path.
 #[derive(Debug)]
 pub struct PowerOfTwoPolicy {
-    /// Cached load information from external monitoring
-    cached_loads: RwLock<HashMap<String, isize>>,
+    /// Cached token-load (or estimated load) per worker URL.
+    /// Updated either via `update_loads()` (legacy) or event-driven via `start_metrics_sync_task`.
+    cached_loads: Arc<RwLock<HashMap<String, isize>>>,
 }
 
 impl PowerOfTwoPolicy {
     pub fn new() -> Self {
         Self {
-            cached_loads: RwLock::new(HashMap::new()),
+            cached_loads: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Create a new policy and immediately start a background event-driven sync task.
+    pub fn with_metrics_store(metrics_store: Arc<metrics_service::MetricsStore>) -> Self {
+        let policy = Self::new();
+        start_metrics_sync_task(metrics_store, Arc::clone(&policy.cached_loads));
+        policy
     }
 }
 

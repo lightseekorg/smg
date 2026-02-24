@@ -1518,3 +1518,82 @@ mod tests {
         assert_eq!(method_to_static_str("UNKNOWN"), "OTHER");
     }
 }
+
+// =============================================================================
+// EVENTBUS OBSERVABILITY EXPORTER
+// =============================================================================
+
+/// Start a background subscriber that listens to the [`metrics_service::EventBus`] and
+/// automatically updates standard `smg_worker_*` Prometheus gauges on every new snapshot.
+///
+/// # How to use
+/// Call once at startup from `AppContext::from_config`:
+/// ```ignore
+/// start_metrics_observability_exporter(metrics_store);
+/// ```
+pub fn start_metrics_observability_exporter(
+    metrics_store: std::sync::Arc<metrics_service::MetricsStore>,
+) {
+    // Register gauge descriptions once
+    describe_gauge!(
+        "smg_worker_kv_cache_tokens",
+        "KV cache tokens currently used by the worker"
+    );
+    describe_gauge!(
+        "smg_worker_in_flight_requests",
+        "Number of in-flight requests on the worker"
+    );
+    describe_gauge!(
+        "smg_worker_avg_tokens_per_req",
+        "Rolling average of tokens per request"
+    );
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "observability exporter: fire-and-forget background task tied to gateway lifetime"
+    )]
+    tokio::spawn(async move {
+        let (mut rx, initial) = metrics_store.subscribe();
+
+        // Export the initial batch of snapshots immediately
+        for snap in &initial {
+            export_snapshot(snap);
+        }
+
+        // Listen for updates
+        loop {
+            match rx.recv().await {
+                Ok(snap) => export_snapshot(&snap),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("metrics_observability_exporter: lagged by {} events", n);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::warn!("metrics_observability_exporter: EventBus closed");
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// Export a single [`metrics_service::WorkerSnapshot`] as Prometheus gauges.
+fn export_snapshot(snap: &metrics_service::WorkerSnapshot) {
+    let worker = snap.url.as_str();
+
+    if let Some(v) = snap.kv_cache_tokens {
+        metrics::gauge!("smg_worker_kv_cache_tokens", "worker" => worker.to_string()).set(v as f64);
+    }
+    if let Some(v) = snap.in_flight_requests {
+        metrics::gauge!("smg_worker_in_flight_requests", "worker" => worker.to_string())
+            .set(v as f64);
+    }
+    if let Some(v) = snap.avg_tokens_per_req {
+        metrics::gauge!("smg_worker_avg_tokens_per_req", "worker" => worker.to_string())
+            .set(v as f64);
+    }
+    // Export any additional custom metrics
+    for (key, val) in &snap.custom_metrics {
+        let metric_name = format!("smg_worker_{}", key.replace('-', "_"));
+        metrics::gauge!(metric_name, "worker" => worker.to_string()).set(*val);
+    }
+}

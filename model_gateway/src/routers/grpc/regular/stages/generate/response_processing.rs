@@ -138,7 +138,33 @@ impl GenerateResponseProcessingStage {
             .await?;
 
         // Store the final response
-        ctx.state.response.final_response = Some(FinalResponse::Generate(result_array));
+        ctx.state.response.final_response = Some(FinalResponse::Generate(result_array.clone()));
+
+        // Piggyback: publish token-count snapshot derived from the complete response
+        if let Some(metrics_store) = ctx.components.metrics_store.as_ref() {
+            if let Some(worker_url) = ctx.primary_worker_url() {
+                let mut snapshot = metrics_service::WorkerSnapshot::new(
+                    worker_url,
+                    metrics_service::MetricSource::Piggyback,
+                );
+
+                // Aggregate usage across all generated choices
+                let mut total_prompt = 0;
+                let mut total_completion = 0;
+                for res in &result_array {
+                    if let Some(usage) = &res.usage {
+                        total_prompt += usage.prompt_tokens;
+                        total_completion += usage.completion_tokens;
+                    }
+                }
+
+                if total_prompt > 0 || total_completion > 0 {
+                    snapshot.in_flight_requests = 0;
+                    snapshot.avg_tokens_per_req = (total_prompt + total_completion) as isize;
+                }
+                metrics_store.update(snapshot);
+            }
+        }
 
         Ok(None)
     }

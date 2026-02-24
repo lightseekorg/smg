@@ -4,6 +4,7 @@ use std::{
 };
 
 use llm_tokenizer::registry::TokenizerRegistry;
+use metrics_service::MetricsStore;
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use reqwest::Client;
 use smg_data_connector::{
@@ -47,6 +48,7 @@ pub struct AppContext {
     pub worker_registry: Arc<WorkerRegistry>,
     pub policy_registry: Arc<PolicyRegistry>,
     pub router_manager: Option<Arc<RouterManager>>,
+    pub metrics_store: Arc<MetricsStore>,
     pub response_storage: Arc<dyn ResponseStorage>,
     pub conversation_storage: Arc<dyn ConversationStorage>,
     pub conversation_item_storage: Arc<dyn ConversationItemStorage>,
@@ -79,6 +81,7 @@ pub struct AppContextBuilder {
     worker_registry: Option<Arc<WorkerRegistry>>,
     policy_registry: Option<Arc<PolicyRegistry>>,
     router_manager: Option<Arc<RouterManager>>,
+    metrics_store: Option<Arc<MetricsStore>>,
     response_storage: Option<Arc<dyn ResponseStorage>>,
     conversation_storage: Option<Arc<dyn ConversationStorage>>,
     conversation_item_storage: Option<Arc<dyn ConversationItemStorage>>,
@@ -124,6 +127,7 @@ impl AppContextBuilder {
             worker_registry: None,
             policy_registry: None,
             router_manager: None,
+            metrics_store: None,
             response_storage: None,
             conversation_storage: None,
             conversation_item_storage: None,
@@ -180,6 +184,11 @@ impl AppContextBuilder {
 
     pub fn router_manager(mut self, router_manager: Option<Arc<RouterManager>>) -> Self {
         self.router_manager = router_manager;
+        self
+    }
+
+    pub fn metrics_store(mut self, metrics_store: Arc<MetricsStore>) -> Self {
+        self.metrics_store = Some(metrics_store);
         self
     }
 
@@ -267,6 +276,9 @@ impl AppContextBuilder {
                 .policy_registry
                 .ok_or(AppContextBuildError("policy_registry"))?,
             router_manager: self.router_manager,
+            metrics_store: self
+                .metrics_store
+                .ok_or(AppContextBuildError("metrics_store"))?,
             response_storage: self
                 .response_storage
                 .ok_or(AppContextBuildError("response_storage"))?,
@@ -298,6 +310,27 @@ impl AppContextBuilder {
         router_config: RouterConfig,
         request_timeout_secs: u64,
     ) -> Result<Self, String> {
+        let bus = Arc::new(metrics_service::EventBus::new(1024));
+        let metrics_store = Arc::new(metrics_service::MetricsStore::new(
+            bus.clone(),
+            std::time::Duration::from_secs(60),
+        ));
+
+        // Start background scrapers
+        let prometheus_scraper = metrics_service::scrapers::prometheus::PrometheusScraper::new(
+            "http://prometheus:9090".to_string(), // In reality we'd load this from config
+            std::time::Duration::from_secs(15),
+            Arc::clone(&metrics_store),
+        );
+        tokio::spawn(async move {
+            prometheus_scraper.run().await;
+        });
+
+        // Start EventBus observability exporter (exports smg_worker_* Prometheus gauges)
+        crate::observability::metrics::start_metrics_observability_exporter(Arc::clone(
+            &metrics_store,
+        ));
+
         Ok(Self::new()
             .with_client(&router_config, request_timeout_secs)?
             .maybe_rate_limiter(&router_config)
@@ -305,6 +338,7 @@ impl AppContextBuilder {
             .with_reasoning_parser_factory()
             .with_tool_parser_factory()
             .with_worker_registry()
+            .metrics_store(metrics_store)
             .with_policy_registry(&router_config)
             .with_storage(&router_config)
             .await?

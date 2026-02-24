@@ -32,6 +32,9 @@ pub(crate) struct ResponsesContext {
 
     /// MCP orchestrator for tool support
     pub mcp_orchestrator: Arc<McpOrchestrator>,
+
+    /// Metrics store for piggybacked metrics
+    pub metrics_store: Arc<metrics_service::MetricsStore>,
 }
 
 impl ResponsesContext {
@@ -43,6 +46,7 @@ impl ResponsesContext {
         conversation_storage: Arc<dyn ConversationStorage>,
         conversation_item_storage: Arc<dyn ConversationItemStorage>,
         mcp_orchestrator: Arc<McpOrchestrator>,
+        metrics_store: Arc<metrics_service::MetricsStore>,
     ) -> Self {
         Self {
             pipeline,
@@ -51,6 +55,7 @@ impl ResponsesContext {
             conversation_storage,
             conversation_item_storage,
             mcp_orchestrator,
+            metrics_store,
         }
     }
 }

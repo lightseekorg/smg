@@ -11,6 +11,7 @@ use crate::core::{HashRing, Worker};
 
 mod bucket;
 mod cache_aware;
+pub mod cel_engine;
 mod consistent_hashing;
 mod factory;
 mod manual;
@@ -23,6 +24,9 @@ pub(crate) mod utils;
 
 pub use bucket::BucketPolicy;
 pub use cache_aware::CacheAwarePolicy;
+pub use cel_engine::{
+    CelPolicyEngine, PolicyDecision, PolicyResult, RoutingStrategy, SelectionTier,
+};
 pub use consistent_hashing::ConsistentHashingPolicy;
 pub use factory::PolicyFactory;
 // Re-export PrefixMatchResult from kv_index for production use

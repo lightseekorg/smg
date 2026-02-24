@@ -1,0 +1,16 @@
+[package]
+name = "metrics-service"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+dashmap = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+metrics = "0.22.3" # assuming metrics is in use as per observability
+cel-interpreter = "0.8" # typically cel-interpreter

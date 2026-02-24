@@ -83,6 +83,7 @@ impl GrpcRouter {
             tool_parser_factory: tool_parser_factory.clone(),
             reasoning_parser_factory: reasoning_parser_factory.clone(),
             multimodal,
+            metrics_store: Some(ctx.metrics_store.clone()),
         });
 
         // Create regular pipeline
@@ -129,6 +130,7 @@ impl GrpcRouter {
                 ctx.conversation_storage.clone(),
                 ctx.conversation_item_storage.clone(),
                 mcp_orchestrator.clone(),
+                ctx.metrics_store.clone(),
             )
         };
 
@@ -304,6 +306,7 @@ impl GrpcRouter {
                     .conversation_item_storage
                     .clone(),
                 self.harmony_responses_context.mcp_orchestrator.clone(),
+                self.harmony_responses_context.metrics_store.clone(),
             );
 
             if body.stream.unwrap_or(false) {
