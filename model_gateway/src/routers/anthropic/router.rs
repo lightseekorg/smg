@@ -88,7 +88,10 @@ impl RouterTrait for AnthropicRouter {
         let request = body.clone();
         let headers_owned = headers.cloned();
 
-        let smg_mcp_enabled = headers.and_then(|h| h.get("x-smg-mcp")).is_some();
+        let smg_mcp_enabled = headers
+            .and_then(|h| h.get("x-smg-mcp"))
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| matches!(v, "enabled" | "true" | "1"));
 
         let mcp_servers = if smg_mcp_enabled && request.has_mcp_toolset() {
             // Build per-server allowed tools from McpToolset entries in tools array.
