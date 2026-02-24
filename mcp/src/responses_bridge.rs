@@ -73,15 +73,15 @@ pub fn build_chat_function_tools_with_names(
         .collect()
 }
 
-/// Build Responses API MCP tools from MCP tool entries.
+/// Build Responses API function tools from MCP tool entries.
 ///
-/// These tools are exposed in Responses requests where MCP tools are represented
-/// as `{"type": "mcp", ...}` tool entries.
+/// MCP tools are exposed to the model as function tools in the Responses API,
+/// so these serialize as `{"type": "function", ...}` tool entries.
 pub fn build_response_tools(entries: &[ToolEntry]) -> Vec<ResponseTool> {
     build_response_tools_with_names(entries, None)
 }
 
-/// Build Responses API MCP tools from MCP tool entries with optional exposed names.
+/// Build Responses API function tools from MCP tool entries with optional exposed names.
 pub fn build_response_tools_with_names(
     entries: &[ToolEntry],
     exposed_names: Option<&std::collections::HashMap<QualifiedToolName, String>>,

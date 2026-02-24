@@ -209,7 +209,7 @@ pub(super) fn insert_optional_value<T: Serialize>(
 /// Returns None for function tools and other types that don't need restoration.
 pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
     match tool {
-        ResponseTool::Mcp(mcp) if mcp.server_url.is_some() => {
+        ResponseTool::Mcp(mcp) => {
             let mut m = Map::new();
             m.insert("type".to_string(), json!("mcp"));
             m.insert("server_label".to_string(), json!(&mcp.server_label));
