@@ -24,13 +24,12 @@ pub fn extract_routing_key(headers: Option<&HeaderMap>) -> Option<&str> {
     extract_header_value(headers, &HEADER_ROUTING_KEY)
 }
 
-/// Check if SMG MCP orchestration is enabled via `X-SMG-MCP` header.
-/// Accepts "enabled", "true", or "1".
+/// Check if SMG MCP orchestration is enabled via `X-SMG-MCP: enabled` header.
 pub fn is_smg_mcp_enabled(headers: Option<&HeaderMap>) -> bool {
     headers
         .and_then(|h| h.get(&HEADER_MCP))
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| matches!(v, "enabled" | "true" | "1"))
+        .is_some_and(|v| v.eq_ignore_ascii_case("enabled"))
 }
 
 /// Copy request headers to a Vec of name-value string pairs
