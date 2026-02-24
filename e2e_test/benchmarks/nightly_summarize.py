@@ -201,6 +201,31 @@ class RuntimeComparisonPoint:
 
 
 @dataclass
+class BfclCategoryResult:
+    """Per-category BFCL accuracy."""
+
+    total: int
+    passed: int
+    failed: int
+    accuracy_pct: float
+
+
+@dataclass
+class BfclResult:
+    """Parsed BFCL accuracy results from a nightly run."""
+
+    model: str
+    runtime: str
+    backend: str
+    total: int
+    passed: int
+    failed: int
+    accuracy_pct: float
+    categories: dict[str, BfclCategoryResult] = field(default_factory=dict)
+    comparison: dict | None = None  # baseline comparison.json contents
+
+
+@dataclass
 class SummaryResult:
     """Return value of generate_summary."""
 
@@ -208,6 +233,7 @@ class SummaryResult:
     experiments: list[ExperimentInfo]
     comparisons: list[ComparisonPoint]
     runtime_comparisons: list[RuntimeComparisonPoint] = field(default_factory=list)
+    bfcl_results: list[BfclResult] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -1182,6 +1208,176 @@ def _section_runtime_comparison(runtime_comparisons: list[RuntimeComparisonPoint
 
 
 # ---------------------------------------------------------------------------
+# BFCL (Function Calling) discovery and rendering
+# ---------------------------------------------------------------------------
+
+
+def discover_bfcl_results(base_dir: Path) -> list[BfclResult]:
+    """Find BFCL accuracy results uploaded alongside nightly benchmarks.
+
+    Looks for ``nightly_bfcl_*/summary.json`` directories produced by the
+    bfcl-accuracy CI job.
+    """
+    results: list[BfclResult] = []
+    for folder in sorted(base_dir.rglob("nightly_bfcl_*")):
+        if not folder.is_dir():
+            continue
+        summary_path = folder / "summary.json"
+        if not summary_path.exists():
+            continue
+
+        try:
+            with summary_path.open() as f:
+                summary = json.load(f)
+        except Exception as e:
+            print(f"Warning: Failed to parse BFCL summary {summary_path}: {e}", file=sys.stderr)
+            continue
+
+        # Read optional metadata
+        meta: dict = {}
+        meta_path = folder / "metadata.json"
+        if meta_path.exists():
+            try:
+                with meta_path.open() as f:
+                    meta = json.load(f)
+            except Exception:
+                pass
+
+        categories: dict[str, BfclCategoryResult] = {}
+        for cat_name, cat_stats in summary.get("by_category", {}).items():
+            cat_total = cat_stats.get("total", 0)
+            cat_passed = cat_stats.get("passed", 0)
+            categories[cat_name] = BfclCategoryResult(
+                total=cat_total,
+                passed=cat_passed,
+                failed=cat_stats.get("failed", 0),
+                accuracy_pct=round(cat_passed / cat_total * 100, 2) if cat_total else 0.0,
+            )
+
+        # Read optional baseline comparison
+        comparison: dict | None = None
+        comp_path = folder / "comparison.json"
+        if comp_path.exists():
+            try:
+                with comp_path.open() as f:
+                    comparison = json.load(f)
+            except Exception:
+                pass
+
+        results.append(
+            BfclResult(
+                model=meta.get("model", "unknown"),
+                runtime=meta.get("runtime", "unknown"),
+                backend=meta.get("backend", "unknown"),
+                total=summary.get("total", 0),
+                passed=summary.get("passed", 0),
+                failed=summary.get("failed", 0),
+                accuracy_pct=summary.get("accuracy_pct", 0.0),
+                categories=categories,
+                comparison=comparison,
+            )
+        )
+
+    return results
+
+
+def _section_bfcl(bfcl_results: list[BfclResult]) -> list[str]:
+    """Render the Function Calling (BFCL) section of the nightly summary."""
+    if not bfcl_results:
+        return []
+
+    lines = [
+        "### Function Calling: BFCL v3",
+        "",
+    ]
+
+    for br in bfcl_results:
+        model_display = br.model.split("/")[-1] if "/" in br.model else br.model
+        rt_display = _RUNTIME_DISPLAY.get(br.runtime, br.runtime)
+        proto_display = _PROTOCOL_DISPLAY.get(br.backend, br.backend.upper())
+
+        lines.extend([
+            f"> **{model_display}** via {proto_display}/{rt_display}"
+            f" — **{br.total}** test cases, **{br.accuracy_pct:.1f}%** accuracy",
+            "",
+            "| Category | Passed | Failed | Total | Accuracy |",
+            "|----------|-------:|-------:|------:|---------:|",
+        ])
+
+        for cat_name in sorted(br.categories):
+            cat = br.categories[cat_name]
+            lines.append(
+                f"| {cat_name} | {cat.passed} | {cat.failed} "
+                f"| {cat.total} | {cat.accuracy_pct:.1f}% |"
+            )
+
+        lines.append(
+            f"| **Overall** | **{br.passed}** | **{br.failed}** "
+            f"| **{br.total}** | **{br.accuracy_pct:.1f}%** |"
+        )
+        lines.append("")
+
+        # Baseline comparison (regression/progression)
+        if br.comparison is not None:
+            comp = br.comparison
+            comp_passed = comp.get("passed", True)
+            tolerance = comp.get("tolerance_pp", 3.0)
+            details = comp.get("details", {})
+            regressions = comp.get("regressions", [])
+            improvements = comp.get("improvements", [])
+
+            if comp_passed:
+                verdict = f"**PASSED** — No regressions (tolerance: ±{tolerance:.1f}pp)"
+            else:
+                verdict = (
+                    f"**FAILED** — {len(regressions)} regression(s) "
+                    f"(tolerance: ±{tolerance:.1f}pp)"
+                )
+
+            lines.extend([
+                "<details>",
+                f"<summary><b>Baseline Comparison</b>: {verdict}</summary>",
+                "",
+                "| Category | Baseline | Current | Delta | Status |",
+                "|----------|-------:|--------:|------:|:------:|",
+            ])
+
+            for cat_name in sorted(details):
+                d = details[cat_name]
+                baseline_val = d.get("baseline", 0)
+                actual_val = d.get("actual", 0)
+                delta = d.get("delta_pp", 0)
+                status = d.get("status", "ok")
+                icon = {"ok": "✓", "improved": "↑", "regression": "✗"}.get(status, "?")
+                lines.append(
+                    f"| {cat_name} | {baseline_val:.1f}% | {actual_val:.1f}% "
+                    f"| {delta:+.1f}pp | {icon} |"
+                )
+
+            lines.extend(["", "</details>", ""])
+
+            if regressions:
+                lines.append("**Regressions:**")
+                lines.append("")
+                for reg in regressions:
+                    lines.append(
+                        f"- **{reg['category']}**: "
+                        f"{reg['baseline']:.1f}% → {reg['actual']:.1f}% "
+                        f"(Δ{reg['delta_pp']:+.1f}pp)"
+                    )
+                lines.append("")
+
+            if improvements:
+                lines.append("**Improvements:**")
+                lines.append("")
+                for imp in improvements:
+                    lines.append(f"- {imp}")
+                lines.append("")
+
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Top-level summary
 # ---------------------------------------------------------------------------
 
@@ -1189,8 +1385,9 @@ def _section_runtime_comparison(runtime_comparisons: list[RuntimeComparisonPoint
 def generate_summary(base_dir: Path) -> SummaryResult:
     """Generate the full markdown summary."""
     experiments = discover_experiments(base_dir)
+    bfcl_results = discover_bfcl_results(base_dir)
 
-    if not experiments:
+    if not experiments and not bfcl_results:
         return SummaryResult(
             markdown="## Nightly Benchmark Summary\n\nNo benchmark results found.",
             experiments=[],
@@ -1215,14 +1412,23 @@ def generate_summary(base_dir: Path) -> SummaryResult:
         f"{count} {_RUNTIME_DISPLAY.get(rt, rt)}" for rt, count in sorted(runtime_counts.items())
     )
 
+    header_parts = []
+    if experiments:
+        header_parts.append(
+            f"**{len(experiments)} experiments** ({runtime_parts}; "
+            f"{grpc_count} gRPC, {http_count} HTTP), "
+            f"**{total_runs} benchmark runs**, "
+            f"**{len(comparisons)} protocol comparisons**, "
+            f"**{len(runtime_comparisons)} runtime comparisons**"
+        )
+    if bfcl_results:
+        bfcl_total = sum(br.total for br in bfcl_results)
+        header_parts.append(f"**{bfcl_total} BFCL function-calling tests**")
+
     lines = [
         "## Nightly Benchmark Summary",
         "",
-        f"> **{len(experiments)} experiments** ({runtime_parts}; "
-        f"{grpc_count} gRPC, {http_count} HTTP), "
-        f"**{total_runs} benchmark runs**, "
-        f"**{len(comparisons)} protocol comparisons**, "
-        f"**{len(runtime_comparisons)} runtime comparisons**",
+        "> " + ", ".join(header_parts),
         "",
         "<details>",
         "<summary><b>Glossary</b></summary>",
@@ -1236,6 +1442,7 @@ def generate_summary(base_dir: Path) -> SummaryResult:
     ]
 
     lines.extend(_section_key_findings(comparisons, experiments, runtime_comparisons))
+    lines.extend(_section_bfcl(bfcl_results))
     lines.extend(_section_overview(experiments, models_with_data))
     lines.extend(_section_aggregate(comparisons))
     lines.extend(_section_runtime_comparison(runtime_comparisons))
@@ -1245,18 +1452,23 @@ def generate_summary(base_dir: Path) -> SummaryResult:
     lines.extend(_section_per_model(comparisons))
     lines.extend(_section_error_rates(experiments))
 
+    footer_parts = [f"{len(experiments)} experiment(s)"]
+    if comparisons:
+        footer_parts.append(f"{len(comparisons)} protocol comparisons")
+    if runtime_comparisons:
+        footer_parts.append(f"{len(runtime_comparisons)} runtime comparisons")
+    if bfcl_results:
+        footer_parts.append(f"{len(bfcl_results)} BFCL accuracy run(s)")
+
     lines.append("---")
-    lines.append(
-        f"*Generated from {len(experiments)} experiment(s), "
-        f"{len(comparisons)} protocol comparisons, "
-        f"{len(runtime_comparisons)} runtime comparisons*"
-    )
+    lines.append(f"*Generated from {', '.join(footer_parts)}*")
 
     return SummaryResult(
         markdown="\n".join(lines),
         experiments=experiments,
         comparisons=comparisons,
         runtime_comparisons=runtime_comparisons,
+        bfcl_results=bfcl_results,
     )
 
 

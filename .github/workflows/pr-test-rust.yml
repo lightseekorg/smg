@@ -278,16 +278,17 @@ jobs:
             timeout: 20
             test_dirs: "e2e_test/chat_completions"
             extra_deps: "pytest-parallel py"
-            env_vars: "E2E_RUNTIME=sglang SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
+            env_vars: "E2E_RUNTIME=sglang BFCL_LIMIT=20 SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"
             test_filter: ""
             ignore_opts: ""
+            download_bfcl: true
           - name: chat-completions-vllm
             timeout: 20
             test_dirs: "e2e_test/chat_completions"
             extra_deps: "pytest-parallel py"
-            env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
+            env_vars: "E2E_RUNTIME=vllm BFCL_LIMIT=20 SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"
             # TODO: Remove filter when vLLM supports logprobs and n>1 with greedy sampling
@@ -295,6 +296,7 @@ jobs:
             test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
             setup_vllm: true
             ignore_opts: ""
+            download_bfcl: true
           - name: vllm-pd
             timeout: 15
             test_dirs: "e2e_test/router/test_pd_mmlu.py"
@@ -368,6 +370,10 @@ jobs:
           pip uninstall -y smg || true
           pip install wheel/*.whl
           bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
+
+      - name: Download BFCL test data
+        if: matrix.download_bfcl
+        run: python3 e2e_test/bfcl/download_data.py
 
       - name: Pull genai-bench image
         if: matrix.upload_benchmarks

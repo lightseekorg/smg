@@ -423,11 +423,113 @@ jobs:
   #   # tp=8, keep disabled for nightly
 
   # ---------------------------------------------------------------------------
+  # BFCL Function Calling Accuracy
+  # ---------------------------------------------------------------------------
+
+  bfcl-accuracy:
+    name: "BFCL Function Calling Accuracy"
+    needs: build-wheel
+    if: ${{ !cancelled() }}
+    runs-on: ["k8s-runner-gpu", "4-gpu-h100"]
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - { id: sglang, runtime: sglang, setup_vllm: false, setup_trtllm: false }
+
+    steps:
+      - name: Check filters
+        id: filter
+        run: |
+          RUNTIME="${{ github.event.inputs.runtime || 'all' }}"
+          SKIP="false"
+          if [ "$RUNTIME" != "all" ] && [ "$RUNTIME" != "${{ matrix.variant.id }}" ]; then
+            SKIP="true"
+          fi
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout code
+        if: steps.filter.outputs.skip != 'true'
+        uses: actions/checkout@v6
+
+      - name: Setup SGLang backend
+        if: steps.filter.outputs.skip != 'true' && !matrix.variant.setup_vllm && !matrix.variant.setup_trtllm
+        uses: ./.github/actions/setup-sglang
+
+      - name: Download wheel artifact
+        if: steps.filter.outputs.skip != 'true'
+        uses: actions/download-artifact@v7
+        with:
+          name: smg-wheel
+          path: wheel/
+
+      - name: Install wheel and test dependencies
+        if: steps.filter.outputs.skip != 'true'
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+          bash scripts/ci_install_e2e_deps.sh
+
+      - name: Download BFCL test data
+        if: steps.filter.outputs.skip != 'true'
+        run: python3 e2e_test/bfcl/download_data.py
+
+      - name: Run BFCL tests
+        if: steps.filter.outputs.skip != 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          E2E_MODEL_TP_OVERRIDES: '{"Qwen/Qwen2.5-7B-Instruct":1}'
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+
+          E2E_RUNTIME=${{ matrix.variant.runtime }} \
+          ROUTER_LOCAL_MODEL_PATH="/raid/models" \
+            pytest e2e_test/chat_completions/test_bfcl.py \
+              -k "not Standalone" \
+              -s -vv -o log_cli=true --log-cli-level=INFO
+
+      - name: Prepare BFCL results
+        if: always() && steps.filter.outputs.skip != 'true'
+        run: |
+          mkdir -p nightly_bfcl_accuracy
+          # Copy the latest summary and comparison
+          LATEST=$(ls -td e2e_test/bfcl_logs/*/ 2>/dev/null | head -1)
+          if [ -n "$LATEST" ]; then
+            cp "$LATEST/summary.json" nightly_bfcl_accuracy/ 2>/dev/null || true
+            cp "$LATEST/comparison.json" nightly_bfcl_accuracy/ 2>/dev/null || true
+          fi
+          # Write metadata for the summarize step
+          echo '{"model":"Qwen/Qwen2.5-7B-Instruct","runtime":"sglang","backend":"grpc"}' \
+            > nightly_bfcl_accuracy/metadata.json
+
+      - name: Upload BFCL results
+        if: always() && steps.filter.outputs.skip != 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-bfcl-accuracy-${{ matrix.variant.id }}-${{ github.run_id }}
+          path: nightly_bfcl_accuracy/
+          retention-days: 90
+
+      - name: Upload BFCL detailed logs
+        if: always() && steps.filter.outputs.skip != 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-bfcl-logs-${{ matrix.variant.id }}-${{ github.run_id }}
+          path: e2e_test/bfcl_logs/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Cleanup
+        if: always() && steps.filter.outputs.skip != 'true'
+        run: bash scripts/ci_killall_sglang.sh || true
+
+  # ---------------------------------------------------------------------------
   # Summary
   # ---------------------------------------------------------------------------
 
   summarize-benchmarks:
-    needs: [single-worker, multi-worker, single-worker-h200]
+    needs: [single-worker, multi-worker, single-worker-h200, bfcl-accuracy]
     runs-on: ubuntu-latest
     if: always()
     permissions:
