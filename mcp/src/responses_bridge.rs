@@ -8,7 +8,7 @@
 
 use openai_protocol::{
     common::{Function, Tool},
-    responses::{generate_id, McpToolInfo, ResponseOutputItem, ResponseTool, ResponseToolType},
+    responses::{generate_id, FunctionTool, McpToolInfo, ResponseOutputItem, ResponseTool},
 };
 use serde_json::{json, Value};
 
@@ -88,21 +88,15 @@ pub fn build_response_tools_with_names(
 ) -> Vec<ResponseTool> {
     entries
         .iter()
-        .map(|entry| ResponseTool {
-            r#type: ResponseToolType::Mcp,
-            function: Some(Function {
-                name: resolved_name_for_entry(entry, exposed_names).to_string(),
-                description: entry.tool.description.as_ref().map(|d| d.to_string()),
-                parameters: Value::Object((*entry.tool.input_schema).clone()),
-                strict: None,
-            }),
-            server_url: None,
-            authorization: None,
-            headers: None,
-            server_label: Some(entry.server_key().to_string()),
-            server_description: None,
-            require_approval: None,
-            allowed_tools: None,
+        .map(|entry| {
+            ResponseTool::Function(FunctionTool {
+                function: Function {
+                    name: resolved_name_for_entry(entry, exposed_names).to_string(),
+                    description: entry.tool.description.as_ref().map(|d| d.to_string()),
+                    parameters: Value::Object((*entry.tool.input_schema).clone()),
+                    strict: None,
+                },
+            })
         })
         .collect()
 }
