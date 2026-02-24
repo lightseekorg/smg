@@ -18,7 +18,7 @@ Usage:
     pytest e2e_test/chat_completions/test_bfcl.py -v
 
     # Run only simple category
-    pytest e2e_test/chat_completions/test_bfcl.py -k "Simple" -v
+    pytest e2e_test/chat_completions/test_bfcl.py -k "simple_" -v
 
     # Run with a subset (first 20 per category)
     BFCL_LIMIT=20 pytest e2e_test/chat_completions/test_bfcl.py -v
@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import time
+from collections import Counter
 from typing import Any
 
 import openai
@@ -49,7 +50,6 @@ except ImportError:
     _HAS_BASELINES = False
 
 from bfcl import (
-    bfcl_messages,
     bfcl_to_openai_tools,
     evaluate_tool_calls,
     get_run_dir,
@@ -92,11 +92,13 @@ def _make_ids(cases: list[dict]) -> list[str]:
     return [c["id"] for c in cases]
 
 
-_simple_cases = _load("simple")
-_multiple_cases = _load("multiple")
-_parallel_cases = _load("parallel")
-_parallel_multiple_cases = _load("parallel_multiple")
-_irrelevance_cases = _load("irrelevance")
+_all_cases = (
+    _load("simple")
+    + _load("multiple")
+    + _load("parallel")
+    + _load("parallel_multiple")
+    + _load("irrelevance")
+)
 
 
 # ---------------------------------------------------------------------------
@@ -131,8 +133,6 @@ def _write_summary_on_exit(bfcl_run_dir):
 
     if not _HAS_BASELINES:
         return
-
-    from collections import Counter
 
     model_counts = Counter(r.get("model", "unknown") for r in _all_results)
     backend_counts = Counter(r.get("backend", "unknown") for r in _all_results)
@@ -187,7 +187,7 @@ def _run_bfcl_case(
     """Execute a single BFCL test case, log the result, assert on failure."""
     category = case["category"]
     test_id = case["id"]
-    messages = bfcl_messages(case["question"])
+    messages = case["question"]
     tools = bfcl_to_openai_tools(case["function"])
 
     request_payload = {
@@ -318,86 +318,10 @@ def _run_bfcl_case(
 @pytest.mark.model("Qwen/Qwen2.5-7B-Instruct")
 @pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
 @pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
-class TestBFCLSimpleQwen:
-    """BFCL simple category — Qwen 2.5 7B with qwen parser."""
+class TestBFCLQwen:
+    """BFCL v3 accuracy — Qwen 2.5 7B with qwen parser (all categories)."""
 
-    @pytest.mark.parametrize("case", _simple_cases, ids=_make_ids(_simple_cases))
-    def test_case(self, setup_backend, bfcl_run_dir, case):
-        backend_name, model, client, _ = setup_backend
-        _run_bfcl_case(
-            case=case, model=model, parser="qwen", backend=backend_name,
-            client=client, run_dir=bfcl_run_dir,
-        )
-
-
-@pytest.mark.skip_for_runtime(
-    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
-)
-@pytest.mark.model("Qwen/Qwen2.5-7B-Instruct")
-@pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
-@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
-class TestBFCLMultipleQwen:
-    """BFCL multiple category — Qwen 2.5 7B with qwen parser."""
-
-    @pytest.mark.parametrize("case", _multiple_cases, ids=_make_ids(_multiple_cases))
-    def test_case(self, setup_backend, bfcl_run_dir, case):
-        backend_name, model, client, _ = setup_backend
-        _run_bfcl_case(
-            case=case, model=model, parser="qwen", backend=backend_name,
-            client=client, run_dir=bfcl_run_dir,
-        )
-
-
-@pytest.mark.skip_for_runtime(
-    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
-)
-@pytest.mark.model("Qwen/Qwen2.5-7B-Instruct")
-@pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
-@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
-class TestBFCLParallelQwen:
-    """BFCL parallel category — Qwen 2.5 7B with qwen parser."""
-
-    @pytest.mark.parametrize("case", _parallel_cases, ids=_make_ids(_parallel_cases))
-    def test_case(self, setup_backend, bfcl_run_dir, case):
-        backend_name, model, client, _ = setup_backend
-        _run_bfcl_case(
-            case=case, model=model, parser="qwen", backend=backend_name,
-            client=client, run_dir=bfcl_run_dir,
-        )
-
-
-@pytest.mark.skip_for_runtime(
-    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
-)
-@pytest.mark.model("Qwen/Qwen2.5-7B-Instruct")
-@pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
-@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
-class TestBFCLParallelMultipleQwen:
-    """BFCL parallel_multiple category — Qwen 2.5 7B with qwen parser."""
-
-    @pytest.mark.parametrize(
-        "case", _parallel_multiple_cases, ids=_make_ids(_parallel_multiple_cases)
-    )
-    def test_case(self, setup_backend, bfcl_run_dir, case):
-        backend_name, model, client, _ = setup_backend
-        _run_bfcl_case(
-            case=case, model=model, parser="qwen", backend=backend_name,
-            client=client, run_dir=bfcl_run_dir,
-        )
-
-
-@pytest.mark.skip_for_runtime(
-    "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
-)
-@pytest.mark.model("Qwen/Qwen2.5-7B-Instruct")
-@pytest.mark.gateway(extra_args=["--tool-call-parser", "qwen", "--history-backend", "memory"])
-@pytest.mark.parametrize("setup_backend", ["grpc"], indirect=True)
-class TestBFCLIrrelevanceQwen:
-    """BFCL irrelevance category — model should NOT produce tool calls."""
-
-    @pytest.mark.parametrize(
-        "case", _irrelevance_cases, ids=_make_ids(_irrelevance_cases)
-    )
+    @pytest.mark.parametrize("case", _all_cases, ids=_make_ids(_all_cases))
     def test_case(self, setup_backend, bfcl_run_dir, case):
         backend_name, model, client, _ = setup_backend
         _run_bfcl_case(
@@ -436,40 +360,8 @@ class TestBFCLStandalone:
         )
         self.run_dir = bfcl_run_dir
 
-    @pytest.mark.parametrize("case", _simple_cases, ids=_make_ids(_simple_cases))
-    def test_simple(self, case):
-        _run_bfcl_case(
-            case=case, model=self.model, parser=self.parser, backend="standalone",
-            client=self.client, run_dir=self.run_dir,
-        )
-
-    @pytest.mark.parametrize("case", _multiple_cases, ids=_make_ids(_multiple_cases))
-    def test_multiple(self, case):
-        _run_bfcl_case(
-            case=case, model=self.model, parser=self.parser, backend="standalone",
-            client=self.client, run_dir=self.run_dir,
-        )
-
-    @pytest.mark.parametrize("case", _parallel_cases, ids=_make_ids(_parallel_cases))
-    def test_parallel(self, case):
-        _run_bfcl_case(
-            case=case, model=self.model, parser=self.parser, backend="standalone",
-            client=self.client, run_dir=self.run_dir,
-        )
-
-    @pytest.mark.parametrize(
-        "case", _parallel_multiple_cases, ids=_make_ids(_parallel_multiple_cases)
-    )
-    def test_parallel_multiple(self, case):
-        _run_bfcl_case(
-            case=case, model=self.model, parser=self.parser, backend="standalone",
-            client=self.client, run_dir=self.run_dir,
-        )
-
-    @pytest.mark.parametrize(
-        "case", _irrelevance_cases, ids=_make_ids(_irrelevance_cases)
-    )
-    def test_irrelevance(self, case):
+    @pytest.mark.parametrize("case", _all_cases, ids=_make_ids(_all_cases))
+    def test_case(self, case):
         _run_bfcl_case(
             case=case, model=self.model, parser=self.parser, backend="standalone",
             client=self.client, run_dir=self.run_dir,
