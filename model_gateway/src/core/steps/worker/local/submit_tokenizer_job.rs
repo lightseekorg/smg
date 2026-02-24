@@ -122,10 +122,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for SubmitTokenizerJobStep {
                     })
                     .await
                 {
-                    warn!(
-                        "Failed to submit tokenizer job for model '{}': {}",
-                        name, e
-                    );
+                    warn!("Failed to submit tokenizer job for model '{}': {}", name, e);
                 }
             }
         }

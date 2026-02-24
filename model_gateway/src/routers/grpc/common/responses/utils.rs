@@ -91,9 +91,10 @@ pub(crate) fn validate_worker_availability(
     worker_registry: &Arc<WorkerRegistry>,
     model: &str,
 ) -> Option<Response> {
-    let available_models = worker_registry.get_models();
-
-    if !available_models.contains(&model.to_string()) {
+    // Use model_index directly so aliases are accepted as valid routing targets,
+    // while get_models() (client-facing) only exposes primary model IDs.
+    if worker_registry.get_by_model(model).is_empty() {
+        let available_models = worker_registry.get_models();
         return Some(error::service_unavailable(
             "no_available_workers",
             format!(

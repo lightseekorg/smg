@@ -79,6 +79,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
                     && backend_model_id != UNKNOWN_MODEL_ID =>
             {
                 model_card.aliases.push(backend_model_id);
+                model_card.aliases.retain(|a| a != sname);
                 model_card.id = sname.to_string();
             }
             _ => {}

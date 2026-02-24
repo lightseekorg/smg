@@ -268,8 +268,7 @@ impl WorkerRegistry {
             self.model_index
                 .entry(name.clone())
                 .and_modify(|existing| {
-                    let mut new_workers: Vec<Arc<dyn Worker>> =
-                        existing.iter().cloned().collect();
+                    let mut new_workers: Vec<Arc<dyn Worker>> = existing.iter().cloned().collect();
                     new_workers.push(worker.clone());
                     *existing = Arc::from(new_workers.into_boxed_slice());
                 })
@@ -520,13 +519,15 @@ impl WorkerRegistry {
             .collect()
     }
 
-    /// Get all model IDs with workers (lock-free)
+    /// Get primary model IDs with workers (lock-free).
+    /// Returns only the canonical model ID for each worker (not aliases), so the
+    /// list matches what clients should see on `/v1/models`.
     pub fn get_models(&self) -> Vec<String> {
-        self.model_index
-            .iter()
-            .filter(|entry| !entry.value().is_empty())
-            .map(|entry| entry.key().clone())
-            .collect()
+        let mut seen = std::collections::HashSet::new();
+        self.workers.iter().for_each(|entry| {
+            seen.insert(entry.value().model_id().to_string());
+        });
+        seen.into_iter().collect()
     }
 
     /// Get workers filtered by multiple criteria
@@ -591,12 +592,15 @@ impl WorkerRegistry {
     /// Get worker statistics (lock-free)
     pub fn stats(&self) -> WorkerRegistryStats {
         let total_workers = self.workers.len();
-        // Count models directly instead of allocating Vec via get_models() (lock-free)
-        let total_models = self
-            .model_index
-            .iter()
-            .filter(|entry| !entry.value().is_empty())
-            .count();
+        // Count distinct primary model IDs (not aliases) so metrics reflect
+        // the number of unique models served to clients, not index entries.
+        let total_models = {
+            let mut seen = std::collections::HashSet::new();
+            self.workers.iter().for_each(|entry| {
+                seen.insert(entry.value().model_id().to_string());
+            });
+            seen.len()
+        };
 
         let mut healthy_count = 0;
         let mut total_load = 0;
