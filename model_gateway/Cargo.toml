@@ -40,6 +40,7 @@ async-trait.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
+cel-interpreter.workspace = true
 futures.workspace = true
 http.workspace = true
 parking_lot.workspace = true

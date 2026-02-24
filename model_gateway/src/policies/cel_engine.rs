@@ -15,7 +15,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use cel_interpreter::{Context, Program, Value as CelValue};
 use metrics_service::{MetricsStore, WorkerSnapshot};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::core::Worker;
@@ -203,40 +205,41 @@ impl CelPolicyEngine {
         }
     }
 
-    /// Evaluate a simple metric expression (placeholder for full CEL).
-    ///
-    /// Supports: `kv_cache_tokens`, `in_flight_requests`, `avg_tokens_per_req`,
-    ///           and their arithmetic combinations parsed naively.
+    /// Evaluate a custom metric expression using CEL.
     fn evaluate_custom_expr(&self, snapshot: &WorkerSnapshot, expr: &str) -> i64 {
-        let expr = expr.trim();
-        // Simple variable resolution
-        match expr {
-            "kv_cache_tokens" => snapshot.kv_cache_tokens.unwrap_or(0) as i64,
-            "in_flight_requests" => snapshot.in_flight_requests as i64,
-            "avg_tokens_per_req" => snapshot.avg_tokens_per_req as i64,
-            _ => {
-                // Look up in custom_metrics
-                if let Some(val) = snapshot.custom_metrics.get(expr) {
-                    return (*val * 1000.0) as i64; // Scale to int for comparison
-                }
-                // Compound: "in_flight_requests * avg_tokens_per_req"
-                if expr.contains('*') {
-                    let parts: Vec<&str> = expr.splitn(2, '*').collect();
-                    if parts.len() == 2 {
-                        let a = self.evaluate_custom_expr(snapshot, parts[0].trim());
-                        let b = self.evaluate_custom_expr(snapshot, parts[1].trim());
-                        return a.saturating_mul(b);
-                    }
-                }
-                // Default: use in_flight estimate
-                let in_flight = snapshot.in_flight_requests as i64;
-                let avg = if snapshot.avg_tokens_per_req > 0 {
-                    snapshot.avg_tokens_per_req as i64
-                } else {
-                    1024
-                };
-                in_flight.saturating_mul(avg)
-            }
+        // In a high-performance system, the CEL Program should be compiled once and cached
+        // in the RoutingStrategy enum. Since expr is passed as a string here, we parse it dynamically.
+        let program = match Program::compile(expr) {
+            Ok(p) => p,
+            Err(_) => return 1024, // Fallback on parse failure
+        };
+
+        let mut context = Context::default();
+
+        // Expose standard fields to the CEL context
+        context.add_variable(
+            "kv_cache_tokens",
+            CelValue::Int(snapshot.kv_cache_tokens.unwrap_or(0) as i64),
+        );
+        context.add_variable(
+            "in_flight_requests",
+            CelValue::Int(snapshot.in_flight_requests as i64),
+        );
+        context.add_variable(
+            "avg_tokens_per_req",
+            CelValue::Int(snapshot.avg_tokens_per_req as i64),
+        );
+
+        // Expose all custom metrics to the CEL context
+        for (k, v) in &snapshot.custom_metrics {
+            // Scale floats to int for comparison or keep them as floats depending on CEL usage
+            context.add_variable(k.as_str(), CelValue::Float(*v));
+        }
+
+        match program.execute(&context) {
+            Ok(CelValue::Int(val)) => val,
+            Ok(CelValue::Float(val)) => (val * 1000.0) as i64, // Scale floats back to ints
+            _ => 1024, // Fallback if execution fails or returns non-numeric
         }
     }
 

@@ -57,8 +57,46 @@ impl DirectScraper {
                         }
                     }
 
-                    // A real implementation might also hit `/metrics` here for custom_metrics
-                    // and merge into snapshot before pushing. Let's push token count.
+                    // Fetch `/metrics` for custom prometheus metrics
+                    let metrics_url = format!("{}/metrics", w_url);
+                    if let Ok(resp) = client.get(&metrics_url).send().await {
+                        if let Ok(text) = resp.text().await {
+                            for line in text.lines() {
+                                let line = line.trim();
+                                if line.is_empty() || line.starts_with('#') {
+                                    continue;
+                                }
+
+                                // Format is typically: metric_name{label="val"} value
+                                if let Some((key_part, val_part)) = line.rsplit_once(' ') {
+                                    if let Ok(val) = val_part.parse::<f64>() {
+                                        // Extract just the metric name, stripping labels
+                                        let key = match key_part.find('{') {
+                                            Some(idx) => &key_part[..idx],
+                                            None => key_part,
+                                        };
+
+                                        // Route standard routing metrics directly to native fields
+                                        match key {
+                                            "sglang:in_flight_requests"
+                                            | "vllm:num_requests_running" => {
+                                                snapshot.in_flight_requests = val as isize;
+                                            }
+                                            "sglang:avg_tokens_per_req" => {
+                                                snapshot.avg_tokens_per_req = val as isize;
+                                            }
+                                            _ => {
+                                                snapshot
+                                                    .custom_metrics
+                                                    .insert(key.to_string(), val);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     store.update(snapshot);
                 });
             }
