@@ -854,6 +854,7 @@ impl CliArgs {
             pool_min,
             pool_max,
             pool_timeout_secs,
+            schema: None,
         })
     }
 
@@ -862,7 +863,11 @@ impl CliArgs {
         let pool_max = self
             .postgres_pool_max_size
             .unwrap_or_else(PostgresConfig::default_pool_max);
-        let pcf = PostgresConfig { db_url, pool_max };
+        let pcf = PostgresConfig {
+            db_url,
+            pool_max,
+            schema: None,
+        };
         pcf.validate().map_err(|e| ConfigError::ValidationFailed {
             reason: e.to_string(),
         })?;
@@ -883,6 +888,7 @@ impl CliArgs {
             url,
             pool_max,
             retention_days,
+            schema: None,
         };
         rcf.validate().map_err(|e| ConfigError::ValidationFailed {
             reason: e.to_string(),

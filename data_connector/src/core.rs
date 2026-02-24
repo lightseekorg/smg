@@ -465,13 +465,45 @@ pub trait ResponseStorage: Send + Sync {
     /// Delete a response
     async fn delete_response(&self, response_id: &ResponseId) -> ResponseResult<()>;
 
-    /// Get the chain of responses leading to a given response
-    /// Returns responses in chronological order (oldest first)
+    /// Get the chain of responses leading to a given response.
+    ///
+    /// Walks `previous_response_id` links from the given response backwards,
+    /// collecting up to `max_depth` responses (or unlimited if `None`).
+    /// Returns responses in chronological order (oldest first).
+    ///
+    /// The default implementation calls `self.get_response()` in a loop.
+    /// Backends that can walk the chain more efficiently (e.g. with a single
+    /// lock or a recursive SQL query) should override this.
     async fn get_response_chain(
         &self,
         response_id: &ResponseId,
         max_depth: Option<usize>,
-    ) -> ResponseResult<ResponseChain>;
+    ) -> ResponseResult<ResponseChain> {
+        let mut chain = ResponseChain::new();
+        let mut current_id = Some(response_id.clone());
+        let mut visited = 0usize;
+
+        while let Some(ref lookup_id) = current_id {
+            if let Some(limit) = max_depth {
+                if visited >= limit {
+                    break;
+                }
+            }
+
+            let fetched = self.get_response(lookup_id).await?;
+            match fetched {
+                Some(response) => {
+                    current_id.clone_from(&response.previous_response_id);
+                    chain.responses.push(response);
+                    visited += 1;
+                }
+                None => break,
+            }
+        }
+
+        chain.responses.reverse();
+        Ok(chain)
+    }
 
     /// List recent responses for a safety identifier
     async fn list_identifier_responses(

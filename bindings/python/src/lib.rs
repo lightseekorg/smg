@@ -283,6 +283,7 @@ impl PyOracleConfig {
             pool_min: self.pool_min,
             pool_max: self.pool_max,
             pool_timeout_secs: self.pool_timeout_secs,
+            schema: None,
         }
     }
 }
@@ -321,6 +322,7 @@ impl PyRedisConfig {
             url: self.url.clone(),
             pool_max: self.pool_max,
             retention_days: self.retention_days,
+            schema: None,
         }
     }
 }
@@ -353,6 +355,7 @@ impl PyPostgresConfig {
         config::PostgresConfig {
             db_url: self.db_url.clone().unwrap_or_default(),
             pool_max: self.pool_max,
+            schema: None,
         }
     }
 }
