@@ -261,6 +261,7 @@ def _run_bfcl_case(
 # ============================================================================
 
 
+@pytest.mark.e2e
 @pytest.mark.skip_for_runtime(
     "trtllm", reason="TRT-LLM does not support guided decoding (json_schema)"
 )
