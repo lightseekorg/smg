@@ -75,17 +75,23 @@ def _load(category: str) -> list[dict]:
         return []
 
 
-def _make_ids(cases: list[dict]) -> list[str]:
-    return [c["id"] for c in cases]
+_cases_cache: list[dict] | None = None
 
 
-_all_cases = (
-    _load("simple")
-    + _load("multiple")
-    + _load("parallel")
-    + _load("parallel_multiple")
-    + _load("irrelevance")
-)
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """Parametrize 'case' lazily — data is loaded only when BFCL tests are collected."""
+    global _cases_cache
+    if "case" not in metafunc.fixturenames:
+        return
+    if _cases_cache is None:
+        _cases_cache = (
+            _load("simple")
+            + _load("multiple")
+            + _load("parallel")
+            + _load("parallel_multiple")
+            + _load("irrelevance")
+        )
+    metafunc.parametrize("case", _cases_cache, ids=[c["id"] for c in _cases_cache])
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +277,6 @@ def _run_bfcl_case(
 class TestBFCLQwen:
     """BFCL v3 accuracy — Qwen 2.5 7B with qwen parser (all categories)."""
 
-    @pytest.mark.parametrize("case", _all_cases, ids=_make_ids(_all_cases))
     def test_case(self, setup_backend, bfcl_run_dir, case):
         backend_name, model, client, _ = setup_backend
         _run_bfcl_case(
@@ -310,7 +315,6 @@ class TestBFCLStandalone:
         )
         self.run_dir = bfcl_run_dir
 
-    @pytest.mark.parametrize("case", _all_cases, ids=_make_ids(_all_cases))
     def test_case(self, case):
         _run_bfcl_case(
             case=case, model=self.model, parser=self.parser, backend="standalone",
