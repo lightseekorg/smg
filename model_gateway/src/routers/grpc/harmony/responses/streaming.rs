@@ -65,7 +65,7 @@ pub(crate) async fn serve_harmony_responses_stream(
     let (tx, rx) = mpsc::unbounded_channel();
 
     // Create response event emitter
-    let response_id = format!("resp_{}", Uuid::new_v4());
+    let response_id = format!("resp_{}", Uuid::now_v7());
     let model = current_request.model.clone();
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -134,7 +134,7 @@ async fn execute_mcp_tool_loop_streaming(
     // the original tools. MCP tools are only merged into current_request for model calls.
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
-    let session_request_id = format!("resp_{}", Uuid::new_v4());
+    let session_request_id = format!("resp_{}", Uuid::now_v7());
 
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
 

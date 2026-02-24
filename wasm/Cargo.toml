@@ -25,7 +25,7 @@ sha2 = "0.10"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt-multi-thread", "time"] }
 tracing = { workspace = true }
-uuid = { workspace = true, features = ["v4", "serde"] }
+uuid = { workspace = true, features = ["serde"] }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 

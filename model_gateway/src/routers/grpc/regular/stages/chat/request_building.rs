@@ -60,7 +60,7 @@ impl PipelineStage for ChatRequestBuildingStage {
         };
 
         // Build chat request
-        let request_id = format!("chatcmpl-{}", Uuid::new_v4());
+        let request_id = format!("chatcmpl-{}", Uuid::now_v7());
         let body_ref = prep.filtered_request.as_ref().unwrap_or(&chat_request);
 
         // Build proto request using centralized dispatch

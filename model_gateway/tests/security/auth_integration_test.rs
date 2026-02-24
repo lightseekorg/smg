@@ -107,7 +107,7 @@ fn create_claims(sub: &str, roles: Vec<&str>) -> TestClaims {
         aud: "test-gateway".to_string(),
         exp: now + 3600, // 1 hour from now
         iat: now,
-        jti: Some(uuid::Uuid::new_v4().to_string()),
+        jti: Some(uuid::Uuid::now_v7().to_string()),
         name: Some("Test User".to_string()),
         roles: Some(roles.into_iter().map(String::from).collect()),
     }
@@ -779,7 +779,7 @@ async fn test_jwt_role_extraction_from_groups_claim() {
         aud: "test-gateway".to_string(),
         exp: now + 3600,
         iat: now,
-        jti: uuid::Uuid::new_v4().to_string(),
+        jti: uuid::Uuid::now_v7().to_string(),
         groups: vec!["administrators".to_string(), "developers".to_string()],
     };
 
@@ -849,7 +849,7 @@ async fn test_jwt_no_role_defaults_to_user() {
         aud: "test-gateway".to_string(),
         exp: now + 3600,
         iat: now,
-        jti: uuid::Uuid::new_v4().to_string(),
+        jti: uuid::Uuid::now_v7().to_string(),
     };
 
     let mut header = Header::new(jsonwebtoken::Algorithm::RS256);

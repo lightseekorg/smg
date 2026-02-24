@@ -484,7 +484,7 @@ impl StepExecutor<WasmRegistrationWorkflowData> for RegisterModuleStep {
             .unwrap_or_else(|_| Duration::from_nanos(0))
             .as_nanos() as u64;
 
-        let module_uuid = Uuid::new_v4();
+        let module_uuid = Uuid::now_v7();
 
         let module = WasmModule {
             module_uuid,

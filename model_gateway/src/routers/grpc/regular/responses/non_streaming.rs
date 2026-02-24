@@ -150,7 +150,7 @@ pub(super) async fn execute_tool_loop(
     let session_request_id = params
         .response_id
         .clone()
-        .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4()));
+        .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::now_v7()));
 
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
 

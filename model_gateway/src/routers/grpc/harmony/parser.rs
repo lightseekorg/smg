@@ -132,7 +132,7 @@ impl HarmonyParserAdapter {
                     // Process each content item separately
                     for content in &msg.content {
                         if let openai_harmony::chat::Content::Text(tc) = content {
-                            let call_id = format!("call_{}", Uuid::new_v4());
+                            let call_id = format!("call_{}", Uuid::now_v7());
                             let tool_call = ToolCall {
                                 id: call_id,
                                 tool_type: "function".to_string(),
@@ -327,7 +327,7 @@ impl HarmonyParserAdapter {
         };
 
         // Create tool call from incomplete content
-        let call_id = format!("call_{}", Uuid::new_v4());
+        let call_id = format!("call_{}", Uuid::now_v7());
         let tool_call = ToolCall {
             id: call_id,
             tool_type: "function".to_string(),
@@ -427,7 +427,7 @@ impl HarmonyParserAdapter {
 
                     if recipient_changed {
                         // NEW tool call: emit name + id
-                        let call_id = format!("call_{}", Uuid::new_v4());
+                        let call_id = format!("call_{}", Uuid::now_v7());
 
                         commentary_delta = Some(super::types::ToolCallDelta {
                             index: base_index,

@@ -60,8 +60,8 @@ impl PipelineStage for HarmonyRequestBuildingStage {
 
         // Generate request_id based on request type
         let request_id = match &ctx.input.request_type {
-            RequestType::Chat(_) => format!("chatcmpl-{}", Uuid::new_v4()),
-            RequestType::Responses(_) => format!("responses-{}", Uuid::new_v4()),
+            RequestType::Chat(_) => format!("chatcmpl-{}", Uuid::now_v7()),
+            RequestType::Responses(_) => format!("responses-{}", Uuid::now_v7()),
             RequestType::Generate(_) => {
                 error!(
                     function = "HarmonyRequestBuildingStage::execute",

@@ -70,7 +70,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         let session_request_id = original_body
             .request_id
             .clone()
-            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
+            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
         let session = McpToolSession::new(mcp_orchestrator, mcp_servers, &session_request_id);
         prepare_mcp_tools_as_functions(&mut payload, &session);
 
