@@ -63,9 +63,7 @@ MCP_CONFIGS = {
 def _extra_body(cfg: McpTestConfig) -> dict:
     """Build extra_body for MCP requests."""
     return {
-        "mcp_servers": [
-            {"type": "url", "name": cfg.server_name, "url": cfg.server_url}
-        ],
+        "mcp_servers": [{"type": "url", "name": cfg.server_name, "url": cfg.server_url}],
         "tools": [{"type": "mcp_toolset", "mcp_server_name": cfg.server_name}],
     }
 
@@ -84,15 +82,11 @@ def assert_non_streaming_mcp_response(response, model: str, server_name: str):
     assert len(response.content) > 0
 
     mcp_tool_use_blocks = [b for b in response.content if b.type == "mcp_tool_use"]
-    mcp_tool_result_blocks = [
-        b for b in response.content if b.type == "mcp_tool_result"
-    ]
+    mcp_tool_result_blocks = [b for b in response.content if b.type == "mcp_tool_result"]
     text_blocks = [b for b in response.content if b.type == "text"]
 
     assert len(mcp_tool_use_blocks) > 0, "Should have at least one mcp_tool_use block"
-    assert len(mcp_tool_result_blocks) > 0, (
-        "Should have at least one mcp_tool_result block"
-    )
+    assert len(mcp_tool_result_blocks) > 0, "Should have at least one mcp_tool_result block"
     assert len(text_blocks) > 0, "Should have a final text block"
 
     # Validate mcp_tool_use structure
@@ -104,8 +98,7 @@ def assert_non_streaming_mcp_response(response, model: str, server_name: str):
 
     # Validate tool_use / tool_result pairing
     assert len(mcp_tool_result_blocks) == len(mcp_tool_use_blocks), (
-        f"Mismatch: {len(mcp_tool_result_blocks)} results vs "
-        f"{len(mcp_tool_use_blocks)} tool uses"
+        f"Mismatch: {len(mcp_tool_result_blocks)} results vs {len(mcp_tool_use_blocks)} tool uses"
     )
     for i, tool_result in enumerate(mcp_tool_result_blocks):
         assert tool_result.tool_use_id == mcp_tool_use_blocks[i].id, (
@@ -144,9 +137,7 @@ def collect_streaming_events(stream):
         if event.type == "content_block_delta":
             if event.delta.type == "input_json_delta":
                 idx = event.index
-                input_json_deltas_by_index.setdefault(idx, []).append(
-                    event.delta.partial_json
-                )
+                input_json_deltas_by_index.setdefault(idx, []).append(event.delta.partial_json)
             elif event.delta.type == "text_delta":
                 text_deltas.append(event.delta.text)
 
@@ -164,9 +155,7 @@ def assert_streaming_mcp_response(
     assert "message_stop" in event_types, "Missing message_stop event"
 
     assert "mcp_tool_use" in block_types, "Should have mcp_tool_use content block"
-    assert "mcp_tool_result" in block_types, (
-        "Should have mcp_tool_result content block"
-    )
+    assert "mcp_tool_result" in block_types, "Should have mcp_tool_result content block"
     assert "text" in block_types, "Should have text content block"
 
     assert len(mcp_tool_use_ids) > 0
@@ -180,12 +169,8 @@ def assert_streaming_mcp_response(
             try:
                 parsed = json.loads(full_json)
             except json.JSONDecodeError as exc:
-                pytest.fail(
-                    f"Failed to parse tool input at index {idx}: {full_json!r} -> {exc}"
-                )
-            assert isinstance(parsed, dict), (
-                f"Tool input at index {idx} should be a dict"
-            )
+                pytest.fail(f"Failed to parse tool input at index {idx}: {full_json!r} -> {exc}")
+            assert isinstance(parsed, dict), f"Tool input at index {idx} should be a dict"
 
     assert len(text_deltas) > 0, "Should have text_delta events"
 
