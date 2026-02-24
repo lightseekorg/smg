@@ -67,7 +67,7 @@ impl PipelineStage for EmbeddingPreparationStage {
                     error = %e,
                     "Tokenization failed"
                 );
-                error::bad_request("tokenization_failed", format!("Tokenization failed: {}", e))
+                error::bad_request("tokenization_failed", format!("Tokenization failed: {e}"))
             })?
             .token_ids()
             .to_vec();

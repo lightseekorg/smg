@@ -1,6 +1,6 @@
 [package]
 name = "llm-tokenizer"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "LLM tokenizer library with caching and chat template support"
 license = "Apache-2.0"
@@ -25,13 +25,13 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros"] }
 tracing.workspace = true
-uuid = { workspace = true, features = ["v4", "serde"] }
+uuid = { workspace = true, features = ["serde"] }
 # Only used by tokenizer
 aho-corasick = "1.1"
 base64 = "0.22"
 rustc-hash = "1.1"
 hf-hub = { version = "0.4.3", features = ["tokio"] }
-minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins"] }
+minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader"] }
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }
 rayon = "1.10"
 tiktoken-rs = "0.9.1"

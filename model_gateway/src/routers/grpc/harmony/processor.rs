@@ -69,7 +69,7 @@ impl HarmonyResponseProcessor {
                 );
                 error::internal_error(
                     "create_harmony_parser_failed",
-                    format!("Failed to create Harmony parser: {}", e),
+                    format!("Failed to create Harmony parser: {e}"),
                 )
             })?;
 
@@ -88,17 +88,15 @@ impl HarmonyResponseProcessor {
                     );
                     error::internal_error(
                         "harmony_parsing_failed",
-                        format!("Harmony parsing failed: {}", e),
+                        format!("Harmony parsing failed: {e}"),
                     )
                 })?;
 
             // Convert output logprobs if present
             let logprobs: Option<ChatLogProbs> = if request_logprobs {
-                complete.output_logprobs().and_then(|lp| {
-                    convert_harmony_logprobs(&lp)
-                        .map_err(|e| error!("Failed to convert logprobs: {}", e))
-                        .ok()
-                })
+                complete
+                    .output_logprobs()
+                    .map(|lp| convert_harmony_logprobs(&lp))
             } else {
                 None
             };
@@ -216,7 +214,7 @@ impl HarmonyResponseProcessor {
             );
             error::internal_error(
                 "create_harmony_parser_failed",
-                format!("Failed to create Harmony parser: {}", e),
+                format!("Failed to create Harmony parser: {e}"),
             )
         })?;
 
@@ -236,7 +234,7 @@ impl HarmonyResponseProcessor {
                 );
                 error::internal_error(
                     "harmony_parsing_failed",
-                    format!("Harmony parsing failed: {}", e),
+                    format!("Harmony parsing failed: {e}"),
                 )
             })?;
 

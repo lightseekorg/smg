@@ -68,10 +68,7 @@ pub unsafe extern "C" fn sgl_postprocess_stream_chunk(
     let json_value: Value = match serde_json::from_str(proto_chunk_str) {
         Ok(v) => v,
         Err(e) => {
-            set_error_message(
-                error_out,
-                &format!("Failed to parse proto chunk JSON: {}", e),
-            );
+            set_error_message(error_out, &format!("Failed to parse proto chunk JSON: {e}"));
             return SglErrorCode::ParsingError;
         }
     };
@@ -83,7 +80,7 @@ pub unsafe extern "C" fn sgl_postprocess_stream_chunk(
     let proto_chunk_json_cstr = match CString::new(proto_chunk_str) {
         Ok(s) => s,
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to create C string: {}", e));
+            set_error_message(error_out, &format!("Failed to create C string: {e}"));
             return SglErrorCode::MemoryError;
         }
     };
@@ -162,7 +159,7 @@ pub unsafe extern "C" fn sgl_postprocess_stream_chunks_batch(
         Err(e) => {
             set_error_message(
                 error_out,
-                &format!("Failed to parse chunks JSON array: {}", e),
+                &format!("Failed to parse chunks JSON array: {e}"),
             );
             return SglErrorCode::ParsingError;
         }
@@ -189,7 +186,7 @@ pub unsafe extern "C" fn sgl_postprocess_stream_chunks_batch(
         let proto_response = match parse_proto_response(chunk_json) {
             Ok(r) => r,
             Err(e) => {
-                error_msg = format!("{}: {}", e, chunk_json);
+                error_msg = format!("{e}: {chunk_json}");
                 has_error = true;
                 break;
             }
@@ -213,7 +210,7 @@ pub unsafe extern "C" fn sgl_postprocess_stream_chunks_batch(
                 // Empty response, skip
             }
             Err(e) => {
-                error_msg = format!("Postprocessing failed for chunk: {}", e);
+                error_msg = format!("Postprocessing failed for chunk: {e}");
                 has_error = true;
                 break;
             }
@@ -231,7 +228,7 @@ pub unsafe extern "C" fn sgl_postprocess_stream_chunks_batch(
         Err(e) => {
             set_error_message(
                 error_out,
-                &format!("Failed to serialize results JSON array: {}", e),
+                &format!("Failed to serialize results JSON array: {e}"),
             );
             return SglErrorCode::ParsingError;
         }
@@ -240,7 +237,7 @@ pub unsafe extern "C" fn sgl_postprocess_stream_chunks_batch(
     let results_cstr = match CString::new(results_json) {
         Ok(s) => s,
         Err(e) => {
-            set_error_message(error_out, &format!("Failed to create C string: {}", e));
+            set_error_message(error_out, &format!("Failed to create C string: {e}"));
             return SglErrorCode::MemoryError;
         }
     };

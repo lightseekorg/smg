@@ -28,8 +28,7 @@ fn test_validate_conversation_id_valid() {
         };
         assert!(
             request.validate().is_ok(),
-            "Expected '{}' to be valid, but got error: {:?}",
-            id,
+            "Expected '{id}' to be valid, but got error: {:?}",
             request.validate().err()
         );
     }
@@ -79,8 +78,7 @@ fn test_validate_conversation_id_invalid() {
         let result = request.validate();
         assert!(
             result.is_err(),
-            "Expected '{}' to be invalid, but validation passed",
-            id
+            "Expected '{id}' to be invalid, but validation passed"
         );
 
         // Verify error is for conversation field
@@ -105,14 +103,11 @@ fn test_validate_conversation_id_invalid() {
             let msg = error_msg.unwrap();
             assert!(
                 msg.contains("Invalid 'conversation'"),
-                "Error message should mention 'conversation', got: {}",
-                msg
+                "Error message should mention 'conversation', got: {msg}"
             );
             assert!(
                 msg.contains(id),
-                "Error message should include the invalid ID '{}', got: {}",
-                id,
-                msg
+                "Error message should include the invalid ID '{id}', got: {msg}"
             );
         }
     }
@@ -199,8 +194,7 @@ fn test_validate_conversation_id_missing_prefix() {
         );
         assert!(
             error_msg.contains("begins with 'conv_'"),
-            "Error should mention the required prefix, got: {}",
-            error_msg
+            "Error should mention the required prefix, got: {error_msg}"
         );
         assert!(
             error_msg.contains(invalid_id),
@@ -225,8 +219,7 @@ fn test_validate_temperature_range() {
         };
         assert!(
             request.validate().is_ok(),
-            "Temperature {} should be valid",
-            temp
+            "Temperature {temp} should be valid"
         );
     }
 
@@ -239,8 +232,7 @@ fn test_validate_temperature_range() {
         };
         assert!(
             request.validate().is_err(),
-            "Temperature {} should be invalid",
-            temp
+            "Temperature {temp} should be invalid"
         );
     }
 }
@@ -257,8 +249,7 @@ fn test_validate_frequency_penalty_range() {
         };
         assert!(
             request.validate().is_ok(),
-            "Frequency penalty {} should be valid",
-            penalty
+            "Frequency penalty {penalty} should be valid"
         );
     }
 
@@ -271,8 +262,7 @@ fn test_validate_frequency_penalty_range() {
         };
         assert!(
             request.validate().is_err(),
-            "Frequency penalty {} should be invalid",
-            penalty
+            "Frequency penalty {penalty} should be invalid"
         );
     }
 }
@@ -289,8 +279,7 @@ fn test_validate_presence_penalty_range() {
         };
         assert!(
             request.validate().is_ok(),
-            "Presence penalty {} should be valid",
-            penalty
+            "Presence penalty {penalty} should be valid"
         );
     }
 
@@ -303,8 +292,7 @@ fn test_validate_presence_penalty_range() {
         };
         assert!(
             request.validate().is_err(),
-            "Presence penalty {} should be invalid",
-            penalty
+            "Presence penalty {penalty} should be invalid"
         );
     }
 }
@@ -322,8 +310,7 @@ fn test_validate_top_logprobs_range() {
         };
         assert!(
             request.validate().is_ok(),
-            "top_logprobs {} should be valid",
-            val
+            "top_logprobs {val} should be valid"
         );
     }
 
@@ -337,8 +324,7 @@ fn test_validate_top_logprobs_range() {
         };
         assert!(
             request.validate().is_err(),
-            "top_logprobs {} should be invalid",
-            val
+            "top_logprobs {val} should be invalid"
         );
     }
 }
@@ -353,7 +339,7 @@ fn test_validate_top_p_range() {
             top_p: Some(val),
             ..Default::default()
         };
-        assert!(request.validate().is_ok(), "top_p {} should be valid", val);
+        assert!(request.validate().is_ok(), "top_p {val} should be valid");
     }
 
     // Invalid values (0.0 is invalid because it means no tokens, < 0 or > 1)
@@ -363,11 +349,7 @@ fn test_validate_top_p_range() {
             top_p: Some(val),
             ..Default::default()
         };
-        assert!(
-            request.validate().is_err(),
-            "top_p {} should be invalid",
-            val
-        );
+        assert!(request.validate().is_err(), "top_p {val} should be invalid");
     }
 }
 
@@ -381,7 +363,7 @@ fn test_validate_top_k() {
             top_k: val,
             ..Default::default()
         };
-        assert!(request.validate().is_ok(), "top_k {} should be valid", val);
+        assert!(request.validate().is_ok(), "top_k {val} should be valid");
     }
 
     // Invalid values (0 or < -1)
@@ -391,11 +373,7 @@ fn test_validate_top_k() {
             top_k: val,
             ..Default::default()
         };
-        assert!(
-            request.validate().is_err(),
-            "top_k {} should be invalid",
-            val
-        );
+        assert!(request.validate().is_err(), "top_k {val} should be invalid");
     }
 }
 
@@ -409,7 +387,7 @@ fn test_validate_min_p_range() {
             min_p: val,
             ..Default::default()
         };
-        assert!(request.validate().is_ok(), "min_p {} should be valid", val);
+        assert!(request.validate().is_ok(), "min_p {val} should be valid");
     }
 
     // Invalid values
@@ -419,11 +397,7 @@ fn test_validate_min_p_range() {
             min_p: val,
             ..Default::default()
         };
-        assert!(
-            request.validate().is_err(),
-            "min_p {} should be invalid",
-            val
-        );
+        assert!(request.validate().is_err(), "min_p {val} should be invalid");
     }
 }
 
@@ -439,8 +413,7 @@ fn test_validate_repetition_penalty_range() {
         };
         assert!(
             request.validate().is_ok(),
-            "repetition_penalty {} should be valid",
-            val
+            "repetition_penalty {val} should be valid"
         );
     }
 
@@ -453,8 +426,7 @@ fn test_validate_repetition_penalty_range() {
         };
         assert!(
             request.validate().is_err(),
-            "repetition_penalty {} should be invalid",
-            val
+            "repetition_penalty {val} should be invalid"
         );
     }
 }
@@ -471,8 +443,7 @@ fn test_validate_max_output_tokens() {
         };
         assert!(
             request.validate().is_ok(),
-            "max_output_tokens {} should be valid",
-            val
+            "max_output_tokens {val} should be valid"
         );
     }
 
@@ -500,8 +471,7 @@ fn test_validate_max_tool_calls() {
         };
         assert!(
             request.validate().is_ok(),
-            "max_tool_calls {} should be valid",
-            val
+            "max_tool_calls {val} should be valid"
         );
     }
 
@@ -521,7 +491,7 @@ fn test_validate_max_tool_calls() {
 #[test]
 fn test_validate_input_empty_text() {
     let request = ResponsesRequest {
-        input: ResponseInput::Text("".to_string()),
+        input: ResponseInput::Text(String::new()),
         ..Default::default()
     };
     let result = request.validate();
@@ -552,7 +522,7 @@ fn test_validate_input_empty_items() {
 fn test_validate_input_items_empty_content() {
     let request = ResponsesRequest {
         input: ResponseInput::Items(vec![ResponseInputOutputItem::SimpleInputMessage {
-            content: StringOrContentParts::String("".to_string()),
+            content: StringOrContentParts::String(String::new()),
             role: "user".to_string(),
             r#type: None,
         }]),
@@ -608,7 +578,7 @@ fn test_validate_stop_sequences_non_empty() {
     // Invalid: empty string stop sequence
     let request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
-        stop: Some(StringOrArray::String("".to_string())),
+        stop: Some(StringOrArray::String(String::new())),
         ..Default::default()
     };
     assert!(
@@ -619,7 +589,7 @@ fn test_validate_stop_sequences_non_empty() {
     // Invalid: array with empty string
     let request = ResponsesRequest {
         input: ResponseInput::Text("test".to_string()),
-        stop: Some(StringOrArray::Array(vec!["".to_string()])),
+        stop: Some(StringOrArray::Array(vec![String::new()])),
         ..Default::default()
     };
     assert!(
@@ -703,16 +673,14 @@ fn test_validate_tools_mcp_missing_server_label() {
     );
 
     let err = result.unwrap_err();
-    let s = format!("{:?}", err);
+    let s = format!("{err:?}");
     assert!(
         s.contains("missing_required_parameter"),
-        "Expected error code missing_required_parameter, got: {:?}",
-        err
+        "Expected error code missing_required_parameter, got: {err:?}",
     );
     assert!(
         s.contains("tools[0].server_label"),
-        "Expected error to reference tools[0].server_label, got: {:?}",
-        err
+        "Expected error to reference tools[0].server_label, got: {err:?}",
     );
 }
 
@@ -756,9 +724,8 @@ fn test_validate_tools_mcp_duplicate_server_label() {
 
     let err = result.unwrap_err();
     assert!(
-        format!("{:?}", err).contains("mcp_tool_duplicate_server_label"),
-        "Expected error code mcp_tool_duplicate_server_label, got: {:?}",
-        err
+        format!("{err:?}").contains("mcp_tool_duplicate_server_label"),
+        "Expected error code mcp_tool_duplicate_server_label, got: {err:?}",
     );
 }
 
@@ -787,15 +754,13 @@ fn test_validate_tools_mcp_server_label_invalid_cases() {
         let result = request.validate();
         assert!(
             result.is_err(),
-            "Expected '{}' to be invalid, but validation passed",
-            label
+            "Expected '{label}' to be invalid, but validation passed",
         );
 
         let err = result.unwrap_err();
         assert!(
-            format!("{:?}", err).contains("invalid_server_label"),
-            "Expected error code invalid_server_label, got: {:?}",
-            err
+            format!("{err:?}").contains("invalid_server_label"),
+            "Expected error code invalid_server_label, got: {err:?}",
         );
     }
 }
@@ -807,7 +772,7 @@ fn test_validate_text_format_json_schema_empty_name() {
         input: ResponseInput::Text("test".to_string()),
         text: Some(TextConfig {
             format: Some(TextFormat::JsonSchema {
-                name: "".to_string(), // Empty name
+                name: String::new(), // Empty name
                 schema: json!({}),
                 description: None,
                 strict: None,
@@ -1041,8 +1006,7 @@ fn test_validate_conversation_previous_response_mutual_exclusion() {
             error_msg.contains("mutually exclusive")
                 || (error_msg.contains("conversation")
                     && error_msg.contains("previous_response_id")),
-            "Error should mention mutual exclusion, got: {}",
-            error_msg
+            "Error should mention mutual exclusion, got: {error_msg}"
         );
     }
 }

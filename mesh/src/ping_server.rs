@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::Result;
 use futures::Stream;
+use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use tonic::{transport::Server, Response, Status};
 use tracing as log;
@@ -52,7 +53,11 @@ pub struct GossipService {
 
 impl GossipService {
     /// Create snapshot chunks for a store
-    pub async fn create_snapshot_chunks(
+    #[expect(
+        clippy::expect_used,
+        reason = "system clock before UNIX epoch is a fatal misconfiguration that must not silently produce timestamp=0"
+    )]
+    pub fn create_snapshot_chunks(
         &self,
         store_type: LocalStoreType,
         chunk_size: usize,
@@ -180,29 +185,36 @@ impl GossipService {
                         }
                         LocalStoreType::RateLimit => {
                             // For rate limit, use timestamp as version
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_nanos() as u64
+                            {
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .expect("system clock before UNIX_EPOCH; cannot generate valid timestamps")
+                                    .as_nanos() as u64
+                            }
                         }
                     };
+
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("system clock before UNIX_EPOCH; cannot generate valid timestamps")
+                        .as_nanos() as u64;
 
                     StateUpdate {
                         key: key.as_str().to_string(),
                         value: value.clone(),
                         version,
                         actor: self.self_name.clone(),
-                        timestamp: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_nanos() as u64,
+                        timestamp,
                     }
                 })
                 .collect();
 
             // Calculate checksum for integrity verification
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            use std::{
+                collections::hash_map::DefaultHasher,
+                hash::{Hash, Hasher},
+            };
+            let mut hasher = DefaultHasher::new();
             for update in &state_updates {
                 update.key.hash(&mut hasher);
                 update.value.hash(&mut hasher);
@@ -286,7 +298,7 @@ impl GossipService {
         Ok(())
     }
 
-    async fn merge_state(&self, incoming_nodes: Vec<NodeState>) -> bool {
+    fn merge_state(&self, incoming_nodes: Vec<NodeState>) -> bool {
         let mut state = self.state.write();
         let mut updated = false;
         for node in incoming_nodes {
@@ -326,7 +338,7 @@ impl Gossip for GossipService {
                 log::info!("Received {:?}", ping);
                 if let Some(stat_sync) = ping.state_sync {
                     log::info!("Merging state from Ping: {} nodes", stat_sync.nodes.len());
-                    self.merge_state(stat_sync.nodes).await;
+                    self.merge_state(stat_sync.nodes);
                 }
                 // Return current status of self node (could be Alive or Leaving)
                 let current_status = {
@@ -364,8 +376,7 @@ impl Gossip for GossipService {
 
         // Create output stream with flow control
         const CHANNEL_CAPACITY: usize = 128;
-        let (tx, rx) =
-            tokio::sync::mpsc::channel::<Result<StreamMessage, Status>>(CHANNEL_CAPACITY);
+        let (tx, rx) = mpsc::channel::<Result<StreamMessage, Status>>(CHANNEL_CAPACITY);
         let size_validator = MessageSizeValidator::default();
 
         // Create incremental update collector if stores are available
@@ -381,6 +392,10 @@ impl Gossip for GossipService {
             let tx_incremental = tx.clone();
             let self_name_incremental = self_name.clone();
             let size_validator_clone = size_validator.clone();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "server-side incremental sender that runs for the lifetime of the sync_stream; terminates when the channel closes"
+            )]
             tokio::spawn(async move {
                 // Use 1 second interval for rate limit counter sync (faster than other stores)
                 let mut interval = tokio::time::interval(Duration::from_secs(1)); // Send every 1 second
@@ -430,21 +445,21 @@ impl Gossip for GossipService {
 
                             // Check backpressure using try_send (mpsc::Sender doesn't have len())
                             match tx_incremental.try_send(Ok(incremental_update)) {
-                                Ok(_) => {
+                                Ok(()) => {
                                     // Successfully queued
                                     // Record metrics
                                     record_batch_sent(&self_name_incremental, batch_size);
                                     // Mark as sent after successful transmission
                                     collector.mark_sent(store_type, &updates);
                                 }
-                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                Err(mpsc::error::TrySendError::Full(_)) => {
                                     log::debug!(
                                         "Backpressure: channel full, skipping send (will retry next interval)"
                                     );
                                     // Don't mark as sent, will retry next interval
                                     continue;
                                 }
-                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
                                     log::warn!(
                                         "Channel closed, stopping incremental update sender"
                                     );
@@ -471,6 +486,10 @@ impl Gossip for GossipService {
         use std::collections::HashMap;
         let mut snapshot_state: HashMap<(LocalStoreType, u64), Vec<SnapshotChunk>> = HashMap::new();
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "server-side stream handler that runs for the lifetime of the sync_stream gRPC connection; terminates when the stream closes"
+        )]
         tokio::spawn(async move {
             let mut peer_id = String::new();
             update_peer_connections(&peer_id, true);
@@ -533,7 +552,7 @@ impl Gossip for GossipService {
                 match msg_result {
                     Ok(msg) => {
                         sequence += 1;
-                        peer_id = msg.peer_id.clone();
+                        peer_id.clone_from(&msg.peer_id);
 
                         match msg.message_type() {
                             StreamMessageType::IncrementalUpdate => {
@@ -555,8 +574,7 @@ impl Gossip for GossipService {
                                                     sequence: msg.sequence,
                                                     success: false,
                                                     error_message: format!(
-                                                        "Message too large: {}",
-                                                        e
+                                                        "Message too large: {e}"
                                                     ),
                                                 },
                                             )),
@@ -733,8 +751,7 @@ impl Gossip for GossipService {
                                         partition_detector: None,
                                         mtls_manager: None,
                                     };
-                                    let chunks =
-                                        service.create_snapshot_chunks(store_type, 100).await; // chunk_size = 100 entries
+                                    let chunks = service.create_snapshot_chunks(store_type, 100); // chunk_size = 100 entries
                                     let total_chunks = chunks.len() as u64;
                                     let mut total_bytes = 0;
 
@@ -769,12 +786,10 @@ impl Gossip for GossipService {
 
                                         // Check backpressure using try_send
                                         match tx.try_send(Ok(chunk_msg)) {
-                                            Ok(_) => {
+                                            Ok(()) => {
                                                 // Successfully queued
                                             }
-                                            Err(tokio::sync::mpsc::error::TrySendError::Full(
-                                                msg,
-                                            )) => {
+                                            Err(mpsc::error::TrySendError::Full(msg)) => {
                                                 log::debug!(
                                                     "Backpressure: channel full, waiting for drain"
                                                 );
@@ -786,9 +801,7 @@ impl Gossip for GossipService {
                                                     break;
                                                 }
                                             }
-                                            Err(
-                                                tokio::sync::mpsc::error::TrySendError::Closed(_),
-                                            ) => {
+                                            Err(mpsc::error::TrySendError::Closed(_)) => {
                                                 log::warn!("Channel closed, stopping snapshot");
                                                 break;
                                             }

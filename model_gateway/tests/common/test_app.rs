@@ -20,7 +20,10 @@ use smg_data_connector::{
 use smg_mcp::{McpConfig, McpOrchestrator};
 
 /// Create a test Axum application using the actual server's build_app function
-#[allow(dead_code)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 pub fn create_test_app(
     router: Arc<dyn RouterTrait>,
     client: Client,
@@ -116,7 +119,6 @@ pub fn create_test_app(
 }
 
 /// Create a test Axum application with an existing AppContext
-#[allow(dead_code)]
 pub fn create_test_app_with_context(
     router: Arc<dyn RouterTrait>,
     app_context: Arc<AppContext>,
@@ -157,7 +159,11 @@ pub fn create_test_app_with_context(
 }
 
 /// Create a minimal test AppContext for unit tests
-#[allow(dead_code)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 pub async fn create_test_app_context() -> Arc<AppContext> {
     let router_config = RouterConfig::default();
     let client = Client::new();
@@ -221,7 +227,6 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
 /// * `ctx` - The AppContext to register the worker in
 /// * `url` - The base URL of the external API endpoint
 /// * `models` - Optional list of model IDs this worker supports. If empty, uses "gpt-3.5-turbo" as default.
-#[allow(dead_code)]
 pub fn register_external_worker(ctx: &Arc<AppContext>, url: &str, models: Option<Vec<&str>>) {
     let model_list: Vec<ModelCard> = models
         .unwrap_or_else(|| vec!["gpt-3.5-turbo"])
@@ -246,7 +251,6 @@ pub fn register_external_worker(ctx: &Arc<AppContext>, url: &str, models: Option
 /// * `ctx` - The AppContext to register the worker in
 /// * `url` - The base URL of the external API endpoint
 /// * `model_card` - A fully configured ModelCard with aliases, provider, etc.
-#[allow(dead_code)]
 pub fn register_external_worker_with_card(ctx: &Arc<AppContext>, url: &str, model_card: ModelCard) {
     let worker: Arc<dyn Worker> = Arc::new(
         BasicWorkerBuilder::new(url)

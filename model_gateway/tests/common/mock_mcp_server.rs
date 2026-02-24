@@ -29,6 +29,11 @@ impl Default for MockSearchServer {
     }
 }
 
+#[expect(
+    clippy::unused_self,
+    clippy::unnecessary_wraps,
+    reason = "proc macro generated"
+)]
 #[tool_router]
 impl MockSearchServer {
     pub fn new() -> Self {
@@ -47,8 +52,7 @@ impl MockSearchServer {
             .and_then(|v| v.as_str())
             .unwrap_or("test");
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Mock search results for: {}",
-            query
+            "Mock search results for: {query}"
         ))]))
     }
 
@@ -85,6 +89,11 @@ impl ServerHandler for MockSearchServer {
 
 impl MockMCPServer {
     /// Start a mock MCP server on an available port
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::expect_used,
+        reason = "test infrastructure"
+    )]
     pub async fn start() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Find an available port
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -139,7 +148,6 @@ impl Drop for MockMCPServer {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
     use super::MockMCPServer;
 
     #[tokio::test]

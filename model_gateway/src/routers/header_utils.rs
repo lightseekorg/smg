@@ -43,7 +43,7 @@ pub fn copy_request_headers(req: &Request<Body>) -> Vec<(String, String)> {
 pub fn preserve_response_headers(reqwest_headers: &HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
 
-    for (name, value) in reqwest_headers.iter() {
+    for (name, value) in reqwest_headers {
         // Skip hop-by-hop headers that shouldn't be forwarded
         // Use eq_ignore_ascii_case to avoid string allocation
         if should_forward_header_no_alloc(name.as_str()) {
@@ -88,7 +88,7 @@ pub fn apply_request_headers(
 
     // Forward other headers, filtering out problematic ones
     // Use eq_ignore_ascii_case to avoid to_lowercase() allocation per header
-    for (key, value) in headers.iter() {
+    for (key, value) in headers {
         let key_str = key.as_str();
 
         // Skip headers that:
@@ -186,7 +186,7 @@ pub fn apply_provider_headers(
 /// 2. Router has a default key for users who don't provide one
 pub fn extract_auth_header(
     headers: Option<&HeaderMap>,
-    worker_api_key: &Option<String>,
+    worker_api_key: Option<&String>,
 ) -> Option<HeaderValue> {
     // Passthrough: Try user's auth header first
     let user_auth = headers.and_then(|h| {
@@ -196,11 +196,8 @@ pub fn extract_auth_header(
     });
 
     // Return user's auth if provided, otherwise use worker's API key
-    user_auth.or_else(|| {
-        worker_api_key
-            .as_ref()
-            .and_then(|k| HeaderValue::from_str(&format!("Bearer {}", k)).ok())
-    })
+    user_auth
+        .or_else(|| worker_api_key.and_then(|k| HeaderValue::from_str(&format!("Bearer {k}")).ok()))
 }
 
 #[inline]

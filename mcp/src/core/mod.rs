@@ -22,4 +22,4 @@ pub use orchestrator::{
 };
 pub use pool::{McpConnectionPool, PoolKey};
 pub use reconnect::ReconnectionManager;
-pub use session::{McpServerBinding, McpSessionOptions, McpToolSession};
+pub use session::{McpServerBinding, McpToolSession};

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::response::Response;
 use openai_protocol::responses::{ResponseStatus, ResponsesRequest, ResponsesResponse};
 use serde_json::json;
-use smg_mcp::{McpServerBinding, McpSessionOptions, McpToolSession, ToolExecutionInput};
+use smg_mcp::{McpServerBinding, McpToolSession, ToolExecutionInput};
 use tracing::{debug, error, trace, warn};
 
 use super::{
@@ -90,7 +90,7 @@ pub(super) async fn execute_without_mcp(
         );
         error::bad_request(
             "convert_request_failed",
-            format!("Failed to convert request: {}", e),
+            format!("Failed to convert request: {e}"),
         )
     })?;
 
@@ -115,7 +115,7 @@ pub(super) async fn execute_without_mcp(
             );
             error::internal_error(
                 "convert_to_responses_format_failed",
-                format!("Failed to convert to responses format: {}", e),
+                format!("Failed to convert to responses format: {e}"),
             )
         },
     )
@@ -150,16 +150,9 @@ pub(super) async fn execute_tool_loop(
     let session_request_id = params
         .response_id
         .clone()
-        .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::new_v4()));
+        .unwrap_or_else(|| format!("resp_{}", uuid::Uuid::now_v7()));
 
-    let session = McpToolSession::new(
-        &ctx.mcp_orchestrator,
-        mcp_servers,
-        &session_request_id,
-        McpSessionOptions {
-            request_tools: original_request.tools.as_deref(),
-        },
-    );
+    let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
 
     // Get MCP tools and convert to chat format (do this once before loop)
     let mcp_chat_tools = convert_mcp_tools_to_chat_tools(&session);
@@ -179,7 +172,7 @@ pub(super) async fn execute_tool_loop(
             );
             error::bad_request(
                 "convert_request_failed",
-                format!("Failed to convert request: {}", e),
+                format!("Failed to convert request: {e}"),
             )
         })?;
 
@@ -200,7 +193,48 @@ pub(super) async fn execute_tool_loop(
         // Check for function calls (extract all for parallel execution)
         let tool_calls = extract_all_tool_calls_from_chat(&chat_response);
 
-        if !tool_calls.is_empty() {
+        if tool_calls.is_empty() {
+            // No more tool calls, we're done
+            trace!(
+                "Tool loop completed: {} iterations, {} total calls",
+                state.iteration,
+                state.total_calls
+            );
+
+            // Convert final chat response to responses format
+            let mut responses_response = conversions::chat_to_responses(
+                &chat_response,
+                original_request,
+                params.response_id.clone(),
+            )
+            .map_err(|e| {
+                error!(
+                    function = "tool_loop",
+                    iteration = state.iteration,
+                    error = %e,
+                    context = "final_response",
+                    "Failed to convert ChatCompletionResponse to ResponsesResponse"
+                );
+                error::internal_error(
+                    "convert_to_responses_format_failed",
+                    format!("Failed to convert to responses format: {e}"),
+                )
+            })?;
+
+            // Inject MCP metadata into output
+            if state.total_calls > 0 {
+                session
+                    .inject_mcp_output_items(&mut responses_response.output, state.mcp_call_items);
+
+                trace!(
+                    "Injected MCP metadata: {} mcp_list_tools + {} mcp_call items",
+                    session.mcp_servers().len(),
+                    state.total_calls
+                );
+            }
+
+            return Ok(responses_response);
+        } else {
             state.iteration += 1;
 
             // Record tool loop iteration metric
@@ -242,7 +276,7 @@ pub(super) async fn execute_tool_loop(
                     );
                     error::internal_error(
                         "convert_to_responses_format_failed",
-                        format!("Failed to convert to responses format: {}", e),
+                        format!("Failed to convert to responses format: {e}"),
                     )
                 })?;
 
@@ -282,7 +316,7 @@ pub(super) async fn execute_tool_loop(
                     );
                     error::internal_error(
                         "convert_to_responses_format_failed",
-                        format!("Failed to convert to responses format: {}", e),
+                        format!("Failed to convert to responses format: {e}"),
                     )
                 })?;
 
@@ -352,47 +386,6 @@ pub(super) async fn execute_tool_loop(
             current_request = build_next_request(&state, &current_request);
 
             // Continue to next iteration
-        } else {
-            // No more tool calls, we're done
-            trace!(
-                "Tool loop completed: {} iterations, {} total calls",
-                state.iteration,
-                state.total_calls
-            );
-
-            // Convert final chat response to responses format
-            let mut responses_response = conversions::chat_to_responses(
-                &chat_response,
-                original_request,
-                params.response_id.clone(),
-            )
-            .map_err(|e| {
-                error!(
-                    function = "tool_loop",
-                    iteration = state.iteration,
-                    error = %e,
-                    context = "final_response",
-                    "Failed to convert ChatCompletionResponse to ResponsesResponse"
-                );
-                error::internal_error(
-                    "convert_to_responses_format_failed",
-                    format!("Failed to convert to responses format: {}", e),
-                )
-            })?;
-
-            // Inject MCP metadata into output
-            if state.total_calls > 0 {
-                session
-                    .inject_mcp_output_items(&mut responses_response.output, state.mcp_call_items);
-
-                trace!(
-                    "Injected MCP metadata: {} mcp_list_tools + {} mcp_call items",
-                    session.mcp_servers().len(),
-                    state.total_calls
-                );
-            }
-
-            return Ok(responses_response);
         }
     }
 }

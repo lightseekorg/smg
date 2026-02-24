@@ -11,12 +11,12 @@ use tool_parser::{parsers::QwenCoderParser, traits::ToolParser};
 #[tokio::test]
 async fn test_qwen_coder_single_tool() {
     let parser = QwenCoderParser::new();
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=get_weather>
 <parameter=city>Beijing</parameter>
 <parameter=units>celsius</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -30,7 +30,7 @@ async fn test_qwen_coder_single_tool() {
 #[tokio::test]
 async fn test_qwen_coder_multiple_sequential_tools() {
     let parser = QwenCoderParser::new();
-    let input = r#"Let me help you with that.
+    let input = r"Let me help you with that.
 <tool_call>
 <function=search>
 <parameter=query>Qwen model</parameter>
@@ -41,7 +41,7 @@ async fn test_qwen_coder_multiple_sequential_tools() {
 <parameter=text>Hello</parameter>
 <parameter=to>zh</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 2);
@@ -73,12 +73,12 @@ async fn test_qwen_coder_nested_json_in_parameters() {
 #[tokio::test]
 async fn test_qwen_coder_string_parameters() {
     let parser = QwenCoderParser::new();
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=process>
 <parameter=text>Hello World</parameter>
 <parameter=number>42</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -92,10 +92,10 @@ async fn test_qwen_coder_string_parameters() {
 #[tokio::test]
 async fn test_qwen_coder_empty_arguments() {
     let parser = QwenCoderParser::new();
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=get_time>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -108,14 +108,14 @@ async fn test_qwen_coder_empty_arguments() {
 #[tokio::test]
 async fn test_qwen_coder_multiline_parameter_values() {
     let parser = QwenCoderParser::new();
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=write_file>
 <parameter=content>Line 1
 Line 2
 Line 3</parameter>
 <parameter=path>/tmp/test.txt</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -140,16 +140,16 @@ async fn test_qwen_coder_incomplete_tags() {
     let parser = QwenCoderParser::new();
 
     // Missing closing tag
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=get_weather>
-<parameter=city>Beijing</parameter>"#;
+<parameter=city>Beijing</parameter>";
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 0);
 
     // Missing opening tag
-    let input = r#"<parameter=city>Beijing</parameter>
+    let input = r"<parameter=city>Beijing</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 0);
 }
@@ -162,9 +162,9 @@ async fn test_qwen_coder_streaming_basic() {
     // Simulate streaming chunks
     let chunks = vec![
         "<tool_call>",
-        r#"<function=get_weather>"#,
-        r#"<parameter=city>Shanghai</parameter>"#,
-        r#"<parameter=units>celsius</parameter>"#,
+        r"<function=get_weather>",
+        r"<parameter=city>Shanghai</parameter>",
+        r"<parameter=units>celsius</parameter>",
         "</function>",
         "</tool_call>",
     ];
@@ -197,9 +197,9 @@ async fn test_qwen_coder_streaming_incremental_json() {
 
     let chunks = vec![
         "<tool_call>",
-        r#"<function=get_weather>"#,
-        r#"<parameter=city>Paris</parameter>"#,
-        r#"<parameter=units>metric</parameter>"#,
+        r"<function=get_weather>",
+        r"<parameter=city>Paris</parameter>",
+        r"<parameter=units>metric</parameter>",
         "</function></tool_call>",
     ];
 
@@ -228,8 +228,7 @@ async fn test_qwen_coder_streaming_incremental_json() {
     if let Some(first) = json_fragments.first() {
         assert!(
             first.starts_with('{'),
-            "First JSON fragment should start with '{{': {}",
-            first
+            "First JSON fragment should start with '{{': {first}",
         );
     }
 }
@@ -243,8 +242,8 @@ async fn test_qwen_coder_streaming_partial_tags() {
     let chunks = vec![
         "<tool_c",
         "all><function=",
-        r#"get_weather><param"#,
-        r#"eter=city>Bei"#,
+        r"get_weather><param",
+        r"eter=city>Bei",
         "jing</parameter></func",
         "tion></tool_call>",
     ];
@@ -278,8 +277,8 @@ async fn test_qwen_coder_multiple_tools_boundary() {
 
     // Tool boundary at chunk boundary
     let chunks = vec![
-        r#"<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>"#,
-        r#"<tool_call><function=search><parameter=query>weather forecast</parameter></function></tool_call>"#,
+        r"<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>",
+        r"<tool_call><function=search><parameter=query>weather forecast</parameter></function></tool_call>",
     ];
 
     let mut tool_names = Vec::new();
@@ -306,8 +305,8 @@ async fn test_qwen_coder_invalid_function_name() {
 
     let chunks = vec![
         "<tool_call>",
-        r#"<function=invalid_function>"#,
-        r#"<parameter=param>value</parameter>"#,
+        r"<function=invalid_function>",
+        r"<parameter=param>value</parameter>",
         "</function></tool_call>",
     ];
 
@@ -333,7 +332,7 @@ async fn test_qwen_coder_invalid_function_name() {
 async fn test_qwen_coder_type_conversion() {
     let parser = QwenCoderParser::new();
 
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=process>
 <parameter=count>42</parameter>
 <parameter=rate>1.5</parameter>
@@ -341,7 +340,7 @@ async fn test_qwen_coder_type_conversion() {
 <parameter=data>null</parameter>
 <parameter=text>string value</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -381,7 +380,7 @@ async fn test_qwen_coder_whitespace_handling() {
     let parser = QwenCoderParser::new();
 
     // Test with various whitespace scenarios
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
     <function=process>
         <parameter=trimmed>  spaces around  </parameter>
         <parameter=newlines>
@@ -389,7 +388,7 @@ async fn test_qwen_coder_whitespace_handling() {
             Line 2
         </parameter>
     </function>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -406,10 +405,10 @@ async fn test_qwen_coder_no_tools() {
     // Test input with no tool calls at all
     let parser = QwenCoderParser::new();
 
-    let input = r#"This is just a normal response without any tool calls.
+    let input = r"This is just a normal response without any tool calls.
 I can provide information directly without using any tools.
 Even if I mention function names like get_weather or search,
-they are not actual tool calls unless properly formatted."#;
+they are not actual tool calls unless properly formatted.";
 
     let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
 
@@ -434,8 +433,8 @@ async fn test_qwen_coder_streaming_state_reset() {
 
     // First tool
     let chunks1 = vec![
-        r#"<tool_call><function=get_weather>"#,
-        r#"<parameter=city>London</parameter>"#,
+        r"<tool_call><function=get_weather>",
+        r"<parameter=city>London</parameter>",
         "</function></tool_call>",
     ];
 
@@ -445,8 +444,8 @@ async fn test_qwen_coder_streaming_state_reset() {
 
     // Second tool - state should be reset
     let chunks2 = vec![
-        r#"<tool_call><function=search>"#,
-        r#"<parameter=query>rust</parameter>"#,
+        r"<tool_call><function=search>",
+        r"<parameter=query>rust</parameter>",
         "</function></tool_call>",
     ];
 
@@ -468,12 +467,12 @@ async fn test_qwen_coder_realistic_chunks() {
     let tools = create_test_tools();
     let mut parser = QwenCoderParser::new();
 
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=get_weather>
 <parameter=city>Tokyo</parameter>
 <parameter=units>celsius</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
     let chunks = streaming_helpers::create_realistic_chunks(input);
 
     assert!(chunks.len() > 20, "Should have many small chunks");
@@ -523,14 +522,14 @@ async fn test_qwen_coder_xml_tag_arrives_in_parts() {
 async fn test_qwen_coder_content_before_and_after_tool_calls() {
     let parser = QwenCoderParser::new();
 
-    let input = r#"I'll analyze the weather for you now.
+    let input = r"I'll analyze the weather for you now.
 <tool_call>
 <function=get_weather>
 <parameter=city>Boston</parameter>
 <parameter=state>MA</parameter>
 </function>
 </tool_call>
-Based on the analysis, here's what I found."#;
+Based on the analysis, here's what I found.";
 
     let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
 
@@ -553,9 +552,9 @@ async fn test_qwen_coder_incomplete_tool_call() {
     let parser = QwenCoderParser::new();
 
     // Incomplete tool call - missing closing tag
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=get_weather>
-<parameter=city>Chicago</parameter>"#;
+<parameter=city>Chicago</parameter>";
 
     let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
 
@@ -569,11 +568,11 @@ async fn test_qwen_coder_malformed_function_tag() {
     let parser = QwenCoderParser::new();
 
     // Malformed function tag - missing name attribute
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function>
 <parameter=city>Miami</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
 
@@ -589,19 +588,17 @@ async fn test_qwen_coder_many_parameters() {
     let mut params_xml = String::new();
     for i in 1..=20 {
         params_xml.push_str(&format!(
-            r#"<parameter=param{}>value{}</parameter>
-"#,
-            i, i
+            r"<parameter=param{i}>value{i}</parameter>
+"
         ));
     }
 
     let input = format!(
-        r#"<tool_call>
+        r"<tool_call>
 <function=complex_func>
-{}
+{params_xml}
 </function>
-</tool_call>"#,
-        params_xml
+</tool_call>"
     );
 
     let (_normal_text, tools) = parser.parse_complete(&input).await.unwrap();
@@ -612,8 +609,8 @@ async fn test_qwen_coder_many_parameters() {
 
     // Verify all 20 parameters are parsed
     for i in 1..=20 {
-        let key = format!("param{}", i);
-        let expected_value = format!("value{}", i);
+        let key = format!("param{i}");
+        let expected_value = format!("value{i}");
         assert_eq!(args[key], expected_value);
     }
 }
@@ -627,11 +624,11 @@ async fn test_qwen_coder_malformed_xml_missing_parameter_close() {
     let parser = QwenCoderParser::new();
 
     // Missing </parameter> closing tag - parser regex won't match incomplete parameter
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=get_weather>
 <parameter=city>Beijing
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
 
@@ -652,10 +649,10 @@ async fn test_qwen_coder_malformed_xml_unclosed_function() {
     let parser = QwenCoderParser::new();
 
     // Missing </function> closing tag
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=get_weather>
 <parameter=city>Beijing</parameter>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
 
@@ -670,14 +667,14 @@ async fn test_qwen_coder_malformed_xml_nested_tool_calls() {
     let parser = QwenCoderParser::new();
 
     // Nested tool_call tags (invalid)
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=outer>
 <tool_call>
 <function=inner>
 </function>
 </tool_call>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
 
@@ -691,13 +688,13 @@ async fn test_qwen_coder_unicode_parameter_names() {
     let parser = QwenCoderParser::new();
 
     // Unicode characters in parameter names (Chinese, Japanese, emoji)
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=process>
 <parameter=城市>北京</parameter>
 <parameter=天気>晴れ</parameter>
 <parameter=emoji_key>🌍🌎🌏</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -714,11 +711,11 @@ async fn test_qwen_coder_unicode_function_name() {
     let parser = QwenCoderParser::new();
 
     // Unicode function name
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=获取天气>
 <parameter=location>上海</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -736,12 +733,11 @@ async fn test_qwen_coder_very_large_parameter_value() {
     let large_value: String = "x".repeat(100_000);
 
     let input = format!(
-        r#"<tool_call>
+        r"<tool_call>
 <function=process_large>
-<parameter=data>{}</parameter>
+<parameter=data>{large_value}</parameter>
 </function>
-</tool_call>"#,
-        large_value
+</tool_call>"
     );
 
     let (_normal_text, tools) = parser.parse_complete(&input).await.unwrap();
@@ -759,16 +755,15 @@ async fn test_qwen_coder_very_large_nested_json_parameter() {
     // Generate moderately nested JSON structure (10 levels to avoid stack overflow)
     let mut nested_json = String::from(r#"{"level": 0}"#);
     for i in 1..=10 {
-        nested_json = format!(r#"{{"level": {}, "child": {}}}"#, i, nested_json);
+        nested_json = format!(r#"{{"level": {i}, "child": {nested_json}}}"#);
     }
 
     let input = format!(
-        r#"<tool_call>
+        r"<tool_call>
 <function=process_nested>
-<parameter=config>{}</parameter>
+<parameter=config>{nested_json}</parameter>
 </function>
-</tool_call>"#,
-        nested_json
+</tool_call>"
     );
 
     let (_normal_text, tools) = parser.parse_complete(&input).await.unwrap();
@@ -789,8 +784,8 @@ async fn test_qwen_coder_streaming_malformed_recovery() {
     // First: malformed tool call (invalid function name)
     // Second: valid tool call
     let chunks = vec![
-        r#"<tool_call><function=invalid_func><parameter=x>1</parameter></function></tool_call>"#,
-        r#"<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>"#,
+        r"<tool_call><function=invalid_func><parameter=x>1</parameter></function></tool_call>",
+        r"<tool_call><function=get_weather><parameter=city>Tokyo</parameter></function></tool_call>",
     ];
 
     let mut valid_tool_found = false;
@@ -842,13 +837,13 @@ async fn test_qwen_coder_parameter_with_xml_like_content() {
 async fn test_qwen_coder_empty_parameter_value() {
     let parser = QwenCoderParser::new();
 
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=process>
 <parameter=empty></parameter>
 <parameter=whitespace>   </parameter>
 <parameter=normal>value</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -868,13 +863,13 @@ async fn test_qwen_coder_html_entity_decoding() {
     let parser = QwenCoderParser::new();
 
     // Test HTML entities in parameter values
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=process>
 <parameter=ampersand>Tom &amp; Jerry</parameter>
 <parameter=comparison>5 &lt; 10 &amp;&amp; 10 &gt; 5</parameter>
 <parameter=quotes>&quot;Hello&quot; &amp; &apos;World&apos;</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -890,12 +885,12 @@ async fn test_qwen_coder_html_numeric_entities() {
     let parser = QwenCoderParser::new();
 
     // Test numeric HTML entities
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=process>
 <parameter=decimal>&#60;tag&#62;</parameter>
 <parameter=hex>&#x3C;tag&#x3E;</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -910,7 +905,7 @@ async fn test_qwen_coder_python_literals() {
     let parser = QwenCoderParser::new();
 
     // Test Python-style literals (True, False, None)
-    let input = r#"<tool_call>
+    let input = r"<tool_call>
 <function=process>
 <parameter=py_true>True</parameter>
 <parameter=py_false>False</parameter>
@@ -919,7 +914,7 @@ async fn test_qwen_coder_python_literals() {
 <parameter=json_false>false</parameter>
 <parameter=json_null>null</parameter>
 </function>
-</tool_call>"#;
+</tool_call>";
 
     let (_normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 1);

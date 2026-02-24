@@ -1,6 +1,6 @@
 //! Mock servers for testing
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::allow_attributes)]
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -38,6 +38,11 @@ impl MockOpenAIServer {
     }
 
     /// Create and start a new mock OpenAI server with optional auth requirement
+    #[expect(
+        clippy::unwrap_used,
+        clippy::disallowed_methods,
+        reason = "test helper - panicking on failure is intentional"
+    )]
     pub async fn new_with_auth(expected_auth: Option<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

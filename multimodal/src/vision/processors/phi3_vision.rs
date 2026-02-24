@@ -23,7 +23,7 @@ use image::{imageops::FilterType, DynamicImage, GenericImageView, Rgb, RgbImage}
 use ndarray::{s, Array3, Array4, IxDyn};
 
 use crate::vision::{
-    image_processor::{ImagePreProcessor, PreprocessedImages},
+    image_processor::{ImagePreProcessor, ModelSpecificValue, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
     transforms::{self, TransformError},
 };
@@ -153,6 +153,10 @@ impl Phi3VisionProcessor {
     }
 
     /// Pad image height to multiple of 336 (centered, white padding).
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the processor; keeps API consistent"
+    )]
     fn padding_336(&self, image: &DynamicImage) -> DynamicImage {
         let (width, height) = image.dimensions();
         let target_h = ((height as f64 / TILE_SIZE as f64).ceil() * TILE_SIZE as f64) as u32;
@@ -177,6 +181,10 @@ impl Phi3VisionProcessor {
     ///
     /// Uses the shared `bicubic_resize` which matches PyTorch's
     /// `torch.nn.functional.interpolate(mode='bicubic', align_corners=False)`.
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the processor; keeps API consistent"
+    )]
     fn create_global_image(&self, tensor: &Array3<f32>) -> Array3<f32> {
         transforms::bicubic_resize(tensor, TILE_SIZE as usize, TILE_SIZE as usize)
     }
@@ -185,6 +193,10 @@ impl Phi3VisionProcessor {
     ///
     /// Transforms [3, H, W] -> [num_tiles, 3, 336, 336]
     /// where H and W are multiples of 336.
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the processor; keeps API consistent"
+    )]
     fn reshape_to_tiles(&self, tensor: &Array3<f32>) -> Vec<Array3<f32>> {
         let (_c, h, w) = (tensor.shape()[0], tensor.shape()[1], tensor.shape()[2]);
         let grid_h = h / TILE_SIZE as usize;
@@ -210,6 +222,10 @@ impl Phi3VisionProcessor {
     /// Calculate number of image tokens for given HD size.
     ///
     /// Formula: `((h//336)*(w//336)+1)*144 + 1 + (h//336+1)*12`
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the processor; keeps API consistent"
+    )]
     pub fn calculate_num_tokens(&self, h: usize, w: usize) -> usize {
         let grid_h = h / TILE_SIZE as usize;
         let grid_w = w / TILE_SIZE as usize;
@@ -219,12 +235,11 @@ impl Phi3VisionProcessor {
     }
 
     /// Process a single image through the full pipeline.
-    #[allow(clippy::type_complexity)]
     fn process_single_image(
         &self,
         image: &DynamicImage,
         config: &PreProcessorConfig,
-    ) -> Result<(Array4<f32>, (usize, usize), usize), TransformError> {
+    ) -> (Array4<f32>, (usize, usize), usize) {
         // 1. Convert to RGB
         let image = DynamicImage::ImageRgb8(image.to_rgb8());
 
@@ -273,7 +288,7 @@ impl Phi3VisionProcessor {
         let num_tokens = self.calculate_num_tokens(hd_h as usize, hd_w as usize);
 
         // image_sizes is the HD-transformed size
-        Ok((output, (hd_h as usize, hd_w as usize), num_tokens))
+        (output, (hd_h as usize, hd_w as usize), num_tokens)
     }
 }
 
@@ -303,8 +318,7 @@ impl ImagePreProcessor for Phi3VisionProcessor {
         let mut all_num_tokens = Vec::with_capacity(images.len());
 
         for image in images {
-            let (pixel_values, image_size, num_tokens) =
-                self.process_single_image(image, config)?;
+            let (pixel_values, image_size, num_tokens) = self.process_single_image(image, config);
             all_pixel_values.push(pixel_values);
             all_image_sizes.push((image_size.1 as u32, image_size.0 as u32)); // (width, height)
             all_num_tokens.push(num_tokens);
@@ -333,13 +347,13 @@ impl ImagePreProcessor for Phi3VisionProcessor {
         let mut model_specific = std::collections::HashMap::new();
 
         // image_sizes as [batch, 2] tensor (h, w for each image)
-        let image_sizes_data: Vec<u32> = all_image_sizes
+        let image_sizes_data: Vec<i64> = all_image_sizes
             .iter()
-            .flat_map(|(w, h)| [*h, *w]) // [h, w] for each image
+            .flat_map(|(w, h)| [*h as i64, *w as i64]) // [h, w] for each image
             .collect();
         model_specific.insert(
             "image_sizes".to_string(),
-            crate::vision::image_processor::ModelSpecificValue::UintTensor {
+            ModelSpecificValue::IntTensor {
                 data: image_sizes_data,
                 shape: vec![batch_size, 2],
             },
@@ -348,16 +362,14 @@ impl ImagePreProcessor for Phi3VisionProcessor {
         // num_img_tokens as list
         model_specific.insert(
             "num_img_tokens".to_string(),
-            crate::vision::image_processor::ModelSpecificValue::UintVec(
-                all_num_tokens.iter().map(|&t| t as u32).collect(),
-            ),
+            ModelSpecificValue::IntVec(all_num_tokens.iter().map(|&t| t as i64).collect()),
         );
 
         // Convert 5D tensor to appropriate format
         // Phi3-Vision expects [B, num_crops+1, C, H, W]
         let pixel_values = ndarray::ArrayD::<f32>::from_shape_vec(IxDyn(&shape), flat_data)
             .map_err(|e| TransformError::InvalidShape {
-                expected: format!("valid 5D shape, but failed with error: {}", e),
+                expected: format!("valid 5D shape, but failed with error: {e}"),
                 actual: shape.clone(),
             })?;
 

@@ -103,12 +103,7 @@ async fn test_incomplete_json() {
 
     for input in incomplete_cases {
         let (_normal_text, tools) = json_parser.parse_complete(input).await.unwrap();
-        assert_eq!(
-            tools.len(),
-            0,
-            "Should not parse incomplete JSON: {}",
-            input
-        );
+        assert_eq!(tools.len(), 0, "Should not parse incomplete JSON: {input}",);
     }
 
     // This case might actually parse because [{"name": "test"}] is complete
@@ -138,8 +133,7 @@ async fn test_malformed_mistral() {
             assert_eq!(
                 tools.len(),
                 0,
-                "Should not parse malformed Mistral: {}",
-                input
+                "Should not parse malformed Mistral: {input}",
             );
         }
         // Error is also acceptable for malformed input
@@ -166,10 +160,7 @@ async fn test_very_long_strings() {
     let json_parser = JsonParser::new();
 
     let long_string = "x".repeat(10000);
-    let input = format!(
-        r#"{{"name": "test", "arguments": {{"data": "{}"}}}}"#,
-        long_string
-    );
+    let input = format!(r#"{{"name": "test", "arguments": {{"data": "{long_string}"}}}}"#,);
 
     let (_normal_text, tools) = json_parser.parse_complete(&input).await.unwrap();
     assert_eq!(tools.len(), 1);
@@ -339,9 +330,7 @@ async fn test_exact_prefix_lengths() {
         let result = parser.parse_incremental(prefix, &tools).await.unwrap();
         assert!(
             result.calls.is_empty(),
-            "Prefix '{}' (len {}) should be incomplete",
-            prefix,
-            expected_len
+            "Prefix '{prefix}' (len {expected_len}) should be incomplete",
         );
         // Buffer is now internal to parser - can't assert on it
     }

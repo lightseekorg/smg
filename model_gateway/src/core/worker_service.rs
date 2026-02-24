@@ -56,16 +56,15 @@ impl WorkerServiceError {
 impl std::fmt::Display for WorkerServiceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound { worker_id } => write!(f, "Worker {} not found", worker_id),
+            Self::NotFound { worker_id } => write!(f, "Worker {worker_id} not found"),
             Self::InvalidId { raw, message } => {
                 write!(
                     f,
-                    "Invalid worker_id '{}' (expected UUID). Error: {}",
-                    raw, message
+                    "Invalid worker_id '{raw}' (expected UUID). Error: {message}"
                 )
             }
             Self::QueueNotInitialized => write!(f, "Job queue not initialized"),
-            Self::QueueSubmitFailed { message } => write!(f, "{}", message),
+            Self::QueueSubmitFailed { message } => write!(f, "{message}"),
         }
     }
 }
@@ -204,7 +203,7 @@ impl WorkerService {
     }
 
     /// Parse and validate a worker ID string
-    pub fn parse_worker_id(&self, raw: &str) -> Result<WorkerId, WorkerServiceError> {
+    pub fn parse_worker_id(raw: &str) -> Result<WorkerId, WorkerServiceError> {
         uuid::Uuid::parse_str(raw)
             .map(|_| WorkerId::from_string(raw.to_string()))
             .map_err(|e| WorkerServiceError::InvalidId {
@@ -278,7 +277,7 @@ impl WorkerService {
     }
 
     pub fn get_worker(&self, worker_id_raw: &str) -> Result<GetWorkerResponse, WorkerServiceError> {
-        let worker_id = self.parse_worker_id(worker_id_raw)?;
+        let worker_id = Self::parse_worker_id(worker_id_raw)?;
         let job_queue = self.get_job_queue()?;
 
         if let Some(worker) = self.worker_registry.get(&worker_id) {
@@ -311,7 +310,7 @@ impl WorkerService {
         &self,
         worker_id_raw: &str,
     ) -> Result<DeleteWorkerResult, WorkerServiceError> {
-        let worker_id = self.parse_worker_id(worker_id_raw)?;
+        let worker_id = Self::parse_worker_id(worker_id_raw)?;
 
         let url = self
             .worker_registry
@@ -337,7 +336,7 @@ impl WorkerService {
         worker_id_raw: &str,
         update: WorkerUpdateRequest,
     ) -> Result<UpdateWorkerResult, WorkerServiceError> {
-        let worker_id = self.parse_worker_id(worker_id_raw)?;
+        let worker_id = Self::parse_worker_id(worker_id_raw)?;
 
         let url = self
             .worker_registry

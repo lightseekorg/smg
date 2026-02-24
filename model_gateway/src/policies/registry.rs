@@ -1,6 +1,7 @@
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
+use parking_lot::RwLock;
 use serde_json;
 use smg_mesh::OptionalMeshSyncManager;
 use tracing::{debug, info, warn};
@@ -55,7 +56,8 @@ impl PolicyRegistry {
 
     /// Set mesh sync manager (thread-safe, can be called after initialization)
     pub fn set_mesh_sync(&self, mesh_sync: OptionalMeshSyncManager) {
-        *self.mesh_sync.write().unwrap() = mesh_sync;
+        let mut guard = self.mesh_sync.write();
+        *guard = mesh_sync;
     }
 
     /// Called when a worker is added
@@ -98,10 +100,17 @@ impl PolicyRegistry {
             .insert(model_id.to_string(), Arc::clone(&policy));
 
         // Sync to mesh if enabled (no-op if mesh is not enabled)
-        if let Some(ref mesh_sync) = *self.mesh_sync.read().unwrap() {
-            // Serialize policy config (simplified - just store policy name for now)
-            let config = serde_json::to_vec(&policy.name()).unwrap_or_default();
-            mesh_sync.sync_policy_state(model_id.to_string(), policy.name().to_string(), config);
+        {
+            let guard = self.mesh_sync.read();
+            if let Some(ref mesh_sync) = *guard {
+                // Serialize policy config (simplified - just store policy name for now)
+                let config = serde_json::to_vec(&policy.name()).unwrap_or_default();
+                mesh_sync.sync_policy_state(
+                    model_id.to_string(),
+                    policy.name().to_string(),
+                    config,
+                );
+            }
         }
 
         policy
@@ -143,8 +152,11 @@ impl PolicyRegistry {
             }
 
             // Sync removal to mesh if enabled (no-op if mesh is not enabled)
-            if let Some(ref mesh_sync) = *self.mesh_sync.read().unwrap() {
-                mesh_sync.remove_policy_state(model_id);
+            {
+                let guard = self.mesh_sync.read();
+                if let Some(ref mesh_sync) = *guard {
+                    mesh_sync.remove_policy_state(model_id);
+                }
             }
         }
     }
@@ -186,8 +198,10 @@ impl PolicyRegistry {
     fn create_policy_from_type(&self, policy_type: &str) -> Arc<dyn LoadBalancingPolicy> {
         if policy_type == "cache_aware" {
             let mut cache_aware = CacheAwarePolicy::new();
-            let mesh_sync = &*self.mesh_sync.read().unwrap();
-            cache_aware.set_mesh_sync(mesh_sync.clone());
+            {
+                let guard = self.mesh_sync.read();
+                cache_aware.set_mesh_sync(guard.clone());
+            }
             Arc::new(cache_aware)
         } else {
             PolicyFactory::create_by_name(policy_type).unwrap_or_else(|| {

@@ -28,7 +28,7 @@ pub enum NodeReadiness {
 }
 
 impl NodeReadiness {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             NodeReadiness::NotReady => "not_ready",
             NodeReadiness::Joining => "joining",

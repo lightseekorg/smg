@@ -60,7 +60,7 @@ impl ResponseTransformer {
         let queries = Self::extract_queries(result);
 
         ResponseOutputItem::WebSearchCall {
-            id: format!("ws_{}", tool_call_id),
+            id: format!("ws_{tool_call_id}"),
             status: WebSearchCallStatus::Completed,
             action: WebSearchAction::Search {
                 query: queries.first().cloned(),
@@ -91,7 +91,7 @@ impl ResponseTransformer {
         let outputs = Self::extract_code_outputs(result);
 
         ResponseOutputItem::CodeInterpreterCall {
-            id: format!("ci_{}", tool_call_id),
+            id: format!("ci_{tool_call_id}"),
             status: CodeInterpreterCallStatus::Completed,
             container_id,
             code,
@@ -107,7 +107,7 @@ impl ResponseTransformer {
         let results = Self::extract_file_results(result);
 
         ResponseOutputItem::FileSearchCall {
-            id: format!("fs_{}", tool_call_id),
+            id: format!("fs_{tool_call_id}"),
             status: FileSearchCallStatus::Completed,
             queries: if queries.is_empty() {
                 obj.and_then(|o| o.get("query"))

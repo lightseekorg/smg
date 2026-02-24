@@ -24,9 +24,7 @@ use openai_protocol::{
     responses::{ResponseToolType, ResponsesRequest},
 };
 use serde_json::{json, Value};
-use smg_mcp::{
-    McpOrchestrator, McpServerBinding, McpSessionOptions, McpToolSession, ResponseFormat,
-};
+use smg_mcp::{McpOrchestrator, McpServerBinding, McpToolSession, ResponseFormat};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::warn;
@@ -159,7 +157,7 @@ pub(super) fn apply_event_transformations_inplace(
                             // Transform ID from fc_* to appropriate prefix
                             if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
                                 if let Some(stripped) = id.strip_prefix("fc_") {
-                                    let new_id = format!("{}{}", id_prefix, stripped);
+                                    let new_id = format!("{id_prefix}{stripped}");
                                     item["id"] = json!(new_id);
                                 }
                             }
@@ -176,7 +174,7 @@ pub(super) fn apply_event_transformations_inplace(
             // Transform item_id from fc_* to mcp_*
             if let Some(item_id) = parsed_data.get("item_id").and_then(|v| v.as_str()) {
                 if let Some(stripped) = item_id.strip_prefix("fc_") {
-                    let new_id = format!("mcp_{}", stripped);
+                    let new_id = format!("mcp_{stripped}");
                     parsed_data["item_id"] = json!(new_id);
                 }
             }
@@ -213,7 +211,7 @@ fn send_sse_event(
     event_name: &str,
     data: &Value,
 ) -> bool {
-    let block = format!("event: {}\ndata: {}\n\n", event_name, data);
+    let block = format!("event: {event_name}\ndata: {data}\n\n");
     tx.send(Ok(Bytes::from(block))).is_ok()
 }
 
@@ -222,7 +220,7 @@ fn send_sse_event(
 fn transform_fc_to_mcp_id(item_id: &str) -> String {
     item_id
         .strip_prefix("fc_")
-        .map(|stripped| format!("mcp_{}", stripped))
+        .map(|stripped| format!("mcp_{stripped}"))
         .unwrap_or_else(|| item_id.to_string())
 }
 
@@ -343,7 +341,7 @@ pub(super) fn forward_streaming_event(
         None => match serde_json::from_str(data) {
             Ok(v) => v,
             Err(_) => {
-                let chunk = format!("{}\n\n", raw_block);
+                let chunk = format!("{raw_block}\n\n");
                 return tx.send(Ok(Bytes::from(chunk))).is_ok();
             }
         },
@@ -396,14 +394,14 @@ pub(super) fn forward_streaming_event(
     let final_data = match serde_json::to_string(&parsed_data) {
         Ok(s) => s,
         Err(_) => {
-            let chunk = format!("{}\n\n", raw_block);
+            let chunk = format!("{raw_block}\n\n");
             return tx.send(Ok(Bytes::from(chunk))).is_ok();
         }
     };
 
     let final_block = match event_name {
         Some(evt) => format!("event: {}\ndata: {}\n\n", map_event_name(evt), final_data),
-        None => format!("data: {}\n\n", final_data),
+        None => format!("data: {final_data}\n\n"),
     };
 
     if tx.send(Ok(Bytes::from(final_block))).is_err() {
@@ -534,7 +532,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
             circuit_breaker.record_failure();
             return (
                 StatusCode::BAD_GATEWAY,
-                format!("Failed to forward request to OpenAI: {}", err),
+                format!("Failed to forward request to OpenAI: {err}"),
             )
                 .into_response();
         }
@@ -549,7 +547,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
         let error_body = response
             .text()
             .await
-            .unwrap_or_else(|err| format!("Failed to read upstream error body: {}", err));
+            .unwrap_or_else(|err| format!("Failed to read upstream error body: {err}"));
         let error_body = error::sanitize_error_body(&error_body);
         return (status_code, error_body).into_response();
     }
@@ -573,6 +571,10 @@ pub(super) async fn handle_simple_streaming_passthrough(
         .ok()
         .flatten();
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fire-and-forget stream processing; gateway shutdown need not wait for individual response streams"
+    )]
     tokio::spawn(async move {
         let mut accumulator = StreamingResponseAccumulator::new();
         let mut upstream_failed = false;
@@ -599,7 +601,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
                         }
 
                         if receiver_connected {
-                            let chunk_to_send = format!("{}\n\n", block_cow);
+                            let chunk_to_send = format!("{block_cow}\n\n");
                             if tx.send(Ok(Bytes::from(chunk_to_send))).is_err() {
                                 receiver_connected = false;
                             }
@@ -661,7 +663,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
     *response.status_mut() = status_code;
 
     let headers_mut = response.headers_mut();
-    for (name, value) in preserved_headers.iter() {
+    for (name, value) in &preserved_headers {
         headers_mut.insert(name, value.clone());
     }
 
@@ -673,7 +675,7 @@ pub(super) async fn handle_simple_streaming_passthrough(
 }
 
 /// Handle streaming WITH MCP tool call interception and execution
-pub(super) async fn handle_streaming_with_tool_interception(
+pub(super) fn handle_streaming_with_tool_interception(
     client: &reqwest::Client,
     headers: Option<&HeaderMap>,
     req: StreamingRequest,
@@ -702,19 +704,20 @@ pub(super) async fn handle_streaming_with_tool_interception(
     let payload_clone = payload.clone();
     let orchestrator_clone = Arc::clone(orchestrator);
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fire-and-forget MCP tool loop; gateway shutdown need not wait for individual tool loops"
+    )]
     tokio::spawn(async move {
         let mut state = ToolLoopState::new(original_request.input.clone());
         let max_tool_calls = original_request.max_tool_calls.map(|n| n as usize);
 
         // Create session inside spawned task (borrows from orchestrator_clone which lives in closure)
-        let session_request_id = format!("resp_{}", uuid::Uuid::new_v4());
+        let session_request_id = format!("resp_{}", uuid::Uuid::now_v7());
         let session = McpToolSession::new(
             &orchestrator_clone,
             mcp_servers.clone(),
             &session_request_id,
-            McpSessionOptions {
-                request_tools: original_request.tools.as_deref(),
-            },
         );
         let mut current_payload = payload_clone;
         prepare_mcp_tools_as_functions(&mut current_payload, &session);
@@ -792,7 +795,9 @@ pub(super) async fn handle_streaming_with_tool_interception(
                                     let parsed = serde_json::from_str::<Value>(data.as_ref()).ok();
 
                                     // Skip response.created and response.in_progress on subsequent iterations
-                                    let should_skip = if !is_first_iteration {
+                                    let should_skip = if is_first_iteration {
+                                        false
+                                    } else {
                                         parsed.as_ref().is_some_and(|v| {
                                             matches!(
                                                 v.get("type").and_then(|t| t.as_str()),
@@ -800,8 +805,6 @@ pub(super) async fn handle_streaming_with_tool_interception(
                                                     | Some(ResponseEvent::IN_PROGRESS)
                                             )
                                         })
-                                    } else {
-                                        false
                                     };
 
                                     if !should_skip {
@@ -830,7 +833,7 @@ pub(super) async fn handle_streaming_with_tool_interception(
                                         if is_in_progress {
                                             seen_in_progress = true;
                                             if !mcp_list_tools_sent {
-                                                for binding in session.mcp_servers().iter() {
+                                                for binding in session.mcp_servers() {
                                                     let list_tools_index =
                                                         handler.allocate_synthetic_output_index();
                                                     if !send_mcp_list_tools_events(
@@ -1083,5 +1086,4 @@ pub async fn handle_streaming_response(ctx: RequestContext) -> Response {
         &mcp_orchestrator,
         mcp_servers,
     )
-    .await
 }

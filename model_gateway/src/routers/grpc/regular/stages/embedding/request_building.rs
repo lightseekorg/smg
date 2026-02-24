@@ -73,9 +73,9 @@ impl PipelineStage for EmbeddingRequestBuildingStage {
 
         // Generate request ID with appropriate prefix based on request type
         let request_id = match &ctx.input.request_type {
-            RequestType::Embedding(_) => format!("embed-{}", Uuid::new_v4()),
-            RequestType::Classify(_) => format!("classify-{}", Uuid::new_v4()),
-            _ => format!("embed-{}", Uuid::new_v4()), // fallback
+            RequestType::Embedding(_) => format!("embed-{}", Uuid::now_v7()),
+            RequestType::Classify(_) => format!("classify-{}", Uuid::now_v7()),
+            _ => format!("embed-{}", Uuid::now_v7()), // fallback
         };
 
         // Extract original text

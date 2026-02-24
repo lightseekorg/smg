@@ -183,6 +183,10 @@ impl ApprovalManager {
         }
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "async kept for API consistency and future async backends"
+    )]
     async fn request_interactive(&self, params: &ApprovalParams<'_>) -> McpResult<ApprovalOutcome> {
         let key = ApprovalKey::new(params.request_id, params.server_key, params.elicitation_id);
 
@@ -225,6 +229,10 @@ impl ApprovalManager {
         })
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "public async API kept for future async resolution backends"
+    )]
     pub async fn resolve(
         &self,
         request_id: &str,
@@ -256,7 +264,7 @@ impl ApprovalManager {
             DecisionResult::Denied {
                 reason: match &decision {
                     ApprovalDecision::Denied { reason } => reason.clone(),
-                    _ => "User denied".to_string(),
+                    ApprovalDecision::Approved => "User denied".to_string(),
                 },
             }
         };
@@ -416,7 +424,7 @@ mod tests {
 
         let rx = match outcome {
             ApprovalOutcome::Pending { rx, .. } => rx,
-            _ => panic!("Expected pending"),
+            ApprovalOutcome::Decided(_) => panic!("Expected pending"),
         };
 
         manager

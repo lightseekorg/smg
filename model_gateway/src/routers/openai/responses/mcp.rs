@@ -122,7 +122,7 @@ pub(super) async fn execute_streaming_tool_calls(
         let arguments: Value = match serde_json::from_str(args_str) {
             Ok(v) => v,
             Err(e) => {
-                let err_str = format!("Failed to parse tool arguments: {}", e);
+                let err_str = format!("Failed to parse tool arguments: {e}");
                 warn!("{}", err_str);
                 let error_output = json!({ "error": &err_str });
                 let mcp_call_item = build_transformed_mcp_call_item(
@@ -259,7 +259,7 @@ pub(super) fn build_resume_payload(
         }
         ResponseInput::Items(items) => {
             let items_value =
-                to_value(items).map_err(|e| format!("Failed to serialize input items: {}", e))?;
+                to_value(items).map_err(|e| format!("Failed to serialize input items: {e}"))?;
             if let Some(items_arr) = items_value.as_array() {
                 input_array.extend_from_slice(items_arr);
             }
@@ -392,7 +392,7 @@ fn send_tool_call_intermediate_event(
     let item_id = call
         .call_id
         .strip_prefix("fc_")
-        .map(|stripped| format!("{}{}", id_prefix, stripped))
+        .map(|stripped| format!("{id_prefix}{stripped}"))
         .unwrap_or_else(|| call.call_id.clone());
 
     let event_payload = json!({
@@ -403,7 +403,7 @@ fn send_tool_call_intermediate_event(
     });
     *sequence_number += 1;
 
-    let event = format!("event: {}\ndata: {}\n\n", event_type, event_payload);
+    let event = format!("event: {event_type}\ndata: {event_payload}\n\n");
     tx.send(Ok(Bytes::from(event))).is_ok()
 }
 
@@ -445,10 +445,7 @@ pub(super) fn send_tool_call_completion_events(
     });
     *sequence_number += 1;
 
-    let completed_event = format!(
-        "event: {}\ndata: {}\n\n",
-        completed_event_type, completed_payload
-    );
+    let completed_event = format!("event: {completed_event_type}\ndata: {completed_payload}\n\n");
     if tx.send(Ok(Bytes::from(completed_event))).is_err() {
         return false;
     }
@@ -497,7 +494,7 @@ pub(super) fn inject_mcp_metadata_streaming(
         }
     } else if let Some(obj) = response.as_object_mut() {
         let mut output_items = Vec::new();
-        for binding in mcp_servers.iter() {
+        for binding in mcp_servers {
             output_items
                 .push(session.build_mcp_list_tools_json(&binding.label, &binding.server_key));
         }
@@ -538,19 +535,19 @@ pub(super) async fn execute_tool_loop(
         let response = request_builder
             .send()
             .await
-            .map_err(|e| format!("upstream request failed: {}", e))?;
+            .map_err(|e| format!("upstream request failed: {e}"))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             let body = error::sanitize_error_body(&body);
-            return Err(format!("upstream error {}: {}", status, body));
+            return Err(format!("upstream error {status}: {body}"));
         }
 
         let mut response_json = response
             .json::<Value>()
             .await
-            .map_err(|e| format!("parse response: {}", e))?;
+            .map_err(|e| format!("parse response: {e}"))?;
 
         let function_calls = extract_function_calls(&response_json);
         if function_calls.is_empty() {
@@ -598,7 +595,7 @@ pub(super) async fn execute_tool_loop(
                 Ok(v) => v,
                 Err(e) => {
                     warn!(tool = %call.name, error = %e, "Failed to parse tool arguments as JSON");
-                    let error_output = format!("Invalid tool arguments: {}", e);
+                    let error_output = format!("Invalid tool arguments: {e}");
                     let response_format = session.tool_response_format(&call.name);
                     let server_label = session.resolve_tool_server_label(&call.name);
                     let error_json = json!({ "error": &error_output });

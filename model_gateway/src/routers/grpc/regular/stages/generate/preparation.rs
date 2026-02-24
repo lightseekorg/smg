@@ -27,7 +27,7 @@ pub(crate) struct GeneratePreparationStage;
 impl PipelineStage for GeneratePreparationStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
         let request = ctx.generate_request_arc();
-        self.prepare_generate(ctx, &request).await?;
+        self.prepare_generate(ctx, &request)?;
         Ok(None)
     }
 
@@ -37,7 +37,11 @@ impl PipelineStage for GeneratePreparationStage {
 }
 
 impl GeneratePreparationStage {
-    async fn prepare_generate(
+    #[expect(
+        clippy::result_large_err,
+        reason = "Response is the standard error type in the pipeline stage pattern"
+    )]
+    fn prepare_generate(
         &self,
         ctx: &mut RequestContext,
         request: &GenerateRequest,
@@ -112,6 +116,10 @@ impl GeneratePreparationStage {
         Err("Either `text` or `input_ids` must be provided".to_string())
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "method on stage struct for consistency with resolve_generate_input"
+    )]
     fn tokenize_single_text(
         &self,
         tokenizer: &Arc<dyn Tokenizer>,
@@ -120,7 +128,7 @@ impl GeneratePreparationStage {
         // Don't add special tokens - raw text generation uses text as-is
         let encoding = tokenizer
             .encode(text, false)
-            .map_err(|e| format!("Tokenization failed: {}", e))?;
+            .map_err(|e| format!("Tokenization failed: {e}"))?;
         Ok((text.to_string(), encoding.token_ids().to_vec()))
     }
 }

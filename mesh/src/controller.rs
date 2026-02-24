@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Result;
 use rand::seq::{IndexedRandom, SliceRandom};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, watch, Mutex};
 use tonic::transport::{ClientTlsConfig, Endpoint};
 use tracing as log;
 use tracing::{instrument, Instrument};
@@ -66,7 +66,7 @@ impl MeshController {
     }
 
     #[instrument(fields(name = %self.self_name), skip(self, signal))]
-    pub async fn event_loop(self, mut signal: tokio::sync::watch::Receiver<bool>) -> Result<()> {
+    pub async fn event_loop(self, mut signal: watch::Receiver<bool>) -> Result<()> {
         let init_state = self.state.clone();
         let read_state = self.state.clone();
         let mut cnt: u64 = 0;
@@ -125,7 +125,7 @@ impl MeshController {
                     break;
                 }
 
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                () = tokio::time::sleep(Duration::from_secs(1)) => {
                     if let Some(peer) = peer {
                         let peer_name = peer.name.clone();
 
@@ -137,7 +137,7 @@ impl MeshController {
                         // Check if we should retry based on backoff
                         if retry_manager.should_retry() {
                             match self.connect_to_peer(peer.clone()).await {
-                                Ok(_) => {
+                                Ok(()) => {
                                     // Success - reset retry state
                                     retry_manager.reset();
                                     log::info!("Successfully connected to peer {}", peer_name);
@@ -206,9 +206,9 @@ impl MeshController {
                             .entry(node_update.name.clone())
                             .and_modify(|e| {
                                 e.status = node_update.status;
-                                e.address = node_update.address.clone();
+                                e.address.clone_from(&node_update.address);
                             })
-                            .or_insert(NodeState {
+                            .or_insert_with(|| NodeState {
                                 name: node_update.name.clone(),
                                 address: node_update.address.clone(),
                                 status: node_update.status,
@@ -270,9 +270,9 @@ impl MeshController {
                     // Broadcast only the unreachable node's status is enough.
                     if let Some(mut unreachable_node) = target.remove(&peer_name) {
                         if unreachable_node.status == NodeStatus::Suspected as i32 {
-                            unreachable_node.status = NodeStatus::Down as i32
+                            unreachable_node.status = NodeStatus::Down as i32;
                         } else {
-                            unreachable_node.status = NodeStatus::Suspected as i32
+                            unreachable_node.status = NodeStatus::Suspected as i32;
                         }
                         unreachable_node.version += 1;
 
@@ -307,8 +307,7 @@ impl MeshController {
                         );
                     }
                     return Err(anyhow::anyhow!(
-                        "Failed to connect to peer {}: direct ping and ping-req both failed",
-                        peer_name
+                        "Failed to connect to peer {peer_name}: direct ping and ping-req both failed"
                     ));
                 }
             }
@@ -329,7 +328,7 @@ impl MeshController {
     fn spawn_sync_stream_handler(
         &self,
         mut incoming_stream: tonic::Streaming<StreamMessage>,
-        tx: tokio::sync::mpsc::Sender<StreamMessage>,
+        tx: mpsc::Sender<StreamMessage>,
         self_name: String,
         peer_name: String,
     ) -> tokio::task::JoinHandle<()> {
@@ -342,6 +341,7 @@ impl MeshController {
             peer = %peer_name
         );
 
+        #[expect(clippy::disallowed_methods, reason = "handle is returned to caller (spawn_sync_stream_handler) and stored in sync_connections map for lifecycle tracking")]
         tokio::spawn(
             async move {
                 use tokio_stream::StreamExt;
@@ -378,6 +378,7 @@ impl MeshController {
                     let peer_name_incremental = peer_name.clone();
                     let shared_sequence = sequence.clone();
 
+                    #[expect(clippy::disallowed_methods, reason = "incremental sender handle is stored and aborted when the parent sync_stream handler exits")]
                     tokio::spawn(async move {
                         let mut interval = tokio::time::interval(Duration::from_secs(1));
 
@@ -431,17 +432,17 @@ impl MeshController {
                                     );
 
                                     match tx_incremental.try_send(incremental_update) {
-                                        Ok(_) => {
+                                        Ok(()) => {
                                             // Mark as sent after successful transmission
                                             collector.mark_sent(store_type, &updates);
                                         }
-                                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                        Err(mpsc::error::TrySendError::Full(_)) => {
                                             log::debug!(
                                                 "Backpressure: channel full, skipping send (will retry next interval)"
                                             );
                                             continue;
                                         }
-                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                        Err(mpsc::error::TrySendError::Closed(_)) => {
                                             log::warn!(
                                                 "Channel closed, stopping incremental update sender"
                                             );
@@ -652,7 +653,7 @@ impl MeshController {
                                         .with_sync_manager(sync_manager.clone());
 
                                         let chunks =
-                                            service.create_snapshot_chunks(store_type, 100).await;
+                                            service.create_snapshot_chunks(store_type, 100);
                                         let total_chunks = chunks.len() as u64;
 
                                         log::info!(
@@ -705,7 +706,7 @@ impl MeshController {
                                         msg.sequence
                                     );
                                 }
-                                _ => {
+                                StreamMessageType::SnapshotComplete => {
                                     log::debug!(
                                         "Received message type {:?} from {}",
                                         msg.message_type,
@@ -760,14 +761,14 @@ impl MeshController {
 
         // Connect to peer's gRPC service via Endpoint so TLS can be configured.
         let connect_url = if self.mtls_manager.is_some() {
-            format!("https://{}", peer_addr)
+            format!("https://{peer_addr}")
         } else {
-            format!("http://{}", peer_addr)
+            format!("http://{peer_addr}")
         };
         log::info!("Connecting to URL: {}", connect_url);
 
         let mut endpoint = Endpoint::from_shared(connect_url.clone())
-            .map_err(|e| anyhow::anyhow!("Invalid peer endpoint {}: {}", connect_url, e))?;
+            .map_err(|e| anyhow::anyhow!("Invalid peer endpoint {connect_url}: {e}"))?;
 
         if let Some(mtls_manager) = self.mtls_manager.clone() {
             let tls_domain = endpoint
@@ -778,7 +779,7 @@ impl MeshController {
             let ca_certificate = mtls_manager
                 .load_ca_certificate()
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to load mTLS CA certificate: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to load mTLS CA certificate: {e}"))?;
 
             endpoint = endpoint
                 .tls_config(
@@ -786,7 +787,7 @@ impl MeshController {
                         .domain_name(tls_domain)
                         .ca_certificate(ca_certificate),
                 )
-                .map_err(|e| anyhow::anyhow!("Failed to configure TLS endpoint: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to configure TLS endpoint: {e}"))?;
         }
 
         let channel = endpoint.connect().await.map_err(|e| {
@@ -795,17 +796,17 @@ impl MeshController {
                 peer_name,
                 e
             );
-            anyhow::anyhow!("Connection failed: {}", e)
+            anyhow::anyhow!("Connection failed: {e}")
         })?;
         let mut client = GossipClient::new(channel);
 
         // Create bidirectional stream
-        let (tx, rx) = tokio::sync::mpsc::channel::<StreamMessage>(128);
+        let (tx, rx) = mpsc::channel::<StreamMessage>(128);
         let outgoing_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
         let response = client.sync_stream(outgoing_stream).await.map_err(|e| {
             log::error!("Failed to establish sync_stream with {}: {}", peer_name, e);
-            anyhow::anyhow!("sync_stream RPC failed: {}", e)
+            anyhow::anyhow!("sync_stream RPC failed: {e}")
         })?;
 
         let incoming_stream = response.into_inner();
@@ -840,5 +841,5 @@ fn get_random_values_refs<K, V>(map: &BTreeMap<K, V>, k: usize) -> Vec<&V> {
 
     let mut rng = rand::rng();
 
-    values.choose_multiple(&mut rng, k).cloned().collect()
+    values.choose_multiple(&mut rng, k).copied().collect()
 }

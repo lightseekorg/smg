@@ -22,8 +22,8 @@ High-performance model-routing gateway for large-scale LLM deployments. Centrali
 
 |                                 |                                                                                                                                                                  |
 |:--------------------------------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **🚀 Maximize GPU Utilization** | Cache-aware routing understands your inference engine's KV cache state—whether vLLM, SGLang, or TensorRT-LLM—to reuse prefixes and reduce redundant computation. |
-| **🔌 One API, Any Backend**     | Route to self-hosted models (vLLM, SGLang, TensorRT-LLM) or cloud providers (OpenAI, Anthropic, Gemini, Bedrock, and more) through a single unified endpoint.    |
+| **🚀 Maximize GPU Utilization** | Cache-aware routing understands your inference engine's KV cache state—whether SGLang, vLLM, or TensorRT-LLM—to reuse prefixes and reduce redundant computation. |
+| **🔌 One API, Any Backend**     | Route to self-hosted models (SGLang, vLLM, TensorRT-LLM) or cloud providers (OpenAI, Anthropic, Gemini, Bedrock, and more) through a single unified endpoint.    |
 | **⚡ Built for Speed**           | Native Rust with gRPC pipelines, sub-millisecond routing decisions, and zero-copy tokenization. Circuit breakers and automatic failover keep things running.     |
 | **🔒 Enterprise Control**       | Multi-tenant rate limiting with OIDC, WebAssembly plugins for custom logic, and a privacy boundary that keeps conversation history within your infrastructure.   |
 | **📊 Full Observability**       | 40+ Prometheus metrics, OpenTelemetry tracing, and structured JSON logs with request correlation—know exactly what's happening at every layer.                   |

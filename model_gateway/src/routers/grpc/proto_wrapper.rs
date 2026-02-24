@@ -3,6 +3,8 @@
 //! This module provides unified enums that wrap proto types from SGLang, vLLM, and TensorRT-LLM,
 //! allowing the router to work with any backend transparently.
 
+use std::collections::HashMap;
+
 use futures_util::StreamExt;
 use smg_grpc_client::{
     sglang_proto::{self as sglang, generate_complete::MatchedStop},
@@ -12,6 +14,100 @@ use smg_grpc_client::{
     vllm_engine::AbortOnDropStream as VllmStream,
     vllm_proto as vllm,
 };
+
+// =====================
+// Multimodal Data
+// =====================
+
+/// Backend-agnostic multimodal data produced by the processing pipeline.
+///
+/// Each backend client converts this into its own proto format:
+/// - SGLang: full pixel_values + model_specific_tensors + placeholders
+/// - vLLM: raw image bytes only (vLLM handles preprocessing internally)
+#[derive(Debug, Clone)]
+pub struct MultimodalData {
+    /// Raw image bytes (JPEG/PNG) for each image
+    pub image_data: Vec<Vec<u8>>,
+    /// Preprocessed pixel values as raw little-endian f32 bytes
+    pub pixel_values: Vec<u8>,
+    /// Shape of the pixel_values tensor
+    pub pixel_values_shape: Vec<u32>,
+    /// Model-specific tensors (aspect_ratios, image_grid_thw, etc.)
+    pub model_specific_tensors: HashMap<String, TensorBytes>,
+    /// Image token ID for downstream pad_input_ids_func
+    pub im_token_id: Option<u32>,
+    /// Placeholder offsets: where each image's tokens are in input_ids
+    pub mm_placeholders: Vec<(u32, u32)>, // (offset, length)
+}
+
+/// Raw tensor bytes with shape and dtype metadata.
+#[derive(Debug, Clone)]
+pub struct TensorBytes {
+    pub data: Vec<u8>,
+    pub shape: Vec<u32>,
+    pub dtype: String,
+}
+
+impl MultimodalData {
+    /// Convert to SGLang proto MultimodalInputs, consuming self to avoid clones.
+    pub fn into_sglang_proto(self) -> sglang::MultimodalInputs {
+        let model_specific_tensors = self
+            .model_specific_tensors
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    sglang::TensorData {
+                        data: v.data,
+                        shape: v.shape,
+                        dtype: v.dtype,
+                    },
+                )
+            })
+            .collect();
+
+        let mm_placeholders = self
+            .mm_placeholders
+            .into_iter()
+            .map(|(offset, length)| sglang::PlaceholderRange { offset, length })
+            .collect();
+
+        sglang::MultimodalInputs {
+            image_urls: vec![],
+            video_urls: vec![],
+            audio_urls: vec![],
+            image_data: self.image_data,
+            video_data: vec![],
+            audio_data: vec![],
+            modalities: vec!["image".to_string()],
+            pixel_values: Some(sglang::TensorData {
+                data: self.pixel_values,
+                shape: self.pixel_values_shape,
+                dtype: "float32".to_string(),
+            }),
+            model_specific_tensors,
+            im_token_id: self.im_token_id,
+            mm_placeholders,
+        }
+    }
+
+    /// Convert to vLLM proto MultimodalInputs, consuming self to avoid clones.
+    pub fn into_vllm_proto(self) -> vllm::MultimodalInputs {
+        vllm::MultimodalInputs {
+            image_data: self.image_data,
+        }
+    }
+
+    /// Convert to TensorRT-LLM proto MultimodalInput, consuming self to avoid clones.
+    ///
+    /// Only sends raw image bytes — TRT-LLM's input processor handles hashing,
+    /// position tracking, and vision encoding server-side.
+    pub fn into_trtllm_proto(self) -> trtllm::MultimodalInput {
+        trtllm::MultimodalInput {
+            image_data: self.image_data,
+        }
+    }
+}
 
 // =====================
 // Unified Logprobs Types
@@ -126,6 +222,10 @@ pub enum ProtoGenerateRequest {
 
 impl ProtoGenerateRequest {
     /// Get SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang(&self) -> &sglang::GenerateRequest {
         match self {
             Self::Sglang(req) => req,
@@ -134,6 +234,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get mutable SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang_mut(&mut self) -> &mut sglang::GenerateRequest {
         match self {
             Self::Sglang(req) => req,
@@ -142,6 +246,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get vLLM variant (panics if not vLLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm(&self) -> &vllm::GenerateRequest {
         match self {
             Self::Vllm(req) => req,
@@ -150,6 +258,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get mutable vLLM variant (panics if not vLLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm_mut(&mut self) -> &mut vllm::GenerateRequest {
         match self {
             Self::Vllm(req) => req,
@@ -158,6 +270,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get TensorRT-LLM variant (panics if not TensorRT-LLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm(&self) -> &trtllm::GenerateRequest {
         match self {
             Self::Trtllm(req) => req,
@@ -166,6 +282,10 @@ impl ProtoGenerateRequest {
     }
 
     /// Get mutable TensorRT-LLM variant (panics if not TensorRT-LLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm_mut(&mut self) -> &mut trtllm::GenerateRequest {
         match self {
             Self::Trtllm(req) => req,
@@ -318,6 +438,10 @@ pub enum ProtoGenerateStreamChunk {
 
 impl ProtoGenerateStreamChunk {
     /// Get SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang(&self) -> &sglang::GenerateStreamChunk {
         match self {
             Self::Sglang(chunk) => chunk,
@@ -326,6 +450,10 @@ impl ProtoGenerateStreamChunk {
     }
 
     /// Get vLLM variant (panics if not vLLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm(&self) -> &vllm::GenerateStreamChunk {
         match self {
             Self::Vllm(chunk) => chunk,
@@ -334,6 +462,10 @@ impl ProtoGenerateStreamChunk {
     }
 
     /// Get TensorRT-LLM variant (panics if not TensorRT-LLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm(&self) -> &trtllm::GenerateStreamChunk {
         match self {
             Self::Trtllm(chunk) => chunk,
@@ -444,6 +576,10 @@ pub enum ProtoGenerateComplete {
 
 impl ProtoGenerateComplete {
     /// Get SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang(&self) -> &sglang::GenerateComplete {
         match self {
             Self::Sglang(complete) => complete,
@@ -452,6 +588,10 @@ impl ProtoGenerateComplete {
     }
 
     /// Get mutable SGLang variant (panics if not SGLang)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_sglang() check"
+    )]
     pub fn as_sglang_mut(&mut self) -> &mut sglang::GenerateComplete {
         match self {
             Self::Sglang(complete) => complete,
@@ -460,6 +600,10 @@ impl ProtoGenerateComplete {
     }
 
     /// Get vLLM variant (panics if not vLLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_vllm() check"
+    )]
     pub fn as_vllm(&self) -> &vllm::GenerateComplete {
         match self {
             Self::Vllm(complete) => complete,
@@ -468,6 +612,10 @@ impl ProtoGenerateComplete {
     }
 
     /// Get TensorRT-LLM variant (panics if not TensorRT-LLM)
+    #[expect(
+        clippy::panic,
+        reason = "typed accessor: caller guarantees variant via is_trtllm() check"
+    )]
     pub fn as_trtllm(&self) -> &trtllm::GenerateComplete {
         match self {
             Self::Trtllm(complete) => complete,

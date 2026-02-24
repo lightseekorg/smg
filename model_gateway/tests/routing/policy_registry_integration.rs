@@ -8,6 +8,7 @@ use smg::{
     routers::router_manager::RouterManager,
 };
 
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 #[tokio::test]
 async fn test_policy_registry_with_router_manager() {
     // Create HTTP client
@@ -63,6 +64,7 @@ async fn test_policy_registry_with_router_manager() {
     println!("Note: This test requires mocking or test servers to fully execute");
 }
 
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 #[test]
 fn test_policy_registry_cleanup() {
     use smg::{config::PolicyConfig, policies::PolicyRegistry};
@@ -90,6 +92,7 @@ fn test_policy_registry_cleanup() {
     println!("✓ PolicyRegistry cleanup test passed");
 }
 
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 #[test]
 fn test_policy_registry_multiple_models() {
     use smg::{config::PolicyConfig, policies::PolicyRegistry};

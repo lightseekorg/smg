@@ -1,3 +1,9 @@
+#![expect(
+    clippy::unwrap_used,
+    clippy::print_stdout,
+    clippy::allow_attributes,
+    clippy::uninlined_format_args
+)]
 use std::{hint::black_box, time::Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};

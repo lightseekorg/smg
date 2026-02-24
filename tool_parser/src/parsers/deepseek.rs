@@ -49,6 +49,10 @@ pub struct DeepSeekParser {
 
 impl DeepSeekParser {
     /// Create a new DeepSeek parser
+    #[expect(
+        clippy::expect_used,
+        reason = "regex patterns are compile-time string literals"
+    )]
     pub fn new() -> Self {
         // Use (?s) flag for DOTALL mode to handle newlines
         let tool_call_pattern = r"(?s)<｜tool▁call▁begin｜>.*?<｜tool▁call▁end｜>";
@@ -88,8 +92,7 @@ impl DeepSeekParser {
         let func_type = captures.get(1).map_or("", |m| m.as_str());
         if func_type != "function" {
             return Err(ParserError::ParsingFailed(format!(
-                "Invalid function type: {}",
-                func_type
+                "Invalid function type: {func_type}"
             )));
         }
 
@@ -106,7 +109,7 @@ impl DeepSeekParser {
 
         // Parse JSON arguments
         let value = serde_json::from_str::<Value>(json_args)
-            .map_err(|e| ParserError::ParsingFailed(format!("Invalid JSON: {}", e)))?;
+            .map_err(|e| ParserError::ParsingFailed(format!("Invalid JSON: {e}")))?;
 
         // Create arguments object
         let args = if value.is_object() {
@@ -142,7 +145,10 @@ impl ToolParser for DeepSeekParser {
         }
 
         // Find where tool calls begin
-        let idx = text.find("<｜tool▁calls▁begin｜>").unwrap();
+        // Safe: has_tool_markers() already confirmed the marker exists
+        let idx = text
+            .find("<｜tool▁calls▁begin｜>")
+            .ok_or_else(|| ParserError::ParsingFailed("tool call marker not found".to_string()))?;
         let normal_text = text[..idx].to_string();
 
         // Try to extract tool calls, log warnings for failures
@@ -228,25 +234,7 @@ impl ToolParser for DeepSeekParser {
             );
 
             // Send tool name if not sent yet
-            if !self.current_tool_name_sent {
-                calls.push(ToolCallItem {
-                    tool_index: self.current_tool_id as usize,
-                    name: Some(func_name.to_string()),
-                    parameters: String::new(),
-                });
-                self.current_tool_name_sent = true;
-
-                // Store the tool call info for serving layer completions endpoint
-                let tool_id = self.current_tool_id as usize;
-                if self.prev_tool_call_arr.len() <= tool_id {
-                    self.prev_tool_call_arr
-                        .resize_with(tool_id + 1, || Value::Null);
-                }
-                self.prev_tool_call_arr[tool_id] = serde_json::json!({
-                    "name": func_name,
-                    "arguments": {},
-                });
-            } else {
+            if self.current_tool_name_sent {
                 // Compute incremental diff
                 let tool_id = self.current_tool_id as usize;
                 let last_sent = self
@@ -299,6 +287,24 @@ impl ToolParser for DeepSeekParser {
                     self.current_tool_name_sent = false;
                     return Ok(result);
                 }
+            } else {
+                calls.push(ToolCallItem {
+                    tool_index: self.current_tool_id as usize,
+                    name: Some(func_name.to_string()),
+                    parameters: String::new(),
+                });
+                self.current_tool_name_sent = true;
+
+                // Store the tool call info for serving layer completions endpoint
+                let tool_id = self.current_tool_id as usize;
+                if self.prev_tool_call_arr.len() <= tool_id {
+                    self.prev_tool_call_arr
+                        .resize_with(tool_id + 1, || Value::Null);
+                }
+                self.prev_tool_call_arr[tool_id] = serde_json::json!({
+                    "name": func_name,
+                    "arguments": {},
+                });
             }
         }
 

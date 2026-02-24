@@ -329,7 +329,6 @@ pub async fn create_conversation_items(
 
     let added_at = Utc::now();
 
-    // Set conversation_id in task-local storage for Oracle backend
     let scope_result = smg_data_connector::CURRENT_CONVERSATION_ID
         .scope(Some(conversation_id.clone()), async move {
             let mut created_items = Vec::new();
@@ -379,7 +378,6 @@ async fn process_item(
     item_val: &Value,
     added_at: chrono::DateTime<Utc>,
 ) -> Result<(Value, Option<String>), Response> {
-    // Accept both "type" and "item_type" for backward compatibility
     let item_type = item_val
         .get("type")
         .or_else(|| item_val.get("item_type"))
@@ -424,16 +422,14 @@ async fn process_item_reference(
 
     let item_id = ConversationItemId::from(ref_id);
 
-    let scoped_result = smg_data_connector::CURRENT_CONVERSATION_ID
-        .scope(Some(conversation_id.clone()), async move {
-            item_storage.get_item(&item_id).await
-        })
-        .await
-        .map_err(|e| internal_error(format!("Failed to get referenced item: {e}")))?;
-
-    let existing_item = match scoped_result {
-        Some(item) => item,
-        None => return Err(not_found(format!("Referenced item '{ref_id}' not found"))),
+    let existing_item = match item_storage.get_item(&item_id).await {
+        Ok(Some(item)) => item,
+        Ok(None) => return Err(not_found(format!("Referenced item '{ref_id}' not found"))),
+        Err(e) => {
+            return Err(internal_error(format!(
+                "Failed to get referenced item: {e}"
+            )))
+        }
     };
 
     if let Err(e) = item_storage
@@ -471,30 +467,23 @@ async fn process_item_with_id(
     }
 
     // Check if item exists globally
-    let item_id_clone = item_id.clone();
-    let item_result = smg_data_connector::CURRENT_CONVERSATION_ID
-        .scope(Some(conversation_id.clone()), async move {
-            item_storage.get_item(&item_id_clone).await
-        })
-        .await
-        .map_err(|e| internal_error(format!("Failed to check item existence: {e}")))?;
-
-    match item_result {
-        Some(existing) => Ok((existing, None)),
-        None => {
+    match item_storage.get_item(&item_id).await {
+        Ok(Some(existing)) => Ok((existing, None)),
+        Ok(None) => {
             // Create new item with the provided ID
             let (mut new_item, warning) = parse_item_from_value(item_val).map_err(bad_request)?;
             new_item.id = Some(item_id);
 
-            let created = smg_data_connector::CURRENT_CONVERSATION_ID
-                .scope(Some(conversation_id.clone()), async move {
-                    item_storage.create_item(new_item).await
-                })
+            let created = item_storage
+                .create_item(new_item)
                 .await
                 .map_err(|e| internal_error(format!("Failed to create item: {e}")))?;
 
             Ok((created, warning))
         }
+        Err(e) => Err(internal_error(format!(
+            "Failed to check item existence: {e}"
+        ))),
     }
 }
 
@@ -505,8 +494,6 @@ async fn process_new_item(
 ) -> Result<(ConversationItem, Option<String>), Response> {
     let (new_item, warning) = parse_item_from_value(item_val).map_err(bad_request)?;
 
-    // For Oracle, conversation_id comes from task-local storage set by middleware
-    // For other backends, they may need to implement their own logic
     let created = item_storage
         .create_item(new_item)
         .await
@@ -571,7 +558,7 @@ pub async fn delete_conversation_item(
         };
 
     match item_storage.delete_item(&conversation_id, &item_id).await {
-        Ok(_) => {
+        Ok(()) => {
             info!(
                 conversation_id = %conversation_id.0,
                 item_id = %item_id.0,
@@ -590,7 +577,6 @@ pub async fn delete_conversation_item(
 fn parse_item_from_value(
     item_val: &Value,
 ) -> Result<(NewConversationItem, Option<String>), String> {
-    // Accept both "type" and "item_type" for backward compatibility
     let item_type = item_val
         .get("type")
         .or_else(|| item_val.get("item_type"))
@@ -605,14 +591,13 @@ fn parse_item_from_value(
         ));
     }
 
-    let warning = if !IMPLEMENTED_ITEM_TYPES.contains(&item_type) {
-        Some(format!(
-            "Item type '{}' is accepted but not yet implemented. \
-             The item will be stored but may not function as expected.",
-            item_type
-        ))
-    } else {
+    let warning = if IMPLEMENTED_ITEM_TYPES.contains(&item_type) {
         None
+    } else {
+        Some(format!(
+            "Item type '{item_type}' is accepted but not yet implemented. \
+             The item will be stored but may not function as expected."
+        ))
     };
 
     let role = item_val

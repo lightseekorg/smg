@@ -137,22 +137,43 @@ message TokenizedInput {
   repeated uint32 input_ids = 2;
 }
 
+// A typed tensor: raw little-endian bytes + shape + dtype.
+// Replaces the base64-in-Struct hack for binary data over gRPC.
+message TensorData {
+  bytes data = 1;              // Raw little-endian bytes (f32/i64/u32)
+  repeated uint32 shape = 2;   // Dimension sizes
+  string dtype = 3;            // "float32", "int64", "uint32"
+}
+
 message MultimodalInputs {
-  // Simplified multimodal handling - actual data processed by tokenizer
   repeated string image_urls = 1;
   repeated string video_urls = 2;
   repeated string audio_urls = 3;
 
-  // Pre-processed multimodal features (if available)
-  google.protobuf.Struct processed_features = 4;
+  // Preprocessed pixel values tensor
+  TensorData pixel_values = 4;
 
-  // Raw data for direct processing
+  // Raw image/video/audio bytes
   repeated bytes image_data = 5;
   repeated bytes video_data = 6;
   repeated bytes audio_data = 7;
 
   // Modality metadata
   repeated string modalities = 8;
+
+  // Model-specific tensors (aspect_ratios, image_grid_thw, etc.)
+  map<string, TensorData> model_specific_tensors = 9;
+
+  // Image token ID for pad_input_ids_func
+  optional uint32 im_token_id = 10;
+
+  // Placeholder offsets: where each image's tokens are in input_ids
+  repeated PlaceholderRange mm_placeholders = 11;
+}
+
+message PlaceholderRange {
+  uint32 offset = 1;
+  uint32 length = 2;
 }
 
 // =====================

@@ -21,7 +21,7 @@ jobs:
   build-and-push:
     name: Build and push Docker image
     if: github.repository == 'lightseekorg/smg'
-    runs-on: ubuntu-latest
+    runs-on: ["8-gpu-h200"]
     permissions:
       contents: read
     steps:

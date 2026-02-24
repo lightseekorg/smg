@@ -56,10 +56,14 @@ pub struct LWWRegister<T: Clone + Serialize + DeserializeOwned> {
 }
 
 impl<T: Clone + Serialize + DeserializeOwned> LWWRegister<T> {
+    #[expect(
+        clippy::expect_used,
+        reason = "system clock before UNIX epoch is a fatal misconfiguration that must not silently produce timestamp=0"
+    )]
     pub fn new(value: T, actor: String) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("system clock before UNIX_EPOCH; cannot generate valid timestamps")
             .as_nanos() as u64;
         Self {
             value,
@@ -73,10 +77,14 @@ impl<T: Clone + Serialize + DeserializeOwned> LWWRegister<T> {
         &self.value
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "system clock before UNIX epoch is a fatal misconfiguration that must not silently produce timestamp=0"
+    )]
     pub fn write(&mut self, value: T, actor: String) {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("system clock before UNIX_EPOCH; cannot generate valid timestamps")
             .as_nanos() as u64;
         self.value = value;
         self.timestamp = timestamp;
@@ -92,7 +100,7 @@ impl<T: Clone + Serialize + DeserializeOwned> LWWRegister<T> {
             self.value = other.value.clone();
             self.timestamp = other.timestamp;
             self.version = other.version;
-            self.actor = other.actor.clone();
+            self.actor.clone_from(&other.actor);
         }
     }
 }
@@ -285,7 +293,7 @@ impl<T: Clone + Serialize + DeserializeOwned> SyncCRDTMap<T> {
         self.inner.write().remove(key);
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn contains_key(&self, key: &SKey) -> bool {
         self.inner.read().contains_key(key)
     }
@@ -302,7 +310,7 @@ impl<T: Clone + Serialize + DeserializeOwned> SyncCRDTMap<T> {
         self.inner.read().len()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.inner.read().is_empty()
     }
@@ -352,6 +360,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(clippy::print_stdout, reason = "diagnostic output in test")]
     fn test_crdt_pncounter_inc_and_value() {
         let mut counter = CRDTPNCounter::new();
         assert_eq!(counter.value(), 0);
@@ -362,17 +371,17 @@ mod tests {
         let op = pn.inc("actor1".to_string());
         pn.apply(op);
         let pn_val: BigInt = pn.read();
-        println!("Direct PNCounter value after inc(1): {:?}", pn_val);
+        println!("Direct PNCounter value after inc(1): {pn_val:?}");
 
         counter.inc("actor1".to_string(), 5);
         let val = counter.value();
-        println!("Counter value after inc(5): {}", val);
+        println!("Counter value after inc(5): {val}");
         println!("Counter inner read(): {:?}", counter.inner.read());
-        assert!(val > 0, "Counter should be incremented, got: {}", val);
+        assert!(val > 0, "Counter should be incremented, got: {val}");
 
         counter.inc("actor2".to_string(), 3);
         let val2 = counter.value();
-        println!("Counter value after inc(3): {}", val2);
+        println!("Counter value after inc(3): {val2}");
         assert!(val2 > val, "Counter should be incremented further");
     }
 
@@ -563,8 +572,8 @@ mod tests {
         map.insert(SKey::new("key2".to_string()), 2, "actor1".to_string());
         map.insert(SKey::new("key3".to_string()), 3, "actor1".to_string());
 
-        let mut values: Vec<i32> = map.values().cloned().collect();
-        values.sort();
+        let mut values: Vec<i32> = map.values().copied().collect();
+        values.sort_unstable();
         assert_eq!(values, vec![1, 2, 3]);
     }
 
@@ -806,8 +815,8 @@ mod tests {
         for i in 0..10 {
             let map_clone = map.clone();
             let handle = thread::spawn(move || {
-                let key = SKey::new(format!("key{}", i));
-                map_clone.insert(key.clone(), i, format!("actor{}", i));
+                let key = SKey::new(format!("key{i}"));
+                map_clone.insert(key.clone(), i, format!("actor{i}"));
                 assert_eq!(map_clone.get(&key), Some(i));
             });
             handles.push(handle);
@@ -886,7 +895,7 @@ mod tests {
         for i in 0..10 {
             let counter_clone = counter.clone();
             let handle = thread::spawn(move || {
-                counter_clone.inc(format!("actor{}", i), 1);
+                counter_clone.inc(format!("actor{i}"), 1);
             });
             handles.push(handle);
         }
@@ -910,7 +919,7 @@ mod tests {
         for i in 0..10 {
             let counter_clone = counter.clone();
             let handle = thread::spawn(move || {
-                counter_clone.inc(format!("actor{}", i), 1);
+                counter_clone.inc(format!("actor{i}"), 1);
             });
             handles.push(handle);
         }

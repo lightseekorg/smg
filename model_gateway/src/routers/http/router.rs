@@ -19,6 +19,7 @@ use openai_protocol::{
     responses::{ResponsesGetParams, ResponsesRequest},
 };
 use reqwest::Client;
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::error;
 
@@ -65,6 +66,10 @@ impl std::fmt::Debug for Router {
 
 impl Router {
     /// Create a new router with injected policy and client
+    #[expect(
+        clippy::unused_async,
+        reason = "async for API consistency with other router constructors"
+    )]
     pub async fn new(ctx: &Arc<AppContext>) -> Result<Self, String> {
         Ok(Router {
             worker_registry: ctx.worker_registry.clone(),
@@ -90,7 +95,7 @@ impl Router {
 
         match self.select_first_worker() {
             Ok(worker_url) => {
-                let mut request_builder = self.client.get(format!("{}/{}", worker_url, endpoint));
+                let mut request_builder = self.client.get(format!("{worker_url}/{endpoint}"));
                 for (name, value) in headers {
                     if header_utils::should_forward_request_header(&name) {
                         request_builder = request_builder.header(name, value);
@@ -115,7 +120,7 @@ impl Router {
                             }
                             Err(e) => error::internal_error(
                                 "read_response_failed",
-                                format!("Failed to read response: {}", e),
+                                format!("Failed to read response: {e}"),
                             ),
                         }
                     }
@@ -133,7 +138,7 @@ impl Router {
         text: Option<&str>,
         headers: Option<&HeaderMap>,
     ) -> Option<Arc<dyn Worker>> {
-        let effective_model_id = if !self.enable_igw { None } else { model_id };
+        let effective_model_id = if self.enable_igw { model_id } else { None };
 
         // Get workers for the specified model O(1), filtered by connection mode
         let workers = self.worker_registry.get_workers_filtered(
@@ -357,7 +362,7 @@ impl Router {
 
                 let headers = filtered_headers.clone();
 
-                let api_key = worker.api_key().clone();
+                let api_key = worker.api_key().cloned();
 
                 async move {
                     let mut request_builder = match method {
@@ -413,7 +418,7 @@ impl Router {
                         Err(e) => {
                             last_response = Some(error::internal_error(
                                 "read_response_failed",
-                                format!("Failed to read response: {}", e),
+                                format!("Failed to read response: {e}"),
                             ));
                         }
                     }
@@ -454,7 +459,7 @@ impl Router {
         is_stream: bool,
         load_guard: Option<WorkerLoadGuard>,
     ) -> Response {
-        let api_key = worker.api_key().clone();
+        let api_key = worker.api_key().cloned();
         let endpoint_url = worker.endpoint_url(route);
 
         let json_val = match serde_json::to_value(typed_req) {
@@ -462,7 +467,7 @@ impl Router {
             Err(e) => {
                 return error::bad_request(
                     "serialization_failed",
-                    format!("Convert into serde_json::Value failed: {}", e),
+                    format!("Convert into serde_json::Value failed: {e}"),
                 );
             }
         };
@@ -472,7 +477,7 @@ impl Router {
             Err(e) => {
                 return error::bad_request(
                     "request_preparation_failed",
-                    format!("Failed to prepare request: {}", e),
+                    format!("Failed to prepare request: {e}"),
                 );
             }
         };
@@ -512,35 +517,20 @@ impl Router {
         let status = StatusCode::from_u16(res.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-        if !is_stream {
-            // For non-streaming requests, preserve headers
-            let response_headers = header_utils::preserve_response_headers(res.headers());
-
-            let response = match res.bytes().await {
-                Ok(body) => {
-                    let mut response = Response::new(Body::from(body));
-                    *response.status_mut() = status;
-                    *response.headers_mut() = response_headers;
-                    response
-                }
-                Err(e) => {
-                    let error_msg = format!("Failed to get response body: {}", e);
-                    error::internal_error("read_response_body_failed", error_msg)
-                }
-            };
-
-            // load_guard dropped here automatically after response body is read
-            response
-        } else {
+        if is_stream {
             // Preserve headers for streaming response
             let mut response_headers = header_utils::preserve_response_headers(res.headers());
             // Ensure we set the correct content-type for SSE
             response_headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
 
             let stream = res.bytes_stream();
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::unbounded_channel();
 
             // Spawn task to forward stream
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "fire-and-forget stream relay; gateway shutdown need not wait for individual stream forwarding"
+            )]
             tokio::spawn(async move {
                 let mut stream = stream;
                 while let Some(chunk) = stream.next().await {
@@ -551,7 +541,7 @@ impl Router {
                             }
                         }
                         Err(e) => {
-                            let _ = tx.send(Err(format!("Stream error: {}", e)));
+                            let _ = tx.send(Err(format!("Stream error: {e}")));
                             break;
                         }
                     }
@@ -570,6 +560,25 @@ impl Router {
             if let Some(guard) = load_guard {
                 response = AttachedBody::wrap_response(response, guard);
             }
+            response
+        } else {
+            // For non-streaming requests, preserve headers
+            let response_headers = header_utils::preserve_response_headers(res.headers());
+
+            let response = match res.bytes().await {
+                Ok(body) => {
+                    let mut response = Response::new(Body::from(body));
+                    *response.status_mut() = status;
+                    *response.headers_mut() = response_headers;
+                    response
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to get response body: {e}");
+                    error::internal_error("read_response_body_failed", error_msg)
+                }
+            };
+
+            // load_guard dropped here automatically after response body is read
             response
         }
     }
@@ -599,7 +608,7 @@ fn convert_reqwest_error(e: reqwest::Error) -> Response {
         .url()
         .map(|u| u.to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    let message = format!("{}. URL: {}", e, url);
+    let message = format!("{e}. URL: {url}");
 
     // TODO improve error status code
     let (status, code) = if let Some(upstream_status) = e.status() {
@@ -716,12 +725,12 @@ impl RouterTrait for Router {
         response_id: &str,
         _params: &ResponsesGetParams,
     ) -> Response {
-        let endpoint = format!("v1/responses/{}", response_id);
+        let endpoint = format!("v1/responses/{response_id}");
         self.route_get_request(headers, &endpoint).await
     }
 
     async fn cancel_response(&self, headers: Option<&HeaderMap>, response_id: &str) -> Response {
-        let endpoint = format!("v1/responses/{}/cancel", response_id);
+        let endpoint = format!("v1/responses/{response_id}/cancel");
         self.route_post_empty_request(headers, &endpoint).await
     }
 
@@ -778,14 +787,12 @@ impl RouterTrait for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::BasicWorkerBuilder;
+    use crate::{config::types::PolicyConfig, core::BasicWorkerBuilder};
 
     fn create_test_regular_router() -> Router {
         // Create registries
         let worker_registry = Arc::new(WorkerRegistry::new());
-        let policy_registry = Arc::new(PolicyRegistry::new(
-            crate::config::types::PolicyConfig::RoundRobin,
-        ));
+        let policy_registry = Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin));
 
         // Register test workers
         let worker1 = BasicWorkerBuilder::new("http://worker1:8080")
