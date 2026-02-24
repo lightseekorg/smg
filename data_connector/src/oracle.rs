@@ -1059,7 +1059,8 @@ impl OracleResponseStorage {
             .query_row_as(
                 &format!(
                     "SELECT COUNT(*) FROM user_tab_columns \
-                     WHERE table_name = '{}' AND column_name = '{col_upper}'", s.table
+                     WHERE table_name = '{}' AND column_name = '{col_upper}'",
+                    s.table
                 ),
                 &[],
             )
@@ -1074,7 +1075,8 @@ impl OracleResponseStorage {
                     .query_row_as(
                         &format!(
                             "SELECT COUNT(*) FROM user_tab_columns \
-                             WHERE table_name = '{}' AND column_name = '{col_upper}'", s.table
+                             WHERE table_name = '{}' AND column_name = '{col_upper}'",
+                            s.table
                         ),
                         &[],
                     )

@@ -130,7 +130,13 @@ impl SchemaConfig {
     }
 
     fn validate_table(label: &str, tc: &TableConfig) -> Result<(), String> {
-        validate_identifier(&tc.table).map_err(|e| format!("{label}.table: {e}"))?;
+        validate_identifier(&tc.table).map_err(|e| {
+            if tc.table.is_empty() {
+                format!("{label}.table: table name is required (got empty string — did you omit the 'table' key in your config?)")
+            } else {
+                format!("{label}.table: {e}")
+            }
+        })?;
 
         for (logical, physical) in &tc.columns {
             validate_identifier(logical)
@@ -143,10 +149,19 @@ impl SchemaConfig {
     }
 }
 
-/// Reject identifiers that are empty or contain characters outside `[a-zA-Z0-9_]`.
+/// Maximum identifier length. Oracle caps at 30 (pre-12.2) or 128,
+/// Postgres at 63. We use 128 as a generous upper bound.
+const MAX_IDENTIFIER_LEN: usize = 128;
+
+/// Reject identifiers that are empty, too long, or contain characters outside `[a-zA-Z0-9_]`.
 fn validate_identifier(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("identifier must not be empty".to_string());
+    }
+    if name.len() > MAX_IDENTIFIER_LEN {
+        return Err(format!(
+            "identifier '{name}' exceeds maximum length of {MAX_IDENTIFIER_LEN} characters"
+        ));
     }
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(format!(
@@ -253,14 +268,22 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_empty_table_name() {
+    fn validate_rejects_empty_table_name_with_helpful_message() {
         let mut cfg = SchemaConfig::default();
         cfg.conversations.table = String::new();
         let err = cfg.validate().unwrap_err();
         assert!(
-            err.contains("conversations.table") && err.contains("empty"),
+            err.contains("conversations.table") && err.contains("table name is required"),
             "unexpected: {err}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_overly_long_identifier() {
+        let mut cfg = SchemaConfig::default();
+        cfg.conversations.table = "a".repeat(129);
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("exceeds maximum length"), "unexpected: {err}");
     }
 
     #[test]
