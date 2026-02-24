@@ -17,7 +17,6 @@ use std::{
 
 use cel_interpreter::{Context, Program, Value as CelValue};
 use metrics_service::{MetricsStore, WorkerSnapshot};
-use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::core::Worker;
@@ -217,15 +216,15 @@ impl CelPolicyEngine {
         let mut context = Context::default();
 
         // Expose standard fields to the CEL context
-        context.add_variable(
+        let _ = context.add_variable(
             "kv_cache_tokens",
             CelValue::Int(snapshot.kv_cache_tokens.unwrap_or(0) as i64),
         );
-        context.add_variable(
+        let _ = context.add_variable(
             "in_flight_requests",
             CelValue::Int(snapshot.in_flight_requests as i64),
         );
-        context.add_variable(
+        let _ = context.add_variable(
             "avg_tokens_per_req",
             CelValue::Int(snapshot.avg_tokens_per_req as i64),
         );
@@ -233,7 +232,7 @@ impl CelPolicyEngine {
         // Expose all custom metrics to the CEL context
         for (k, v) in &snapshot.custom_metrics {
             // Scale floats to int for comparison or keep them as floats depending on CEL usage
-            context.add_variable(k.as_str(), CelValue::Float(*v));
+            let _ = context.add_variable(k.as_str(), CelValue::Float(*v));
         }
 
         match program.execute(&context) {
