@@ -54,8 +54,9 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
         let kv_connector = labels.remove("kv_connector");
         let kv_role = labels.remove("kv_role");
 
-        // Determine model_id: config.models > discovered labels > UNKNOWN_MODEL_ID
-        let model_id = config
+        // Determine backend-reported model_id:
+        // config.models > discovered labels["served_model_name"] > labels["model_id"] > labels["model_path"]
+        let backend_model_id = config
             .models
             .primary()
             .map(|m| m.id.clone())
@@ -64,7 +65,19 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
             .or_else(|| labels.get("model_path").cloned())
             .unwrap_or_else(|| UNKNOWN_MODEL_ID.to_string());
 
-        let model_card = build_model_card(&model_id, config, &labels);
+        // Apply router-level served_model_name: becomes primary ID; backend name kept as alias.
+        let (model_id, backend_alias) =
+            match app_context.router_config.served_model_name.as_deref() {
+                Some(sname) if !sname.is_empty() && sname != backend_model_id => {
+                    (sname.to_string(), Some(backend_model_id))
+                }
+                _ => (backend_model_id, None),
+            };
+
+        let mut model_card = build_model_card(&model_id, config, &labels);
+        if let Some(alias) = backend_alias {
+            model_card = model_card.with_alias(alias);
+        }
 
         let runtime_type = match context.data.detected_runtime_type.as_deref() {
             Some(s) => s.parse::<RuntimeType>().unwrap_or(config.runtime_type),

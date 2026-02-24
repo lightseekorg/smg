@@ -262,18 +262,29 @@ impl WorkerRegistry {
         // Update model index for O(1) lookups using copy-on-write
         // This creates a new immutable snapshot with the added worker
         let model_id = worker.model_id().to_string();
-        self.model_index
-            .entry(model_id.clone())
-            .and_modify(|existing| {
-                // Create new snapshot with the additional worker
-                let mut new_workers: Vec<Arc<dyn Worker>> = existing.iter().cloned().collect();
-                new_workers.push(worker.clone());
-                *existing = Arc::from(new_workers.into_boxed_slice());
-            })
-            .or_insert_with(|| Arc::from(vec![worker.clone()].into_boxed_slice()));
 
-        // Rebuild hash ring for this model
-        self.rebuild_hash_ring(&model_id);
+        // Index primary model ID + all aliases for O(1) lookup by any name.
+        let mut all_names: Vec<String> = vec![model_id.clone()];
+        if let Some(primary_card) = worker.metadata().spec.models.primary() {
+            for alias in &primary_card.aliases {
+                if alias != &model_id {
+                    all_names.push(alias.clone());
+                }
+            }
+        }
+
+        for name in &all_names {
+            self.model_index
+                .entry(name.clone())
+                .and_modify(|existing| {
+                    let mut new_workers: Vec<Arc<dyn Worker>> =
+                        existing.iter().cloned().collect();
+                    new_workers.push(worker.clone());
+                    *existing = Arc::from(new_workers.into_boxed_slice());
+                })
+                .or_insert_with(|| Arc::from(vec![worker.clone()].into_boxed_slice()));
+            self.rebuild_hash_ring(name);
+        }
 
         // Update type index (clone needed for DashMap key ownership)
         self.type_workers
@@ -330,17 +341,29 @@ impl WorkerRegistry {
             // Create new snapshot without the removed worker
             let worker_url = worker.url();
             let model_id = worker.model_id().to_string();
-            if let Some(mut entry) = self.model_index.get_mut(&model_id) {
-                let new_workers: Vec<Arc<dyn Worker>> = entry
-                    .iter()
-                    .filter(|w| w.url() != worker_url)
-                    .cloned()
-                    .collect();
-                *entry = Arc::from(new_workers.into_boxed_slice());
+
+            // Clean up primary model ID + all aliases from model_index.
+            let mut all_names: Vec<String> = vec![model_id.clone()];
+            if let Some(primary_card) = worker.metadata().spec.models.primary() {
+                for alias in &primary_card.aliases {
+                    if alias != &model_id {
+                        all_names.push(alias.clone());
+                    }
+                }
             }
 
-            // Rebuild hash ring for this model
-            self.rebuild_hash_ring(&model_id);
+            for name in &all_names {
+                if let Some(mut entry) = self.model_index.get_mut(name) {
+                    let new_workers: Vec<Arc<dyn Worker>> = entry
+                        .iter()
+                        .filter(|w| w.url() != worker_url)
+                        .cloned()
+                        .collect();
+                    *entry = Arc::from(new_workers.into_boxed_slice());
+                }
+                // Rebuild hash ring for each name
+                self.rebuild_hash_ring(name);
+            }
 
             // Remove from type index
             if let Some(mut type_workers) = self.type_workers.get_mut(worker.worker_type()) {

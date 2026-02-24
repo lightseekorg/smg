@@ -399,6 +399,10 @@ struct CliArgs {
     #[arg(long, help_heading = "Tokenizer")]
     chat_template: Option<String>,
 
+    /// Client-facing model name override; both this and the backend-reported name are accepted.
+    #[arg(long, help_heading = "Tokenizer")]
+    served_model_name: Option<String>,
+
     /// Enable L0 (exact match) tokenizer cache
     #[arg(long, default_value_t = false, help_heading = "Tokenizer")]
     tokenizer_cache_enable_l0: bool,
@@ -1052,6 +1056,7 @@ impl CliArgs {
             .maybe_model_path(self.model_path.as_ref())
             .maybe_tokenizer_path(self.tokenizer_path.as_ref())
             .maybe_chat_template(self.chat_template.as_ref())
+            .maybe_served_model_name(self.served_model_name.as_ref())
             .maybe_oracle(oracle)
             .maybe_postgres(postgres)
             .maybe_redis(redis)

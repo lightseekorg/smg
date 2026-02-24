@@ -526,6 +526,17 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn served_model_name<S: Into<String>>(mut self, name: S) -> Self {
+        self.config.served_model_name = Some(name.into());
+        self
+    }
+
+    /// Set served_model_name if Some, clear if None.
+    pub fn maybe_served_model_name(mut self, name: Option<impl Into<String>>) -> Self {
+        self.config.served_model_name = name.map(|n| n.into());
+        self
+    }
+
     pub fn maybe_oracle(mut self, oracle: Option<OracleConfig>) -> Self {
         if let Some(cfg) = oracle {
             self.config.history_backend = HistoryBackend::Oracle;
