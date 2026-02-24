@@ -2,15 +2,32 @@
 name = "metrics-service"
 version = "1.0.0"
 edition = "2021"
+description = "Event-driven metrics store and collection service for SMG workers"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+    "Keyang Ru <rukeyang@gmail.com>",
+    "Praneth Paruchuri <pranethparuchuri@gmail.com>",
+]
+keywords = ["metrics", "smg", "llm", "prometheus"]
+categories = ["api-bindings", "network-programming"]
+
+[lib]
+name = "metrics_service"
 
 [dependencies]
-dashmap = { workspace = true }
-tokio = { workspace = true }
-futures = { workspace = true }
-reqwest = { workspace = true }
+dashmap.workspace = true
+tokio.workspace = true
+futures.workspace = true
+reqwest.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-tracing = { workspace = true }
-anyhow = { workspace = true }
-metrics = "0.22.3" # assuming metrics is in use as per observability
-cel-interpreter = "0.8" # typically cel-interpreter
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+metrics = "0.22.3" 
+cel-interpreter.workspace = true
+
+[lints]
+workspace = true
