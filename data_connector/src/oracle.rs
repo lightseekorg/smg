@@ -54,8 +54,12 @@ impl OracleStore {
     /// Accepts a list of schema initializers that run on a single connection
     /// before the pool is created, ensuring all tables exist.
     pub fn new(config: &OracleConfig, init_schemas: &[SchemaInitFn]) -> Result<Self, String> {
-        // Extract and validate schema config
-        let schema = config.schema.clone().unwrap_or_default();
+        // Extract and validate schema config.
+        // Oracle folds unquoted identifiers to uppercase, so existing tables
+        // are CONVERSATIONS etc.  Uppercase the configured names so that
+        // quoted references (`OWNER."TABLE"`) match reality.
+        let mut schema = config.schema.clone().unwrap_or_default();
+        schema.uppercase_table_names();
         schema.validate()?;
         let schema = Arc::new(schema);
 
@@ -279,12 +283,15 @@ impl OracleConversationStorage {
 
     pub(crate) fn init_schema(conn: &Connection, schema: &SchemaConfig) -> Result<(), String> {
         let s = &schema.conversations;
-        let table_upper = s.table.to_uppercase();
+        // Table names are already uppercased by OracleStore::new().
         let table = s.qualified_table(schema.owner.as_deref());
 
         let exists: i64 = conn
             .query_row_as(
-                &format!("SELECT COUNT(*) FROM user_tables WHERE table_name = '{table_upper}'"),
+                &format!(
+                    "SELECT COUNT(*) FROM user_tables WHERE table_name = '{}'",
+                    s.table
+                ),
                 &[],
             )
             .map_err(map_oracle_error)?;
@@ -496,12 +503,15 @@ impl OracleConversationItemStorage {
 
     pub(crate) fn init_schema(conn: &Connection, schema: &SchemaConfig) -> Result<(), String> {
         let si = &schema.conversation_items;
-        let si_table_upper = si.table.to_uppercase();
+        // Table names are already uppercased by OracleStore::new().
         let si_table = si.qualified_table(schema.owner.as_deref());
 
         let exists_items: i64 = conn
             .query_row_as(
-                &format!("SELECT COUNT(*) FROM user_tables WHERE table_name = '{si_table_upper}'"),
+                &format!(
+                    "SELECT COUNT(*) FROM user_tables WHERE table_name = '{}'",
+                    si.table
+                ),
                 &[],
             )
             .map_err(map_oracle_error)?;
@@ -525,12 +535,14 @@ impl OracleConversationItemStorage {
         }
 
         let sl = &schema.conversation_item_links;
-        let sl_table_upper = sl.table.to_uppercase();
         let sl_table = sl.qualified_table(schema.owner.as_deref());
 
         let exists_links: i64 = conn
             .query_row_as(
-                &format!("SELECT COUNT(*) FROM user_tables WHERE table_name = '{sl_table_upper}'"),
+                &format!(
+                    "SELECT COUNT(*) FROM user_tables WHERE table_name = '{}'",
+                    sl.table
+                ),
                 &[],
             )
             .map_err(map_oracle_error)?;
@@ -975,12 +987,15 @@ impl OracleResponseStorage {
 
     pub(crate) fn init_schema(conn: &Connection, schema: &SchemaConfig) -> Result<(), String> {
         let s = &schema.responses;
-        let table_upper = s.table.to_uppercase();
+        // Table names are already uppercased by OracleStore::new().
         let table = s.qualified_table(schema.owner.as_deref());
 
         let exists: i64 = conn
             .query_row_as(
-                &format!("SELECT COUNT(*) FROM user_tables WHERE table_name = '{table_upper}'"),
+                &format!(
+                    "SELECT COUNT(*) FROM user_tables WHERE table_name = '{}'",
+                    s.table
+                ),
                 &[],
             )
             .map_err(map_oracle_error)?;
@@ -1014,7 +1029,7 @@ impl OracleResponseStorage {
         let prev = s.col("previous_response_id");
         create_index_if_missing(
             conn,
-            &table_upper,
+            &s.table,
             "RESPONSES_PREV_IDX",
             &format!("CREATE INDEX responses_prev_idx ON {table}({prev})"),
         )?;
@@ -1022,7 +1037,7 @@ impl OracleResponseStorage {
         let safety = s.col("safety_identifier");
         create_index_if_missing(
             conn,
-            &table_upper,
+            &s.table,
             "RESPONSES_USER_IDX",
             &format!("CREATE INDEX responses_user_idx ON {table}({safety})"),
         )?;
@@ -1036,7 +1051,7 @@ impl OracleResponseStorage {
     ) -> Result<(), String> {
         let s = &schema.responses;
         let col_safety = s.col("safety_identifier");
-        let table_upper = s.table.to_uppercase();
+        // Table names are already uppercased by OracleStore::new().
         let col_upper = col_safety.to_uppercase();
         let table = s.qualified_table(schema.owner.as_deref());
 
@@ -1044,7 +1059,7 @@ impl OracleResponseStorage {
             .query_row_as(
                 &format!(
                     "SELECT COUNT(*) FROM user_tab_columns \
-                     WHERE table_name = '{table_upper}' AND column_name = '{col_upper}'"
+                     WHERE table_name = '{}' AND column_name = '{col_upper}'", s.table
                 ),
                 &[],
             )
@@ -1059,7 +1074,7 @@ impl OracleResponseStorage {
                     .query_row_as(
                         &format!(
                             "SELECT COUNT(*) FROM user_tab_columns \
-                             WHERE table_name = '{table_upper}' AND column_name = '{col_upper}'"
+                             WHERE table_name = '{}' AND column_name = '{col_upper}'", s.table
                         ),
                         &[],
                     )
@@ -1077,14 +1092,16 @@ impl OracleResponseStorage {
         conn: &Connection,
         schema: &SchemaConfig,
     ) -> Result<(), String> {
-        let table_upper = schema.responses.table.to_uppercase();
-        let table = schema.responses.qualified_table(schema.owner.as_deref());
+        // Table names are already uppercased by OracleStore::new().
+        let s = &schema.responses;
+        let table = s.qualified_table(schema.owner.as_deref());
 
         let present: i64 = conn
             .query_row_as(
                 &format!(
                     "SELECT COUNT(*) FROM user_tab_columns \
-                     WHERE table_name = '{table_upper}' AND column_name = 'USER_ID'"
+                     WHERE table_name = '{}' AND column_name = 'USER_ID'",
+                    s.table
                 ),
                 &[],
             )
@@ -1097,7 +1114,8 @@ impl OracleResponseStorage {
                     .query_row_as(
                         &format!(
                             "SELECT COUNT(*) FROM user_tab_columns \
-                             WHERE table_name = '{table_upper}' AND column_name = 'USER_ID'"
+                             WHERE table_name = '{}' AND column_name = 'USER_ID'",
+                            s.table
                         ),
                         &[],
                     )

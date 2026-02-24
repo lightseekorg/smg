@@ -151,7 +151,7 @@ postgres:
   schema:
     owner: "myschema"           # Oracle: schema prefix (MYSCHEMA."TABLE")
                                 # Redis: key prefix ("myschema:conversation:{id}")
-                                # Postgres: not used in qualified_table today
+                                # Postgres: ignored (use search_path for schema control)
 
     conversations:
       table: "my_conversations" # Overrides default "conversations"

@@ -9,7 +9,7 @@
 // 3. Response types + trait
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::{Display, Formatter, Write},
 };
 
@@ -471,7 +471,8 @@ pub trait ResponseStorage: Send + Sync {
     /// collecting up to `max_depth` responses (or unlimited if `None`).
     /// Returns responses in chronological order (oldest first).
     ///
-    /// The default implementation calls `self.get_response()` in a loop.
+    /// The default implementation calls `self.get_response()` in a loop with
+    /// cycle detection to prevent infinite loops from self-referencing chains.
     /// Backends that can walk the chain more efficiently (e.g. with a single
     /// lock or a recursive SQL query) should override this.
     async fn get_response_chain(
@@ -481,13 +482,18 @@ pub trait ResponseStorage: Send + Sync {
     ) -> ResponseResult<ResponseChain> {
         let mut chain = ResponseChain::new();
         let mut current_id = Some(response_id.clone());
-        let mut visited = 0usize;
+        let mut seen = HashSet::new();
 
         while let Some(ref lookup_id) = current_id {
             if let Some(limit) = max_depth {
-                if visited >= limit {
+                if seen.len() >= limit {
                     break;
                 }
+            }
+
+            // Cycle detection: stop if we've already visited this ID.
+            if !seen.insert(lookup_id.clone()) {
+                break;
             }
 
             let fetched = self.get_response(lookup_id).await?;
@@ -495,7 +501,6 @@ pub trait ResponseStorage: Send + Sync {
                 Some(response) => {
                     current_id.clone_from(&response.previous_response_id);
                     chain.responses.push(response);
-                    visited += 1;
                 }
                 None => break,
             }
