@@ -336,13 +336,21 @@ impl WorkerRegistry {
             let all_names = worker.model_names();
 
             for name in &all_names {
+                let mut remove_entry = false;
                 if let Some(mut entry) = self.model_index.get_mut(name) {
                     let new_workers: Vec<Arc<dyn Worker>> = entry
                         .iter()
                         .filter(|w| w.url() != worker_url)
                         .cloned()
                         .collect();
-                    *entry = Arc::from(new_workers.into_boxed_slice());
+                    if new_workers.is_empty() {
+                        remove_entry = true;
+                    } else {
+                        *entry = Arc::from(new_workers.into_boxed_slice());
+                    }
+                }
+                if remove_entry {
+                    self.model_index.remove(name);
                 }
                 // Rebuild hash ring for each name
                 self.rebuild_hash_ring(name);
