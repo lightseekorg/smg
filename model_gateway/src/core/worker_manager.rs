@@ -12,7 +12,7 @@ use futures::{
 use http::StatusCode;
 use openai_protocol::worker::{FlushCacheResult, WorkerLoadInfo, WorkerLoadsResult};
 use serde_json::Value;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::core::{
     metrics_aggregator::{self, MetricPack},

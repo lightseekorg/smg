@@ -1531,9 +1531,7 @@ mod tests {
 /// ```ignore
 /// start_metrics_observability_exporter(metrics_store);
 /// ```
-pub fn start_metrics_observability_exporter(
-    metrics_store: std::sync::Arc<metrics_service::MetricsStore>,
-) {
+pub fn start_metrics_observability_exporter(metrics_store: Arc<metrics_service::MetricsStore>) {
     // Register gauge descriptions once
     describe_gauge!(
         "smg_worker_kv_cache_tokens",

@@ -302,16 +302,16 @@ impl AppContextBuilder {
         request_timeout_secs: u64,
     ) -> Result<Self, String> {
         let bus = Arc::new(metrics_service::EventBus::new(1024));
-        let metrics_store = Arc::new(metrics_service::MetricsStore::new(
-            bus.clone(),
-            std::time::Duration::from_secs(60),
+        let metrics_store = Arc::new(MetricsStore::new(
+            // We'll keep snapshots valid for 60s
+            Duration::from_secs(60),
         ));
 
         // Start background scrapers
         let prometheus_scraper = metrics_service::scrapers::prometheus::PrometheusScraper::new(
             Arc::clone(&metrics_store),
             "http://prometheus:9090".to_string(), // In reality we'd load this from config
-            std::time::Duration::from_secs(15),
+            Duration::from_secs(15),
         );
         tokio::spawn(async move {
             prometheus_scraper.run().await;
