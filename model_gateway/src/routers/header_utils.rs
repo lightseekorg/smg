@@ -7,6 +7,7 @@ use http::header::HeaderName;
 
 static HEADER_TARGET_WORKER: HeaderName = HeaderName::from_static("x-smg-target-worker");
 static HEADER_ROUTING_KEY: HeaderName = HeaderName::from_static("x-smg-routing-key");
+static HEADER_MCP: HeaderName = HeaderName::from_static("x-smg-mcp");
 
 fn extract_header_value<'a>(headers: Option<&'a HeaderMap>, name: &HeaderName) -> Option<&'a str> {
     headers
@@ -21,6 +22,15 @@ pub fn extract_target_worker(headers: Option<&HeaderMap>) -> Option<&str> {
 
 pub fn extract_routing_key(headers: Option<&HeaderMap>) -> Option<&str> {
     extract_header_value(headers, &HEADER_ROUTING_KEY)
+}
+
+/// Check if SMG MCP orchestration is enabled via `X-SMG-MCP` header.
+/// Accepts "enabled", "true", or "1".
+pub fn is_smg_mcp_enabled(headers: Option<&HeaderMap>) -> bool {
+    headers
+        .and_then(|h| h.get(&HEADER_MCP))
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| matches!(v, "enabled" | "true" | "1"))
 }
 
 /// Copy request headers to a Vec of name-value string pairs
