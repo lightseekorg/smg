@@ -84,7 +84,7 @@ impl TableConfig {
     /// or just `my_table` without.
     ///
     /// The table name is quoted to preserve case. For Oracle, call
-    /// `SchemaConfig::uppercase_table_names()` first so the quoted names match
+    /// `SchemaConfig::uppercase_for_oracle()` first so the quoted names match
     /// Oracle's uppercase catalog entries.
     pub fn qualified_table(&self, owner: Option<&str>) -> String {
         match owner {
@@ -99,18 +99,25 @@ impl TableConfig {
 // ────────────────────────────────────────────────────────────────────────────
 
 impl SchemaConfig {
-    /// Uppercase all table names in-place.
+    /// Uppercase all table names and column override values in-place.
     ///
-    /// Oracle folds unquoted identifiers to uppercase, so existing tables are
-    /// stored as `CONVERSATIONS`, etc.  `qualified_table()` quotes identifiers
-    /// (`OWNER."table"`), making them case-sensitive.  Calling this in
-    /// `OracleStore::new()` ensures the quoted names match the actual uppercase
-    /// table names Oracle created.
-    pub fn uppercase_table_names(&mut self) {
-        self.conversations.table.make_ascii_uppercase();
-        self.responses.table.make_ascii_uppercase();
-        self.conversation_items.table.make_ascii_uppercase();
-        self.conversation_item_links.table.make_ascii_uppercase();
+    /// Oracle folds unquoted identifiers to uppercase, so existing tables and
+    /// columns are stored as `CONVERSATIONS`, `CONV_ID`, etc.
+    /// `qualified_table()` quotes identifiers (`OWNER."table"`), making them
+    /// case-sensitive.  Calling this in `OracleStore::new()` ensures the
+    /// quoted names match the actual uppercase catalog entries Oracle created.
+    pub fn uppercase_for_oracle(&mut self) {
+        for tc in [
+            &mut self.conversations,
+            &mut self.responses,
+            &mut self.conversation_items,
+            &mut self.conversation_item_links,
+        ] {
+            tc.table.make_ascii_uppercase();
+            for val in tc.columns.values_mut() {
+                val.make_ascii_uppercase();
+            }
+        }
     }
 
     /// Validate the entire schema config at startup. Rejects invalid identifiers.
@@ -231,12 +238,12 @@ mod tests {
         assert_eq!(tc.qualified_table(Some("ADMIN")), "ADMIN.\"CONVERSATIONS\"");
     }
 
-    // ── uppercase_table_names() ─────────────────────────────────────────
+    // ── uppercase_for_oracle() ──────────────────────────────────────────
 
     #[test]
-    fn uppercase_table_names_converts_defaults() {
+    fn uppercase_for_oracle_converts_defaults() {
         let mut cfg = SchemaConfig::default();
-        cfg.uppercase_table_names();
+        cfg.uppercase_for_oracle();
         assert_eq!(cfg.conversations.table, "CONVERSATIONS");
         assert_eq!(cfg.responses.table, "RESPONSES");
         assert_eq!(cfg.conversation_items.table, "CONVERSATION_ITEMS");
@@ -245,11 +252,15 @@ mod tests {
     }
 
     #[test]
-    fn uppercase_table_names_preserves_custom_names() {
+    fn uppercase_for_oracle_converts_custom_table_and_columns() {
         let mut cfg = SchemaConfig::default();
         cfg.conversations.table = "my_convos".to_string();
-        cfg.uppercase_table_names();
+        cfg.conversations
+            .columns
+            .insert("id".to_string(), "conv_id".to_string());
+        cfg.uppercase_for_oracle();
         assert_eq!(cfg.conversations.table, "MY_CONVOS");
+        assert_eq!(cfg.conversations.col("id"), "CONV_ID");
     }
 
     // ── validate() ────────────────────────────────────────────────────────

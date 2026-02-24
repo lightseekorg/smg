@@ -56,10 +56,10 @@ impl OracleStore {
     pub fn new(config: &OracleConfig, init_schemas: &[SchemaInitFn]) -> Result<Self, String> {
         // Extract and validate schema config.
         // Oracle folds unquoted identifiers to uppercase, so existing tables
-        // are CONVERSATIONS etc.  Uppercase the configured names so that
-        // quoted references (`OWNER."TABLE"`) match reality.
+        // and columns are CONVERSATIONS, CONV_ID, etc.  Uppercase all
+        // configured names so that quoted references match reality.
         let mut schema = config.schema.clone().unwrap_or_default();
-        schema.uppercase_table_names();
+        schema.uppercase_for_oracle();
         schema.validate()?;
         let schema = Arc::new(schema);
 
@@ -283,7 +283,7 @@ impl OracleConversationStorage {
 
     pub(crate) fn init_schema(conn: &Connection, schema: &SchemaConfig) -> Result<(), String> {
         let s = &schema.conversations;
-        // Table names are already uppercased by OracleStore::new().
+        // Table and column names are already uppercased by OracleStore::new().
         let table = s.qualified_table(schema.owner.as_deref());
 
         let exists: i64 = conn
@@ -503,7 +503,7 @@ impl OracleConversationItemStorage {
 
     pub(crate) fn init_schema(conn: &Connection, schema: &SchemaConfig) -> Result<(), String> {
         let si = &schema.conversation_items;
-        // Table names are already uppercased by OracleStore::new().
+        // Table and column names are already uppercased by OracleStore::new().
         let si_table = si.qualified_table(schema.owner.as_deref());
 
         let exists_items: i64 = conn
@@ -552,11 +552,14 @@ impl OracleConversationItemStorage {
             let col_iid = sl.col("item_id");
             let col_added = sl.col("added_at");
 
+            let pk_name = format!("PK_{}", sl.table);
+            let idx_name = format!("{}_CONV_IDX", sl.table);
+
             let col_defs = [
                 format!("{col_cid} VARCHAR2(64) NOT NULL"),
                 format!("{col_iid} VARCHAR2(64) NOT NULL"),
                 format!("{col_added} TIMESTAMP WITH TIME ZONE"),
-                format!("CONSTRAINT pk_conv_item_link PRIMARY KEY ({col_cid}, {col_iid})"),
+                format!("CONSTRAINT {pk_name} PRIMARY KEY ({col_cid}, {col_iid})"),
             ];
 
             conn.execute(
@@ -566,9 +569,7 @@ impl OracleConversationItemStorage {
             .map_err(map_oracle_error)?;
 
             conn.execute(
-                &format!(
-                    "CREATE INDEX conv_item_links_conv_idx ON {sl_table} ({col_cid}, {col_added})"
-                ),
+                &format!("CREATE INDEX {idx_name} ON {sl_table} ({col_cid}, {col_added})"),
                 &[],
             )
             .map_err(map_oracle_error)?;
@@ -987,7 +988,7 @@ impl OracleResponseStorage {
 
     pub(crate) fn init_schema(conn: &Connection, schema: &SchemaConfig) -> Result<(), String> {
         let s = &schema.responses;
-        // Table names are already uppercased by OracleStore::new().
+        // Table and column names are already uppercased by OracleStore::new().
         let table = s.qualified_table(schema.owner.as_deref());
 
         let exists: i64 = conn
@@ -1027,19 +1028,21 @@ impl OracleResponseStorage {
         }
 
         let prev = s.col("previous_response_id");
+        let prev_idx = format!("{}_PREV_IDX", s.table);
         create_index_if_missing(
             conn,
             &s.table,
-            "RESPONSES_PREV_IDX",
-            &format!("CREATE INDEX responses_prev_idx ON {table}({prev})"),
+            &prev_idx,
+            &format!("CREATE INDEX {prev_idx} ON {table}({prev})"),
         )?;
 
         let safety = s.col("safety_identifier");
+        let user_idx = format!("{}_USER_IDX", s.table);
         create_index_if_missing(
             conn,
             &s.table,
-            "RESPONSES_USER_IDX",
-            &format!("CREATE INDEX responses_user_idx ON {table}({safety})"),
+            &user_idx,
+            &format!("CREATE INDEX {user_idx} ON {table}({safety})"),
         )?;
 
         Ok(())
@@ -1051,7 +1054,7 @@ impl OracleResponseStorage {
     ) -> Result<(), String> {
         let s = &schema.responses;
         let col_safety = s.col("safety_identifier");
-        // Table names are already uppercased by OracleStore::new().
+        // Table and column names are already uppercased by OracleStore::new().
         let col_upper = col_safety.to_uppercase();
         let table = s.qualified_table(schema.owner.as_deref());
 
@@ -1094,7 +1097,7 @@ impl OracleResponseStorage {
         conn: &Connection,
         schema: &SchemaConfig,
     ) -> Result<(), String> {
-        // Table names are already uppercased by OracleStore::new().
+        // Table and column names are already uppercased by OracleStore::new().
         let s = &schema.responses;
         let table = s.qualified_table(schema.owner.as_deref());
 
