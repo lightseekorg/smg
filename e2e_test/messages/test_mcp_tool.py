@@ -54,11 +54,6 @@ PASSTHROUGH = McpTestConfig(
     prompt="Roll 2d4+1",
 )
 
-MCP_CONFIGS = {
-    "smg_handled": SMG_HANDLED,
-    "passthrough": PASSTHROUGH,
-}
-
 
 def _extra_body(cfg: McpTestConfig) -> dict:
     """Build extra_body for MCP requests."""
@@ -183,22 +178,17 @@ def assert_streaming_mcp_response(
 
 
 # =============================================================================
-# MCP Tool Tests — parametrized over SMG-handled vs passthrough
+# MCP Tool Tests — SMG-handled (X-SMG-MCP: enabled)
 # =============================================================================
 
 
 @pytest.mark.parametrize("setup_backend", ["anthropic"], indirect=True)
-@pytest.mark.parametrize("mcp_mode", ["smg_handled", "passthrough"])
 class TestMcpTool:
-    """MCP tool use tests for both SMG-handled and passthrough modes.
+    """MCP tool use tests with SMG orchestration (X-SMG-MCP: enabled)."""
 
-    smg_handled: X-SMG-MCP header present, SMG orchestrates the MCP tool loop.
-    passthrough: No X-SMG-MCP header, request forwarded to Anthropic backend as-is.
-    """
-
-    def test_mcp_non_streaming(self, setup_backend, mcp_mode):
+    def test_mcp_non_streaming(self, setup_backend):
         """Test MCP tool execution in non-streaming mode."""
-        cfg = MCP_CONFIGS[mcp_mode]
+        cfg = SMG_HANDLED
         _, model, client, _ = setup_backend
 
         response = client.messages.create(
@@ -211,9 +201,55 @@ class TestMcpTool:
 
         assert_non_streaming_mcp_response(response, model, cfg.server_name)
 
-    def test_mcp_streaming(self, setup_backend, mcp_mode):
+    def test_mcp_streaming(self, setup_backend):
         """Test MCP tool execution with SSE streaming."""
-        cfg = MCP_CONFIGS[mcp_mode]
+        cfg = SMG_HANDLED
+        _, model, client, _ = setup_backend
+
+        with client.messages.stream(
+            model=model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": cfg.prompt}],
+            extra_headers=cfg.headers,
+            extra_body=_extra_body(cfg),
+        ) as stream:
+            results = collect_streaming_events(stream)
+
+        assert_streaming_mcp_response(*results)
+
+
+# =============================================================================
+# MCP Passthrough Tests — external DMCP server (run with: pytest -m external)
+# =============================================================================
+
+
+@pytest.mark.external
+@pytest.mark.parametrize("setup_backend", ["anthropic"], indirect=True)
+class TestMcpToolPassthrough:
+    """MCP passthrough tests using external DMCP server.
+
+    No X-SMG-MCP header — request forwarded to Anthropic backend as-is.
+    Requires external https://dmcp-server.deno.dev/sse to be reachable.
+    """
+
+    def test_mcp_passthrough_non_streaming(self, setup_backend):
+        """Test MCP passthrough in non-streaming mode."""
+        cfg = PASSTHROUGH
+        _, model, client, _ = setup_backend
+
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": cfg.prompt}],
+            extra_headers=cfg.headers,
+            extra_body=_extra_body(cfg),
+        )
+
+        assert_non_streaming_mcp_response(response, model, cfg.server_name)
+
+    def test_mcp_passthrough_streaming(self, setup_backend):
+        """Test MCP passthrough with SSE streaming."""
+        cfg = PASSTHROUGH
         _, model, client, _ = setup_backend
 
         with client.messages.stream(
