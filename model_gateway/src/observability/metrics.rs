@@ -46,7 +46,7 @@ pub(crate) fn intern_string(s: &str) -> Arc<str> {
         .clone()
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn interner_size() -> usize {
     STRING_INTERNER.len()
 }
@@ -334,6 +334,10 @@ pub(crate) fn init_metrics() {
     smg_mesh::init_mesh_metrics();
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "startup initialization — metrics exporter must be installed or the process cannot serve metrics"
+)]
 pub fn start_prometheus(config: PrometheusConfig) {
     init_metrics();
 
@@ -1339,7 +1343,7 @@ mod tests {
             let bucket_found = buckets
                 .iter()
                 .any(|&b| (b - duration).abs() < 0.0001 || b > duration);
-            assert!(bucket_found, "No bucket found for {} ({})", duration, label);
+            assert!(bucket_found, "No bucket found for {duration} ({label})");
         }
     }
 
@@ -1470,7 +1474,7 @@ mod tests {
         let initial_size = interner_size();
 
         // Intern some unique strings
-        let unique = format!("unique_test_string_{}", initial_size);
+        let unique = format!("unique_test_string_{initial_size}");
         intern_string(&unique);
 
         assert!(interner_size() > initial_size);

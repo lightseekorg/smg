@@ -33,7 +33,7 @@ fn test_create_message_request_deserialization() {
 
     match &request.messages[0].content {
         InputContent::String(s) => assert_eq!(s, "Hello, Claude!"),
-        _ => panic!("Expected string content"),
+        InputContent::Blocks(_) => panic!("Expected string content"),
     }
 }
 
@@ -54,7 +54,7 @@ fn test_create_message_request_with_system() {
     assert!(request.system.is_some());
     match request.system.unwrap() {
         SystemContent::String(s) => assert_eq!(s, "You are a helpful assistant."),
-        _ => panic!("Expected string system content"),
+        SystemContent::Blocks(_) => panic!("Expected string system content"),
     }
 }
 

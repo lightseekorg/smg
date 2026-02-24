@@ -16,7 +16,6 @@ categories = ["database", "asynchronous"]
 [dependencies]
 async-trait.workspace = true
 chrono = { workspace = true, features = ["serde"] }
-dashmap.workspace = true
 parking_lot.workspace = true
 rand.workspace = true
 serde = { workspace = true, features = ["derive"] }

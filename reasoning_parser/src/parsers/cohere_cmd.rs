@@ -52,7 +52,7 @@ impl ReasoningParser for CohereCmdParser {
     }
 
     fn reset(&mut self) {
-        self.base.reset()
+        self.base.reset();
     }
 
     fn model_type(&self) -> &str {
@@ -184,12 +184,12 @@ mod tests {
         let mut parser = CohereCmdParser::new();
 
         // Simulate full Cohere response with thinking and response markers
-        let input = r#"<|START_THINKING|>
+        let input = r"<|START_THINKING|>
 Let me analyze this step by step.
 1. First, I'll consider the question.
 2. Then, I'll formulate a response.
 <|END_THINKING|>
-<|START_RESPONSE|>The answer is 42.<|END_RESPONSE|>"#;
+<|START_RESPONSE|>The answer is 42.<|END_RESPONSE|>";
 
         let result = parser.detect_and_parse_reasoning(input).unwrap();
         assert!(result.reasoning_text.contains("step by step"));

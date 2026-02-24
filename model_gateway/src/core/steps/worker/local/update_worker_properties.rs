@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::core::{steps::workflow_data::WorkerUpdateWorkflowData, BasicWorkerBuilder, Worker};
@@ -41,7 +41,7 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
 
         let mut updated_workers: Vec<Arc<dyn Worker>> = Vec::with_capacity(workers_to_update.len());
 
-        for worker in workers_to_update.iter() {
+        for worker in &workers_to_update {
             // Build updated labels - merge new labels into existing ones
             let mut updated_labels = worker.metadata().spec.labels.clone();
             if let Some(ref new_labels) = request.labels {
@@ -51,8 +51,8 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
             }
 
             // Resolve priority and cost: use update value if specified, otherwise keep existing
-            let updated_priority = request.priority.unwrap_or(worker.priority());
-            let updated_cost = request.cost.unwrap_or(worker.cost());
+            let updated_priority = request.priority.unwrap_or_else(|| worker.priority());
+            let updated_cost = request.cost.unwrap_or_else(|| worker.cost());
 
             // Build updated health config from resolved runtime config
             let existing_health = &worker.metadata().health_config;
@@ -87,10 +87,16 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
 
             // Preserve DP configuration if the worker is DP-aware
             if worker.is_dp_aware() {
-                builder = builder.dp_config(
-                    worker.dp_rank().expect("DP-aware worker must have dp_rank"),
-                    worker.dp_size().expect("DP-aware worker must have dp_size"),
-                );
+                if let (Some(rank), Some(size)) = (worker.dp_rank(), worker.dp_size()) {
+                    builder = builder.dp_config(rank, size);
+                } else {
+                    warn!(
+                        worker_url = %worker.url(),
+                        dp_rank = ?worker.dp_rank(),
+                        dp_size = ?worker.dp_size(),
+                        "DP-aware worker is missing dp_rank or dp_size; skipping DP config"
+                    );
+                }
             }
 
             let new_worker: Arc<dyn Worker> = Arc::new(builder.build());

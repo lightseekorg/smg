@@ -35,7 +35,7 @@ const SSE_CHANNEL_SIZE: usize = 128;
 /// passthrough (no MCP) and MCP tool loop paths.
 pub(crate) async fn execute(router: &RouterContext, req_ctx: RequestContext) -> Response {
     if req_ctx.mcp_servers.is_some() {
-        return execute_mcp_streaming(router, req_ctx).await;
+        return execute_mcp_streaming(router, req_ctx);
     }
     execute_passthrough(router, &req_ctx).await
 }
@@ -148,13 +148,21 @@ async fn build_streaming_error_response(
 // ============================================================================
 
 /// Spawn the MCP tool loop in a background task and return an SSE response.
-async fn execute_mcp_streaming(router: &RouterContext, req_ctx: RequestContext) -> Response {
+fn execute_mcp_streaming(router: &RouterContext, req_ctx: RequestContext) -> Response {
     let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(SSE_CHANNEL_SIZE);
 
     let router = router.clone();
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fire-and-forget streaming task; gateway shutdown need not wait for individual MCP tool loops"
+    )]
     tokio::spawn(async move {
         if let Err(e) = run_tool_loop(tx.clone(), router, req_ctx).await {
+            if e == sse::CLIENT_DISCONNECTED_ERROR {
+                debug!(error = %e, "Streaming tool loop ended: client disconnected");
+                return;
+            }
             warn!(error = %e, "Streaming tool loop failed");
             let _ = sse::send_error(&tx, &e).await;
         }
@@ -181,18 +189,12 @@ async fn run_tool_loop(
     router: RouterContext,
     mut req_ctx: RequestContext,
 ) -> Result<(), String> {
-    let session_id = format!("msg_{}", uuid::Uuid::new_v4());
+    let session_id = format!("msg_{}", uuid::Uuid::now_v7());
     let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
-    let session = McpToolSession::new(
-        &router.mcp_orchestrator,
-        mcp_servers,
-        &session_id,
-        Default::default(),
-    );
+    let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &session_id);
 
     // Inject MCP tools into the request as regular tools
-    let allowed_tools = mcp::collect_allowed_tools_from_toolsets(&req_ctx.request.tools);
-    mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session, &allowed_tools);
+    mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session);
 
     let mut global_index: u32 = 0;
     let mut total_input_tokens: u32 = 0;
@@ -273,10 +275,7 @@ async fn run_tool_loop(
         "Streaming MCP tool loop exceeded max iterations ({})",
         DEFAULT_MAX_ITERATIONS
     );
-    let error_msg = format!(
-        "MCP tool loop exceeded maximum iterations ({})",
-        DEFAULT_MAX_ITERATIONS
-    );
+    let error_msg = format!("MCP tool loop exceeded maximum iterations ({DEFAULT_MAX_ITERATIONS})");
     let _ = sse::send_error(&tx, &error_msg).await;
     Ok(())
 }

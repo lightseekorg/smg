@@ -70,11 +70,12 @@ impl TraceService for TestOtelCollector {
     }
 }
 
+#[expect(clippy::disallowed_methods, reason = "test infrastructure")]
 async fn start_collector(
     port: u16,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<TestOtelCollector, Box<dyn std::error::Error>> {
-    let addr = format!("0.0.0.0:{}", port).parse()?;
+    let addr = format!("0.0.0.0:{port}").parse()?;
     let collector = TestOtelCollector::new();
     let collector_clone = collector.clone();
 
@@ -92,6 +93,7 @@ async fn start_collector(
     Ok(collector)
 }
 
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 #[tokio::test]
 #[serial]
 async fn test_router_with_tracing() {
@@ -101,8 +103,8 @@ async fn test_router_with_tracing() {
     let collector = start_collector(port, shutdown_rx)
         .await
         .expect("Failed to start collector");
-    let collector_endpoint = format!("0.0.0.0:{}", port);
-    println!("OTLP Collector started on: {}", collector_endpoint);
+    let collector_endpoint = format!("0.0.0.0:{port}");
+    println!("OTLP Collector started on: {collector_endpoint}");
 
     // 2. create the mock worker
     let mut mock_worker = MockWorker::new(MockWorkerConfig {
@@ -115,7 +117,7 @@ async fn test_router_with_tracing() {
 
     let worker_url = mock_worker.start().await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    println!("Mock worker started on: {}", worker_url);
+    println!("Mock worker started on: {worker_url}");
 
     // 3. create router config and enable tracing
     let router_config = RouterConfig::builder()
@@ -133,7 +135,12 @@ async fn test_router_with_tracing() {
         .build_unchecked();
 
     // 4. Initialize the OTLP client (check if already initialized by another test)
-    let otel_initialized_by_this_test = if !otel_trace::is_otel_enabled() {
+    let otel_initialized_by_this_test = if otel_trace::is_otel_enabled() {
+        println!(
+            "OpenTelemetry already initialized by previous test (spans will go to that collector)"
+        );
+        false
+    } else {
         let init_result = otel_trace::otel_tracing_init(true, Some(&collector_endpoint));
         assert!(
             init_result.is_ok(),
@@ -142,11 +149,6 @@ async fn test_router_with_tracing() {
         );
         println!("OpenTelemetry initialized successfully");
         true
-    } else {
-        println!(
-            "OpenTelemetry already initialized by previous test (spans will go to that collector)"
-        );
-        false
     };
 
     let trace_config = TraceConfig {
@@ -233,29 +235,27 @@ async fn test_router_with_tracing() {
 
     // 11. Wait for spans to be exported
     match otel_trace::flush_spans_async().await {
-        Ok(_) => println!("Spans flushed successfully"),
-        Err(e) => println!("Failed to flush spans: {:?}", e),
+        Ok(()) => println!("Spans flushed successfully"),
+        Err(e) => println!("Failed to flush spans: {e:?}"),
     }
 
     // 12. Verify that the spans were exported to the collector
     let span_count = collector.get_span_count();
-    println!("Total spans received by collector: {}", span_count);
+    println!("Total spans received by collector: {span_count}");
 
     // Only assert span count if we initialized OTEL with our own collector
     // When OTEL was pre-initialized by another test, spans go to that collector instead
     if otel_initialized_by_this_test {
         assert!(
             span_count == 2,
-            "Expected to receive at least 2 span, but got {}. \
-            This indicates that tracing data is not being exported to the OTLP collector.",
-            span_count
+            "Expected to receive exactly 2 spans, but got {span_count}. \
+            This indicates that tracing data is not being exported to the OTLP collector."
         );
-        println!("Test passed! Collector received {} spans", span_count);
+        println!("Test passed! Collector received {span_count} spans");
     } else {
         println!(
             "Skipping span count assertion - OTEL was pre-initialized by another test. \
-            Spans went to that collector. Received {} spans on this test's collector.",
-            span_count
+            Spans went to that collector. Received {span_count} spans on this test's collector."
         );
     }
 
@@ -279,6 +279,7 @@ async fn test_router_with_tracing() {
 ///
 /// Note: This test handles the case where OTEL may already be initialized
 /// by a previous test (since tests run sequentially with #[serial]).
+#[expect(clippy::print_stdout, reason = "test diagnostic output")]
 #[tokio::test]
 #[serial]
 async fn test_grpc_trace_context_injection() {
@@ -289,7 +290,7 @@ async fn test_grpc_trace_context_injection() {
     let _collector = start_collector(port, shutdown_rx)
         .await
         .expect("Failed to start collector");
-    let collector_endpoint = format!("0.0.0.0:{}", port);
+    let collector_endpoint = format!("0.0.0.0:{port}");
 
     // 2. Initialize OTEL if not already enabled
     // Note: otel_tracing_init will fail if already initialized (OnceLock),
@@ -342,7 +343,7 @@ async fn test_grpc_trace_context_injection() {
         assert_eq!(parts[1].len(), 32, "trace ID should be 32 hex characters");
         assert_eq!(parts[2].len(), 16, "span ID should be 16 hex characters");
 
-        println!("Successfully injected traceparent: {}", traceparent_value);
+        println!("Successfully injected traceparent: {traceparent_value}");
 
         // === Test 3: Verify all keys are lowercase (gRPC metadata requirement) ===
         for key_and_value in metadata.iter() {
@@ -352,8 +353,7 @@ async fn test_grpc_trace_context_injection() {
                     assert_eq!(
                         key_str,
                         key_str.to_lowercase(),
-                        "gRPC metadata key '{}' should be lowercase",
-                        key_str
+                        "gRPC metadata key '{key_str}' should be lowercase"
                     );
                 }
                 tonic::metadata::KeyAndValueRef::Binary(key, _) => {
@@ -361,8 +361,7 @@ async fn test_grpc_trace_context_injection() {
                     assert_eq!(
                         key_str,
                         key_str.to_lowercase(),
-                        "gRPC metadata key '{}' should be lowercase",
-                        key_str
+                        "gRPC metadata key '{key_str}' should be lowercase"
                     );
                 }
             }

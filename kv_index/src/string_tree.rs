@@ -281,7 +281,7 @@ struct EvictionEntry {
 
 impl Eq for EvictionEntry {}
 
-#[allow(clippy::non_canonical_partial_ord_impl)]
+#[expect(clippy::non_canonical_partial_ord_impl)]
 impl PartialOrd for EvictionEntry {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.timestamp.cmp(&other.timestamp))
@@ -421,9 +421,7 @@ impl Tree {
             },
         }
 
-        while !remaining.is_empty() {
-            let first_char = remaining.chars().next().unwrap();
-
+        while let Some(first_char) = remaining.chars().next() {
             // Use entry API for atomic check-and-insert semantics (required for thread safety)
             let step = match prev.children.entry(first_char) {
                 Entry::Vacant(entry) => {
@@ -480,7 +478,10 @@ impl Tree {
                             last_tenant: RwLock::new(matched_node.last_tenant.read().clone()),
                         });
 
-                        let first_new_char = contracted_text.first_char().unwrap();
+                        let Some(first_new_char) = contracted_text.first_char() else {
+                            // split_at_char with shared_count < char_count guarantees non-empty suffix
+                            return;
+                        };
                         new_node
                             .children
                             .insert(first_new_char, Arc::clone(&matched_node));
@@ -562,9 +563,7 @@ impl Tree {
         let mut matched_chars = 0;
         let mut prev = Arc::clone(&self.root);
 
-        while !remaining.is_empty() {
-            let first_char = remaining.chars().next().unwrap();
-
+        while let Some(first_char) = remaining.chars().next() {
             let child_node = prev.children.get(&first_char).map(|e| e.value().clone());
 
             if let Some(matched_node) = child_node {
@@ -657,7 +656,6 @@ impl Tree {
         (matched_text, result.tenant.to_string())
     }
 
-    #[allow(dead_code)]
     pub fn prefix_match_tenant(&self, text: &str, tenant: &str) -> String {
         // Use slice-based traversal - no Vec<char> allocation
 
@@ -668,9 +666,7 @@ impl Tree {
         let mut matched_chars = 0;
         let mut prev = Arc::clone(&self.root);
 
-        while !remaining.is_empty() {
-            let first_char = remaining.chars().next().unwrap();
-
+        while let Some(first_char) = remaining.chars().next() {
             let child_node = prev.children.get(&first_char).map(|e| e.value().clone());
 
             if let Some(matched_node) = child_node {
@@ -732,8 +728,8 @@ impl Tree {
             .map(|entry| (Arc::clone(entry.key()), true))
             .collect();
 
-        for child in node.children.iter() {
-            for tenant in child.value().tenant_last_access_time.iter() {
+        for child in &node.children {
+            for tenant in &child.value().tenant_last_access_time {
                 // Mark as non-leaf if any child has this tenant
                 candidates.insert(Arc::clone(tenant.key()), false);
             }
@@ -752,7 +748,7 @@ impl Tree {
         let mut pq = BinaryHeap::new();
 
         while let Some(curr) = stack.pop() {
-            for child in curr.children.iter() {
+            for child in &curr.children {
                 stack.push(Arc::clone(child.value()));
             }
 
@@ -769,7 +765,7 @@ impl Tree {
         }
 
         debug!("Before eviction - Used size per tenant:");
-        for entry in self.tenant_char_count.iter() {
+        for entry in &self.tenant_char_count {
             debug!("Tenant: {}, Size: {}", entry.key(), entry.value());
         }
 
@@ -847,7 +843,7 @@ impl Tree {
         }
 
         debug!("After eviction - Used size per tenant:");
-        for entry in self.tenant_char_count.iter() {
+        for entry in &self.tenant_char_count {
             debug!("Tenant: {}, Size: {}", entry.key(), entry.value());
         }
     }
@@ -856,7 +852,6 @@ impl Tree {
     // See lib.rs for design options. Current naive O(n) traversal removed.
     // For now, stale entries are cleaned up by LRU eviction.
 
-    #[allow(dead_code)]
     pub fn get_tenant_char_count(&self) -> HashMap<String, usize> {
         self.tenant_char_count
             .iter()
@@ -864,7 +859,6 @@ impl Tree {
             .collect()
     }
 
-    #[allow(dead_code)]
     pub fn get_used_size_per_tenant(&self) -> HashMap<String, usize> {
         // perform a DFS to traverse all nodes and calculate the total size used by each tenant
 
@@ -875,14 +869,14 @@ impl Tree {
             // Use cached char count instead of chars().count()
             let text_count = curr.text.read().char_count();
 
-            for tenant in curr.tenant_last_access_time.iter() {
+            for tenant in &curr.tenant_last_access_time {
                 let size = used_size_per_tenant
                     .entry(tenant.key().to_string())
                     .or_insert(0);
                 *size += text_count;
             }
 
-            for child in curr.children.iter() {
+            for child in &curr.children {
                 stack.push(Arc::clone(child.value()));
             }
         }
@@ -948,11 +942,15 @@ impl Tree {
             }
         }
 
-        for child in node.children.iter() {
+        for child in &node.children {
             self.collect_tenant_nodes(child.value(), tenant_id, result);
         }
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "method logically belongs to the tree instance; keeps API consistent with collect_tenant_nodes"
+    )]
     fn remove_tenant_from_node(&self, node: &NodeRef, tenant_id: &TenantId) -> bool {
         node.tenant_last_access_time.remove(tenant_id).is_some()
     }
@@ -974,7 +972,6 @@ impl Tree {
         *self.root.text.write() = NodeText::new(String::new());
     }
 
-    #[allow(dead_code)]
     fn node_to_string(node: &NodeRef, prefix: &str, is_last: bool) -> String {
         let mut result = String::new();
 
@@ -988,10 +985,10 @@ impl Tree {
 
         // Add tenant information with epoch values
         let mut tenant_info = Vec::new();
-        for entry in node.tenant_last_access_time.iter() {
+        for entry in &node.tenant_last_access_time {
             let tenant_id = entry.key();
             let epoch = entry.value();
-            tenant_info.push(format!("{} | epoch:{}", tenant_id, epoch));
+            tenant_info.push(format!("{tenant_id} | epoch:{epoch}"));
         }
 
         result.push_str(&tenant_info.join(", "));
@@ -1015,7 +1012,10 @@ impl Tree {
         result
     }
 
-    #[allow(dead_code)]
+    #[expect(
+        clippy::print_stdout,
+        reason = "diagnostic method intended for debugging and test output"
+    )]
     pub fn pretty_print(&self) {
         if self.root.children.is_empty() {
             return;
@@ -1070,6 +1070,7 @@ impl RadixTree for Tree {
 
 //  Unit tests
 #[cfg(test)]
+#[expect(clippy::print_stdout, reason = "test diagnostics")]
 mod tests {
     use std::{
         thread,
@@ -1105,10 +1106,7 @@ mod tests {
         let maintained_counts = get_maintained_counts(&tree);
 
         println!("Phase 1 - Maintained vs Computed counts:");
-        println!(
-            "Maintained: {:?}\nComputed: {:?}",
-            maintained_counts, computed_sizes
-        );
+        println!("Maintained: {maintained_counts:?}\nComputed: {computed_sizes:?}");
         assert_eq!(
             maintained_counts, computed_sizes,
             "Phase 1: Initial insertions"
@@ -1123,10 +1121,7 @@ mod tests {
         let maintained_counts = get_maintained_counts(&tree);
 
         println!("Phase 2 - Maintained vs Computed counts:");
-        println!(
-            "Maintained: {:?}\nComputed: {:?}",
-            maintained_counts, computed_sizes
-        );
+        println!("Maintained: {maintained_counts:?}\nComputed: {computed_sizes:?}");
         assert_eq!(
             maintained_counts, computed_sizes,
             "Phase 2: Additional insertions"
@@ -1141,10 +1136,7 @@ mod tests {
         let maintained_counts = get_maintained_counts(&tree);
 
         println!("Phase 3 - Maintained vs Computed counts:");
-        println!(
-            "Maintained: {:?}\nComputed: {:?}",
-            maintained_counts, computed_sizes
-        );
+        println!("Maintained: {maintained_counts:?}\nComputed: {computed_sizes:?}");
         assert_eq!(
             maintained_counts, computed_sizes,
             "Phase 3: Overlapping insertions"
@@ -1156,10 +1148,7 @@ mod tests {
         let maintained_counts = get_maintained_counts(&tree);
 
         println!("Phase 4 - Maintained vs Computed counts:");
-        println!(
-            "Maintained: {:?}\nComputed: {:?}",
-            maintained_counts, computed_sizes
-        );
+        println!("Maintained: {maintained_counts:?}\nComputed: {computed_sizes:?}");
         assert_eq!(maintained_counts, computed_sizes, "Phase 4: After eviction");
     }
 
@@ -1265,7 +1254,7 @@ mod tests {
 
         let mut handles = vec![];
 
-        for text in TEXTS.iter() {
+        for text in &TEXTS {
             let tree_clone = Arc::clone(&tree_clone);
             let tenant = "tenant0";
 
@@ -1286,7 +1275,7 @@ mod tests {
 
         let tree_clone = Arc::clone(&tree);
 
-        for text in TEXTS.iter() {
+        for text in &TEXTS {
             let tree_clone = Arc::clone(&tree_clone);
             let tenant = "tenant0";
 
@@ -1322,10 +1311,10 @@ mod tests {
         let mut handles = vec![];
 
         for (i, prefix) in PREFIXES.iter().enumerate() {
-            for suffix in suffixes.iter() {
+            for suffix in &suffixes {
                 let tree_clone = Arc::clone(&tree);
-                let text = format!("{} {}", prefix, suffix);
-                let tenant = format!("tenant{}", i);
+                let text = format!("{prefix} {suffix}");
+                let tenant = format!("tenant{i}");
 
                 let handle = thread::spawn(move || {
                     tree_clone.insert_text(&text, &tenant);
@@ -1350,7 +1339,7 @@ mod tests {
 
             let handle = thread::spawn(move || {
                 let (matched_text, matched_tenant) = tree_clone.prefix_match_legacy(prefix);
-                let tenant = format!("tenant{}", i);
+                let tenant = format!("tenant{i}");
                 assert_eq!(matched_text, *prefix);
                 assert_eq!(matched_tenant, tenant);
             });
@@ -1383,10 +1372,10 @@ mod tests {
         let mut handles = vec![];
 
         for (i, prefix) in PREFIXES.iter().enumerate() {
-            for suffix in suffixes.iter() {
+            for suffix in &suffixes {
                 let tree_clone = Arc::clone(&tree);
-                let text = format!("{} {}", prefix, suffix);
-                let tenant = format!("tenant{}", i);
+                let text = format!("{prefix} {suffix}");
+                let tenant = format!("tenant{i}");
 
                 let handle = thread::spawn(move || {
                     tree_clone.insert_text(&text, &tenant);
@@ -1397,7 +1386,7 @@ mod tests {
         }
 
         // check matching using multi threads
-        for prefix in PREFIXES.iter() {
+        for prefix in &PREFIXES {
             let tree_clone = Arc::clone(&tree);
 
             let handle = thread::spawn(move || {
@@ -1426,13 +1415,13 @@ mod tests {
         ];
 
         // Insert sequentially
-        for (text, tenant) in TEST_PAIRS.iter() {
+        for (text, tenant) in &TEST_PAIRS {
             tree.insert_text(text, tenant);
         }
 
         tree.pretty_print();
 
-        for (text, tenant) in TEST_PAIRS.iter() {
+        for (text, tenant) in &TEST_PAIRS {
             let (matched_text, matched_tenant) = tree.prefix_match_legacy(text);
             assert_eq!(matched_text, *text);
             assert_eq!(matched_tenant, *tenant);
@@ -1452,7 +1441,7 @@ mod tests {
         // Create multiple threads for insertion
         let mut handles = vec![];
 
-        for (text, tenant) in TEST_PAIRS.iter() {
+        for (text, tenant) in &TEST_PAIRS {
             let tree_clone = Arc::clone(&tree);
 
             let handle = thread::spawn(move || {
@@ -1472,7 +1461,7 @@ mod tests {
         // Create multiple threads for matching
         let mut handles = vec![];
 
-        for (text, tenant) in TEST_PAIRS.iter() {
+        for (text, tenant) in &TEST_PAIRS {
             let tree_clone = Arc::clone(&tree);
 
             let handle = thread::spawn(move || {
@@ -1536,7 +1525,7 @@ mod tests {
         for _i in 0..100 {
             for (j, prefix) in prefixes.iter().enumerate() {
                 let random_suffix = random_string(10);
-                let text = format!("{}{}", prefix, random_suffix);
+                let text = format!("{prefix}{random_suffix}");
                 let tenant = format!("tenant{}", j + 1);
                 tree.insert_text(&text, &tenant);
             }
@@ -1547,13 +1536,10 @@ mod tests {
 
         // Check sizes after eviction
         let sizes_after = tree.get_used_size_per_tenant();
-        for (tenant, &size) in sizes_after.iter() {
+        for (tenant, &size) in &sizes_after {
             assert!(
                 size <= max_size,
-                "Tenant {} exceeds size limit. Current size: {}, Limit: {}",
-                tenant,
-                size,
-                max_size
+                "Tenant {tenant} exceeds size limit. Current size: {size}, Limit: {max_size}"
             );
         }
     }
@@ -1589,19 +1575,19 @@ mod tests {
             let handle = thread::spawn(move || {
                 let mut rng = rand::rng();
                 let tenant = format!("tenant{}", thread_id + 1);
-                let prefix = format!("prefix{}", thread_id);
+                let prefix = format!("prefix{thread_id}");
 
                 while start_time.elapsed() < test_duration {
                     // Random decision: match or insert (70% match, 30% insert)
                     if rng.random_bool(0.7) {
                         // Perform match operation
                         let random_len = rng.random_range(3..10);
-                        let search_str = format!("{}{}", prefix, random_string(random_len));
+                        let search_str = format!("{prefix}{}", random_string(random_len));
                         let (_matched, _) = tree.prefix_match_legacy(&search_str);
                     } else {
                         // Perform insert operation
                         let random_len = rng.random_range(5..15);
-                        let insert_str = format!("{}{}", prefix, random_string(random_len));
+                        let insert_str = format!("{prefix}{}", random_string(random_len));
                         tree.insert_text(&insert_str, &tenant);
                         // println!("Thread {} inserted: {}", thread_id, insert_str);
                     }
@@ -1623,14 +1609,12 @@ mod tests {
 
         // Final size check
         let final_sizes = tree.get_used_size_per_tenant();
-        println!("Final sizes after test completion: {:?}", final_sizes);
+        println!("Final sizes after test completion: {final_sizes:?}");
 
-        for (_, &size) in final_sizes.iter() {
+        for &size in final_sizes.values() {
             assert!(
                 size <= max_size,
-                "Tenant exceeds size limit. Final size: {}, Limit: {}",
-                size,
-                max_size
+                "Tenant exceeds size limit. Final size: {size}, Limit: {max_size}"
             );
         }
     }
@@ -1672,7 +1656,7 @@ mod tests {
         let sizes = tree.get_used_size_per_tenant();
 
         tree.pretty_print();
-        println!("{:?}", sizes);
+        println!("{sizes:?}");
         assert_eq!(sizes.get("tenant1").unwrap(), &10); // "hello" + "world"
 
         // Multiple tenants sharing nodes
@@ -1681,7 +1665,7 @@ mod tests {
         let sizes = tree.get_used_size_per_tenant();
 
         tree.pretty_print();
-        println!("{:?}", sizes);
+        println!("{sizes:?}");
         assert_eq!(sizes.get("tenant1").unwrap(), &10);
         assert_eq!(sizes.get("tenant2").unwrap(), &6); // "hello" + "p"
 
@@ -1689,7 +1673,7 @@ mod tests {
         tree.insert_text("你好", "tenant3");
         let sizes = tree.get_used_size_per_tenant();
         tree.pretty_print();
-        println!("{:?}", sizes);
+        println!("{sizes:?}");
         assert_eq!(sizes.get("tenant3").unwrap(), &2); // 2 Chinese characters
 
         tree.pretty_print();
@@ -1955,9 +1939,9 @@ mod tests {
         for thread_id in 0..num_threads {
             let tree = Arc::clone(&tree);
             let handle = thread::spawn(move || {
-                let tenant = format!("tenant{}", thread_id);
+                let tenant = format!("tenant{thread_id}");
                 for i in 0..ops_per_thread {
-                    let text = format!("shared_prefix_{}", i);
+                    let text = format!("shared_prefix_{i}");
                     tree.insert_text(&text, &tenant);
 
                     // Immediately try to match
@@ -2075,7 +2059,7 @@ mod tests {
 
         // Insert many entries for single tenant
         for i in 0..100 {
-            let text = format!("entry{:03}", i);
+            let text = format!("entry{i:03}");
             tree.insert_text(&text, "tenant1");
         }
 
@@ -2088,8 +2072,7 @@ mod tests {
         let final_size = *tree.get_used_size_per_tenant().get("tenant1").unwrap_or(&0);
         assert!(
             final_size <= 50,
-            "Size {} should be <= 50 after eviction",
-            final_size
+            "Size {final_size} should be <= 50 after eviction"
         );
     }
 
@@ -2135,14 +2118,14 @@ mod tests {
 
         // Insert phase
         for i in 0..50 {
-            tree.insert_text(&format!("prefix{}", i), "tenant1");
-            tree.insert_text(&format!("other{}", i), "tenant2");
+            tree.insert_text(&format!("prefix{i}"), "tenant1");
+            tree.insert_text(&format!("other{i}"), "tenant2");
         }
         verify_consistency(&tree);
 
         // Overlapping inserts
         for i in 0..25 {
-            tree.insert_text(&format!("prefix{}", i), "tenant2");
+            tree.insert_text(&format!("prefix{i}"), "tenant2");
         }
         verify_consistency(&tree);
 
@@ -2164,7 +2147,7 @@ mod tests {
             let tree = Arc::clone(&tree);
             let handle = thread::spawn(move || {
                 let mut rng = rand::rng();
-                let tenant = format!("tenant{}", thread_id);
+                let tenant = format!("tenant{thread_id}");
 
                 for _ in 0..200 {
                     let op: u8 = rng.random_range(0..10);
@@ -2195,8 +2178,8 @@ mod tests {
 
         // Verify tree is still functional
         let sizes = tree.get_used_size_per_tenant();
-        for (tenant, size) in sizes.iter() {
-            assert!(*size > 0, "Tenant {} should have positive size", tenant);
+        for (tenant, size) in &sizes {
+            assert!(*size > 0, "Tenant {tenant} should have positive size");
         }
 
         // Verify char count consistency
@@ -2237,7 +2220,7 @@ mod tests {
 
         // 100 tenants all insert same string
         for i in 0..100 {
-            tree.insert_text("shared_path", &format!("tenant{}", i));
+            tree.insert_text("shared_path", &format!("tenant{i}"));
         }
 
         // Match should return one of them
@@ -2269,7 +2252,7 @@ mod tests {
 
         for (text, tenant) in &test_cases {
             let (matched, matched_tenant) = tree.prefix_match_legacy(text);
-            assert_eq!(matched, *text, "Failed for: {:?}", text);
+            assert_eq!(matched, *text, "Failed for: {text:?}");
             assert_eq!(matched_tenant, *tenant);
         }
     }

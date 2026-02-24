@@ -19,7 +19,7 @@ mod health_tests {
     #[tokio::test]
     async fn test_liveness_endpoint() {
         let ctx = AppTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("GET")
@@ -44,7 +44,7 @@ mod health_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("GET")
@@ -62,7 +62,7 @@ mod health_tests {
     async fn test_readiness_with_unhealthy_workers() {
         let ctx = AppTestContext::new(vec![]).await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("GET")
@@ -96,7 +96,7 @@ mod health_tests {
         ])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("GET")
@@ -121,7 +121,7 @@ mod health_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("GET")
@@ -157,7 +157,7 @@ mod generation_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "Hello, world!",
@@ -198,7 +198,7 @@ mod generation_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "Stream test",
@@ -234,7 +234,7 @@ mod generation_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "This should fail",
@@ -265,7 +265,7 @@ mod generation_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "model": "test-model",
@@ -310,7 +310,7 @@ mod model_info_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("GET")
@@ -348,7 +348,7 @@ mod model_info_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("GET")
@@ -393,7 +393,7 @@ mod model_info_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("GET")
@@ -441,7 +441,7 @@ mod model_info_tests {
     #[tokio::test]
     async fn test_model_info_with_no_workers() {
         let ctx = AppTestContext::new(vec![]).await;
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("GET")
@@ -514,7 +514,7 @@ mod model_info_tests {
         ])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         for _ in 0..5 {
             let req = Request::builder()
@@ -550,7 +550,7 @@ mod model_info_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("GET")
@@ -596,7 +596,7 @@ mod router_policy_tests {
         .await;
 
         // Send multiple requests and verify they succeed
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         for i in 0..10 {
             let payload = json!({
@@ -659,7 +659,7 @@ mod responses_endpoint_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "input": "Hello Responses API",
@@ -698,7 +698,7 @@ mod responses_endpoint_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "input": "Hello Responses API",
@@ -739,7 +739,7 @@ mod responses_endpoint_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // First create a response to obtain an id
         let resp_id = "test-get-resp-id-123";
@@ -763,7 +763,7 @@ mod responses_endpoint_tests {
         // Retrieve the response
         let req = Request::builder()
             .method("GET")
-            .uri(format!("/v1/responses/{}", resp_id))
+            .uri(format!("/v1/responses/{resp_id}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
@@ -788,7 +788,7 @@ mod responses_endpoint_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // First create a response to obtain an id
         let resp_id = "test-cancel-resp-id-456";
@@ -812,7 +812,7 @@ mod responses_endpoint_tests {
         // Cancel the response
         let req = Request::builder()
             .method("POST")
-            .uri(format!("/v1/responses/{}/cancel", resp_id))
+            .uri(format!("/v1/responses/{resp_id}/cancel"))
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
@@ -837,14 +837,14 @@ mod responses_endpoint_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Test DELETE is not implemented
         let resp_id = "resp-test-123";
 
         let req = Request::builder()
             .method("DELETE")
-            .uri(format!("/v1/responses/{}", resp_id))
+            .uri(format!("/v1/responses/{resp_id}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
@@ -877,7 +877,7 @@ mod responses_endpoint_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Directly store a response in the storage to test the retrieval endpoint
         use smg_data_connector::{ResponseId, StoredResponse};
@@ -943,7 +943,7 @@ mod responses_endpoint_tests {
         ])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Create a background response with a known id
         let rid = format!("resp_{}", 18960); // arbitrary unique id
@@ -967,7 +967,7 @@ mod responses_endpoint_tests {
         // Using the router, GET should succeed by fanning out across workers
         let req = Request::builder()
             .method("GET")
-            .uri(format!("/v1/responses/{}", rid))
+            .uri(format!("/v1/responses/{rid}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
@@ -982,7 +982,7 @@ mod responses_endpoint_tests {
             "http://127.0.0.1:18961".to_string(),
         ];
         for url in worker_urls {
-            let get_url = format!("{}/v1/responses/{}", url, rid);
+            let get_url = format!("{url}/v1/responses/{rid}");
             let res = client.get(get_url).send().await.unwrap();
             if res.status() == StatusCode::OK {
                 ok_count += 1;
@@ -1009,7 +1009,7 @@ mod error_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("GET")
@@ -1046,7 +1046,7 @@ mod error_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // GET request to POST-only endpoint
         let req = Request::builder()
@@ -1119,7 +1119,7 @@ mod error_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Send invalid JSON
         let req = Request::builder()
@@ -1157,7 +1157,7 @@ mod error_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "model": "invalid-model-name-that-does-not-exist",
@@ -1195,7 +1195,7 @@ mod cache_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("POST")
@@ -1241,7 +1241,7 @@ mod cache_tests {
         ])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("GET")
@@ -1268,7 +1268,7 @@ mod cache_tests {
     async fn test_flush_cache_no_workers() {
         let ctx = AppTestContext::new(vec![]).await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let req = Request::builder()
             .method("POST")
@@ -1311,7 +1311,7 @@ mod load_balancing_tests {
         ])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Send multiple requests and track distribution
         let mut request_count = 0;
@@ -1419,7 +1419,7 @@ mod request_id_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "Test request",
@@ -1539,7 +1539,7 @@ mod request_id_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "Test request",
@@ -1581,7 +1581,7 @@ mod rerank_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "query": "machine learning algorithms",
@@ -1633,7 +1633,7 @@ mod rerank_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "query": "test query",
@@ -1680,7 +1680,7 @@ mod rerank_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "query": "test query",
@@ -1724,7 +1724,7 @@ mod rerank_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "query": "test query",
@@ -1757,7 +1757,7 @@ mod rerank_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "query": "machine learning algorithms",
@@ -1814,7 +1814,7 @@ mod rerank_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "query": "",

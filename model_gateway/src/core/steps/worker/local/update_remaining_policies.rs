@@ -31,7 +31,7 @@ impl StepExecutor<WorkerRemovalWorkflowData> for UpdateRemainingPoliciesStep {
             affected_models.len()
         );
 
-        for model_id in affected_models.iter() {
+        for model_id in affected_models {
             let remaining_workers = app_context.worker_registry.get_by_model(model_id);
 
             if let Some(policy) = app_context.policy_registry.get_policy(model_id) {

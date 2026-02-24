@@ -56,7 +56,7 @@ impl LlamaParser {
     }
 
     /// Extract content after python_tag token
-    fn extract_content_after_python_tag(&self, text: &str) -> Option<(String, String)> {
+    fn extract_content_after_python_tag(text: &str) -> Option<(String, String)> {
         const PYTHON_TAG: &str = "<|python_tag|>";
 
         if let Some(tag_pos) = text.find(PYTHON_TAG) {
@@ -69,7 +69,7 @@ impl LlamaParser {
     }
 
     /// Parse a single JSON object into a ToolCall (Llama format: name + parameters)
-    fn parse_single_object(&self, obj: &Value) -> ParserResult<Option<ToolCall>> {
+    fn parse_single_object(obj: &Value) -> ParserResult<Option<ToolCall>> {
         // Llama format only: {"name": "function_name", "parameters": {...}}
         let name = obj.get("name").and_then(|v| v.as_str());
 
@@ -94,7 +94,7 @@ impl LlamaParser {
     }
 
     /// Parse semicolon-separated JSON objects
-    fn parse_semicolon_separated(&self, content: &str) -> ParserResult<Vec<ToolCall>> {
+    fn parse_semicolon_separated(content: &str) -> ParserResult<Vec<ToolCall>> {
         let mut all_tools = Vec::new();
 
         // Split by semicolon and parse each JSON object
@@ -107,7 +107,7 @@ impl LlamaParser {
             // Try to parse this part as a single JSON object
             match serde_json::from_str::<Value>(trimmed) {
                 Ok(value) => {
-                    if let Some(tool) = self.parse_single_object(&value)? {
+                    if let Some(tool) = Self::parse_single_object(&value)? {
                         all_tools.push(tool);
                     }
                 }
@@ -133,7 +133,7 @@ impl ToolParser for LlamaParser {
     async fn parse_complete(&self, text: &str) -> ParserResult<(String, Vec<ToolCall>)> {
         // Extract normal text and JSON content
         let (normal_text, json_content) =
-            if let Some((normal, json)) = self.extract_content_after_python_tag(text) {
+            if let Some((normal, json)) = Self::extract_content_after_python_tag(text) {
                 (normal, json)
             } else if text.trim_start().starts_with('{') {
                 (String::new(), text.to_string())
@@ -144,13 +144,13 @@ impl ToolParser for LlamaParser {
 
         // Parse the JSON content (may contain semicolon-separated objects)
         let tools = if json_content.contains(';') {
-            self.parse_semicolon_separated(&json_content)?
+            Self::parse_semicolon_separated(&json_content)?
         } else {
             // Try single JSON object
             let parsed = serde_json::from_str::<Value>(json_content.trim())
                 .map_err(|e| ParserError::ParsingFailed(e.to_string()))
                 .and_then(|v| {
-                    self.parse_single_object(&v)
+                    Self::parse_single_object(&v)
                         .map(|opt| opt.map_or_else(Vec::new, |tool| vec![tool]))
                 });
 

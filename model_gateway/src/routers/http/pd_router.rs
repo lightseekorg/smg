@@ -19,6 +19,7 @@ use openai_protocol::{
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, warn};
 
@@ -85,7 +86,7 @@ impl PDRouter {
         endpoint: &str,
         headers: Option<Vec<(String, String)>>,
     ) -> Response {
-        let url = format!("{}/{}", worker_url, endpoint);
+        let url = format!("{worker_url}/{endpoint}");
         let mut request_builder = self.client.get(&url);
 
         if let Some(headers) = headers {
@@ -109,7 +110,7 @@ impl PDRouter {
                         error!("Failed to read response body: {}", e);
                         error::internal_error(
                             "read_response_body_failed",
-                            format!("Failed to read response body: {}", e),
+                            format!("Failed to read response body: {e}"),
                         )
                     }
                 }
@@ -149,12 +150,16 @@ impl PDRouter {
                 error!("Failed to proxy request server: {}", e);
                 error::internal_error(
                     "proxy_request_failed",
-                    format!("Failed to proxy request: {}", e),
+                    format!("Failed to proxy request: {e}"),
                 )
             }
         }
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "async for API consistency with other router constructors"
+    )]
     pub async fn new(ctx: &Arc<crate::app_context::AppContext>) -> Result<Self, String> {
         Ok(PDRouter {
             worker_registry: Arc::clone(&ctx.worker_registry),
@@ -170,7 +175,7 @@ impl PDRouter {
         error!("Failed to select PD pair error={}", error);
         error::service_unavailable(
             "server_selection_failed",
-            format!("No available servers: {}", error),
+            format!("No available servers: {error}"),
         )
     }
 
@@ -501,7 +506,7 @@ impl PDRouter {
                     }
                 }
                 Err(e) => {
-                    let error_message = format!("Decode server error: {}", e);
+                    let error_message = format!("Decode server error: {e}");
                     let status_code = StatusCode::from_u16(status.as_u16())
                         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                     match status_code {
@@ -686,7 +691,7 @@ impl PDRouter {
                     error = %e,
                     "Decode request failed"
                 );
-                error::bad_gateway("decode_server_error", format!("Decode server error: {}", e))
+                error::bad_gateway("decode_server_error", format!("Decode server error: {e}"))
             }
         }
     }
@@ -697,13 +702,17 @@ impl PDRouter {
         prefill_policy.needs_request_text() || decode_policy.needs_request_text()
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "async for API consistency; callers await uniformly"
+    )]
     async fn select_pd_pair(
         &self,
         request_text: Option<&str>,
         model_id: Option<&str>,
         headers: Option<&HeaderMap>,
     ) -> Result<(Arc<dyn Worker>, Arc<dyn Worker>), String> {
-        let effective_model_id = if !self.enable_igw { None } else { model_id };
+        let effective_model_id = if self.enable_igw { model_id } else { None };
 
         debug!(
             "Selecting PD pair: enable_igw={}, model_id={:?}, effective_model_id={:?}",
@@ -786,8 +795,7 @@ impl PDRouter {
     ) -> Result<Arc<dyn Worker>, String> {
         if workers.is_empty() {
             return Err(format!(
-                "No {} workers available. Please check if {} servers are configured and healthy.",
-                worker_type, worker_type
+                "No {worker_type} workers available. Please check if {worker_type} servers are configured and healthy."
             ));
         }
 
@@ -799,8 +807,7 @@ impl PDRouter {
 
         if available_workers.is_empty() {
             return Err(format!(
-                "No available {} workers (all circuits open or unhealthy)",
-                worker_type
+                "No available {worker_type} workers (all circuits open or unhealthy)"
             ));
         }
 
@@ -825,7 +832,11 @@ impl PDRouter {
         Ok(available_workers[selected_idx].clone())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::unused_self,
+        reason = "method on PDRouter for consistent API; may use self in future"
+    )]
     fn create_streaming_response(
         &self,
         stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
@@ -839,8 +850,12 @@ impl PDRouter {
     ) -> Response {
         use crate::core::AttachedBody;
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "fire-and-forget stream relay; gateway shutdown need not wait for decode stream forwarding"
+        )]
         tokio::spawn(async move {
             futures_util::pin_mut!(stream);
             while let Some(chunk_result) = stream.next().await {
@@ -867,7 +882,7 @@ impl PDRouter {
                         if let Some(ref url) = decode_url {
                             error!("Stream error from decode server {}: {}", url, e);
                         }
-                        let _ = tx.send(Err(format!("Stream error: {}", e)));
+                        let _ = tx.send(Err(format!("Stream error: {e}")));
                         break;
                     }
                 }
@@ -958,10 +973,7 @@ impl PDRouter {
                 // Return error immediately - don't wait for decode to timeout
                 return Err(error::bad_gateway(
                     "prefill_server_error",
-                    format!(
-                        "Prefill server error: {}. This will cause decode timeout.",
-                        e
-                    ),
+                    format!("Prefill server error: {e}. This will cause decode timeout."),
                 ));
             }
         };
@@ -986,27 +998,27 @@ impl PDRouter {
             let error_response = match prefill_status {
                 StatusCode::BAD_REQUEST => error::bad_request(
                     "prefill_bad_request",
-                    format!("Prefill server error ({}): {}", prefill_status, error_msg),
+                    format!("Prefill server error ({prefill_status}): {error_msg}"),
                 ),
                 StatusCode::NOT_FOUND => error::not_found(
                     "prefill_not_found",
-                    format!("Prefill server error ({}): {}", prefill_status, error_msg),
+                    format!("Prefill server error ({prefill_status}): {error_msg}"),
                 ),
                 StatusCode::INTERNAL_SERVER_ERROR => error::internal_error(
                     "prefill_internal_error",
-                    format!("Prefill server error ({}): {}", prefill_status, error_msg),
+                    format!("Prefill server error ({prefill_status}): {error_msg}"),
                 ),
                 StatusCode::SERVICE_UNAVAILABLE => error::service_unavailable(
                     "prefill_unavailable",
-                    format!("Prefill server error ({}): {}", prefill_status, error_msg),
+                    format!("Prefill server error ({prefill_status}): {error_msg}"),
                 ),
                 StatusCode::BAD_GATEWAY => error::bad_gateway(
                     "prefill_bad_gateway",
-                    format!("Prefill server error ({}): {}", prefill_status, error_msg),
+                    format!("Prefill server error ({prefill_status}): {error_msg}"),
                 ),
                 _ => error::internal_error(
                     "prefill_error",
-                    format!("Prefill server error ({}): {}", prefill_status, error_msg),
+                    format!("Prefill server error ({prefill_status}): {error_msg}"),
                 ),
             };
             return Err(error_response);
@@ -1034,6 +1046,10 @@ impl PDRouter {
         Ok((prefill_status, prefill_body))
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "method on PDRouter for consistent API; may use self.api_key in future"
+    )]
     fn build_post_with_headers(
         &self,
         client: &Client,
@@ -1048,7 +1064,7 @@ impl PDRouter {
             request = request.header("Connection", "close");
         }
         if let Some(headers) = headers {
-            for (name, value) in headers.iter() {
+            for (name, value) in headers {
                 if header_utils::should_forward_request_header(name.as_str()) {
                     if let Ok(val) = value.to_str() {
                         request = request.header(name, val);
@@ -1146,7 +1162,7 @@ impl RouterTrait for PDRouter {
             Err(e) => {
                 return error::service_unavailable(
                     "no_healthy_worker_pair",
-                    format!("No healthy worker pair available: {}", e),
+                    format!("No healthy worker pair available: {e}"),
                 );
             }
         };
@@ -1210,7 +1226,7 @@ impl RouterTrait for PDRouter {
         } else {
             error::service_unavailable(
                 "health_generate_failed",
-                format!("Health generate failed: {:?}", errors),
+                format!("Health generate failed: {errors:?}"),
             )
         }
     }
@@ -1380,12 +1396,14 @@ impl RouterTrait for PDRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{BasicWorkerBuilder, WorkerType};
+    use crate::{
+        config::PolicyConfig,
+        core::{BasicWorkerBuilder, WorkerType},
+    };
 
     fn create_test_pd_router() -> PDRouter {
         let worker_registry = Arc::new(WorkerRegistry::new());
-        let policy_registry =
-            Arc::new(PolicyRegistry::new(crate::config::PolicyConfig::RoundRobin));
+        let policy_registry = Arc::new(PolicyRegistry::new(PolicyConfig::RoundRobin));
 
         PDRouter {
             worker_registry,
@@ -1489,7 +1507,7 @@ mod tests {
         assert_eq!(prefill_ref.load(), 0);
         assert_eq!(decode_ref.load(), 0);
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
         let stream = UnboundedReceiverStream::new(rx);
 
         {

@@ -1,11 +1,9 @@
 // Factory and registry for creating model-specific reasoning parsers.
 // Now with parser pooling support for efficient reuse across requests.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::{collections::HashMap, sync::Arc};
 
+use parking_lot::RwLock;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -13,7 +11,7 @@ use crate::{
         BaseReasoningParser, CohereCmdParser, DeepSeekR1Parser, Glm45Parser, KimiParser,
         MiniMaxParser, NanoV3Parser, Qwen3Parser, QwenThinkingParser, Step3Parser,
     },
-    traits::{ParseError, ParserConfig, ReasoningParser},
+    traits::{ParserConfig, ReasoningParser},
 };
 
 /// Type alias for pooled parser instances.
@@ -49,14 +47,14 @@ impl ParserRegistry {
     where
         F: Fn() -> Box<dyn ReasoningParser> + Send + Sync + 'static,
     {
-        let mut creators = self.creators.write().unwrap();
+        let mut creators = self.creators.write();
         creators.insert(name.to_string(), Arc::new(creator));
     }
 
     /// Register a model pattern to parser mapping.
     /// Patterns are checked in order, first match wins.
     pub fn register_pattern(&self, pattern: &str, parser_name: &str) {
-        let mut patterns = self.patterns.write().unwrap();
+        let mut patterns = self.patterns.write();
         patterns.push((pattern.to_string(), parser_name.to_string()));
     }
 
@@ -65,19 +63,19 @@ impl ParserRegistry {
     pub fn get_pooled_parser(&self, name: &str) -> Option<PooledParser> {
         // First check if we have a pooled instance
         {
-            let pool = self.pool.read().unwrap();
+            let pool = self.pool.read();
             if let Some(parser) = pool.get(name) {
                 return Some(Arc::clone(parser));
             }
         }
 
         // If not in pool, create one and add to pool
-        let creators = self.creators.read().unwrap();
+        let creators = self.creators.read();
         if let Some(creator) = creators.get(name) {
             let parser = Arc::new(Mutex::new(creator()));
 
             // Add to pool for future use
-            let mut pool = self.pool.write().unwrap();
+            let mut pool = self.pool.write();
             pool.insert(name.to_string(), Arc::clone(&parser));
 
             Some(parser)
@@ -88,20 +86,20 @@ impl ParserRegistry {
 
     /// Check if a parser with the given name is registered.
     pub fn has_parser(&self, name: &str) -> bool {
-        let creators = self.creators.read().unwrap();
+        let creators = self.creators.read();
         creators.contains_key(name)
     }
 
     /// Create a fresh parser instance by exact name (not pooled).
     /// Returns a new parser instance for each call - useful for streaming where state isolation is needed.
     pub fn create_parser(&self, name: &str) -> Option<Box<dyn ReasoningParser>> {
-        let creators = self.creators.read().unwrap();
+        let creators = self.creators.read();
         creators.get(name).map(|creator| creator())
     }
 
     /// Find a pooled parser for a given model ID by pattern matching.
     pub fn find_pooled_parser_for_model(&self, model_id: &str) -> Option<PooledParser> {
-        let patterns = self.patterns.read().unwrap();
+        let patterns = self.patterns.read();
         let model_lower = model_id.to_lowercase();
 
         for (pattern, parser_name) in patterns.iter() {
@@ -115,12 +113,12 @@ impl ParserRegistry {
     /// Check if a parser can be created for a specific model without actually creating it.
     /// Returns true if a parser is available (registered) for this model.
     pub fn has_parser_for_model(&self, model_id: &str) -> bool {
-        let patterns = self.patterns.read().unwrap();
+        let patterns = self.patterns.read();
         let model_lower = model_id.to_lowercase();
 
         for (pattern, parser_name) in patterns.iter() {
             if model_lower.contains(&pattern.to_lowercase()) {
-                let creators = self.creators.read().unwrap();
+                let creators = self.creators.read();
                 return creators.contains_key(parser_name);
             }
         }
@@ -130,7 +128,7 @@ impl ParserRegistry {
     /// Create a fresh parser instance for a given model ID by pattern matching (not pooled).
     /// Returns a new parser instance for each call - useful for streaming where state isolation is needed.
     pub fn create_for_model(&self, model_id: &str) -> Option<Box<dyn ReasoningParser>> {
-        let patterns = self.patterns.read().unwrap();
+        let patterns = self.patterns.read();
         let model_lower = model_id.to_lowercase();
 
         for (pattern, parser_name) in patterns.iter() {
@@ -144,7 +142,7 @@ impl ParserRegistry {
     /// Clear the parser pool, forcing new instances to be created.
     /// Useful for testing or when parsers need to be reset globally.
     pub fn clear_pool(&self) {
-        let mut pool = self.pool.write().unwrap();
+        let mut pool = self.pool.write();
         pool.clear();
     }
 }
@@ -229,6 +227,10 @@ impl ParserFactory {
     /// Get a pooled parser for the given model ID.
     /// Returns a shared instance that can be used concurrently.
     /// Falls back to a passthrough parser if model is not recognized.
+    #[expect(
+        clippy::expect_used,
+        reason = "passthrough parser is registered on the line above; None indicates a bug in registration logic"
+    )]
     pub fn get_pooled(&self, model_id: &str) -> PooledParser {
         // First try to find by pattern
         if let Some(parser) = self.registry.find_pooled_parser_for_model(model_id) {
@@ -242,8 +244,8 @@ impl ParserFactory {
                 // Register passthrough if not already registered
                 self.registry.register_parser("passthrough", || {
                     let config = ParserConfig {
-                        think_start_token: "".to_string(),
-                        think_end_token: "".to_string(),
+                        think_start_token: String::new(),
+                        think_end_token: String::new(),
                         stream_reasoning: true,
                         max_buffer_size: 65536,
                         initial_in_reasoning: false,
@@ -252,30 +254,30 @@ impl ParserFactory {
                         BaseReasoningParser::new(config).with_model_type("passthrough".to_string()),
                     )
                 });
-                self.registry.get_pooled_parser("passthrough").unwrap()
+                self.registry
+                    .get_pooled_parser("passthrough")
+                    .expect("passthrough parser was just registered")
             })
     }
 
     /// Create a new parser instance for the given model ID.
     /// Returns a fresh instance (not pooled).
     /// Use this when you need an isolated parser instance.
-    pub fn create(&self, model_id: &str) -> Result<Box<dyn ReasoningParser>, ParseError> {
+    pub fn create(&self, model_id: &str) -> Box<dyn ReasoningParser> {
         // First try to find by pattern
         if let Some(parser) = self.registry.create_for_model(model_id) {
-            return Ok(parser);
+            return parser;
         }
 
         // Fall back to no-op parser (base parser without reasoning detection)
         let config = ParserConfig {
-            think_start_token: "".to_string(),
-            think_end_token: "".to_string(),
+            think_start_token: String::new(),
+            think_end_token: String::new(),
             stream_reasoning: true,
             max_buffer_size: 65536,
             initial_in_reasoning: false,
         };
-        Ok(Box::new(
-            BaseReasoningParser::new(config).with_model_type("passthrough".to_string()),
-        ))
+        Box::new(BaseReasoningParser::new(config).with_model_type("passthrough".to_string()))
     }
 
     /// Get the internal registry for custom registration.
@@ -297,43 +299,47 @@ impl Default for ParserFactory {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tokio::spawn is fine in unit tests that await all handles"
+)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_factory_creates_deepseek_r1() {
         let factory = ParserFactory::new();
-        let parser = factory.create("deepseek-r1-distill").unwrap();
+        let parser = factory.create("deepseek-r1-distill");
         assert_eq!(parser.model_type(), "deepseek_r1");
     }
 
     #[test]
     fn test_factory_creates_qwen3() {
         let factory = ParserFactory::new();
-        let parser = factory.create("qwen3-7b").unwrap();
+        let parser = factory.create("qwen3-7b");
         assert_eq!(parser.model_type(), "qwen3");
     }
 
     #[test]
     fn test_factory_creates_kimi() {
         let factory = ParserFactory::new();
-        let parser = factory.create("kimi-chat").unwrap();
+        let parser = factory.create("kimi-chat");
         assert_eq!(parser.model_type(), "kimi");
     }
 
     #[test]
     fn test_factory_fallback_to_passthrough() {
         let factory = ParserFactory::new();
-        let parser = factory.create("unknown-model").unwrap();
+        let parser = factory.create("unknown-model");
         assert_eq!(parser.model_type(), "passthrough");
     }
 
     #[test]
     fn test_case_insensitive_matching() {
         let factory = ParserFactory::new();
-        let parser1 = factory.create("DeepSeek-R1").unwrap();
-        let parser2 = factory.create("QWEN3").unwrap();
-        let parser3 = factory.create("Kimi").unwrap();
+        let parser1 = factory.create("DeepSeek-R1");
+        let parser2 = factory.create("QWEN3");
+        let parser3 = factory.create("Kimi");
 
         assert_eq!(parser1.model_type(), "deepseek_r1");
         assert_eq!(parser2.model_type(), "qwen3");
@@ -343,25 +349,25 @@ mod tests {
     #[test]
     fn test_step3_model() {
         let factory = ParserFactory::new();
-        let step3 = factory.create("step3-model").unwrap();
+        let step3 = factory.create("step3-model");
         assert_eq!(step3.model_type(), "step3");
     }
 
     #[test]
     fn test_glm45_model() {
         let factory = ParserFactory::new();
-        let glm45 = factory.create("glm45-v2").unwrap();
+        let glm45 = factory.create("glm45-v2");
         assert_eq!(glm45.model_type(), "glm45");
     }
 
     #[test]
     fn test_minimax_model() {
         let factory = ParserFactory::new();
-        let minimax = factory.create("minimax-m2").unwrap();
+        let minimax = factory.create("minimax-m2");
         assert_eq!(minimax.model_type(), "minimax");
 
         // Also test alternate patterns
-        let mm = factory.create("mm-m2-chat").unwrap();
+        let mm = factory.create("mm-m2-chat");
         assert_eq!(mm.model_type(), "minimax");
     }
 
@@ -369,13 +375,13 @@ mod tests {
     fn test_nano_v3_model() {
         let factory = ParserFactory::new();
 
-        let nano = factory.create("nano-v3-chat").unwrap();
+        let nano = factory.create("nano-v3-chat");
         assert_eq!(nano.model_type(), "nano_v3");
 
-        let nemotron_nano = factory.create("nemotron-nano-4b").unwrap();
+        let nemotron_nano = factory.create("nemotron-nano-4b");
         assert_eq!(nemotron_nano.model_type(), "nano_v3");
 
-        let nemotron_super = factory.create("NVIDIA-Nemotron/nemotron-super").unwrap();
+        let nemotron_super = factory.create("NVIDIA-Nemotron/nemotron-super");
         assert_eq!(nemotron_super.model_type(), "nano_v3");
     }
 
@@ -384,16 +390,16 @@ mod tests {
         let factory = ParserFactory::new();
 
         // Test various Cohere model patterns
-        let command_r = factory.create("command-r-plus").unwrap();
+        let command_r = factory.create("command-r-plus");
         assert_eq!(command_r.model_type(), "cohere_cmd");
 
-        let command_a = factory.create("command-a-03-2025").unwrap();
+        let command_a = factory.create("command-a-03-2025");
         assert_eq!(command_a.model_type(), "cohere_cmd");
 
-        let c4ai = factory.create("c4ai-command-r-v01").unwrap();
+        let c4ai = factory.create("c4ai-command-r-v01");
         assert_eq!(c4ai.model_type(), "cohere_cmd");
 
-        let cohere = factory.create("cohere-embed").unwrap();
+        let cohere = factory.create("cohere-embed");
         assert_eq!(cohere.model_type(), "cohere_cmd");
     }
 
@@ -425,7 +431,7 @@ mod tests {
             let parser_clone = Arc::clone(&parser);
             let handle = tokio::spawn(async move {
                 let mut parser = parser_clone.lock().await;
-                let input = format!("thread {} reasoning</think>answer", i);
+                let input = format!("thread {i} reasoning</think>answer");
                 let result = parser.detect_and_parse_reasoning(&input).unwrap();
                 assert_eq!(result.normal_text, "answer");
                 assert!(result.reasoning_text.contains("reasoning"));
@@ -507,47 +513,42 @@ mod tests {
 
                     // Simulate realistic parsing work with substantial text
                     // Typical reasoning can be 500-5000 tokens
+                    let product = task_id * request_id;
                     let reasoning_text = format!(
-                        "Task {} is processing request {}. Let me think through this step by step. \
+                        "Task {task_id} is processing request {request_id}. Let me think through this step by step. \
                         First, I need to understand the problem. The problem involves analyzing data \
                         and making calculations. Let me break this down: \n\
                         1. Initial analysis shows that we have multiple variables to consider. \
                         2. The data suggests a pattern that needs further investigation. \
-                        3. Computing the values: {} * {} = {}. \
+                        3. Computing the values: {task_id} * {request_id} = {product}. \
                         4. Cross-referencing with previous results indicates consistency. \
                         5. The mathematical proof follows from the axioms... \
                         6. Considering edge cases and boundary conditions... \
                         7. Validating against known constraints... \
                         8. The conclusion follows logically from premises A, B, and C. \
                         This reasoning chain demonstrates the validity of our approach.",
-                        task_id, request_id, task_id, request_id, task_id * request_id
                     );
 
                     let answer_text = format!(
-                        "Based on my analysis, the answer for task {} request {} is: \
+                        "Based on my analysis, the answer for task {task_id} request {request_id} is: \
                         The solution involves multiple steps as outlined in the reasoning. \
-                        The final result is {} with confidence level high. \
+                        The final result is {product} with confidence level high. \
                         This conclusion is supported by rigorous mathematical analysis \
                         and has been validated against multiple test cases. \
                         The implementation should handle edge cases appropriately.",
-                        task_id,
-                        request_id,
-                        task_id * request_id
                     );
 
-                    let input = format!("<think>{}</think>{}", reasoning_text, answer_text);
+                    let input = format!("<think>{reasoning_text}</think>{answer_text}");
 
                     match p.detect_and_parse_reasoning(&input) {
                         Ok(result) => {
                             // Note: Some parsers with stream_reasoning=true won't accumulate reasoning text
-                            assert!(result.normal_text.contains(&format!("task {}", task_id)));
+                            assert!(result.normal_text.contains(&format!("task {task_id}")));
 
                             // For parsers that accumulate reasoning (stream_reasoning=false)
                             // the reasoning_text should be populated
                             if !result.reasoning_text.is_empty() {
-                                assert!(result
-                                    .reasoning_text
-                                    .contains(&format!("Task {}", task_id)));
+                                assert!(result.reasoning_text.contains(&format!("Task {task_id}")));
                                 assert!(result.reasoning_text.len() > 500); // Ensure substantial reasoning
                             }
 
@@ -556,7 +557,10 @@ mod tests {
                             success_count.fetch_add(1, Ordering::Relaxed);
                         }
                         Err(e) => {
-                            eprintln!("Parse error: {:?}", e);
+                            #[expect(clippy::print_stderr, reason = "test diagnostic output")]
+                            {
+                                eprintln!("Parse error: {e:?}");
+                            }
                             error_count.fetch_add(1, Ordering::Relaxed);
                         }
                     }
@@ -579,18 +583,15 @@ mod tests {
         let errors = error_count.load(Ordering::Relaxed);
 
         // Print stats for debugging
-        println!(
-            "High concurrency test: {} tasks, {} requests each",
-            num_tasks, requests_per_task
-        );
-        println!(
-            "Completed in {:?}, {} successes, {} errors",
-            duration, successes, errors
-        );
-        println!(
-            "Throughput: {:.0} requests/sec",
-            (total_requests as f64) / duration.as_secs_f64()
-        );
+        #[expect(clippy::print_stdout, reason = "test diagnostic output")]
+        {
+            println!("High concurrency test: {num_tasks} tasks, {requests_per_task} requests each");
+            println!("Completed in {duration:?}, {successes} successes, {errors} errors");
+            println!(
+                "Throughput: {:.0} requests/sec",
+                (total_requests as f64) / duration.as_secs_f64()
+            );
+        }
 
         // All requests should succeed
         assert_eq!(successes, total_requests);
@@ -600,8 +601,7 @@ mod tests {
         let throughput = (total_requests as f64) / duration.as_secs_f64();
         assert!(
             throughput > 1000.0,
-            "Throughput too low: {:.0} req/sec",
-            throughput
+            "Throughput too low: {throughput:.0} req/sec",
         );
     }
 

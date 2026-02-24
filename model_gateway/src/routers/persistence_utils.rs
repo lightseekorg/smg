@@ -74,10 +74,6 @@ pub fn item_to_json(item: &ConversationItem) -> Value {
         obj.insert("status".to_string(), json!(status));
     }
 
-    if let Some(response_id) = &item.response_id {
-        obj.insert("response_id".to_string(), json!(response_id));
-    }
-
     Value::Object(obj)
 }
 
@@ -137,7 +133,6 @@ fn get_string(json: &Value, key: &str) -> Option<String> {
 pub fn build_stored_response(
     response_json: &Value,
     original_body: &ResponsesRequest,
-    conversation_store_id: Option<String>,
 ) -> StoredResponse {
     let mut stored = StoredResponse::new(None);
 
@@ -150,25 +145,16 @@ pub fn build_stored_response(
 
     stored.model = get_string(response_json, "model").or_else(|| Some(original_body.model.clone()));
 
-    stored.safety_identifier = original_body.user.clone();
-    stored.conversation_id = original_body.conversation.clone();
+    stored.safety_identifier.clone_from(&original_body.user);
+    stored
+        .conversation_id
+        .clone_from(&original_body.conversation);
 
-    // Merge metadata from response_json and original_body, preserving conversation_store_id
-    let mut base_metadata = response_json
+    stored.metadata = response_json
         .get("metadata")
         .and_then(|v| v.as_object())
         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_else(|| original_body.metadata.clone().unwrap_or_default());
-
-    // Add conversation_store_id to merged metadata if provided
-    if let Some(store_id) = conversation_store_id {
-        base_metadata.insert(
-            "oci:conversation_store_id".to_string(),
-            serde_json::json!(store_id),
-        );
-    }
-
-    stored.metadata = base_metadata;
 
     stored.previous_response_id = get_string(response_json, "previous_response_id")
         .map(|s| ResponseId::from(s.as_str()))
@@ -212,10 +198,10 @@ fn extract_input_items(input: &ResponseInput) -> Result<Vec<Value>, String> {
                                 StringOrContentParts::String(s) => {
                                     json!([{"type": "input_text", "text": s}])
                                 }
-                                StringOrContentParts::Array(parts) => serde_json::to_value(parts)
-                                    .map_err(|e| {
-                                    format!("Failed to serialize content: {}", e)
-                                })?,
+                                StringOrContentParts::Array(parts) => {
+                                    serde_json::to_value(parts)
+                                        .map_err(|e| format!("Failed to serialize content: {e}"))?
+                                }
                             };
 
                             Ok(json!({
@@ -229,7 +215,7 @@ fn extract_input_items(input: &ResponseInput) -> Result<Vec<Value>, String> {
                         _ => {
                             // For other item types, serialize and ensure ID
                             let mut value = serde_json::to_value(item)
-                                .map_err(|e| format!("Failed to serialize item: {}", e))?;
+                                .map_err(|e| format!("Failed to serialize item: {e}"))?;
 
                             // Ensure ID exists - generate if missing
                             if let Some(obj) = value.as_object_mut() {
@@ -345,7 +331,6 @@ pub async fn persist_conversation_items(
     response_storage: Arc<dyn ResponseStorage>,
     response_json: &Value,
     original_body: &ResponsesRequest,
-    conversation_store_id: Option<String>,
 ) -> Result<(), String> {
     // Extract response ID
     let response_id_str = response_json
@@ -365,8 +350,7 @@ pub async fn persist_conversation_items(
         .ok_or_else(|| "No output array in response".to_string())?;
 
     // Build and store response
-    let mut stored_response =
-        build_stored_response(response_json, original_body, conversation_store_id.clone());
+    let mut stored_response = build_stored_response(response_json, original_body);
     stored_response.id = response_id.clone();
     stored_response.input = Value::Array(input_items.clone());
     stored_response.output = Value::Array(output_items.clone());
@@ -374,7 +358,7 @@ pub async fn persist_conversation_items(
     response_storage
         .store_response(stored_response)
         .await
-        .map_err(|e| format!("Failed to store response: {}", e))?;
+        .map_err(|e| format!("Failed to store response: {e}"))?;
 
     // Check if conversation is provided and validate it exists
     let conv_id_opt = if let Some(id) = &original_body.conversation {
@@ -385,7 +369,7 @@ pub async fn persist_conversation_items(
                 warn!(conversation_id = %conv_id.0, "Conversation not found, skipping item linking");
                 None
             }
-            Err(e) => return Err(format!("Failed to get conversation: {}", e)),
+            Err(e) => return Err(format!("Failed to get conversation: {e}")),
         }
     } else {
         None

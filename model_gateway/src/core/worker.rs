@@ -33,6 +33,10 @@ pub const DEFAULT_BOOTSTRAP_PORT: u16 = 8998;
 /// vLLM Mooncake KV connector name
 pub const MOONCAKE_CONNECTOR: &str = "MooncakeConnector";
 
+#[expect(
+    clippy::expect_used,
+    reason = "LazyLock static initialization — reqwest::Client::build() only fails on TLS backend misconfiguration which is unrecoverable"
+)]
 static WORKER_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(DEFAULT_WORKER_HTTP_TIMEOUT_SECS))
@@ -115,7 +119,7 @@ pub trait Worker: Send + Sync + fmt::Debug {
     /// Get the worker's URL
     fn url(&self) -> &str;
     /// Get the worker's API key
-    fn api_key(&self) -> &Option<String>;
+    fn api_key(&self) -> Option<&String>;
     /// Get the worker's type (Regular, Prefill, or Decode)
     /// Returns a reference to avoid cloning on every access
     fn worker_type(&self) -> &WorkerType;
@@ -193,7 +197,7 @@ pub trait Worker: Send + Sync + fmt::Debug {
             .spec
             .dp_base_url
             .as_deref()
-            .unwrap_or(self.url())
+            .unwrap_or_else(|| self.url())
     }
 
     /// Get DP rank if this is a DP-aware worker
@@ -333,7 +337,7 @@ pub trait Worker: Send + Sync + fmt::Debug {
         self.metadata()
             .find_model(model_id)
             .map(|m| m.get_label(class_idx))
-            .unwrap_or_else(|| format!("LABEL_{}", class_idx))
+            .unwrap_or_else(|| format!("LABEL_{class_idx}"))
     }
 
     /// Check if this worker supports a specific model.
@@ -511,8 +515,8 @@ impl Worker for BasicWorker {
         &self.metadata.spec.url
     }
 
-    fn api_key(&self) -> &Option<String> {
-        &self.metadata.spec.api_key
+    fn api_key(&self) -> Option<&String> {
+        self.metadata.spec.api_key.as_ref()
     }
 
     fn worker_type(&self) -> &WorkerType {
@@ -578,7 +582,7 @@ impl Worker for BasicWorker {
 
             Err(WorkerError::HealthCheckFailed {
                 url: self.metadata.spec.url.clone(),
-                reason: format!("Health check failed (consecutive failures: {})", failures),
+                reason: format!("Health check failed (consecutive failures: {failures})"),
             })
         }
     }
@@ -699,7 +703,7 @@ impl Worker for BasicWorker {
                                 );
                                 Err(WorkerError::ConnectionFailed {
                                     url: self.metadata.spec.url.clone(),
-                                    reason: format!("Failed to connect to gRPC server: {}", e),
+                                    reason: format!("Failed to connect to gRPC server: {e}"),
                                 })
                             }
                         }
@@ -880,8 +884,7 @@ impl<T: Send + Unpin + 'static> http_body::Body for AttachedBody<T> {
 /// The checker sleeps until the next worker is due for a health check,
 /// so it wakes only when there is actual work to do.
 pub(crate) struct HealthChecker {
-    #[allow(dead_code)]
-    handle: tokio::task::JoinHandle<()>,
+    handle: Option<tokio::task::JoinHandle<()>>,
     shutdown_notify: Arc<tokio::sync::Notify>,
 }
 
@@ -897,17 +900,32 @@ impl HealthChecker {
         shutdown_notify: Arc<tokio::sync::Notify>,
     ) -> Self {
         Self {
-            handle,
+            handle: Some(handle),
             shutdown_notify,
         }
     }
 
     /// Shutdown the health checker gracefully.
-    /// Wakes the sleeping task immediately so it can exit.
-    #[allow(dead_code)]
-    pub async fn shutdown(self) {
+    /// Wakes the sleeping task immediately so it can exit cleanly.
+    /// Prefer this over dropping when you can `.await` — it lets the
+    /// current health-check iteration finish instead of aborting mid-flight.
+    #[expect(
+        dead_code,
+        reason = "Drop::drop handles abort; this exists for graceful shutdown when an async context is available"
+    )]
+    pub async fn shutdown(&mut self) {
         self.shutdown_notify.notify_one();
-        let _ = self.handle.await;
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for HealthChecker {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -1136,6 +1154,10 @@ mod tests {
 
         for _ in 0..100 {
             let worker_clone = Arc::clone(&worker);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "Test helper: short-lived tasks joined before test ends"
+            )]
             let handle = tokio::spawn(async move {
                 worker_clone.increment_load();
             });
@@ -1167,6 +1189,10 @@ mod tests {
 
         for _ in 0..100 {
             let worker_clone = Arc::clone(&worker);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "Test helper: short-lived tasks joined before test ends"
+            )]
             let handle = tokio::spawn(async move {
                 worker_clone.decrement_load();
             });
@@ -1193,6 +1219,10 @@ mod tests {
 
         for i in 0..100 {
             let worker_clone = Arc::clone(&worker);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "Test helper: short-lived tasks joined before test ends"
+            )]
             let handle = tokio::spawn(async move {
                 worker_clone.set_healthy(i % 2 == 0);
                 time::sleep(Duration::from_micros(10)).await;
@@ -1264,6 +1294,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::print_stderr)]
     fn test_load_counter_performance() {
         use std::time::Instant;
 
@@ -1281,7 +1312,7 @@ mod tests {
         let duration = start.elapsed();
 
         let ops_per_sec = iterations as f64 / duration.as_secs_f64();
-        println!("Load counter operations per second: {:.0}", ops_per_sec);
+        eprintln!("Load counter operations per second: {ops_per_sec:.0}");
 
         assert!(ops_per_sec > 1_000_000.0);
     }

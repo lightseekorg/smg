@@ -115,7 +115,7 @@ impl StepExecutor<TokenizerWorkflowData> for LoadTokenizerStep {
                         chat_template.as_deref(),
                     )
                     .await
-                    .map_err(|e| format!("Failed to load tokenizer: {}", e))?;
+                    .map_err(|e| format!("Failed to load tokenizer: {e}"))?;
 
                     // Wrap with caching layer if configured
                     let tokenizer: Arc<dyn Tokenizer> = match cache_cfg {
@@ -157,10 +157,7 @@ impl StepExecutor<TokenizerWorkflowData> for LoadTokenizerStep {
                         if config.fail_on_duplicate {
                             return Err(WorkflowError::StepFailed {
                                 step_id: StepId::new("load_tokenizer"),
-                                message: format!(
-                                    "Tokenizer '{}' already exists (id: {})",
-                                    name, id
-                                ),
+                                message: format!("Tokenizer '{name}' already exists (id: {id})"),
                             });
                         }
                         info!(

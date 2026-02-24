@@ -117,7 +117,7 @@ impl TokenizerRegistry {
 
     /// Generate a new UUID for a tokenizer
     pub fn generate_id() -> String {
-        Uuid::new_v4().to_string()
+        Uuid::now_v7().to_string()
     }
 
     /// Load and register a tokenizer
@@ -341,8 +341,18 @@ impl Default for TokenizerRegistry {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tokio::spawn is fine in unit tests that await all handles"
+)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
 
     use tokio::time::sleep;
 
@@ -450,20 +460,20 @@ mod tests {
     #[tokio::test]
     async fn test_load_prevents_duplicate_loading() {
         let registry = Arc::new(TokenizerRegistry::new());
-        let load_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let load_count = Arc::new(AtomicUsize::new(0));
 
         // Spawn multiple tasks trying to load the same tokenizer
         let mut handles = vec![];
         for i in 0..10 {
             let registry = registry.clone();
             let load_count = load_count.clone();
-            let id = format!("id-{}", i);
+            let id = format!("id-{i}");
             let handle = tokio::spawn(async move {
                 registry
                     .load(&id, "model1", "source", || async {
                         // Simulate slow loading
                         sleep(Duration::from_millis(10)).await;
-                        load_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        load_count.fetch_add(1, Ordering::SeqCst);
                         Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
                     })
                     .await
@@ -478,7 +488,7 @@ mod tests {
 
         // Verify tokenizer was loaded only once
         assert_eq!(
-            load_count.load(std::sync::atomic::Ordering::SeqCst),
+            load_count.load(Ordering::SeqCst),
             1,
             "Tokenizer should be loaded exactly once despite concurrent requests"
         );
@@ -491,7 +501,7 @@ mod tests {
 
         // Load multiple tokenizers
         for i in 1..=5 {
-            let model_name = format!("model{}", i);
+            let model_name = format!("model{i}");
             let id = TokenizerRegistry::generate_id();
             registry
                 .load(&id, &model_name, "source", || async {

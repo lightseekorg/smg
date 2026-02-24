@@ -5,14 +5,14 @@ use std::borrow::Cow;
 use async_trait::async_trait;
 use axum::response::Response;
 use openai_protocol::chat::ChatCompletionRequest;
-use tracing::error;
+use tracing::{debug, error};
 
 use crate::routers::{
     error,
     grpc::{
         common::stages::PipelineStage,
         context::{PreparationOutput, RequestContext},
-        utils,
+        multimodal, utils,
     },
 };
 
@@ -64,19 +64,60 @@ impl ChatPreparationStage {
                 error!(function = "ChatPreparationStage::execute", error = %e, "Tokenization failed");
                 return Err(error::internal_error(
                     "tokenization_failed",
-                    format!("Tokenization failed: {}", e),
+                    format!("Tokenization failed: {e}"),
                 ));
             }
         };
 
         let token_ids = encoding.token_ids().to_vec();
 
+        // Step 3.5: Fetch multimodal images (Phase 1 — backend-agnostic)
+        // Pixel preprocessing and token expansion are deferred to Phase 2
+        // in ChatRequestBuildingStage, where the backend type is known.
+        let mut multimodal_images = None;
+        if multimodal::has_multimodal_content(&request.messages) {
+            if let Some(mm_components) = ctx.components.multimodal.as_ref() {
+                match multimodal::fetch_images(&request.messages, mm_components).await {
+                    Ok(images) => {
+                        debug!(
+                            function = "ChatPreparationStage::execute",
+                            image_count = images.len(),
+                            "Multimodal images fetched"
+                        );
+                        multimodal_images = Some(images);
+                    }
+                    Err(e) => {
+                        error!(
+                            function = "ChatPreparationStage::execute",
+                            error = %e,
+                            "Multimodal image fetching failed"
+                        );
+                        // TODO: Distinguish 4xx (invalid URL, unsupported format) from 5xx
+                        // (fetch timeout, backend failure) once error types are refined.
+                        return Err(error::bad_request(
+                            "multimodal_processing_failed",
+                            format!("Multimodal processing failed: {e}"),
+                        ));
+                    }
+                }
+            } else {
+                error!(
+                    function = "ChatPreparationStage::execute",
+                    "Multimodal content detected but multimodal components not initialized"
+                );
+                return Err(error::bad_request(
+                    "multimodal_not_supported",
+                    "Multimodal content detected but multimodal processing is not available",
+                ));
+            }
+        }
+
         // Step 4: Build tool constraints if needed
         let tool_call_constraint = if let Some(tools) = body_ref.tools.as_ref() {
-            utils::generate_tool_constraints(tools, &request.tool_choice, &request.model)
+            utils::generate_tool_constraints(tools, request.tool_choice.as_ref(), &request.model)
                 .map_err(|e| {
                     error!(function = "ChatPreparationStage::execute", error = %e, "Invalid tool configuration");
-                    error::bad_request("invalid_tool_configuration", format!("Invalid tool configuration: {}", e))
+                    error::bad_request("invalid_tool_configuration", format!("Invalid tool configuration: {e}"))
                 })?
         } else {
             None
@@ -90,6 +131,10 @@ impl ChatPreparationStage {
             request.skip_special_tokens,
             request.no_stop_trim,
         );
+
+        // Store fetched images on processed messages for Phase 2
+        let mut processed_messages = processed_messages;
+        processed_messages.multimodal_images = multimodal_images;
 
         // Store results in context
         ctx.state.preparation = Some(PreparationOutput {

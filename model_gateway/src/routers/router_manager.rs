@@ -104,7 +104,7 @@ impl RouterManager {
             let single_router = Arc::from(RouterFactory::create_router(app_context).await?);
             let router_id = Self::determine_router_id(
                 &config.router_config.mode,
-                &config.router_config.connection_mode,
+                config.router_config.connection_mode,
             );
 
             info!("Created single router with ID: {}", router_id.as_str());
@@ -121,7 +121,7 @@ impl RouterManager {
 
     pub fn determine_router_id(
         routing_mode: &RoutingMode,
-        connection_mode: &ConnectionMode,
+        connection_mode: ConnectionMode,
     ) -> RouterId {
         match (connection_mode, routing_mode) {
             (ConnectionMode::Http, RoutingMode::Regular { .. }) => router_ids::HTTP_REGULAR,
@@ -609,13 +609,13 @@ impl RouterTrait for RouterManager {
         response_id: &str,
         params: &ResponsesGetParams,
     ) -> Response {
-        // Always use OpenAI router for response retrieval (it has database storage)
-        if let Some(router) = self.routers.get(&router_ids::HTTP_OPENAI) {
+        let router = self.select_router_for_request(headers, None);
+        if let Some(router) = router {
             router.get_response(headers, response_id, params).await
         } else {
             (
                 StatusCode::NOT_FOUND,
-                "Response storage not available - OpenAI router not found".to_string(),
+                format!("No router available to get response '{response_id}'"),
             )
                 .into_response()
         }
@@ -628,7 +628,7 @@ impl RouterTrait for RouterManager {
         } else {
             (
                 StatusCode::NOT_FOUND,
-                format!("No router available to cancel response '{}'", response_id),
+                format!("No router available to cancel response '{response_id}'"),
             )
                 .into_response()
         }
@@ -647,13 +647,15 @@ impl RouterTrait for RouterManager {
         headers: Option<&HeaderMap>,
         response_id: &str,
     ) -> Response {
-        // Always use OpenAI router for response input items retrieval (it has database storage)
-        if let Some(router) = self.routers.get(&router_ids::HTTP_OPENAI) {
+        // Delegate to the default router (typically http-regular)
+        // Response storage is shared across all routers via AppContext
+        let router = self.select_router_for_request(headers, None);
+        if let Some(router) = router {
             router.list_response_input_items(headers, response_id).await
         } else {
             (
                 StatusCode::NOT_FOUND,
-                "Response storage not available - OpenAI router not found",
+                "No router available to list response input items",
             )
                 .into_response()
         }

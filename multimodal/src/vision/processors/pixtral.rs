@@ -282,6 +282,7 @@ mod tests {
     use image::{Rgb, RgbImage};
 
     use super::*;
+    use crate::vision::preprocessor_config::PatchSize;
 
     fn create_test_image(width: u32, height: u32) -> DynamicImage {
         let mut img = RgbImage::new(width, height);
@@ -382,7 +383,7 @@ mod tests {
 
         let config = PreProcessorConfig {
             size: Some(size),
-            patch_size: Some(crate::vision::preprocessor_config::PatchSize {
+            patch_size: Some(PatchSize {
                 height: Some(14),
                 width: Some(14),
             }),

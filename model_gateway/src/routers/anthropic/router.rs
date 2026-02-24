@@ -14,11 +14,11 @@ use tracing::{error, info};
 
 use super::{
     context::{RequestContext, RouterContext},
-    models, non_streaming, streaming, worker,
+    mcp, models, non_streaming, streaming, worker,
 };
 use crate::{
     app_context::AppContext,
-    routers::{mcp_utils, RouterTrait},
+    routers::{error::bad_gateway, mcp_utils, RouterTrait},
 };
 
 /// Router for Anthropic-specific APIs
@@ -89,6 +89,9 @@ impl RouterTrait for AnthropicRouter {
         let headers_owned = headers.cloned();
 
         let mcp_servers = if request.has_mcp_toolset() {
+            // Build per-server allowed tools from McpToolset entries in tools array.
+            let toolset_allowed = mcp::collect_allowed_tools_per_server(request.tools.as_ref());
+
             let inputs: Vec<mcp_utils::McpServerInput> = request
                 .mcp_server_configs()
                 .unwrap_or_default()
@@ -98,6 +101,7 @@ impl RouterTrait for AnthropicRouter {
                     url: Some(server.url.clone()),
                     authorization: server.authorization_token.clone(),
                     headers: HashMap::new(),
+                    allowed_tools: toolset_allowed.get(&server.name).and_then(|v| v.clone()),
                 })
                 .collect();
 
@@ -113,7 +117,7 @@ impl RouterTrait for AnthropicRouter {
                 }
                 None => {
                     error!("Failed to connect to any MCP servers");
-                    return crate::routers::error::bad_gateway(
+                    return bad_gateway(
                         "mcp_connection_failed",
                         "Failed to connect to MCP servers. Check server URLs and authorization.",
                     );

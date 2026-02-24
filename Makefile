@@ -18,7 +18,7 @@ else
     $(info sccache not found. Install it for faster builds: cargo install sccache)
 endif
 
-.PHONY: help build test clean docs check fmt lint dev-setup pre-commit setup-rust setup-sccache sccache-stats sccache-clean sccache-stop \
+.PHONY: help build test clean docs check fmt dev-setup pre-commit setup-sccache sccache-stats sccache-clean sccache-stop \
         python-dev python-build python-build-release python-install python-clean python-test python-check \
         show-version bump-version check-versions
 
@@ -29,16 +29,13 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 
-setup-rust: ## Install Rust toolchain and deps (Oracle Linux)
-	@bash scripts/ci_install_rust_oracle.sh
-
 build: ## Build the project in release mode
 	@echo "Building Shepherd Model Gateway..."
 	@cargo build --release
 
 test: ## Run all tests
 	@echo "Running tests..."
-	@source "$$HOME/.cargo/env" && cargo test
+	@cargo test
 
 clean: ## Clean build artifacts
 	@echo "Cleaning build artifacts..."
@@ -48,18 +45,15 @@ docs: ## Generate and open documentation
 	@echo "Generating documentation..."
 	@cargo doc --open
 
-check: ## Run cargo check
-	@source "$$HOME/.cargo/env" && cargo check
-
-lint: ## Run clippy lint checks
-	@source "$$HOME/.cargo/env" && rustup component add clippy
-	@source "$$HOME/.cargo/env" && cargo clippy --all-targets --all-features -- -D warnings
+check: ## Run cargo check and clippy
+	@echo "Running cargo check..."
+	@cargo check
+	@echo "Running clippy..."
+	@cargo clippy --all-targets --all-features -- -D warnings
 
 fmt: ## Format code with rustfmt
 	@echo "Formatting code..."
-	@source "$$HOME/.cargo/env" && rustup component add --toolchain nightly rustfmt
-	@source "$$HOME/.cargo/env" && rustup toolchain install nightly --profile minimal
-	@source "$$HOME/.cargo/env" && cargo +nightly fmt -- --check
+	@rustup run nightly cargo fmt
 
 # Development workflow shortcuts
 dev-setup: build test ## Set up development environment
@@ -145,9 +139,7 @@ VERSION_FILES := model_gateway/Cargo.toml \
                  bindings/golang/Cargo.toml \
                  bindings/python/Cargo.toml \
                  bindings/python/pyproject.toml \
-                 bindings/python/src/smg/version.py \
-                 grpc_client/python/pyproject.toml \
-                 grpc_client/python/smg_grpc_proto/__init__.py
+                 bindings/python/src/smg/version.py
 
 show-version: ## Show current version across all files
 	@echo "Current versions:"
@@ -156,8 +148,6 @@ show-version: ## Show current version across all files
 	@echo "  bindings/python/Cargo.toml: $$(grep -m1 '^version = ' bindings/python/Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
 	@echo "  bindings/python/pyproject.toml: $$(grep -m1 '^version = ' bindings/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')"
 	@echo "  bindings/python/.../version.py: $$(grep '__version__' bindings/python/src/smg/version.py | sed 's/__version__ = "\(.*\)"/\1/')"
-	@echo "  grpc_client/python/pyproject.toml: $$(grep -m1 '^version = ' grpc_client/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')"
-	@echo "  grpc_client/python/.../__init__.py: $$(grep '__version__' grpc_client/python/smg_grpc_proto/__init__.py | sed 's/__version__ = "\(.*\)"/\1/')"
 
 bump-version: ## Bump version across all files (usage: make bump-version VERSION=0.3.3)
 	@if [ -z "$(VERSION)" ]; then \
@@ -179,18 +169,12 @@ bump-version: ## Bump version across all files (usage: make bump-version VERSION
 	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' bindings/python/pyproject.toml && rm -f bindings/python/pyproject.toml.bak
 	@# Update version.py
 	@sed -i.bak 's/__version__ = ".*"/__version__ = "$(VERSION)"/' bindings/python/src/smg/version.py && rm -f bindings/python/src/smg/version.py.bak
-	@# Update grpc_client/python/pyproject.toml
-	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' grpc_client/python/pyproject.toml && rm -f grpc_client/python/pyproject.toml.bak
-	@# Update grpc_client/python/smg_grpc_proto/__init__.py
-	@sed -i.bak 's/__version__ = ".*"/__version__ = "$(VERSION)"/' grpc_client/python/smg_grpc_proto/__init__.py && rm -f grpc_client/python/smg_grpc_proto/__init__.py.bak
 	@echo "Version updated to $(VERSION) in all files:"
 	@echo "  - model_gateway/Cargo.toml"
 	@echo "  - bindings/golang/Cargo.toml"
 	@echo "  - bindings/python/Cargo.toml"
 	@echo "  - bindings/python/pyproject.toml"
 	@echo "  - bindings/python/src/smg/version.py"
-	@echo "  - grpc_client/python/pyproject.toml"
-	@echo "  - grpc_client/python/smg_grpc_proto/__init__.py"
 	@echo ""
 	@echo "Verify with: make show-version"
 

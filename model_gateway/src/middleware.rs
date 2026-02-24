@@ -21,9 +21,6 @@ use http_body::Frame;
 use rand::Rng;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-// Task-local storage for conversation store ID to avoid passing private data through request structures.
-// This is defined in smg_data_connector::core and re-exported through its lib.rs.
-pub use smg_data_connector::CONVERSATION_STORE_ID;
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tower::{Layer, Service};
@@ -31,50 +28,6 @@ use tower_http::trace::{MakeSpan, OnRequest, OnResponse, TraceLayer};
 use tracing::{debug, error, field::Empty, info, info_span, warn, Span};
 
 pub use crate::core::token_bucket::TokenBucket;
-
-/// Header name used to pass Oracle conversation store id.
-pub const CONVERSATION_STORE_ID_HEADER: &str = "opc-conversation-store-id";
-
-/// Extract selected headers and store them in task-local storage.
-///
-/// Note: task-locals do not automatically propagate into `tokio::spawn` tasks; if a handler spawns,
-/// it should capture the values it needs before spawning.
-pub fn create_header_extraction_middleware(
-    headers_to_extract: Vec<String>,
-) -> impl Fn(Request<Body>, Next) -> Pin<Box<dyn std::future::Future<Output = Response> + Send>>
-       + Clone
-       + Send
-       + Sync
-       + 'static {
-    let headers = Arc::new(headers_to_extract);
-
-    move |request: Request<Body>, next: Next| {
-        let headers = headers.clone();
-        Box::pin(async move {
-            let want_store_id = headers
-                .iter()
-                .any(|h| h.eq_ignore_ascii_case(CONVERSATION_STORE_ID_HEADER));
-
-            let conversation_store_id = if want_store_id {
-                request
-                    .headers()
-                    .get(CONVERSATION_STORE_ID_HEADER)
-                    .and_then(|h| h.to_str().ok())
-                    .map(str::to_string)
-            } else {
-                None
-            };
-
-            CONVERSATION_STORE_ID
-                .scope(
-                    conversation_store_id,
-                    async move { next.run(request).await },
-                )
-                .await
-        })
-    }
-}
-
 use crate::{
     observability::{
         inflight_tracker::InFlightRequestTracker,
@@ -223,7 +176,7 @@ fn generate_request_id(path: &str) -> String {
         })
         .collect();
 
-    format!("{}{}", prefix, random_part)
+    format!("{prefix}{random_part}")
 }
 
 // Re-export RequestId from auth crate for backward compatibility
@@ -460,7 +413,7 @@ impl QueueProcessor {
             let remaining_timeout = self.queue_timeout - elapsed;
 
             // Try to acquire token for this request
-            if self.token_bucket.try_acquire(1.0).await.is_ok() {
+            if self.token_bucket.try_acquire(1.0).is_ok() {
                 // Got token immediately
                 debug!("Queue: acquired token immediately for queued request");
                 let _ = queued.permit_tx.send(Ok(()));
@@ -469,6 +422,10 @@ impl QueueProcessor {
                 let token_bucket = self.token_bucket.clone();
 
                 // Spawn task only when we actually need to wait
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "fire-and-forget permit acquisition: task is bounded by remaining_timeout and communicates via oneshot; dropping the JoinHandle detaches the task but it self-terminates"
+                )]
                 tokio::spawn(async move {
                     if token_bucket
                         .acquire_timeout(1.0, remaining_timeout)
@@ -555,7 +512,7 @@ pub async fn concurrency_limit_middleware(
     };
 
     // Try to acquire token immediately
-    if token_bucket.try_acquire(1.0).await.is_ok() {
+    if token_bucket.try_acquire(1.0).is_ok() {
         debug!("Acquired token immediately");
         Metrics::record_http_rate_limit(metrics_labels::RATE_LIMIT_ALLOWED);
         let response = next.run(request).await;
@@ -581,7 +538,7 @@ pub async fn concurrency_limit_middleware(
 
             // Try to send to queue
             match queue_tx.try_send(queued) {
-                Ok(_) => {
+                Ok(()) => {
                     // Wait for token from queue processor
                     match permit_rx.await {
                         Ok(Ok(())) => {

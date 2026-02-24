@@ -78,7 +78,7 @@ pub(crate) fn find_workers_by_url(
     dp_aware: bool,
 ) -> Vec<Arc<dyn Worker>> {
     if dp_aware {
-        let worker_url_prefix = format!("{}@", url);
+        let worker_url_prefix = format!("{url}@");
         registry
             .get_all()
             .iter()

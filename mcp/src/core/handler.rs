@@ -58,7 +58,7 @@ impl HandlerRequestContext {
 pub struct SmgClientHandler {
     server_key: Arc<str>,
     approval_manager: Arc<ApprovalManager>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     tool_inventory: Arc<ToolInventory>,
     client_info: ClientInfo,
     request_ctx: Arc<RwLock<Option<HandlerRequestContext>>>,

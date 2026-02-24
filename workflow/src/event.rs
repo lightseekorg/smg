@@ -121,6 +121,10 @@ impl EventBus {
 
         for (idx, subscriber) in subscribers.into_iter().enumerate() {
             let event = event.clone();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "fire-and-forget event notification; subscriber timeout and failure are logged internally"
+            )]
             tokio::spawn(async move {
                 let result = tokio::time::timeout(timeout, subscriber.on_event(&event)).await;
                 match result {
@@ -151,6 +155,7 @@ impl EventBus {
             .enumerate()
             .map(|(idx, subscriber)| {
                 let event = event.clone();
+                #[expect(clippy::disallowed_methods, reason = "parallel event fan-out; handles are collected and awaited by publish_and_wait")]
                 tokio::spawn(async move {
                     let result = tokio::time::timeout(timeout, subscriber.on_event(&event)).await;
                     if result.is_err() {

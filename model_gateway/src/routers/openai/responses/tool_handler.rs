@@ -149,7 +149,7 @@ impl StreamingToolHandler {
         self.accumulator.ingest_block(&format!(
             "{}data: {}",
             event_name
-                .map(|n| format!("event: {}\n", n))
+                .map(|n| format!("event: {n}\n"))
                 .unwrap_or_default(),
             data
         ));
@@ -334,6 +334,10 @@ impl StreamingToolHandler {
         }
 
         self.pending_calls.push(call);
+        #[expect(
+            clippy::expect_used,
+            reason = "just pushed an element; last_mut is infallible"
+        )]
         self.pending_calls
             .last_mut()
             .expect("Just pushed to pending_calls, must have at least one element")

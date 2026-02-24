@@ -70,10 +70,10 @@ pub enum WasmTask {
 }
 
 impl WasmRuntime {
-    pub fn new(config: WasmRuntimeConfig) -> Result<Self> {
-        let thread_pool = Arc::new(WasmThreadPool::new(config.clone())?);
+    pub fn new(config: WasmRuntimeConfig) -> Self {
+        let thread_pool = Arc::new(WasmThreadPool::new(config.clone()));
 
-        Ok(Self {
+        Self {
             config,
             thread_pool,
             total_executions: AtomicU64::new(0),
@@ -81,10 +81,10 @@ impl WasmRuntime {
             failed_executions: AtomicU64::new(0),
             total_execution_time_ms: AtomicU64::new(0),
             max_execution_time_ms: AtomicU64::new(0),
-        })
+        }
     }
 
-    pub fn with_default_config() -> Result<Self> {
+    pub fn with_default_config() -> Self {
         Self::new(WasmRuntimeConfig::default())
     }
 
@@ -128,13 +128,12 @@ impl WasmRuntime {
         };
 
         self.thread_pool.sender.send(task).await.map_err(|e| {
-            WasmRuntimeError::CallFailed(format!("Failed to send task to thread pool: {}", e))
+            WasmRuntimeError::CallFailed(format!("Failed to send task to thread pool: {e}"))
         })?;
 
         let result = response_rx.await.map_err(|e| {
             WasmRuntimeError::CallFailed(format!(
-                "Failed to receive response from thread pool: {}",
-                e
+                "Failed to receive response from thread pool: {e}"
             ))
         })?;
 
@@ -179,7 +178,7 @@ fn map_wasm_error(e: wasmtime::Error, timeout_ms: u64) -> WasmError {
 }
 
 impl WasmThreadPool {
-    pub fn new(config: WasmRuntimeConfig) -> Result<Self> {
+    pub fn new(config: WasmRuntimeConfig) -> Self {
         let (sender, receiver) = async_channel::unbounded();
 
         let mut workers = Vec::new();
@@ -223,14 +222,14 @@ impl WasmThreadPool {
             workers.push(worker);
         }
 
-        Ok(Self {
+        Self {
             sender,
             receiver,
             workers,
             total_tasks: AtomicU64::new(0),
             completed_tasks: AtomicU64::new(0),
             failed_tasks: AtomicU64::new(0),
-        })
+        }
     }
 
     /// Get current thread pool metrics
@@ -295,8 +294,10 @@ impl WasmThreadPool {
             return;
         }
 
+        // SAFETY: 10 is a non-zero literal, so NonZeroUsize::new(10) always returns Some.
+        let default_capacity = NonZeroUsize::new(10).unwrap_or(NonZeroUsize::MIN);
         let cache_capacity =
-            NonZeroUsize::new(config.module_cache_size).unwrap_or(NonZeroUsize::new(10).unwrap());
+            NonZeroUsize::new(config.module_cache_size).unwrap_or(default_capacity);
         let mut component_cache: LruCache<[u8; 32], Component> = LruCache::new(cache_capacity);
 
         // Start epoch incrementer for timeout enforcement.
@@ -304,6 +305,10 @@ impl WasmThreadPool {
         // can set a deadline (number of epochs). When the deadline is reached,
         // WASM execution is interrupted with a trap.
         let engine_for_epoch = engine.clone();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "epoch interrupt handler must run as independent background task; abort on drop ensures cleanup"
+        )]
         let epoch_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(EPOCH_INTERVAL_MS));
             loop {
@@ -359,7 +364,7 @@ impl WasmThreadPool {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn execute_component_in_worker(
         engine: &Engine,
         linker: &Linker<WasiState>,
@@ -379,10 +384,9 @@ impl WasmThreadPool {
             // Compile new component
             let comp = Component::new(engine, wasm_bytes).map_err(|e| {
                 WasmRuntimeError::CompileFailed(format!(
-                    "failed to parse WebAssembly component: {}. \
+                    "failed to parse WebAssembly component: {e}. \
                      Hint: The WASM file must be in component format. \
-                     If you're using wit-bindgen, use 'wasm-tools component new' to wrap the WASM module into a component.",
-                    e
+                     If you're using wit-bindgen, use 'wasm-tools component new' to wrap the WASM module into a component."
                 ))
             })?;
 
@@ -434,7 +438,7 @@ impl WasmThreadPool {
             WasmModuleAttachPoint::Middleware(MiddlewareAttachPoint::OnRequest) => {
                 let request = match input {
                     WasmComponentInput::MiddlewareRequest(req) => req,
-                    _ => {
+                    WasmComponentInput::MiddlewareResponse(_) => {
                         return Err(WasmError::from(WasmRuntimeError::CallFailed(
                             "Expected MiddlewareRequest input for OnRequest attach point"
                                 .to_string(),
@@ -462,7 +466,7 @@ impl WasmThreadPool {
                 // Extract Response input
                 let response = match input {
                     WasmComponentInput::MiddlewareResponse(resp) => resp,
-                    _ => {
+                    WasmComponentInput::MiddlewareRequest(_) => {
                         return Err(WasmError::from(WasmRuntimeError::CallFailed(
                             "Expected MiddlewareResponse input for OnResponse attach point"
                                 .to_string(),
@@ -553,7 +557,7 @@ mod tests {
         assert_eq!(config.module_cache_size, cloned_config.module_cache_size);
     }
     #[test]
-    fn test_wasm_instantiation_performance_threshold() -> Result<()> {
+    fn test_wasm_instantiation_performance_threshold() {
         // A simple WASM module forcing memory allocation
         const WASM_WAT: &str = r#"
             (module
@@ -622,11 +626,8 @@ mod tests {
 
             assert!(
                 speedup > 5.0,
-                "Optimization regression: Pooling+Caching was only {:.2}x faster",
-                speedup
+                "Optimization regression: Pooling+Caching was only {speedup:.2}x faster",
             );
         }
-
-        Ok(())
     }
 }

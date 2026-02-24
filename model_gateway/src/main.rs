@@ -74,7 +74,7 @@ impl std::fmt::Display for Backend {
             Backend::Openai => "openai",
             Backend::Anthropic => "anthropic",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -607,12 +607,15 @@ enum OracleConnectSource {
 }
 
 /// Parse role mapping from CLI format "idp_role=gateway_role"
+#[expect(
+    clippy::print_stderr,
+    reason = "pre-logger CLI argument parsing warnings"
+)]
 fn parse_role_mapping(mapping: &str) -> Option<(String, Role)> {
     let parts: Vec<&str> = mapping.splitn(2, '=').collect();
     if parts.len() != 2 {
         eprintln!(
-            "WARNING: Invalid role mapping format '{}'. Expected 'idp_role=gateway_role'",
-            mapping
+            "WARNING: Invalid role mapping format '{mapping}'. Expected 'idp_role=gateway_role'"
         );
         return None;
     }
@@ -622,8 +625,7 @@ fn parse_role_mapping(mapping: &str) -> Option<(String, Role)> {
         "user" => Role::User,
         other => {
             eprintln!(
-                "WARNING: Invalid gateway role '{}' in mapping. Valid roles: admin, user",
-                other
+                "WARNING: Invalid gateway role '{other}' in mapping. Valid roles: admin, user"
             );
             return None;
         }
@@ -632,12 +634,15 @@ fn parse_role_mapping(mapping: &str) -> Option<(String, Role)> {
 }
 
 /// Parse control plane API key from CLI format "id:name:role:key"
+#[expect(
+    clippy::print_stderr,
+    reason = "pre-logger CLI argument parsing warnings"
+)]
 fn parse_control_plane_api_key(key_str: &str) -> Option<ApiKeyEntry> {
     let parts: Vec<&str> = key_str.splitn(4, ':').collect();
     if parts.len() != 4 {
         eprintln!(
-            "WARNING: Invalid control-plane-api-key format '{}'. Expected 'id:name:role:key'",
-            key_str
+            "WARNING: Invalid control-plane-api-key format '{key_str}'. Expected 'id:name:role:key'"
         );
         return None;
     }
@@ -651,8 +656,7 @@ fn parse_control_plane_api_key(key_str: &str) -> Option<ApiKeyEntry> {
         "user" => Role::User,
         other => {
             eprintln!(
-                "WARNING: Invalid role '{}' in control-plane-api-key. Valid roles: admin, user",
-                other
+                "WARNING: Invalid role '{other}' in control-plane-api-key. Valid roles: admin, user"
             );
             return None;
         }
@@ -663,6 +667,7 @@ fn parse_control_plane_api_key(key_str: &str) -> Option<ApiKeyEntry> {
 
 impl CliArgs {
     /// Build control plane authentication configuration from CLI args.
+    #[expect(clippy::print_stderr, reason = "pre-logger CLI configuration warnings")]
     fn build_control_plane_auth_config(&self) -> ControlPlaneAuthConfig {
         // Build JWT config if issuer and audience are provided
         let jwt = match (&self.jwt_issuer, &self.jwt_audience) {
@@ -674,7 +679,7 @@ impl CliArgs {
                     .collect();
 
                 let mut jwt_config = JwtConfig::new(issuer.clone(), audience.clone());
-                jwt_config.role_claim = self.jwt_role_claim.clone();
+                jwt_config.role_claim.clone_from(&self.jwt_role_claim);
                 jwt_config.role_mapping = role_mapping;
                 if let Some(jwks_uri) = &self.jwt_jwks_uri {
                     jwt_config.jwks_uri = Some(jwks_uri.clone());
@@ -727,6 +732,10 @@ impl CliArgs {
         map
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "unreachable: clap value_parser restricts valid assignment modes"
+    )]
     fn parse_policy(&self, policy_str: &str) -> PolicyConfig {
         match policy_str {
             "random" => PolicyConfig::Random,
@@ -752,7 +761,7 @@ impl CliArgs {
                     "random" => ManualAssignmentMode::Random,
                     "min_load" => ManualAssignmentMode::MinLoad,
                     "min_group" => ManualAssignmentMode::MinGroup,
-                    other => panic!("Unknown assignment mode: {}", other),
+                    other => panic!("Unknown assignment mode: {other}"),
                 },
             },
             _ => PolicyConfig::RoundRobin,
@@ -764,19 +773,19 @@ impl CliArgs {
             return Ok(OracleConnectSource::Dsn { descriptor: dsn });
         }
 
-        let wallet_path = self
-            .oracle_wallet_path
-            .clone()
-            .ok_or(ConfigError::MissingRequired {
-                field: "oracle_wallet_path or ATP_WALLET_PATH".to_string(),
-            })?;
+        let wallet_path =
+            self.oracle_wallet_path
+                .clone()
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    field: "oracle_wallet_path or ATP_WALLET_PATH".to_string(),
+                })?;
 
-        let tns_alias = self
-            .oracle_tns_alias
-            .clone()
-            .ok_or(ConfigError::MissingRequired {
-                field: "oracle_tns_alias or ATP_TNS_ALIAS".to_string(),
-            })?;
+        let tns_alias =
+            self.oracle_tns_alias
+                .clone()
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    field: "oracle_tns_alias or ATP_TNS_ALIAS".to_string(),
+                })?;
 
         Ok(OracleConnectSource::Wallet {
             path: wallet_path,
@@ -798,12 +807,12 @@ impl CliArgs {
             (
                 self.oracle_user
                     .clone()
-                    .ok_or(ConfigError::MissingRequired {
+                    .ok_or_else(|| ConfigError::MissingRequired {
                         field: "oracle_user or ATP_USER".to_string(),
                     })?,
                 self.oracle_password
                     .clone()
-                    .ok_or(ConfigError::MissingRequired {
+                    .ok_or_else(|| ConfigError::MissingRequired {
                         field: "oracle_password or ATP_PASSWORD".to_string(),
                     })?,
             )
@@ -1119,7 +1128,7 @@ impl CliArgs {
                 let mut rng = rand::rng();
                 let random_string: String =
                     (0..4).map(|_| rng.sample(Alphanumeric) as char).collect();
-                format!("Mesh_{}", random_string)
+                format!("Mesh_{random_string}")
             };
 
             let peer = self
@@ -1166,6 +1175,10 @@ impl CliArgs {
     }
 }
 
+#[expect(
+    clippy::print_stdout,
+    reason = "pre-logger startup output and version display"
+)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check for version flags before parsing other args to avoid errors
     let args: Vec<String> = std::env::args().collect();
@@ -1224,7 +1237,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if cli_args.pd_disaggregation {
         "PD Disaggregated".to_string()
     } else if let Some(backend) = &cli_args.backend {
-        format!("Regular ({})", backend)
+        format!("Regular ({backend})")
     } else {
         "Regular".to_string()
     };
@@ -1235,7 +1248,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Policy: {}", cli_args.policy);
 
         if cli_args.pd_disaggregation && !prefill_urls.is_empty() {
-            println!("Prefill nodes: {:?}", prefill_urls);
+            println!("Prefill nodes: {prefill_urls:?}");
             println!("Decode nodes: {:?}", cli_args.decode);
         }
     }

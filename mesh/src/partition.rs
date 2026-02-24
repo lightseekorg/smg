@@ -78,7 +78,7 @@ impl PartitionDetector {
         let mut unreachable_count = 0;
         let mut reachable_nodes = HashSet::new();
 
-        for (name, node) in cluster_state.iter() {
+        for (name, node) in cluster_state {
             if node.status == NodeStatus::Alive as i32 {
                 alive_count += 1;
 
@@ -144,7 +144,7 @@ impl PartitionDetector {
         let last_seen = self.last_seen.read();
         let mut unreachable = Vec::new();
 
-        for (name, node) in cluster_state.iter() {
+        for (name, node) in cluster_state {
             if node.status == NodeStatus::Alive as i32 {
                 if let Some(last_seen_time) = last_seen.get(name) {
                     if now.duration_since(*last_seen_time) >= self.config.unreachable_timeout {

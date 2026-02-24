@@ -96,7 +96,7 @@ pub fn otel_tracing_init(enable: bool, otlp_endpoint: Option<&str>) -> Result<()
 
     let endpoint = otlp_endpoint.unwrap_or("localhost:4317");
     let endpoint = if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
-        format!("http://{}", endpoint)
+        format!("http://{endpoint}")
     } else {
         endpoint.to_string()
     };
@@ -109,8 +109,12 @@ pub fn otel_tracing_init(enable: bool, otlp_endpoint: Option<&str>) -> Result<()
         .with_protocol(opentelemetry_otlp::Protocol::Grpc)
         .build()
         .map_err(|e| {
-            eprintln!("[tracing] Failed to create OTLP exporter: {}", e);
-            anyhow::anyhow!("Failed to create OTLP exporter: {}", e)
+            // Logger may not be initialized yet during OTEL setup; use stderr
+            #[expect(clippy::print_stderr)]
+            {
+                eprintln!("[tracing] Failed to create OTLP exporter: {e}");
+            }
+            anyhow::anyhow!("Failed to create OTLP exporter: {e}")
         })?;
 
     let batch_config = BatchConfigBuilder::default()
@@ -146,7 +150,11 @@ pub fn otel_tracing_init(enable: bool, otlp_endpoint: Option<&str>) -> Result<()
     // so any thread that loads ENABLED with Acquire will see the initialized state.
     ENABLED.store(true, Ordering::Release);
 
-    eprintln!("[tracing] OpenTelemetry initialized successfully");
+    // Logger may not be fully initialized yet during OTEL setup; use stderr
+    #[expect(clippy::print_stderr)]
+    {
+        eprintln!("[tracing] OpenTelemetry initialized successfully");
+    }
     Ok(())
 }
 
@@ -192,7 +200,7 @@ pub async fn flush_spans_async() -> Result<()> {
 
     spawn_blocking(move || provider.force_flush())
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to flush spans: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to flush spans: {e}"))?;
 
     Ok(())
 }
@@ -203,7 +211,11 @@ pub fn shutdown_otel() {
         global::shutdown_tracer_provider();
         // Use Release to ensure shutdown completes before flag is cleared
         ENABLED.store(false, Ordering::Release);
-        eprintln!("[tracing] OpenTelemetry shut down");
+        // Logger may already be shut down during process teardown; use stderr
+        #[expect(clippy::print_stderr)]
+        {
+            eprintln!("[tracing] OpenTelemetry shut down");
+        }
     }
 }
 

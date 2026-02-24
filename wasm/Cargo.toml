@@ -1,6 +1,6 @@
 [package]
 name = "smg-wasm"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "WebAssembly runtime and module management for Shepherd Model Gateway"
 license = "Apache-2.0"
@@ -25,7 +25,7 @@ sha2 = "0.10"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt-multi-thread", "time"] }
 tracing = { workspace = true }
-uuid = { workspace = true, features = ["v4", "serde"] }
+uuid = { workspace = true, features = ["serde"] }
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
 

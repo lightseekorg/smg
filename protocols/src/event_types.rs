@@ -13,7 +13,7 @@ impl ResponseEvent {
     pub const IN_PROGRESS: &'static str = "response.in_progress";
     pub const COMPLETED: &'static str = "response.completed";
 
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Created => Self::CREATED,
             Self::InProgress => Self::IN_PROGRESS,
@@ -41,7 +41,7 @@ impl OutputItemEvent {
     pub const DONE: &'static str = "response.output_item.done";
     pub const DELTA: &'static str = "response.output_item.delta";
 
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Added => Self::ADDED,
             Self::Done => Self::DONE,
@@ -67,7 +67,7 @@ impl FunctionCallEvent {
     pub const ARGUMENTS_DELTA: &'static str = "response.function_call_arguments.delta";
     pub const ARGUMENTS_DONE: &'static str = "response.function_call_arguments.done";
 
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::ArgumentsDelta => Self::ARGUMENTS_DELTA,
             Self::ArgumentsDone => Self::ARGUMENTS_DONE,
@@ -92,7 +92,7 @@ impl ContentPartEvent {
     pub const ADDED: &'static str = "response.content_part.added";
     pub const DONE: &'static str = "response.content_part.done";
 
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Added => Self::ADDED,
             Self::Done => Self::DONE,
@@ -117,7 +117,7 @@ impl OutputTextEvent {
     pub const DELTA: &'static str = "response.output_text.delta";
     pub const DONE: &'static str = "response.output_text.done";
 
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Delta => Self::DELTA,
             Self::Done => Self::DONE,
@@ -156,7 +156,7 @@ impl McpEvent {
     pub const LIST_TOOLS_IN_PROGRESS: &'static str = "response.mcp_list_tools.in_progress";
     pub const LIST_TOOLS_COMPLETED: &'static str = "response.mcp_list_tools.completed";
 
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::CallArgumentsDelta => Self::CALL_ARGUMENTS_DELTA,
             Self::CallArgumentsDone => Self::CALL_ARGUMENTS_DONE,
@@ -192,7 +192,7 @@ impl WebSearchCallEvent {
     pub const SEARCHING: &'static str = "response.web_search_call.searching";
     pub const COMPLETED: &'static str = "response.web_search_call.completed";
 
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::InProgress => Self::IN_PROGRESS,
             Self::Searching => Self::SEARCHING,
@@ -220,7 +220,7 @@ impl CodeInterpreterCallEvent {
     pub const INTERPRETING: &'static str = "response.code_interpreter_call.interpreting";
     pub const COMPLETED: &'static str = "response.code_interpreter_call.completed";
 
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::InProgress => Self::IN_PROGRESS,
             Self::Interpreting => Self::INTERPRETING,
@@ -248,7 +248,7 @@ impl FileSearchCallEvent {
     pub const SEARCHING: &'static str = "response.file_search_call.searching";
     pub const COMPLETED: &'static str = "response.file_search_call.completed";
 
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::InProgress => Self::IN_PROGRESS,
             Self::Searching => Self::SEARCHING,
@@ -286,7 +286,7 @@ impl ItemType {
     pub const CODE_INTERPRETER_CALL: &'static str = "code_interpreter_call";
     pub const FILE_SEARCH_CALL: &'static str = "file_search_call";
 
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::FunctionCall => Self::FUNCTION_CALL,
             Self::FunctionToolCall => Self::FUNCTION_TOOL_CALL,
@@ -300,12 +300,12 @@ impl ItemType {
     }
 
     /// Check if this is a function call variant (FunctionCall or FunctionToolCall)
-    pub const fn is_function_call(&self) -> bool {
+    pub const fn is_function_call(self) -> bool {
         matches!(self, Self::FunctionCall | Self::FunctionToolCall)
     }
 
     /// Check if this is a builtin tool call variant
-    pub const fn is_builtin_tool_call(&self) -> bool {
+    pub const fn is_builtin_tool_call(self) -> bool {
         matches!(
             self,
             Self::WebSearchCall | Self::CodeInterpreterCall | Self::FileSearchCall
@@ -354,7 +354,7 @@ impl RealtimeClientEvent {
     pub const SESSION_UPDATE: &'static str = "session.update";
     pub const TRANSCRIPTION_SESSION_UPDATE: &'static str = "transcription_session.update";
 
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::ConversationItemCreate => Self::CONVERSATION_ITEM_CREATE,
             Self::ConversationItemDelete => Self::CONVERSATION_ITEM_DELETE,
@@ -523,7 +523,7 @@ impl RealtimeServerEvent {
     // Error
     pub const ERROR: &'static str = "error";
 
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::SessionCreated => Self::SESSION_CREATED,
             Self::SessionUpdated => Self::SESSION_UPDATED,

@@ -42,7 +42,7 @@ pub fn create_tokenizer_with_chat_template(
 
     // Check if file exists
     if !path.exists() {
-        return Err(Error::msg(format!("File not found: {}", file_path)));
+        return Err(Error::msg(format!("File not found: {file_path}")));
     }
 
     // If path is a directory, search for tokenizer files
@@ -54,8 +54,7 @@ pub fn create_tokenizer_with_chat_template(
                 resolve_and_log_chat_template(chat_template_path, path, file_path);
             let tokenizer_path_str = tokenizer_json.to_str().ok_or_else(|| {
                 Error::msg(format!(
-                    "Tokenizer path is not valid UTF-8: {:?}",
-                    tokenizer_json
+                    "Tokenizer path is not valid UTF-8: {tokenizer_json:?}"
                 ))
             })?;
             return create_tokenizer_with_chat_template(
@@ -75,8 +74,7 @@ pub fn create_tokenizer_with_chat_template(
         }
 
         return Err(Error::msg(format!(
-            "Directory '{}' does not contain a valid tokenizer file (tokenizer.json, tiktoken.model, *.tiktoken, or vocab.json)",
-            file_path
+            "Directory '{file_path}' does not contain a valid tokenizer file (tokenizer.json, tiktoken.model, *.tiktoken, or vocab.json)"
         )));
     }
 
@@ -143,8 +141,7 @@ fn auto_detect_tokenizer(file_path: &str) -> Result<Arc<dyn traits::Tokenizer>> 
     }
 
     Err(Error::msg(format!(
-        "Unable to determine tokenizer type for file: {}",
-        file_path
+        "Unable to determine tokenizer type for file: {file_path}"
     )))
 }
 
@@ -265,18 +262,52 @@ pub async fn create_tokenizer_async(
 
 /// Check if a model name looks like an OpenAI model that should use tiktoken.
 ///
-/// Uses targeted patterns to avoid false positives on HuggingFace models
-/// like "openai/gpt-oss-20b".
+/// Uses targeted patterns to minimise false positives.  False negatives are
+/// acceptable — the caller falls back to HuggingFace Hub download, which
+/// handles non-OpenAI models correctly.  False positives waste time by
+/// trying tiktoken for a model that doesn't support it.
+///
+/// Matched model families:
+///   gpt-4, gpt-4o, gpt-4-turbo, gpt-4-32k, gpt-4o-mini, gpt-4.5-preview,
+///   gpt-3.5-turbo, gpt-3.5-turbo-16k, gpt-3.5-turbo-instruct,
+///   chatgpt-4o-latest,
+///   o1, o1-mini, o1-preview, o3, o3-mini, o3-pro, o4-mini,
+///   text-davinci-003, code-davinci-002, davinci,
+///   text-curie-001, curie, text-babbage-001, babbage,
+///   text-ada-001, text-embedding-ada-002, ada
 fn is_likely_openai_model(name: &str) -> bool {
-    name.contains("gpt-4")
-        || name.contains("gpt-3.5")
-        || name.contains("gpt-3")
-        || name.contains("turbo")
-        || name.contains("davinci")
-        || name.contains("curie")
-        || name.contains("babbage")
-        || name.contains("ada")
-        || name.contains("codex")
+    let bare = name.rsplit('/').next().unwrap_or(name);
+
+    // GPT family: gpt-4*, gpt-3.5*, chatgpt-*
+    // Require "gpt-" followed by a digit to avoid false positives like "gpt-oss-20b"
+    if bare.starts_with("gpt-") && bare.as_bytes().get(4).is_some_and(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    if bare.starts_with("chatgpt-") {
+        return true;
+    }
+
+    // Reasoning model family (o1, o1-mini, o1-preview, o3, o3-mini, o3-pro, o4-mini, …)
+    // Pattern: "o" + digit, optionally followed by "-suffix"
+    if bare.starts_with('o')
+        && bare.as_bytes().get(1).is_some_and(|b| b.is_ascii_digit())
+        && bare.as_bytes().get(2).is_none_or(|b| *b == b'-')
+    {
+        return true;
+    }
+
+    // Legacy completion / embedding / edit models.
+    // Use prefix-based checks ("text-", "code-") or exact-match for bare
+    // names to avoid matching unrelated models (e.g. "adapter-v2" for "ada",
+    // "turbo-llama" for "turbo").
+    matches!(bare, "davinci" | "curie" | "babbage" | "ada")
+        || bare.starts_with("text-davinci")
+        || bare.starts_with("code-davinci")
+        || bare.starts_with("text-curie")
+        || bare.starts_with("text-babbage")
+        || bare.starts_with("text-ada")
+        || bare.starts_with("text-embedding-ada")
+        || bare.starts_with("code-cushman")
 }
 
 /// Factory function to create tokenizer with optional chat template (async version)
@@ -319,8 +350,7 @@ pub async fn create_tokenizer_async_with_chat_template(
 
                 let tokenizer_path_str = tokenizer_path.to_str().ok_or_else(|| {
                     Error::msg(format!(
-                        "Tokenizer path is not valid UTF-8: {:?}",
-                        tokenizer_path
+                        "Tokenizer path is not valid UTF-8: {tokenizer_path:?}"
                     ))
                 })?;
                 create_tokenizer_with_chat_template(
@@ -346,7 +376,7 @@ pub async fn create_tokenizer_async_with_chat_template(
                         );
 
                         let file_path_str = file_path.to_str().ok_or_else(|| {
-                            Error::msg(format!("File path is not valid UTF-8: {:?}", file_path))
+                            Error::msg(format!("File path is not valid UTF-8: {file_path:?}"))
                         })?;
                         return create_tokenizer_with_chat_template(
                             file_path_str,
@@ -355,14 +385,12 @@ pub async fn create_tokenizer_async_with_chat_template(
                     }
                 }
                 Err(Error::msg(format!(
-                    "Downloaded model '{}' but couldn't find a suitable tokenizer file",
-                    model_name_or_path
+                    "Downloaded model '{model_name_or_path}' but couldn't find a suitable tokenizer file"
                 )))
             }
         }
         Err(e) => Err(Error::msg(format!(
-            "Failed to download tokenizer from HuggingFace: {}",
-            e
+            "Failed to download tokenizer from HuggingFace: {e}"
         ))),
     }
 }
@@ -422,7 +450,7 @@ pub fn get_tokenizer_info(file_path: &str) -> Result<TokenizerType> {
     let path = Path::new(file_path);
 
     if !path.exists() {
-        return Err(Error::msg(format!("File not found: {}", file_path)));
+        return Err(Error::msg(format!("File not found: {file_path}")));
     }
 
     let extension = path
@@ -451,9 +479,14 @@ pub fn get_tokenizer_info(file_path: &str) -> Result<TokenizerType> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::print_stdout,
+    reason = "diagnostic output in tests for CI skip messages and download results"
+)]
 mod tests {
     use super::{
         create_tokenizer, create_tokenizer_async, create_tokenizer_from_file, is_likely_json,
+        is_likely_openai_model,
     };
 
     #[test]
@@ -510,9 +543,70 @@ mod tests {
                 println!("Successfully downloaded and created tokenizer");
             }
             Err(e) => {
-                println!("Download failed (this might be expected): {}", e);
+                println!("Download failed (this might be expected): {e}");
                 // Don't fail the test - network issues shouldn't break CI
             }
         }
+    }
+
+    #[test]
+    fn test_is_likely_openai_model_positives() {
+        // GPT-4 family
+        assert!(is_likely_openai_model("gpt-4"));
+        assert!(is_likely_openai_model("gpt-4o"));
+        assert!(is_likely_openai_model("gpt-4o-mini"));
+        assert!(is_likely_openai_model("gpt-4-turbo"));
+        assert!(is_likely_openai_model("gpt-4-32k"));
+        assert!(is_likely_openai_model("gpt-4.5-preview"));
+
+        // GPT-3.5 family
+        assert!(is_likely_openai_model("gpt-3.5-turbo"));
+        assert!(is_likely_openai_model("gpt-3.5-turbo-16k"));
+        assert!(is_likely_openai_model("gpt-3.5-turbo-instruct"));
+
+        // ChatGPT
+        assert!(is_likely_openai_model("chatgpt-4o-latest"));
+
+        // Reasoning models
+        assert!(is_likely_openai_model("o1"));
+        assert!(is_likely_openai_model("o1-mini"));
+        assert!(is_likely_openai_model("o1-preview"));
+        assert!(is_likely_openai_model("o3"));
+        assert!(is_likely_openai_model("o3-mini"));
+        assert!(is_likely_openai_model("o3-pro"));
+        assert!(is_likely_openai_model("o4-mini"));
+
+        // Legacy models
+        assert!(is_likely_openai_model("davinci"));
+        assert!(is_likely_openai_model("text-davinci-003"));
+        assert!(is_likely_openai_model("code-davinci-002"));
+        assert!(is_likely_openai_model("curie"));
+        assert!(is_likely_openai_model("text-curie-001"));
+        assert!(is_likely_openai_model("babbage"));
+        assert!(is_likely_openai_model("text-babbage-001"));
+        assert!(is_likely_openai_model("ada"));
+        assert!(is_likely_openai_model("text-ada-001"));
+        assert!(is_likely_openai_model("text-embedding-ada-002"));
+        assert!(is_likely_openai_model("code-cushman-001"));
+
+        // With org prefix
+        assert!(is_likely_openai_model("openai/gpt-4"));
+        assert!(is_likely_openai_model("openai/o1-mini"));
+        assert!(is_likely_openai_model("openai/davinci"));
+    }
+
+    #[test]
+    fn test_is_likely_openai_model_negatives() {
+        // HuggingFace models that should NOT match
+        assert!(!is_likely_openai_model("openai/gpt-oss-20b"));
+        assert!(!is_likely_openai_model("meta-llama/Llama-3-8B"));
+        assert!(!is_likely_openai_model("mistralai/Mistral-7B"));
+        assert!(!is_likely_openai_model("bert-base-uncased"));
+
+        // Names that previously caused false positives
+        assert!(!is_likely_openai_model("turbo-llama"));
+        assert!(!is_likely_openai_model("adapter-v2"));
+        assert!(!is_likely_openai_model("oracle-7b"));
+        assert!(!is_likely_openai_model("open-llama"));
     }
 }

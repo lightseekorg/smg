@@ -212,8 +212,7 @@ async fn test_mistral_streaming_closing_bracket() {
     // Should emit only the third chunk as normal text, NOT the ]
     assert_eq!(
         all_normal_text, " Here's the weather info",
-        "Should not emit ] for Mistral array format, got: '{}'",
-        all_normal_text
+        "Should not emit ] for Mistral array format, got: '{all_normal_text}'",
     );
 }
 
@@ -269,7 +268,6 @@ async fn test_mistral_streaming_bracket_in_text_after_tools() {
     // Should preserve ] in normal text after tools complete
     assert_eq!(
         all_normal_text, " Array notation: arr[0]",
-        "Should preserve ] in normal text after tools, got: '{}'",
-        all_normal_text
+        "Should preserve ] in normal text after tools, got: '{all_normal_text}'",
     );
 }

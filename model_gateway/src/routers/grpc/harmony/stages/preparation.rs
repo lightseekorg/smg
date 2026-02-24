@@ -53,10 +53,10 @@ impl PipelineStage for HarmonyPreparationStage {
 
         if is_chat {
             let request_arc = ctx.chat_request_arc();
-            self.prepare_chat(ctx, &request_arc).await?;
+            self.prepare_chat(ctx, &request_arc)?;
         } else if is_responses {
             let request_arc = ctx.responses_request_arc();
-            self.prepare_responses(ctx, &request_arc).await?;
+            self.prepare_responses(ctx, &request_arc)?;
         } else {
             error!(
                 function = "HarmonyPreparationStage::execute",
@@ -78,7 +78,11 @@ impl PipelineStage for HarmonyPreparationStage {
 
 impl HarmonyPreparationStage {
     /// Prepare a chat completion request using Harmony encoding
-    async fn prepare_chat(
+    #[expect(
+        clippy::result_large_err,
+        reason = "Response is the standard error type in the pipeline stage pattern"
+    )]
+    fn prepare_chat(
         &self,
         ctx: &mut RequestContext,
         request: &ChatCompletionRequest,
@@ -88,7 +92,8 @@ impl HarmonyPreparationStage {
 
         // Step 2: Build tool constraints
         let tool_constraints = if let Some(tools) = body_ref.tools.as_ref() {
-            Self::generate_tool_call_constraint(tools, &body_ref.tool_choice).map_err(|e| *e)?
+            Self::generate_tool_call_constraint(tools, body_ref.tool_choice.as_ref())
+                .map_err(|e| *e)?
         } else {
             None
         };
@@ -100,10 +105,7 @@ impl HarmonyPreparationStage {
                 error = %e,
                 "Harmony build failed for chat request"
             );
-            error::bad_request(
-                "harmony_build_failed",
-                format!("Harmony build failed: {}", e),
-            )
+            error::bad_request("harmony_build_failed", format!("Harmony build failed: {e}"))
         })?;
 
         // Step 4: Store results
@@ -130,7 +132,11 @@ impl HarmonyPreparationStage {
     ///
     /// For responses API, we build from conversation history using the same Harmony
     /// encoding that the builder provides. This handles the MCP loop integration.
-    pub async fn prepare_responses(
+    #[expect(
+        clippy::result_large_err,
+        reason = "Response is the standard error type in the pipeline stage pattern"
+    )]
+    pub fn prepare_responses(
         &self,
         ctx: &mut RequestContext,
         request: &ResponsesRequest,
@@ -141,17 +147,17 @@ impl HarmonyPreparationStage {
         // Step 2: Filter tools based on tool_choice (AllowedTools or Function)
         // Note: Tool existence is already validated in ResponsesRequest::validate()
         if let Some(filtered) =
-            utils::filter_tools_by_tool_choice(&function_tools, &request.tool_choice)
+            utils::filter_tools_by_tool_choice(&function_tools, request.tool_choice.as_ref())
         {
             function_tools = filtered;
         }
 
         // Step 3: Generate Harmony structural tags
-        let tool_constraint = if !function_tools.is_empty() {
-            Self::generate_tool_call_constraint(&function_tools, &request.tool_choice)
-                .map_err(|e| *e)?
-        } else {
+        let tool_constraint = if function_tools.is_empty() {
             None
+        } else {
+            Self::generate_tool_call_constraint(&function_tools, request.tool_choice.as_ref())
+                .map_err(|e| *e)?
         };
 
         let text_constraint = if let Some(text_config) = &request.text {
@@ -180,10 +186,7 @@ impl HarmonyPreparationStage {
                 error = %e,
                 "Harmony build failed for responses request"
             );
-            error::bad_request(
-                "harmony_build_failed",
-                format!("Harmony build failed: {}", e),
-            )
+            error::bad_request("harmony_build_failed", format!("Harmony build failed: {e}"))
         })?;
 
         // Step 4: Store results with constraint
@@ -249,9 +252,9 @@ impl HarmonyPreparationStage {
     /// This ensures the model outputs in Harmony format (with channels) even when constrained.
     fn generate_tool_call_constraint(
         tools: &[Tool],
-        tool_choice: &Option<ToolChoice>,
+        tool_choice: Option<&ToolChoice>,
     ) -> Result<Option<(String, String)>, Box<Response>> {
-        let Some(choice) = tool_choice.as_ref() else {
+        let Some(choice) = tool_choice else {
             return Ok(None);
         };
 
@@ -272,7 +275,7 @@ impl HarmonyPreparationStage {
                     Ok(None)
                 }
             }
-            _ => Ok(None),
+            ToolChoice::Value(_) => Ok(None),
         }
     }
 
@@ -307,7 +310,7 @@ impl HarmonyPreparationStage {
                 );
                 return Err(Box::new(error::bad_request(
                     "tool_not_found",
-                    format!("Tool '{}' not found in tools list", tool_name),
+                    format!("Tool '{tool_name}' not found in tools list"),
                 )));
             }
             _ => {}
@@ -359,7 +362,7 @@ impl HarmonyPreparationStage {
             );
             Box::new(error::internal_error(
                 "serialize_structural_tag_failed",
-                format!("Failed to serialize structural tag: {}", e),
+                format!("Failed to serialize structural tag: {e}"),
             ))
         })
     }
@@ -405,10 +408,6 @@ pub(crate) fn build_text_format_structural_tag(
         }
     });
 
-    serde_json::to_string(&structural_tag).map_err(|e| {
-        format!(
-            "Failed to serialize structural tag for structured output: {}",
-            e
-        )
-    })
+    serde_json::to_string(&structural_tag)
+        .map_err(|e| format!("Failed to serialize structural tag for structured output: {e}"))
 }

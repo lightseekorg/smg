@@ -8,7 +8,7 @@ use axum::{
     Json,
 };
 use serde_json::Value;
-use smg_mcp::{McpSessionOptions, McpToolSession};
+use smg_mcp::McpToolSession;
 use tracing::warn;
 
 use super::{
@@ -70,15 +70,8 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         let session_request_id = original_body
             .request_id
             .clone()
-            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::new_v4()));
-        let session = McpToolSession::new(
-            mcp_orchestrator,
-            mcp_servers,
-            &session_request_id,
-            McpSessionOptions {
-                request_tools: original_body.tools.as_deref(),
-            },
-        );
+            .unwrap_or_else(|| format!("req_{}", uuid::Uuid::now_v7()));
+        let session = McpToolSession::new(mcp_orchestrator, mcp_servers, &session_request_id);
         prepare_mcp_tools_as_functions(&mut payload, &session);
 
         match execute_tool_loop(
@@ -116,7 +109,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
                 );
                 return error::bad_gateway(
                     "upstream_error",
-                    format!("Failed to forward request to OpenAI: {}", e),
+                    format!("Failed to forward request to OpenAI: {e}"),
                 );
             }
         };
@@ -136,7 +129,7 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
                 worker.circuit_breaker().record_failure();
                 return error::internal_error(
                     "parse_error",
-                    format!("Failed to parse upstream response: {}", e),
+                    format!("Failed to parse upstream response: {e}"),
                 );
             }
         };
@@ -156,18 +149,12 @@ pub async fn handle_non_streaming_response(mut ctx: RequestContext) -> Response 
         ctx.components.conversation_item_storage(),
         ctx.components.response_storage(),
     ) {
-        let conversation_store_id = crate::middleware::CONVERSATION_STORE_ID
-            .try_with(|id| id.clone())
-            .ok()
-            .flatten();
-
         if let Err(err) = persist_conversation_items(
             conv_storage.clone(),
             item_storage.clone(),
             resp_storage.clone(),
             &response_json,
             original_body,
-            conversation_store_id,
         )
         .await
         {

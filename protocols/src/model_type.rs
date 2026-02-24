@@ -83,78 +83,78 @@ const CAPABILITY_NAMES: &[(ModelType, &str)] = &[
 impl ModelType {
     /// Check if this model type supports the chat completions endpoint
     #[inline]
-    pub fn supports_chat(&self) -> bool {
+    pub fn supports_chat(self) -> bool {
         self.contains(Self::CHAT)
     }
 
     /// Check if this model type supports the legacy completions endpoint
     #[inline]
-    pub fn supports_completions(&self) -> bool {
+    pub fn supports_completions(self) -> bool {
         self.contains(Self::COMPLETIONS)
     }
 
     /// Check if this model type supports the responses endpoint
     #[inline]
-    pub fn supports_responses(&self) -> bool {
+    pub fn supports_responses(self) -> bool {
         self.contains(Self::RESPONSES)
     }
 
     /// Check if this model type supports the embeddings endpoint
     #[inline]
-    pub fn supports_embeddings(&self) -> bool {
+    pub fn supports_embeddings(self) -> bool {
         self.contains(Self::EMBEDDINGS)
     }
 
     /// Check if this model type supports the rerank endpoint
     #[inline]
-    pub fn supports_rerank(&self) -> bool {
+    pub fn supports_rerank(self) -> bool {
         self.contains(Self::RERANK)
     }
 
     /// Check if this model type supports the generate endpoint
     #[inline]
-    pub fn supports_generate(&self) -> bool {
+    pub fn supports_generate(self) -> bool {
         self.contains(Self::GENERATE)
     }
 
     /// Check if this model type supports vision/multimodal input
     #[inline]
-    pub fn supports_vision(&self) -> bool {
+    pub fn supports_vision(self) -> bool {
         self.contains(Self::VISION)
     }
 
     /// Check if this model type supports tool/function calling
     #[inline]
-    pub fn supports_tools(&self) -> bool {
+    pub fn supports_tools(self) -> bool {
         self.contains(Self::TOOLS)
     }
 
     /// Check if this model type supports reasoning/thinking
     #[inline]
-    pub fn supports_reasoning(&self) -> bool {
+    pub fn supports_reasoning(self) -> bool {
         self.contains(Self::REASONING)
     }
 
     /// Check if this model type supports image generation
     #[inline]
-    pub fn supports_image_gen(&self) -> bool {
+    pub fn supports_image_gen(self) -> bool {
         self.contains(Self::IMAGE_GEN)
     }
 
     /// Check if this model type supports audio (TTS, Whisper, etc.)
     #[inline]
-    pub fn supports_audio(&self) -> bool {
+    pub fn supports_audio(self) -> bool {
         self.contains(Self::AUDIO)
     }
 
     /// Check if this model type supports content moderation
     #[inline]
-    pub fn supports_moderation(&self) -> bool {
+    pub fn supports_moderation(self) -> bool {
         self.contains(Self::MODERATION)
     }
 
     /// Check if this model type supports a given endpoint
-    pub fn supports_endpoint(&self, endpoint: Endpoint) -> bool {
+    pub fn supports_endpoint(self, endpoint: Endpoint) -> bool {
         match endpoint {
             Endpoint::Chat => self.supports_chat(),
             Endpoint::Completions => self.supports_completions(),
@@ -167,7 +167,7 @@ impl ModelType {
     }
 
     /// Convert to a list of supported capability names
-    pub fn as_capability_names(&self) -> Vec<&'static str> {
+    pub fn as_capability_names(self) -> Vec<&'static str> {
         let mut result = Vec::with_capacity(CAPABILITY_NAMES.len());
         for &(flag, name) in CAPABILITY_NAMES {
             if self.contains(flag) {
@@ -179,37 +179,37 @@ impl ModelType {
 
     /// Check if this is an LLM (supports at least chat)
     #[inline]
-    pub fn is_llm(&self) -> bool {
+    pub fn is_llm(self) -> bool {
         self.supports_chat()
     }
 
     /// Check if this is an embedding model
     #[inline]
-    pub fn is_embedding_model(&self) -> bool {
+    pub fn is_embedding_model(self) -> bool {
         self.supports_embeddings() && !self.supports_chat()
     }
 
     /// Check if this is a reranker model
     #[inline]
-    pub fn is_reranker(&self) -> bool {
+    pub fn is_reranker(self) -> bool {
         self.supports_rerank() && !self.supports_chat()
     }
 
     /// Check if this is an image generation model
     #[inline]
-    pub fn is_image_model(&self) -> bool {
+    pub fn is_image_model(self) -> bool {
         self.supports_image_gen() && !self.supports_chat()
     }
 
     /// Check if this is an audio model
     #[inline]
-    pub fn is_audio_model(&self) -> bool {
+    pub fn is_audio_model(self) -> bool {
         self.supports_audio() && !self.supports_chat()
     }
 
     /// Check if this is a moderation model
     #[inline]
-    pub fn is_moderation_model(&self) -> bool {
+    pub fn is_moderation_model(self) -> bool {
         self.supports_moderation() && !self.supports_chat()
     }
 }
@@ -259,9 +259,9 @@ impl<'de> Deserialize<'de> for ModelType {
             // Backward compat: accept numeric u16 bitfield
             fn visit_u64<E: de::Error>(self, v: u64) -> Result<ModelType, E> {
                 let bits = u16::try_from(v)
-                    .map_err(|_| E::custom(format!("ModelType bits out of u16 range: {}", v)))?;
+                    .map_err(|_| E::custom(format!("ModelType bits out of u16 range: {v}")))?;
                 ModelType::from_bits(bits)
-                    .ok_or_else(|| E::custom(format!("invalid ModelType bits: {}", bits)))
+                    .ok_or_else(|| E::custom(format!("invalid ModelType bits: {bits}")))
             }
 
             // New format: array of capability name strings
@@ -273,7 +273,7 @@ impl<'de> Deserialize<'de> for ModelType {
                         .find(|(_, n)| *n == name.as_str())
                         .map(|(f, _)| *f)
                         .ok_or_else(|| {
-                            de::Error::custom(format!("unknown ModelType capability: {}", name))
+                            de::Error::custom(format!("unknown ModelType capability: {name}"))
                         })?;
                     model_type |= flag;
                 }
@@ -307,7 +307,7 @@ pub enum Endpoint {
 
 impl Endpoint {
     /// Get the URL path for this endpoint
-    pub fn path(&self) -> &'static str {
+    pub fn path(self) -> &'static str {
         match self {
             Endpoint::Chat => "/v1/chat/completions",
             Endpoint::Completions => "/v1/completions",
@@ -335,7 +335,7 @@ impl Endpoint {
     }
 
     /// Get the required ModelType flag for this endpoint
-    pub fn required_capability(&self) -> Option<ModelType> {
+    pub fn required_capability(self) -> Option<ModelType> {
         match self {
             Endpoint::Chat => Some(ModelType::CHAT),
             Endpoint::Completions => Some(ModelType::COMPLETIONS),

@@ -1,5 +1,5 @@
 // These modules are used by tests and benchmarks
-#![allow(dead_code)]
+#![allow(dead_code, clippy::allow_attributes)]
 
 pub mod mock_mcp_server;
 pub mod mock_openai_server;
@@ -47,6 +47,10 @@ pub struct WorkerTestContext {
 }
 
 impl WorkerTestContext {
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test helper - panicking on failure is intentional"
+    )]
     pub async fn new(worker_configs: Vec<MockWorkerConfig>) -> Self {
         let mut workers = Vec::new();
         let mut worker_urls = Vec::new();
@@ -83,11 +87,11 @@ impl WorkerTestContext {
             .ok_or_else(|| "No workers available".to_string())?;
 
         let response = client
-            .post(format!("{}{}", worker_url, endpoint))
+            .post(format!("{worker_url}{endpoint}"))
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Request failed: {}", e))?;
+            .map_err(|e| format!("Request failed: {e}"))?;
 
         if !response.status().is_success() {
             return Err(format!("Request failed with status: {}", response.status()));
@@ -96,7 +100,7 @@ impl WorkerTestContext {
         response
             .json::<serde_json::Value>()
             .await
-            .map_err(|e| format!("Failed to parse response: {}", e))
+            .map_err(|e| format!("Failed to parse response: {e}"))
     }
 
     pub async fn make_streaming_request(
@@ -112,11 +116,11 @@ impl WorkerTestContext {
             .ok_or_else(|| "No workers available".to_string())?;
 
         let response = client
-            .post(format!("{}{}", worker_url, endpoint))
+            .post(format!("{worker_url}{endpoint}"))
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Request failed: {}", e))?;
+            .map_err(|e| format!("Request failed: {e}"))?;
 
         if !response.status().is_success() {
             return Err(format!("Request failed with status: {}", response.status()));
@@ -184,6 +188,11 @@ impl AppTestContext {
         Self::new_with_config(config, worker_configs).await
     }
 
+    #[expect(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "test helper - panicking on failure is intentional"
+    )]
     pub async fn new_with_config(
         mut config: RouterConfig,
         worker_configs: Vec<MockWorkerConfig>,
@@ -207,14 +216,14 @@ impl AppTestContext {
                 worker_urls: ref mut urls,
             } => {
                 if urls.is_empty() {
-                    *urls = worker_urls.clone();
+                    urls.clone_from(&worker_urls);
                 }
             }
             RoutingMode::OpenAI {
                 worker_urls: ref mut urls,
             } => {
                 if urls.is_empty() {
-                    *urls = worker_urls.clone();
+                    urls.clone_from(&worker_urls);
                 }
             }
             _ => {}
@@ -250,12 +259,10 @@ impl AppTestContext {
                     break;
                 }
 
-                if start.elapsed() > timeout_duration {
-                    panic!(
-                        "Timeout waiting for {} workers to become healthy (only {} ready)",
-                        expected_count, healthy_workers
-                    );
-                }
+                assert!(
+                    start.elapsed() <= timeout_duration,
+                    "Timeout waiting for {expected_count} workers to become healthy (only {healthy_workers} ready)"
+                );
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
@@ -272,7 +279,7 @@ impl AppTestContext {
         }
     }
 
-    pub async fn create_app(&self) -> axum::Router {
+    pub fn create_app(&self) -> axum::Router {
         test_app::create_test_app_with_context(
             Arc::clone(&self.router),
             Arc::clone(&self.app_context),
@@ -287,6 +294,11 @@ impl AppTestContext {
 }
 
 /// Helper function to create AppContext for tests
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 pub async fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
     let client = reqwest::Client::new();
 
@@ -407,6 +419,11 @@ pub async fn create_test_context(config: RouterConfig) -> Arc<AppContext> {
 }
 
 /// Helper function to create AppContext for tests with parser factories initialized
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 pub async fn create_test_context_with_parsers(config: RouterConfig) -> Arc<AppContext> {
     let client = reqwest::Client::new();
 
@@ -532,6 +549,11 @@ pub async fn create_test_context_with_parsers(config: RouterConfig) -> Arc<AppCo
 }
 
 /// Helper function to create AppContext for tests with MCP config from file
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 pub async fn create_test_context_with_mcp_config(
     config: RouterConfig,
     mcp_config_path: &str,
@@ -664,6 +686,12 @@ static DOWNLOAD_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 ///
 /// This function is thread-safe and will only download the tokenizer once
 /// even if called from multiple threads concurrently.
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stdout,
+    reason = "test helper - panicking on failure is intentional"
+)]
 pub fn ensure_tokenizer_cached() -> PathBuf {
     // Get or initialize the mutex
     let mutex = DOWNLOAD_MUTEX.get_or_init(|| Mutex::new(()));
@@ -690,15 +718,19 @@ pub fn ensure_tokenizer_cached() -> PathBuf {
             .send()
             .expect("Failed to download tokenizer");
 
-        if !response.status().is_success() {
-            panic!("Failed to download tokenizer: HTTP {}", response.status());
-        }
+        assert!(
+            response.status().is_success(),
+            "Failed to download tokenizer: HTTP {}",
+            response.status()
+        );
 
         let content = response.bytes().expect("Failed to read tokenizer content");
 
-        if content.len() < 100 {
-            panic!("Downloaded content too small: {} bytes", content.len());
-        }
+        assert!(
+            content.len() >= 100,
+            "Downloaded content too small: {} bytes",
+            content.len()
+        );
 
         fs::write(&tokenizer_path, content).expect("Failed to write tokenizer to cache");
         println!(
@@ -727,7 +759,6 @@ pub const EXPECTED_HASHES: [u64; 4] = [
 ];
 
 /// Create a comprehensive set of test tools covering all parser test scenarios
-#[allow(dead_code)]
 pub fn create_test_tools() -> Vec<Tool> {
     vec![
         Tool {
