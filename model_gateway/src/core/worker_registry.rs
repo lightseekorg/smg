@@ -264,14 +264,7 @@ impl WorkerRegistry {
         let model_id = worker.model_id().to_string();
 
         // Index primary model ID + all aliases for O(1) lookup by any name.
-        let mut all_names: Vec<String> = vec![model_id.clone()];
-        if let Some(primary_card) = worker.metadata().spec.models.primary() {
-            for alias in &primary_card.aliases {
-                if alias != &model_id {
-                    all_names.push(alias.clone());
-                }
-            }
-        }
+        let all_names = worker.model_names();
 
         for name in &all_names {
             self.model_index
@@ -343,14 +336,7 @@ impl WorkerRegistry {
             let model_id = worker.model_id().to_string();
 
             // Clean up primary model ID + all aliases from model_index.
-            let mut all_names: Vec<String> = vec![model_id.clone()];
-            if let Some(primary_card) = worker.metadata().spec.models.primary() {
-                for alias in &primary_card.aliases {
-                    if alias != &model_id {
-                        all_names.push(alias.clone());
-                    }
-                }
-            }
+            let all_names = worker.model_names();
 
             for name in &all_names {
                 if let Some(mut entry) = self.model_index.get_mut(name) {

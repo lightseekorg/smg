@@ -64,14 +64,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for SubmitTokenizerJobStep {
             let model_id = worker.model_id().to_string();
 
             // Register tokenizer under primary name and all aliases.
-            let mut all_names: Vec<String> = vec![model_id.clone()];
-            if let Some(primary_card) = worker.metadata().spec.models.primary() {
-                for alias in &primary_card.aliases {
-                    if alias != &model_id {
-                        all_names.push(alias.clone());
-                    }
-                }
-            }
+            let all_names = worker.model_names();
 
             // Get tokenizer path with fallback chain:
             // 1. Worker labels: tokenizer_path
