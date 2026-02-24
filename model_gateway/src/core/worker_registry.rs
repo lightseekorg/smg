@@ -261,8 +261,6 @@ impl WorkerRegistry {
 
         // Update model index for O(1) lookups using copy-on-write
         // This creates a new immutable snapshot with the added worker
-        let model_id = worker.model_id().to_string();
-
         // Index primary model ID + all aliases for O(1) lookup by any name.
         let all_names = worker.model_names();
 
@@ -333,7 +331,6 @@ impl WorkerRegistry {
             // Remove from model index using copy-on-write
             // Create new snapshot without the removed worker
             let worker_url = worker.url();
-            let model_id = worker.model_id().to_string();
 
             // Clean up primary model ID + all aliases from model_index.
             let all_names = worker.model_names();
