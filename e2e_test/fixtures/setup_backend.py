@@ -494,8 +494,12 @@ def _setup_grpc_backend(
     try:
         if num_workers > 1:
             # Multi-worker: find existing gRPC workers, launch missing ones
+            # get_workers_by_type auto-acquires all returned workers
             all_existing = model_pool.get_workers_by_type(model_id, WorkerType.REGULAR)
             existing_grpc = [w for w in all_existing if w.mode == ConnectionMode.GRPC]
+
+            # Track all acquired workers immediately so they get cleaned up on failure
+            instances = list(existing_grpc)
 
             # Release workers we won't use (wrong mode)
             for w in all_existing:
@@ -525,13 +529,21 @@ def _setup_grpc_backend(
                     missing,
                 )
                 new_instances = model_pool.launch_workers(workers_to_launch, startup_timeout=300)
+
+                if not new_instances:
+                    pytest.fail(
+                        f"Failed to launch {runtime_label} gRPC workers: needed "
+                        f"{missing} workers but could not allocate GPUs"
+                    )
+
                 for inst in new_instances:
                     inst.acquire()
-                instances = existing_grpc + new_instances
+                    instances.append(inst)
 
-            if not instances:
+            if len(instances) < num_workers:
                 pytest.fail(
-                    f"Failed to get {num_workers} {runtime_label} gRPC workers for {model_id}"
+                    f"Failed to get {num_workers} {runtime_label} gRPC workers for {model_id} "
+                    f"(got {len(instances)})"
                 )
             worker_urls = [inst.worker_url for inst in instances]
             model_path = instances[0].model_path
@@ -579,7 +591,7 @@ def _setup_grpc_backend(
         "Setup %s gRPC backend: model=%s, workers=%d, gateway=%s, policy=%s",
         runtime_label,
         model_id,
-        num_workers,
+        len(instances),
         gateway.base_url,
         gateway_config["policy"],
     )
