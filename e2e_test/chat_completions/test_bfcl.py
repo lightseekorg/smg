@@ -31,23 +31,10 @@ import json
 import logging
 import os
 import time
-from collections import Counter
 from typing import Any
 
 import openai
 import pytest
-
-try:
-    from baselines.compare import (
-        baseline_path,
-        compare_summary,
-        load_baseline,
-        save_baseline,
-    )
-
-    _HAS_BASELINES = True
-except ImportError:
-    _HAS_BASELINES = False
 
 from bfcl import (
     bfcl_to_openai_tools,
@@ -130,44 +117,6 @@ def _write_summary_on_exit(bfcl_run_dir):
         summary["accuracy_pct"],
         bfcl_run_dir,
     )
-
-    if not _HAS_BASELINES:
-        return
-
-    model_counts = Counter(r.get("model", "unknown") for r in _all_results)
-    backend_counts = Counter(r.get("backend", "unknown") for r in _all_results)
-    model = model_counts.most_common(1)[0][0]
-    backend = backend_counts.most_common(1)[0][0]
-
-    bl_path = baseline_path("bfcl", model, backend)
-
-    if os.environ.get("BFCL_UPDATE_BASELINE"):
-        save_baseline(bl_path, summary, model=model, backend=backend)
-        logger.info("Baseline updated — commit %s to lock it in", bl_path)
-        return
-
-    baseline = load_baseline(bl_path)
-    if baseline is None:
-        logger.info(
-            "No baseline found for bfcl / %s / %s — skipping comparison. "
-            "Run with BFCL_UPDATE_BASELINE=1 to create one.",
-            model,
-            backend,
-        )
-        return
-
-    comparison = compare_summary(summary, baseline, bl_path)
-
-    comparison_file = bfcl_run_dir / "comparison.json"
-    comparison_file.write_text(
-        json.dumps(comparison.to_dict(), indent=2) + "\n"
-    )
-
-    report = comparison.format_report()
-    if comparison.passed:
-        logger.info("\n%s", report)
-    else:
-        logger.warning("\n%s", report)
 
 
 # ---------------------------------------------------------------------------
