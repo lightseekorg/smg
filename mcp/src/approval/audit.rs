@@ -62,7 +62,7 @@ impl AuditEntry {
         source: DecisionSource,
     ) -> Self {
         Self {
-            id: Arc::from(uuid::Uuid::new_v4().to_string()),
+            id: Arc::from(uuid::Uuid::now_v7().to_string()),
             timestamp: Utc::now(),
             tenant_id,
             request_id,

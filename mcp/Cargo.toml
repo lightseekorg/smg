@@ -42,7 +42,7 @@ rmcp = { version = "0.8.3", features = ["client", "server",
     "auth"] }
 chrono = { workspace = true, features = ["serde"] }
 regex = "1.12"
-uuid = { workspace = true, features = ["v4"] }
+uuid = { workspace = true }
 tokio-util = { workspace = true }
 scopeguard = { workspace = true }
 

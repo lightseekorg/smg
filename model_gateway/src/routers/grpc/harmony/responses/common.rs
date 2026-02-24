@@ -96,7 +96,7 @@ pub(super) fn build_next_request_with_tools(
 
     // Build assistant response item with reasoning + content + tool calls
     // This represents what the model generated in this iteration
-    let assistant_id = format!("msg_{}", Uuid::new_v4());
+    let assistant_id = format!("msg_{}", Uuid::now_v7());
 
     // Add reasoning if present (from analysis channel)
     if let Some(analysis_text) = analysis {

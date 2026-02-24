@@ -75,7 +75,7 @@ impl SessionId {
 
 impl Default for SessionId {
     fn default() -> Self {
-        Self(Arc::from(uuid::Uuid::new_v4().to_string()))
+        Self(Arc::from(uuid::Uuid::now_v7().to_string()))
     }
 }
 

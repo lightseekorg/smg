@@ -3,10 +3,6 @@ name: Nightly Benchmark
 on:
   schedule:
     - cron: '0 8 * * *'
-  pull_request:
-    paths:
-      - e2e_test/**
-      - .github/workflows/nightly-benchmark.yml
   workflow_dispatch:
     inputs:
       models:

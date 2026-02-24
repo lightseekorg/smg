@@ -370,7 +370,7 @@ async fn chat_completions_handler(
         .as_secs();
 
     Json(json!({
-        "id": format!("chatcmpl-{}", uuid::Uuid::new_v4()),
+        "id": format!("chatcmpl-{}", uuid::Uuid::now_v7()),
         "object": "chat.completion",
         "created": timestamp,
         "model": "mock-tls-model",

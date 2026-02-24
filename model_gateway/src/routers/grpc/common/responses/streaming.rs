@@ -91,7 +91,7 @@ pub(crate) struct ResponseStreamEventEmitter {
 
 impl ResponseStreamEventEmitter {
     pub fn new(response_id: String, model: String, created_at: u64) -> Self {
-        let message_id = format!("msg_{}", Uuid::new_v4());
+        let message_id = format!("msg_{}", Uuid::now_v7());
 
         Self {
             sequence_number: 0,
@@ -607,7 +607,7 @@ impl ResponseStreamEventEmitter {
 
     /// Generate unique ID for item type
     fn generate_item_id(prefix: &str) -> String {
-        format!("{}_{}", prefix, Uuid::new_v4().simple())
+        format!("{}_{}", prefix, Uuid::now_v7().simple())
     }
 
     /// Allocate next output index and track item

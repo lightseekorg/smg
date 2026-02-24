@@ -75,7 +75,7 @@ pub(crate) async fn route_responses(
         let params = ResponsesCallContext {
             headers,
             model_id,
-            response_id: Some(format!("resp_{}", Uuid::new_v4())),
+            response_id: Some(format!("resp_{}", Uuid::now_v7())),
         };
         route_responses_sync(ctx, request, params).await
     }

@@ -4,6 +4,7 @@ use openai_protocol::{
     event_types::is_response_event,
     responses::{ResponseTool, ResponseToolType, ResponsesRequest},
 };
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tracing::warn;
 
@@ -184,14 +185,21 @@ pub(super) fn rewrite_streaming_block(
     Some(rebuild_sse_block(trimmed, &new_payload))
 }
 
-/// Helper to insert an optional string field into a JSON map
-pub(super) fn insert_optional_string(
+/// Helper to insert an optional serializable field into a JSON map.
+pub(super) fn insert_optional_value<T: Serialize>(
     map: &mut Map<String, Value>,
     key: &str,
-    value: Option<&String>,
+    value: Option<&T>,
 ) {
     if let Some(v) = value {
-        map.insert(key.to_string(), Value::String(v.clone()));
+        match serde_json::to_value(v) {
+            Ok(val) => {
+                map.insert(key.to_string(), val);
+            }
+            Err(e) => {
+                warn!(field = key, error = %e, "Failed to serialize optional field");
+            }
+        }
     }
 }
 
@@ -204,14 +212,14 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
         ResponseToolType::Mcp if tool.server_url.is_some() => {
             let mut m = Map::new();
             m.insert("type".to_string(), json!("mcp"));
-            insert_optional_string(&mut m, "server_label", tool.server_label.as_ref());
-            insert_optional_string(&mut m, "server_url", tool.server_url.as_ref());
-            insert_optional_string(
+            insert_optional_value(&mut m, "server_label", tool.server_label.as_ref());
+            insert_optional_value(&mut m, "server_url", tool.server_url.as_ref());
+            insert_optional_value(
                 &mut m,
                 "server_description",
                 tool.server_description.as_ref(),
             );
-            insert_optional_string(&mut m, "require_approval", tool.require_approval.as_ref());
+            insert_optional_value(&mut m, "require_approval", tool.require_approval.as_ref());
             if let Some(allowed) = &tool.allowed_tools {
                 m.insert(
                     "allowed_tools".to_string(),

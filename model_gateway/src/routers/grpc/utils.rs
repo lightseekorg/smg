@@ -735,7 +735,7 @@ pub(crate) fn generate_tool_call_id(
         format!("functions.{}:{}", tool_name, history_count + tool_index)
     } else {
         // Standard OpenAI format: call_{24-char-uuid}
-        format!("call_{}", &Uuid::new_v4().simple().to_string()[..24])
+        format!("call_{}", &Uuid::now_v7().simple().to_string()[..24])
     }
 }
 
