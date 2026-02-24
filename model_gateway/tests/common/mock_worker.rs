@@ -673,10 +673,7 @@ async fn responses_handler(
 
         if has_tools && !has_function_output {
             // First turn: emit streaming tool call events
-            let call_id = format!(
-                "call_{}",
-                Uuid::now_v7().to_string().split('-').next().unwrap()
-            );
+            let call_id = format!("call_{}", &Uuid::now_v7().simple().to_string()[..24]);
             let rid = request_id.clone();
 
             let events = vec![
@@ -821,10 +818,7 @@ async fn responses_handler(
         } else if has_tools && has_function_output {
             // Second turn: emit streaming text response
             let rid = request_id.clone();
-            let msg_id = format!(
-                "msg_{}",
-                Uuid::now_v7().to_string().split('-').next().unwrap()
-            );
+            let msg_id = format!("msg_{}", &Uuid::now_v7().simple().to_string()[..24]);
 
             let events = vec![
                 // response.created
