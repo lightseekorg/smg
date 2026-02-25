@@ -108,6 +108,10 @@ impl<T: CrdtValue> CrdtStore<T> {
         })
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "serialization failure in CRDT update is an invariant violation that must abort the update path"
+    )]
     fn update<F>(&self, key: String, updater: F) -> Option<T>
     where
         F: FnOnce(Option<T>) -> T,
@@ -124,10 +128,7 @@ impl<T: CrdtValue> CrdtStore<T> {
             let updated = updater(current);
             match updated.to_bytes() {
                 Ok(bytes) => bytes,
-                Err(err) => {
-                    debug!(error = %err, "Failed to serialize updated CRDT value");
-                    current_bytes.map_or_else(Vec::new, |bytes| bytes.to_vec())
-                }
+                Err(err) => panic!("CRDT update serialization invariant violated: {err}"),
             }
         });
         T::from_bytes(&updated_bytes)

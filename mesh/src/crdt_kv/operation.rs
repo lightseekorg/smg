@@ -160,6 +160,12 @@ impl OperationLog {
     }
 
     /// Keep only latest operation per key to bound log growth.
+    ///
+    /// This uses `latest_operations_by_key` LWW tie-breaking by `(timestamp, ReplicaId)`.
+    /// As a result, concurrent operations may be compacted away deterministically, so
+    /// `compact()` + `merge()` can be non-idempotent in raw log contents even though
+    /// `apply_operation` and `operation_id` guards keep state semantics safe.
+    /// Stronger concurrency retention would require vector-clock/version-vector metadata.
     pub fn compact(&mut self) {
         self.operations = self
             .latest_operations_by_key()
@@ -209,7 +215,10 @@ impl OperationLog {
         }
     }
 
-    /// Merge another operation log
+    /// Merge another operation log.
+    ///
+    /// INVARIANT: `Operation::operation_id()` (`ReplicaId`, `timestamp`) is unique per operation
+    /// because each replica's `LamportClock::tick()` is monotonic and never repeats a timestamp.
     pub fn merge(&mut self, other: &OperationLog) {
         let mut seen_ids: HashSet<(ReplicaId, u64)> = self
             .operations

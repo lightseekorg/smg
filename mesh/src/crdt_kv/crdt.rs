@@ -250,24 +250,29 @@ impl CrdtOrMap {
             }
         }
 
-        let mut unseen_operations: Vec<&Operation> = log
-            .operations()
-            .iter()
-            .filter(|operation| {
-                operation.timestamp()
-                    > high_water_by_replica
-                        .get(&operation.replica_id())
-                        .copied()
-                        .unwrap_or(0)
-            })
-            .collect();
-        unseen_operations.sort_by_key(|operation| (operation.timestamp(), operation.replica_id()));
+        let unseen_operations: Vec<Operation> = {
+            let mut local_log = self.operation_log.write();
+            local_log.merge(log);
+            local_log.compact();
 
-        // Merge into local operation log
-        self.operation_log.write().merge(log);
+            let mut unseen: Vec<Operation> = local_log
+                .operations()
+                .iter()
+                .filter(|operation| {
+                    operation.timestamp()
+                        > high_water_by_replica
+                            .get(&operation.replica_id())
+                            .copied()
+                            .unwrap_or(0)
+                })
+                .cloned()
+                .collect();
+            unseen.sort_by_key(|operation| (operation.timestamp(), operation.replica_id()));
+            unseen
+        };
 
         // Apply only new operations in deterministic order.
-        for operation in unseen_operations {
+        for operation in &unseen_operations {
             self.apply_operation(operation);
         }
     }
@@ -302,9 +307,10 @@ impl CrdtOrMap {
         }
 
         if let Some(winner) = versions.iter().max_by_key(|v| v.version_key()).cloned() {
+            let winner_is_tombstone = winner.is_tombstone;
             versions.clear();
-            versions.push(winner.clone());
-            if winner.is_tombstone {
+            versions.push(winner);
+            if winner_is_tombstone {
                 self.key_locks.remove(key);
             }
         }
@@ -389,9 +395,14 @@ impl CrdtOrMap {
                 true
             }
             MapEntry::Vacant(entry) => {
-                entry.insert(vec![tombstone]);
-                self.key_locks.remove(key);
-                true
+                if self.store.contains_key(key) {
+                    entry.insert(vec![tombstone]);
+                    self.key_locks.remove(key);
+                    true
+                } else {
+                    self.key_locks.remove(key);
+                    false
+                }
             }
         }
     }

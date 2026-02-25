@@ -686,15 +686,15 @@ impl Gossip for GossipService {
                                                     }
                                                 }
                                                 LocalStoreType::RateLimit => {
-                                                    if let Ok(log) = serde_json::from_slice::<
+                                                    if let Ok(op_log) = serde_json::from_slice::<
                                                         super::crdt_kv::OperationLog,
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        if let Some(counter_value) = log
+                                                        if let Some(counter_value) = op_log
                                                             .latest_counter_value(&state_update.key)
                                                             .or_else(|| {
-                                                                log.latest_counter_value_any()
+                                                                op_log.latest_counter_value_any()
                                                             })
                                                         {
                                                             sync_manager
@@ -950,17 +950,10 @@ impl Gossip for GossipService {
                                                             }
                                                             LocalStoreType::RateLimit => {
                                                                 if let Some(ref sync_manager) = sync_manager {
-                                                                    if let Ok(counter_value) = serde_json::from_slice::<i64>(&entry.value) {
-                                                                        sync_manager
-                                                                            .apply_remote_rate_limit_counter_value_with_actor(
-                                                                                entry.key.clone(),
-                                                                                entry.actor.clone(),
-                                                                                counter_value,
-                                                                            );
-                                                                    } else if let Ok(log) = serde_json::from_slice::<super::crdt_kv::OperationLog>(&entry.value) {
-                                                                        if let Some(counter_value) = log
+                                                                    if let Ok(op_log) = serde_json::from_slice::<super::crdt_kv::OperationLog>(&entry.value) {
+                                                                        if let Some(counter_value) = op_log
                                                                             .latest_counter_value(&entry.key)
-                                                                            .or_else(|| log.latest_counter_value_any())
+                                                                            .or_else(|| op_log.latest_counter_value_any())
                                                                         {
                                                                             sync_manager
                                                                                 .apply_remote_rate_limit_counter_value_with_actor(
@@ -974,6 +967,13 @@ impl Gossip for GossipService {
                                                                                 "Snapshot OperationLog does not contain a decodable rate-limit counter"
                                                                             );
                                                                         }
+                                                                    } else if let Ok(counter_value) = serde_json::from_slice::<i64>(&entry.value) {
+                                                                        sync_manager
+                                                                            .apply_remote_rate_limit_counter_value_with_actor(
+                                                                                entry.key.clone(),
+                                                                                entry.actor.clone(),
+                                                                                counter_value,
+                                                                            );
                                                                     } else {
                                                                         log::warn!(
                                                                             key = %entry.key,

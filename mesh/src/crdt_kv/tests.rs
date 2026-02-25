@@ -326,8 +326,9 @@ fn test_distributed_scenario() {
 
     // Replica 3 operations
     replica3.insert("user:4".to_string(), b"David".to_vec());
-    // Advance replica3 clock so remove is strictly newer than replica1's user:2 insert.
-    replica3.remove("noop:key");
+    // OR-Map remove only applies to observed keys, so replica3 first observes replica1 state.
+    let log1 = replica1.get_operation_log();
+    replica3.merge(&log1);
     replica3.remove("user:2");
 
     // Merge all replicas into replica 1

@@ -103,7 +103,6 @@ impl IncrementalUpdateCollector {
 
             if current_version > last_sent_version {
                 if let Ok(serialized) = serde_json::to_vec(&state) {
-                    let key_for_last_sent = key.clone();
                     updates.push(StateUpdate {
                         key,
                         value: serialized,
@@ -111,8 +110,6 @@ impl IncrementalUpdateCollector {
                         actor: self.self_name.clone(),
                         timestamp,
                     });
-
-                    last_sent_map.insert(key_for_last_sent, current_version);
                     debug!(
                         "Collected {} update: {} (version: {})",
                         store_name,
@@ -180,15 +177,13 @@ impl IncrementalUpdateCollector {
                             // Only send if at least 1 second has passed since last send
                             if current_timestamp > last_sent_timestamp + 1_000_000_000 {
                                 if let Ok(serialized) = serde_json::to_vec(&counter_value) {
-                                    let key_str = key.clone();
                                     updates.push(StateUpdate {
-                                        key: key_str.clone(),
+                                        key: key.clone(),
                                         value: serialized,
                                         version: current_timestamp,
                                         actor: self.self_name.clone(),
                                         timestamp: current_timestamp,
                                     });
-                                    last_sent.rate_limit.insert(key_str, current_timestamp);
                                     trace!("Collected rate limit counter update: {}", key);
                                 }
                             }
@@ -279,9 +274,14 @@ mod tests {
         assert_eq!(updates[0].version, 1);
         assert_eq!(updates[0].actor, "node1");
 
-        // Collect again - should be empty (already sent)
+        // Collect again before mark_sent - should still include pending updates.
         let updates2 = collector.collect_updates_for_store(StoreType::Worker);
-        assert_eq!(updates2.len(), 0);
+        assert_eq!(updates2.len(), 1);
+
+        // Mark transmission success and verify it is no longer collected.
+        collector.mark_sent(StoreType::Worker, &updates2);
+        let updates_after_mark = collector.collect_updates_for_store(StoreType::Worker);
+        assert_eq!(updates_after_mark.len(), 0);
 
         // Update worker state
         let key2 = "worker1".to_string();
