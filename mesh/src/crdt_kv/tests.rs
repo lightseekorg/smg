@@ -84,8 +84,8 @@ fn test_concurrent_inserts() {
         let map_clone = map.clone();
         let handle = thread::spawn(move || {
             for j in 0..100 {
-                let key = format!("key_{}_{}", i, j);
-                let value = format!("value_{}_{}", i, j).into_bytes();
+                let key = format!("key_{i}_{j}");
+                let value = format!("value_{i}_{j}").into_bytes();
                 map_clone.insert(key, value);
             }
         });
@@ -100,7 +100,7 @@ fn test_concurrent_inserts() {
     // Verify all data was inserted successfully
     for i in 0..10 {
         for j in 0..100 {
-            let key = format!("key_{}_{}", i, j);
+            let key = format!("key_{i}_{j}");
             assert!(map.contains_key(&key));
         }
     }
@@ -236,7 +236,6 @@ fn test_operation_log_json_serialization() {
 
     // Serialize to JSON
     let json = log.to_json().unwrap();
-    println!("JSON: {}", json);
 
     // Deserialize
     let deserialized_log = OperationLog::from_json(&json).unwrap();
@@ -256,7 +255,7 @@ fn test_operation_log_binary_serialization() {
 
     // Serialize to binary
     let bytes = log.to_bytes().unwrap();
-    println!("Binary size: {} bytes", bytes.len());
+    assert!(!bytes.is_empty());
 
     // Deserialize
     let deserialized_log = OperationLog::from_bytes(&bytes).unwrap();
@@ -346,17 +345,7 @@ fn test_distributed_scenario() {
     assert!(replica1.contains_key("user:3")); // Exists
     assert!(replica1.contains_key("user:4")); // Exists
 
-    println!("Final state:");
-    println!(
-        "user:1 = {:?}",
-        String::from_utf8(replica1.get("user:1").unwrap())
-    );
-    println!(
-        "user:3 = {:?}",
-        String::from_utf8(replica1.get("user:3").unwrap())
-    );
-    println!(
-        "user:4 = {:?}",
-        String::from_utf8(replica1.get("user:4").unwrap())
-    );
+    assert_eq!(replica1.get("user:1"), Some(b"Alice_Updated".to_vec()));
+    assert_eq!(replica1.get("user:3"), Some(b"Charlie".to_vec()));
+    assert_eq!(replica1.get("user:4"), Some(b"David".to_vec()));
 }

@@ -9,7 +9,7 @@ use tracing::debug;
 use super::{
     service::gossip::NodeStatus,
     stores::{
-        tree_state_key, PolicyState, RateLimitConfig, StateStores, WorkerState,
+        tree_state_key, PolicyState, RateLimitConfig, RateLimitStore, StateStores, WorkerState,
         GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
     },
     tree_ops::{TreeOperation, TreeState},
@@ -246,10 +246,7 @@ impl MeshSyncManager {
     /// This keeps wire compatibility with incremental updates while
     /// reusing the existing OperationLog merge path.
     pub fn apply_remote_rate_limit_counter_value(&self, key: String, counter_value: i64) {
-        let log = self
-            .stores
-            .rate_limit
-            .operation_log_for_counter_value(key, counter_value);
+        let log = RateLimitStore::operation_log_for_counter_value(key, counter_value);
         self.apply_remote_rate_limit_counter(&log);
     }
 

@@ -25,7 +25,10 @@ use super::{
 /// Provides transparent serialization/deserialization
 trait CrdtValue: Serialize + DeserializeOwned + Clone {
     fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("Serialization should never fail for valid types")
+        serde_json::to_vec(self).unwrap_or_else(|err| {
+            debug!(error = %err, "Failed to serialize CRDT value");
+            Vec::new()
+        })
     }
 
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
@@ -96,7 +99,7 @@ impl<T: CrdtValue> CrdtStore<T> {
     // }
 
     fn merge(&self, log: &OperationLog) {
-        self.inner.merge(log)
+        self.inner.merge(log);
     }
 
     fn get_operation_log(&self) -> OperationLog {
@@ -517,7 +520,7 @@ impl RateLimitStore {
 
     /// Build a minimal operation log for a counter snapshot.
     /// This keeps the sync manager API compatible with OperationLog merge flow.
-    pub fn operation_log_for_counter_value(&self, key: String, counter_value: i64) -> OperationLog {
+    pub fn operation_log_for_counter_value(key: String, counter_value: i64) -> OperationLog {
         let temp_store = CrdtStore::<CounterValue>::new();
         let _ = temp_store.insert(
             key,

@@ -14,7 +14,7 @@ pub struct ReplicaId(Uuid);
 impl ReplicaId {
     /// Generate a new replica ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4())
+        Self(Uuid::now_v7())
     }
 
     /// Parse replica ID from string
@@ -82,7 +82,6 @@ impl LamportClock {
             }
         }
     }
-
 }
 
 impl Default for LamportClock {

@@ -33,7 +33,7 @@ impl KvStore {
         match self.store.entry(key) {
             Entry::Occupied(mut entry) => {
                 let new_value = updater(Some(entry.get().as_slice()));
-                *entry.get_mut() = new_value.clone();
+                entry.get_mut().clone_from(&new_value);
                 new_value
             }
             Entry::Vacant(entry) => {
@@ -58,7 +58,6 @@ impl KvStore {
     pub fn contains_key(&self, key: &str) -> bool {
         self.store.contains_key(key)
     }
-
 
     /// Get all key-value pairs as a BTreeMap
     pub fn all(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
