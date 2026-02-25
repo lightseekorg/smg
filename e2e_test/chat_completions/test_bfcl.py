@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 import openai
@@ -41,9 +42,9 @@ from bfcl import (
     evaluate_tool_calls,
     get_run_dir,
     load_bfcl_category,
-    save_summary,
     save_test_log,
 )
+from bfcl.session_state import append_result, set_run_dir
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,13 @@ def _extract_tool_calls(response: Any) -> list[dict[str, Any]]:
     for tc in tool_calls:
         try:
             args = json.loads(tc.function.arguments)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning(
+                "Malformed tool call arguments for %r — %s | raw: %r",
+                tc.function.name,
+                exc,
+                tc.function.arguments,
+            )
             args = {}
         result.append({"name": tc.function.name, "arguments": args})
     return result
@@ -100,29 +107,11 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
 
 @pytest.fixture(scope="session")
-def bfcl_run_dir():
+def bfcl_run_dir() -> Path:
     """Single timestamped directory for all BFCL logs in this test session."""
-    return get_run_dir()
-
-
-_all_results: list[dict[str, Any]] = []
-
-
-@pytest.fixture(autouse=True, scope="session")
-def _write_summary_on_exit(bfcl_run_dir):
-    """Write summary.json and compare against baseline when the session ends."""
-    yield
-    if not _all_results:
-        return
-
-    summary = save_summary(bfcl_run_dir, _all_results)
-    logger.info(
-        "BFCL summary: %d/%d passed (%.1f%%) — %s/summary.json",
-        summary["passed"],
-        summary["total"],
-        summary["accuracy_pct"],
-        bfcl_run_dir,
-    )
+    run_dir = get_run_dir()
+    set_run_dir(run_dir)
+    return run_dir
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +174,7 @@ def _run_bfcl_case(
             errors=[f"API error: {exc}"],
             latency_ms=latency,
         )
-        _all_results.append({
+        append_result({
             "test_id": test_id,
             "category": category,
             "passed": False,
@@ -235,7 +224,7 @@ def _run_bfcl_case(
         usage = response_payload.get("usage") or {}
         completion_tokens = usage.get("completion_tokens")
 
-    _all_results.append({
+    append_result({
         "test_id": test_id,
         "category": category,
         "passed": passed,

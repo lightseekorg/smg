@@ -448,7 +448,7 @@ def is_parallel_execution(config: pytest.Config) -> bool:
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Cleanup all thread-cached backends at session end.
+    """Cleanup all thread-cached backends and write BFCL summary at session end.
 
     This hook runs exactly once when the session ends, unlike session-scoped
     autouse fixtures which fire per-test under pytest-parallel's thread model.
@@ -456,6 +456,10 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     from .setup_backend import cleanup_all_cached_backends
 
     cleanup_all_cached_backends()
+
+    from bfcl.session_state import write_summary_if_needed
+
+    write_summary_if_needed()
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
