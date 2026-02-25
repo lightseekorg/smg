@@ -38,6 +38,10 @@ _ANSWER_FILE_MAP = {
 }
 
 
+class MissingBFCLAnswerFileError(FileNotFoundError):
+    """Raised when BFCL question data exists but the mapped answer file is missing."""
+
+
 def load_bfcl_category(
     category: str,
     *,
@@ -73,8 +77,13 @@ def load_bfcl_category(
 
     answer_filename = _ANSWER_FILE_MAP.get(category)
     answers_by_id: dict[str, list] = {}
-    if answer_filename and (DATA_DIR / answer_filename).exists():
+    if answer_filename:
         answer_path = DATA_DIR / answer_filename
+        if not answer_path.exists():
+            raise MissingBFCLAnswerFileError(
+                f"BFCL answer file not found: {answer_path}. "
+                "Run: python e2e_test/bfcl/download_data.py"
+            )
         with open(answer_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -86,17 +95,21 @@ def load_bfcl_category(
     results: list[dict[str, Any]] = []
     for test_id, entry in questions_by_id.items():
         raw_question = entry.get("question", [])
-        messages = raw_question[0] if raw_question and isinstance(raw_question[0], list) else raw_question
+        messages = (
+            raw_question[0] if raw_question and isinstance(raw_question[0], list) else raw_question
+        )
 
         ground_truth = answers_by_id.get(test_id, [])
 
-        results.append({
-            "id": test_id,
-            "question": messages,
-            "function": entry.get("function", []),
-            "ground_truth": ground_truth,
-            "category": category,
-        })
+        results.append(
+            {
+                "id": test_id,
+                "question": messages,
+                "function": entry.get("function", []),
+                "ground_truth": ground_truth,
+                "category": category,
+            }
+        )
 
     if limit is not None:
         results = results[:limit]
@@ -115,8 +128,7 @@ def _fix_parameter_type(params: dict) -> dict:
     props = result.get("properties")
     if isinstance(props, dict):
         result["properties"] = {
-            k: _fix_parameter_type(v) if isinstance(v, dict) else v
-            for k, v in props.items()
+            k: _fix_parameter_type(v) if isinstance(v, dict) else v for k, v in props.items()
         }
     items = result.get("items")
     if isinstance(items, dict):
@@ -139,5 +151,3 @@ def bfcl_to_openai_tools(bfcl_functions: list[dict]) -> list[dict]:
             fixed_fn["parameters"] = _fix_parameter_type(fixed_fn["parameters"])
         tools.append({"type": "function", "function": fixed_fn})
     return tools
-
-

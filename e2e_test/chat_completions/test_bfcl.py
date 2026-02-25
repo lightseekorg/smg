@@ -31,19 +31,20 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 import openai
 import pytest
 
 from bfcl import (
+    MissingBFCLAnswerFileError,
     bfcl_to_openai_tools,
     evaluate_tool_calls,
-    get_run_dir,
     load_bfcl_category,
-    save_summary,
     save_test_log,
 )
+from bfcl.session_state import append_result, get_or_create_run_dir
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +58,21 @@ BFCL_LIMIT = int(os.environ.get("BFCL_LIMIT", "0")) or None
 
 def _extract_tool_calls(response: Any) -> list[dict[str, Any]]:
     """Pull structured tool calls out of an OpenAI ChatCompletion response."""
+    if not response.choices:
+        return []
     tool_calls = response.choices[0].message.tool_calls or []
     result = []
     for tc in tool_calls:
         try:
             args = json.loads(tc.function.arguments)
-        except (json.JSONDecodeError, TypeError):
-            args = {}
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning(
+                "Malformed tool call arguments for %r — %s | raw: %r",
+                tc.function.name,
+                exc,
+                tc.function.arguments,
+            )
+            args = {"_parse_error": str(exc)}
         result.append({"name": tc.function.name, "arguments": args})
     return result
 
@@ -71,7 +80,10 @@ def _extract_tool_calls(response: Any) -> list[dict[str, Any]]:
 def _load(category: str) -> list[dict]:
     try:
         return load_bfcl_category(category, limit=BFCL_LIMIT)
+    except MissingBFCLAnswerFileError:
+        raise
     except FileNotFoundError:
+        logger.warning("BFCL data not found for category %r — run download_data.py", category)
         return []
 
 
@@ -91,38 +103,25 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
             + _load("parallel_multiple")
             + _load("irrelevance")
         )
+    if not _cases_cache:
+        metafunc.parametrize("case", [], ids=[])
+        return
     metafunc.parametrize("case", _cases_cache, ids=[c["id"] for c in _cases_cache])
 
 
 # ---------------------------------------------------------------------------
-# Session-scoped fixtures for the log directory and result collector
+# Session-scoped fixture for the log directory
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="session")
-def bfcl_run_dir():
-    """Single timestamped directory for all BFCL logs in this test session."""
-    return get_run_dir()
+def bfcl_run_dir() -> Path:
+    """Single timestamped directory for all BFCL logs in this test session.
 
-
-_all_results: list[dict[str, Any]] = []
-
-
-@pytest.fixture(autouse=True, scope="session")
-def _write_summary_on_exit(bfcl_run_dir):
-    """Write summary.json and compare against baseline when the session ends."""
-    yield
-    if not _all_results:
-        return
-
-    summary = save_summary(bfcl_run_dir, _all_results)
-    logger.info(
-        "BFCL summary: %d/%d passed (%.1f%%) — %s/summary.json",
-        summary["passed"],
-        summary["total"],
-        summary["accuracy_pct"],
-        bfcl_run_dir,
-    )
+    Safe under pytest-parallel: get_or_create_run_dir() creates the directory
+    exactly once under a lock; subsequent calls return the same path.
+    """
+    return get_or_create_run_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +136,7 @@ def _run_bfcl_case(
     parser: str,
     backend: str,
     client: openai.OpenAI,
-    run_dir: Any,
+    run_dir: Path,
 ) -> None:
     """Execute a single BFCL test case, log the result, assert on failure."""
     category = case["category"]
@@ -146,6 +145,7 @@ def _run_bfcl_case(
     tools = bfcl_to_openai_tools(case["function"])
 
     request_payload = {
+        "model": model,
         "messages": messages,
         "tools": tools,
         "tool_choice": "auto",
@@ -158,19 +158,12 @@ def _run_bfcl_case(
     actual: list[dict[str, Any]] = []
 
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            temperature=0.01,
-            max_tokens=1024,
-        )
+        response = client.chat.completions.create(**request_payload)
         response_payload = response.model_dump()
         actual = _extract_tool_calls(response)
     except Exception as exc:
         latency = (time.monotonic() - start) * 1000
-        save_test_log(
+        log_path = save_test_log(
             run_dir,
             test_id=test_id,
             category=category,
@@ -185,19 +178,21 @@ def _run_bfcl_case(
             errors=[f"API error: {exc}"],
             latency_ms=latency,
         )
-        _all_results.append({
-            "test_id": test_id,
-            "category": category,
-            "passed": False,
-            "errors": [f"API error: {exc}"],
-            "latency_ms": latency,
-            "finish_reason": None,
-            "completion_tokens": None,
-            "had_reasoning": False,
-            "log_file": f"{category}/{test_id.replace('/', '_')}_FAIL.json",
-            "model": model,
-            "backend": backend,
-        })
+        append_result(
+            {
+                "test_id": test_id,
+                "category": category,
+                "passed": False,
+                "errors": [f"API error: {exc}"],
+                "latency_ms": latency,
+                "finish_reason": None,
+                "completion_tokens": None,
+                "had_reasoning": False,
+                "log_file": f"{category}/{log_path.name}",
+                "model": model,
+                "backend": backend,
+            }
+        )
         pytest.fail(f"BFCL {test_id}: API call failed — {exc}")
 
     latency = (time.monotonic() - start) * 1000
@@ -235,19 +230,21 @@ def _run_bfcl_case(
         usage = response_payload.get("usage") or {}
         completion_tokens = usage.get("completion_tokens")
 
-    _all_results.append({
-        "test_id": test_id,
-        "category": category,
-        "passed": passed,
-        "errors": errors,
-        "latency_ms": latency,
-        "finish_reason": finish_reason,
-        "completion_tokens": completion_tokens,
-        "had_reasoning": had_reasoning,
-        "log_file": log_path.name,
-        "model": model,
-        "backend": backend,
-    })
+    append_result(
+        {
+            "test_id": test_id,
+            "category": category,
+            "passed": passed,
+            "errors": errors,
+            "latency_ms": latency,
+            "finish_reason": finish_reason,
+            "completion_tokens": completion_tokens,
+            "had_reasoning": had_reasoning,
+            "log_file": f"{category}/{log_path.name}",
+            "model": model,
+            "backend": backend,
+        }
+    )
 
     status = "PASS" if passed else "FAIL"
     logger.info(
@@ -280,8 +277,12 @@ class TestBFCLQwen:
     def test_case(self, setup_backend, bfcl_run_dir, case):
         backend_name, model, client, _ = setup_backend
         _run_bfcl_case(
-            case=case, model=model, parser="qwen", backend=backend_name,
-            client=client, run_dir=bfcl_run_dir,
+            case=case,
+            model=model,
+            parser="qwen",
+            backend=backend_name,
+            client=client,
+            run_dir=bfcl_run_dir,
         )
 
 
@@ -317,6 +318,10 @@ class TestBFCLStandalone:
 
     def test_case(self, case):
         _run_bfcl_case(
-            case=case, model=self.model, parser=self.parser, backend="standalone",
-            client=self.client, run_dir=self.run_dir,
+            case=case,
+            model=self.model,
+            parser=self.parser,
+            backend="standalone",
+            client=self.client,
+            run_dir=self.run_dir,
         )

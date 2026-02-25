@@ -7,15 +7,16 @@ Usage:
 
 from __future__ import annotations
 
+import shutil
 import urllib.request
 from pathlib import Path
 
 HF_BASE = (
-    "https://huggingface.co/datasets/gorilla-llm/"
-    "Berkeley-Function-Calling-Leaderboard/resolve/main"
+    "https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard/resolve/main"
 )
 
 DATA_DIR = Path(__file__).parent / "data"
+TIMEOUT_SECONDS = 60
 
 FILES = [
     "BFCL_v3_simple.json",
@@ -40,7 +41,10 @@ def _download_one(remote_path: str, local_name: str) -> None:
     url = f"{HF_BASE}/{remote_path}"
     dest = DATA_DIR / local_name
     print(f"Downloading {local_name}...")
-    urllib.request.urlretrieve(url, dest)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    with urllib.request.urlopen(url, timeout=TIMEOUT_SECONDS) as resp, tmp.open("wb") as out:
+        shutil.copyfileobj(resp, out)
+    tmp.replace(dest)
     with open(dest, encoding="utf-8") as f:
         lines = sum(1 for _ in f)
     print(f"  → {dest.name} ({lines} entries)")

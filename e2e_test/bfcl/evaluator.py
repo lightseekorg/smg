@@ -18,7 +18,7 @@ Log directory layout:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +27,60 @@ BFCL_LOGS_DIR = Path(__file__).parent.parent / "bfcl_logs"
 
 def get_run_dir() -> Path:
     """Create and return a timestamped run directory for this test session."""
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    ts = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
     run_dir = BFCL_LOGS_DIR / ts
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
+
+
+def _call_matches(actual: dict[str, Any], gt_entry: dict[str, Any]) -> bool:
+    """Check whether a single actual tool call satisfies a ground truth entry."""
+    expected_name = next(iter(gt_entry.keys()), None)
+    if actual.get("name") != expected_name:
+        return False
+    expected_args = gt_entry.get(expected_name, {})
+    for param_name, possible_values in expected_args.items():
+        actual_val = actual.get("arguments", {}).get(param_name)
+        if not isinstance(possible_values, list):
+            possible_values = [possible_values]
+        if not any(_values_match(actual_val, pv) for pv in possible_values):
+            return False
+    return True
+
+
+def _match_tool_calls(
+    actual_tool_calls: list[dict[str, Any]],
+    ground_truth: list[dict[str, Any]],
+) -> list[int | None]:
+    """Return a maximum matching from actual calls to ground-truth entries."""
+    candidate_gt_indices = [
+        [gt_idx for gt_idx, gt_entry in enumerate(ground_truth) if _call_matches(actual, gt_entry)]
+        for actual in actual_tool_calls
+    ]
+    actual_for_gt: list[int | None] = [None] * len(ground_truth)
+
+    def _assign(actual_idx: int, seen_gt_indices: set[int]) -> bool:
+        for gt_idx in candidate_gt_indices[actual_idx]:
+            if gt_idx in seen_gt_indices:
+                continue
+            seen_gt_indices.add(gt_idx)
+            prev_actual_idx = actual_for_gt[gt_idx]
+            if prev_actual_idx is None or _assign(prev_actual_idx, seen_gt_indices):
+                actual_for_gt[gt_idx] = actual_idx
+                return True
+        return False
+
+    for actual_idx in sorted(
+        range(len(actual_tool_calls)),
+        key=lambda idx: len(candidate_gt_indices[idx]),
+    ):
+        _assign(actual_idx, set())
+
+    gt_for_actual: list[int | None] = [None] * len(actual_tool_calls)
+    for gt_idx, actual_idx in enumerate(actual_for_gt):
+        if actual_idx is not None:
+            gt_for_actual[actual_idx] = gt_idx
+    return gt_for_actual
 
 
 def evaluate_tool_calls(
@@ -48,55 +98,31 @@ def evaluate_tool_calls(
     Returns (passed, list_of_error_messages).
     """
     if category == "irrelevance":
-        if len(actual_tool_calls) > 0:
-            return False, [
-                f"Irrelevance test: expected 0 tool calls, got {len(actual_tool_calls)}"
-            ]
+        if actual_tool_calls:
+            return False, [f"Irrelevance test: expected 0 tool calls, got {len(actual_tool_calls)}"]
         return True, []
 
     if not ground_truth:
-        if len(actual_tool_calls) == 0:
+        if not actual_tool_calls:
             return True, []
         return False, ["No ground truth available but model produced tool calls"]
 
     errors: list[str] = []
 
     if len(actual_tool_calls) != len(ground_truth):
-        errors.append(
-            f"Expected {len(ground_truth)} tool call(s), got {len(actual_tool_calls)}"
-        )
+        errors.append(f"Expected {len(ground_truth)} tool call(s), got {len(actual_tool_calls)}")
 
-    check_count = min(len(actual_tool_calls), len(ground_truth))
+    gt_for_actual = _match_tool_calls(actual_tool_calls, ground_truth)
+    matched_gt_indices = {gt_idx for gt_idx in gt_for_actual if gt_idx is not None}
 
-    for i in range(check_count):
-        gt_entry = ground_truth[i]
-        actual = actual_tool_calls[i]
+    for actual, gt_idx in zip(actual_tool_calls, gt_for_actual):
+        if gt_idx is None:
+            errors.append(f"Unexpected tool call: '{actual.get('name', '?')}'")
 
-        expected_name = next(iter(gt_entry.keys()), None)
-        expected_args = gt_entry.get(expected_name, {}) if expected_name else {}
-
-        if actual["name"] != expected_name:
-            errors.append(
-                f"[{i}] Expected function '{expected_name}', got '{actual['name']}'"
-            )
-            continue
-
-        for param_name, possible_values in expected_args.items():
-            actual_val = actual["arguments"].get(param_name)
-
-            if not isinstance(possible_values, list):
-                possible_values = [possible_values]
-
-            all_accepted = list(possible_values)
-            if "" in all_accepted:
-                all_accepted.append(None)
-
-            matched = any(_values_match(actual_val, pv) for pv in all_accepted)
-            if not matched:
-                errors.append(
-                    f"[{i}] '{expected_name}' arg '{param_name}': "
-                    f"expected one of {possible_values!r}, got {actual_val!r}"
-                )
+    for gt_idx, gt_entry in enumerate(ground_truth):
+        if gt_idx not in matched_gt_indices:
+            gt_name = next(iter(gt_entry.keys()), "?")
+            errors.append(f"Unmatched expected call: '{gt_name}'")
 
     return len(errors) == 0, errors
 
@@ -131,7 +157,7 @@ def save_test_log(
         "model": model,
         "parser": parser,
         "backend": backend,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "passed": passed,
         "request": request_payload,
         "response": response_payload,
@@ -166,27 +192,30 @@ def save_summary(run_dir: Path, results: list[dict[str, Any]]) -> dict[str, Any]
             by_cat[cat]["passed"] += 1
         else:
             by_cat[cat]["failed"] += 1
-            failures.append({
-                "test_id": r.get("test_id", "?"),
-                "category": cat,
-                "errors": r.get("errors", []),
-                "latency_ms": round(lat, 1),
-                "finish_reason": r.get("finish_reason"),
-                "completion_tokens": r.get("completion_tokens"),
-                "had_reasoning": r.get("had_reasoning", False),
-                "log_file": r.get("log_file", ""),
-            })
+            failures.append(
+                {
+                    "test_id": r.get("test_id", "?"),
+                    "category": cat,
+                    "errors": r.get("errors", []),
+                    "latency_ms": round(lat, 1),
+                    "finish_reason": r.get("finish_reason"),
+                    "completion_tokens": r.get("completion_tokens"),
+                    "had_reasoning": r.get("had_reasoning", False),
+                    "log_file": r.get("log_file", ""),
+                }
+            )
 
     for cat_stats in by_cat.values():
         lats = cat_stats.pop("latencies_ms")
         if lats:
             lats_sorted = sorted(lats)
+            n = len(lats_sorted)
             cat_stats["latency_ms"] = {
                 "min": round(lats_sorted[0], 1),
-                "median": round(lats_sorted[len(lats_sorted) // 2], 1),
-                "p95": round(lats_sorted[int(len(lats_sorted) * 0.95)], 1),
+                "median": round(lats_sorted[n // 2], 1),
+                "p95": round(lats_sorted[min(int(n * 0.95), n - 1)], 1),
                 "max": round(lats_sorted[-1], 1),
-                "mean": round(sum(lats) / len(lats), 1),
+                "mean": round(sum(lats) / n, 1),
             }
 
     total = sum(c["total"] for c in by_cat.values())
@@ -195,16 +224,17 @@ def save_summary(run_dir: Path, results: list[dict[str, Any]]) -> dict[str, Any]
     latency_summary = {}
     if all_latencies:
         s = sorted(all_latencies)
+        n = len(s)
         latency_summary = {
             "min": round(s[0], 1),
-            "median": round(s[len(s) // 2], 1),
-            "p95": round(s[int(len(s) * 0.95)], 1),
+            "median": round(s[n // 2], 1),
+            "p95": round(s[min(int(n * 0.95), n - 1)], 1),
             "max": round(s[-1], 1),
-            "mean": round(sum(s) / len(s), 1),
+            "mean": round(sum(s) / n, 1),
         }
 
     summary = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "total": total,
         "passed": passed,
         "failed": total - passed,
@@ -220,21 +250,27 @@ def save_summary(run_dir: Path, results: list[dict[str, Any]]) -> dict[str, Any]
 
 def _values_match(actual: Any, expected: Any) -> bool:
     """Flexible comparison handling type coercion and empty-string-means-absent."""
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        if len(expected) != len(actual):
+            return False
+        return all(k in actual and _values_match(actual[k], v) for k, v in expected.items())
+    if isinstance(expected, list) and isinstance(actual, list):
+        if len(expected) != len(actual):
+            return False
+        return all(_values_match(a, e) for a, e in zip(actual, expected))
     if actual == expected:
+        if isinstance(actual, bool) != isinstance(expected, bool):
+            return False
         return True
     if expected == "" and actual is None:
         return True
-    if expected is None and actual is None:
-        return True
     try:
-        if float(actual) == float(expected):
-            return True
+        if not isinstance(actual, bool) and not isinstance(expected, bool):
+            if float(actual) == float(expected):
+                return True
     except (TypeError, ValueError):
         pass
     if isinstance(expected, str) and isinstance(actual, str):
         if actual.strip().lower() == expected.strip().lower():
             return True
-    if isinstance(expected, list) and isinstance(actual, list):
-        if len(expected) == len(actual):
-            return all(_values_match(a, e) for a, e in zip(actual, expected))
     return False
