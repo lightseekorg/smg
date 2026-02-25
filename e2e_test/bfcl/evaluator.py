@@ -18,7 +18,7 @@ Log directory layout:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +27,7 @@ BFCL_LOGS_DIR = Path(__file__).parent.parent / "bfcl_logs"
 
 def get_run_dir() -> Path:
     """Create and return a timestamped run directory for this test session."""
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    ts = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
     run_dir = BFCL_LOGS_DIR / ts
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
@@ -131,7 +131,7 @@ def save_test_log(
         "model": model,
         "parser": parser,
         "backend": backend,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "passed": passed,
         "request": request_payload,
         "response": response_payload,
@@ -181,12 +181,13 @@ def save_summary(run_dir: Path, results: list[dict[str, Any]]) -> dict[str, Any]
         lats = cat_stats.pop("latencies_ms")
         if lats:
             lats_sorted = sorted(lats)
+            n = len(lats_sorted)
             cat_stats["latency_ms"] = {
                 "min": round(lats_sorted[0], 1),
-                "median": round(lats_sorted[len(lats_sorted) // 2], 1),
-                "p95": round(lats_sorted[int(len(lats_sorted) * 0.95)], 1),
+                "median": round(lats_sorted[n // 2], 1),
+                "p95": round(lats_sorted[min(int(n * 0.95), n - 1)], 1),
                 "max": round(lats_sorted[-1], 1),
-                "mean": round(sum(lats) / len(lats), 1),
+                "mean": round(sum(lats) / n, 1),
             }
 
     total = sum(c["total"] for c in by_cat.values())
@@ -195,16 +196,17 @@ def save_summary(run_dir: Path, results: list[dict[str, Any]]) -> dict[str, Any]
     latency_summary = {}
     if all_latencies:
         s = sorted(all_latencies)
+        n = len(s)
         latency_summary = {
             "min": round(s[0], 1),
-            "median": round(s[len(s) // 2], 1),
-            "p95": round(s[int(len(s) * 0.95)], 1),
+            "median": round(s[n // 2], 1),
+            "p95": round(s[min(int(n * 0.95), n - 1)], 1),
             "max": round(s[-1], 1),
-            "mean": round(sum(s) / len(s), 1),
+            "mean": round(sum(s) / n, 1),
         }
 
     summary = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "total": total,
         "passed": passed,
         "failed": total - passed,

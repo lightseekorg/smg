@@ -139,5 +139,3 @@ def bfcl_to_openai_tools(bfcl_functions: list[dict]) -> list[dict]:
             fixed_fn["parameters"] = _fix_parameter_type(fixed_fn["parameters"])
         tools.append({"type": "function", "function": fixed_fn})
     return tools
-
-
