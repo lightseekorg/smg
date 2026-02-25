@@ -1,7 +1,7 @@
-//! WebAssembly Interface Bindings for Storage Hooks
+//! WebAssembly Interface Bindings for Storage Hooks.
 //!
-//! Generated from `interface/storage/storage-hooks.wit` using wasmtime's
-//! component model bindgen.
+//! Invokes `wasmtime::component::bindgen!` at compile time to generate
+//! host-side bindings from `interface/storage/storage-hooks.wit`.
 
 wasmtime::component::bindgen!({
     path: "src/interface/storage",

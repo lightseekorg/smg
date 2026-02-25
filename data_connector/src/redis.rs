@@ -882,12 +882,14 @@ impl ResponseStorage for RedisResponseStorage {
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
 
         // Index by safety identifier if present
-        if let Some(safety) = &response.safety_identifier {
-            let safety_key = self.safety_key(safety);
-            let score = response.created_at.timestamp_millis() as f64;
-            conn.zadd::<_, _, _, ()>(safety_key, response_id_str, score)
-                .await
-                .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+        if !sr.is_skipped("safety_identifier") {
+            if let Some(safety) = &response.safety_identifier {
+                let safety_key = self.safety_key(safety);
+                let score = response.created_at.timestamp_millis() as f64;
+                conn.zadd::<_, _, _, ()>(safety_key, response_id_str, score)
+                    .await
+                    .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+            }
         }
 
         Ok(response_id)
@@ -920,7 +922,6 @@ impl ResponseStorage for RedisResponseStorage {
 
     async fn delete_response(&self, response_id: &ResponseId) -> ResponseResult<()> {
         let sr = &self.store.schema.responses;
-        let col_safety = sr.col("safety_identifier");
 
         let id = response_id.0.as_str();
         let key = self.response_key(id);
@@ -931,18 +932,26 @@ impl ResponseStorage for RedisResponseStorage {
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
 
-        let (safety, ()): (Option<String>, ()) = redis::pipe()
-            .atomic()
-            .hget(&key, col_safety)
-            .del(&key)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
-
-        if let Some(s) = safety {
-            conn.zrem::<_, _, ()>(self.safety_key(&s), id)
+        if sr.is_skipped("safety_identifier") {
+            conn.del::<_, ()>(&key)
                 .await
                 .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+        } else {
+            let col_safety = sr.col("safety_identifier");
+
+            let (safety, ()): (Option<String>, ()) = redis::pipe()
+                .atomic()
+                .hget(&key, col_safety)
+                .del(&key)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+
+            if let Some(s) = safety {
+                conn.zrem::<_, _, ()>(self.safety_key(&s), id)
+                    .await
+                    .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+            }
         }
 
         Ok(())
@@ -953,6 +962,11 @@ impl ResponseStorage for RedisResponseStorage {
         identifier: &str,
         limit: Option<usize>,
     ) -> ResponseResult<Vec<StoredResponse>> {
+        let sr = &self.store.schema.responses;
+        if sr.is_skipped("safety_identifier") {
+            return Ok(Vec::new());
+        }
+
         let key = self.safety_key(identifier);
         let mut conn = self
             .store
@@ -998,6 +1012,11 @@ impl ResponseStorage for RedisResponseStorage {
     }
 
     async fn delete_identifier_responses(&self, identifier: &str) -> ResponseResult<usize> {
+        let sr = &self.store.schema.responses;
+        if sr.is_skipped("safety_identifier") {
+            return Ok(0);
+        }
+
         let key = self.safety_key(identifier);
         let mut conn = self
             .store

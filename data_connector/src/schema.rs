@@ -208,6 +208,19 @@ impl SchemaConfig {
                 .map_err(|e| format!("{label}.extra_columns['{name}'].sql_type: {e}"))?;
         }
 
+        // Detect case-insensitive collisions (e.g. "tenant_id" and "TENANT_ID"
+        // would collide after uppercase_for_oracle)
+        let mut folded: HashSet<String> = HashSet::new();
+        for name in tc.extra_columns.keys() {
+            let upper = name.to_ascii_uppercase();
+            if !folded.insert(upper) {
+                return Err(format!(
+                    "{label}.extra_columns: case-insensitive collision on '{name}' \
+                     (Oracle normalizes identifiers to uppercase)"
+                ));
+            }
+        }
+
         for name in &tc.skip_columns {
             validate_identifier(name).map_err(|e| format!("{label}.skip_columns '{name}': {e}"))?;
             if name == "id" {
@@ -686,5 +699,29 @@ mod tests {
         let json = serde_json::to_string(&cfg).expect("serialize");
         let restored: SchemaConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(cfg, restored);
+    }
+
+    #[test]
+    fn validate_rejects_case_colliding_extra_columns() {
+        let mut cfg = SchemaConfig::default();
+        cfg.conversations.extra_columns.insert(
+            "tenant_id".to_string(),
+            ColumnDef {
+                sql_type: "TEXT".to_string(),
+                default_value: None,
+            },
+        );
+        cfg.conversations.extra_columns.insert(
+            "TENANT_ID".to_string(),
+            ColumnDef {
+                sql_type: "TEXT".to_string(),
+                default_value: None,
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("case-insensitive collision"),
+            "unexpected: {err}"
+        );
     }
 }

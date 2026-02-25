@@ -61,6 +61,7 @@ impl WasmStorageHook {
         let mut config = Config::new();
         config.async_support(true);
         config.wasm_component_model(true);
+        config.epoch_interruption(true);
 
         let engine = Engine::new(&config).map_err(|e| format!("engine creation failed: {e}"))?;
         let component = Component::new(&engine, wasm_bytes)
@@ -94,6 +95,7 @@ impl WasmStorageHook {
             },
         );
         store.limiter(|state| &mut state.limits);
+        store.set_epoch_deadline(1);
         store
     }
 }
@@ -179,11 +181,23 @@ impl StorageHook for WasmStorageHook {
         let wit_ctx = to_wit_context(context);
         let payload_str = payload.to_string();
 
+        // Spawn epoch ticker to enforce a 5-second execution budget.
+        // The task is aborted immediately after the WASM call completes,
+        // so it is safe for the gateway to shut down without waiting for it.
+        let epoch_engine = self.engine.clone();
+        #[expect(clippy::disallowed_methods, reason = "epoch ticker is aborted after WASM call")]
+        let ticker = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            epoch_engine.increment_epoch();
+        });
+
         let result = bindings
             .smg_storage_storage_hook_before()
             .call_before(&mut store, wit_op, &wit_ctx, &payload_str)
             .await
             .map_err(|e| HookError::Internal(format!("WASM before() call failed: {e}")))?;
+
+        ticker.abort();
 
         match result {
             WitBeforeResult::DoContinue(extra_cols) => Ok(BeforeHookResult::Continue(
@@ -214,6 +228,16 @@ impl StorageHook for WasmStorageHook {
         let result_str = result.to_string();
         let wit_extra = to_wit_extra_columns(extra);
 
+        // Spawn epoch ticker to enforce a 5-second execution budget.
+        // The task is aborted immediately after the WASM call completes,
+        // so it is safe for the gateway to shut down without waiting for it.
+        let epoch_engine = self.engine.clone();
+        #[expect(clippy::disallowed_methods, reason = "epoch ticker is aborted after WASM call")]
+        let ticker = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            epoch_engine.increment_epoch();
+        });
+
         let updated = bindings
             .smg_storage_storage_hook_after()
             .call_after(
@@ -226,6 +250,8 @@ impl StorageHook for WasmStorageHook {
             )
             .await
             .map_err(|e| HookError::Internal(format!("WASM after() call failed: {e}")))?;
+
+        ticker.abort();
 
         Ok(from_wit_extra_columns(updated))
     }

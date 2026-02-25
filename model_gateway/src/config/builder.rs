@@ -353,8 +353,8 @@ impl RouterConfigBuilder {
         self
     }
 
-    pub fn maybe_storage_hook_wasm_path(mut self, path: Option<&String>) -> Self {
-        self.config.storage_hook_wasm_path = path.cloned();
+    pub fn maybe_storage_hook_wasm_path(mut self, path: Option<&str>) -> Self {
+        self.config.storage_hook_wasm_path = path.map(|p| p.to_string());
         self
     }
 

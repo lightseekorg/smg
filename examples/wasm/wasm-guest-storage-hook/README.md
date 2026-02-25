@@ -43,7 +43,7 @@ target/wasm32-wasip2/release/wasm_guest_storage_hook.component.wasm
 
 ```rust
 use smg_wasm::WasmStorageHook;  // requires `storage-hooks` feature
-use smg_data_connector::factory::StorageFactoryConfig;
+use smg_data_connector::StorageFactoryConfig;
 
 // Load the compiled WASM component
 let wasm_bytes = std::fs::read("path/to/wasm_guest_storage_hook.component.wasm")?;

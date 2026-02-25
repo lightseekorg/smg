@@ -314,4 +314,82 @@ mod tests {
         let err = create_storage(config).await.err().expect("should fail");
         assert!(err.contains("Redis configuration is required"));
     }
+
+    #[tokio::test]
+    async fn test_create_storage_with_hook() {
+        use std::sync::Arc;
+
+        use async_trait::async_trait;
+
+        use crate::{
+            context::RequestContext,
+            hooks::{BeforeHookResult, ExtraColumns, HookError, StorageHook, StorageOperation},
+        };
+
+        struct NoOpHook;
+
+        #[async_trait]
+        impl StorageHook for NoOpHook {
+            async fn before(
+                &self,
+                _op: StorageOperation,
+                _ctx: Option<&RequestContext>,
+                _payload: &serde_json::Value,
+            ) -> Result<BeforeHookResult, HookError> {
+                Ok(BeforeHookResult::default())
+            }
+
+            async fn after(
+                &self,
+                _op: StorageOperation,
+                _ctx: Option<&RequestContext>,
+                _payload: &serde_json::Value,
+                _result: &serde_json::Value,
+                extra: &ExtraColumns,
+            ) -> Result<ExtraColumns, HookError> {
+                Ok(extra.clone())
+            }
+        }
+
+        let config = StorageFactoryConfig {
+            backend: &HistoryBackend::Memory,
+            oracle: None,
+            postgres: None,
+            redis: None,
+            hook: Some(Arc::new(NoOpHook)),
+        };
+        let (resp, conv, items) = create_storage(config).await.unwrap();
+
+        // Verify hooked storage works end-to-end
+        let mut response = StoredResponse::new(None);
+        response.input = json!("hello");
+        let id = resp.store_response(response).await.unwrap();
+        assert!(resp.get_response(&id).await.unwrap().is_some());
+
+        let conversation = conv
+            .create_conversation(NewConversation {
+                id: None,
+                metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(conv
+            .get_conversation(&conversation.id)
+            .await
+            .unwrap()
+            .is_some());
+
+        let item = items
+            .create_item(NewConversationItem {
+                id: None,
+                response_id: None,
+                item_type: "message".to_string(),
+                role: Some("user".to_string()),
+                content: json!([]),
+                status: Some("completed".to_string()),
+            })
+            .await
+            .unwrap();
+        assert!(items.get_item(&item.id).await.unwrap().is_some());
+    }
 }

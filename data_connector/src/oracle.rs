@@ -362,10 +362,8 @@ impl ConversationStorage for OracleConversationStorage {
                 // Append extra columns from hooks or defaults
                 let extra_cols: Vec<(&str, Option<String>)> =
                     resolve_extra_column_values(s, &hook_extra);
-                for (name, _) in &extra_cols {
-                    columns.push(name);
-                }
-                for (_, val) in &extra_cols {
+                for (name, val) in &extra_cols {
+                    columns.push(*name);
                     params.push(val);
                 }
 
@@ -459,7 +457,7 @@ impl ConversationStorage for OracleConversationStorage {
 
                 if s.is_skipped("metadata") {
                     // Nothing to update — just verify the row exists
-                    let sql = format!("SELECT 1 FROM {table} WHERE {col_id} = :1");
+                    let sql = format!("SELECT COUNT(*) FROM {table} WHERE {col_id} = :1");
                     let count: i64 = conn
                         .query_row_as(&sql, &[&id_str])
                         .map_err(map_oracle_error)?;
@@ -718,10 +716,8 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                 // Append extra columns from hooks or defaults
                 let extra_cols: Vec<(&str, Option<String>)> =
                     resolve_extra_column_values(si, &hook_extra);
-                for (name, _) in &extra_cols {
-                    columns.push(name);
-                }
-                for (_, val) in &extra_cols {
+                for (name, val) in &extra_cols {
+                    columns.push(*name);
                     params.push(val);
                 }
 
@@ -774,10 +770,8 @@ impl ConversationItemStorage for OracleConversationItemStorage {
 
                 let extra_cols: Vec<(&str, Option<String>)> =
                     resolve_extra_column_values(sl, &hook_extra);
-                for (name, _) in &extra_cols {
-                    columns.push(name);
-                }
-                for (_, val) in &extra_cols {
+                for (name, val) in &extra_cols {
+                    columns.push(*name);
                     params.push(val);
                 }
 
@@ -1175,7 +1169,9 @@ impl OracleResponseStorage {
             )
             .map_err(map_oracle_error)?;
         } else {
-            Self::alter_safety_identifier_column(conn, schema)?;
+            if !s.is_skipped("safety_identifier") {
+                Self::alter_safety_identifier_column(conn, schema)?;
+            }
             Self::remove_user_id_column_if_exists(conn, schema)?;
         }
 
@@ -1449,10 +1445,8 @@ impl ResponseStorage for OracleResponseStorage {
                 // Append extra columns from hooks or defaults
                 let extra_cols: Vec<(&str, Option<String>)> =
                     resolve_extra_column_values(s, &hook_extra);
-                for (name, _) in &extra_cols {
-                    columns.push(name);
-                }
-                for (_, val) in &extra_cols {
+                for (name, val) in &extra_cols {
+                    columns.push(*name);
                     params.push(val);
                 }
 
@@ -1529,16 +1523,34 @@ impl ResponseStorage for OracleResponseStorage {
         self.store
             .execute(move |conn| {
                 let s = &schema.responses;
-                let col_safety = s.col("safety_identifier");
-                let col_created = s.col("created_at");
 
-                let sql = if let Some(limit) = limit {
-                    format!(
-                        "SELECT * FROM ({select_base} WHERE {col_safety} = :1 \
-                         ORDER BY {col_created} DESC) WHERE ROWNUM <= {limit}"
-                    )
+                // If safety_identifier is skipped, we cannot filter by identifier
+                if s.is_skipped("safety_identifier") {
+                    return Ok(Vec::new());
+                }
+
+                let col_safety = s.col("safety_identifier");
+
+                let sql = if s.is_skipped("created_at") {
+                    // No created_at column — omit ORDER BY
+                    if let Some(limit) = limit {
+                        format!(
+                            "SELECT * FROM ({select_base} WHERE {col_safety} = :1) \
+                             WHERE ROWNUM <= {limit}"
+                        )
+                    } else {
+                        format!("{select_base} WHERE {col_safety} = :1")
+                    }
                 } else {
-                    format!("{select_base} WHERE {col_safety} = :1 ORDER BY {col_created} DESC")
+                    let col_created = s.col("created_at");
+                    if let Some(limit) = limit {
+                        format!(
+                            "SELECT * FROM ({select_base} WHERE {col_safety} = :1 \
+                             ORDER BY {col_created} DESC) WHERE ROWNUM <= {limit}"
+                        )
+                    } else {
+                        format!("{select_base} WHERE {col_safety} = :1 ORDER BY {col_created} DESC")
+                    }
                 };
 
                 let mut stmt = conn.statement(&sql).build().map_err(map_oracle_error)?;
@@ -1562,6 +1574,11 @@ impl ResponseStorage for OracleResponseStorage {
     ) -> Result<usize, ResponseStorageError> {
         let identifier = identifier.to_string();
         let schema = self.store.schema.clone();
+
+        let schema_check = self.store.schema.clone();
+        if schema_check.responses.is_skipped("safety_identifier") {
+            return Ok(0);
+        }
 
         let affected = self
             .store

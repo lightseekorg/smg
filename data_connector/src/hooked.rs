@@ -1210,4 +1210,254 @@ mod tests {
             .unwrap();
         assert!(!conv.id.0.is_empty());
     }
+
+    // ── Integration tests: full decorator-chain round-trips ──────────
+
+    #[tokio::test]
+    async fn hooked_response_store_and_get_round_trips() {
+        let inner = Arc::new(MemoryResponseStorage::new());
+        let hook = Arc::new(MockHook::new());
+        let hooked = HookedResponseStorage::new(inner, hook.clone());
+
+        let mut resp = StoredResponse::new(None);
+        resp.input = json!("round-trip-input");
+        resp.output = json!(["round-trip-output"]);
+        resp.safety_identifier = Some("user-rt".to_string());
+
+        let id = hooked.store_response(resp).await.unwrap();
+        assert_eq!(hook.before_calls(), 1);
+        assert_eq!(hook.after_calls(), 1);
+
+        let fetched = hooked.get_response(&id).await.unwrap();
+        assert!(fetched.is_some(), "stored response should be retrievable");
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.input, json!("round-trip-input"));
+        assert_eq!(fetched.output, json!(["round-trip-output"]));
+        assert_eq!(fetched.safety_identifier.as_deref(), Some("user-rt"));
+
+        // get_response also triggers before/after hooks
+        assert_eq!(hook.before_calls(), 2);
+        assert_eq!(hook.after_calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn hooked_response_list_identifier_responses_with_hook() {
+        let inner = Arc::new(MemoryResponseStorage::new());
+        let hook = Arc::new(MockHook::new());
+        let hooked = HookedResponseStorage::new(inner, hook.clone());
+
+        // Store two responses with the same safety_identifier
+        let mut r1 = StoredResponse::new(None);
+        r1.input = json!("first");
+        r1.safety_identifier = Some("user-1".to_string());
+        hooked.store_response(r1).await.unwrap();
+
+        let mut r2 = StoredResponse::new(None);
+        r2.input = json!("second");
+        r2.safety_identifier = Some("user-1".to_string());
+        hooked.store_response(r2).await.unwrap();
+
+        // 2 stores = 2 before + 2 after
+        assert_eq!(hook.before_calls(), 2);
+        assert_eq!(hook.after_calls(), 2);
+
+        let listed = hooked
+            .list_identifier_responses("user-1", None)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 2, "should list both responses for user-1");
+
+        // list_identifier_responses triggers its own before/after hook
+        assert_eq!(hook.before_calls(), 3);
+        assert_eq!(hook.after_calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn hooked_response_delete_identifier_responses_with_hook() {
+        let inner = Arc::new(MemoryResponseStorage::new());
+        let hook = Arc::new(MockHook::new());
+        let hooked = HookedResponseStorage::new(inner, hook.clone());
+
+        // Store two responses with the same safety_identifier
+        let mut r1 = StoredResponse::new(None);
+        r1.safety_identifier = Some("user-1".to_string());
+        hooked.store_response(r1).await.unwrap();
+
+        let mut r2 = StoredResponse::new(None);
+        r2.safety_identifier = Some("user-1".to_string());
+        hooked.store_response(r2).await.unwrap();
+
+        assert_eq!(hook.before_calls(), 2);
+        assert_eq!(hook.after_calls(), 2);
+
+        // Delete all responses for user-1
+        let deleted = hooked
+            .delete_identifier_responses("user-1")
+            .await
+            .unwrap();
+        assert_eq!(deleted, 2, "should delete both responses");
+        assert_eq!(hook.before_calls(), 3);
+        assert_eq!(hook.after_calls(), 3);
+
+        // Verify list is now empty
+        let listed = hooked
+            .list_identifier_responses("user-1", None)
+            .await
+            .unwrap();
+        assert!(listed.is_empty(), "no responses should remain after delete");
+        assert_eq!(hook.before_calls(), 4);
+        assert_eq!(hook.after_calls(), 4);
+    }
+
+    #[tokio::test]
+    async fn hooked_conversation_update_calls_hooks() {
+        let inner = Arc::new(MemoryConversationStorage::new());
+        let hook = Arc::new(MockHook::new());
+        let hooked = HookedConversationStorage::new(inner, hook.clone());
+
+        // Create a conversation
+        let conv = hooked
+            .create_conversation(NewConversation::default())
+            .await
+            .unwrap();
+        assert_eq!(hook.before_calls(), 1);
+        assert_eq!(hook.after_calls(), 1);
+
+        // Update its metadata
+        let mut metadata = ConversationMetadata::new();
+        metadata.insert("key".to_string(), json!("value"));
+
+        let updated = hooked
+            .update_conversation(&conv.id, Some(metadata.clone()))
+            .await
+            .unwrap();
+        assert_eq!(hook.before_calls(), 2);
+        assert_eq!(hook.after_calls(), 2);
+
+        // Verify the metadata was persisted correctly
+        let updated = updated.expect("update should return the conversation");
+        assert_eq!(updated.metadata, Some(metadata));
+
+        // Read it back via get to confirm persistence
+        let fetched = hooked
+            .get_conversation(&conv.id)
+            .await
+            .unwrap()
+            .expect("conversation should exist");
+        assert_eq!(
+            fetched.metadata.as_ref().and_then(|m| m.get("key")),
+            Some(&json!("value")),
+        );
+        assert_eq!(hook.before_calls(), 3);
+        assert_eq!(hook.after_calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn hooked_item_link_and_list_calls_hooks() {
+        let conv_store = Arc::new(MemoryConversationStorage::new());
+        let conv = conv_store
+            .create_conversation(NewConversation::default())
+            .await
+            .unwrap();
+
+        let inner = Arc::new(MemoryConversationItemStorage::new());
+        let hook = Arc::new(MockHook::new());
+        let hooked = HookedConversationItemStorage::new(inner, hook.clone());
+
+        // Create an item
+        let item = hooked
+            .create_item(NewConversationItem {
+                id: None,
+                response_id: Some("resp-1".to_string()),
+                item_type: "message".to_string(),
+                role: Some("user".to_string()),
+                content: json!("hello"),
+                status: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(hook.before_calls(), 1);
+        assert_eq!(hook.after_calls(), 1);
+
+        // Link item to conversation
+        hooked
+            .link_item(&conv.id, &item.id, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(hook.before_calls(), 2);
+        assert_eq!(hook.after_calls(), 2);
+
+        // List items for the conversation
+        let items = hooked
+            .list_items(
+                &conv.id,
+                ListParams {
+                    limit: 10,
+                    order: crate::core::SortOrder::Asc,
+                    after: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(hook.before_calls(), 3);
+        assert_eq!(hook.after_calls(), 3);
+
+        // Verify the listed item matches what was created
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, item.id);
+        assert_eq!(items[0].item_type, "message");
+        assert_eq!(items[0].role.as_deref(), Some("user"));
+        assert_eq!(items[0].content, json!("hello"));
+        assert_eq!(items[0].response_id.as_deref(), Some("resp-1"));
+    }
+
+    #[tokio::test]
+    async fn multiple_operations_accumulate_hook_calls() {
+        let conv_inner = Arc::new(MemoryConversationStorage::new());
+        let resp_inner = Arc::new(MemoryResponseStorage::new());
+        let item_inner = Arc::new(MemoryConversationItemStorage::new());
+        let hook = Arc::new(MockHook::new());
+
+        let hooked_conv = HookedConversationStorage::new(conv_inner, hook.clone());
+        let hooked_resp = HookedResponseStorage::new(resp_inner, hook.clone());
+        let hooked_item = HookedConversationItemStorage::new(item_inner, hook.clone());
+
+        // 1. create_conversation
+        let conv = hooked_conv
+            .create_conversation(NewConversation::default())
+            .await
+            .unwrap();
+        assert_eq!(hook.before_calls(), 1);
+        assert_eq!(hook.after_calls(), 1);
+
+        // 2. store_response
+        let mut resp = StoredResponse::new(None);
+        resp.input = json!("multi-op");
+        hooked_resp.store_response(resp).await.unwrap();
+        assert_eq!(hook.before_calls(), 2);
+        assert_eq!(hook.after_calls(), 2);
+
+        // 3. create_item
+        let item = hooked_item
+            .create_item(NewConversationItem {
+                id: None,
+                response_id: None,
+                item_type: "message".to_string(),
+                role: Some("user".to_string()),
+                content: json!("test"),
+                status: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(hook.before_calls(), 3);
+        assert_eq!(hook.after_calls(), 3);
+
+        // 4. link_item
+        hooked_item
+            .link_item(&conv.id, &item.id, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(hook.before_calls(), 4);
+        assert_eq!(hook.after_calls(), 4);
+    }
 }

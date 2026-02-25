@@ -536,4 +536,250 @@ mod tests {
             "should use remapped name: {sql}"
         );
     }
+
+    // ── Combined feature tests ────────────────────────────────────────────
+
+    #[test]
+    fn skip_columns_and_extra_columns_together() {
+        use crate::hooks::ExtraColumns;
+        use crate::schema::ColumnDef;
+
+        let mut cfg = SchemaConfig::default();
+        cfg.responses
+            .skip_columns
+            .insert("raw_response".to_string());
+        cfg.responses
+            .skip_columns
+            .insert("safety_identifier".to_string());
+        cfg.responses.extra_columns.insert(
+            "TENANT_ID".to_string(),
+            ColumnDef {
+                sql_type: "VARCHAR(128)".to_string(),
+                default_value: None,
+            },
+        );
+        cfg.responses.extra_columns.insert(
+            "AUDIT_TS".to_string(),
+            ColumnDef {
+                sql_type: "TIMESTAMP".to_string(),
+                default_value: None,
+            },
+        );
+
+        let sql = build_response_select_base(&cfg);
+
+        // Skipped columns must be absent
+        assert!(
+            !sql.contains("raw_response"),
+            "raw_response should be skipped: {sql}"
+        );
+        assert!(
+            !sql.contains("safety_identifier"),
+            "safety_identifier should be skipped: {sql}"
+        );
+
+        // Extra columns are write-side only — NOT in SELECT
+        assert!(
+            !sql.contains("TENANT_ID"),
+            "TENANT_ID should not be in SELECT: {sql}"
+        );
+        assert!(
+            !sql.contains("AUDIT_TS"),
+            "AUDIT_TS should not be in SELECT: {sql}"
+        );
+
+        // Core columns that are not skipped must still be present
+        for col in &["id", "input", "output", "model", "conversation_id"] {
+            assert!(sql.contains(col), "core column '{col}' should remain: {sql}");
+        }
+
+        // extra_column_defs returns both extra columns
+        let defs = extra_column_defs(&cfg.responses);
+        assert_eq!(defs.len(), 2);
+        // Sorted alphabetically: AUDIT_TS before TENANT_ID
+        assert_eq!(defs[0], "AUDIT_TS TIMESTAMP");
+        assert_eq!(defs[1], "TENANT_ID VARCHAR(128)");
+
+        // resolve_extra_column_values works with hook values for both
+        let mut hook = ExtraColumns::new();
+        hook.insert("TENANT_ID".to_string(), json!("acme"));
+        hook.insert("AUDIT_TS".to_string(), json!("2025-01-01T00:00:00Z"));
+        let resolved = resolve_extra_column_values(&cfg.responses, &hook);
+        assert_eq!(resolved.len(), 2);
+        // Sorted: AUDIT_TS first, TENANT_ID second
+        assert_eq!(resolved[0].0, "AUDIT_TS");
+        assert_eq!(resolved[0].1, Some("2025-01-01T00:00:00Z".to_string()));
+        assert_eq!(resolved[1].0, "TENANT_ID");
+        assert_eq!(resolved[1].1, Some("acme".to_string()));
+    }
+
+    #[test]
+    fn column_remapping_with_skip_and_extra() {
+        use crate::schema::ColumnDef;
+
+        let mut cfg = SchemaConfig::default();
+        // Rename table
+        cfg.responses.table = "my_responses".to_string();
+        // Remap columns
+        cfg.responses
+            .columns
+            .insert("id".to_string(), "resp_id".to_string());
+        cfg.responses
+            .columns
+            .insert("input".to_string(), "user_input".to_string());
+        // Skip a column
+        cfg.responses
+            .skip_columns
+            .insert("safety_identifier".to_string());
+        // Add extra column
+        cfg.responses.extra_columns.insert(
+            "TENANT_ID".to_string(),
+            ColumnDef {
+                sql_type: "VARCHAR(128)".to_string(),
+                default_value: None,
+            },
+        );
+
+        let sql = build_response_select_base(&cfg);
+
+        // Table name should be the renamed one
+        assert!(
+            sql.contains("my_responses"),
+            "should use renamed table: {sql}"
+        );
+
+        // Remapped column names
+        assert!(
+            sql.contains("resp_id"),
+            "should use remapped 'resp_id': {sql}"
+        );
+        assert!(
+            sql.contains("user_input"),
+            "should use remapped 'user_input': {sql}"
+        );
+        // Original names should not appear (they were remapped)
+        // Note: "id" is a substring of other column names, so we check more carefully
+        // by looking at the column list portion. "input" could be substring of "user_input".
+        // We check that the original logical names aren't used as standalone columns.
+        let cols_part = sql.strip_prefix("SELECT ").unwrap().split(" FROM ").next().unwrap();
+        let col_list: Vec<&str> = cols_part.split(", ").collect();
+        assert!(
+            !col_list.contains(&"id"),
+            "should not contain bare 'id': {col_list:?}"
+        );
+        assert!(
+            !col_list.contains(&"input"),
+            "should not contain bare 'input': {col_list:?}"
+        );
+
+        // Skipped column absent
+        assert!(
+            !sql.contains("safety_identifier"),
+            "safety_identifier should be skipped: {sql}"
+        );
+
+        // Extra column DDL still works
+        let defs = extra_column_defs(&cfg.responses);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0], "TENANT_ID VARCHAR(128)");
+    }
+
+    #[test]
+    fn extra_columns_in_insert_column_list() {
+        use crate::hooks::ExtraColumns;
+        use crate::schema::ColumnDef;
+
+        let mut cfg = SchemaConfig::default();
+        // Remap id → resp_id
+        cfg.responses
+            .columns
+            .insert("id".to_string(), "resp_id".to_string());
+        // Skip raw_response
+        cfg.responses
+            .skip_columns
+            .insert("raw_response".to_string());
+        // Extra column with default
+        cfg.responses.extra_columns.insert(
+            "TENANT_ID".to_string(),
+            ColumnDef {
+                sql_type: "VARCHAR(128)".to_string(),
+                default_value: Some(json!("unknown")),
+            },
+        );
+
+        let s = &cfg.responses;
+
+        // Build column names list the way INSERT code does in postgres.rs/oracle.rs
+        let mut col_names: Vec<&str> = Vec::new();
+        for &logical in RESPONSE_COLUMNS {
+            if !s.is_skipped(logical) {
+                col_names.push(s.col(logical));
+            }
+        }
+        let hook_extra = ExtraColumns::new(); // empty hook
+        let extra = resolve_extra_column_values(s, &hook_extra);
+        for (name, _val) in &extra {
+            col_names.push(name);
+        }
+
+        // Remapped: "resp_id" present, not "id"
+        assert!(
+            col_names.contains(&"resp_id"),
+            "should contain remapped 'resp_id': {col_names:?}"
+        );
+        assert!(
+            !col_names.contains(&"id"),
+            "should not contain original 'id': {col_names:?}"
+        );
+
+        // Skipped: "raw_response" absent
+        assert!(
+            !col_names.contains(&"raw_response"),
+            "should not contain skipped 'raw_response': {col_names:?}"
+        );
+
+        // Extra column appended
+        assert!(
+            col_names.contains(&"TENANT_ID"),
+            "should contain extra 'TENANT_ID': {col_names:?}"
+        );
+
+        // Extra column value resolves to the default "unknown"
+        assert_eq!(extra.len(), 1);
+        assert_eq!(extra[0].0, "TENANT_ID");
+        assert_eq!(extra[0].1, Some("unknown".to_string()));
+    }
+
+    #[test]
+    fn value_to_sql_string_conversions() {
+        // String → string as-is
+        assert_eq!(
+            value_to_sql_string(&json!("hello")),
+            "hello"
+        );
+
+        // Number → "42"
+        assert_eq!(
+            value_to_sql_string(&json!(42)),
+            "42"
+        );
+
+        // Bool → "true"
+        assert_eq!(
+            value_to_sql_string(&json!(true)),
+            "true"
+        );
+
+        // Null → "null"
+        assert_eq!(
+            value_to_sql_string(&json!(null)),
+            "null"
+        );
+
+        // Object → JSON string
+        let obj = json!({"key": "value"});
+        let result = value_to_sql_string(&obj);
+        // serde_json::to_string produces compact JSON
+        assert_eq!(result, r#"{"key":"value"}"#);
+    }
 }

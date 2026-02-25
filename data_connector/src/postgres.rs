@@ -141,10 +141,8 @@ impl ConversationStorage for PostgresConversationStorage {
         // Append extra columns from hooks or defaults
         let hook_extra = current_extra_columns().unwrap_or_default();
         let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(s, &hook_extra);
-        for (name, _) in &extra_cols {
-            col_names.push(name);
-        }
-        for (_, val) in &extra_cols {
+        for (name, val) in &extra_cols {
+            col_names.push(*name);
             params.push(val);
         }
 
@@ -261,7 +259,7 @@ impl ConversationStorage for PostgresConversationStorage {
         let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
         let col_meta = s.col("metadata");
 
-        let (sql, created_at) = if s.is_skipped("created_at") {
+        let (_, created_at) = if s.is_skipped("created_at") {
             let sql = format!("UPDATE {table} SET {col_meta} = $1 WHERE {col_id} = $2");
             let rows_affected = client
                 .execute(&sql, &[&metadata_json, &id.0.as_str()])
@@ -286,7 +284,6 @@ impl ConversationStorage for PostgresConversationStorage {
             let created_at: DateTime<Utc> = rows[0].get(col_created);
             (sql, created_at)
         };
-        drop(sql);
 
         Ok(Some(Conversation::with_parts(
             ConversationId(id.0.clone()),
@@ -434,10 +431,8 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         // Append extra columns from hooks or defaults
         let hook_extra = current_extra_columns().unwrap_or_default();
         let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(si, &hook_extra);
-        for (name, _) in &extra_cols {
-            col_names.push(name);
-        }
-        for (_, val) in &extra_cols {
+        for (name, val) in &extra_cols {
+            col_names.push(*name);
             params.push(val);
         }
 
@@ -491,10 +486,8 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         // Append extra columns from hooks or defaults
         let hook_extra = current_extra_columns().unwrap_or_default();
         let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(sl, &hook_extra);
-        for (name, _) in &extra_cols {
-            col_names.push(name);
-        }
-        for (_, val) in &extra_cols {
+        for (name, val) in &extra_cols {
+            col_names.push(*name);
             params.push(val);
         }
 
@@ -1046,10 +1039,8 @@ impl ResponseStorage for PostgresResponseStorage {
         // Append extra columns from hooks or defaults
         let hook_extra = current_extra_columns().unwrap_or_default();
         let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(s, &hook_extra);
-        for (name, _) in &extra_cols {
-            col_names.push(name);
-        }
-        for (_, val) in &extra_cols {
+        for (name, val) in &extra_cols {
+            col_names.push(*name);
             params.push(val);
         }
 
@@ -1128,8 +1119,19 @@ impl ResponseStorage for PostgresResponseStorage {
         limit: Option<usize>,
     ) -> ResponseResult<Vec<StoredResponse>> {
         let s = &self.store.schema.responses;
+
+        // safety_identifier must exist to filter by it
+        if s.is_skipped("safety_identifier") {
+            return Ok(vec![]);
+        }
+
         let col_safety = s.col("safety_identifier");
-        let col_created = s.col("created_at");
+
+        let order_clause = if s.is_skipped("created_at") {
+            String::new()
+        } else {
+            format!(" ORDER BY {} DESC", s.col("created_at"))
+        };
 
         let client = self
             .store
@@ -1140,7 +1142,7 @@ impl ResponseStorage for PostgresResponseStorage {
         let rows = if let Some(l) = limit {
             let l_i64: i64 = l as i64;
             let sql = format!(
-                "{} WHERE {col_safety} = $1 ORDER BY {col_created} DESC LIMIT $2",
+                "{} WHERE {col_safety} = $1{order_clause} LIMIT $2",
                 self.select_base,
             );
             client
@@ -1148,10 +1150,7 @@ impl ResponseStorage for PostgresResponseStorage {
                 .await
                 .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?
         } else {
-            let sql = format!(
-                "{} WHERE {col_safety} = $1 ORDER BY {col_created} DESC",
-                self.select_base,
-            );
+            let sql = format!("{} WHERE {col_safety} = $1{order_clause}", self.select_base,);
             client
                 .query(&sql, &[&identifier])
                 .await
@@ -1171,6 +1170,12 @@ impl ResponseStorage for PostgresResponseStorage {
 
     async fn delete_identifier_responses(&self, identifier: &str) -> ResponseResult<usize> {
         let s = &self.store.schema.responses;
+
+        // safety_identifier must exist to filter by it
+        if s.is_skipped("safety_identifier") {
+            return Ok(0);
+        }
+
         let table = s.qualified_table(self.store.schema.owner.as_deref());
         let col_safety = s.col("safety_identifier");
 
