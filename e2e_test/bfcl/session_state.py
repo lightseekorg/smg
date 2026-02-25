@@ -24,11 +24,15 @@ def append_result(result: dict[str, Any]) -> None:
         _all_results.append(result)
 
 
-def set_run_dir(path: Path) -> None:
+def get_or_create_run_dir() -> Path:
+    """Return the session's log directory, creating it exactly once."""
     global _run_dir
     with _results_lock:
         if _run_dir is None:
-            _run_dir = path
+            from .evaluator import get_run_dir
+
+            _run_dir = get_run_dir()
+        return _run_dir
 
 
 def write_summary_if_needed() -> None:

@@ -40,11 +40,10 @@ import pytest
 from bfcl import (
     bfcl_to_openai_tools,
     evaluate_tool_calls,
-    get_run_dir,
     load_bfcl_category,
     save_test_log,
 )
-from bfcl.session_state import append_result, set_run_dir
+from bfcl.session_state import append_result, get_or_create_run_dir
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +82,8 @@ def _load(category: str) -> list[dict]:
         return []
 
 
+# Safe without a lock: pytest_generate_tests runs during collection,
+# which is single-threaded even under pytest-parallel (--tests-per-worker N).
 _cases_cache: list[dict] | None = None
 
 
@@ -111,10 +112,12 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
 @pytest.fixture(scope="session")
 def bfcl_run_dir() -> Path:
-    """Single timestamped directory for all BFCL logs in this test session."""
-    run_dir = get_run_dir()
-    set_run_dir(run_dir)
-    return run_dir
+    """Single timestamped directory for all BFCL logs in this test session.
+
+    Safe under pytest-parallel: get_or_create_run_dir() creates the directory
+    exactly once under a lock; subsequent calls return the same path.
+    """
+    return get_or_create_run_dir()
 
 
 # ---------------------------------------------------------------------------
