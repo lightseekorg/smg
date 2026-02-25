@@ -844,7 +844,13 @@ mod tests {
             conversation_item_storage: Arc::new(
                 smg_data_connector::MemoryConversationItemStorage::new(),
             ),
-            metrics_store: None,
+            metrics_store: {
+                let bus = Arc::new(metrics_service::EventBus::new(64));
+                Arc::new(metrics_service::MetricsStore::new(
+                    bus,
+                    std::time::Duration::from_secs(60),
+                ))
+            },
             configured_reasoning_parser: None,
             configured_tool_parser: None,
             worker_job_queue: worker_job_queue.clone(),

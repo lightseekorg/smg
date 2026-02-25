@@ -25,10 +25,7 @@ use serde_json::json;
 use smg::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
-    core::{
-        BasicWorkerBuilder, Job, LoadMonitor, ModelCard, RuntimeType, Worker, WorkerRegistry,
-        WorkerType,
-    },
+    core::{BasicWorkerBuilder, Job, ModelCard, RuntimeType, Worker, WorkerRegistry, WorkerType},
     middleware::TokenBucket,
     policies::PolicyRegistry,
     routers::{RouterFactory, RouterTrait},
