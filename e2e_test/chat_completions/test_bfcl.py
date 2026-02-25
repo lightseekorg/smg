@@ -105,7 +105,7 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Session-scoped fixtures for the log directory and result collector
+# Session-scoped fixture for the log directory
 # ---------------------------------------------------------------------------
 
 
@@ -129,7 +129,7 @@ def _run_bfcl_case(
     parser: str,
     backend: str,
     client: openai.OpenAI,
-    run_dir: Any,
+    run_dir: Path,
 ) -> None:
     """Execute a single BFCL test case, log the result, assert on failure."""
     category = case["category"]
