@@ -734,17 +734,8 @@ impl ConversationItemStorage for OracleConversationItemStorage {
             None
         };
 
-        // Build the main list query
-        let rows: Vec<(
-            String,
-            Option<String>,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            DateTime<Utc>,
-        )> = self
-            .store
+        // Build the main list query and construct items directly in the closure.
+        self.store
             .execute({
                 let cid = cid.clone();
                 let schema = schema.clone();
@@ -807,50 +798,33 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                     let rows_iter =
                         conn.query_named(&sql, &params_vec).map_err(map_oracle_error)?;
 
-                    let mut out = Vec::new();
+                    let mut items = Vec::new();
                     for row_res in rows_iter {
                         let row = row_res.map_err(map_oracle_error)?;
-                        let id: String = row.get(si_col_id).map_err(map_oracle_error)?;
-                        let resp_id: Option<String> =
-                            row.get(si_col_resp).map_err(map_oracle_error)?;
-                        let item_type: String = row.get(si_col_type).map_err(map_oracle_error)?;
-                        let role: Option<String> =
-                            row.get(si_col_role).map_err(map_oracle_error)?;
                         let content_raw: Option<String> =
                             row.get(si_col_content).map_err(map_oracle_error)?;
-                        let status: Option<String> =
-                            row.get(si_col_status).map_err(map_oracle_error)?;
-                        let created_at: DateTime<Utc> =
-                            row.get(si_col_created).map_err(map_oracle_error)?;
-                        out.push((id, resp_id, item_type, role, content_raw, status, created_at));
+                        let content: Value = match content_raw {
+                            Some(s) => serde_json::from_str(&s).map_err(|e| e.to_string())?,
+                            None => Value::Null,
+                        };
+
+                        items.push(ConversationItem {
+                            id: ConversationItemId(
+                                row.get(si_col_id).map_err(map_oracle_error)?,
+                            ),
+                            response_id: row.get(si_col_resp).map_err(map_oracle_error)?,
+                            item_type: row.get(si_col_type).map_err(map_oracle_error)?,
+                            role: row.get(si_col_role).map_err(map_oracle_error)?,
+                            content,
+                            status: row.get(si_col_status).map_err(map_oracle_error)?,
+                            created_at: row.get(si_col_created).map_err(map_oracle_error)?,
+                        });
                     }
-                    Ok(out)
+                    Ok(items)
                 }
             })
             .await
-            .map_err(ConversationItemStorageError::StorageError)?;
-
-        rows.into_iter()
-            .map(
-                |(id, resp_id, item_type, role, content_raw, status, created_at)| {
-                    let content = match content_raw {
-                        Some(s) => {
-                            serde_json::from_str(&s).map_err(ConversationItemStorageError::from)?
-                        }
-                        None => Value::Null,
-                    };
-                    Ok(ConversationItem {
-                        id: ConversationItemId(id),
-                        response_id: resp_id,
-                        item_type,
-                        role,
-                        content,
-                        status,
-                        created_at,
-                    })
-                },
-            )
-            .collect()
+            .map_err(ConversationItemStorageError::StorageError)
     }
 
     async fn get_item(
