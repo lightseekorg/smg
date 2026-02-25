@@ -52,7 +52,7 @@ struct LastSentVersions {
     policy: HashMap<String, u64>,
     app: HashMap<String, u64>,
     membership: HashMap<String, u64>,
-    rate_limit: HashMap<String, u64>, // Track last sent timestamp for rate limit counters
+    rate_limit: HashMap<String, u64>, // Track last sent timestamp for rate limit counter shards
 }
 
 /// Incremental update collector
@@ -81,6 +81,10 @@ impl IncrementalUpdateCollector {
             .duration_since(UNIX_EPOCH)
             .expect("system clock before UNIX_EPOCH; cannot generate valid timestamps")
             .as_nanos() as u64
+    }
+
+    fn rate_limit_last_sent_key(key: &str, actor: &str) -> String {
+        format!("{key}::actor:{actor}")
     }
 
     /// Helper function to collect updates for stores with serializable state
@@ -165,28 +169,35 @@ impl IncrementalUpdateCollector {
                 );
             }
             StoreType::RateLimit => {
-                let rate_limit_keys = self.stores.rate_limit.keys();
                 let current_timestamp = Self::current_timestamp();
 
-                for key in rate_limit_keys {
-                    if self.stores.rate_limit.is_owner(&key) {
-                        if let Some(counter_value) = self.stores.rate_limit.get_counter(&key) {
-                            let last_sent_timestamp =
-                                last_sent.rate_limit.get(&key).copied().unwrap_or(0);
+                for (key, actor, counter_value) in self.stores.rate_limit.all_shards() {
+                    if !self.stores.rate_limit.is_owner(&key) {
+                        continue;
+                    }
 
-                            // Only send if at least 1 second has passed since last send
-                            if current_timestamp > last_sent_timestamp + 1_000_000_000 {
-                                if let Ok(serialized) = serde_json::to_vec(&counter_value) {
-                                    updates.push(StateUpdate {
-                                        key: key.clone(),
-                                        value: serialized,
-                                        version: current_timestamp,
-                                        actor: self.self_name.clone(),
-                                        timestamp: current_timestamp,
-                                    });
-                                    trace!("Collected rate limit counter update: {}", key);
-                                }
-                            }
+                    let shard_last_sent_key = Self::rate_limit_last_sent_key(&key, &actor);
+                    let last_sent_timestamp = last_sent
+                        .rate_limit
+                        .get(&shard_last_sent_key)
+                        .copied()
+                        .unwrap_or(0);
+
+                    // Only send if at least 1 second has passed since last send.
+                    if current_timestamp > last_sent_timestamp + 1_000_000_000 {
+                        if let Ok(serialized) = serde_json::to_vec(&counter_value) {
+                            updates.push(StateUpdate {
+                                key: key.clone(),
+                                value: serialized,
+                                version: current_timestamp,
+                                actor: actor.clone(),
+                                timestamp: current_timestamp,
+                            });
+                            trace!(
+                                "Collected rate limit counter shard update: {} actor={}",
+                                key,
+                                actor
+                            );
                         }
                     }
                 }
@@ -224,16 +235,28 @@ impl IncrementalUpdateCollector {
     /// Mark updates as sent (called after successful transmission)
     pub fn mark_sent(&self, store_type: StoreType, updates: &[StateUpdate]) {
         let mut last_sent = self.last_sent.write();
-        let target_map = match store_type {
-            StoreType::Worker => &mut last_sent.worker,
-            StoreType::Policy => &mut last_sent.policy,
-            StoreType::App => &mut last_sent.app,
-            StoreType::Membership => &mut last_sent.membership,
-            StoreType::RateLimit => &mut last_sent.rate_limit,
-        };
 
         for update in updates {
-            target_map.insert(update.key.clone(), update.version);
+            match store_type {
+                StoreType::Worker => {
+                    last_sent.worker.insert(update.key.clone(), update.version);
+                }
+                StoreType::Policy => {
+                    last_sent.policy.insert(update.key.clone(), update.version);
+                }
+                StoreType::App => {
+                    last_sent.app.insert(update.key.clone(), update.version);
+                }
+                StoreType::Membership => {
+                    last_sent
+                        .membership
+                        .insert(update.key.clone(), update.version);
+                }
+                StoreType::RateLimit => {
+                    let shard_key = Self::rate_limit_last_sent_key(&update.key, &update.actor);
+                    last_sent.rate_limit.insert(shard_key, update.version);
+                }
+            }
         }
     }
 }

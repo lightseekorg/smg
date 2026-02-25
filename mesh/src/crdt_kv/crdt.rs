@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
 use dashmap::{mapref::entry::Entry as MapEntry, DashMap};
 use parking_lot::{Mutex, RwLock};
@@ -92,33 +92,63 @@ impl CrdtOrMap {
             .clone()
     }
 
+    fn key_is_tombstoned_or_unknown(&self, key: &str) -> bool {
+        self.metadata.get(key).is_none_or(|versions| {
+            versions
+                .iter()
+                .max_by_key(|version| version.version_key())
+                .is_none_or(|winner| winner.is_tombstone)
+        })
+    }
+
+    fn try_cleanup_key_lock(&self, key: &str, key_lock: &Arc<Mutex<()>>) {
+        if self.store.contains_key(key) || !self.key_is_tombstoned_or_unknown(key) {
+            return;
+        }
+
+        let can_remove = self.key_locks.get(key).is_some_and(|stored_lock| {
+            let lock_ref = stored_lock.value();
+            Arc::ptr_eq(lock_ref, key_lock)
+                && Arc::strong_count(lock_ref) <= 2
+                && lock_ref.try_lock().is_some()
+        });
+
+        if can_remove {
+            self.key_locks.remove(key);
+        }
+    }
+
     /// Insert key-value pair (transparent operation)
     pub fn insert(&self, key: String, value: Vec<u8>) -> Option<Vec<u8>> {
         let key_lock = self.key_lock_for(&key);
-        let _key_guard = key_lock.lock();
+        let key_guard = key_lock.lock();
 
         let timestamp = self.clock.tick();
-        if !self.record_insert_metadata(&key, &value, timestamp, self.replica_id) {
-            return self.store.get(&key).map(|bytes| bytes.to_vec());
-        }
+        let result = if self.record_insert_metadata(&key, &value, timestamp, self.replica_id) {
+            let mut prev = None;
+            let value_for_operation = value.clone();
+            let _ = self.store.upsert(key.clone(), |current| {
+                prev = current.map(|bytes| bytes.to_vec());
+                value
+            });
 
-        let mut prev = None;
-        let value_for_operation = value.clone();
-        let _ = self.store.upsert(key.clone(), |current| {
-            prev = current.map(|bytes| bytes.to_vec());
-            value
-        });
+            let operation =
+                Operation::insert(key.clone(), value_for_operation, timestamp, self.replica_id);
+            self.operation_log.write().append(operation);
 
-        let operation =
-            Operation::insert(key.clone(), value_for_operation, timestamp, self.replica_id);
-        self.operation_log.write().append(operation);
+            debug!(
+                "Insert: key={}, timestamp={}, replica={}",
+                key, timestamp, self.replica_id
+            );
 
-        debug!(
-            "Insert: key={}, timestamp={}, replica={}",
-            key, timestamp, self.replica_id
-        );
+            prev
+        } else {
+            self.store.get(&key).map(|bytes| bytes.to_vec())
+        };
 
-        prev
+        drop(key_guard);
+        self.try_cleanup_key_lock(&key, &key_lock);
+        result
     }
 
     /// Update a key using the current store value and CRDT insert semantics.
@@ -127,33 +157,72 @@ impl CrdtOrMap {
         F: FnOnce(Option<&[u8]>) -> Vec<u8>,
     {
         let key_lock = self.key_lock_for(&key);
-        let _key_guard = key_lock.lock();
+        let key_guard = key_lock.lock();
 
         let current_value = self.store.get(&key);
         let updated_value = updater(current_value.as_deref());
         let timestamp = self.clock.tick();
 
-        if !self.record_insert_metadata(&key, &updated_value, timestamp, self.replica_id) {
-            return self.store.get(&key).unwrap_or_default();
-        }
+        let result =
+            if self.record_insert_metadata(&key, &updated_value, timestamp, self.replica_id) {
+                let operation = Operation::insert(
+                    key.clone(),
+                    updated_value.clone(),
+                    timestamp,
+                    self.replica_id,
+                );
 
-        let operation = Operation::insert(
-            key.clone(),
-            updated_value.clone(),
-            timestamp,
-            self.replica_id,
-        );
+                self.store.insert(key.clone(), updated_value.clone());
+                self.operation_log.write().append(operation);
 
-        self.store.insert(key, updated_value.clone());
-        self.operation_log.write().append(operation);
+                updated_value
+            } else {
+                self.store.get(&key).unwrap_or_default()
+            };
 
-        updated_value
+        drop(key_guard);
+        self.try_cleanup_key_lock(&key, &key_lock);
+        result
+    }
+
+    /// Fallible variant of upsert that returns serializer/updater errors.
+    pub fn try_upsert<F, E>(&self, key: String, updater: F) -> Result<Vec<u8>, E>
+    where
+        F: FnOnce(Option<&[u8]>) -> Result<Vec<u8>, E>,
+    {
+        let key_lock = self.key_lock_for(&key);
+        let key_guard = key_lock.lock();
+
+        let current_value = self.store.get(&key);
+        let updated_value = updater(current_value.as_deref())?;
+        let timestamp = self.clock.tick();
+
+        let result =
+            if self.record_insert_metadata(&key, &updated_value, timestamp, self.replica_id) {
+                let operation = Operation::insert(
+                    key.clone(),
+                    updated_value.clone(),
+                    timestamp,
+                    self.replica_id,
+                );
+
+                self.store.insert(key.clone(), updated_value.clone());
+                self.operation_log.write().append(operation);
+
+                updated_value
+            } else {
+                self.store.get(&key).unwrap_or_default()
+            };
+
+        drop(key_guard);
+        self.try_cleanup_key_lock(&key, &key_lock);
+        Ok(result)
     }
 
     /// Remove key (transparent operation)
     pub fn remove(&self, key: &str) -> Option<Vec<u8>> {
         let key_lock = self.key_lock_for(key);
-        let _key_guard = key_lock.lock();
+        let key_guard = key_lock.lock();
 
         let timestamp = self.clock.tick();
 
@@ -170,6 +239,8 @@ impl CrdtOrMap {
             None
         };
 
+        drop(key_guard);
+        self.try_cleanup_key_lock(key, &key_lock);
         removed
     }
 
@@ -239,16 +310,14 @@ impl CrdtOrMap {
             self.replica_id
         );
 
-        let mut high_water_by_replica: HashMap<ReplicaId, u64> = HashMap::new();
-        {
+        let seen_operations: HashSet<(ReplicaId, u64)> = {
             let local_log = self.operation_log.read();
-            for operation in local_log.operations() {
-                high_water_by_replica
-                    .entry(operation.replica_id())
-                    .and_modify(|ts| *ts = (*ts).max(operation.timestamp()))
-                    .or_insert_with(|| operation.timestamp());
-            }
-        }
+            local_log
+                .operations()
+                .iter()
+                .map(|operation| (operation.replica_id(), operation.timestamp()))
+                .collect()
+        };
 
         let unseen_operations: Vec<Operation> = {
             let mut local_log = self.operation_log.write();
@@ -259,11 +328,7 @@ impl CrdtOrMap {
                 .operations()
                 .iter()
                 .filter(|operation| {
-                    operation.timestamp()
-                        > high_water_by_replica
-                            .get(&operation.replica_id())
-                            .copied()
-                            .unwrap_or(0)
+                    !seen_operations.contains(&(operation.replica_id(), operation.timestamp()))
                 })
                 .cloned()
                 .collect();
@@ -291,28 +356,24 @@ impl CrdtOrMap {
     /// Apply insert (LWW semantic; newer tombstones can suppress older inserts).
     fn apply_insert(&self, key: &str, value: Vec<u8>, timestamp: u64, replica_id: ReplicaId) {
         let key_lock = self.key_lock_for(key);
-        let _key_guard = key_lock.lock();
+        let key_guard = key_lock.lock();
 
         if self.record_insert_metadata(key, &value, timestamp, replica_id) {
             self.store.insert(key.to_string(), value);
         }
+
+        drop(key_guard);
+        self.try_cleanup_key_lock(key, &key_lock);
     }
 
-    fn compact_key_metadata(&self, key: &str, versions: &mut Vec<ValueMetadata>) {
+    fn compact_key_metadata(versions: &mut Vec<ValueMetadata>) {
         if versions.len() <= 1 {
-            if versions.first().is_some_and(|winner| winner.is_tombstone) {
-                self.key_locks.remove(key);
-            }
             return;
         }
 
         if let Some(winner) = versions.iter().max_by_key(|v| v.version_key()).cloned() {
-            let winner_is_tombstone = winner.is_tombstone;
             versions.clear();
             versions.push(winner);
-            if winner_is_tombstone {
-                self.key_locks.remove(key);
-            }
         }
     }
 
@@ -333,7 +394,7 @@ impl CrdtOrMap {
                     .iter()
                     .any(|v| v.matches_version(timestamp, replica_id));
                 if has_existing_entry {
-                    self.compact_key_metadata(key, versions);
+                    Self::compact_key_metadata(versions);
                     return false;
                 }
 
@@ -341,12 +402,12 @@ impl CrdtOrMap {
 
                 if current_winner.is_some_and(|winner| winner.is_newer_than(timestamp, replica_id))
                 {
-                    self.compact_key_metadata(key, versions);
+                    Self::compact_key_metadata(versions);
                     return false;
                 }
 
                 versions.push(new_metadata);
-                self.compact_key_metadata(key, versions);
+                Self::compact_key_metadata(versions);
                 true
             }
             MapEntry::Vacant(entry) => {
@@ -359,13 +420,17 @@ impl CrdtOrMap {
     /// Apply remove
     fn apply_remove(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> Option<Vec<u8>> {
         let key_lock = self.key_lock_for(key);
-        let _key_guard = key_lock.lock();
+        let key_guard = key_lock.lock();
 
-        if self.record_remove_metadata(key, timestamp, replica_id) {
-            return self.store.remove(key);
-        }
+        let removed = if self.record_remove_metadata(key, timestamp, replica_id) {
+            self.store.remove(key)
+        } else {
+            None
+        };
 
-        None
+        drop(key_guard);
+        self.try_cleanup_key_lock(key, &key_lock);
+        removed
     }
 
     fn record_remove_metadata(&self, key: &str, timestamp: u64, replica_id: ReplicaId) -> bool {
@@ -378,7 +443,7 @@ impl CrdtOrMap {
                     .iter()
                     .any(|v| v.is_tombstone && v.matches_version(timestamp, replica_id));
                 if has_existing_entry {
-                    self.compact_key_metadata(key, versions);
+                    Self::compact_key_metadata(versions);
                     return false;
                 }
 
@@ -386,21 +451,19 @@ impl CrdtOrMap {
                     .iter()
                     .any(|v| v.is_newer_than(timestamp, replica_id));
                 if has_newer_version {
-                    self.compact_key_metadata(key, versions);
+                    Self::compact_key_metadata(versions);
                     return false;
                 }
 
                 versions.push(tombstone);
-                self.compact_key_metadata(key, versions);
+                Self::compact_key_metadata(versions);
                 true
             }
             MapEntry::Vacant(entry) => {
                 if self.store.contains_key(key) {
                     entry.insert(vec![tombstone]);
-                    self.key_locks.remove(key);
                     true
                 } else {
-                    self.key_locks.remove(key);
                     false
                 }
             }

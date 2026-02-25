@@ -108,15 +108,11 @@ impl<T: CrdtValue> CrdtStore<T> {
         })
     }
 
-    #[expect(
-        clippy::panic,
-        reason = "serialization failure in CRDT update is an invariant violation that must abort the update path"
-    )]
-    fn update<F>(&self, key: String, updater: F) -> Option<T>
+    fn update<F>(&self, key: String, updater: F) -> Result<Option<T>, serde_json::Error>
     where
         F: FnOnce(Option<T>) -> T,
     {
-        let updated_bytes = self.inner.upsert(key, |current_bytes| {
+        let updated_bytes = self.inner.try_upsert(key, |current_bytes| {
             let current = current_bytes.and_then(|bytes| {
                 T::from_bytes(bytes)
                     .map_err(|err| {
@@ -126,16 +122,15 @@ impl<T: CrdtValue> CrdtStore<T> {
             });
 
             let updated = updater(current);
-            match updated.to_bytes() {
-                Ok(bytes) => bytes,
-                Err(err) => panic!("CRDT update serialization invariant violated: {err}"),
-            }
-        });
-        T::from_bytes(&updated_bytes)
+            updated.to_bytes()
+        })?;
+
+        Ok(T::from_bytes(&updated_bytes)
             .map_err(|err| {
                 debug!(error = %err, "Failed to deserialize updated CRDT value");
+                err
             })
-            .ok()
+            .ok())
     }
 
     fn len(&self) -> usize {
@@ -326,7 +321,11 @@ macro_rules! define_state_store {
                 self.inner.get_operation_log()
             }
 
-            pub fn update<F>(&self, key: String, updater: F) -> Option<$value_type>
+            pub fn update<F>(
+                &self,
+                key: String,
+                updater: F,
+            ) -> Result<Option<$value_type>, serde_json::Error>
             where
                 F: FnOnce(Option<$value_type>) -> $value_type,
             {
@@ -396,10 +395,12 @@ impl RateLimitStore {
         format!("{key}{}{actor}", Self::SHARD_SEPARATOR)
     }
 
+    fn split_shard_key(shard_key: &str) -> Option<(&str, &str)> {
+        shard_key.rsplit_once(Self::SHARD_SEPARATOR)
+    }
+
     fn base_key(shard_key: &str) -> &str {
-        shard_key
-            .split_once(Self::SHARD_SEPARATOR)
-            .map_or(shard_key, |(base, _)| base)
+        Self::split_shard_key(shard_key).map_or(shard_key, |(base, _)| base)
     }
 
     fn aggregate_counter(&self, key: &str) -> Option<i64> {
@@ -463,6 +464,19 @@ impl RateLimitStore {
         self.aggregate_counter(key)
     }
 
+    /// Get all actor shards as (base_key, actor, value).
+    pub fn all_shards(&self) -> Vec<(String, String, i64)> {
+        self.counters
+            .all()
+            .into_iter()
+            .filter_map(|(shard_key, counter)| {
+                Self::split_shard_key(&shard_key).map(|(base_key, actor)| {
+                    (base_key.to_string(), actor.to_string(), counter.value)
+                })
+            })
+            .collect()
+    }
+
     /// Increment counter (only if this node is an owner)
     pub fn inc(&self, key: String, actor: String, delta: i64) {
         if !self.is_owner(&key) {
@@ -470,9 +484,11 @@ impl RateLimitStore {
         }
 
         let shard_key = Self::shard_key(&key, &actor);
-        let _ = self.counters.update(shard_key, |current| CounterValue {
+        if let Err(err) = self.counters.update(shard_key, |current| CounterValue {
             value: current.map_or(delta, |existing| existing.value + delta),
-        });
+        }) {
+            debug!(error = %err, %key, %actor, "Failed to update rate-limit counter shard");
+        }
     }
 
     /// Set a snapshot value for one actor shard.

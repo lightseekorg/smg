@@ -59,11 +59,17 @@ impl MeshSyncManager {
             }
         });
 
-        if let Some(state) = updated_state {
-            debug!(
-                "Synced worker state to mesh {} (version: {})",
-                state.worker_id, state.version
-            );
+        match updated_state {
+            Ok(Some(state)) => {
+                debug!(
+                    "Synced worker state to mesh {} (version: {})",
+                    state.worker_id, state.version
+                );
+            }
+            Ok(None) => {}
+            Err(err) => {
+                debug!(error = %err, worker_id = %worker_id, "Failed to sync worker state");
+            }
         }
     }
 

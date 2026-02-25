@@ -159,8 +159,8 @@ fn test_concurrent_insert_same_key() {
     );
     replica1.merge(&log2);
 
-    // Add-wins semantic: both values should be preserved, but only one is displayed
-    // Due to timestamp and replica ID ordering, one will be selected
+    // LWW semantic: conflicts resolve by (timestamp, replica_id), so one value wins.
+    // The winner displayed here is deterministic under that ordering.
     info!("{:?}", String::from_utf8(replica1.get("key1").unwrap()));
     assert!(replica1.contains_key("key1"));
 }
