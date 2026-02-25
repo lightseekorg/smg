@@ -29,12 +29,10 @@ impl MetricsStore {
         let should_update = if let Some(mut entry) = self.cache.get_mut(&url) {
             let current = entry.value();
 
-            // 1. Monotonic sequence number check for the same source
-            if new_snapshot.source == current.source
-                && new_snapshot.seq_no > 0
-                && new_snapshot.seq_no <= current.seq_no
-            {
-                return; // Ignore older updates from the same source
+            // 1. Monotonic sequence number check for the same source.
+            // seq_no = 0 means "unset" — always treated as older than any real seq (1+).
+            if new_snapshot.source == current.source && new_snapshot.seq_no <= current.seq_no {
+                return; // Ignore older or unset updates from the same source
             }
 
             // 2. Source priority check
