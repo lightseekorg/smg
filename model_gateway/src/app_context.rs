@@ -305,7 +305,7 @@ impl AppContextBuilder {
 
         // Create the WorkerRegistry early so the DirectScraper closure can hold
         // a Weak reference to the same registry that the application uses.
-        let worker_registry = Arc::new(crate::core::WorkerRegistry::new());
+        let worker_registry = Arc::new(WorkerRegistry::new());
 
         // Build MetricsStore using the configured staleness threshold
         let bus = Arc::new(metrics_service::EventBus::new(1024));
@@ -375,7 +375,7 @@ impl AppContextBuilder {
             .with_tool_parser_factory()
             // Pass the pre-built registry so both the scraper and the builder share the same Arc
             .worker_registry(worker_registry)
-            .metrics_store(metrics_store)
+            .metrics_store(Arc::clone(&metrics_store))
             .with_policy_registry(&router_config, Some(Arc::clone(&metrics_store)))
             .with_storage(&router_config)
             .await?
