@@ -21,7 +21,7 @@ pub const BUILD_MODE: &str = build_env!(BUILD_MODE);
 
 /// Get simple version string (default for --version)
 pub fn get_version_string() -> String {
-    format!("{} {}", PROJECT_NAME, VERSION)
+    format!("{PROJECT_NAME} {VERSION}")
 }
 
 /// Get verbose version information string with full build details (for --version-verbose)
@@ -54,4 +54,61 @@ Compiler:\n\
 /// Get version number only
 pub fn get_version() -> &'static str {
     VERSION
+}
+
+/// Print the startup banner with braille art and key configuration info.
+///
+/// Layout inspired by vLLM's startup banner — art on the left,
+/// useful context on the right. Shepherd with sheep motif.
+#[expect(
+    clippy::print_stdout,
+    reason = "startup banner is printed before tracing is initialized; stdout is intentional"
+)]
+pub fn print_banner(host: &str, port: u16, mode: &str) {
+    let info: [(&str, String); 4] = [
+        ("", PROJECT_NAME.to_string()),
+        ("version", VERSION.to_string()),
+        ("listening", format!("{host}:{port}")),
+        ("mode", mode.to_string()),
+    ];
+
+    let art: [&str; 15] = [
+        "⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣤⣤⣴⠟⠛⢶⣤⣤⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+        "⠀⠀⠀⠀⠀⠀⠀⠀⣰⡏⠀⠀⠁⠀⠀⠈⠁⠀⢹⣇⠀⠀⠀⠀⠀⠀⠀⠀",
+        "⠀⠀⠀⠀⠀⠀⠀⡾⠋⠉⠀⠀⠀⠀⠀⠀⠀⠀⠈⠙⢳⡄⠀⠀⠀⠀⠀⠀",
+        "⢀⡾⠛⠛⠀⢶⣤⣿⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣾⣧⡶⠞⠛⠛⢳⡄",
+        "⠈⣷⡀⠀⠀⠀⠈⣟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢹⡇⠀⠀⠀⠀⣼⠃",
+        "⠀⠈⠻⣦⣤⣤⣤⡿⢷⡦⠀⠀⠀⠀⠀⠀⠀⠀⢰⡶⢿⣤⣤⣤⣴⠾⠃⠀",
+        "⠀⢠⡾⠋⠁⢸⠏⠀⠈⢷⣤⣤⣦⠀⠀⣰⣤⣠⡼⠃⠀⠘⣧⠈⠉⢻⡆⠀",
+        "⠀⢈⣷⡄⠀⣿⠀⠀⠀⣴⡄⠀⠙⠛⠛⠋⠀⢠⣦⡄⠀⠀⣿⠀⢠⣾⡃⠀",
+        "⠀⣾⠁⠀⠀⣿⠀⠀⠀⠉⠁⠀⠀⠀⠀⠀⠀⠀⠉⠀⠀⠀⣼⠀⠀⠈⣿⠀",
+        "⠀⢘⣿⠆⠀⢻⡄⠀⠀⠀⢀⠀⠈⣳⣾⠃⠀⡀⠀⠀⠀⢀⣿⠀⠰⢾⡋⠀",
+        "⠀⠘⣧⣀⡀⠈⣷⡀⠀⠀⠈⠛⠛⠋⠉⠛⠛⠉⠀⠀⢀⣼⠃⢀⣀⣸⠇⠀",
+        "⠀⠀⠈⣿⠃⠀⠈⠻⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡀⠾⠁⠀⠈⣿⠁⠀⠀",
+        "⠀⠀⠀⠘⠷⢶⡖⠀⠈⠛⠶⣤⣤⣤⣤⣤⣤⠶⠛⠁⠀⢰⡦⠾⠋⠀⠀⠀",
+        "⠀⠀⠀⠀⠀⠘⢷⣤⣴⡆⠀⠀⡀⠀⠀⢀⠀⠀⢠⣦⣤⡾⠃⠀⠀⠀⠀⠀",
+        "⠀⠀⠀⠀⠀⠀⠀⠀⠈⠻⠶⠾⢻⣤⣤⡾⠷⠶⠞⠁⠀⠀⠀⠀⠀⠀⠀⠀",
+    ];
+
+    // Info appears to the right of lines 11-14 (lower body area)
+    let info_start: usize = 11;
+    let art_width: usize = art.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let pad = 3;
+
+    for (i, line) in art.iter().enumerate() {
+        let idx = i.wrapping_sub(info_start);
+        if idx < info.len() {
+            let chars = line.chars().count();
+            let padding = " ".repeat(art_width - chars + pad);
+            let (label, value) = &info[idx];
+            if label.is_empty() {
+                println!("{line}{padding}{value}");
+            } else {
+                println!("{line}{padding}{label}  {value}");
+            }
+        } else {
+            println!("{line}");
+        }
+    }
+    println!();
 }

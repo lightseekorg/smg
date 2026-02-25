@@ -20,6 +20,7 @@ use crate::validated::Normalizable;
 /// This is the main request type for `/v1/messages` endpoint.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[validate(schema(function = "validate_mcp_config"))]
 pub struct CreateMessageRequest {
     /// The model that will complete your prompt.
     #[validate(length(min = 1, message = "model field is required and cannot be empty"))]
@@ -88,6 +89,30 @@ impl CreateMessageRequest {
     pub fn get_model(&self) -> &str {
         &self.model
     }
+
+    /// Check if the request contains any `mcp_toolset` tool entries.
+    pub fn has_mcp_toolset(&self) -> bool {
+        self.tools
+            .as_ref()
+            .is_some_and(|tools| tools.iter().any(|t| matches!(t, Tool::McpToolset(_))))
+    }
+
+    /// Return MCP server configs if present and non-empty.
+    pub fn mcp_server_configs(&self) -> Option<&[McpServerConfig]> {
+        self.mcp_servers
+            .as_deref()
+            .filter(|servers| !servers.is_empty())
+    }
+}
+
+/// Validate that `mcp_servers` is non-empty when `mcp_toolset` tools are present.
+fn validate_mcp_config(req: &CreateMessageRequest) -> Result<(), validator::ValidationError> {
+    if req.has_mcp_toolset() && req.mcp_server_configs().is_none() {
+        let mut e = validator::ValidationError::new("mcp_servers_required");
+        e.message = Some("mcp_servers is required when mcp_toolset tools are present".into());
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Request metadata
@@ -414,6 +439,10 @@ pub struct CitationsConfig {
 /// Citation types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "variant names match the OpenAI API citation type discriminators (char_location, page_location, etc.)"
+)]
 pub enum Citation {
     CharLocation(CharLocationCitation),
     PageLocation(PageLocationCitation),
@@ -482,6 +511,8 @@ pub struct SearchResultLocationCitation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Tool {
+    /// MCP toolset definition
+    McpToolset(McpToolset),
     /// Custom tool definition
     Custom(CustomTool),
     /// Bash tool (computer use)
@@ -696,6 +727,19 @@ pub enum ContentBlock {
         tool_use_id: String,
         content: WebSearchToolResultContent,
     },
+    /// MCP tool use (beta) - model requesting tool execution via MCP
+    McpToolUse {
+        id: String,
+        name: String,
+        server_name: String,
+        input: Value,
+    },
+    /// MCP tool result (beta) - result from MCP tool execution
+    McpToolResult {
+        tool_use_id: String,
+        content: Option<ToolResultContent>,
+        is_error: Option<bool>,
+    },
 }
 
 /// Stop reasons
@@ -817,6 +861,10 @@ pub struct MessageDeltaUsage {
 /// Content block delta for streaming updates
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "variant names match the OpenAI/Anthropic streaming delta type discriminators (text_delta, input_json_delta, etc.)"
+)]
 pub enum ContentBlockDelta {
     /// Text delta
     TextDelta { text: String },
@@ -846,6 +894,10 @@ pub struct ErrorResponse {
 /// API error types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "variant names match the OpenAI API error type discriminators (invalid_request_error, authentication_error, etc.)"
+)]
 pub enum ApiError {
     InvalidRequestError { message: String },
     AuthenticationError { message: String },
@@ -940,6 +992,10 @@ pub struct ContainerConfig {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
+    /// Server type (always "url")
+    #[serde(rename = "type", default = "McpServerConfig::default_type")]
+    pub server_type: String,
+
     /// Name of the MCP server
     pub name: String,
 
@@ -951,6 +1007,12 @@ pub struct McpServerConfig {
 
     /// Tool configuration for this server
     pub tool_configuration: Option<McpToolConfiguration>,
+}
+
+impl McpServerConfig {
+    fn default_type() -> String {
+        "url".to_string()
+    }
 }
 
 /// MCP tool configuration

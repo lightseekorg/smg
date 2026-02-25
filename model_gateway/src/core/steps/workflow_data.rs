@@ -310,7 +310,8 @@ impl McpWorkflowData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WasmRegistrationWorkflowData {
     pub config: WasmModuleConfigRequest,
-    pub wasm_bytes: Option<Vec<u8>>,
+    #[serde(skip, default)]
+    pub wasm_bytes: Option<Arc<Vec<u8>>>,
     /// SHA256 hash of the module file (32 bytes)
     pub sha256_hash: Option<[u8; 32]>,
     /// File size in bytes

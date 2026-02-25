@@ -57,39 +57,38 @@ pub fn create_strategic_chunks(input: &str) -> Vec<String> {
 /// Create the bug scenario chunks: `{"name": "` arrives in parts
 pub fn create_bug_scenario_chunks() -> Vec<&'static str> {
     vec![
-        r#"{"#,
-        r#"""#,
-        r#"name"#,
-        r#"""#,
-        r#":"#,
-        r#" "#,
-        r#"""#,      // Bug occurs here: parser has {"name": "
-        r#"search"#, // Use valid tool name
-        r#"""#,
-        r#","#,
-        r#" "#,
-        r#"""#,
-        r#"arguments"#,
-        r#"""#,
-        r#":"#,
-        r#" "#,
-        r#"{"#,
-        r#"""#,
-        r#"query"#,
-        r#"""#,
-        r#":"#,
-        r#" "#,
-        r#"""#,
-        r#"test query"#,
-        r#"""#,
-        r#"}"#,
-        r#"}"#,
+        "{",
+        "\"",
+        "name",
+        "\"",
+        ":",
+        " ",
+        "\"",     // Bug occurs here: parser has {"name": "
+        "search", // Use valid tool name
+        "\"",
+        ",",
+        " ",
+        "\"",
+        "arguments",
+        "\"",
+        ":",
+        " ",
+        "{",
+        "\"",
+        "query",
+        "\"",
+        ":",
+        " ",
+        "\"",
+        "test query",
+        "\"",
+        "}",
+        "}",
     ]
 }
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
     use super::*;
 
     #[test]
@@ -129,6 +128,6 @@ mod tests {
 
         // The critical chunk sequence should be present (space after colon, then quote in next chunk)
         let joined = chunks.join("|");
-        assert!(joined.contains(r#" |"#)); // The bug happens at {"name": " and then "
+        assert!(joined.contains(" |\"")); // The bug happens at {"name": " and then "
     }
 }

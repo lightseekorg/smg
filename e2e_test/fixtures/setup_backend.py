@@ -480,18 +480,88 @@ def _setup_grpc_backend(
     """Setup a runtime-specific gRPC backend (vLLM or TensorRT-LLM)."""
     runtime = get_runtime()
     runtime_label = RUNTIME_LABELS.get(runtime, runtime)
+    num_workers = workers_config.get("count") or 1
 
-    logger.info("Setting up %s gRPC backend for model %s", runtime_label, model_id)
+    logger.info(
+        "Setting up %s gRPC backend for model %s (%d workers)",
+        runtime_label,
+        model_id,
+        num_workers,
+    )
 
-    instance = None
+    instances: list = []
+
     try:
-        instance = model_pool.get_grpc_worker(model_id)
-    except RuntimeError as e:
-        pytest.fail(str(e))
-    assert instance is not None
+        if num_workers > 1:
+            # Multi-worker: find existing gRPC workers, launch missing ones
+            # get_workers_by_type auto-acquires all returned workers
+            all_existing = model_pool.get_workers_by_type(model_id, WorkerType.REGULAR)
+            existing_grpc = [w for w in all_existing if w.mode == ConnectionMode.GRPC]
 
-    model_path = instance.model_path
-    worker_urls = [instance.worker_url]
+            # Track all acquired workers immediately so they get cleaned up on failure
+            instances = list(existing_grpc)
+
+            # Release workers we won't use (wrong mode)
+            for w in all_existing:
+                if w not in existing_grpc:
+                    w.release()
+
+            if len(existing_grpc) >= num_workers:
+                instances = existing_grpc[:num_workers]
+                for w in existing_grpc[num_workers:]:
+                    w.release()
+            else:
+                missing = num_workers - len(existing_grpc)
+                workers_to_launch = [
+                    WorkerIdentity(
+                        model_id,
+                        ConnectionMode.GRPC,
+                        WorkerType.REGULAR,
+                        len(existing_grpc) + i,
+                    )
+                    for i in range(missing)
+                ]
+                logger.info(
+                    "Have %d/%d %s gRPC workers. Launching %d more",
+                    len(existing_grpc),
+                    num_workers,
+                    runtime_label,
+                    missing,
+                )
+                new_instances = model_pool.launch_workers(workers_to_launch, startup_timeout=300)
+
+                if not new_instances:
+                    pytest.fail(
+                        f"Failed to launch {runtime_label} gRPC workers: needed "
+                        f"{missing} workers but could not allocate GPUs"
+                    )
+
+                for inst in new_instances:
+                    inst.acquire()
+                    instances.append(inst)
+
+            if len(instances) < num_workers:
+                pytest.fail(
+                    f"Failed to get {num_workers} {runtime_label} gRPC workers for {model_id} "
+                    f"(got {len(instances)})"
+                )
+            worker_urls = [inst.worker_url for inst in instances]
+            model_path = instances[0].model_path
+        else:
+            # Single worker: use existing get_grpc_worker path
+            instance = model_pool.get_grpc_worker(model_id)
+            instances = [instance]
+            worker_urls = [instance.worker_url]
+            model_path = instance.model_path
+    except Exception as e:
+        for inst in instances:
+            try:
+                inst.release()
+            except Exception as release_err:
+                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        if isinstance(e, RuntimeError):
+            pytest.fail(str(e))
+        raise
 
     gateway = Gateway()
     try:
@@ -505,10 +575,9 @@ def _setup_grpc_backend(
             log_dir=gateway_config.get("log_dir"),
         )
     except Exception:
-        # Release worker if gateway fails to start
-        if instance is not None:
+        for inst in instances:
             try:
-                instance.release()
+                inst.release()
             except Exception as release_err:
                 logger.warning("Failed to release worker during cleanup: %s", release_err)
         raise
@@ -519,10 +588,10 @@ def _setup_grpc_backend(
     )
 
     logger.info(
-        "Setup %s gRPC backend: model=%s, worker=%s, gateway=%s, policy=%s",
+        "Setup %s gRPC backend: model=%s, workers=%d, gateway=%s, policy=%s",
         runtime_label,
         model_id,
-        instance.worker_url,
+        len(instances),
         gateway.base_url,
         gateway_config["policy"],
     )
@@ -532,9 +601,9 @@ def _setup_grpc_backend(
     finally:
         logger.info("Tearing down %s gRPC gateway", runtime_label)
         gateway.shutdown()
-        if instance is not None:
+        for inst in instances:
             try:
-                instance.release()
+                inst.release()
             except Exception as release_err:
                 logger.warning("Failed to release worker during cleanup: %s", release_err)
 

@@ -28,6 +28,7 @@ markers = [
   "e2e: mark test as end-to-end test requiring GPU workers",
   "slow: mark test as slow-running",
   "thread_unsafe: mark test as incompatible with parallel thread execution",
+  "external: mark test as dependent on external third-party services (run with -m external)",
 ]
 addopts = "-v -s"
 # Explicitly disable live log to avoid "---- live log ----" dividers

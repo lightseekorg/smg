@@ -226,7 +226,7 @@ impl std::fmt::Debug for PyOracleConfig {
 
 #[pymethods]
 impl PyOracleConfig {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[new]
     #[pyo3(signature = (
         password = None,
@@ -302,6 +302,10 @@ pub struct PyRedisConfig {
 impl PyRedisConfig {
     #[new]
     #[pyo3(signature = (url, pool_max = 16, retention_days = Some(30)))]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "PyO3 #[new] method signature requires PyResult"
+    )]
     fn new(url: String, pool_max: usize, retention_days: Option<u64>) -> PyResult<Self> {
         Ok(PyRedisConfig {
             url,
@@ -335,6 +339,10 @@ pub struct PyPostgresConfig {
 impl PyPostgresConfig {
     #[new]
     #[pyo3(signature = (db_url = None,pool_max = 16,))]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "PyO3 #[new] method signature requires PyResult"
+    )]
     fn new(db_url: Option<String>, pool_max: usize) -> PyResult<Self> {
         Ok(PyPostgresConfig { db_url, pool_max })
     }
@@ -757,7 +765,11 @@ impl Router {
         otlp_traces_endpoint = String::from("localhost:4317"),
         control_plane_auth = None,
     ))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "PyO3 #[new] method signature requires PyResult"
+    )]
     fn new(
         worker_urls: Vec<String>,
         policy: PolicyType,
@@ -951,14 +963,11 @@ impl Router {
         use observability::metrics::PrometheusConfig;
 
         let router_config = self.to_router_config().map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Configuration error: {}", e))
+            pyo3::exceptions::PyValueError::new_err(format!("Configuration error: {e}"))
         })?;
 
         router_config.validate().map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "Configuration validation failed: {}",
-                e
-            ))
+            pyo3::exceptions::PyValueError::new_err(format!("Configuration validation failed: {e}"))
         })?;
 
         let service_discovery_config = if self.service_discovery {
@@ -1029,6 +1038,12 @@ fn get_verbose_version_string() -> String {
     version::get_verbose_version_string()
 }
 
+/// Print the startup banner with braille art and key configuration info.
+#[pyfunction]
+fn print_banner(host: &str, port: u16, mode: &str) {
+    version::print_banner(host, port, mode);
+}
+
 /// Get the list of available tool call parsers from the Rust factory.
 #[pyfunction]
 fn get_available_tool_call_parsers() -> Vec<String> {
@@ -1056,6 +1071,7 @@ fn smg_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Router>()?;
     m.add_function(wrap_pyfunction!(get_version_string, m)?)?;
     m.add_function(wrap_pyfunction!(get_verbose_version_string, m)?)?;
+    m.add_function(wrap_pyfunction!(print_banner, m)?)?;
     m.add_function(wrap_pyfunction!(get_available_tool_call_parsers, m)?)?;
     Ok(())
 }

@@ -19,7 +19,10 @@ use tokio::{
 use tracing::{debug, info, warn};
 
 use crate::{
-    core::{metrics_aggregator::MetricPack, ConnectionMode, Worker, WorkerRegistry, WorkerType},
+    core::{
+        metrics_aggregator::{self, MetricPack},
+        ConnectionMode, Worker, WorkerRegistry, WorkerType,
+    },
     policies::PolicyRegistry,
 };
 
@@ -44,8 +47,8 @@ async fn fan_out(
         .map(|worker| {
             let client = client.clone();
             let url = worker.url().to_string();
-            let full_url = format!("{}/{}", url, endpoint);
-            let api_key = worker.api_key().clone();
+            let full_url = format!("{url}/{endpoint}");
+            let api_key = worker.api_key().cloned();
             let method = method.clone();
 
             async move {
@@ -168,7 +171,7 @@ impl WorkerManager {
             .iter()
             .map(|worker| {
                 let url = worker.url().to_string();
-                let api_key = worker.api_key().clone();
+                let api_key = worker.api_key().cloned();
                 let worker_type = match worker.worker_type() {
                     WorkerType::Regular => None,
                     WorkerType::Prefill => Some("prefill".to_string()),
@@ -209,7 +212,7 @@ impl WorkerManager {
         url: &str,
         api_key: Option<&str>,
     ) -> isize {
-        let load_url = format!("{}/get_load", url);
+        let load_url = format!("{url}/get_load");
         let mut req = client.get(&load_url).timeout(REQUEST_TIMEOUT);
         if let Some(key) = api_key {
             req = req.bearer_auth(key);
@@ -217,9 +220,7 @@ impl WorkerManager {
 
         match req.send().await {
             Ok(r) if r.status().is_success() => match r.json::<Value>().await {
-                Ok(json) if json.is_array() => json
-                    .as_array()
-                    .unwrap()
+                Ok(Value::Array(arr)) => arr
                     .iter()
                     .filter_map(|e| e.get("num_tokens").and_then(|v| v.as_i64()))
                     .sum::<i64>() as isize,
@@ -259,9 +260,9 @@ impl WorkerManager {
             return EngineMetricsResult::Err("All backend requests failed".to_string());
         }
 
-        match crate::core::metrics_aggregator::aggregate_metrics(metric_packs) {
+        match metrics_aggregator::aggregate_metrics(metric_packs) {
             Ok(text) => EngineMetricsResult::Ok(text),
-            Err(e) => EngineMetricsResult::Err(format!("Failed to aggregate metrics: {}", e)),
+            Err(e) => EngineMetricsResult::Err(format!("Failed to aggregate metrics: {e}")),
         }
     }
 }
@@ -315,6 +316,10 @@ impl LoadMonitor {
         let interval = self.interval;
         let tx = self.tx.clone();
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "Load monitor loop: runs for the lifetime of the gateway, handle is stored and abort() is called on shutdown"
+        )]
         let handle = tokio::spawn(async move {
             Self::monitor_loop(worker_registry, policy_registry, client, interval, tx).await;
         });
@@ -323,11 +328,14 @@ impl LoadMonitor {
     }
 
     pub async fn stop(&self) {
-        let mut handle_guard = self.monitor_handle.lock().await;
-        if let Some(handle) = handle_guard.take() {
+        let handle = {
+            let mut handle_guard = self.monitor_handle.lock().await;
+            handle_guard.take()
+        };
+        if let Some(handle) = handle {
             info!("Stopping load monitoring");
             handle.abort();
-            let _ = handle.await; // Wait for task to finish
+            let _ = handle.await;
         }
     }
 
@@ -361,7 +369,9 @@ impl LoadMonitor {
                 loads.insert(load_info.worker, load_info.load);
             }
 
-            if !loads.is_empty() {
+            if loads.is_empty() {
+                warn!("No loads fetched from workers");
+            } else {
                 debug!(
                     "Fetched loads from {} workers, updating {} PowerOfTwo policies",
                     loads.len(),
@@ -371,8 +381,6 @@ impl LoadMonitor {
                     policy.update_loads(&loads);
                 }
                 let _ = tx.send(loads);
-            } else {
-                warn!("No loads fetched from workers");
             }
         }
     }

@@ -197,7 +197,7 @@ impl Qwen3VLProcessor {
         grid_t: usize,
         grid_h: usize,
         grid_w: usize,
-    ) -> Vec<f32> {
+    ) -> Result<Vec<f32>, TransformError> {
         self.inner
             .reshape_to_patches(tensor, grid_t, grid_h, grid_w)
     }
@@ -388,13 +388,13 @@ mod tests {
         assert_eq!(result.num_img_tokens.len(), 2);
 
         // Check grid_thw shape
-        if let Some(ModelSpecificValue::UintTensor { data, shape }) =
+        if let Some(ModelSpecificValue::IntTensor { data, shape }) =
             result.model_specific.get("image_grid_thw")
         {
             assert_eq!(shape, &[2, 3]); // 2 images, 3 values (T, H, W) each
             assert_eq!(data.len(), 6);
         } else {
-            panic!("Expected image_grid_thw to be UintTensor");
+            panic!("Expected image_grid_thw to be IntTensor");
         }
     }
 

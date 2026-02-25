@@ -776,12 +776,13 @@ mod pd_routing_unit_tests {
         let missing: Vec<_> = implemented_endpoints
             .iter()
             .filter(|(_, _, impl_status)| !impl_status)
-            .map(|(endpoint, method, _)| format!("{} {}", method, endpoint))
+            .map(|(endpoint, method, _)| format!("{method} {endpoint}"))
             .collect();
 
         assert_eq!(missing, vec!["POST /register"]);
     }
 
+    #[expect(clippy::print_stdout, reason = "test diagnostic output")]
     #[test]
     fn test_large_batch_bootstrap_injection() {
         // This simulates the bench_one_batch_server.py scenario
@@ -841,18 +842,15 @@ mod pd_routing_unit_tests {
             );
 
             // Bootstrap injection should be reasonably fast even for large batches
-            println!(
-                "Bootstrap injection for batch_size {} took {:?}",
-                batch_size, elapsed
-            );
+            println!("Bootstrap injection for batch_size {batch_size} took {elapsed:?}");
             assert!(
                 elapsed.as_millis() < 1000,
-                "Bootstrap injection took too long for batch size {}",
-                batch_size
+                "Bootstrap injection took too long for batch size {batch_size}"
             );
         }
     }
 
+    #[expect(clippy::print_stdout, reason = "test diagnostic output")]
     #[test]
     fn test_payload_size_calculation() {
         let test_cases = vec![
@@ -869,11 +867,9 @@ mod pd_routing_unit_tests {
             let json_overhead = batch_size * 100; // ~100 bytes overhead per request
             let total_size = tokens_size + json_overhead;
 
+            let payload_mb = total_size / (1024 * 1024);
             println!(
-                "Batch size: {}, Input len: {}, Estimated payload: {} MB",
-                batch_size,
-                input_len,
-                total_size / (1024 * 1024)
+                "Batch size: {batch_size}, Input len: {input_len}, Estimated payload: {payload_mb} MB"
             );
 
             // For the benchmark case (8192, 4096), this should be ~134 MB

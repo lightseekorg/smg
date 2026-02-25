@@ -199,7 +199,7 @@
   <rect x="660" y="70" width="145" height="24" rx="10" fill="url(#greenGrad)"/>
   <rect x="660" y="82" width="145" height="12" fill="url(#greenGrad)"/>
   <text x="732" y="88" text-anchor="middle" class="label" font-size="10" fill="white">gRPC Workers</text>
-  <text x="732" y="110" text-anchor="middle" class="feature">vLLM / SGLang / TRT-LLM</text>
+  <text x="732" y="110" text-anchor="middle" class="feature">SGLang / vLLM / TRT-LLM</text>
   <text x="732" y="124" text-anchor="middle" class="feature">Raw Inference + PD</text>
   <text x="732" y="138" text-anchor="middle" class="feature">Max Performance</text>
 
@@ -208,7 +208,7 @@
   <rect x="660" y="170" width="145" height="24" rx="10" fill="url(#blueGrad)"/>
   <rect x="660" y="182" width="145" height="12" fill="url(#blueGrad)"/>
   <text x="732" y="188" text-anchor="middle" class="label" font-size="10" fill="white">HTTP Workers</text>
-  <text x="732" y="210" text-anchor="middle" class="feature">vLLM / SGLang / TRT-LLM</text>
+  <text x="732" y="210" text-anchor="middle" class="feature">SGLang / vLLM / TRT-LLM</text>
   <text x="732" y="224" text-anchor="middle" class="feature">OpenAI-Compatible</text>
 
   <!-- External APIs -->

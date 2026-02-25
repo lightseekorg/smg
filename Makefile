@@ -20,7 +20,7 @@ endif
 
 .PHONY: help build test clean docs check fmt dev-setup pre-commit setup-sccache sccache-stats sccache-clean sccache-stop \
         python-dev python-build python-build-release python-install python-clean python-test python-check \
-        show-version bump-version release-notes
+        show-version bump-version check-versions
 
 help: ## Show this help message
 	@echo "Model Gateway Development Commands"
@@ -139,9 +139,7 @@ VERSION_FILES := model_gateway/Cargo.toml \
                  bindings/golang/Cargo.toml \
                  bindings/python/Cargo.toml \
                  bindings/python/pyproject.toml \
-                 bindings/python/src/smg/version.py \
-                 grpc_client/python/pyproject.toml \
-                 grpc_client/python/smg_grpc_proto/__init__.py
+                 bindings/python/src/smg/version.py
 
 show-version: ## Show current version across all files
 	@echo "Current versions:"
@@ -150,8 +148,6 @@ show-version: ## Show current version across all files
 	@echo "  bindings/python/Cargo.toml: $$(grep -m1 '^version = ' bindings/python/Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
 	@echo "  bindings/python/pyproject.toml: $$(grep -m1 '^version = ' bindings/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')"
 	@echo "  bindings/python/.../version.py: $$(grep '__version__' bindings/python/src/smg/version.py | sed 's/__version__ = "\(.*\)"/\1/')"
-	@echo "  grpc_client/python/pyproject.toml: $$(grep -m1 '^version = ' grpc_client/python/pyproject.toml | sed 's/version = "\(.*\)"/\1/')"
-	@echo "  grpc_client/python/.../__init__.py: $$(grep '__version__' grpc_client/python/smg_grpc_proto/__init__.py | sed 's/__version__ = "\(.*\)"/\1/')"
 
 bump-version: ## Bump version across all files (usage: make bump-version VERSION=0.3.3)
 	@if [ -z "$(VERSION)" ]; then \
@@ -173,40 +169,18 @@ bump-version: ## Bump version across all files (usage: make bump-version VERSION
 	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' bindings/python/pyproject.toml && rm -f bindings/python/pyproject.toml.bak
 	@# Update version.py
 	@sed -i.bak 's/__version__ = ".*"/__version__ = "$(VERSION)"/' bindings/python/src/smg/version.py && rm -f bindings/python/src/smg/version.py.bak
-	@# Update grpc_client/python/pyproject.toml
-	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' grpc_client/python/pyproject.toml && rm -f grpc_client/python/pyproject.toml.bak
-	@# Update grpc_client/python/smg_grpc_proto/__init__.py
-	@sed -i.bak 's/__version__ = ".*"/__version__ = "$(VERSION)"/' grpc_client/python/smg_grpc_proto/__init__.py && rm -f grpc_client/python/smg_grpc_proto/__init__.py.bak
 	@echo "Version updated to $(VERSION) in all files:"
 	@echo "  - model_gateway/Cargo.toml"
 	@echo "  - bindings/golang/Cargo.toml"
 	@echo "  - bindings/python/Cargo.toml"
 	@echo "  - bindings/python/pyproject.toml"
 	@echo "  - bindings/python/src/smg/version.py"
-	@echo "  - grpc_client/python/pyproject.toml"
-	@echo "  - grpc_client/python/smg_grpc_proto/__init__.py"
 	@echo ""
 	@echo "Verify with: make show-version"
 
-release-notes: ## Generate release notes for gateway (usage: make release-notes PREV=gateway-v0.2.2 CURR=gateway-v1.0.0)
-	@if [ -z "$(PREV)" ] || [ -z "$(CURR)" ]; then \
-		echo "Usage: make release-notes PREV=<previous-tag> CURR=<current-tag>"; \
-		echo "Example: make release-notes PREV=gateway-v0.2.2 CURR=gateway-v1.0.0"; \
-		echo ""; \
-		echo "Options:"; \
-		echo "  OUTPUT=<file>     Save to file (default: stdout)"; \
-		echo "  CREATE_RELEASE=1  Create GitHub draft release via gh CLI (default: draft)"; \
-		echo "  DRAFT=0           Publish release immediately (skip draft)"; \
-		exit 1; \
+check-versions: ## Check workspace crate versions against latest tag (usage: make check-versions [TAG=v1.0.0])
+	@if [ -n "$(TAG)" ]; then \
+		./scripts/check_release_versions.sh "$(TAG)"; \
+	else \
+		./scripts/check_release_versions.sh; \
 	fi
-	@ARGS="$(PREV) $(CURR)"; \
-	if [ -n "$(OUTPUT)" ]; then \
-		ARGS="$$ARGS --output $(OUTPUT)"; \
-	fi; \
-	if [ "$(CREATE_RELEASE)" = "1" ]; then \
-		ARGS="$$ARGS --create-release"; \
-		if [ "$(DRAFT)" = "0" ]; then \
-			ARGS="$$ARGS --no-draft"; \
-		fi; \
-	fi; \
-	./scripts/generate_gateway_release_notes.sh $$ARGS

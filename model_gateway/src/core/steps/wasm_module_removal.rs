@@ -64,7 +64,7 @@ impl StepExecutor<WasmRemovalWorkflowData> for FindModuleToRemoveStep {
             .get_module(removal_request.module_uuid)
             .map_err(|e| WorkflowError::StepFailed {
                 step_id: StepId::new("find_module_to_remove"),
-                message: format!("Failed to get module: {}", e),
+                message: format!("Failed to get module: {e}"),
             })?;
 
         if module.is_none() {
@@ -124,7 +124,7 @@ impl StepExecutor<WasmRemovalWorkflowData> for RemoveModuleStep {
             .remove_module_internal(removal_request.module_uuid)
             .map_err(|e| WorkflowError::StepFailed {
                 step_id: StepId::new("remove_module"),
-                message: format!("Failed to remove module: {}", e),
+                message: format!("Failed to remove module: {e}"),
             })?;
 
         info!(

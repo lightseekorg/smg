@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 // Re-export storage config types from data_connector
 pub use smg_data_connector::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
 
-use super::ConfigResult;
+use super::{validation::ConfigValidator, ConfigResult};
 use crate::core::ConnectionMode;
 
 /// Main router configuration
@@ -553,7 +553,7 @@ impl RouterConfig {
 
     /// Validate the configuration
     pub fn validate(&self) -> ConfigResult<()> {
-        crate::config::validation::ConfigValidator::validate(self)
+        ConfigValidator::validate(self)
     }
 
     /// Get the routing mode type as a string
@@ -1008,7 +1008,7 @@ mod tests {
 
     #[test]
     fn test_large_worker_lists() {
-        let large_urls: Vec<String> = (0..1000).map(|i| format!("http://worker{}", i)).collect();
+        let large_urls: Vec<String> = (0..1000).map(|i| format!("http://worker{i}")).collect();
 
         let config = RouterConfig::builder()
             .regular_mode(large_urls.clone())
@@ -1060,8 +1060,8 @@ mod tests {
             .build_unchecked();
 
         assert_eq!(config.host, "");
-        assert_eq!(config.log_dir, Some("".to_string()));
-        assert_eq!(config.log_level, Some("".to_string()));
+        assert_eq!(config.log_dir, Some(String::new()));
+        assert_eq!(config.log_level, Some(String::new()));
     }
 
     #[test]

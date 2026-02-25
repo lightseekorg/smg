@@ -5,6 +5,8 @@ use std::{
 
 use anyhow::Result;
 
+use crate::chat_template::{ChatTemplateContentFormat, ChatTemplateParams};
+
 /// Type alias for token IDs
 pub type TokenIdType = u32;
 
@@ -28,6 +30,32 @@ pub trait Tokenizer: Encoder + Decoder {
 
     /// Enable downcasting to concrete types
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Apply chat template to messages. Default returns an error for tokenizers without template support.
+    fn apply_chat_template(
+        &self,
+        _messages: &[serde_json::Value],
+        _params: ChatTemplateParams,
+    ) -> Result<String> {
+        Err(anyhow::anyhow!(
+            "Chat template not supported by this tokenizer"
+        ))
+    }
+
+    /// Get the content format expected by the chat template.
+    fn chat_template_content_format(&self) -> ChatTemplateContentFormat {
+        ChatTemplateContentFormat::default()
+    }
+
+    /// Set or override the chat template.
+    ///
+    /// Returns an error if the template fails to parse or the tokenizer
+    /// does not support chat templates.
+    fn set_chat_template(&mut self, _template: String) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "set_chat_template is not supported by this tokenizer"
+        ))
+    }
 }
 
 /// Contains the results of tokenizing text: token IDs, string tokens, and their spans
@@ -35,8 +63,8 @@ pub trait Tokenizer: Encoder + Decoder {
 pub enum Encoding {
     /// Hugging Face
     Hf(Box<tokenizers::tokenizer::Encoding>),
-    /// Sentence Piece
-    Sp(Vec<TokenIdType>),
+    /// Plain token ID vector
+    Plain(Vec<TokenIdType>),
     /// Tiktoken (for GPT models) - now uses u32 in tiktoken-rs 0.7.0
     Tiktoken(Vec<TokenIdType>),
 }
@@ -47,15 +75,9 @@ impl Encoding {
     pub fn token_ids(&self) -> &[TokenIdType] {
         match self {
             Encoding::Hf(inner) => inner.get_ids(),
-            Encoding::Sp(inner) => inner,
+            Encoding::Plain(inner) => inner,
             Encoding::Tiktoken(inner) => inner,
         }
-    }
-
-    /// Deprecated: Use token_ids() instead (kept for compatibility)
-    #[deprecated(since = "0.1.0", note = "Use token_ids() instead")]
-    pub fn token_ids_ref(&self) -> &[TokenIdType] {
-        self.token_ids()
     }
 
     /// Get a hash of the token IDs for caching purposes
@@ -71,13 +93,13 @@ impl Hash for Encoding {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             Encoding::Hf(inner) => inner.get_ids().hash(state),
-            Encoding::Sp(inner) => inner.hash(state),
+            Encoding::Plain(inner) => inner.hash(state),
             Encoding::Tiktoken(inner) => inner.hash(state),
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SpecialTokens {
     pub bos_token: Option<String>,
     pub eos_token: Option<String>,

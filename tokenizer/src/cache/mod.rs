@@ -26,7 +26,10 @@ pub use l0::{CacheStats, L0Cache};
 pub use l1::{L1Cache, L1CacheStats};
 use rayon::prelude::*;
 
-use crate::traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer};
+use crate::{
+    chat_template::{ChatTemplateContentFormat, ChatTemplateParams},
+    traits::{Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer},
+};
 
 /// Configuration for the tokenizer cache
 #[derive(Debug, Clone)]
@@ -60,9 +63,6 @@ pub struct CachedTokenizer {
     l0: Option<L0Cache>,
     /// L1 cache (prefix matching at fixed boundaries)
     l1: Option<L1Cache>,
-    /// Configuration
-    #[allow(dead_code)]
-    config: CacheConfig,
     /// Fingerprint for cache invalidation
     fingerprint: TokenizerFingerprint,
     /// Cached special token strings (extracted once at construction)
@@ -93,7 +93,6 @@ impl CachedTokenizer {
             inner,
             l0,
             l1,
-            config,
             fingerprint,
             special_token_strings,
         }
@@ -163,21 +162,15 @@ impl CachedTokenizer {
 
 impl Encoder for CachedTokenizer {
     fn encode(&self, input: &str, add_special_tokens: bool) -> Result<Encoding> {
-        // L0 cache lookup (exact match) - returns Arc<Encoding> for zero-copy
-        // Note: L0 cache doesn't distinguish by add_special_tokens flag
-        // This is acceptable for the current use case where embeddings always use true
-        // and chat always uses false with different input content
+        // L0 cache lookup (exact match, keyed on input + add_special_tokens)
         if let Some(l0) = &self.l0 {
-            if let Some(cached) = l0.get(input) {
-                // Unwrap the Arc - since Encoding is Clone, we can return the inner value
-                // For callers who need the tokens, they can access via token_ids() which is &[u32]
+            if let Some(cached) = l0.get(input, add_special_tokens) {
                 return Ok((*cached).clone());
             }
         }
 
         // L1 cache lookup (prefix match at special token boundaries)
         if let Some(l1) = &self.l1 {
-            // Use pre-computed special tokens refs (avoids allocation per call)
             let tokens: Vec<&str> = self
                 .special_token_strings
                 .iter()
@@ -185,21 +178,21 @@ impl Encoder for CachedTokenizer {
                 .collect();
 
             if let Some((prefix_tokens, prefix_len)) = l1.longest_prefix_match(input, &tokens) {
-                // We have a prefix match - tokenize the suffix
                 let suffix = &input[prefix_len..];
                 if !suffix.is_empty() {
                     let suffix_encoding = self.inner.encode(suffix, add_special_tokens)?;
 
-                    // Merge prefix tokens + suffix tokens
-                    // Safe because we're splitting at special token boundaries
                     let mut merged_tokens = prefix_tokens;
                     merged_tokens.extend_from_slice(suffix_encoding.token_ids());
 
-                    let merged_encoding = Encoding::Sp(merged_tokens);
+                    let merged_encoding = Encoding::Plain(merged_tokens);
 
-                    // Cache the full result in L0
                     if let Some(l0) = &self.l0 {
-                        l0.insert(input.to_string(), merged_encoding.clone());
+                        l0.insert(
+                            input.to_string(),
+                            add_special_tokens,
+                            merged_encoding.clone(),
+                        );
                     }
 
                     return Ok(merged_encoding);
@@ -212,11 +205,10 @@ impl Encoder for CachedTokenizer {
 
         // Cache in L0
         if let Some(l0) = &self.l0 {
-            l0.insert(input.to_string(), encoding.clone());
+            l0.insert(input.to_string(), add_special_tokens, encoding.clone());
         }
 
         // Cache in L1 at special token boundaries
-        // Re-tokenizes prefixes for correctness (optimized for high prefix reuse)
         if let Some(l1) = &self.l1 {
             let tokens: Vec<&str> = self
                 .special_token_strings
@@ -225,7 +217,6 @@ impl Encoder for CachedTokenizer {
                 .collect();
             let _ =
                 l1.insert_at_boundaries(input, self.inner.as_ref(), &tokens, add_special_tokens);
-            // Ignore errors in cache insertion - cache is best-effort
         }
 
         Ok(encoding)
@@ -267,6 +258,18 @@ impl Tokenizer for CachedTokenizer {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn apply_chat_template(
+        &self,
+        messages: &[serde_json::Value],
+        params: ChatTemplateParams,
+    ) -> Result<String> {
+        self.inner.apply_chat_template(messages, params)
+    }
+
+    fn chat_template_content_format(&self) -> ChatTemplateContentFormat {
+        self.inner.chat_template_content_format()
     }
 }
 

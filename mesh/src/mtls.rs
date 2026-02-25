@@ -130,7 +130,11 @@ impl MTLSManager {
     }
 
     /// Start certificate rotation monitoring
-    pub async fn start_rotation_monitor(&self) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "fire-and-forget background monitor; rotation runs for the process lifetime and does not need explicit join"
+    )]
+    pub fn start_rotation_monitor(&self) {
         let config = self.config.clone();
         let server_config = self.server_config.clone();
         let client_config = self.client_config.clone();

@@ -1,5 +1,5 @@
 // Mock worker for testing - these functions are used by integration tests
-#![allow(dead_code)]
+#![allow(dead_code, clippy::allow_attributes)]
 
 use std::{
     collections::{HashMap, HashSet},
@@ -20,7 +20,7 @@ use axum::{
 };
 use futures_util::stream::{self, StreamExt};
 use serde_json::json;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
 use uuid::Uuid;
 
 /// Configuration for mock worker behavior
@@ -51,7 +51,7 @@ pub enum HealthStatus {
 pub struct MockWorker {
     config: Arc<RwLock<MockWorkerConfig>>,
     shutdown_handle: Option<tokio::task::JoinHandle<()>>,
-    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
 impl MockWorker {
@@ -64,6 +64,11 @@ impl MockWorker {
     }
 
     /// Start the mock worker server
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::print_stderr,
+        reason = "test infrastructure"
+    )]
     pub async fn start(&mut self) -> Result<String, Box<dyn std::error::Error>> {
         let config = self.config.clone();
         let port = config.read().await.port;
@@ -98,7 +103,7 @@ impl MockWorker {
             .route("/v1/models", get(v1_models_handler))
             .with_state(config);
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         self.shutdown_tx = Some(shutdown_tx);
 
         // Spawn the server in a separate task
@@ -106,7 +111,7 @@ impl MockWorker {
             let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("Failed to bind to port {}: {}", port, e);
+                    eprintln!("Failed to bind to port {port}: {e}");
                     return;
                 }
             };
@@ -116,7 +121,7 @@ impl MockWorker {
             });
 
             if let Err(e) = server.await {
-                eprintln!("Server error: {}", e);
+                eprintln!("Server error: {e}");
             }
         });
 
@@ -125,7 +130,7 @@ impl MockWorker {
         // Wait for the server to start
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        let url = format!("http://127.0.0.1:{}", port);
+        let url = format!("http://127.0.0.1:{port}");
         Ok(url)
     }
 
@@ -154,10 +159,14 @@ impl Drop for MockWorker {
 // Handler implementations
 
 /// Check if request should fail based on configured fail_rate
-async fn should_fail(config: &MockWorkerConfig) -> bool {
+fn should_fail(config: &MockWorkerConfig) -> bool {
     rand::random::<f32>() < config.fail_rate
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn health_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>) -> Response {
     let config = config.read().await;
 
@@ -187,7 +196,7 @@ async fn health_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>) -> 
 async fn health_generate_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -218,7 +227,7 @@ async fn health_generate_handler(State(config): State<Arc<RwLock<MockWorkerConfi
 async fn server_info_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -270,7 +279,7 @@ async fn server_info_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>
 async fn model_info_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -294,6 +303,10 @@ async fn model_info_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>)
     .into_response()
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn generate_handler(
     State(config): State<Arc<RwLock<MockWorkerConfig>>>,
     Json(payload): Json<serde_json::Value>,
@@ -301,7 +314,7 @@ async fn generate_handler(
     let config = config.read().await;
     let worker_id = format!("worker-{}", config.port);
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             [("x-worker-id", worker_id)],
@@ -405,13 +418,17 @@ async fn generate_handler(
     }
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn chat_completions_handler(
     State(config): State<Arc<RwLock<MockWorkerConfig>>>,
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -440,7 +457,7 @@ async fn chat_completions_handler(
         .as_secs();
 
     if is_stream {
-        let request_id = format!("chatcmpl-{}", Uuid::new_v4());
+        let request_id = format!("chatcmpl-{}", Uuid::now_v7());
 
         let stream = stream::once(async move {
             let chunk = json!({
@@ -466,7 +483,7 @@ async fn chat_completions_handler(
             .into_response()
     } else {
         Json(json!({
-            "id": format!("chatcmpl-{}", Uuid::new_v4()),
+            "id": format!("chatcmpl-{}", Uuid::now_v7()),
             "object": "chat.completion",
             "created": timestamp,
             "model": "mock-model",
@@ -488,13 +505,17 @@ async fn chat_completions_handler(
     }
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn completions_handler(
     State(config): State<Arc<RwLock<MockWorkerConfig>>>,
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -523,7 +544,7 @@ async fn completions_handler(
         .as_secs();
 
     if is_stream {
-        let request_id = format!("cmpl-{}", Uuid::new_v4());
+        let request_id = format!("cmpl-{}", Uuid::now_v7());
 
         let stream = stream::once(async move {
             let chunk = json!({
@@ -548,7 +569,7 @@ async fn completions_handler(
             .into_response()
     } else {
         Json(json!({
-            "id": format!("cmpl-{}", Uuid::new_v4()),
+            "id": format!("cmpl-{}", Uuid::now_v7()),
             "object": "text_completion",
             "created": timestamp,
             "model": "mock-model",
@@ -568,13 +589,17 @@ async fn completions_handler(
     }
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn responses_handler(
     State(config): State<Arc<RwLock<MockWorkerConfig>>>,
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -618,7 +643,7 @@ async fn responses_handler(
     }
 
     if is_stream {
-        let request_id = format!("resp-{}", Uuid::new_v4());
+        let request_id = format!("resp-{}", Uuid::now_v7());
 
         // Check if this is an MCP tool call scenario
         let has_tools = payload
@@ -648,10 +673,7 @@ async fn responses_handler(
 
         if has_tools && !has_function_output {
             // First turn: emit streaming tool call events
-            let call_id = format!(
-                "call_{}",
-                Uuid::new_v4().to_string().split('-').next().unwrap()
-            );
+            let call_id = format!("call_{}", &Uuid::now_v7().simple().to_string()[..24]);
             let rid = request_id.clone();
 
             let events = vec![
@@ -796,10 +818,7 @@ async fn responses_handler(
         } else if has_tools && has_function_output {
             // Second turn: emit streaming text response
             let rid = request_id.clone();
-            let msg_id = format!(
-                "msg_{}",
-                Uuid::new_v4().to_string().split('-').next().unwrap()
-            );
+            let msg_id = format!("msg_{}", &Uuid::now_v7().simple().to_string()[..24]);
 
             let events = vec![
                 // response.created
@@ -968,7 +987,7 @@ async fn responses_handler(
                 .into_response()
         }
     } else if is_background {
-        let rid = req_id.unwrap_or_else(|| format!("resp-{}", Uuid::new_v4()));
+        let rid = req_id.unwrap_or_else(|| format!("resp-{}", Uuid::now_v7()));
         Json(json!({
             "id": rid,
             "object": "response",
@@ -1008,7 +1027,7 @@ async fn responses_handler(
             .unwrap_or(false);
 
         if has_tools && !has_function_output {
-            let rid = format!("resp-{}", Uuid::new_v4());
+            let rid = format!("resp-{}", Uuid::now_v7());
             Json(json!({
                 "id": rid,
                 "object": "response",
@@ -1027,7 +1046,7 @@ async fn responses_handler(
             .into_response()
         } else if has_tools && has_function_output {
             Json(json!({
-                "id": format!("resp-{}", Uuid::new_v4()),
+                "id": format!("resp-{}", Uuid::now_v7()),
                 "object": "response",
                 "created_at": timestamp,
                 "model": "mock-model",
@@ -1049,7 +1068,7 @@ async fn responses_handler(
             .into_response()
         } else {
             Json(json!({
-                "id": format!("resp-{}", Uuid::new_v4()),
+                "id": format!("resp-{}", Uuid::now_v7()),
                 "object": "response",
                 "created_at": timestamp,
                 "model": "mock-model",
@@ -1076,7 +1095,7 @@ async fn responses_handler(
 async fn flush_cache_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -1092,10 +1111,14 @@ async fn flush_cache_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>
     .into_response()
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn v1_models_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>) -> Response {
     let config = config.read().await;
 
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -1126,12 +1149,16 @@ async fn v1_models_handler(State(config): State<Arc<RwLock<MockWorkerConfig>>>) 
     .into_response()
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn responses_get_handler(
     State(config): State<Arc<RwLock<MockWorkerConfig>>>,
     Path(response_id): Path<String>,
 ) -> Response {
     let config = config.read().await;
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "Random failure for testing" })),
@@ -1163,12 +1190,16 @@ async fn responses_get_handler(
     }
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn responses_cancel_handler(
     State(config): State<Arc<RwLock<MockWorkerConfig>>>,
     Path(response_id): Path<String>,
 ) -> Response {
     let config = config.read().await;
-    if should_fail(&config).await {
+    if should_fail(&config) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "Random failure for testing" })),
@@ -1202,11 +1233,19 @@ fn get_store() -> &'static Mutex<HashMap<u16, HashSet<String>>> {
     RESP_STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 fn store_response_for_port(port: u16, response_id: &str) {
     let mut map = get_store().lock().unwrap();
     map.entry(port).or_default().insert(response_id.to_string());
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 fn response_exists_for_port(port: u16, response_id: &str) -> bool {
     let map = get_store().lock().unwrap();
     map.get(&port)
@@ -1215,6 +1254,10 @@ fn response_exists_for_port(port: u16, response_id: &str) -> bool {
 }
 
 // Minimal rerank handler returning mock results; router shapes final response
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper - panicking on failure is intentional"
+)]
 async fn rerank_handler(
     State(config): State<Arc<RwLock<MockWorkerConfig>>>,
     Json(payload): Json<serde_json::Value>,

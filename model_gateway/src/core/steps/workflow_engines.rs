@@ -74,6 +74,10 @@ pub struct WorkflowEngines {
 
 impl WorkflowEngines {
     /// Create and initialize all workflow engines with their workflow definitions
+    #[expect(
+        clippy::expect_used,
+        reason = "Workflow registration uses compile-time-known step/transition definitions that cannot fail at runtime — a failure here indicates a programming error in workflow construction"
+    )]
     pub fn new(router_config: &RouterConfig) -> Self {
         // Create local worker engine
         let local_worker = WorkflowEngine::new();

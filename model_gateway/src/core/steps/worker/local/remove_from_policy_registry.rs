@@ -34,7 +34,7 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromPolicyRegistryStep {
             workers_to_remove.len()
         );
 
-        for worker in workers_to_remove.iter() {
+        for worker in workers_to_remove {
             let model_id = worker.model_id().to_string();
             let worker_url = worker.url();
 

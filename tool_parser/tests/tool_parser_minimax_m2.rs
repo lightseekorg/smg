@@ -270,8 +270,7 @@ async fn test_minimax_streaming_incremental_json() {
     if let Some(first) = json_fragments.first() {
         assert!(
             first.starts_with('{'),
-            "First JSON fragment should start with '{{': {}",
-            first
+            "First JSON fragment should start with '{{': {first}",
         );
     }
 
@@ -279,8 +278,7 @@ async fn test_minimax_streaming_incremental_json() {
     if let Some(last) = json_fragments.last() {
         assert!(
             last.contains('}'),
-            "Last JSON fragment should contain '}}': {}",
-            last
+            "Last JSON fragment should contain '}}': {last}",
         );
     }
 }
@@ -447,19 +445,17 @@ async fn test_minimax_many_parameters() {
     let mut params_xml = String::new();
     for i in 1..=20 {
         params_xml.push_str(&format!(
-            r#"<parameter name="param{}">value{}</parameter>
+            r#"<parameter name="param{i}">value{i}</parameter>
 "#,
-            i, i
         ));
     }
 
     let input = format!(
         r#"<minimax:tool_call>
 <invoke name="complex_func">
-{}
+{params_xml}
 </invoke>
 </minimax:tool_call>"#,
-        params_xml
     );
 
     let (_normal_text, tools) = parser.parse_complete(&input).await.unwrap();
@@ -470,8 +466,8 @@ async fn test_minimax_many_parameters() {
 
     // Verify all 20 parameters are parsed
     for i in 1..=20 {
-        let key = format!("param{}", i);
-        let expected_value = format!("value{}", i);
+        let key = format!("param{i}");
+        let expected_value = format!("value{i}");
         assert_eq!(args[key], expected_value);
     }
 }
@@ -714,10 +710,10 @@ async fn test_minimax_no_tools() {
     // Test input with no tool calls at all
     let parser = MinimaxM2Parser::new();
 
-    let input = r#"This is just a normal response without any tool calls.
+    let input = r"This is just a normal response without any tool calls.
 I can provide information directly without using any tools.
 Even if I mention function names like get_weather or search,
-they are not actual tool calls unless properly formatted."#;
+they are not actual tool calls unless properly formatted.";
 
     let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
 

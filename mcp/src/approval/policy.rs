@@ -135,7 +135,7 @@ impl RulePattern {
             RulePattern::Server(re) => re.is_match(server_key),
             RulePattern::Tool(re) => re.is_match(tool_name),
             RulePattern::Qualified(re) => {
-                let qualified = format!("{}:{}", server_key, tool_name);
+                let qualified = format!("{server_key}:{tool_name}");
                 re.is_match(&qualified)
             }
             RulePattern::Any => true,
@@ -273,7 +273,7 @@ impl PolicyEngine {
         // 2. Check server policy + trust level
         if let Some(server_policy) = self.server_policies.get(server_key) {
             let decision =
-                self.evaluate_with_trust(&server_policy.trust_level, hints, &server_policy.default);
+                Self::evaluate_with_trust(server_policy.trust_level, hints, &server_policy.default);
             if matches!(server_policy.trust_level, TrustLevel::Trusted)
                 || !matches!(decision, PolicyDecision::Allow)
             {
@@ -315,8 +315,7 @@ impl PolicyEngine {
     }
 
     fn evaluate_with_trust(
-        &self,
-        trust_level: &TrustLevel,
+        trust_level: TrustLevel,
         hints: &ToolAnnotations,
         server_default: &PolicyDecision,
     ) -> PolicyDecision {

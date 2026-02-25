@@ -9,7 +9,7 @@ use openai_protocol::{
 };
 use serde_json::to_value;
 use smg_data_connector::{ConversationItemStorage, ConversationStorage, ResponseStorage};
-use smg_mcp::McpOrchestrator;
+use smg_mcp::{McpOrchestrator, McpServerBinding};
 use tracing::{debug, error, warn};
 
 use crate::{
@@ -29,7 +29,7 @@ use crate::{
 pub(crate) async fn ensure_mcp_connection(
     mcp_orchestrator: &Arc<McpOrchestrator>,
     tools: Option<&[ResponseTool]>,
-) -> Result<(bool, Vec<(String, String)>), Response> {
+) -> Result<(bool, Vec<McpServerBinding>), Response> {
     // Check for explicit MCP tools (must error if connection fails)
     let has_explicit_mcp_tools = tools
         .map(|t| {

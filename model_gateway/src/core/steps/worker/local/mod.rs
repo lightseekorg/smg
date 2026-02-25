@@ -1,4 +1,5 @@
 mod create_worker;
+mod detect_backend;
 mod detect_connection;
 mod discover_dp;
 mod discover_metadata;
@@ -21,7 +22,26 @@ pub(crate) fn strip_protocol(url: &str) -> String {
         .to_string()
 }
 
+/// Ensure URL has an HTTP(S) scheme — handles bare `host:port` and `grpc://` inputs.
+pub(super) fn http_base_url(url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.trim_end_matches('/').to_string()
+    } else {
+        format!("http://{}", strip_protocol(url).trim_end_matches('/'))
+    }
+}
+
+/// Ensure URL has a gRPC scheme — handles bare `host:port` and `http://` inputs.
+pub(super) fn grpc_base_url(url: &str) -> String {
+    if url.starts_with("grpc://") {
+        url.trim_end_matches('/').to_string()
+    } else {
+        format!("grpc://{}", strip_protocol(url).trim_end_matches('/'))
+    }
+}
+
 pub use create_worker::CreateLocalWorkerStep;
+pub use detect_backend::DetectBackendStep;
 pub use detect_connection::DetectConnectionModeStep;
 pub use discover_dp::{get_dp_info, DiscoverDPInfoStep, DpInfo};
 pub use discover_metadata::DiscoverMetadataStep;
@@ -58,7 +78,7 @@ pub(crate) fn find_workers_by_url(
     dp_aware: bool,
 ) -> Vec<Arc<dyn Worker>> {
     if dp_aware {
-        let worker_url_prefix = format!("{}@", url);
+        let worker_url_prefix = format!("{url}@");
         registry
             .get_all()
             .iter()
@@ -105,6 +125,21 @@ pub fn create_local_worker_workflow(
             .with_timeout(detect_timeout)
             .with_failure_action(FailureAction::FailWorkflow),
         )
+        // Step 1.5: Detect backend runtime (sglang, vllm, trtllm)
+        .add_step(
+            StepDefinition::new(
+                "detect_backend",
+                "Detect Backend",
+                Arc::new(DetectBackendStep),
+            )
+            .with_retry(RetryPolicy {
+                max_attempts: 2,
+                backoff: BackoffStrategy::Fixed(Duration::from_secs(1)),
+            })
+            .with_timeout(Duration::from_secs(10))
+            .with_failure_action(FailureAction::ContinueNextStep)
+            .depends_on(&["detect_connection_mode"]),
+        )
         // Step 2a: Discover metadata (parallel with DP discovery)
         .add_step(
             StepDefinition::new(
@@ -118,7 +153,7 @@ pub fn create_local_worker_workflow(
             })
             .with_timeout(Duration::from_secs(10))
             .with_failure_action(FailureAction::ContinueNextStep)
-            .depends_on(&["detect_connection_mode"]),
+            .depends_on(&["detect_backend"]),
         )
         // Step 2b: Discover DP info (after metadata to avoid concurrent /server_info calls)
         .add_step(

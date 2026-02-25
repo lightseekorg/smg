@@ -2,8 +2,6 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use super::types::Modality;
-
 pub type MultiModalResult<T> = Result<T, MultiModalError>;
 
 #[derive(Debug, Error)]
@@ -38,8 +36,6 @@ pub enum MultiModalError {
     Media(#[from] MediaConnectorError),
     #[error("unsupported content part: {0}")]
     UnsupportedContent(&'static str),
-    #[error("too many {modality:?} items provided. limit={limit}")]
-    ModalityLimit { modality: Modality, limit: usize },
     #[error("tracker task join error: {0}")]
     Join(#[from] tokio::task::JoinError),
     #[error("tracker validation error: {0}")]

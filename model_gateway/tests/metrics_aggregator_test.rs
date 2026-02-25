@@ -92,7 +92,7 @@ fn test_real() {
     let pack1 = MetricPack {
         labels: vec![("source".to_string(), "worker1".to_string())],
         // https://docs.sglang.io/references/production_metrics.html
-        metrics_text: r###"# HELP sglang:prompt_tokens_total Number of prefill tokens processed.
+        metrics_text: r#"# HELP sglang:prompt_tokens_total Number of prefill tokens processed.
 # TYPE sglang:prompt_tokens_total counter
 sglang:prompt_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct"} 8.128902e+06
 # HELP sglang:generation_tokens_total Number of generation tokens processed.
@@ -149,14 +149,14 @@ sglang:gen_throughput{model_name="meta-llama/Llama-3.1-8B-Instruct"} 86.50814177
 # HELP sglang:num_queue_reqs The number of requests in the waiting queue
 # TYPE sglang:num_queue_reqs gauge
 sglang:num_queue_reqs{model_name="meta-llama/Llama-3.1-8B-Instruct"} 2826.0
-"###.to_string(),
+"#.to_string(),
     };
     let pack2 = MetricPack {
         labels: vec![("source".to_string(), "worker2".to_string())],
         metrics_text: pack1.metrics_text.clone(),
     };
     let result = aggregate_metrics(vec![pack1, pack2]).unwrap();
-    let expected = r###"# HELP sglang_token_usage The token usage
+    let expected = r#"# HELP sglang_token_usage The token usage
 # TYPE sglang_token_usage gauge
 sglang_token_usage{model_name="meta-llama/Llama-3.1-8B-Instruct",source="worker1"} 0.28
 sglang_token_usage{model_name="meta-llama/Llama-3.1-8B-Instruct",source="worker2"} 0.28
@@ -256,16 +256,16 @@ sglang_gen_throughput{model_name="meta-llama/Llama-3.1-8B-Instruct",source="work
 # HELP sglang_prompt_tokens_total Number of prefill tokens processed.
 # TYPE sglang_prompt_tokens_total counter
 sglang_prompt_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct",source="worker1"} 8128902
-sglang_prompt_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct",source="worker2"} 8128902"###;
-    println!("result=\n{result}");
-    assert_eq_sorted(result.trim(), expected.trim());
+sglang_prompt_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct",source="worker2"} 8128902"#;
+    // result output intentionally omitted for clippy compliance
+    assert_eq_sorted(&result, expected);
 }
 
 fn assert_eq_sorted(result: &str, expected: &str) {
     // Split into lines and sort to handle BTreeMap ordering issues between test environments
     let mut result_lines: Vec<_> = result.trim().lines().map(|l| l.trim()).collect();
     let mut expected_lines: Vec<_> = expected.trim().lines().map(|l| l.trim()).collect();
-    result_lines.sort();
-    expected_lines.sort();
+    result_lines.sort_unstable();
+    expected_lines.sort_unstable();
     assert_eq!(result_lines, expected_lines);
 }

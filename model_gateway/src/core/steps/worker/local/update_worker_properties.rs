@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
 use crate::core::{steps::workflow_data::WorkerUpdateWorkflowData, BasicWorkerBuilder, Worker};
@@ -41,7 +41,7 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
 
         let mut updated_workers: Vec<Arc<dyn Worker>> = Vec::with_capacity(workers_to_update.len());
 
-        for worker in workers_to_update.iter() {
+        for worker in &workers_to_update {
             // Build updated labels - merge new labels into existing ones
             let mut updated_labels = worker.metadata().spec.labels.clone();
             if let Some(ref new_labels) = request.labels {
@@ -51,11 +51,11 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
             }
 
             // Resolve priority and cost: use update value if specified, otherwise keep existing
-            let updated_priority = request.priority.unwrap_or(worker.priority());
-            let updated_cost = request.cost.unwrap_or(worker.cost());
+            let updated_priority = request.priority.unwrap_or_else(|| worker.priority());
+            let updated_cost = request.cost.unwrap_or_else(|| worker.cost());
 
-            // Build updated health config
-            let existing_health = &worker.metadata().spec.health;
+            // Build updated health config from resolved runtime config
+            let existing_health = &worker.metadata().health_config;
             let updated_health_config = match &request.health {
                 Some(update) => update.apply_to(existing_health),
                 None => existing_health.clone(),
@@ -69,48 +69,37 @@ impl StepExecutor<WorkerUpdateWorkflowData> for UpdateWorkerPropertiesStep {
                 .or_else(|| worker.metadata().spec.api_key.clone());
 
             // Create a new worker with updated properties
-            let new_worker: Arc<dyn Worker> = if worker.is_dp_aware() {
-                // For DP-aware workers, extract DP info and rebuild
-                let dp_rank = worker.dp_rank().unwrap_or(0);
-                let dp_size = worker.dp_size().unwrap_or(1);
-                let base_url = worker.base_url().to_string();
+            // Use base_url() so DP workers start from the un-suffixed URL
+            let mut builder = BasicWorkerBuilder::new(worker.base_url())
+                .worker_type(*worker.worker_type())
+                .connection_mode(*worker.connection_mode())
+                .runtime_type(worker.metadata().spec.runtime_type)
+                .labels(updated_labels)
+                .health_config(updated_health_config.clone())
+                .health_endpoint(&health_endpoint)
+                .models(worker.metadata().spec.models.clone())
+                .priority(updated_priority)
+                .cost(updated_cost);
 
-                let mut builder =
-                    crate::core::DPAwareWorkerBuilder::new(base_url, dp_rank, dp_size)
-                        .worker_type(*worker.worker_type())
-                        .connection_mode(*worker.connection_mode())
-                        .runtime_type(worker.metadata().spec.runtime_type)
-                        .labels(updated_labels)
-                        .health_config(updated_health_config.clone())
-                        .health_endpoint(&health_endpoint)
-                        .models(worker.metadata().spec.models.clone())
-                        .priority(updated_priority)
-                        .cost(updated_cost);
+            if let Some(ref api_key) = updated_api_key {
+                builder = builder.api_key(api_key.clone());
+            }
 
-                if let Some(ref api_key) = updated_api_key {
-                    builder = builder.api_key(api_key.clone());
+            // Preserve DP configuration if the worker is DP-aware
+            if worker.is_dp_aware() {
+                if let (Some(rank), Some(size)) = (worker.dp_rank(), worker.dp_size()) {
+                    builder = builder.dp_config(rank, size);
+                } else {
+                    warn!(
+                        worker_url = %worker.url(),
+                        dp_rank = ?worker.dp_rank(),
+                        dp_size = ?worker.dp_size(),
+                        "DP-aware worker is missing dp_rank or dp_size; skipping DP config"
+                    );
                 }
+            }
 
-                Arc::new(builder.build())
-            } else {
-                // For basic workers, rebuild with updated properties
-                let mut builder = BasicWorkerBuilder::new(worker.url())
-                    .worker_type(*worker.worker_type())
-                    .connection_mode(*worker.connection_mode())
-                    .runtime_type(worker.metadata().spec.runtime_type)
-                    .labels(updated_labels)
-                    .health_config(updated_health_config.clone())
-                    .health_endpoint(&health_endpoint)
-                    .models(worker.metadata().spec.models.clone())
-                    .priority(updated_priority)
-                    .cost(updated_cost);
-
-                if let Some(ref api_key) = updated_api_key {
-                    builder = builder.api_key(api_key.clone());
-                }
-
-                Arc::new(builder.build())
-            };
+            let new_worker: Arc<dyn Worker> = Arc::new(builder.build());
 
             // Re-register the worker (this replaces the old one)
             app_context.worker_registry.register(new_worker.clone());

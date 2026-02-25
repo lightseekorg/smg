@@ -366,6 +366,10 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
         let interval = interval.unwrap_or(Duration::from_secs(300)); // 5 minutes default
         let mut shutdown_rx = self.shutdown_rx.clone();
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "periodic cleanup task with bounded lifetime via shutdown signal"
+        )]
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -456,6 +460,10 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
 
         let engine = self.clone_for_execution();
         let def = Arc::clone(&definition);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "detached workflow execution; caller receives instance_id to track progress via state store"
+        )]
         tokio::spawn(async move {
             let _guard = engine.active_workflow_guard();
             let result = engine.execute_workflow(instance_id, def).await;
@@ -655,6 +663,10 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                 let tx = tx.clone();
                 let tracker = Arc::clone(&tracker);
 
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "parallel step execution; results sent back via channel tx"
+                )]
                 tokio::spawn(async move {
                     let step = &def.steps[step_idx];
 
@@ -984,12 +996,12 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                 Ok(Ok(StepResult::Failure)) | Ok(Err(_)) | Err(_) => {
                     let (error_msg, should_retry) = match result {
                         Ok(Err(e)) => {
-                            let msg = format!("{}", e);
+                            let msg = format!("{e}");
                             let retryable = step.executor.is_retryable(&e);
                             (msg, retryable)
                         }
                         Err(_) => (
-                            format!("Step timeout after {:?}", step_timeout),
+                            format!("Step timeout after {step_timeout:?}"),
                             true, // Timeouts are retryable
                         ),
                         _ => ("Step failed".to_string(), false),
@@ -1127,11 +1139,11 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
             let state = self
                 .get_status(instance_id)
                 .await
-                .map_err(|e| format!("Failed to get workflow status: {:?}", e))?;
+                .map_err(|e| format!("Failed to get workflow status: {e:?}"))?;
 
             let result = match state.status {
                 WorkflowStatus::Completed => {
-                    Ok(format!("{} completed successfully via workflow", label))
+                    Ok(format!("{label} completed successfully via workflow"))
                 }
                 WorkflowStatus::Failed => {
                     let current_step = state.current_step.as_ref();
@@ -1142,12 +1154,9 @@ impl<D: WorkflowData, S: StateStore<D> + 'static> WorkflowEngine<D, S> {
                         .and_then(|step_id| state.step_states.get(step_id))
                         .and_then(|s| s.last_error.as_deref())
                         .unwrap_or("Unknown error");
-                    Err(format!(
-                        "Workflow failed at step {}: {}",
-                        step_name, error_msg
-                    ))
+                    Err(format!("Workflow failed at step {step_name}: {error_msg}"))
                 }
-                WorkflowStatus::Cancelled => Err(format!("Workflow cancelled for {}", label)),
+                WorkflowStatus::Cancelled => Err(format!("Workflow cancelled for {label}")),
                 WorkflowStatus::Pending | WorkflowStatus::Paused | WorkflowStatus::Running => {
                     tokio::time::sleep(poll_interval).await;
                     poll_interval = (poll_interval + poll_backoff).min(max_poll_interval);

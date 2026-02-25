@@ -50,12 +50,12 @@ mod fault_tolerance_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Requests should succeed via retry to healthy worker
         for i in 0..10 {
             let payload = json!({
-                "text": format!("Fault tolerance test {}", i),
+                "text": format!("Fault tolerance test {i}"),
                 "stream": false
             });
 
@@ -99,7 +99,7 @@ mod fault_tolerance_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "Test with all failing workers",
@@ -127,6 +127,7 @@ mod fault_tolerance_tests {
 
     /// Test graceful handling of slow workers
     #[tokio::test]
+    #[expect(clippy::disallowed_methods)]
     async fn test_slow_worker_handling() {
         let config = TestRouterConfig::round_robin(4102);
 
@@ -139,7 +140,7 @@ mod fault_tolerance_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Send concurrent requests
         let mut handles = Vec::new();
@@ -151,7 +152,7 @@ mod fault_tolerance_tests {
 
             let handle = tokio::spawn(async move {
                 let payload = json!({
-                    "text": format!("Slow worker test {}", i),
+                    "text": format!("Slow worker test {i}"),
                     "stream": false
                 });
 
@@ -213,13 +214,13 @@ mod fault_tolerance_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
         let mut success_count = 0;
 
         // Send many requests - after CB opens, all should route to healthy worker
         for i in 0..20 {
             let payload = json!({
-                "text": format!("Circuit breaker cascade test {}", i),
+                "text": format!("Circuit breaker cascade test {i}"),
                 "stream": false
             });
 
@@ -239,8 +240,7 @@ mod fault_tolerance_tests {
         // Most requests should succeed after CB opens on failing worker
         assert!(
             success_count >= 15,
-            "Most requests should succeed after circuit breaker opens, got {} successes",
-            success_count
+            "Most requests should succeed after circuit breaker opens, got {success_count} successes"
         );
 
         ctx.shutdown().await;
@@ -274,13 +274,13 @@ mod fault_tolerance_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
         let mut success_count = 0;
 
         // System should maintain stability with partial failures
         for i in 0..30 {
             let payload = json!({
-                "text": format!("Stability test {}", i),
+                "text": format!("Stability test {i}"),
                 "stream": false
             });
 
@@ -300,8 +300,7 @@ mod fault_tolerance_tests {
         // With retries and one healthy worker, most should succeed
         assert!(
             success_count >= 25,
-            "System should maintain stability under partial failure, got {} successes",
-            success_count
+            "System should maintain stability under partial failure, got {success_count} successes"
         );
 
         ctx.shutdown().await;

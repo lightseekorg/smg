@@ -32,7 +32,10 @@ use crate::{
 // PART 1: OracleStore Helper + Common Utilities
 // ============================================================================
 
-/// Shared Oracle connection pool infrastructure
+/// Schema initializer function signature for Oracle storage backends.
+pub(crate) type SchemaInitFn = fn(&Connection) -> Result<(), String>;
+
+/// Shared Oracle connection pool infrastructure.
 ///
 /// This helper eliminates ~540 LOC of duplication across storage implementations.
 /// It handles connection pooling, error mapping, and client configuration.
@@ -41,20 +44,15 @@ pub(crate) struct OracleStore {
 }
 
 impl OracleStore {
-    /// Create pool with custom schema initialization
+    /// Create a connection pool and initialize all schemas.
     ///
-    /// The `init_schema` function receives a connection and should:
-    /// - Check if tables/indexes exist
-    /// - Create them if needed
-    /// - Return Ok(()) on success or Err(message) on failure
-    pub fn new(
-        config: &OracleConfig,
-        init_schema: impl FnOnce(&Connection) -> Result<(), String>,
-    ) -> Result<Self, String> {
-        // Configure Oracle client (wallet, etc.)
-        configure_oracle_client(config)?;
+    /// Accepts a list of schema initializers that run on a single connection
+    /// before the pool is created, ensuring all tables exist.
+    pub fn new(config: &OracleConfig, init_schemas: &[SchemaInitFn]) -> Result<Self, String> {
+        // Configure Oracle client (wallet env vars, etc.)
+        configure_oracle_env(config)?;
 
-        // Initialize schema using the provided function
+        // Initialize schemas using a single connection
         let conn = connect_oracle(
             config.external_auth,
             &config.username,
@@ -63,7 +61,9 @@ impl OracleStore {
         )
         .map_err(map_oracle_error)?;
 
-        init_schema(&conn)?;
+        for init_schema in init_schemas {
+            init_schema(&conn)?;
+        }
         drop(conn);
 
         // Create connection pool
@@ -130,22 +130,29 @@ pub(crate) fn map_oracle_error(err: oracle::Error) -> String {
     }
 }
 
-// Client configuration helper
-fn configure_oracle_client(config: &OracleConfig) -> Result<(), String> {
+/// Validate Oracle wallet path and set `TNS_ADMIN` environment variable.
+///
+/// # Thread-safety note
+///
+/// `std::env::set_var` is not thread-safe and is marked unsafe in Rust 2024 edition.
+/// This function is called once during `OracleStore::new()` initialization, before the
+/// connection pool is created and before any worker threads are spawned.  When migrating
+/// to edition 2024, this call will need to be wrapped in `unsafe` (requires removing the
+/// workspace `unsafe_code = "deny"` lint or adding a targeted `#[expect]`), or the
+/// environment variable should be set by the process launcher instead.
+pub(crate) fn configure_oracle_env(config: &OracleConfig) -> Result<(), String> {
     if let Some(wallet_path) = &config.wallet_path {
         let path = Path::new(wallet_path);
 
         if !path.is_dir() {
             return Err(format!(
-                "Oracle wallet path '{}' is not a directory",
-                wallet_path
+                "Oracle wallet path '{wallet_path}' is not a directory"
             ));
         }
 
         if !path.join("tnsnames.ora").exists() && !path.join("sqlnet.ora").exists() {
             return Err(format!(
-                "Oracle wallet path '{}' is missing tnsnames.ora or sqlnet.ora",
-                wallet_path
+                "Oracle wallet path '{wallet_path}' is missing tnsnames.ora or sqlnet.ora"
             ));
         }
 
@@ -220,7 +227,7 @@ impl Manager for OracleConnectionManager {
         }
     }
 
-    #[allow(clippy::manual_async_fn)]
+    #[expect(clippy::manual_async_fn)]
     fn recycle(
         &self,
         conn: &mut Connection,
@@ -255,52 +262,46 @@ pub(super) struct OracleConversationStorage {
 }
 
 impl OracleConversationStorage {
-    pub fn new(config: OracleConfig) -> Result<Self, ConversationStorageError> {
-        let store = OracleStore::new(&config, |conn| {
-            // Check if table exists
-            let exists: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATIONS'",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
-
-            // Create table if missing
-            if exists == 0 {
-                conn.execute(
-                    "CREATE TABLE conversations (
-                        id VARCHAR2(64) PRIMARY KEY,
-                        created_at TIMESTAMP WITH TIME ZONE,
-                        metadata CLOB
-                    )",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
-            }
-
-            Ok(())
-        })
-        .map_err(ConversationStorageError::StorageError)?;
-
-        Ok(Self { store })
+    pub fn new(store: OracleStore) -> Self {
+        Self { store }
     }
 
+    pub(crate) fn init_schema(conn: &Connection) -> Result<(), String> {
+        let exists: i64 = conn
+            .query_row_as(
+                "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATIONS'",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+
+        if exists == 0 {
+            conn.execute(
+                "CREATE TABLE conversations (
+                    id VARCHAR2(64) PRIMARY KEY,
+                    created_at TIMESTAMP WITH TIME ZONE,
+                    metadata CLOB
+                )",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+        }
+
+        Ok(())
+    }
+
+    /// Parse raw metadata JSON into `ConversationMetadata`.
+    ///
+    /// Delegates to the shared `parse_conversation_metadata` in `common.rs`.
+    /// The previous Oracle-specific version performed an extra `Value` type-check
+    /// (rejecting non-object JSON explicitly), but the common function achieves the
+    /// same result: `serde_json::from_str::<JsonMap>` already rejects non-object JSON
+    /// with a descriptive error, and metadata is always serialized from a `JsonMap` by
+    /// our own code, so non-object values cannot occur in practice.
     fn parse_metadata(
         raw: Option<String>,
     ) -> Result<Option<ConversationMetadata>, ConversationStorageError> {
-        match raw {
-            Some(json) if !json.is_empty() => {
-                let value: Value = serde_json::from_str(&json)?;
-                match value {
-                    Value::Object(map) => Ok(Some(map)),
-                    Value::Null => Ok(None),
-                    other => Err(ConversationStorageError::StorageError(format!(
-                        "conversation metadata expected object, got {other}"
-                    ))),
-                }
-            }
-            _ => Ok(None),
-        }
+        crate::common::parse_conversation_metadata(raw)
+            .map_err(ConversationStorageError::StorageError)
     }
 }
 
@@ -443,64 +444,61 @@ pub(super) struct OracleConversationItemStorage {
 }
 
 impl OracleConversationItemStorage {
-    pub fn new(config: OracleConfig) -> Result<Self, ConversationItemStorageError> {
-        let store = OracleStore::new(&config, |conn| {
-            // Create conversation_items table
-            let exists_items: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEMS'",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
+    pub fn new(store: OracleStore) -> Self {
+        Self { store }
+    }
 
-            if exists_items == 0 {
-                conn.execute(
-                    "CREATE TABLE conversation_items (
-                        id VARCHAR2(64) PRIMARY KEY,
-                        response_id VARCHAR2(64),
-                        item_type VARCHAR2(32) NOT NULL,
-                        role VARCHAR2(32),
-                        content CLOB,
-                        status VARCHAR2(32),
-                        created_at TIMESTAMP WITH TIME ZONE
-                    )",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
-            }
+    pub(crate) fn init_schema(conn: &Connection) -> Result<(), String> {
+        let exists_items: i64 = conn
+            .query_row_as(
+                "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEMS'",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
 
-            // Create conversation_item_links table
-            let exists_links: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEM_LINKS'",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
+        if exists_items == 0 {
+            conn.execute(
+                "CREATE TABLE conversation_items (
+                    id VARCHAR2(64) PRIMARY KEY,
+                    response_id VARCHAR2(64),
+                    item_type VARCHAR2(32) NOT NULL,
+                    role VARCHAR2(32),
+                    content CLOB,
+                    status VARCHAR2(32),
+                    created_at TIMESTAMP WITH TIME ZONE
+                )",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+        }
 
-            if exists_links == 0 {
-                conn.execute(
-                    "CREATE TABLE conversation_item_links (
-                        conversation_id VARCHAR2(64) NOT NULL,
-                        item_id VARCHAR2(64) NOT NULL,
-                        added_at TIMESTAMP WITH TIME ZONE,
-                        CONSTRAINT pk_conv_item_link PRIMARY KEY (conversation_id, item_id)
-                    )",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
+        let exists_links: i64 = conn
+            .query_row_as(
+                "SELECT COUNT(*) FROM user_tables WHERE table_name = 'CONVERSATION_ITEM_LINKS'",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
 
-                conn.execute(
-                    "CREATE INDEX conv_item_links_conv_idx ON conversation_item_links (conversation_id, added_at)",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
-            }
+        if exists_links == 0 {
+            conn.execute(
+                "CREATE TABLE conversation_item_links (
+                    conversation_id VARCHAR2(64) NOT NULL,
+                    item_id VARCHAR2(64) NOT NULL,
+                    added_at TIMESTAMP WITH TIME ZONE,
+                    CONSTRAINT pk_conv_item_link PRIMARY KEY (conversation_id, item_id)
+                )",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
 
-            Ok(())
-        })
-        .map_err(ConversationItemStorageError::StorageError)?;
+            conn.execute(
+                "CREATE INDEX conv_item_links_conv_idx ON conversation_item_links (conversation_id, added_at)",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+        }
 
-        Ok(Self { store })
+        Ok(())
     }
 }
 
@@ -510,35 +508,32 @@ impl ConversationItemStorage for OracleConversationItemStorage {
         &self,
         item: NewConversationItem,
     ) -> Result<ConversationItem, ConversationItemStorageError> {
-        let id = item
-            .id
-            .clone()
-            .unwrap_or_else(|| make_item_id(&item.item_type));
+        let NewConversationItem {
+            id: opt_id,
+            response_id,
+            item_type,
+            role,
+            content,
+            status,
+        } = item;
+        let id = opt_id.unwrap_or_else(|| make_item_id(&item_type));
         let created_at = Utc::now();
-        let content_json = serde_json::to_string(&item.content)?;
+        let content_json = serde_json::to_string(&content)?;
 
-        let conversation_item = ConversationItem {
-            id: id.clone(),
-            response_id: item.response_id.clone(),
-            item_type: item.item_type.clone(),
-            role: item.role.clone(),
-            content: item.content,
-            status: item.status.clone(),
-            created_at,
-        };
-
-        let id_str = conversation_item.id.0.clone();
-        let response_id = conversation_item.response_id.clone();
-        let item_type = conversation_item.item_type.clone();
-        let role = conversation_item.role.clone();
-        let status = conversation_item.status.clone();
+        // Clone fields needed for both the closure and the return value.
+        // The closure consumes the clones; originals go into the return struct.
+        let id_str = id.0.clone();
+        let cl_response_id = response_id.clone();
+        let cl_item_type = item_type.clone();
+        let cl_role = role.clone();
+        let cl_status = status.clone();
 
         self.store
             .execute(move |conn| {
                 conn.execute(
                     "INSERT INTO conversation_items (id, response_id, item_type, role, content, status, created_at) \
                      VALUES (:1, :2, :3, :4, :5, :6, :7)",
-                    &[&id_str, &response_id, &item_type, &role, &content_json, &status, &created_at],
+                    &[&id_str, &cl_response_id, &cl_item_type, &cl_role, &content_json, &cl_status, &created_at],
                 )
                 .map_err(map_oracle_error)?;
                 Ok(())
@@ -546,7 +541,15 @@ impl ConversationItemStorage for OracleConversationItemStorage {
             .await
             .map_err(ConversationItemStorageError::StorageError)?;
 
-        Ok(conversation_item)
+        Ok(ConversationItem {
+            id,
+            response_id,
+            item_type,
+            role,
+            content,
+            status,
+            created_at,
+        })
     }
 
     async fn link_item(
@@ -798,57 +801,54 @@ pub(super) struct OracleResponseStorage {
 }
 
 impl OracleResponseStorage {
-    pub fn new(config: OracleConfig) -> Result<Self, ResponseStorageError> {
-        let store = OracleStore::new(&config, |conn| {
-            // Create responses table
-            let exists: i64 = conn
-                .query_row_as(
-                    "SELECT COUNT(*) FROM user_tables WHERE table_name = 'RESPONSES'",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
+    pub fn new(store: OracleStore) -> Self {
+        Self { store }
+    }
 
-            if exists == 0 {
-                conn.execute(
-                    "CREATE TABLE responses (
-                        id VARCHAR2(64) PRIMARY KEY,
-                        conversation_id VARCHAR2(64),
-                        previous_response_id VARCHAR2(64),
-                        input CLOB,
-                        instructions CLOB,
-                        output CLOB,
-                        tool_calls CLOB,
-                        metadata CLOB,
-                        created_at TIMESTAMP WITH TIME ZONE,
-                        safety_identifier VARCHAR2(128),
-                        model VARCHAR2(128),
-                        raw_response CLOB
-                    )",
-                    &[],
-                )
-                .map_err(map_oracle_error)?;
-            } else {
-                Self::alter_safety_identifier_column(conn)?;
-                Self::remove_user_id_column_if_exists(conn)?;
-            }
+    pub(crate) fn init_schema(conn: &Connection) -> Result<(), String> {
+        let exists: i64 = conn
+            .query_row_as(
+                "SELECT COUNT(*) FROM user_tables WHERE table_name = 'RESPONSES'",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
 
-            // Create indexes
-            create_index_if_missing(
-                conn,
-                "RESPONSES_PREV_IDX",
-                "CREATE INDEX responses_prev_idx ON responses(previous_response_id)",
-            )?;
-            create_index_if_missing(
-                conn,
-                "RESPONSES_USER_IDX",
-                "CREATE INDEX responses_user_idx ON responses(safety_identifier)",
-            )?;
+        if exists == 0 {
+            conn.execute(
+                "CREATE TABLE responses (
+                    id VARCHAR2(64) PRIMARY KEY,
+                    conversation_id VARCHAR2(64),
+                    previous_response_id VARCHAR2(64),
+                    input CLOB,
+                    instructions CLOB,
+                    output CLOB,
+                    tool_calls CLOB,
+                    metadata CLOB,
+                    created_at TIMESTAMP WITH TIME ZONE,
+                    safety_identifier VARCHAR2(128),
+                    model VARCHAR2(128),
+                    raw_response CLOB
+                )",
+                &[],
+            )
+            .map_err(map_oracle_error)?;
+        } else {
+            Self::alter_safety_identifier_column(conn)?;
+            Self::remove_user_id_column_if_exists(conn)?;
+        }
 
-            Ok(())
-        })
-        .map_err(ResponseStorageError::StorageError)?;
+        create_index_if_missing(
+            conn,
+            "RESPONSES_PREV_IDX",
+            "CREATE INDEX responses_prev_idx ON responses(previous_response_id)",
+        )?;
+        create_index_if_missing(
+            conn,
+            "RESPONSES_USER_IDX",
+            "CREATE INDEX responses_user_idx ON responses(safety_identifier)",
+        )?;
 
-        Ok(Self { store })
+        Ok(())
     }
 
     // Alter safety_identifier column if missing
@@ -950,19 +950,31 @@ impl ResponseStorage for OracleResponseStorage {
         &self,
         response: StoredResponse,
     ) -> Result<ResponseId, ResponseStorageError> {
-        let response_id = response.id.clone();
-        let response_id_str = response_id.0.clone();
-        let previous_id = response.previous_response_id.map(|r| r.0);
-        let json_input = serde_json::to_string(&response.input)?;
-        let json_output = serde_json::to_string(&response.output)?;
-        let json_tool_calls = serde_json::to_string(&response.tool_calls)?;
-        let json_metadata = serde_json::to_string(&response.metadata)?;
-        let json_raw_response = serde_json::to_string(&response.raw_response)?;
-        let instructions = response.instructions.clone();
-        let created_at = response.created_at;
-        let safety_identifier = response.safety_identifier.clone();
-        let model = response.model.clone();
-        let conversation_id = response.conversation_id.clone();
+        let StoredResponse {
+            id,
+            previous_response_id,
+            input,
+            instructions,
+            output,
+            tool_calls,
+            metadata,
+            created_at,
+            safety_identifier,
+            model,
+            conversation_id,
+            raw_response,
+        } = response;
+
+        // Clone only the return value; everything else moves into the closure.
+        let return_id = id.clone();
+
+        let response_id_str = id.0;
+        let previous_id = previous_response_id.map(|r| r.0);
+        let json_input = serde_json::to_string(&input)?;
+        let json_output = serde_json::to_string(&output)?;
+        let json_tool_calls = serde_json::to_string(&tool_calls)?;
+        let json_metadata = serde_json::to_string(&metadata)?;
+        let json_raw_response = serde_json::to_string(&raw_response)?;
 
         self.store
             .execute(move |conn| {
@@ -991,7 +1003,7 @@ impl ResponseStorage for OracleResponseStorage {
             .await
             .map_err(ResponseStorageError::StorageError)?;
 
-        Ok(response_id)
+        Ok(return_id)
     }
 
     async fn get_response(
@@ -1002,7 +1014,7 @@ impl ResponseStorage for OracleResponseStorage {
         self.store
             .execute(move |conn| {
                 let mut stmt = conn
-                    .statement(&format!("{} WHERE id = :1", SELECT_BASE))
+                    .statement(&format!("{SELECT_BASE} WHERE id = :1"))
                     .build()
                     .map_err(map_oracle_error)?;
                 let mut rows = stmt.query(&[&id]).map_err(map_oracle_error)?;
@@ -1049,7 +1061,7 @@ impl ResponseStorage for OracleResponseStorage {
             let fetched = self.get_response(lookup_id).await?;
             match fetched {
                 Some(response) => {
-                    current_id = response.previous_response_id.clone();
+                    current_id.clone_from(&response.previous_response_id);
                     chain.responses.push(response);
                     visited += 1;
                 }
@@ -1072,11 +1084,10 @@ impl ResponseStorage for OracleResponseStorage {
             .execute(move |conn| {
                 let sql = if let Some(limit) = limit {
                     format!(
-                        "SELECT * FROM ({} WHERE safety_identifier = :1 ORDER BY created_at DESC) WHERE ROWNUM <= {}",
-                        SELECT_BASE, limit
+                        "SELECT * FROM ({SELECT_BASE} WHERE safety_identifier = :1 ORDER BY created_at DESC) WHERE ROWNUM <= {limit}"
                     )
                 } else {
-                    format!("{} WHERE safety_identifier = :1 ORDER BY created_at DESC", SELECT_BASE)
+                    format!("{SELECT_BASE} WHERE safety_identifier = :1 ORDER BY created_at DESC")
                 };
 
                 let mut stmt = conn.statement(&sql).build().map_err(map_oracle_error)?;

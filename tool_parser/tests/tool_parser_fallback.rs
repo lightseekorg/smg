@@ -77,7 +77,7 @@ async fn test_llama_parser_invalid_format_returns_as_normal_text() {
     assert_eq!(normal_text, input); // Should return original text
 
     // Text with python_tag but completely invalid content
-    let input = r#"Here's my response <|python_tag|>not even close to JSON"#;
+    let input = r"Here's my response <|python_tag|>not even close to JSON";
     let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 0);
     assert_eq!(normal_text, input); // Should preserve everything when parsing fails
@@ -231,7 +231,7 @@ async fn test_very_long_invalid_input() {
     // Generate a very long string that looks like it might be JSON but isn't
     let mut input = String::from("{\"name\": \"test\", \"arguments\": {");
     for i in 0..1000 {
-        input.push_str(&format!("\"field{}\": \"value{}\", ", i, i));
+        input.push_str(&format!("\"field{i}\": \"value{i}\", "));
     }
     input.push_str("\"final\": incomplete"); // Don't close the JSON properly
 
@@ -264,8 +264,8 @@ async fn test_almost_valid_tool_calls() {
     }
 
     // Wrong quote types
-    let input = r#"{'name': 'test', 'arguments': {}}"#;
+    let input = r"{'name': 'test', 'arguments': {}}";
     let (normal_text, tools) = parser.parse_complete(input).await.unwrap();
     assert_eq!(tools.len(), 0); // Standard JSON requires double quotes
-    assert_eq!(normal_text, r#"{'name': 'test', 'arguments': {}}"#);
+    assert_eq!(normal_text, r"{'name': 'test', 'arguments': {}}");
 }

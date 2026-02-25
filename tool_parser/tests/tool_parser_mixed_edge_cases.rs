@@ -265,7 +265,7 @@ async fn test_extremely_long_function_names() {
     let parser = PythonicParser::new();
 
     let long_name = "very_long_function_name_that_might_appear_in_generated_code_somewhere";
-    let input = format!(r#"[{}(param="value")]"#, long_name);
+    let input = format!(r#"[{long_name}(param="value")]"#);
 
     let (_normal_text, tools) = parser.parse_complete(&input).await.unwrap();
     assert_eq!(tools.len(), 1);

@@ -31,7 +31,9 @@ docker:
 
 grpc:
   - changed-files:
-      - any-glob-to-any-file: 'grpc_client/**/*'
+      - any-glob-to-any-file:
+          - 'grpc_client/**/*'
+          - 'model_gateway/src/routers/grpc/**/*'
 
 mcp:
   - changed-files:
@@ -78,6 +80,25 @@ workflow:
 model-gateway:
   - changed-files:
       - any-glob-to-any-file: 'model_gateway/**/*'
+
+openai:
+  - changed-files:
+      - any-glob-to-any-file: 'model_gateway/src/routers/openai/**/*'
+
+anthropic:
+  - changed-files:
+      - any-glob-to-any-file: 'model_gateway/src/routers/anthropic/**/*'
+
+gemini:
+  - changed-files:
+      - any-glob-to-any-file: 'model_gateway/src/routers/gemini/**/*'
+
+realtime-api:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'protocols/src/realtime_*'
+          - 'protocols/src/builders/realtime/**/*'
+          - 'model_gateway/src/routers/openai/realtime/**/*'
 
 benchmarks:
   - changed-files:

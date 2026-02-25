@@ -112,6 +112,7 @@ _GLOSSARY_LINES = [
     "|-------|---------|",
     "| **gRPC X%** | gRPC is X% better than HTTP for this metric |",
     "| **HTTP X%** | HTTP is X% better than gRPC for this metric |",
+    "| **{Runtime} X%** | That runtime is X% better than the other for this metric (e.g. SGLang, vLLM, TRT-LLM) |",
     "| **~** | Difference is within 2% — essentially a tie |",
     "",
     "*Lower is better for latency metrics (TTFT, TPOT, E2E). Higher is better for throughput (tput, RPS).*",
@@ -181,12 +182,32 @@ class ComparisonPoint:
 
 
 @dataclass
+class RuntimeComparisonPoint:
+    """A matched runtime-A vs runtime-B data point (same protocol)."""
+
+    model: str
+    protocol: str
+    worker_type: str
+    scenario: str
+    concurrency: int
+    runtime_a: str  # alphabetically first, e.g. "sglang"
+    runtime_b: str  # e.g. "vllm"
+    run_a: RunResult
+    run_b: RunResult
+
+    @property
+    def config(self) -> str:
+        return f"{self.protocol}/{self.worker_type}"
+
+
+@dataclass
 class SummaryResult:
     """Return value of generate_summary."""
 
     markdown: str
     experiments: list[ExperimentInfo]
     comparisons: list[ComparisonPoint]
+    runtime_comparisons: list[RuntimeComparisonPoint] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +391,45 @@ def build_comparisons(experiments: list[ExperimentInfo]) -> list[ComparisonPoint
     return comparisons
 
 
+def build_runtime_comparisons(experiments: list[ExperimentInfo]) -> list[RuntimeComparisonPoint]:
+    """Match runs across runtimes for the same model/protocol/worker/scenario/concurrency."""
+    groups: dict[str, dict[str, ExperimentInfo]] = defaultdict(dict)
+    for exp in experiments:
+        key = f"{exp.model}|{exp.protocol}|{exp.worker_type}"
+        groups[key][exp.runtime] = exp
+
+    comparisons = []
+    for group_key, runtimes in groups.items():
+        if len(runtimes) < 2:
+            continue
+
+        sorted_rts = sorted(runtimes.keys())
+        for i in range(len(sorted_rts)):
+            for j in range(i + 1, len(sorted_rts)):
+                rt_a, rt_b = sorted_rts[i], sorted_rts[j]
+                exp_a, exp_b = runtimes[rt_a], runtimes[rt_b]
+                runs_b = {(r.scenario, r.concurrency): r for r in exp_b.runs}
+
+                for run_a in exp_a.runs:
+                    run_b = runs_b.get((run_a.scenario, run_a.concurrency))
+                    if run_b and run_a.error_rate == 0 and run_b.error_rate == 0:
+                        comparisons.append(
+                            RuntimeComparisonPoint(
+                                model=exp_a.model,
+                                protocol=exp_a.protocol,
+                                worker_type=exp_a.worker_type,
+                                scenario=run_a.scenario,
+                                concurrency=run_a.concurrency,
+                                runtime_a=rt_a,
+                                runtime_b=rt_b,
+                                run_a=run_a,
+                                run_b=run_b,
+                            )
+                        )
+
+    return comparisons
+
+
 # ---------------------------------------------------------------------------
 # Formatting helpers
 #
@@ -398,13 +458,19 @@ def _avg_advantage(cps: list[ComparisonPoint], fld: str, lower_is_better: bool) 
     return sum(advs) / len(advs) if advs else None
 
 
-def _fmt_winner(pct: float | None, threshold: float = 2.0, bold: bool = False) -> str:
-    """Format as 'gRPC X%' or 'HTTP X%' or '~'. pct is gRPC advantage."""
+def _fmt_winner(
+    pct: float | None,
+    threshold: float = 2.0,
+    bold: bool = False,
+    label_a: str = "gRPC",
+    label_b: str = "HTTP",
+) -> str:
+    """Format as 'A X%' or 'B X%' or '~'. pct > 0 means A is better."""
     if pct is None:
         return "N/A"
     if abs(pct) < threshold:
         return "~"
-    name = "gRPC" if pct > 0 else "HTTP"
+    name = label_a if pct > 0 else label_b
     if bold:
         name = f"**{name}**"
     return f"{name} {abs(pct):.1f}%"
@@ -562,33 +628,77 @@ _PROTOCOL_DISPLAY = {"http": "HTTP", "grpc": "gRPC"}
 def _section_key_findings(
     comparisons: list[ComparisonPoint],
     experiments: list[ExperimentInfo],
+    runtime_comparisons: list[RuntimeComparisonPoint] | None = None,
 ) -> list[str]:
     """Auto-generated executive summary of the benchmark results."""
-    if not comparisons:
+    if not comparisons and not runtime_comparisons:
         return []
 
     lines = ["### Key Findings", ""]
 
-    # 1. Overall verdict per key metric
-    for label, fld, lower_better, _unit in CHART_METRICS:
-        advs = [a for cp in comparisons if (a := _cp_advantage(cp, fld, lower_better)) is not None]
-        if not advs:
-            continue
-        avg_adv = sum(advs) / len(advs)
-        grpc_wins = sum(1 for a in advs if a > 2)
-        http_wins = sum(1 for a in advs if a < -2)
-        ties = len(advs) - grpc_wins - http_wins
-        if abs(avg_adv) < 1:
-            lines.append(f"- **{label}**: No clear winner — essentially tied across all scenarios")
-        else:
-            winner = "gRPC" if avg_adv > 0 else "HTTP"
-            lines.append(
-                f"- **{label}**: {winner} wins {max(grpc_wins, http_wins)}/{len(advs)} "
-                f"comparisons (avg {abs(avg_adv):.1f}% better), "
-                f"{min(grpc_wins, http_wins)} losses, {ties} ties"
-            )
+    # 1. Protocol verdict per key metric
+    if comparisons:
+        lines.append("**Protocol (gRPC vs HTTP):**")
+        lines.append("")
+        for label, fld, lower_better, _unit in CHART_METRICS:
+            advs = [
+                a for cp in comparisons if (a := _cp_advantage(cp, fld, lower_better)) is not None
+            ]
+            if not advs:
+                continue
+            avg_adv = sum(advs) / len(advs)
+            grpc_wins = sum(1 for a in advs if a > 2)
+            http_wins = sum(1 for a in advs if a < -2)
+            ties = len(advs) - grpc_wins - http_wins
+            if abs(avg_adv) < 1:
+                lines.append(
+                    f"- **{label}**: No clear winner — essentially tied across all scenarios"
+                )
+            else:
+                winner = "gRPC" if avg_adv > 0 else "HTTP"
+                lines.append(
+                    f"- **{label}**: {winner} wins {max(grpc_wins, http_wins)}/{len(advs)} "
+                    f"comparisons (avg {abs(avg_adv):.1f}% better), "
+                    f"{min(grpc_wins, http_wins)} losses, {ties} ties"
+                )
+        lines.append("")
 
-    # 2. Error rates
+    # 2. Runtime verdict per key metric (one block per runtime pair)
+    if runtime_comparisons:
+        by_pair = _group_by_runtime_pair(runtime_comparisons)
+        for (rt_a, rt_b), pair_rcps in sorted(by_pair.items()):
+            rt_a_display = _RUNTIME_DISPLAY.get(rt_a, rt_a)
+            rt_b_display = _RUNTIME_DISPLAY.get(rt_b, rt_b)
+
+            lines.append(f"**Runtime ({rt_a_display} vs {rt_b_display}):**")
+            lines.append("")
+            for label, fld, lower_better, _unit in CHART_METRICS:
+                advs = [
+                    a
+                    for rcp in pair_rcps
+                    if (a := _rt_advantage(rcp, fld, lower_better)) is not None
+                ]
+                if not advs:
+                    continue
+                avg_adv = sum(advs) / len(advs)
+                a_wins = sum(1 for a in advs if a > 2)
+                b_wins = sum(1 for a in advs if a < -2)
+                ties = len(advs) - a_wins - b_wins
+                if abs(avg_adv) < 1:
+                    lines.append(
+                        f"- **{label}**: No clear winner — essentially tied across all scenarios"
+                    )
+                else:
+                    winner = rt_a_display if avg_adv > 0 else rt_b_display
+                    lines.append(
+                        f"- **{label}**: {winner} wins "
+                        f"{max(a_wins, b_wins)}/{len(advs)} "
+                        f"comparisons (avg {abs(avg_adv):.1f}% better), "
+                        f"{min(a_wins, b_wins)} losses, {ties} ties"
+                    )
+            lines.append("")
+
+    # 3. Error rates
     total_runs = sum(len(e.runs) for e in experiments)
     error_runs = [(e, r) for e in experiments for r in e.runs if r.error_rate > 0]
     if error_runs:
@@ -596,31 +706,32 @@ def _section_key_findings(
     else:
         lines.append(f"- **Errors**: All {total_runs} runs completed with 0% error rate")
 
-    # 3. Biggest outliers
-    biggest_grpc_win = biggest_http_win = None
-    biggest_grpc_adv = biggest_http_adv = 0.0
-    for cp in comparisons:
-        for label, fld, lower_better, _ in CHART_METRICS:
-            adv = _cp_advantage(cp, fld, lower_better)
-            if adv is not None and adv > biggest_grpc_adv:
-                biggest_grpc_adv = adv
-                biggest_grpc_win = (cp, label)
-            if adv is not None and adv < biggest_http_adv:
-                biggest_http_adv = adv
-                biggest_http_win = (cp, label)
+    # 4. Biggest protocol outliers
+    if comparisons:
+        biggest_grpc_win = biggest_http_win = None
+        biggest_grpc_adv = biggest_http_adv = 0.0
+        for cp in comparisons:
+            for label, fld, lower_better, _ in CHART_METRICS:
+                adv = _cp_advantage(cp, fld, lower_better)
+                if adv is not None and adv > biggest_grpc_adv:
+                    biggest_grpc_adv = adv
+                    biggest_grpc_win = (cp, label)
+                if adv is not None and adv < biggest_http_adv:
+                    biggest_http_adv = adv
+                    biggest_http_win = (cp, label)
 
-    if biggest_grpc_win and biggest_grpc_adv > 10:
-        cp, metric = biggest_grpc_win
-        lines.append(
-            f"- **Largest gRPC win**: {biggest_grpc_adv:.0f}% on {metric} "
-            f"— {cp.model} `{cp.scenario}` C={cp.concurrency}"
-        )
-    if biggest_http_win and abs(biggest_http_adv) > 10:
-        cp, metric = biggest_http_win
-        lines.append(
-            f"- **Largest HTTP win**: {abs(biggest_http_adv):.0f}% on {metric} "
-            f"— {cp.model} `{cp.scenario}` C={cp.concurrency}"
-        )
+        if biggest_grpc_win and biggest_grpc_adv > 10:
+            cp, metric = biggest_grpc_win
+            lines.append(
+                f"- **Largest gRPC win**: {biggest_grpc_adv:.0f}% on {metric} "
+                f"— {cp.model} `{cp.scenario}` C={cp.concurrency}"
+            )
+        if biggest_http_win and abs(biggest_http_adv) > 10:
+            cp, metric = biggest_http_win
+            lines.append(
+                f"- **Largest HTTP win**: {abs(biggest_http_adv):.0f}% on {metric} "
+                f"— {cp.model} `{cp.scenario}` C={cp.concurrency}"
+            )
 
     lines.append("")
     return lines
@@ -714,8 +825,33 @@ def _section_overview(experiments: list[ExperimentInfo], models_with_data: set[s
     return lines
 
 
+def _aggregate_table(
+    comparisons: list[ComparisonPoint],
+    label_a: str = "gRPC",
+    label_b: str = "HTTP",
+) -> list[str]:
+    """Render an aggregate comparison table for a list of ComparisonPoints."""
+    lines = [
+        "| Metric | Avg | Median | Verdict |",
+        "|--------|----:|-------:|---------|",
+    ]
+    for label, fld, lower_better in AGGREGATE_METRICS:
+        advs = [a for cp in comparisons if (a := _cp_advantage(cp, fld, lower_better)) is not None]
+        if not advs:
+            continue
+        avg = sum(advs) / len(advs)
+        med = median(advs)
+        lines.append(
+            f"| {label} "
+            f"| {_fmt_winner(avg, label_a=label_a, label_b=label_b)} "
+            f"| {_fmt_winner(med, label_a=label_a, label_b=label_b)} "
+            f"| {_fmt_winner(avg, bold=True, label_a=label_a, label_b=label_b)} |"
+        )
+    return lines
+
+
 def _section_aggregate(comparisons: list[ComparisonPoint]) -> list[str]:
-    """Aggregate gRPC vs HTTP comparison table."""
+    """Aggregate gRPC vs HTTP comparison table with per-runtime breakdown."""
     if not comparisons:
         return ["*No gRPC vs HTTP comparison data available.*", ""]
 
@@ -725,21 +861,28 @@ def _section_aggregate(comparisons: list[ComparisonPoint]) -> list[str]:
         f"*{len(comparisons)} matched data points. "
         "Shows which protocol is better and by how much.*",
         "",
-        "| Metric | Avg | Median | Verdict |",
-        "|--------|----:|-------:|---------|",
     ]
-
-    for label, fld, lower_better in AGGREGATE_METRICS:
-        advs = [a for cp in comparisons if (a := _cp_advantage(cp, fld, lower_better)) is not None]
-        if not advs:
-            continue
-        avg = sum(advs) / len(advs)
-        med = median(advs)
-        lines.append(
-            f"| {label} | {_fmt_winner(avg)} | {_fmt_winner(med)} | {_fmt_winner(avg, bold=True)} |"
-        )
-
+    lines.extend(_aggregate_table(comparisons))
     lines.append("")
+
+    # Per-runtime breakdown
+    by_runtime: dict[str, list[ComparisonPoint]] = defaultdict(list)
+    for cp in comparisons:
+        by_runtime[cp.runtime].append(cp)
+
+    if len(by_runtime) > 1:
+        for runtime in sorted(by_runtime.keys()):
+            rt_cps = by_runtime[runtime]
+            rt_display = _RUNTIME_DISPLAY.get(runtime, runtime)
+            lines.extend(
+                [
+                    f"#### {rt_display}: gRPC vs HTTP ({len(rt_cps)} points)",
+                    "",
+                ]
+            )
+            lines.extend(_aggregate_table(rt_cps))
+            lines.append("")
+
     return lines
 
 
@@ -917,6 +1060,127 @@ def _section_per_model(comparisons: list[ComparisonPoint]) -> list[str]:
     return lines
 
 
+def _rt_advantage(rcp: RuntimeComparisonPoint, fld: str, lower_is_better: bool) -> float | None:
+    """Shorthand: compute runtime_a advantage for a RuntimeComparisonPoint."""
+    return _advantage(getattr(rcp.run_a, fld), getattr(rcp.run_b, fld), lower_is_better)
+
+
+def _avg_rt_advantage(
+    rcps: list[RuntimeComparisonPoint], fld: str, lower_is_better: bool
+) -> float | None:
+    """Average runtime_a advantage across a list of runtime comparison points."""
+    advs = [a for rcp in rcps if (a := _rt_advantage(rcp, fld, lower_is_better)) is not None]
+    return sum(advs) / len(advs) if advs else None
+
+
+def _group_by_runtime_pair(
+    runtime_comparisons: list[RuntimeComparisonPoint],
+) -> dict[tuple[str, str], list[RuntimeComparisonPoint]]:
+    """Group runtime comparisons by (runtime_a, runtime_b) pair."""
+    by_pair: dict[tuple[str, str], list[RuntimeComparisonPoint]] = defaultdict(list)
+    for rcp in runtime_comparisons:
+        by_pair[(rcp.runtime_a, rcp.runtime_b)].append(rcp)
+    return by_pair
+
+
+def _rt_aggregate_table(
+    rcps: list[RuntimeComparisonPoint],
+    rt_a_display: str,
+    rt_b_display: str,
+) -> list[str]:
+    """Render an aggregate runtime comparison table."""
+    lines = [
+        "| Metric | Avg | Median | Verdict |",
+        "|--------|----:|-------:|---------|",
+    ]
+    for label, fld, lower_better in AGGREGATE_METRICS:
+        advs = [a for rcp in rcps if (a := _rt_advantage(rcp, fld, lower_better)) is not None]
+        if not advs:
+            continue
+        avg = sum(advs) / len(advs)
+        med = median(advs)
+        lines.append(
+            f"| {label} "
+            f"| {_fmt_winner(avg, label_a=rt_a_display, label_b=rt_b_display)} "
+            f"| {_fmt_winner(med, label_a=rt_a_display, label_b=rt_b_display)} "
+            f"| {_fmt_winner(avg, bold=True, label_a=rt_a_display, label_b=rt_b_display)} |"
+        )
+    return lines
+
+
+def _section_runtime_comparison(runtime_comparisons: list[RuntimeComparisonPoint]) -> list[str]:
+    """Cross-runtime comparison sections, one per runtime pair."""
+    if not runtime_comparisons:
+        return []
+
+    by_pair = _group_by_runtime_pair(runtime_comparisons)
+    lines: list[str] = []
+
+    for (rt_a, rt_b), pair_rcps in sorted(by_pair.items()):
+        rt_a_display = _RUNTIME_DISPLAY.get(rt_a, rt_a)
+        rt_b_display = _RUNTIME_DISPLAY.get(rt_b, rt_b)
+
+        lines.extend(
+            [
+                f"### Runtime Comparison: {rt_a_display} vs {rt_b_display}",
+                "",
+                f"*{len(pair_rcps)} matched data points. "
+                f"Shows which runtime is better and by how much.*",
+                "",
+            ]
+        )
+        lines.extend(_rt_aggregate_table(pair_rcps, rt_a_display, rt_b_display))
+        lines.append("")
+
+        # Per-protocol sub-tables
+        by_protocol: dict[str, list[RuntimeComparisonPoint]] = defaultdict(list)
+        for rcp in pair_rcps:
+            by_protocol[rcp.protocol].append(rcp)
+
+        if len(by_protocol) > 1:
+            for protocol in sorted(by_protocol.keys()):
+                p_cps = by_protocol[protocol]
+                p_display = _PROTOCOL_DISPLAY.get(protocol, protocol.upper())
+                lines.extend(
+                    [
+                        f"#### {p_display}: {rt_a_display} vs {rt_b_display} ({len(p_cps)} points)",
+                        "",
+                    ]
+                )
+                lines.extend(_rt_aggregate_table(p_cps, rt_a_display, rt_b_display))
+                lines.append("")
+
+        # Per-model runtime comparison
+        by_model: dict[str, list[RuntimeComparisonPoint]] = defaultdict(list)
+        for rcp in pair_rcps:
+            by_model[rcp.model].append(rcp)
+
+        if by_model:
+            headers = [m[0] for m in PER_MODEL_METRICS]
+            lines.extend(
+                [
+                    f"#### Per-Model: {rt_a_display} vs {rt_b_display}",
+                    "",
+                    "| Model | " + " | ".join(headers) + " | N |",
+                    "|-------" + "|--------:" * len(headers) + "|---:|",
+                ]
+            )
+            for model in sorted(by_model.keys()):
+                rcps = by_model[model]
+                cells = [
+                    _fmt_winner(
+                        _avg_rt_advantage(rcps, fld, lb),
+                        label_a=rt_a_display,
+                        label_b=rt_b_display,
+                    )
+                    for _, fld, lb in PER_MODEL_METRICS
+                ]
+                lines.append(f"| {model} | " + " | ".join(cells) + f" | {len(rcps)} |")
+            lines.append("")
+
+    return lines
+
+
 # ---------------------------------------------------------------------------
 # Top-level summary
 # ---------------------------------------------------------------------------
@@ -934,6 +1198,7 @@ def generate_summary(base_dir: Path) -> SummaryResult:
         )
 
     comparisons = build_comparisons(experiments)
+    runtime_comparisons = build_runtime_comparisons(experiments)
 
     # Only include models that have comparison data
     models_with_data = {cp.model for cp in comparisons}
@@ -942,12 +1207,22 @@ def generate_summary(base_dir: Path) -> SummaryResult:
     http_count = sum(1 for e in experiments if e.protocol == "http")
     total_runs = sum(len(e.runs) for e in experiments)
 
+    # Count experiments per runtime
+    runtime_counts: dict[str, int] = defaultdict(int)
+    for e in experiments:
+        runtime_counts[e.runtime] += 1
+    runtime_parts = ", ".join(
+        f"{count} {_RUNTIME_DISPLAY.get(rt, rt)}" for rt, count in sorted(runtime_counts.items())
+    )
+
     lines = [
-        "## Nightly Benchmark: gRPC vs HTTP",
+        "## Nightly Benchmark Summary",
         "",
-        f"> **{len(experiments)} experiments** ({grpc_count} gRPC, {http_count} HTTP), "
+        f"> **{len(experiments)} experiments** ({runtime_parts}; "
+        f"{grpc_count} gRPC, {http_count} HTTP), "
         f"**{total_runs} benchmark runs**, "
-        f"**{len(comparisons)} matched comparison points**",
+        f"**{len(comparisons)} protocol comparisons**, "
+        f"**{len(runtime_comparisons)} runtime comparisons**",
         "",
         "<details>",
         "<summary><b>Glossary</b></summary>",
@@ -960,9 +1235,10 @@ def generate_summary(base_dir: Path) -> SummaryResult:
         "",
     ]
 
-    lines.extend(_section_key_findings(comparisons, experiments))
+    lines.extend(_section_key_findings(comparisons, experiments, runtime_comparisons))
     lines.extend(_section_overview(experiments, models_with_data))
     lines.extend(_section_aggregate(comparisons))
+    lines.extend(_section_runtime_comparison(runtime_comparisons))
     lines.extend(_section_by_concurrency(comparisons))
     lines.extend(_section_scorecard(comparisons))
     lines.extend(_section_top_wins(comparisons))
@@ -971,13 +1247,16 @@ def generate_summary(base_dir: Path) -> SummaryResult:
 
     lines.append("---")
     lines.append(
-        f"*Generated from {len(experiments)} experiment(s), {len(comparisons)} comparison points*"
+        f"*Generated from {len(experiments)} experiment(s), "
+        f"{len(comparisons)} protocol comparisons, "
+        f"{len(runtime_comparisons)} runtime comparisons*"
     )
 
     return SummaryResult(
         markdown="\n".join(lines),
         experiments=experiments,
         comparisons=comparisons,
+        runtime_comparisons=runtime_comparisons,
     )
 
 

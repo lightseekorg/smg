@@ -33,7 +33,7 @@ pub(crate) struct PostgresStore {
 impl PostgresStore {
     pub fn new(config: PostgresConfig) -> Result<Self, String> {
         let pg_config = tokio_postgres::Config::from_str(config.db_url.as_str())
-            .map_err(|e| format!("Invalid PostgreSQL connection URL: {}", e))?;
+            .map_err(|e| format!("Invalid PostgreSQL connection URL: {e}"))?;
         let mgr_config = ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         };
@@ -41,7 +41,7 @@ impl PostgresStore {
         let pool = Pool::builder(mgr)
             .max_size(config.pool_max)
             .build()
-            .map_err(|e| format!("Failed to build PostgreSQL connection pool: {}", e))?;
+            .map_err(|e| format!("Failed to build PostgreSQL connection pool: {e}"))?;
 
         Ok(Self { pool })
     }
@@ -60,13 +60,7 @@ pub(super) struct PostgresConversationStorage {
 }
 
 impl PostgresConversationStorage {
-    pub fn new(store: PostgresStore) -> Result<Self, ConversationStorageError> {
-        futures::executor::block_on(Self::initialize_schema(store.clone()))
-            .expect("Failed to initialize conversations schema");
-        Ok(Self { store })
-    }
-
-    async fn initialize_schema(store: PostgresStore) -> Result<(), ConversationStorageError> {
+    pub async fn new(store: PostgresStore) -> Result<Self, ConversationStorageError> {
         let client = store
             .pool
             .get()
@@ -83,25 +77,14 @@ impl PostgresConversationStorage {
             )
             .await
             .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
-
-        Ok(())
+        Ok(Self { store })
     }
 
     fn parse_metadata(
         metadata: Option<String>,
     ) -> Result<Option<ConversationMetadata>, ConversationStorageError> {
-        match metadata {
-            None => Ok(None),
-            Some(s) => {
-                let s = s.trim();
-                if s.is_empty() || s.eq_ignore_ascii_case("null") {
-                    return Ok(None);
-                }
-                serde_json::from_str::<ConversationMetadata>(s)
-                    .map(Some)
-                    .map_err(|e| ConversationStorageError::StorageError(e.to_string()))
-            }
-        }
+        crate::common::parse_conversation_metadata(metadata)
+            .map_err(ConversationStorageError::StorageError)
     }
 }
 
@@ -139,7 +122,6 @@ impl ConversationStorage for PostgresConversationStorage {
         &self,
         id: &ConversationId,
     ) -> Result<Option<Conversation>, ConversationStorageError> {
-        let conversation_id = id.0.clone();
         let client = self
             .store
             .pool
@@ -149,7 +131,7 @@ impl ConversationStorage for PostgresConversationStorage {
         let rows = client
             .query(
                 "SELECT id, created_at, metadata FROM conversations WHERE id = $1",
-                &[&conversation_id],
+                &[&id.0.as_str()],
             )
             .await
             .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
@@ -173,7 +155,6 @@ impl ConversationStorage for PostgresConversationStorage {
         id: &ConversationId,
         metadata: Option<ConversationMetadata>,
     ) -> Result<Option<Conversation>, ConversationStorageError> {
-        let conversation_id = id.0.clone();
         let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
         let client = self
             .store
@@ -184,7 +165,7 @@ impl ConversationStorage for PostgresConversationStorage {
         let rows = client
             .query(
                 "UPDATE conversations SET metadata = $1 WHERE id = $2 RETURNING created_at",
-                &[&metadata_json, &conversation_id],
+                &[&metadata_json, &id.0.as_str()],
             )
             .await
             .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
@@ -194,14 +175,13 @@ impl ConversationStorage for PostgresConversationStorage {
         let row = &rows[0];
         let created_at: DateTime<Utc> = row.get(0);
         Ok(Some(Conversation::with_parts(
-            ConversationId(conversation_id),
+            ConversationId(id.0.clone()),
             created_at,
             metadata,
         )))
     }
 
     async fn delete_conversation(&self, id: &ConversationId) -> ConversationResult<bool> {
-        let conversation_id = id.0.clone();
         let client = self
             .store
             .pool
@@ -209,10 +189,7 @@ impl ConversationStorage for PostgresConversationStorage {
             .await
             .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         let rows_deleted = client
-            .execute(
-                "DELETE FROM conversations WHERE id = $1",
-                &[&conversation_id],
-            )
+            .execute("DELETE FROM conversations WHERE id = $1", &[&id.0.as_str()])
             .await
             .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         Ok(rows_deleted > 0)
@@ -224,13 +201,7 @@ pub(super) struct PostgresConversationItemStorage {
 }
 
 impl PostgresConversationItemStorage {
-    pub fn new(store: PostgresStore) -> Result<Self, ConversationItemStorageError> {
-        futures::executor::block_on(Self::initialize_schema(store.clone()))
-            .expect("Failed to initialize conversation_items or conversation_item_links schema");
-        Ok(Self { store })
-    }
-
-    async fn initialize_schema(store: PostgresStore) -> Result<(), ConversationItemStorageError> {
+    pub async fn new(store: PostgresStore) -> Result<Self, ConversationItemStorageError> {
         let client = store
             .pool
             .get()
@@ -240,7 +211,7 @@ impl PostgresConversationItemStorage {
             .batch_execute(
                 "
             CREATE TABLE IF NOT EXISTS conversation_items (
-                id SERIAL PRIMARY KEY,
+                id VARCHAR(64) PRIMARY KEY,
                 response_id VARCHAR(64),
                 item_type VARCHAR(32) NOT NULL,
                 role VARCHAR(32),
@@ -252,7 +223,6 @@ impl PostgresConversationItemStorage {
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
 
-        // Create conversation_item_links table
         client
             .batch_execute(
                 "
@@ -266,7 +236,7 @@ impl PostgresConversationItemStorage {
             )
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
-        Ok(())
+        Ok(Self { store })
     }
 }
 
@@ -276,26 +246,17 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         &self,
         item: NewConversationItem,
     ) -> Result<ConversationItem, ConversationItemStorageError> {
-        let id = item
-            .id
-            .clone()
-            .unwrap_or_else(|| make_item_id(&item.item_type));
+        let NewConversationItem {
+            id: opt_id,
+            response_id,
+            item_type,
+            role,
+            content,
+            status,
+        } = item;
+        let id = opt_id.unwrap_or_else(|| make_item_id(&item_type));
         let created_at = Utc::now();
-        let content_json = serde_json::to_string(&item.content)?;
-        let conversation_item = ConversationItem {
-            id: id.clone(),
-            response_id: item.response_id.clone(),
-            item_type: item.item_type.clone(),
-            role: item.role.clone(),
-            content: item.content.clone(),
-            status: item.status.clone(),
-            created_at,
-        };
-        let id_str = conversation_item.id.0.clone();
-        let response_id = conversation_item.response_id.clone();
-        let item_type = conversation_item.item_type.clone();
-        let role = conversation_item.role.clone();
-        let status = conversation_item.status.clone();
+        let content_json = serde_json::to_string(&content)?;
 
         let client = self
             .store
@@ -304,10 +265,18 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         client.execute("INSERT INTO conversation_items (id, response_id, item_type, role, content, status, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            &[&id_str, &response_id, &item_type, &role, &content_json, &status, &created_at])
+            &[&id.0.as_str(), &response_id, &item_type, &role, &content_json, &status, &created_at])
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
-        Ok(conversation_item)
+        Ok(ConversationItem {
+            id,
+            response_id,
+            item_type,
+            role,
+            content,
+            status,
+            created_at,
+        })
     }
 
     async fn link_item(
@@ -316,8 +285,6 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         item_id: &ConversationItemId,
         added_at: DateTime<Utc>,
     ) -> ConversationItemResult<()> {
-        let cid = conversation_id.0.clone();
-        let iid = item_id.0.clone();
         let client = self
             .store
             .pool
@@ -325,7 +292,7 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         client.execute("INSERT INTO conversation_item_links (conversation_id, item_id, added_at) VALUES ($1, $2, $3)",
-            &[&cid, &iid, &added_at])
+            &[&conversation_id.0.as_str(), &item_id.0.as_str(), &added_at])
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         Ok(())
@@ -336,14 +303,11 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         conversation_id: &ConversationId,
         params: ListParams,
     ) -> ConversationItemResult<Vec<ConversationItem>> {
-        let cid = conversation_id.0.clone();
+        let cid = conversation_id.0.as_str();
         let limit: i64 = params.limit as i64;
         let order_desc = matches!(params.order, SortOrder::Desc);
-        let after_id = params.after.clone();
 
-        let after_key: Option<(DateTime<Utc>, String)> = if let Some(ref aid) = after_id {
-            let cid = cid.clone();
-            let aid = aid.clone();
+        let after_key: Option<(DateTime<Utc>, String)> = if let Some(ref aid) = params.after {
             let client = self
                 .store
                 .pool
@@ -353,22 +317,21 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
             let rows = client
                 .query(
                     "SELECT added_at FROM conversation_item_links WHERE conversation_id = $1 AND item_id = $2",
-                    &[&cid, &aid],
+                    &[&cid, &aid.as_str()],
                 )
                 .await
                 .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
-            if !rows.is_empty() {
+            if rows.is_empty() {
+                None
+            } else {
                 let row = &rows[0];
                 let ts: DateTime<Utc> = row.get(0);
-                Some((ts, aid))
-            } else {
-                None
+                Some((ts, aid.clone()))
             }
         } else {
             None
         };
 
-        let cid = cid.clone();
         let mut sql = String::from(
             "SELECT i.id, i.response_id, i.item_type, i.role, i.content, i.status, i.created_at \
                              FROM conversation_item_links l \
@@ -458,7 +421,6 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         &self,
         item_id: &ConversationItemId,
     ) -> Result<Option<ConversationItem>, ConversationItemStorageError> {
-        let iid = item_id.0.clone();
         let client = self
             .store
             .pool
@@ -468,7 +430,7 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         let rows = client
             .query(
                 "SELECT id, response_id, item_type, role, content, status, created_at FROM conversation_items WHERE id = $1",
-                &[&iid],
+                &[&item_id.0.as_str()],
             )
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
@@ -507,8 +469,6 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         conversation_id: &ConversationId,
         item_id: &ConversationItemId,
     ) -> ConversationItemResult<bool> {
-        let cid = conversation_id.0.clone();
-        let iid = item_id.0.clone();
         let client = self
             .store
             .pool
@@ -518,7 +478,7 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         let row = client
             .query_one(
                 "SELECT COUNT(*) FROM conversation_item_links WHERE conversation_id = $1 AND item_id = $2",
-                &[&cid, &iid],
+                &[&conversation_id.0.as_str(), &item_id.0.as_str()],
             )
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
@@ -531,8 +491,6 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         conversation_id: &ConversationId,
         item_id: &ConversationItemId,
     ) -> ConversationItemResult<()> {
-        let cid = conversation_id.0.clone();
-        let iid = item_id.0.clone();
         let client = self
             .store
             .pool
@@ -542,7 +500,7 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         client
             .execute(
                 "DELETE FROM conversation_item_links WHERE conversation_id = $1 AND item_id = $2",
-                &[&cid, &iid],
+                &[&conversation_id.0.as_str(), &item_id.0.as_str()],
             )
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
@@ -555,13 +513,7 @@ pub(super) struct PostgresResponseStorage {
 }
 
 impl PostgresResponseStorage {
-    pub fn new(store: PostgresStore) -> Result<Self, ResponseStorageError> {
-        futures::executor::block_on(Self::initialize_schema(store.clone()))
-            .expect("Failed to initialize responses schema");
-        Ok(Self { store })
-    }
-
-    async fn initialize_schema(store: PostgresStore) -> Result<(), ResponseStorageError> {
+    pub async fn new(store: PostgresStore) -> Result<Self, ResponseStorageError> {
         let client = store
             .pool
             .get()
@@ -583,14 +535,15 @@ impl PostgresResponseStorage {
                 safety_identifier VARCHAR(128),
                 model VARCHAR(128),
                 raw_response JSON
-            );",
+            );
+            CREATE INDEX IF NOT EXISTS responses_safety_idx ON responses (safety_identifier);",
             )
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
-        Ok(())
+        Ok(Self { store })
     }
 
-    pub fn build_response_from_now(row: &Row) -> Result<StoredResponse, String> {
+    pub fn build_response_from_row(row: &Row) -> Result<StoredResponse, String> {
         let id: String = row.get("id");
         let conversation_id: Option<String> = row.get("conversation_id");
         let previous: Option<String> = row.get("previous_response_id");
@@ -634,19 +587,23 @@ impl ResponseStorage for PostgresResponseStorage {
         &self,
         response: StoredResponse,
     ) -> Result<ResponseId, ResponseStorageError> {
-        let response_id = response.id.clone();
-        let response_id_str = response_id.0.clone();
-        let previous_id = response.previous_response_id.map(|r| r.0);
-        let json_input = &response.input;
-        let json_output = &response.output;
-        let json_tool_calls = serde_json::to_string(&response.tool_calls)?;
-        let json_metadata = serde_json::to_string(&response.metadata)?;
-        let json_raw_response = &response.raw_response;
-        let instructions = response.instructions.clone();
-        let created_at = response.created_at;
-        let safety_identifier = response.safety_identifier.clone();
-        let model = response.model.clone();
-        let conversation_id = response.conversation_id.clone();
+        let StoredResponse {
+            id: response_id,
+            previous_response_id,
+            input,
+            instructions,
+            output,
+            tool_calls,
+            metadata,
+            created_at,
+            safety_identifier,
+            model,
+            conversation_id,
+            raw_response,
+        } = response;
+        let previous_id = previous_response_id.map(|r| r.0);
+        let tool_calls_value = serde_json::to_value(&tool_calls)?;
+        let metadata_value = serde_json::to_value(&metadata)?;
         let client = self
             .store
             .pool
@@ -658,18 +615,18 @@ impl ResponseStorage for PostgresResponseStorage {
                     tool_calls, metadata, created_at, safety_identifier, model, conversation_id, raw_response) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             &[
-                &response_id_str,
+                &response_id.0.as_str(),
                 &previous_id,
-                &json_input,
+                &input,
                 &instructions,
-                &json_output,
-                &serde_json::json!(&json_tool_calls),
-                &serde_json::json!(&json_metadata),
+                &output,
+                &tool_calls_value,
+                &metadata_value,
                 &created_at,
                 &safety_identifier,
                 &model,
                 &conversation_id,
-                &json_raw_response,
+                &raw_response,
             ]).await.map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         tracing::debug!(rows_affected = insert_count, "Response stored in Postgres");
         Ok(response_id)
@@ -679,7 +636,6 @@ impl ResponseStorage for PostgresResponseStorage {
         &self,
         response_id: &ResponseId,
     ) -> Result<Option<StoredResponse>, ResponseStorageError> {
-        let id = response_id.0.clone();
         let client = self
             .store
             .pool
@@ -687,19 +643,21 @@ impl ResponseStorage for PostgresResponseStorage {
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         let rows = client
-            .query("SELECT * FROM responses WHERE id = $1", &[&id])
+            .query(
+                "SELECT * FROM responses WHERE id = $1",
+                &[&response_id.0.as_str()],
+            )
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         if rows.is_empty() {
             return Ok(None);
         }
-        Self::build_response_from_now(&rows[0])
+        Self::build_response_from_row(&rows[0])
             .map(Some)
             .map_err(|err| ResponseStorageError::StorageError(err.to_string()))
     }
 
     async fn delete_response(&self, response_id: &ResponseId) -> ResponseResult<()> {
-        let id = response_id.0.clone();
         let client = self
             .store
             .pool
@@ -707,7 +665,10 @@ impl ResponseStorage for PostgresResponseStorage {
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         client
-            .execute("DELETE FROM responses WHERE id = $1", &[&id])
+            .execute(
+                "DELETE FROM responses WHERE id = $1",
+                &[&response_id.0.as_str()],
+            )
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         Ok(())
@@ -732,7 +693,7 @@ impl ResponseStorage for PostgresResponseStorage {
             let fetched = self.get_response(lookup_id).await?;
             match fetched {
                 Some(response) => {
-                    current_id = response.previous_response_id.clone();
+                    current_id.clone_from(&response.previous_response_id);
                     chain.responses.push(response);
                     visited += 1;
                 }
@@ -749,7 +710,6 @@ impl ResponseStorage for PostgresResponseStorage {
         identifier: &str,
         limit: Option<usize>,
     ) -> ResponseResult<Vec<StoredResponse>> {
-        let identifier = identifier.to_string();
         let client = self
             .store
             .pool
@@ -778,7 +738,7 @@ impl ResponseStorage for PostgresResponseStorage {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let resp =
-                Self::build_response_from_now(&row).map_err(ResponseStorageError::StorageError)?;
+                Self::build_response_from_row(&row).map_err(ResponseStorageError::StorageError)?;
             out.push(resp);
         }
 
@@ -786,7 +746,6 @@ impl ResponseStorage for PostgresResponseStorage {
     }
 
     async fn delete_identifier_responses(&self, identifier: &str) -> ResponseResult<usize> {
-        let identifier = identifier.to_string();
         let client = self
             .store
             .pool

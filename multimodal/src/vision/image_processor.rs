@@ -10,6 +10,24 @@ use ndarray::{Array4, ArrayD};
 
 use super::{preprocessor_config::PreProcessorConfig, transforms::TransformError};
 
+/// Helper to extract a dimension from pixel_values given an ndim-dependent axis index.
+/// Returns `Err` if the ndim is not 4 or 5.
+fn dim_for_ndim(
+    ndim: usize,
+    axis_4d: usize,
+    axis_5d: usize,
+    shape: &[usize],
+) -> Result<usize, TransformError> {
+    match ndim {
+        4 => Ok(shape[axis_4d]),
+        5 => Ok(shape[axis_5d]),
+        _ => Err(TransformError::InvalidShape {
+            expected: format!("4D or 5D pixel_values tensor, got {ndim}D"),
+            actual: shape.to_vec(),
+        }),
+    }
+}
+
 /// Model-specific output values that vary by architecture.
 ///
 /// Different vision models require different auxiliary outputs beyond pixel_values.
@@ -71,6 +89,14 @@ impl ModelSpecificValue {
         Self::IntTensor {
             data,
             shape: vec![len],
+        }
+    }
+
+    /// Create a 2D int tensor.
+    pub fn int_2d(data: Vec<i64>, rows: usize, cols: usize) -> Self {
+        Self::IntTensor {
+            data,
+            shape: vec![rows, cols],
         }
     }
 }
@@ -155,45 +181,33 @@ impl PreprocessedImages {
     ///
     /// For 4D tensors [B, C, H, W], returns shape[1].
     /// For 5D tensors [B, N, C, H, W] (Phi3-Vision), returns shape[2].
-    pub fn channels(&self) -> usize {
-        match self.pixel_values.ndim() {
-            4 => self.pixel_values.shape()[1],
-            5 => self.pixel_values.shape()[2],
-            ndim => panic!(
-                "Unsupported pixel_values dimension: {}, expected 4 or 5",
-                ndim
-            ),
-        }
+    ///
+    /// # Errors
+    /// Returns `TransformError::InvalidShape` if pixel_values is not 4D or 5D.
+    pub fn channels(&self) -> Result<usize, TransformError> {
+        dim_for_ndim(self.pixel_values.ndim(), 1, 2, self.pixel_values.shape())
     }
 
     /// Get the height of processed images.
     ///
     /// For 4D tensors [B, C, H, W], returns shape[2].
     /// For 5D tensors [B, N, C, H, W] (Phi3-Vision), returns shape[3].
-    pub fn height(&self) -> usize {
-        match self.pixel_values.ndim() {
-            4 => self.pixel_values.shape()[2],
-            5 => self.pixel_values.shape()[3],
-            ndim => panic!(
-                "Unsupported pixel_values dimension: {}, expected 4 or 5",
-                ndim
-            ),
-        }
+    ///
+    /// # Errors
+    /// Returns `TransformError::InvalidShape` if pixel_values is not 4D or 5D.
+    pub fn height(&self) -> Result<usize, TransformError> {
+        dim_for_ndim(self.pixel_values.ndim(), 2, 3, self.pixel_values.shape())
     }
 
     /// Get the width of processed images.
     ///
     /// For 4D tensors [B, C, H, W], returns shape[3].
     /// For 5D tensors [B, N, C, H, W] (Phi3-Vision), returns shape[4].
-    pub fn width(&self) -> usize {
-        match self.pixel_values.ndim() {
-            4 => self.pixel_values.shape()[3],
-            5 => self.pixel_values.shape()[4],
-            ndim => panic!(
-                "Unsupported pixel_values dimension: {}, expected 4 or 5",
-                ndim
-            ),
-        }
+    ///
+    /// # Errors
+    /// Returns `TransformError::InvalidShape` if pixel_values is not 4D or 5D.
+    pub fn width(&self) -> Result<usize, TransformError> {
+        dim_for_ndim(self.pixel_values.ndim(), 3, 4, self.pixel_values.shape())
     }
 
     /// Get the number of dimensions of pixel_values.
@@ -385,6 +399,16 @@ impl ImageProcessorRegistry {
             Box::new(super::processors::Phi3VisionProcessor::new()),
         );
 
+        // Register LLaMA 4 Vision
+        registry.register(
+            "llama-4",
+            Box::new(super::processors::Llama4VisionProcessor::new()),
+        );
+        registry.register(
+            "llama4",
+            Box::new(super::processors::Llama4VisionProcessor::new()),
+        );
+
         registry
     }
 }
@@ -394,6 +418,7 @@ mod tests {
     use ndarray::Array4;
 
     use super::*;
+    use crate::vision::processors::LlavaProcessor;
 
     #[test]
     fn test_preprocessed_images_accessors() {
@@ -402,9 +427,9 @@ mod tests {
             PreprocessedImages::new(pixel_values, vec![576, 576], vec![(640, 480), (800, 600)]);
 
         assert_eq!(images.batch_size(), 2);
-        assert_eq!(images.channels(), 3);
-        assert_eq!(images.height(), 336);
-        assert_eq!(images.width(), 336);
+        assert_eq!(images.channels().unwrap(), 3);
+        assert_eq!(images.height().unwrap(), 336);
+        assert_eq!(images.width().unwrap(), 336);
         assert_eq!(images.total_tokens(), 1152);
     }
 
@@ -440,6 +465,24 @@ mod tests {
                 assert_eq!(shape, vec![2, 2]);
             }
             _ => panic!("Expected UintTensor"),
+        }
+
+        let int_1d = ModelSpecificValue::int_1d(vec![1, 2, 3]);
+        match int_1d {
+            ModelSpecificValue::IntTensor { data, shape } => {
+                assert_eq!(data, vec![1, 2, 3]);
+                assert_eq!(shape, vec![3]);
+            }
+            _ => panic!("Expected IntTensor"),
+        }
+
+        let int_2d = ModelSpecificValue::int_2d(vec![1, 2, 3, 4], 2, 2);
+        match int_2d {
+            ModelSpecificValue::IntTensor { data, shape } => {
+                assert_eq!(data, vec![1, 2, 3, 4]);
+                assert_eq!(shape, vec![2, 2]);
+            }
+            _ => panic!("Expected IntTensor"),
         }
     }
 
@@ -479,10 +522,7 @@ mod tests {
         let mut registry = ImageProcessorRegistry::new();
 
         // Create a mock processor using LlavaProcessor
-        registry.register(
-            "test-model",
-            Box::new(crate::vision::processors::LlavaProcessor::new()),
-        );
+        registry.register("test-model", Box::new(LlavaProcessor::new()));
 
         assert!(registry.has_processor("test-model-7b"));
         assert!(registry.has_processor("TEST-MODEL"));

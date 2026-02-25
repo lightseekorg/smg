@@ -52,6 +52,10 @@ impl Glm4MoeParser {
     /// - `func_detail_pattern`: Regex pattern for extracting function name and arguments
     ///   - For GLM-4: `r"(?s)<tool_call>([^\n]*)\n(.*)</tool_call>"`
     ///   - For GLM-4.7: `r"(?s)<tool_call>\s*([^<\s]+)\s*(.*?)</tool_call>"`
+    #[expect(
+        clippy::expect_used,
+        reason = "regex patterns are compile-time string literals"
+    )]
     pub(crate) fn new(func_detail_pattern: &str) -> Self {
         // Use (?s) flag for DOTALL mode to handle newlines
         let tool_call_pattern = r"(?s)<tool_call>.*?</tool_call>";
@@ -86,7 +90,7 @@ impl Glm4MoeParser {
     }
 
     /// Parse arguments from key-value pairs
-    fn parse_arguments(&self, args_text: &str) -> ParserResult<serde_json::Map<String, Value>> {
+    fn parse_arguments(&self, args_text: &str) -> serde_json::Map<String, Value> {
         let mut arguments = serde_json::Map::new();
 
         for capture in self.arg_extractor.captures_iter(args_text) {
@@ -120,7 +124,7 @@ impl Glm4MoeParser {
             arguments.insert(key.to_string(), value);
         }
 
-        Ok(arguments)
+        arguments
     }
 
     /// Parse a single tool call block
@@ -133,7 +137,7 @@ impl Glm4MoeParser {
             let args_text = captures.get(2).map_or("", |m| m.as_str());
 
             // Parse arguments
-            let arguments = self.parse_arguments(args_text)?;
+            let arguments = self.parse_arguments(args_text);
 
             let arguments_str = serde_json::to_string(&arguments)
                 .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
@@ -150,7 +154,7 @@ impl Glm4MoeParser {
     }
 
     /// Parse all tool calls from text (shared logic for complete and incremental parsing)
-    fn parse_tool_calls_from_text(&self, text: &str) -> ParserResult<Vec<ToolCall>> {
+    fn parse_tool_calls_from_text(&self, text: &str) -> Vec<ToolCall> {
         let mut tools = Vec::new();
 
         for mat in self.tool_call_extractor.find_iter(text) {
@@ -164,7 +168,7 @@ impl Glm4MoeParser {
             }
         }
 
-        Ok(tools)
+        tools
     }
 }
 
@@ -183,11 +187,14 @@ impl ToolParser for Glm4MoeParser {
         }
 
         // Find where tool calls begin
-        let idx = text.find("<tool_call>").unwrap();
+        // Safe: has_tool_markers() already confirmed the marker exists
+        let idx = text
+            .find("<tool_call>")
+            .ok_or_else(|| ParserError::ParsingFailed("tool call marker not found".to_string()))?;
         let normal_text = text[..idx].to_string();
 
         // Parse all tool calls using shared helper
-        let tools = self.parse_tool_calls_from_text(text)?;
+        let tools = self.parse_tool_calls_from_text(text);
 
         // If no tools were successfully parsed despite having markers, return entire text as fallback
         if tools.is_empty() {
@@ -243,7 +250,7 @@ impl ToolParser for Glm4MoeParser {
 
             // Parse the complete block using shared helper
             let block_end = end_pos + self.eot_token.len();
-            let parsed_tools = self.parse_tool_calls_from_text(&current_text[..block_end])?;
+            let parsed_tools = self.parse_tool_calls_from_text(&current_text[..block_end]);
 
             // Extract normal text before tool calls
             let idx = current_text.find(self.bot_token);
@@ -300,7 +307,7 @@ impl ToolParser for Glm4MoeParser {
                     self.streamed_args_for_tool
                         .resize_with(tool_id + 1, String::new);
                 }
-                self.streamed_args_for_tool[tool_id] = tool_call.function.arguments.clone();
+                self.streamed_args_for_tool[tool_id].clone_from(&tool_call.function.arguments);
 
                 self.current_tool_id += 1;
             }
@@ -311,7 +318,10 @@ impl ToolParser for Glm4MoeParser {
         }
 
         // No complete tool call yet - return normal text before start token
-        let start_pos = start.unwrap();
+        // Safe: start.is_none() case was handled above (early return)
+        let Some(start_pos) = start else {
+            return Ok(StreamingParseResult::default());
+        };
         let normal_text = current_text[..start_pos].to_string();
         self.buffer = current_text[start_pos..].to_string();
 

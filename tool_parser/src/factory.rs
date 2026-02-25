@@ -1,10 +1,8 @@
 // Factory and pool for creating model-specific tool parsers with pooling support.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::{collections::HashMap, sync::Arc};
 
+use parking_lot::RwLock;
 use tokio::sync::Mutex;
 
 use crate::{
@@ -51,13 +49,13 @@ impl ParserRegistry {
     where
         F: Fn() -> Box<dyn ToolParser> + Send + Sync + 'static,
     {
-        let mut creators = self.creators.write().unwrap();
+        let mut creators = self.creators.write();
         creators.insert(name.to_string(), Arc::new(creator));
     }
 
     /// Map a model name/pattern to a parser
     pub fn map_model(&self, model: impl Into<String>, parser: impl Into<String>) {
-        let mut mapping = self.model_mapping.write().unwrap();
+        let mut mapping = self.model_mapping.write();
         mapping.insert(model.into(), parser.into());
     }
 
@@ -66,19 +64,19 @@ impl ParserRegistry {
     pub fn get_pooled_parser(&self, name: &str) -> Option<PooledParser> {
         // First check if we have a pooled instance
         {
-            let pool = self.pool.read().unwrap();
+            let pool = self.pool.read();
             if let Some(parser) = pool.get(name) {
                 return Some(Arc::clone(parser));
             }
         }
 
         // If not in pool, create one and add to pool
-        let creators = self.creators.read().unwrap();
+        let creators = self.creators.read();
         if let Some(creator) = creators.get(name) {
             let parser = Arc::new(Mutex::new(creator()));
 
             // Add to pool for future use
-            let mut pool = self.pool.write().unwrap();
+            let mut pool = self.pool.write();
             pool.insert(name.to_string(), Arc::clone(&parser));
 
             Some(parser)
@@ -89,14 +87,14 @@ impl ParserRegistry {
 
     /// Check if a parser with the given name is registered.
     pub fn has_parser(&self, name: &str) -> bool {
-        let creators = self.creators.read().unwrap();
+        let creators = self.creators.read();
         creators.contains_key(name)
     }
 
     /// Create a fresh (non-pooled) parser instance by exact name.
     /// Returns a new parser instance for each call - useful for streaming where state isolation is needed.
     pub fn create_parser(&self, name: &str) -> Option<Box<dyn ToolParser>> {
-        let creators = self.creators.read().unwrap();
+        let creators = self.creators.read();
         creators.get(name).map(|creator| creator())
     }
 
@@ -105,9 +103,9 @@ impl ParserRegistry {
     pub fn has_parser_for_model(&self, model: &str) -> bool {
         // Try exact match first
         {
-            let mapping = self.model_mapping.read().unwrap();
+            let mapping = self.model_mapping.read();
             if let Some(parser_name) = mapping.get(model) {
-                let creators = self.creators.read().unwrap();
+                let creators = self.creators.read();
                 if creators.contains_key(parser_name) {
                     return true;
                 }
@@ -115,7 +113,7 @@ impl ParserRegistry {
         }
 
         // Try prefix matching
-        let model_mapping = self.model_mapping.read().unwrap();
+        let model_mapping = self.model_mapping.read();
         let best_match = model_mapping
             .iter()
             .filter(|(pattern, _)| {
@@ -124,7 +122,7 @@ impl ParserRegistry {
             .max_by_key(|(pattern, _)| pattern.len());
 
         if let Some((_, parser_name)) = best_match {
-            let creators = self.creators.read().unwrap();
+            let creators = self.creators.read();
             if creators.contains_key(parser_name) {
                 return true;
             }
@@ -140,7 +138,7 @@ impl ParserRegistry {
     pub fn create_for_model(&self, model: &str) -> Option<Box<dyn ToolParser>> {
         // Try exact match first
         {
-            let mapping = self.model_mapping.read().unwrap();
+            let mapping = self.model_mapping.read();
             if let Some(parser_name) = mapping.get(model) {
                 if let Some(parser) = self.create_parser(parser_name) {
                     return Some(parser);
@@ -149,7 +147,7 @@ impl ParserRegistry {
         }
 
         // Try prefix matching with more specific patterns first
-        let model_mapping = self.model_mapping.read().unwrap();
+        let model_mapping = self.model_mapping.read();
         let best_match = model_mapping
             .iter()
             .filter(|(pattern, _)| {
@@ -165,7 +163,7 @@ impl ParserRegistry {
         }
 
         // Fall back to default parser
-        let default = self.default_parser.read().unwrap().clone();
+        let default = self.default_parser.read().clone();
         self.create_parser(&default)
     }
 
@@ -173,7 +171,7 @@ impl ParserRegistry {
     pub fn get_pooled_for_model(&self, model: &str) -> Option<PooledParser> {
         // Try exact match first
         {
-            let mapping = self.model_mapping.read().unwrap();
+            let mapping = self.model_mapping.read();
             if let Some(parser_name) = mapping.get(model) {
                 if let Some(parser) = self.get_pooled_parser(parser_name) {
                     return Some(parser);
@@ -182,7 +180,7 @@ impl ParserRegistry {
         }
 
         // Try prefix matching with more specific patterns first
-        let model_mapping = self.model_mapping.read().unwrap();
+        let model_mapping = self.model_mapping.read();
         let best_match = model_mapping
             .iter()
             .filter(|(pattern, _)| {
@@ -198,19 +196,19 @@ impl ParserRegistry {
         }
 
         // Fall back to default parser
-        let default = self.default_parser.read().unwrap().clone();
+        let default = self.default_parser.read().clone();
         self.get_pooled_parser(&default)
     }
 
     /// Clear the parser pool, forcing new instances to be created.
     pub fn clear_pool(&self) {
-        let mut pool = self.pool.write().unwrap();
+        let mut pool = self.pool.write();
         pool.clear();
     }
 
     /// Set the default parser
     pub fn set_default_parser(&self, name: impl Into<String>) {
-        let mut default = self.default_parser.write().unwrap();
+        let mut default = self.default_parser.write();
         *default = name.into();
     }
 }
@@ -328,6 +326,10 @@ impl ParserFactory {
     /// Get a pooled parser for the given model ID.
     /// Returns a shared instance that can be used concurrently.
     /// Falls back to passthrough parser if model is not recognized.
+    #[expect(
+        clippy::expect_used,
+        reason = "passthrough parser is registered in new(); None indicates a bug in registration logic"
+    )]
     pub fn get_pooled(&self, model_id: &str) -> PooledParser {
         self.registry
             .get_pooled_for_model(model_id)
@@ -354,7 +356,7 @@ impl ParserFactory {
     pub fn get_parser(&self, model_id: &str) -> Option<Arc<dyn ToolParser>> {
         // Determine which parser type to use
         let parser_type = {
-            let mapping = self.registry.model_mapping.read().unwrap();
+            let mapping = self.registry.model_mapping.read();
 
             // Try exact match first
             if let Some(parser_name) = mapping.get(model_id) {
@@ -373,12 +375,12 @@ impl ParserFactory {
                     parser_name.clone()
                 } else {
                     // Fall back to default
-                    self.registry.default_parser.read().unwrap().clone()
+                    self.registry.default_parser.read().clone()
                 }
             }
         };
 
-        let creators = self.registry.creators.read().unwrap();
+        let creators = self.registry.creators.read();
         creators.get(&parser_type).map(|creator| {
             // Call the creator to get a Box<dyn ToolParser>, then convert to Arc
             let boxed_parser = creator();
@@ -388,13 +390,7 @@ impl ParserFactory {
 
     /// List all registered parsers (for compatibility with old API).
     pub fn list_parsers(&self) -> Vec<String> {
-        self.registry
-            .creators
-            .read()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect()
+        self.registry.creators.read().keys().cloned().collect()
     }
 }
 

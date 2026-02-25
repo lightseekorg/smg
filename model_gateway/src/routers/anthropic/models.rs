@@ -8,10 +8,8 @@ use axum::{
 use tracing::{debug, warn};
 
 use super::{
-    utils::{
-        get_healthy_anthropic_workers, read_response_body_limited, should_propagate_header,
-        ReadBodyResult,
-    },
+    utils::{read_response_body_limited, should_propagate_header, ReadBodyResult},
+    worker::get_healthy_anthropic_workers,
     AnthropicRouter,
 };
 use crate::routers::error;
@@ -75,16 +73,13 @@ pub async fn handle_list_models(router: &AnthropicRouter, req: Request<Body>) ->
                 }
                 ReadBodyResult::Error(e) => {
                     warn!("Failed to read response body: {}", e);
-                    error::internal_error("read_error", format!("Failed to read response: {}", e))
+                    error::internal_error("read_error", format!("Failed to read response: {e}"))
                 }
             }
         }
         Err(e) => {
             warn!("Failed to forward list models request: {}", e);
-            error::bad_gateway(
-                "forward_failed",
-                format!("Failed to forward request: {}", e),
-            )
+            error::bad_gateway("forward_failed", format!("Failed to forward request: {e}"))
         }
     }
 }

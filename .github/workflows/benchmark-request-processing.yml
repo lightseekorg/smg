@@ -8,6 +8,9 @@ on:
       - 'model_gateway/src/routers/**'
       - 'model_gateway/src/core/**'
       - 'model_gateway/src/middleware.rs'
+      - '!model_gateway/src/**/tests/**'
+      - '!model_gateway/src/**/*_test.rs'
+      - '!model_gateway/src/**/test_*.rs'
   pull_request:
     branches: [ main ]
     paths:
@@ -15,6 +18,9 @@ on:
       - 'model_gateway/src/routers/**'
       - 'model_gateway/src/core/**'
       - 'model_gateway/src/middleware.rs'
+      - '!model_gateway/src/**/tests/**'
+      - '!model_gateway/src/**/*_test.rs'
+      - '!model_gateway/src/**/test_*.rs'
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * 0'
@@ -47,9 +53,7 @@ jobs:
     needs: check-ci
     if: |
       github.repository == 'lightseekorg/smg' &&
-      needs.check-ci.outputs.should_run == 'true' &&
-      (github.event_name != 'pull_request' ||
-       contains(github.event.pull_request.labels.*.name, 'router-benchmark'))
+      needs.check-ci.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

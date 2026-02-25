@@ -73,7 +73,7 @@ impl MeshSyncManager {
 
     /// Sync policy state to mesh stores
     pub fn sync_policy_state(&self, model_id: String, policy_type: String, config: Vec<u8>) {
-        let key = format!("policy:{}", model_id);
+        let key = SKey::new(format!("policy:{model_id}"));
 
         // Get current version if exists, otherwise start at 1
         let current_version = self.stores.policy.get(&key).map(|s| s.version).unwrap_or(0);
@@ -97,7 +97,7 @@ impl MeshSyncManager {
 
     /// Remove policy state from mesh stores
     pub fn remove_policy_state(&self, model_id: &str) {
-        let key = format!("policy:{}", model_id);
+        let key = SKey::new(format!("policy:{model_id}"));
         self.stores.policy.remove(&key);
         debug!("Removed policy state from mesh model={}", model_id);
     }
@@ -114,7 +114,7 @@ impl MeshSyncManager {
 
     /// Get policy state from mesh stores
     pub fn get_policy_state(&self, model_id: &str) -> Option<PolicyState> {
-        let key = format!("policy:{}", model_id);
+        let key = SKey::new(format!("policy:{model_id}"));
         self.stores.policy.get(&key)
     }
 
@@ -329,7 +329,7 @@ impl MeshSyncManager {
 
         // Serialize and store back
         let serialized = serde_json::to_vec(&tree_state)
-            .map_err(|e| format!("Failed to serialize tree state: {}", e))?;
+            .map_err(|e| format!("Failed to serialize tree state: {e}"))?;
 
         // Get current version if exists
         let current_version = self.stores.policy.get(&key).map(|s| s.version).unwrap_or(0);

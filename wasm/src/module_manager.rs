@@ -15,6 +15,7 @@ use crate::{
     errors::{Result, WasmError, WasmManagerError, WasmModuleError},
     module::{WasmModule, WasmModuleAttachPoint},
     runtime::WasmRuntime,
+    spec::smg::gateway::middleware_types::Action as MiddlewareAction,
     types::{WasmComponentInput, WasmComponentOutput},
 };
 
@@ -30,9 +31,9 @@ pub struct WasmModuleManager {
 }
 
 impl WasmModuleManager {
-    pub fn new(config: WasmRuntimeConfig) -> Result<Self> {
-        let runtime = Arc::new(WasmRuntime::new(config)?);
-        Ok(Self {
+    pub fn new(config: WasmRuntimeConfig) -> Self {
+        let runtime = Arc::new(WasmRuntime::new(config));
+        Self {
             modules: Arc::new(RwLock::new(HashMap::new())),
             runtime,
             total_executions: AtomicU64::new(0),
@@ -40,10 +41,10 @@ impl WasmModuleManager {
             failed_executions: AtomicU64::new(0),
             total_execution_time_ms: AtomicU64::new(0),
             max_execution_time_ms: AtomicU64::new(0),
-        })
+        }
     }
 
-    pub fn with_default_config() -> Result<Self> {
+    pub fn with_default_config() -> Self {
         Self::new(WasmRuntimeConfig::default())
     }
 
@@ -142,8 +143,9 @@ impl WasmModuleManager {
     ) -> Result<WasmComponentOutput> {
         let start_time = std::time::Instant::now();
 
-        // First, get the WASM bytes with a read lock (faster)
-        let wasm_bytes = {
+        // Get the SHA256 hash and Arc-wrapped WASM bytes with a read lock.
+        // The Arc clone is ~1ns (atomic increment) instead of cloning the full bytes.
+        let (sha256_hash, wasm_bytes) = {
             let modules = self
                 .modules
                 .read()
@@ -152,8 +154,10 @@ impl WasmModuleManager {
                 .get(&module_uuid)
                 .ok_or_else(|| WasmError::from(WasmManagerError::ModuleNotFound(module_uuid)))?;
 
-            // Clone the pre-loaded WASM bytes (already in memory, no file I/O)
-            module.module_meta.wasm_bytes.clone()
+            (
+                module.module_meta.sha256_hash,
+                module.module_meta.wasm_bytes.clone(), // Arc clone (cheap)
+            )
         };
 
         {
@@ -179,7 +183,7 @@ impl WasmModuleManager {
 
         let result = self
             .runtime
-            .execute_component_async(wasm_bytes, attach_point, input)
+            .execute_component_async(sha256_hash, wasm_bytes, attach_point, input)
             .await;
 
         // Record metrics
@@ -232,7 +236,7 @@ impl WasmModuleManager {
         module: &WasmModule,
         attach_point: WasmModuleAttachPoint,
         input: WasmComponentInput,
-    ) -> Option<crate::spec::smg::gateway::middleware_types::Action> {
+    ) -> Option<MiddlewareAction> {
         use tracing::error;
 
         let action_result = self
@@ -256,9 +260,6 @@ impl WasmModuleManager {
 
 impl Default for WasmModuleManager {
     fn default() -> Self {
-        // with_default_config() should always succeed with default configuration.
-        // If it fails, it indicates a critical system configuration error.
         Self::with_default_config()
-            .expect("Failed to create WasmModuleManager with default config. This should never happen with valid default configuration.")
     }
 }

@@ -1,4 +1,4 @@
-use std::{ops::Deref, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -12,12 +12,8 @@ pub mod stop;
 pub mod stream;
 pub mod traits;
 
-// Feature-gated modules
-
 pub mod chat_template;
-
 pub mod huggingface;
-
 pub mod tiktoken;
 
 #[cfg(test)]
@@ -25,6 +21,7 @@ mod tests;
 
 // Re-export types used outside this module
 pub use cache::{CacheConfig, CacheStats, CachedTokenizer, L0Cache, L1Cache, TokenizerFingerprint};
+pub use chat_template::ChatTemplateState;
 pub use factory::{
     create_tokenizer, create_tokenizer_from_file, create_tokenizer_with_chat_template,
     TokenizerType,
@@ -35,7 +32,7 @@ pub use registry::{LoadError, LoadOutcome, TokenizerRegistry};
 pub use sequence::Sequence;
 pub use stop::{SequenceDecoderOutput, StopSequenceConfig, StopSequenceDecoder};
 pub use stream::DecodeStream;
-pub use tiktoken::TiktokenModel;
+pub use tiktoken::{TiktokenModel, TiktokenTokenizer};
 pub use traits::{
     Decoder, Encoder, Encoding, SpecialTokens, TokenIdType, Tokenizer as TokenizerTrait,
 };
@@ -114,14 +111,6 @@ impl Tokenizer {
     /// Convert ID to token string
     pub fn id_to_token(&self, id: u32) -> Option<String> {
         self.0.id_to_token(id)
-    }
-}
-
-impl Deref for Tokenizer {
-    type Target = Arc<dyn traits::Tokenizer>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
     }
 }
 

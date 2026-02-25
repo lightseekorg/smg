@@ -11,9 +11,10 @@
 //! The ring is rebuilt only when workers are added/removed, not per-request.
 //! Uses virtual nodes (150 per worker) for even distribution and blake3 for stable hashing.
 
-use std::sync::{Arc, RwLock};
+use std::{collections::HashMap, sync::Arc};
 
 use dashmap::DashMap;
+use parking_lot::RwLock;
 use smg_mesh::OptionalMeshSyncManager;
 use uuid::Uuid;
 
@@ -60,7 +61,7 @@ impl HashRing {
 
             // Create multiple virtual nodes per worker
             for vnode in 0..VIRTUAL_NODES_PER_WORKER {
-                let vnode_key = format!("{}#{}", url, vnode);
+                let vnode_key = format!("{url}#{vnode}");
                 let pos = Self::hash_position(&vnode_key);
                 entries.push((pos, Arc::clone(&url)));
             }
@@ -76,10 +77,18 @@ impl HashRing {
 
     /// Hash a string to a ring position using blake3 (stable across versions).
     #[inline]
+    #[expect(
+        clippy::expect_used,
+        reason = "blake3 always produces 32 bytes — converting a fixed 8-byte slice to [u8; 8] is infallible"
+    )]
     fn hash_position(s: &str) -> u64 {
         let hash = blake3::hash(s.as_bytes());
         // Take first 8 bytes as u64
-        u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap())
+        u64::from_le_bytes(
+            hash.as_bytes()[..8]
+                .try_into()
+                .expect("blake3 hash is always 32 bytes, slicing first 8 is infallible"),
+        )
     }
 
     /// Find worker URL for a key using consistent hashing.
@@ -145,7 +154,7 @@ pub struct WorkerId(String);
 impl WorkerId {
     /// Create a new worker ID
     pub fn new() -> Self {
-        Self(Uuid::new_v4().to_string())
+        Self(Uuid::now_v7().to_string())
     }
 
     /// Create a worker ID from a string
@@ -230,7 +239,8 @@ impl WorkerRegistry {
 
     /// Set mesh sync manager (thread-safe, can be called after initialization)
     pub fn set_mesh_sync(&self, mesh_sync: OptionalMeshSyncManager) {
-        *self.mesh_sync.write().unwrap() = mesh_sync;
+        let mut guard = self.mesh_sync.write();
+        *guard = mesh_sync;
     }
 
     /// Register a new worker
@@ -278,14 +288,17 @@ impl WorkerRegistry {
             .push(worker_id.clone());
 
         // Sync to mesh if enabled (no-op if mesh is not enabled)
-        if let Some(ref mesh_sync) = *self.mesh_sync.read().unwrap() {
-            mesh_sync.sync_worker_state(
-                worker_id.as_str().to_string(),
-                worker.model_id().to_string(),
-                worker.url().to_string(),
-                worker.is_healthy(),
-                0.0, // TODO: Get actual load
-            );
+        {
+            let guard = self.mesh_sync.read();
+            if let Some(ref mesh_sync) = *guard {
+                mesh_sync.sync_worker_state(
+                    worker_id.as_str().to_string(),
+                    worker.model_id().to_string(),
+                    worker.url().to_string(),
+                    worker.is_healthy(),
+                    0.0, // TODO: Get actual load
+                );
+            }
         }
 
         worker_id
@@ -345,8 +358,11 @@ impl WorkerRegistry {
             Metrics::remove_worker_metrics(worker.url());
 
             // Sync removal to mesh if enabled (no-op if mesh is not enabled)
-            if let Some(ref mesh_sync) = *self.mesh_sync.read().unwrap() {
-                mesh_sync.remove_worker_state(worker_id.as_str());
+            {
+                let guard = self.mesh_sync.read();
+                if let Some(ref mesh_sync) = *guard {
+                    mesh_sync.remove_worker_state(worker_id.as_str());
+                }
             }
 
             Some(worker)
@@ -388,9 +404,9 @@ impl WorkerRegistry {
     }
 
     /// Get all workers by worker type
-    pub fn get_by_type(&self, worker_type: &WorkerType) -> Vec<Arc<dyn Worker>> {
+    pub fn get_by_type(&self, worker_type: WorkerType) -> Vec<Arc<dyn Worker>> {
         self.type_workers
-            .get(worker_type)
+            .get(&worker_type)
             .map(|ids| ids.iter().filter_map(|id| self.get(id)).collect())
             .unwrap_or_default()
     }
@@ -402,14 +418,17 @@ impl WorkerRegistry {
             // For now, we'll just sync to mesh
 
             // Sync to mesh if enabled (no-op if mesh is not enabled)
-            if let Some(ref mesh_sync) = *self.mesh_sync.read().unwrap() {
-                mesh_sync.sync_worker_state(
-                    worker_id.as_str().to_string(),
-                    worker.model_id().to_string(),
-                    worker.url().to_string(),
-                    is_healthy,
-                    0.0, // TODO: Get actual load
-                );
+            {
+                let guard = self.mesh_sync.read();
+                if let Some(ref mesh_sync) = *guard {
+                    mesh_sync.sync_worker_state(
+                        worker_id.as_str().to_string(),
+                        worker.model_id().to_string(),
+                        worker.url().to_string(),
+                        is_healthy,
+                        0.0, // TODO: Get actual load
+                    );
+                }
             }
         }
     }
@@ -430,13 +449,13 @@ impl WorkerRegistry {
 
     /// Get all decode workers
     pub fn get_decode_workers(&self) -> Vec<Arc<dyn Worker>> {
-        self.get_by_type(&WorkerType::Decode)
+        self.get_by_type(WorkerType::Decode)
     }
 
     /// Get all workers by connection mode
-    pub fn get_by_connection(&self, connection_mode: &ConnectionMode) -> Vec<Arc<dyn Worker>> {
+    pub fn get_by_connection(&self, connection_mode: ConnectionMode) -> Vec<Arc<dyn Worker>> {
         self.connection_workers
-            .get(connection_mode)
+            .get(&connection_mode)
             .map(|ids| ids.iter().filter_map(|id| self.get(id)).collect())
             .unwrap_or_default()
     }
@@ -481,7 +500,7 @@ impl WorkerRegistry {
             .map(|entry| {
                 (
                     entry.value().url().to_string(),
-                    entry.value().api_key().clone(),
+                    entry.value().api_key().cloned(),
                 )
             })
             .collect()
@@ -636,54 +655,98 @@ impl WorkerRegistry {
         (regular_count, pd_count)
     }
 
-    /// Start a health checker for all workers in the registry
-    /// This should be called once after the registry is populated with workers
-    pub(crate) fn start_health_checker(&self, check_interval_secs: u64) -> HealthChecker {
-        use std::sync::{
-            atomic::{AtomicBool, Ordering},
-            Arc,
-        };
-
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let shutdown_clone = shutdown.clone();
+    /// Start a deadline-driven health checker for all workers in the registry.
+    ///
+    /// Each worker is checked according to its own `health_config.check_interval_secs`.
+    /// The task sleeps until the next worker is due, so it only wakes when there is
+    /// actual work to do — zero CPU when idle, no polling.
+    pub(crate) fn start_health_checker(&self, default_interval_secs: u64) -> HealthChecker {
+        let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+        let shutdown_clone = shutdown_notify.clone();
         let workers_ref = self.workers.clone();
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "Health checker loop: runs for the lifetime of the registry, handle is stored in HealthChecker and abort() is called on drop"
+        )]
         let handle = tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(check_interval_secs));
+            // next_check[url] = Instant when the worker is next due for a health check.
+            let mut next_check: HashMap<String, tokio::time::Instant> = HashMap::new();
 
             loop {
-                interval.tick().await;
+                let now = tokio::time::Instant::now();
 
-                // Check for shutdown signal
-                if shutdown_clone.load(Ordering::Acquire) {
-                    tracing::debug!("Registry health checker shutting down");
-                    break;
-                }
-
-                // Get all workers from registry
+                // Snapshot current workers from the registry
                 let workers: Vec<Arc<dyn Worker>> = workers_ref
                     .iter()
                     .map(|entry| entry.value().clone())
                     .collect();
 
-                // Perform health checks in parallel for better performance
-                // This is especially important when there are many workers
-                let health_futures: Vec<_> = workers
+                // Sync schedule with registry: add new workers, prune removed
+                // and disabled ones so stale deadlines don't cause wakeups.
+                let checkable_urls: std::collections::HashSet<String> = workers
                     .iter()
-                    .filter(|worker| !worker.metadata().spec.health.disable_health_check)
-                    .map(|worker| {
-                        let worker = worker.clone();
-                        async move {
-                            let _ = worker.check_health_async().await;
-                        }
-                    })
+                    .filter(|w| !w.metadata().health_config.disable_health_check)
+                    .map(|w| w.url().to_string())
                     .collect();
-                futures::future::join_all(health_futures).await;
+                next_check.retain(|url, _| checkable_urls.contains(url));
+                for url in &checkable_urls {
+                    next_check.entry(url.clone()).or_insert(now);
+                }
+
+                // Collect workers whose deadline has passed
+                let due_workers: Vec<_> = workers
+                    .iter()
+                    .filter(|w| !w.metadata().health_config.disable_health_check)
+                    .filter(|w| {
+                        next_check
+                            .get(w.url())
+                            .is_some_and(|deadline| now >= *deadline)
+                    })
+                    .cloned()
+                    .collect();
+
+                // Run due health checks in parallel and schedule the next deadline
+                if !due_workers.is_empty() {
+                    for worker in &due_workers {
+                        let secs = worker.metadata().health_config.check_interval_secs;
+                        let secs = if secs > 0 {
+                            secs
+                        } else {
+                            default_interval_secs
+                        };
+                        next_check.insert(
+                            worker.url().to_string(),
+                            now + tokio::time::Duration::from_secs(secs),
+                        );
+                    }
+                    let futs: Vec<_> = due_workers
+                        .into_iter()
+                        .map(|w| async move {
+                            let _ = w.check_health_async().await;
+                        })
+                        .collect();
+                    futures::future::join_all(futs).await;
+                }
+
+                // Sleep until the earliest deadline or until shutdown is signalled.
+                // If the registry is empty, sleep for the default interval then re-scan
+                // (new workers may have been added).
+                let sleep_until = next_check.values().min().copied().unwrap_or_else(|| {
+                    now + tokio::time::Duration::from_secs(default_interval_secs)
+                });
+
+                tokio::select! {
+                    () = tokio::time::sleep_until(sleep_until) => {}
+                    () = shutdown_clone.notified() => {
+                        tracing::debug!("Registry health checker shutting down");
+                        break;
+                    }
+                }
             }
         });
 
-        HealthChecker::new(handle, shutdown)
+        HealthChecker::new(handle, shutdown_notify)
     }
 }
 
@@ -754,8 +817,8 @@ mod tests {
         assert!(registry.get(&worker_id).is_some());
         assert!(registry.get_by_url("http://worker1:8080").is_some());
         assert_eq!(registry.get_by_model("llama-3-8b").len(), 1);
-        assert_eq!(registry.get_by_type(&WorkerType::Regular).len(), 1);
-        assert_eq!(registry.get_by_connection(&ConnectionMode::Http).len(), 1);
+        assert_eq!(registry.get_by_type(WorkerType::Regular).len(), 1);
+        assert_eq!(registry.get_by_connection(ConnectionMode::Http).len(), 1);
 
         let stats = registry.stats();
         assert_eq!(stats.total_workers, 1);

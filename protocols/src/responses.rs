@@ -1,11 +1,11 @@
 // OpenAI Responses API types
 // https://platform.openai.com/docs/api-reference/responses
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use validator::Validate;
+use validator::{Validate, ValidationError};
 
 use super::{
     common::{
@@ -36,7 +36,8 @@ pub struct ResponseTool {
     pub headers: Option<HashMap<String, String>>,
     pub server_label: Option<String>,
     pub server_description: Option<String>,
-    pub require_approval: Option<String>,
+    /// Approval requirement configuration for MCP tools.
+    pub require_approval: Option<RequireApproval>,
     pub allowed_tools: Option<Vec<String>>,
 }
 
@@ -54,6 +55,14 @@ impl Default for ResponseTool {
             allowed_tools: None,
         }
     }
+}
+
+/// `require_approval` values.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RequireApproval {
+    Always,
+    Never,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -77,6 +86,10 @@ pub struct ResponseReasoningParam {
     pub summary: Option<ReasoningSummary>,
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde default function must match field type Option<T>"
+)]
 fn default_reasoning_effort() -> Option<ReasoningEffort> {
     Some(ReasoningEffort::Medium)
 }
@@ -150,6 +163,22 @@ pub enum ResponseInputOutputItem {
         output: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
+    },
+    #[serde(rename = "mcp_approval_request")]
+    McpApprovalRequest {
+        id: String,
+        server_label: String,
+        name: String,
+        arguments: String,
+    },
+    #[serde(rename = "mcp_approval_response")]
+    McpApprovalResponse {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        approval_request_id: String,
+        approve: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     #[serde(untagged)]
     SimpleInputMessage {
@@ -242,6 +271,13 @@ pub enum ResponseOutputItem {
         name: String,
         output: String,
         server_label: String,
+    },
+    #[serde(rename = "mcp_approval_request")]
+    McpApprovalRequest {
+        id: String,
+        server_label: String,
+        name: String,
+        arguments: String,
     },
     #[serde(rename = "web_search_call")]
     WebSearchCall {
@@ -555,10 +591,18 @@ fn default_repetition_penalty() -> f32 {
     1.0
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde default function must match field type Option<T>"
+)]
 fn default_temperature() -> Option<f32> {
     Some(1.0)
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde default function must match field type Option<T>"
+)]
 fn default_top_p() -> Option<f32> {
     Some(1.0)
 }
@@ -766,10 +810,10 @@ impl Normalizable for ResponsesRequest {
         // 1. Apply tool_choice defaults
         if self.tool_choice.is_none() {
             if let Some(tools) = &self.tools {
-                let choice_value = if !tools.is_empty() {
-                    ToolChoiceValue::Auto
-                } else {
+                let choice_value = if tools.is_empty() {
                     ToolChoiceValue::None
+                } else {
+                    ToolChoiceValue::Auto
                 };
                 self.tool_choice = Some(ToolChoice::Value(choice_value));
             }
@@ -859,6 +903,8 @@ impl GenerationRequest for ResponsesRequest {
                     ResponseInputOutputItem::FunctionCallOutput { output, .. } => {
                         Some(output.clone())
                     }
+                    ResponseInputOutputItem::McpApprovalRequest { .. } => None,
+                    ResponseInputOutputItem::McpApprovalResponse { .. } => None,
                 })
                 .collect::<Vec<String>>()
                 .join(" "),
@@ -867,12 +913,11 @@ impl GenerationRequest for ResponsesRequest {
 }
 
 /// Validate conversation ID format
-pub fn validate_conversation_id(conv_id: &str) -> Result<(), validator::ValidationError> {
+pub fn validate_conversation_id(conv_id: &str) -> Result<(), ValidationError> {
     if !conv_id.starts_with("conv_") {
-        let mut error = validator::ValidationError::new("invalid_conversation_id");
+        let mut error = ValidationError::new("invalid_conversation_id");
         error.message = Some(std::borrow::Cow::Owned(format!(
-            "Invalid 'conversation': '{}'. Expected an ID that begins with 'conv_'.",
-            conv_id
+            "Invalid 'conversation': '{conv_id}'. Expected an ID that begins with 'conv_'."
         )));
         return Err(error);
     }
@@ -883,10 +928,9 @@ pub fn validate_conversation_id(conv_id: &str) -> Result<(), validator::Validati
         .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
 
     if !is_valid {
-        let mut error = validator::ValidationError::new("invalid_conversation_id");
+        let mut error = ValidationError::new("invalid_conversation_id");
         error.message = Some(std::borrow::Cow::Owned(format!(
-            "Invalid 'conversation': '{}'. Expected an ID that contains letters, numbers, underscores, or dashes, but this value contained additional characters.",
-            conv_id
+            "Invalid 'conversation': '{conv_id}'. Expected an ID that contains letters, numbers, underscores, or dashes, but this value contained additional characters."
         )));
         return Err(error);
     }
@@ -894,9 +938,7 @@ pub fn validate_conversation_id(conv_id: &str) -> Result<(), validator::Validati
 }
 
 /// Validates tool_choice requires tools and references exist
-fn validate_tool_choice_with_tools(
-    request: &ResponsesRequest,
-) -> Result<(), validator::ValidationError> {
+fn validate_tool_choice_with_tools(request: &ResponsesRequest) -> Result<(), ValidationError> {
     let Some(tool_choice) = &request.tool_choice else {
         return Ok(());
     };
@@ -906,7 +948,7 @@ fn validate_tool_choice_with_tools(
 
     // Check if tool_choice requires tools but none are provided
     if is_some_choice && !has_tools {
-        let mut e = validator::ValidationError::new("tool_choice_requires_tools");
+        let mut e = ValidationError::new("tool_choice_requires_tools");
         e.message = Some("Invalid value for 'tool_choice': 'tool_choice' is only allowed when 'tools' are specified.".into());
         return Err(e);
     }
@@ -917,7 +959,10 @@ fn validate_tool_choice_with_tools(
     }
 
     // Extract function tool names from ResponseTools
-    let tools = request.tools.as_ref().unwrap();
+    // INVARIANT: has_tools is true here, so tools is Some and non-empty
+    let Some(tools) = request.tools.as_ref() else {
+        return Ok(());
+    };
     let function_tool_names: Vec<&str> = tools
         .iter()
         .filter_map(|t| match t.r#type {
@@ -930,7 +975,7 @@ fn validate_tool_choice_with_tools(
     match tool_choice {
         ToolChoice::Function { function, .. } => {
             if !function_tool_names.contains(&function.name.as_str()) {
-                let mut e = validator::ValidationError::new("tool_choice_function_not_found");
+                let mut e = ValidationError::new("tool_choice_function_not_found");
                 e.message = Some(
                     format!(
                         "Invalid value for 'tool_choice': function '{}' not found in 'tools'.",
@@ -948,11 +993,10 @@ fn validate_tool_choice_with_tools(
         } => {
             // Validate mode is "auto" or "required"
             if mode != "auto" && mode != "required" {
-                let mut e = validator::ValidationError::new("tool_choice_invalid_mode");
+                let mut e = ValidationError::new("tool_choice_invalid_mode");
                 e.message = Some(
                     format!(
-                        "Invalid value for 'tool_choice.mode': must be 'auto' or 'required', got '{}'.",
-                        mode
+                        "Invalid value for 'tool_choice.mode': must be 'auto' or 'required', got '{mode}'."
                     )
                     .into(),
                 );
@@ -963,11 +1007,10 @@ fn validate_tool_choice_with_tools(
             for tool_ref in allowed_tools {
                 if let ToolReference::Function { name } = tool_ref {
                     if !function_tool_names.contains(&name.as_str()) {
-                        let mut e = validator::ValidationError::new("tool_choice_tool_not_found");
+                        let mut e = ValidationError::new("tool_choice_tool_not_found");
                         e.message = Some(
                             format!(
-                                "Invalid value for 'tool_choice.tools': tool '{}' not found in 'tools'.",
-                                name
+                                "Invalid value for 'tool_choice.tools': tool '{name}' not found in 'tools'."
                             )
                             .into(),
                         );
@@ -978,16 +1021,14 @@ fn validate_tool_choice_with_tools(
                 // as they are resolved dynamically at runtime
             }
         }
-        _ => {}
+        ToolChoice::Value(_) => {}
     }
 
     Ok(())
 }
 
 /// Schema-level validation for cross-field dependencies
-fn validate_responses_cross_parameters(
-    request: &ResponsesRequest,
-) -> Result<(), validator::ValidationError> {
+fn validate_responses_cross_parameters(request: &ResponsesRequest) -> Result<(), ValidationError> {
     // 1. Validate tool_choice requires tools (enhanced)
     validate_tool_choice_with_tools(request)?;
 
@@ -999,7 +1040,7 @@ fn validate_responses_cross_parameters(
             .is_some_and(|inc| inc.contains(&IncludeField::MessageOutputTextLogprobs));
 
         if !has_logprobs_include {
-            let mut e = validator::ValidationError::new("top_logprobs_requires_include");
+            let mut e = ValidationError::new("top_logprobs_requires_include");
             e.message = Some(
                 "top_logprobs requires include field with 'message.output_text.logprobs'".into(),
             );
@@ -1009,14 +1050,14 @@ fn validate_responses_cross_parameters(
 
     // 3. Validate background/stream conflict
     if request.background == Some(true) && request.stream == Some(true) {
-        let mut e = validator::ValidationError::new("background_conflicts_with_stream");
+        let mut e = ValidationError::new("background_conflicts_with_stream");
         e.message = Some("Cannot use background mode with streaming".into());
         return Err(e);
     }
 
     // 4. Validate conversation and previous_response_id are mutually exclusive
     if request.conversation.is_some() && request.previous_response_id.is_some() {
-        let mut e = validator::ValidationError::new("mutually_exclusive_parameters");
+        let mut e = ValidationError::new("mutually_exclusive_parameters");
         e.message = Some("Mutually exclusive parameters. Ensure you are only providing one of: 'previous_response_id' or 'conversation'.".into());
         return Err(e);
     }
@@ -1033,7 +1074,7 @@ fn validate_responses_cross_parameters(
         });
 
         if !has_valid_input {
-            let mut e = validator::ValidationError::new("input_missing_user_message");
+            let mut e = ValidationError::new("input_missing_user_message");
             e.message = Some("Input items must contain at least one message".into());
             return Err(e);
         }
@@ -1051,18 +1092,18 @@ fn validate_responses_cross_parameters(
 // ============================================================================
 
 /// Validates response input is not empty and has valid content
-fn validate_response_input(input: &ResponseInput) -> Result<(), validator::ValidationError> {
+fn validate_response_input(input: &ResponseInput) -> Result<(), ValidationError> {
     match input {
         ResponseInput::Text(text) => {
             if text.is_empty() {
-                let mut e = validator::ValidationError::new("input_text_empty");
+                let mut e = ValidationError::new("input_text_empty");
                 e.message = Some("Input text cannot be empty".into());
                 return Err(e);
             }
         }
         ResponseInput::Items(items) => {
             if items.is_empty() {
-                let mut e = validator::ValidationError::new("input_items_empty");
+                let mut e = ValidationError::new("input_items_empty");
                 e.message = Some("Input items cannot be empty".into());
                 return Err(e);
             }
@@ -1076,23 +1117,23 @@ fn validate_response_input(input: &ResponseInput) -> Result<(), validator::Valid
 }
 
 /// Validates individual input items have valid content
-fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), validator::ValidationError> {
+fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), ValidationError> {
     match item {
         ResponseInputOutputItem::Message { content, .. } => {
             if content.is_empty() {
-                let mut e = validator::ValidationError::new("message_content_empty");
+                let mut e = ValidationError::new("message_content_empty");
                 e.message = Some("Message content cannot be empty".into());
                 return Err(e);
             }
         }
         ResponseInputOutputItem::SimpleInputMessage { content, .. } => match content {
             StringOrContentParts::String(s) if s.is_empty() => {
-                let mut e = validator::ValidationError::new("message_content_empty");
+                let mut e = ValidationError::new("message_content_empty");
                 e.message = Some("Message content cannot be empty".into());
                 return Err(e);
             }
             StringOrContentParts::Array(parts) if parts.is_empty() => {
-                let mut e = validator::ValidationError::new("message_content_empty");
+                let mut e = ValidationError::new("message_content_empty");
                 e.message = Some("Message content parts cannot be empty".into());
                 return Err(e);
             }
@@ -1103,31 +1144,67 @@ fn validate_input_item(item: &ResponseInputOutputItem) -> Result<(), validator::
         }
         ResponseInputOutputItem::FunctionCallOutput { output, .. } => {
             if output.is_empty() {
-                let mut e = validator::ValidationError::new("function_output_empty");
+                let mut e = ValidationError::new("function_output_empty");
                 e.message = Some("Function call output cannot be empty".into());
                 return Err(e);
             }
         }
-        _ => {}
+        ResponseInputOutputItem::FunctionToolCall { .. } => {}
+        ResponseInputOutputItem::McpApprovalRequest { .. } => {}
+        ResponseInputOutputItem::McpApprovalResponse { .. } => {}
     }
     Ok(())
 }
 
 /// Validates ResponseTool structure based on tool type
-fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), validator::ValidationError> {
-    for tool in tools {
+fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), ValidationError> {
+    // MCP server_label must be present and unique (case-insensitive).
+    let mut seen_mcp_labels: HashSet<String> = HashSet::new();
+
+    for (idx, tool) in tools.iter().enumerate() {
         match tool.r#type {
             ResponseToolType::Function => {
                 if tool.function.is_none() {
-                    let mut e = validator::ValidationError::new("function_tool_missing_function");
+                    let mut e = ValidationError::new("function_tool_missing_function");
                     e.message = Some("Function tool must have a function definition".into());
                     return Err(e);
                 }
             }
             ResponseToolType::Mcp => {
-                if tool.server_url.is_none() && tool.server_label.is_none() {
-                    let mut e = validator::ValidationError::new("mcp_tool_missing_connection_info");
-                    e.message = Some("MCP tool must have either server_url or server_label".into());
+                let Some(raw_label) = tool.server_label.as_deref().filter(|s| !s.is_empty()) else {
+                    let mut e = ValidationError::new("missing_required_parameter");
+                    e.message = Some(
+                        format!("Missing required parameter: 'tools[{idx}].server_label'.").into(),
+                    );
+                    return Err(e);
+                };
+
+                // OpenAI spec-compatible validation: require a non-empty label that starts with a
+                // letter and contains only letters, digits, '-' and '_'.
+                let valid = raw_label.starts_with(|c: char| c.is_ascii_alphabetic())
+                    && raw_label
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+                if !valid {
+                    let mut e = ValidationError::new("invalid_server_label");
+                    e.message = Some(
+                        format!(
+                            "Invalid input {raw_label}: 'server_label' must start with a letter and consist of only letters, digits, '-' and '_'"
+                        )
+                        .into(),
+                    );
+                    return Err(e);
+                }
+
+                let normalized = raw_label.to_lowercase();
+                if !seen_mcp_labels.insert(normalized) {
+                    let mut e = ValidationError::new("mcp_tool_duplicate_server_label");
+                    e.message = Some(
+                        format!(
+                            "Duplicate MCP server_label '{raw_label}' found in 'tools' parameter."
+                        )
+                        .into(),
+                    );
                     return Err(e);
                 }
             }
@@ -1138,10 +1215,10 @@ fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), validator::Vali
 }
 
 /// Validates text format configuration (JSON schema name cannot be empty)
-fn validate_text_format(text: &TextConfig) -> Result<(), validator::ValidationError> {
+fn validate_text_format(text: &TextConfig) -> Result<(), ValidationError> {
     if let Some(TextFormat::JsonSchema { name, .. }) = &text.format {
         if name.is_empty() {
-            let mut e = validator::ValidationError::new("json_schema_name_empty");
+            let mut e = ValidationError::new("json_schema_name_empty");
             e.message = Some("JSON schema name cannot be empty".into());
             return Err(e);
         }
@@ -1189,8 +1266,8 @@ pub fn generate_id(prefix: &str) -> String {
     // Generate exactly 50 hex characters (25 bytes) for the part after the underscore
     let mut bytes = [0u8; 25];
     rng.fill_bytes(&mut bytes);
-    let hex_string: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("{}_{}", prefix, hex_string)
+    let hex_string: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{prefix}_{hex_string}")
 }
 
 #[serde_with::skip_serializing_none]

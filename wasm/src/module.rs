@@ -10,6 +10,8 @@
 //! - SHA256 hashes (hex string representation)
 //! - Timestamps (ISO 8601 format for JSON output)
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
 
@@ -18,10 +20,7 @@ fn serialize_sha256_hash<S>(hash: &[u8; 32], serializer: S) -> Result<S::Ok, S::
 where
     S: Serializer,
 {
-    let hex_string = hash
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<String>();
+    let hex_string = hash.iter().map(|b| format!("{b:02x}")).collect::<String>();
     serializer.serialize_str(&hex_string)
 }
 
@@ -47,15 +46,19 @@ where
             return Err(serde::de::Error::custom("Invalid hex string format"));
         }
         let byte_str = std::str::from_utf8(chunk)
-            .map_err(|e| serde::de::Error::custom(format!("Invalid UTF-8: {}", e)))?;
+            .map_err(|e| serde::de::Error::custom(format!("Invalid UTF-8: {e}")))?;
         hash[i] = u8::from_str_radix(byte_str, 16)
-            .map_err(|e| serde::de::Error::custom(format!("Invalid hex digit: {}", e)))?;
+            .map_err(|e| serde::de::Error::custom(format!("Invalid hex digit: {e}")))?;
     }
 
     Ok(hash)
 }
 
 /// Serialize u64 timestamp (nanoseconds since epoch) as ISO 8601 string
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde serialize_with requires &T signature"
+)]
 fn serialize_timestamp<S>(timestamp: &u64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -73,7 +76,7 @@ where
         }
         None => {
             // Fallback: format manually if timestamp is out of range
-            let s = format!("{}", timestamp);
+            let s = format!("{timestamp}");
             serializer.serialize_str(&s)
         }
     }
@@ -102,7 +105,7 @@ where
             // Fallback: try to parse as u64 directly
             timestamp_str
                 .parse::<u64>()
-                .map_err(|e| serde::de::Error::custom(format!("Invalid timestamp format: {}", e)))
+                .map_err(|e| serde::de::Error::custom(format!("Invalid timestamp format: {e}")))
         }
     }
 }
@@ -160,8 +163,9 @@ pub struct WasmModuleMeta {
     // attach points for the module
     pub attach_points: Vec<WasmModuleAttachPoint>,
     // Pre-loaded WASM component bytes (loaded into memory for faster execution)
+    // Wrapped in Arc to avoid cloning full bytes on every execution request.
     #[serde(skip)]
-    pub wasm_bytes: Vec<u8>,
+    pub wasm_bytes: Arc<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -170,6 +174,10 @@ pub enum WasmModuleType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "On* prefix is the standard naming convention for middleware lifecycle hooks"
+)]
 pub enum MiddlewareAttachPoint {
     OnRequest,
     OnResponse,

@@ -58,7 +58,7 @@ pub async fn parse_function_call(
             error!("Failed to parse function calls: {}", e);
             error_response(
                 StatusCode::BAD_REQUEST,
-                &format!("Failed to parse function calls: {}", e),
+                &format!("Failed to parse function calls: {e}"),
             )
         }
     }
@@ -95,7 +95,7 @@ pub async fn parse_reasoning(ctx: &Arc<AppContext>, req: &SeparateReasoningReque
             error!("Failed to separate reasoning: {}", e);
             error_response(
                 StatusCode::BAD_REQUEST,
-                &format!("Failed to separate reasoning: {}", e),
+                &format!("Failed to separate reasoning: {e}"),
             )
         }
     }

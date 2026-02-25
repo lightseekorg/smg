@@ -110,7 +110,7 @@ impl LoadBalancingPolicy for PowerOfTwoPolicy {
 
     fn update_loads(&self, loads: &HashMap<String, isize>) {
         if let Ok(mut cached) = self.cached_loads.write() {
-            *cached = loads.clone();
+            cached.clone_from(loads);
         }
     }
 
@@ -223,6 +223,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::print_stdout, reason = "test diagnostic output")]
     fn test_reproduce_incompatible_metric_bug() {
         use std::{collections::HashMap, sync::Arc};
 
@@ -281,6 +282,7 @@ mod tests {
         );
     }
     #[test]
+    #[expect(clippy::print_stdout, reason = "test diagnostic output")]
     fn test_power_of_two_edge_cases() {
         use std::{collections::HashMap, sync::Arc};
 

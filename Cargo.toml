@@ -4,19 +4,19 @@ resolver = "2"
 
 [workspace.dependencies]
 # Internal workspace crates
-openai-protocol = { version = "1.1.0", path = "protocols" }
-reasoning-parser = { version = "1.1.0", path = "reasoning_parser" }
-tool-parser = { version = "1.1.0", path = "tool_parser" }
-wfaas = { version = "1.0.1", path = "workflow" }
-llm-tokenizer = { version = "1.1.0", path = "tokenizer" }
-smg-auth = { version = "1.1.0", path = "auth" }
-smg-mcp = { version = "2.0.0", path = "mcp" }
-kv-index = { version = "1.0.0", path = "kv_index" }
-smg-data-connector = { version = "1.1.0", path = "data_connector", package = "data-connector" }
-llm-multimodal = { version = "1.1.0", path = "multimodal" }
-smg-wasm = { version = "1.0.0", path = "wasm", package = "smg-wasm" }
-smg-mesh = { version = "1.1.0", path = "mesh", package = "smg-mesh" }
-smg-grpc-client = { version = "1.1.0", path = "grpc_client" }
+openai-protocol = { version = "1.2.0", path = "protocols" }
+reasoning-parser = { version = "1.2.0", path = "reasoning_parser" }
+tool-parser = { version = "1.1.1", path = "tool_parser" }
+wfaas = { version = "1.0.2", path = "workflow" }
+llm-tokenizer = { version = "1.2.0", path = "tokenizer" }
+smg-auth = { version = "1.1.1", path = "auth" }
+smg-mcp = { version = "2.1.0", path = "mcp" }
+kv-index = { version = "1.0.1", path = "kv_index" }
+smg-data-connector = { version = "2.0.0", path = "data_connector", package = "data-connector" }
+llm-multimodal = { version = "1.2.0", path = "multimodal" }
+smg-wasm = { version = "1.0.1", path = "wasm", package = "smg-wasm" }
+smg-mesh = { version = "1.1.1", path = "mesh", package = "smg-mesh" }
+smg-grpc-client = { version = "1.2.0", path = "grpc_client" }
 
 # Shared dependencies
 anyhow = "1.0"
@@ -45,7 +45,7 @@ thiserror = "2.0.12"
 tokio = { version = "1.42.0" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "chrono"] }
-uuid = { version = "1.10" }
+uuid = { version = "1.10", features = ["v7"] }
 wasmtime = { version = "41.0", features = ["component-model", "async"] }
 wasmtime-wasi = "41.0"
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -53,7 +53,67 @@ scopeguard = "1.2"
 bitflags = "2.10.0"
 
 [workspace.lints.rust]
+unsafe_code = "deny"
 unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+# Deny unwrap in production code (tests exempted via clippy.toml)
+unwrap_used = "deny"
+# Warn for now — promote to deny after cleanup (99 expect, 82 panic violations)
+expect_used = "warn"
+panic = "warn"
+
+# Deny debug/placeholder macros (currently zero violations)
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+
+# Print macros — use tracing instead (58 existing violations, warn for now)
+print_stdout = "warn"
+print_stderr = "warn"
+
+# Enforce #[expect] over #[allow] for better lint tracking (92 existing violations, warn for now)
+allow_attributes = "warn"
+
+# Disallowed methods (see clippy.toml for the list) — warn for now, promote after audit
+disallowed_methods = "warn"
+
+# Code quality lints — warn initially, promote to deny after cleanup
+explicit_iter_loop = "warn"
+explicit_into_iter_loop = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"
+manual_assert = "warn"
+manual_string_new = "warn"
+inconsistent_struct_constructor = "warn"
+needless_raw_string_hashes = "warn"
+cloned_instead_of_copied = "warn"
+inefficient_to_string = "warn"
+assigning_clones = "warn"
+stable_sort_primitive = "warn"
+unnecessary_wraps = "warn"
+unused_self = "warn"
+unused_async = "warn"
+if_not_else = "warn"
+match_bool = "warn"
+match_wildcard_for_single_variants = "warn"
+trivially_copy_pass_by_ref = "warn"
+or_fun_call = "warn"
+ignored_unit_patterns = "warn"
+ref_option = "warn"
+large_futures = "warn"
+
+# Import hygiene
+single_component_path_imports = "warn"
+absolute_paths = "warn"
+
+# These pedantic lints are explicitly allowed to give authors discretion
+default_trait_access = "allow"
+match_same_arms = "allow"
+must_use_candidate = "allow"
+single_match_else = "allow"
+doc_lazy_continuation = "allow"
 
 [profile.release]
 opt-level = "z"     # Optimize for size

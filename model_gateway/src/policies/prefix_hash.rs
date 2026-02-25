@@ -71,7 +71,7 @@ enum Branch {
 
 impl Branch {
     #[inline]
-    const fn as_str(&self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::NoHealthyWorkers => "no_healthy_workers",
             Self::NoTokens => "no_tokens",
@@ -151,7 +151,7 @@ impl PrefixHashPolicy {
         // Use pre-computed ring if available
         if let Some(ref ring) = info.hash_ring {
             // Convert prefix hash to a ring key string for lookup
-            let key = format!("{:016x}", prefix_hash);
+            let key = format!("{prefix_hash:016x}");
 
             // Build URL to (index, worker) map for healthy workers
             let healthy_url_map: std::collections::HashMap<&str, (usize, &Arc<dyn Worker>)> =
@@ -301,8 +301,7 @@ mod tests {
 
         assert!(
             distribution.len() > 1,
-            "Should distribute across workers, got {:?}",
-            distribution
+            "Should distribute across workers, got {distribution:?}",
         );
     }
 

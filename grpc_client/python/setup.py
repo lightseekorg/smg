@@ -2,6 +2,7 @@
 Custom setup.py to generate protobuf stubs at build time.
 The generated files are NOT committed to git — they're created fresh during pip install.
 """
+
 from pathlib import Path
 
 from setuptools import setup
@@ -16,9 +17,7 @@ def compile_grpc_protos():
     output_dir = package_dir / "smg_grpc_proto" / "generated"
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "__init__.py").write_text(
-        '"""Auto-generated protobuf stubs. Do not edit."""\n'
-    )
+    (output_dir / "__init__.py").write_text('"""Auto-generated protobuf stubs. Do not edit."""\n')
 
     proto_files = list(proto_dir.glob("*.proto"))
     if not proto_files:
@@ -26,10 +25,10 @@ def compile_grpc_protos():
 
     # Use grpc_tools.protoc Python API (same approach as vLLM)
     try:
-        from grpc_tools import protoc
-
         # Include well-known types (google/protobuf/*.proto) shipped with grpc_tools
         import grpc_tools
+        from grpc_tools import protoc
+
         well_known_protos = Path(grpc_tools.__file__).parent / "_proto"
 
         args = [
@@ -48,9 +47,7 @@ def compile_grpc_protos():
             raise RuntimeError(f"protoc returned non-zero exit code: {result}")
 
     except ImportError:
-        raise RuntimeError(
-            "grpcio-tools not installed. Install with: pip install grpcio-tools"
-        )
+        raise RuntimeError("grpcio-tools not installed. Install with: pip install grpcio-tools")
 
     # Fix imports in generated files (grpcio-tools generates absolute imports)
     # Also add mypy ignore-errors comment for generated code
@@ -62,9 +59,7 @@ def compile_grpc_protos():
         # Fix imports to be relative
         for proto_file in proto_files:
             module_name = proto_file.stem + "_pb2"
-            content = content.replace(
-                f"import {module_name}", f"from . import {module_name}"
-            )
+            content = content.replace(f"import {module_name}", f"from . import {module_name}")
 
         # Add mypy ignore-errors if not already present
         if not content.startswith("# mypy:"):
@@ -78,9 +73,7 @@ def compile_grpc_protos():
         if not content.startswith("# mypy:"):
             pyi_file.write_text(mypy_header + content)
 
-    generated_count = len(list(output_dir.glob("*.py"))) + len(
-        list(output_dir.glob("*.pyi"))
-    )
+    generated_count = len(list(output_dir.glob("*.py"))) + len(list(output_dir.glob("*.pyi")))
     print(f"Generated {generated_count} files (including type stubs)")
 
 
