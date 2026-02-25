@@ -360,13 +360,13 @@ impl ConversationStorage for OracleConversationStorage {
                 }
 
                 // Append extra columns from hooks or defaults
-                let (extra_names, extra_values): (Vec<&str>, Vec<Option<String>>) =
-                    resolve_extra_column_values(s, &hook_extra)
-                        .into_iter()
-                        .unzip();
-                for (i, name) in extra_names.iter().enumerate() {
+                let extra_cols: Vec<(&str, Option<String>)> =
+                    resolve_extra_column_values(s, &hook_extra);
+                for (name, _) in &extra_cols {
                     columns.push(name);
-                    params.push(&extra_values[i]);
+                }
+                for (_, val) in &extra_cols {
+                    params.push(val);
                 }
 
                 let placeholders: Vec<String> =
@@ -456,9 +456,44 @@ impl ConversationStorage for OracleConversationStorage {
                 let s = &schema.conversations;
                 let table = s.qualified_table(schema.owner.as_deref());
                 let col_id = s.col("id");
-                let col_meta = s.col("metadata");
-                let col_created = s.col("created_at");
 
+                if s.is_skipped("metadata") {
+                    // Nothing to update — just verify the row exists
+                    let sql = format!("SELECT 1 FROM {table} WHERE {col_id} = :1");
+                    let count: i64 = conn
+                        .query_row_as(&sql, &[&id_str])
+                        .map_err(map_oracle_error)?;
+                    return if count > 0 {
+                        Ok(Some(Conversation::with_parts(
+                            conversation_id,
+                            Utc::now(),
+                            metadata,
+                        )))
+                    } else {
+                        Ok(None)
+                    };
+                }
+
+                let col_meta = s.col("metadata");
+
+                if s.is_skipped("created_at") {
+                    let sql = format!("UPDATE {table} SET {col_meta} = :1 WHERE {col_id} = :2");
+                    let stmt = conn
+                        .execute(&sql, &[&metadata_json, &id_str])
+                        .map_err(map_oracle_error)?;
+                    let rows = stmt.row_count().map_err(map_oracle_error)?;
+                    return if rows == 0 {
+                        Ok(None)
+                    } else {
+                        Ok(Some(Conversation::with_parts(
+                            conversation_id,
+                            Utc::now(),
+                            metadata,
+                        )))
+                    };
+                }
+
+                let col_created = s.col("created_at");
                 let sql = format!(
                     "UPDATE {table} SET {col_meta} = :1 \
                      WHERE {col_id} = :2 \
@@ -681,13 +716,13 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                 }
 
                 // Append extra columns from hooks or defaults
-                let (extra_names, extra_values): (Vec<&str>, Vec<Option<String>>) =
-                    resolve_extra_column_values(si, &hook_extra)
-                        .into_iter()
-                        .unzip();
-                for (i, name) in extra_names.iter().enumerate() {
+                let extra_cols: Vec<(&str, Option<String>)> =
+                    resolve_extra_column_values(si, &hook_extra);
+                for (name, _) in &extra_cols {
                     columns.push(name);
-                    params.push(&extra_values[i]);
+                }
+                for (_, val) in &extra_cols {
+                    params.push(val);
                 }
 
                 let placeholders: Vec<String> =
@@ -737,13 +772,13 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                 ];
                 let mut params: Vec<&dyn ToSql> = vec![&cid, &iid, &added_at];
 
-                let (extra_names, extra_values): (Vec<&str>, Vec<Option<String>>) =
-                    resolve_extra_column_values(sl, &hook_extra)
-                        .into_iter()
-                        .unzip();
-                for (i, name) in extra_names.iter().enumerate() {
+                let extra_cols: Vec<(&str, Option<String>)> =
+                    resolve_extra_column_values(sl, &hook_extra);
+                for (name, _) in &extra_cols {
                     columns.push(name);
-                    params.push(&extra_values[i]);
+                }
+                for (_, val) in &extra_cols {
+                    params.push(val);
                 }
 
                 let placeholders: Vec<String> =
@@ -1144,23 +1179,27 @@ impl OracleResponseStorage {
             Self::remove_user_id_column_if_exists(conn, schema)?;
         }
 
-        let prev = s.col("previous_response_id");
-        let prev_idx = format!("{}_PREV_IDX", s.table);
-        create_index_if_missing(
-            conn,
-            &s.table,
-            &prev_idx,
-            &format!("CREATE INDEX {prev_idx} ON {table}({prev})"),
-        )?;
+        if !s.is_skipped("previous_response_id") {
+            let prev = s.col("previous_response_id");
+            let prev_idx = format!("{}_PREV_IDX", s.table);
+            create_index_if_missing(
+                conn,
+                &s.table,
+                &prev_idx,
+                &format!("CREATE INDEX {prev_idx} ON {table}({prev})"),
+            )?;
+        }
 
-        let safety = s.col("safety_identifier");
-        let user_idx = format!("{}_USER_IDX", s.table);
-        create_index_if_missing(
-            conn,
-            &s.table,
-            &user_idx,
-            &format!("CREATE INDEX {user_idx} ON {table}({safety})"),
-        )?;
+        if !s.is_skipped("safety_identifier") {
+            let safety = s.col("safety_identifier");
+            let user_idx = format!("{}_USER_IDX", s.table);
+            create_index_if_missing(
+                conn,
+                &s.table,
+                &user_idx,
+                &format!("CREATE INDEX {user_idx} ON {table}({safety})"),
+            )?;
+        }
 
         Ok(())
     }
@@ -1408,13 +1447,13 @@ impl ResponseStorage for OracleResponseStorage {
                 }
 
                 // Append extra columns from hooks or defaults
-                let (extra_names, extra_values): (Vec<&str>, Vec<Option<String>>) =
-                    resolve_extra_column_values(s, &hook_extra)
-                        .into_iter()
-                        .unzip();
-                for (i, name) in extra_names.iter().enumerate() {
+                let extra_cols: Vec<(&str, Option<String>)> =
+                    resolve_extra_column_values(s, &hook_extra);
+                for (name, _) in &extra_cols {
                     columns.push(name);
-                    params.push(&extra_values[i]);
+                }
+                for (_, val) in &extra_cols {
+                    params.push(val);
                 }
 
                 let placeholders: Vec<String> =

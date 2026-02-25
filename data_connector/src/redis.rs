@@ -203,8 +203,6 @@ impl ConversationStorage for RedisConversationStorage {
         metadata: Option<ConversationMetadata>,
     ) -> Result<Option<Conversation>, ConversationStorageError> {
         let s = &self.store.schema.conversations;
-        let col_meta = s.col("metadata");
-        let col_created = s.col("created_at");
 
         let id_str = id.0.as_str();
         let key = self.conversation_key(id_str);
@@ -223,25 +221,33 @@ impl ConversationStorage for RedisConversationStorage {
             return Ok(None);
         }
 
-        let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
+        if !s.is_skipped("metadata") {
+            let col_meta = s.col("metadata");
+            let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
 
-        if let Some(meta) = metadata_json {
-            conn.hset::<_, _, _, ()>(&key, col_meta, meta)
-                .await
-                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
-        } else {
-            conn.hdel::<_, _, ()>(&key, col_meta)
-                .await
-                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            if let Some(meta) = metadata_json {
+                conn.hset::<_, _, _, ()>(&key, col_meta, meta)
+                    .await
+                    .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            } else {
+                conn.hdel::<_, _, ()>(&key, col_meta)
+                    .await
+                    .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            }
         }
 
-        let created_at_str: String = conn
-            .hget(&key, col_created)
-            .await
-            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
-        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?
-            .with_timezone(&Utc);
+        let created_at = if s.is_skipped("created_at") {
+            Utc::now()
+        } else {
+            let col_created = s.col("created_at");
+            let created_at_str: String = conn
+                .hget(&key, col_created)
+                .await
+                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            DateTime::parse_from_rfc3339(&created_at_str)
+                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?
+                .with_timezone(&Utc)
+        };
 
         Ok(Some(Conversation::with_parts(
             id.clone(),

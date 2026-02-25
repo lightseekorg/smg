@@ -140,13 +140,12 @@ impl ConversationStorage for PostgresConversationStorage {
 
         // Append extra columns from hooks or defaults
         let hook_extra = current_extra_columns().unwrap_or_default();
-        let (extra_names, extra_values): (Vec<&str>, Vec<Option<String>>) =
-            resolve_extra_column_values(s, &hook_extra)
-                .into_iter()
-                .unzip();
-        for (i, name) in extra_names.iter().enumerate() {
+        let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(s, &hook_extra);
+        for (name, _) in &extra_cols {
             col_names.push(name);
-            params.push(&extra_values[i]);
+        }
+        for (_, val) in &extra_cols {
+            params.push(val);
         }
 
         let placeholders: String = (1..=params.len())
@@ -230,17 +229,9 @@ impl ConversationStorage for PostgresConversationStorage {
         id: &ConversationId,
         metadata: Option<ConversationMetadata>,
     ) -> Result<Option<Conversation>, ConversationStorageError> {
-        let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
-
         let s = &self.store.schema.conversations;
         let table = s.qualified_table(self.store.schema.owner.as_deref());
         let col_id = s.col("id");
-        let col_meta = s.col("metadata");
-        let col_created = s.col("created_at");
-
-        let sql = format!(
-            "UPDATE {table} SET {col_meta} = $1 WHERE {col_id} = $2 RETURNING {col_created}"
-        );
 
         let client = self
             .store
@@ -248,15 +239,55 @@ impl ConversationStorage for PostgresConversationStorage {
             .get()
             .await
             .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
-        let rows = client
-            .query(&sql, &[&metadata_json, &id.0.as_str()])
-            .await
-            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
-        if rows.is_empty() {
-            return Ok(None);
+
+        if s.is_skipped("metadata") {
+            // Nothing to update — just verify the row exists
+            let sql = format!("SELECT 1 FROM {table} WHERE {col_id} = $1");
+            let rows = client
+                .query(&sql, &[&id.0.as_str()])
+                .await
+                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            if rows.is_empty() {
+                return Ok(None);
+            }
+            let created_at = Utc::now();
+            return Ok(Some(Conversation::with_parts(
+                ConversationId(id.0.clone()),
+                created_at,
+                metadata,
+            )));
         }
-        let row = &rows[0];
-        let created_at: DateTime<Utc> = row.get(col_created);
+
+        let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
+        let col_meta = s.col("metadata");
+
+        let (sql, created_at) = if s.is_skipped("created_at") {
+            let sql = format!("UPDATE {table} SET {col_meta} = $1 WHERE {col_id} = $2");
+            let rows_affected = client
+                .execute(&sql, &[&metadata_json, &id.0.as_str()])
+                .await
+                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            if rows_affected == 0 {
+                return Ok(None);
+            }
+            (sql, Utc::now())
+        } else {
+            let col_created = s.col("created_at");
+            let sql = format!(
+                "UPDATE {table} SET {col_meta} = $1 WHERE {col_id} = $2 RETURNING {col_created}"
+            );
+            let rows = client
+                .query(&sql, &[&metadata_json, &id.0.as_str()])
+                .await
+                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            if rows.is_empty() {
+                return Ok(None);
+            }
+            let created_at: DateTime<Utc> = rows[0].get(col_created);
+            (sql, created_at)
+        };
+        drop(sql);
+
         Ok(Some(Conversation::with_parts(
             ConversationId(id.0.clone()),
             created_at,
@@ -402,13 +433,12 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
 
         // Append extra columns from hooks or defaults
         let hook_extra = current_extra_columns().unwrap_or_default();
-        let (extra_names, extra_values): (Vec<&str>, Vec<Option<String>>) =
-            resolve_extra_column_values(si, &hook_extra)
-                .into_iter()
-                .unzip();
-        for (i, name) in extra_names.iter().enumerate() {
+        let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(si, &hook_extra);
+        for (name, _) in &extra_cols {
             col_names.push(name);
-            params.push(&extra_values[i]);
+        }
+        for (_, val) in &extra_cols {
+            params.push(val);
         }
 
         let placeholders: String = (1..=params.len())
@@ -460,13 +490,12 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
 
         // Append extra columns from hooks or defaults
         let hook_extra = current_extra_columns().unwrap_or_default();
-        let (extra_names, extra_values): (Vec<&str>, Vec<Option<String>>) =
-            resolve_extra_column_values(sl, &hook_extra)
-                .into_iter()
-                .unzip();
-        for (i, name) in extra_names.iter().enumerate() {
+        let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(sl, &hook_extra);
+        for (name, _) in &extra_cols {
             col_names.push(name);
-            params.push(&extra_values[i]);
+        }
+        for (_, val) in &extra_cols {
+            params.push(val);
         }
 
         let placeholders: String = (1..=params.len())
@@ -830,10 +859,12 @@ impl PostgresResponseStorage {
             "CREATE TABLE IF NOT EXISTS {table} ({});",
             col_defs.join(", "),
         );
-        ddl.push_str(&format!(
-            "\nCREATE INDEX IF NOT EXISTS responses_safety_idx ON {table} ({});",
-            s.col("safety_identifier")
-        ));
+        if !s.is_skipped("safety_identifier") {
+            ddl.push_str(&format!(
+                "\nCREATE INDEX IF NOT EXISTS responses_safety_idx ON {table} ({});",
+                s.col("safety_identifier")
+            ));
+        }
 
         let client = store
             .pool
@@ -1014,13 +1045,12 @@ impl ResponseStorage for PostgresResponseStorage {
 
         // Append extra columns from hooks or defaults
         let hook_extra = current_extra_columns().unwrap_or_default();
-        let (extra_names, extra_values): (Vec<&str>, Vec<Option<String>>) =
-            resolve_extra_column_values(s, &hook_extra)
-                .into_iter()
-                .unzip();
-        for (i, name) in extra_names.iter().enumerate() {
+        let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(s, &hook_extra);
+        for (name, _) in &extra_cols {
             col_names.push(name);
-            params.push(&extra_values[i]);
+        }
+        for (_, val) in &extra_cols {
+            params.push(val);
         }
 
         let placeholders: String = (1..=params.len())

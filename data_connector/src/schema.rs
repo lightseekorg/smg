@@ -157,11 +157,10 @@ impl SchemaConfig {
                     tc.extra_columns.insert(key.to_ascii_uppercase(), def);
                 }
             }
-            // Uppercase skip column names so they match Oracle's uppercase catalog.
-            let skip: Vec<String> = tc.skip_columns.drain().collect();
-            for name in skip {
-                tc.skip_columns.insert(name.to_ascii_uppercase());
-            }
+            // NOTE: skip_columns are NOT uppercased. They are logical field
+            // names used in is_skipped() checks throughout the backends, and
+            // callers always pass lowercase literals (e.g. "safety_identifier").
+            // Uppercasing them would break the case-sensitive HashSet lookup.
         }
     }
 
@@ -253,6 +252,9 @@ const MAX_SQL_TYPE_LEN: usize = 64;
 /// alphanumeric, underscore, space, parentheses, comma, period.
 /// Examples: `VARCHAR(128)`, `TIMESTAMP WITH TIME ZONE`, `NUMBER(10,2)`.
 fn validate_sql_type(sql_type: &str) -> Result<(), String> {
+    if sql_type.trim().is_empty() {
+        return Err("sql_type must not be whitespace-only".to_string());
+    }
     if sql_type.len() > MAX_SQL_TYPE_LEN {
         return Err(format!(
             "sql_type '{sql_type}' exceeds maximum length of {MAX_SQL_TYPE_LEN} characters"
@@ -654,14 +656,15 @@ mod tests {
     }
 
     #[test]
-    fn uppercase_for_oracle_converts_skip_column_names() {
+    fn uppercase_for_oracle_preserves_skip_column_names_lowercase() {
         let mut cfg = SchemaConfig::default();
         cfg.responses
             .skip_columns
             .insert("safety_identifier".to_string());
         cfg.uppercase_for_oracle();
-        assert!(cfg.responses.skip_columns.contains("SAFETY_IDENTIFIER"));
-        assert!(!cfg.responses.skip_columns.contains("safety_identifier"));
+        // skip_columns must stay lowercase — backends call is_skipped("safety_identifier")
+        assert!(cfg.responses.skip_columns.contains("safety_identifier"));
+        assert!(!cfg.responses.skip_columns.contains("SAFETY_IDENTIFIER"));
     }
 
     // ── Serde roundtrip with extra_columns and skip_columns ──────────────

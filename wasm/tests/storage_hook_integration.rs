@@ -97,11 +97,7 @@ async fn create_conversation_adds_created_by_from_context() -> TestResult {
 
     let payload = json!({});
     let result = hook
-        .before(
-            StorageOperation::CreateConversation,
-            Some(&ctx),
-            &payload,
-        )
+        .before(StorageOperation::CreateConversation, Some(&ctx), &payload)
         .await?;
 
     match result {

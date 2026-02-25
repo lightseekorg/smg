@@ -47,7 +47,7 @@ fi
 
 # Check if the file is already a component
 echo "Checking WASM file format..."
-if wasm-tools print "$WASM_MODULE" 2>/dev/null | grep -q "^(\s*component"; then
+if wasm-tools print "$WASM_MODULE" 2>/dev/null | grep -q "^([[:space:]]*component"; then
     echo "WASM file is already in component format"
     cp "$WASM_MODULE" "$WASM_COMPONENT"
 else
