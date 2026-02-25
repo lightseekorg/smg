@@ -447,8 +447,8 @@ class TestSglangWorkerLauncher:
         assert "--enable-cache-report" not in cmd
 
     def test_build_command_http_mode_with_token_usage_details(self):
-        """When connection_mode is http and enable_token_usage_details is True,"""
-        """--enable-cache-report should be present."""
+        """When connection_mode is http and enable_token_usage_details is True,
+        --enable-cache-report should be present."""
         launcher = SglangWorkerLauncher()
         args = argparse.Namespace(
             model_path="/tmp/model", connection_mode="http", enable_token_usage_details=True
@@ -530,8 +530,8 @@ class TestVllmWorkerLauncher:
         assert "--enable-prompt-tokens-details" not in cmd
 
     def test_build_command_http_mode_with_token_usage_details(self):
-        """When connection_mode is http and enable_token_usage_details is True,"""
-        """--enable-prompt-tokens-details should be present."""
+        """When connection_mode is http and enable_token_usage_details is True,
+        --enable-prompt-tokens-details should be present."""
         launcher = VllmWorkerLauncher()
         args = argparse.Namespace(
             model="/tmp/model", connection_mode="http", enable_token_usage_details=True
