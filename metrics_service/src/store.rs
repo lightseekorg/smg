@@ -30,9 +30,13 @@ impl MetricsStore {
             let current = entry.value();
 
             // 1. Monotonic sequence number check for the same source.
-            // seq_no = 0 means "unset" — always treated as older than any real seq (1+).
-            if new_snapshot.source == current.source && new_snapshot.seq_no <= current.seq_no {
-                return; // Ignore older or unset updates from the same source
+            // seq_no = 0 means "unset" — the store auto-assigns; skip the check.
+            // For explicit seq numbers (> 0), reject anything that isn't strictly newer.
+            if new_snapshot.source == current.source
+                && new_snapshot.seq_no > 0
+                && new_snapshot.seq_no <= current.seq_no
+            {
+                return; // Ignore stale explicit-seq updates from the same source
             }
 
             // 2. Source priority check
@@ -122,9 +126,10 @@ mod tests {
         // First update — gets seq_no 1
         store.update(snap("http://w1", MetricSource::Piggyback, 3));
 
-        // Manually craft an "older" snapshot by injecting a low seq_no
+        // Craft a stale snapshot: seq_no = 1 equals the current stored seq_no (1),
+        // so it satisfies `> 0 && <= current.seq_no` and gets rejected.
         let mut old = snap("http://w1", MetricSource::Piggyback, 99);
-        old.seq_no = 0; // explicit seq_no = 0 < current 1 → should be rejected
+        old.seq_no = 1; // explicit seq_no = 1 == current (1) → rejected
         store.update(old);
 
         // Value should still be 3
