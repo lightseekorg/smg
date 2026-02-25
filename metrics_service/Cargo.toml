@@ -19,7 +19,7 @@ name = "metrics_service"
 
 [dependencies]
 dashmap.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 futures.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }
