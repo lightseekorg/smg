@@ -1,0 +1,90 @@
+package smg:storage;
+
+/// Shared types for storage hook interfaces.
+interface storage-hook-types {
+    /// A key-value entry from the request context.
+    record context-entry {
+        key: string,
+        value: string,
+    }
+
+    /// Identifies which storage operation is being hooked.
+    enum operation {
+        create-conversation,
+        get-conversation,
+        update-conversation,
+        delete-conversation,
+        create-item,
+        link-item,
+        list-items,
+        get-item,
+        is-item-linked,
+        delete-item,
+        store-response,
+        get-response,
+        delete-response,
+        get-response-chain,
+        list-identifier-responses,
+        delete-identifier-responses,
+    }
+
+    /// An extra column name-value pair to persist alongside core data.
+    record extra-column {
+        name: string,
+        value: string,
+    }
+
+    /// Result from a before-hook.
+    variant before-result {
+        /// Continue with the operation, optionally providing extra columns.
+        do-continue(list<extra-column>),
+        /// Reject the operation with a reason.
+        reject(string),
+    }
+}
+
+/// Before-hook interface: called before a storage operation executes.
+interface storage-hook-before {
+    use storage-hook-types.{context-entry, operation, before-result};
+
+    /// Called before a storage operation.
+    ///
+    /// `op` identifies the operation.
+    /// `context` contains request-scoped key-value pairs (e.g. tenant ID).
+    /// `payload` is the JSON-serialised operation arguments.
+    ///
+    /// Return `do-continue` to proceed (with optional extra columns)
+    /// or `reject` to abort.
+    before: func(
+        op: operation,
+        context: list<context-entry>,
+        payload: string,
+    ) -> before-result;
+}
+
+/// After-hook interface: called after a storage operation succeeds.
+interface storage-hook-after {
+    use storage-hook-types.{context-entry, operation, extra-column};
+
+    /// Called after a storage operation completes successfully.
+    ///
+    /// `op` identifies the operation.
+    /// `context` contains request-scoped key-value pairs.
+    /// `payload` is the original JSON arguments.
+    /// `result-json` is the JSON-serialised operation result.
+    /// `extra` contains extra columns from the before-hook.
+    ///
+    /// Returns (possibly modified) extra columns.
+    after: func(
+        op: operation,
+        context: list<context-entry>,
+        payload: string,
+        result-json: string,
+        extra: list<extra-column>,
+    ) -> list<extra-column>;
+}
+
+world storage-hook {
+    export storage-hook-before;
+    export storage-hook-after;
+}
