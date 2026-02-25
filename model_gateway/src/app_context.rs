@@ -446,8 +446,12 @@ impl AppContextBuilder {
                 let bytes = tokio::fs::read(path)
                     .await
                     .map_err(|e| format!("failed to read WASM storage hook at {path}: {e}"))?;
-                let wasm_hook = smg_wasm::WasmStorageHook::new(&bytes)
-                    .map_err(|e| format!("failed to compile WASM storage hook at {path}: {e}"))?;
+                let wasm_hook = tokio::task::spawn_blocking(move || {
+                    smg_wasm::WasmStorageHook::new(&bytes)
+                })
+                .await
+                .map_err(|e| format!("WASM compilation task panicked: {e}"))?
+                .map_err(|e| format!("failed to compile WASM storage hook at {path}: {e}"))?;
                 debug!("loaded WASM storage hook from {path}");
                 Some(Arc::new(wasm_hook))
             }

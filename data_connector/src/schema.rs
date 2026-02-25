@@ -208,8 +208,20 @@ impl SchemaConfig {
                 .map_err(|e| format!("{label}.extra_columns['{name}'].sql_type: {e}"))?;
         }
 
-        // Detect case-insensitive collisions (e.g. "tenant_id" and "TENANT_ID"
-        // would collide after uppercase_for_oracle)
+        // Reject extra_columns that shadow core column names (case-insensitive,
+        // since Oracle normalizes to uppercase)
+        let core = core_columns_for(label);
+        for name in tc.extra_columns.keys() {
+            let upper = name.to_ascii_uppercase();
+            if core.iter().any(|c| c.to_ascii_uppercase() == upper) {
+                return Err(format!(
+                    "{label}.extra_columns: '{name}' shadows a core column name"
+                ));
+            }
+        }
+
+        // Detect case-insensitive collisions between extra_columns keys
+        // (e.g. "tenant_id" and "TENANT_ID" would collide after uppercase_for_oracle)
         let mut folded: HashSet<String> = HashSet::new();
         for name in tc.extra_columns.keys() {
             let upper = name.to_ascii_uppercase();
@@ -231,6 +243,39 @@ impl SchemaConfig {
         }
 
         Ok(())
+    }
+}
+
+/// Core logical column names for each table, used by validation to reject
+/// `extra_columns` that would shadow built-in fields.
+fn core_columns_for(label: &str) -> &'static [&'static str] {
+    match label {
+        "conversations" => &["id", "created_at", "metadata"],
+        "responses" => &[
+            "id",
+            "conversation_id",
+            "previous_response_id",
+            "input",
+            "instructions",
+            "output",
+            "tool_calls",
+            "metadata",
+            "created_at",
+            "safety_identifier",
+            "model",
+            "raw_response",
+        ],
+        "conversation_items" => &[
+            "id",
+            "response_id",
+            "item_type",
+            "role",
+            "content",
+            "status",
+            "created_at",
+        ],
+        "conversation_item_links" => &["conversation_id", "item_id", "added_at"],
+        _ => &[],
     }
 }
 
@@ -699,6 +744,38 @@ mod tests {
         let json = serde_json::to_string(&cfg).expect("serialize");
         let restored: SchemaConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(cfg, restored);
+    }
+
+    #[test]
+    fn validate_rejects_extra_column_shadowing_core_column() {
+        let mut cfg = SchemaConfig::default();
+        cfg.responses.extra_columns.insert(
+            "CREATED_AT".to_string(),
+            ColumnDef {
+                sql_type: "TIMESTAMP".to_string(),
+                default_value: None,
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("shadows a core column"),
+            "unexpected: {err}"
+        );
+
+        // Also check a conversation core column
+        let mut cfg2 = SchemaConfig::default();
+        cfg2.conversations.extra_columns.insert(
+            "metadata".to_string(),
+            ColumnDef {
+                sql_type: "TEXT".to_string(),
+                default_value: None,
+            },
+        );
+        let err2 = cfg2.validate().unwrap_err();
+        assert!(
+            err2.contains("shadows a core column"),
+            "unexpected: {err2}"
+        );
     }
 
     #[test]

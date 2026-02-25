@@ -194,10 +194,12 @@ impl StorageHook for WasmStorageHook {
         let result = bindings
             .smg_storage_storage_hook_before()
             .call_before(&mut store, wit_op, &wit_ctx, &payload_str)
-            .await
-            .map_err(|e| HookError::Internal(format!("WASM before() call failed: {e}")))?;
+            .await;
 
         ticker.abort();
+
+        let result =
+            result.map_err(|e| HookError::Internal(format!("WASM before() call failed: {e}")))?;
 
         match result {
             WitBeforeResult::DoContinue(extra_cols) => Ok(BeforeHookResult::Continue(
@@ -248,10 +250,12 @@ impl StorageHook for WasmStorageHook {
                 &result_str,
                 &wit_extra,
             )
-            .await
-            .map_err(|e| HookError::Internal(format!("WASM after() call failed: {e}")))?;
+            .await;
 
         ticker.abort();
+
+        let updated =
+            updated.map_err(|e| HookError::Internal(format!("WASM after() call failed: {e}")))?;
 
         Ok(from_wit_extra_columns(updated))
     }
