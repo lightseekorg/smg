@@ -87,6 +87,8 @@ def _load(category: str) -> list[dict]:
         return []
 
 
+# Safe without a lock: pytest_generate_tests runs during collection,
+# which is single-threaded even under pytest-parallel (--tests-per-worker N).
 _cases_cache: list[dict] | None = None
 
 
