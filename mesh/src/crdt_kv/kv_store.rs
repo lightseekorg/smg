@@ -59,25 +59,6 @@ impl KvStore {
         self.store.contains_key(key)
     }
 
-    // /// Get number of key-value pairs
-    // pub fn len(&self) -> usize {
-    //     self.store.len()
-    // }
-
-    // /// Check if storage is empty
-    // pub fn is_empty(&self) -> bool {
-    //     self.store.is_empty()
-    // }
-
-    // /// Clear all data
-    // pub fn clear(&self) {
-    //     self.store.clear();
-    // }
-
-    // /// Get all keys
-    // pub fn keys(&self) -> Vec<String> {
-    //     self.store.iter().map(|entry| entry.key().clone()).collect()
-    // }
 
     /// Get all key-value pairs as a BTreeMap
     pub fn all(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
