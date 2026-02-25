@@ -26,20 +26,25 @@ def append_result(result: dict[str, Any]) -> None:
 
 def set_run_dir(path: Path) -> None:
     global _run_dir
-    _run_dir = path
+    with _results_lock:
+        if _run_dir is None:
+            _run_dir = path
 
 
 def write_summary_if_needed() -> None:
     """Write summary.json — called from fixtures/hooks.py at session end."""
     from .evaluator import save_summary
 
-    if not _all_results or _run_dir is None:
+    with _results_lock:
+        results = list(_all_results)
+        run_dir = _run_dir
+    if not results or run_dir is None:
         return
-    summary = save_summary(_run_dir, _all_results)
+    summary = save_summary(run_dir, results)
     logger.info(
         "BFCL summary: %d/%d passed (%.1f%%) — %s/summary.json",
         summary["passed"],
         summary["total"],
         summary["accuracy_pct"],
-        _run_dir,
+        run_dir,
     )
