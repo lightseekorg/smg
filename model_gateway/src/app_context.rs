@@ -495,12 +495,6 @@ impl AppContextBuilder {
         self
     }
 
-    /// Create worker registry
-    fn with_worker_registry(mut self) -> Self {
-        self.worker_registry = Some(Arc::new(WorkerRegistry::new()));
-        self
-    }
-
     /// Create policy registry, optionally wiring a MetricsStore for the MetricsDriven policy
     fn with_policy_registry(
         mut self,
