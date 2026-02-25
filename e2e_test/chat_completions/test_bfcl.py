@@ -36,7 +36,6 @@ from typing import Any
 
 import openai
 import pytest
-
 from bfcl import (
     bfcl_to_openai_tools,
     evaluate_tool_calls,
