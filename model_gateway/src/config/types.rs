@@ -90,6 +90,10 @@ pub struct RouterConfig {
     /// Enable WASM support
     #[serde(default)]
     pub enable_wasm: bool,
+    /// Path to a WASM component implementing storage hooks.
+    /// When set, wraps all storage backends with hook-based interceptors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_hook_wasm_path: Option<String>,
 }
 
 /// Tokenizer cache configuration
@@ -539,6 +543,7 @@ impl Default for RouterConfig {
             ca_certificates: vec![],
             mcp_config: None,
             enable_wasm: false,
+            storage_hook_wasm_path: None,
             server_cert: None,
             server_key: None,
         }

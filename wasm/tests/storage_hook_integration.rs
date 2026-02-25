@@ -1,0 +1,175 @@
+//! Integration tests for WasmStorageHook using a compiled WASM guest component.
+//!
+//! These tests load the pre-built `wasm-guest-storage-hook` example and verify
+//! the full host↔guest round-trip: Rust types → WIT types → WASM execution →
+//! WIT types → Rust types.
+//!
+//! Run with: `cargo test -p smg-wasm --features storage-hooks`
+
+#![cfg(feature = "storage-hooks")]
+
+use std::collections::HashMap;
+
+use serde_json::json;
+use smg_data_connector::{
+    context::RequestContext,
+    hooks::{BeforeHookResult, ExtraColumns, StorageHook, StorageOperation},
+};
+use smg_wasm::WasmStorageHook;
+
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+/// Load the pre-built WASM guest fixture.
+fn load_hook() -> Result<WasmStorageHook, Box<dyn std::error::Error>> {
+    let wasm_bytes = include_bytes!("fixtures/storage_hook_guest.wasm");
+    Ok(WasmStorageHook::new(wasm_bytes)?)
+}
+
+// ── StoreResponse tests ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn store_response_with_tenant_id_continues_with_extra_columns() -> TestResult {
+    let hook = load_hook()?;
+
+    let mut ctx_data = HashMap::new();
+    ctx_data.insert("tenant_id".into(), "acme-corp".into());
+    ctx_data.insert("user_id".into(), "user_42".into());
+    let ctx = RequestContext::with_data(ctx_data);
+
+    let payload = json!({"id": "resp_123"});
+    let result = hook
+        .before(StorageOperation::StoreResponse, Some(&ctx), &payload)
+        .await?;
+
+    match result {
+        BeforeHookResult::Continue(extra) => {
+            assert_eq!(
+                extra.get("TENANT_ID").and_then(|v| v.as_str()),
+                Some("acme-corp"),
+                "TENANT_ID should come from context"
+            );
+            assert_eq!(
+                extra.get("STORED_BY").and_then(|v| v.as_str()),
+                Some("user_42"),
+                "STORED_BY should come from user_id in context"
+            );
+        }
+        BeforeHookResult::Reject(reason) => {
+            panic!("expected Continue, got Reject: {reason}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn store_response_without_tenant_id_is_rejected() -> TestResult {
+    let hook = load_hook()?;
+
+    let payload = json!({"id": "resp_123"});
+    let result = hook
+        .before(StorageOperation::StoreResponse, None, &payload)
+        .await?;
+
+    match result {
+        BeforeHookResult::Reject(reason) => {
+            assert!(
+                reason.contains("tenant_id"),
+                "rejection should mention tenant_id, got: {reason}"
+            );
+        }
+        BeforeHookResult::Continue(_) => {
+            panic!("expected Reject without tenant_id");
+        }
+    }
+    Ok(())
+}
+
+// ── CreateConversation tests ────────────────────────────────────────────
+
+#[tokio::test]
+async fn create_conversation_adds_created_by_from_context() -> TestResult {
+    let hook = load_hook()?;
+
+    let mut ctx_data = HashMap::new();
+    ctx_data.insert("tenant_id".into(), "acme-corp".into());
+    ctx_data.insert("user_id".into(), "admin".into());
+    let ctx = RequestContext::with_data(ctx_data);
+
+    let payload = json!({});
+    let result = hook
+        .before(
+            StorageOperation::CreateConversation,
+            Some(&ctx),
+            &payload,
+        )
+        .await?;
+
+    match result {
+        BeforeHookResult::Continue(extra) => {
+            assert_eq!(
+                extra.get("TENANT_ID").and_then(|v| v.as_str()),
+                Some("acme-corp"),
+            );
+            assert_eq!(
+                extra.get("CREATED_BY").and_then(|v| v.as_str()),
+                Some("admin"),
+            );
+        }
+        BeforeHookResult::Reject(reason) => {
+            panic!("expected Continue, got Reject: {reason}");
+        }
+    }
+    Ok(())
+}
+
+// ── Passthrough operations ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn get_response_passes_through_without_extra_columns() -> TestResult {
+    let hook = load_hook()?;
+
+    let payload = json!({"id": "resp_123"});
+    let result = hook
+        .before(StorageOperation::GetResponse, None, &payload)
+        .await?;
+
+    match result {
+        BeforeHookResult::Continue(extra) => {
+            assert!(extra.is_empty(), "read ops should not add extra columns");
+        }
+        BeforeHookResult::Reject(reason) => {
+            panic!("read ops should not reject: {reason}");
+        }
+    }
+    Ok(())
+}
+
+// ── After hook ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn after_hook_passes_through_extra_columns() -> TestResult {
+    let hook = load_hook()?;
+
+    let mut extra = ExtraColumns::new();
+    extra.insert("TENANT_ID".into(), json!("acme-corp"));
+
+    let payload = json!({"id": "resp_123"});
+    let result_json = json!({"stored": true});
+
+    let updated = hook
+        .after(
+            StorageOperation::StoreResponse,
+            None,
+            &payload,
+            &result_json,
+            &extra,
+        )
+        .await?;
+
+    assert_eq!(
+        updated.get("TENANT_ID").and_then(|v| v.as_str()),
+        Some("acme-corp"),
+        "after() should pass through extra columns"
+    );
+    Ok(())
+}

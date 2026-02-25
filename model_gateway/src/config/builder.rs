@@ -353,6 +353,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn maybe_storage_hook_wasm_path(mut self, path: Option<&String>) -> Self {
+        self.config.storage_hook_wasm_path = path.cloned();
+        self
+    }
+
     pub fn model_path<S: Into<String>>(mut self, path: S) -> Self {
         self.config.model_path = Some(path.into());
         self

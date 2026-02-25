@@ -938,6 +938,239 @@ mod tests {
         );
     }
 
+    // ── temp_oracle.rs scenario: hooks + extra columns replace forking ──
+
+    /// Simulates the temp_oracle.rs use case end-to-end:
+    /// Instead of forking Oracle to add a TENANT_ID column, configure
+    /// `extra_columns` on the schema and attach a hook that provides values.
+    ///
+    /// This test verifies:
+    /// 1. Hook `before()` is called with `StoreResponse`
+    /// 2. ExtraColumns from the hook are available via task-local during write
+    /// 3. Hook `after()` is called with the result
+    /// 4. The response round-trips correctly (store → get)
+    #[tokio::test]
+    async fn hook_with_extra_columns_replaces_forked_backend() {
+        use crate::context::current_extra_columns;
+
+        /// Hook that returns TENANT_ID extra column, simulating what
+        /// a forked Oracle backend would hardcode.
+        struct TenantHook;
+
+        #[async_trait]
+        impl StorageHook for TenantHook {
+            async fn before(
+                &self,
+                _op: StorageOperation,
+                _ctx: Option<&RequestContext>,
+                _payload: &serde_json::Value,
+            ) -> Result<BeforeHookResult, HookError> {
+                let mut extra = ExtraColumns::new();
+                extra.insert(
+                    "TENANT_ID".to_string(),
+                    serde_json::Value::String("acme-corp".to_string()),
+                );
+                Ok(BeforeHookResult::Continue(extra))
+            }
+
+            async fn after(
+                &self,
+                _op: StorageOperation,
+                _ctx: Option<&RequestContext>,
+                _payload: &serde_json::Value,
+                _result: &serde_json::Value,
+                extra: &ExtraColumns,
+            ) -> Result<ExtraColumns, HookError> {
+                Ok(extra.clone())
+            }
+        }
+
+        /// Storage wrapper that captures task-local ExtraColumns during writes.
+        struct CapturingResponseStorage {
+            inner: MemoryResponseStorage,
+            captured: parking_lot::Mutex<Option<ExtraColumns>>,
+        }
+
+        #[async_trait]
+        impl ResponseStorage for CapturingResponseStorage {
+            async fn store_response(
+                &self,
+                resp: StoredResponse,
+            ) -> Result<ResponseId, ResponseStorageError> {
+                *self.captured.lock() = current_extra_columns();
+                self.inner.store_response(resp).await
+            }
+
+            async fn get_response(
+                &self,
+                id: &ResponseId,
+            ) -> Result<Option<StoredResponse>, ResponseStorageError> {
+                self.inner.get_response(id).await
+            }
+
+            async fn delete_response(&self, id: &ResponseId) -> Result<(), ResponseStorageError> {
+                self.inner.delete_response(id).await
+            }
+
+            async fn list_identifier_responses(
+                &self,
+                identifier: &str,
+                limit: Option<usize>,
+            ) -> Result<Vec<StoredResponse>, ResponseStorageError> {
+                self.inner
+                    .list_identifier_responses(identifier, limit)
+                    .await
+            }
+
+            async fn delete_identifier_responses(
+                &self,
+                identifier: &str,
+            ) -> Result<usize, ResponseStorageError> {
+                self.inner.delete_identifier_responses(identifier).await
+            }
+        }
+
+        let capturing = Arc::new(CapturingResponseStorage {
+            inner: MemoryResponseStorage::new(),
+            captured: parking_lot::Mutex::new(None),
+        });
+        let hooked = HookedResponseStorage::new(
+            capturing.clone() as Arc<dyn ResponseStorage>,
+            Arc::new(TenantHook),
+        );
+
+        // Store a response — hook provides TENANT_ID extra column
+        let mut resp = StoredResponse::new(None);
+        resp.input = json!("hello");
+        let id = hooked.store_response(resp).await.unwrap();
+
+        // Verify extra columns were available to the backend during write
+        let captured = capturing
+            .captured
+            .lock()
+            .clone()
+            .expect("ExtraColumns should be set during store_response");
+        assert_eq!(
+            captured.get("TENANT_ID").and_then(|v| v.as_str()),
+            Some("acme-corp"),
+        );
+
+        // Response round-trips correctly
+        let stored = hooked.get_response(&id).await.unwrap();
+        assert!(stored.is_some());
+        assert_eq!(stored.unwrap().input, json!("hello"));
+    }
+
+    /// Proves that RequestContext flows through hooks and can be used to
+    /// drive extra column values — the full pipeline from request to storage.
+    #[tokio::test]
+    async fn request_context_drives_hook_extra_columns() {
+        use crate::context::{current_extra_columns, with_request_context};
+
+        /// Hook that reads tenant_id from RequestContext and produces ExtraColumns.
+        struct ContextDrivenHook;
+
+        #[async_trait]
+        impl StorageHook for ContextDrivenHook {
+            async fn before(
+                &self,
+                _op: StorageOperation,
+                context: Option<&RequestContext>,
+                _payload: &serde_json::Value,
+            ) -> Result<BeforeHookResult, HookError> {
+                let mut extra = ExtraColumns::new();
+                if let Some(ctx) = context {
+                    if let Some(tid) = ctx.get("tenant_id") {
+                        extra.insert(
+                            "TENANT_ID".to_string(),
+                            serde_json::Value::String(tid.to_string()),
+                        );
+                    }
+                }
+                Ok(BeforeHookResult::Continue(extra))
+            }
+
+            async fn after(
+                &self,
+                _op: StorageOperation,
+                _ctx: Option<&RequestContext>,
+                _payload: &serde_json::Value,
+                _result: &serde_json::Value,
+                extra: &ExtraColumns,
+            ) -> Result<ExtraColumns, HookError> {
+                Ok(extra.clone())
+            }
+        }
+
+        /// Storage that captures task-local ExtraColumns during writes.
+        struct CapturingConvStorage {
+            inner: MemoryConversationStorage,
+            captured: parking_lot::Mutex<Option<ExtraColumns>>,
+        }
+
+        #[async_trait]
+        impl ConversationStorage for CapturingConvStorage {
+            async fn create_conversation(
+                &self,
+                input: NewConversation,
+            ) -> ConversationResult<Conversation> {
+                *self.captured.lock() = current_extra_columns();
+                self.inner.create_conversation(input).await
+            }
+
+            async fn get_conversation(
+                &self,
+                id: &ConversationId,
+            ) -> ConversationResult<Option<Conversation>> {
+                self.inner.get_conversation(id).await
+            }
+
+            async fn update_conversation(
+                &self,
+                id: &ConversationId,
+                metadata: Option<ConversationMetadata>,
+            ) -> ConversationResult<Option<Conversation>> {
+                self.inner.update_conversation(id, metadata).await
+            }
+
+            async fn delete_conversation(&self, id: &ConversationId) -> ConversationResult<bool> {
+                self.inner.delete_conversation(id).await
+            }
+        }
+
+        let capturing = Arc::new(CapturingConvStorage {
+            inner: MemoryConversationStorage::new(),
+            captured: parking_lot::Mutex::new(None),
+        });
+        let hooked = HookedConversationStorage::new(
+            capturing.clone() as Arc<dyn ConversationStorage>,
+            Arc::new(ContextDrivenHook),
+        );
+
+        // Set up RequestContext with tenant_id (simulating middleware)
+        let mut ctx = RequestContext::new();
+        ctx.set("tenant_id", "acme-corp");
+
+        with_request_context(ctx, async {
+            hooked
+                .create_conversation(NewConversation::default())
+                .await
+                .unwrap();
+        })
+        .await;
+
+        // Hook read tenant_id from context → produced ExtraColumns → backend received them
+        let captured = capturing
+            .captured
+            .lock()
+            .clone()
+            .expect("ExtraColumns should be set during create_conversation");
+        assert_eq!(
+            captured.get("TENANT_ID").and_then(|v| v.as_str()),
+            Some("acme-corp"),
+        );
+    }
+
     // ── Hook error is non-fatal ──────────────────────────────────────────
 
     #[tokio::test]

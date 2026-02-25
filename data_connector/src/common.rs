@@ -419,4 +419,121 @@ mod tests {
         assert!(!sql.contains("tenant_id"));
         assert!(sql.contains("id")); // core cols still there
     }
+
+    // ── Schema config replaces forked Oracle (temp_oracle.rs scenario) ───
+
+    /// Proves that SchemaConfig with custom names generates the same SQL
+    /// patterns that temp_oracle.rs used with hardcoded strings — without
+    /// forking the backend code.
+    #[test]
+    fn schema_config_produces_oracle_compatible_sql() {
+        // Build a config matching what temp_oracle.rs hardcoded:
+        // - default table names (conversations, responses, etc.)
+        // - default column names (Oracle uses unquoted identifiers = case-insensitive)
+        // - Oracle owner prefix
+        let mut cfg = SchemaConfig {
+            owner: Some("ADMIN".to_string()),
+            ..SchemaConfig::default()
+        };
+
+        // Uppercase for Oracle catalog compatibility (uppercases table names)
+        cfg.uppercase_for_oracle();
+
+        let sql = build_response_select_base(&cfg);
+
+        // Should produce Oracle-style qualified table with all standard columns.
+        // Column names are lowercase (Oracle treats unquoted identifiers as
+        // case-insensitive, so `id` and `ID` resolve to the same column).
+        assert!(
+            sql.contains("ADMIN.\"RESPONSES\""),
+            "missing qualified table: {sql}"
+        );
+        for col in RESPONSE_COLUMNS {
+            assert!(sql.contains(col), "missing standard column '{col}': {sql}");
+        }
+    }
+
+    /// Proves that adding a TENANT_ID extra column (a common fork reason)
+    /// works purely through config — no code changes needed.
+    #[test]
+    fn schema_config_adds_tenant_column_without_forking() {
+        let mut cfg = SchemaConfig {
+            owner: Some("ADMIN".to_string()),
+            ..SchemaConfig::default()
+        };
+
+        // Add TENANT_ID — this is the column that temp_oracle.rs would
+        // require forking the entire backend to add
+        cfg.responses.extra_columns.insert(
+            "TENANT_ID".to_string(),
+            crate::schema::ColumnDef {
+                sql_type: "VARCHAR2(128)".to_string(),
+                default_value: Some(json!("default_tenant")),
+            },
+        );
+
+        cfg.uppercase_for_oracle();
+
+        // DDL includes the extra column
+        let defs = extra_column_defs(&cfg.responses);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0], "TENANT_ID VARCHAR2(128)");
+
+        // Extra columns resolve with hook value > default > None
+        let mut hook_extra = ExtraColumns::new();
+        hook_extra.insert("TENANT_ID".to_string(), json!("acme-corp"));
+        let resolved = resolve_extra_column_values(&cfg.responses, &hook_extra);
+        assert_eq!(resolved[0].0, "TENANT_ID");
+        assert_eq!(resolved[0].1, Some("acme-corp".to_string()));
+
+        // Without hook value, falls back to default
+        let empty_hook = ExtraColumns::new();
+        let resolved = resolve_extra_column_values(&cfg.responses, &empty_hook);
+        assert_eq!(resolved[0].1, Some("default_tenant".to_string()));
+    }
+
+    /// Proves that skip_columns lets you omit columns that a particular
+    /// deployment doesn't use — another common fork reason.
+    #[test]
+    fn schema_config_skips_unused_columns_without_forking() {
+        let mut cfg = SchemaConfig::default();
+        // This deployment doesn't use safety_identifier or raw_response
+        cfg.responses
+            .skip_columns
+            .insert("safety_identifier".to_string());
+        cfg.responses
+            .skip_columns
+            .insert("raw_response".to_string());
+
+        let sql = build_response_select_base(&cfg);
+        assert!(
+            !sql.contains("safety_identifier"),
+            "should be skipped: {sql}"
+        );
+        assert!(!sql.contains("raw_response"), "should be skipped: {sql}");
+        // Other columns still present
+        assert!(sql.contains("id"), "id should remain: {sql}");
+        assert!(sql.contains("model"), "model should remain: {sql}");
+    }
+
+    /// Proves that column name remapping works — another fork reason when
+    /// an existing database uses different naming conventions.
+    #[test]
+    fn schema_config_remaps_column_names_without_forking() {
+        let mut cfg = SchemaConfig::default();
+        // This DB uses "resp_id" instead of "id" and "user_input" instead of "input"
+        cfg.responses
+            .columns
+            .insert("id".to_string(), "resp_id".to_string());
+        cfg.responses
+            .columns
+            .insert("input".to_string(), "user_input".to_string());
+
+        let sql = build_response_select_base(&cfg);
+        assert!(sql.contains("resp_id"), "should use remapped name: {sql}");
+        assert!(
+            sql.contains("user_input"),
+            "should use remapped name: {sql}"
+        );
+    }
 }

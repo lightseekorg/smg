@@ -72,7 +72,7 @@ smg-mcp.workspace = true
 kv-index.workspace = true
 smg-data-connector.workspace = true
 llm-multimodal.workspace = true
-smg-wasm.workspace = true
+smg-wasm = { workspace = true, features = ["storage-hooks"] }
 smg-mesh.workspace = true
 smg-grpc-client.workspace = true
 

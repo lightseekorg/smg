@@ -144,3 +144,6 @@ outputs/
 
 # MkDocs build output
 site/
+
+# Compiled WASM test fixtures (rebuild with: ./wasm/tests/fixtures/build_fixtures.sh)
+wasm/tests/fixtures/*.wasm
