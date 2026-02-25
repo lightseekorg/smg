@@ -388,7 +388,7 @@ struct CliArgs {
 
     // ==================== Tokenizer ====================
     /// Model path for loading tokenizer (HuggingFace ID or local path)
-    #[arg(long, help_heading = "Tokenizer")]
+    #[arg(long, alias = "model", help_heading = "Tokenizer")]
     model_path: Option<String>,
 
     /// Explicit tokenizer path (overrides model_path)

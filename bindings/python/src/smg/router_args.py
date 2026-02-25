@@ -668,6 +668,7 @@ class RouterArgs:
         # Tokenizer configuration
         tokenizer_group.add_argument(
             f"--{prefix}model-path",
+            f"--{prefix}model",
             type=str,
             default=None,
             help="Model path for loading tokenizer (HuggingFace model ID or local path)",
@@ -975,9 +976,14 @@ class RouterArgs:
         args_dict = {}
 
         for attr in dataclasses.fields(cls):
-            # Auto strip prefix from args
-            if f"{prefix}{attr.name}" in cli_args_dict:
-                args_dict[attr.name] = cli_args_dict[f"{prefix}{attr.name}"]
+            # Auto strip prefix from args.
+            # Prefer the prefixed version (e.g. --router-model-path) when
+            # explicitly set, but fall back to the unprefixed version
+            # (e.g. --model-path from the backend) when the prefixed key
+            # exists but is None (argparse default).
+            prefixed_key = f"{prefix}{attr.name}"
+            if prefixed_key in cli_args_dict and cli_args_dict[prefixed_key] is not None:
+                args_dict[attr.name] = cli_args_dict[prefixed_key]
             elif attr.name in cli_args_dict:
                 args_dict[attr.name] = cli_args_dict[attr.name]
 
