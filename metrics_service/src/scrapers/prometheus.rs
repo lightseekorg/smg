@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use reqwest::Client;
 use serde::Deserialize;
+use tracing::{debug, warn};
 
 use crate::{
     store::MetricsStore,
@@ -13,6 +14,9 @@ pub struct PrometheusScraper {
     client: Client,
     interval: Duration,
     prom_url: String,
+    /// PromQL selector for which metrics to pull.
+    /// Defaults to `{__name__=~"^custom_.*"}`.
+    metric_selector: String,
 }
 
 #[derive(Deserialize)]
@@ -34,6 +38,25 @@ struct PromResult {
 
 impl PrometheusScraper {
     pub fn new(store: Arc<MetricsStore>, prom_url: String, interval: Duration) -> Self {
+        Self::with_selector(
+            store,
+            prom_url,
+            interval,
+            r#"{__name__=~"^custom_.*"}"#.to_string(),
+        )
+    }
+
+    /// Create with a custom PromQL selector string.
+    ///
+    /// For example:
+    /// - `{__name__=~"^sglang:.*"}` to pull all SGLang metrics
+    /// - `{job="sgw_workers"}` to pull all metrics for a specific job
+    pub fn with_selector(
+        store: Arc<MetricsStore>,
+        prom_url: String,
+        interval: Duration,
+        metric_selector: String,
+    ) -> Self {
         Self {
             store,
             client: Client::builder()
@@ -42,43 +65,94 @@ impl PrometheusScraper {
                 .unwrap_or_default(),
             interval,
             prom_url,
+            metric_selector,
         }
     }
 
     pub async fn run(&self) {
         let mut ticker = tokio::time::interval(self.interval);
+        let mut consecutive_failures: u32 = 0;
 
         loop {
             ticker.tick().await;
 
-            // Example custom query metric collection (all custom metrics prefixed with custom_)
             let query_url = format!(
-                "{}/api/v1/query?query={{__name__=~\"^custom_.*\"}}",
-                self.prom_url
+                "{}/api/v1/query?query={}",
+                self.prom_url,
+                urlencoding::encode(&self.metric_selector),
             );
 
-            if let Ok(resp) = self.client.get(&query_url).send().await {
-                if let Ok(prom_resp) = resp.json::<PromResponse>().await {
-                    if prom_resp.status == "success" {
-                        if let Some(data) = prom_resp.data {
-                            for res in data.result {
-                                if let (Some(worker_url), Some(metric_name)) =
-                                    (res.metric.get("worker_url"), res.metric.get("__name__"))
-                                {
-                                    if let Ok(val) = res.value.1.parse::<f64>() {
-                                        let mut snapshot = WorkerSnapshot::new(
-                                            worker_url.clone(),
-                                            MetricSource::Prometheus,
-                                        );
-                                        snapshot.custom_metrics.insert(metric_name.clone(), val);
-                                        self.store.update(snapshot);
-                                    }
-                                }
-                            }
+            match self.client.get(&query_url).send().await {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        consecutive_failures += 1;
+                        warn!(
+                            consecutive_failures,
+                            status = %resp.status(),
+                            url = %query_url,
+                            "PrometheusScraper: HTTP error from Prometheus"
+                        );
+                        continue;
+                    }
+
+                    match resp.json::<PromResponse>().await {
+                        Ok(prom_resp) if prom_resp.status == "success" => {
+                            consecutive_failures = 0;
+                            let count = self.ingest(prom_resp.data);
+                            debug!(metrics_ingested = count, "PrometheusScraper: scrape OK");
+                        }
+                        Ok(prom_resp) => {
+                            consecutive_failures += 1;
+                            warn!(
+                                consecutive_failures,
+                                status = %prom_resp.status,
+                                "PrometheusScraper: Prometheus returned non-success status"
+                            );
+                        }
+                        Err(e) => {
+                            consecutive_failures += 1;
+                            warn!(
+                                consecutive_failures,
+                                error = %e,
+                                "PrometheusScraper: failed to parse Prometheus response"
+                            );
                         }
                     }
                 }
+                Err(e) => {
+                    consecutive_failures += 1;
+                    warn!(
+                        consecutive_failures,
+                        error = %e,
+                        url = %self.prom_url,
+                        "PrometheusScraper: HTTP request failed"
+                    );
+                }
             }
         }
+    }
+
+    /// Ingest metric results, returning the number of worker snapshots pushed.
+    fn ingest(&self, data: Option<PromData>) -> usize {
+        let Some(data) = data else { return 0 };
+        let mut count = 0;
+
+        for res in data.result {
+            let (Some(worker_url), Some(metric_name)) =
+                (res.metric.get("worker_url"), res.metric.get("__name__"))
+            else {
+                continue;
+            };
+
+            if let Ok(val) = res.value.1.parse::<f64>() {
+                let mut snapshot =
+                    WorkerSnapshot::new(worker_url.clone(), MetricSource::Prometheus);
+                snapshot.custom_metrics.insert(metric_name.clone(), val);
+                self.store.update(snapshot);
+                count += 1;
+            }
+        }
+
+        count
     }
 }

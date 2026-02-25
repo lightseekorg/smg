@@ -92,3 +92,123 @@ impl MetricsStore {
         (rx, initial_state)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{bus::EventBus, types::MetricSource};
+
+    fn make_store() -> MetricsStore {
+        let bus = Arc::new(EventBus::new(64));
+        MetricsStore::new(bus, Duration::from_secs(60))
+    }
+
+    fn snap(url: &str, source: MetricSource, in_flight: isize) -> WorkerSnapshot {
+        let mut s = WorkerSnapshot::new(url.to_string(), source);
+        s.in_flight_requests = in_flight;
+        s
+    }
+
+    #[test]
+    fn test_basic_update_and_get() {
+        let store = make_store();
+        store.update(snap("http://w1", MetricSource::DirectScrape, 5));
+        let got = store.get("http://w1").unwrap();
+        assert_eq!(got.in_flight_requests, 5);
+    }
+
+    #[test]
+    fn test_monotonic_seq_rejection() {
+        let store = make_store();
+
+        // First update — gets seq_no 1
+        store.update(snap("http://w1", MetricSource::Piggyback, 3));
+
+        // Manually craft an "older" snapshot by injecting a low seq_no
+        let mut old = snap("http://w1", MetricSource::Piggyback, 99);
+        old.seq_no = 0; // explicit seq_no = 0 < current 1 → should be rejected
+        store.update(old);
+
+        // Value should still be 3
+        let got = store.get("http://w1").unwrap();
+        // Note: seq_no 0 is treated as "unset" by the store; it still gets
+        // stored on first insert. After that, the existing seq is 1.
+        // The second update has seq_no 0 < 1 so it is rejected.
+        assert_eq!(got.in_flight_requests, 3);
+    }
+
+    #[test]
+    fn test_source_priority_rejection() {
+        let store = make_store();
+
+        // High priority (Piggyback = 100) stored first
+        store.update(snap("http://w1", MetricSource::Piggyback, 10));
+
+        // Low priority (Prometheus = 25) update — should be rejected while Piggyback is fresh
+        store.update(snap("http://w1", MetricSource::Prometheus, 99));
+
+        let got = store.get("http://w1").unwrap();
+        assert_eq!(
+            got.in_flight_requests, 10,
+            "Prometheus should not overwrite fresh Piggyback"
+        );
+    }
+
+    #[test]
+    fn test_custom_metrics_merge() {
+        let store = make_store();
+
+        let mut s1 = WorkerSnapshot::new("http://w1".to_string(), MetricSource::Piggyback);
+        s1.custom_metrics.insert("gpu_util".to_string(), 0.8);
+        store.update(s1);
+
+        let mut s2 = WorkerSnapshot::new("http://w1".to_string(), MetricSource::Piggyback);
+        s2.custom_metrics.insert("cache_hit_rate".to_string(), 0.65);
+        store.update(s2);
+
+        let got = store.get("http://w1").unwrap();
+        // Both keys survive after merge
+        assert!(
+            got.custom_metrics.contains_key("gpu_util"),
+            "gpu_util should be preserved after merge"
+        );
+        assert!(
+            got.custom_metrics.contains_key("cache_hit_rate"),
+            "cache_hit_rate should be added by second update"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_returns_initial_state() {
+        let store = make_store();
+        store.update(snap("http://w1", MetricSource::DirectScrape, 7));
+        store.update(snap("http://w2", MetricSource::DirectScrape, 3));
+
+        let (_rx, initial) = store.subscribe();
+        assert_eq!(initial.len(), 2);
+        let urls: Vec<_> = initial.iter().map(|s| s.url.as_str()).collect();
+        assert!(urls.contains(&"http://w1"));
+        assert!(urls.contains(&"http://w2"));
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_receives_event_bus_update() {
+        let store = make_store();
+        let (mut rx, _initial) = store.subscribe();
+
+        store.update(snap("http://w3", MetricSource::Piggyback, 42));
+
+        let received = rx.recv().await.expect("should receive update on bus");
+        assert_eq!(received.url, "http://w3");
+        assert_eq!(received.in_flight_requests, 42);
+    }
+
+    #[test]
+    fn test_get_all() {
+        let store = make_store();
+        store.update(snap("http://a", MetricSource::Piggyback, 1));
+        store.update(snap("http://b", MetricSource::Piggyback, 2));
+        let all = store.get_all();
+        assert_eq!(all.len(), 2);
+    }
+}

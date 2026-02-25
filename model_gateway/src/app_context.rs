@@ -301,22 +301,66 @@ impl AppContextBuilder {
         router_config: RouterConfig,
         request_timeout_secs: u64,
     ) -> Result<Self, String> {
+        let scraper_cfg = &router_config.metrics_scraper;
+
+        // Create the WorkerRegistry early so the DirectScraper closure can hold
+        // a Weak reference to the same registry that the application uses.
+        let worker_registry = Arc::new(crate::core::WorkerRegistry::new());
+
+        // Build MetricsStore using the configured staleness threshold
         let bus = Arc::new(metrics_service::EventBus::new(1024));
         let metrics_store = Arc::new(MetricsStore::new(
             bus.clone(),
-            // We'll keep snapshots valid for 60s
-            Duration::from_secs(60),
+            Duration::from_secs(scraper_cfg.staleness_threshold_secs),
         ));
 
-        // Start background scrapers
-        let prometheus_scraper = metrics_service::scrapers::prometheus::PrometheusScraper::new(
-            Arc::clone(&metrics_store),
-            "http://prometheus:9090".to_string(), // In reality we'd load this from config
-            Duration::from_secs(15),
-        );
-        tokio::spawn(async move {
-            prometheus_scraper.run().await;
-        });
+        // Spawn DirectScraper — polls each worker's /get_load and /metrics endpoints
+        {
+            let direct_scraper = metrics_service::scrapers::direct::DirectScraper::new(
+                Arc::clone(&metrics_store),
+                Duration::from_secs(scraper_cfg.scrape_interval_secs),
+            );
+            let weak_wr = Arc::downgrade(&worker_registry);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "direct scraper runs for the lifetime of the gateway"
+            )]
+            tokio::spawn(async move {
+                direct_scraper
+                    .run(move || {
+                        let urls = weak_wr
+                            .upgrade()
+                            .map(|wr| {
+                                wr.get_all()
+                                    .iter()
+                                    .map(|w| w.url().to_string())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        std::future::ready(urls)
+                    })
+                    .await;
+            });
+        }
+
+        // Optionally spawn PrometheusScraper when prometheus_url is configured
+        if let Some(prom_url) = &scraper_cfg.prometheus_url {
+            let prom_url = prom_url.clone();
+            let prom_interval = Duration::from_secs(scraper_cfg.prometheus_scrape_interval_secs);
+            let prom_store = Arc::clone(&metrics_store);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "prometheus scraper runs for the lifetime of the gateway"
+            )]
+            tokio::spawn(async move {
+                let scraper = metrics_service::scrapers::prometheus::PrometheusScraper::new(
+                    prom_store,
+                    prom_url,
+                    prom_interval,
+                );
+                scraper.run().await;
+            });
+        }
 
         // Start EventBus observability exporter (exports smg_worker_* Prometheus gauges)
         crate::observability::metrics::start_metrics_observability_exporter(Arc::clone(
@@ -329,9 +373,10 @@ impl AppContextBuilder {
             .with_tokenizer_registry()
             .with_reasoning_parser_factory()
             .with_tool_parser_factory()
-            .with_worker_registry()
+            // Pass the pre-built registry so both the scraper and the builder share the same Arc
+            .worker_registry(worker_registry)
             .metrics_store(metrics_store)
-            .with_policy_registry(&router_config)
+            .with_policy_registry(&router_config, Some(Arc::clone(&metrics_store)))
             .with_storage(&router_config)
             .await?
             .with_worker_job_queue()
@@ -456,9 +501,16 @@ impl AppContextBuilder {
         self
     }
 
-    /// Create policy registry
-    fn with_policy_registry(mut self, config: &RouterConfig) -> Self {
-        self.policy_registry = Some(Arc::new(PolicyRegistry::new(config.policy.clone())));
+    /// Create policy registry, optionally wiring a MetricsStore for the MetricsDriven policy
+    fn with_policy_registry(
+        mut self,
+        config: &RouterConfig,
+        metrics_store: Option<Arc<MetricsStore>>,
+    ) -> Self {
+        self.policy_registry = Some(Arc::new(PolicyRegistry::new_with_store(
+            config.policy.clone(),
+            metrics_store,
+        )));
         self
     }
 

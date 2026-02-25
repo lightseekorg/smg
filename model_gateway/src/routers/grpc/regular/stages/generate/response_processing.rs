@@ -101,6 +101,23 @@ impl GenerateResponseProcessingStage {
                 tokenizer,
             );
 
+            // Piggyback: emit a snapshot when streaming starts so the MetricsStore sees
+            // that we've begun processing this request on this worker.
+            // We publish in_flight = 0 as a "stream opened" signal; the DirectScraper
+            // will update the actual live count on the next poll cycle.
+            if let Some(metrics_store) = ctx.components.metrics_store.as_ref() {
+                if let Some(worker_url) = ctx.primary_worker_url() {
+                    let mut snapshot = metrics_service::WorkerSnapshot::new(
+                        worker_url,
+                        metrics_service::MetricSource::Piggyback,
+                    );
+                    // Signal that at least one streaming request is active on this worker.
+                    // This keeps the worker "visible" in the MetricsStore between scrape intervals.
+                    snapshot.in_flight_requests = 1;
+                    metrics_store.update(snapshot);
+                }
+            }
+
             // Attach load guards to response body for proper RAII lifecycle
             let response = match ctx.state.load_guards.take() {
                 Some(guards) => AttachedBody::wrap_response(response, guards),

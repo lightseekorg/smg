@@ -5,18 +5,14 @@
 use std::{sync::Arc, time::Duration};
 
 use axum::response::{IntoResponse, Response};
-use futures::{
-    future,
-    stream::{self, StreamExt},
-};
+use futures::stream::{self, StreamExt};
 use http::StatusCode;
-use openai_protocol::worker::{FlushCacheResult, WorkerLoadInfo, WorkerLoadsResult};
-use serde_json::Value;
+use openai_protocol::worker::FlushCacheResult;
 use tracing::info;
 
 use crate::core::{
     metrics_aggregator::{self, MetricPack},
-    ConnectionMode, Worker, WorkerRegistry, WorkerType,
+    ConnectionMode, Worker, WorkerRegistry,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -150,76 +146,6 @@ impl WorkerManager {
             total_workers,
             http_workers: http_workers.len(),
             message,
-        }
-    }
-
-    pub async fn get_all_worker_loads(
-        worker_registry: &WorkerRegistry,
-        client: &reqwest::Client,
-    ) -> WorkerLoadsResult {
-        let workers = worker_registry.get_all();
-        let total_workers = workers.len();
-
-        let futures: Vec<_> = workers
-            .iter()
-            .map(|worker| {
-                let url = worker.url().to_string();
-                let api_key = worker.api_key().cloned();
-                let worker_type = match worker.worker_type() {
-                    WorkerType::Regular => None,
-                    WorkerType::Prefill => Some("prefill".to_string()),
-                    WorkerType::Decode => Some("decode".to_string()),
-                };
-                let is_http = matches!(worker.connection_mode(), ConnectionMode::Http);
-                let client = client.clone();
-
-                async move {
-                    let load = if is_http {
-                        Self::parse_load_response(&client, &url, api_key.as_deref()).await
-                    } else {
-                        -1
-                    };
-                    WorkerLoadInfo {
-                        worker: url,
-                        worker_type,
-                        load,
-                    }
-                }
-            })
-            .collect();
-
-        let loads = future::join_all(futures).await;
-        let successful = loads.iter().filter(|l| l.load >= 0).count();
-        let failed = loads.iter().filter(|l| l.load < 0).count();
-
-        WorkerLoadsResult {
-            loads,
-            total_workers,
-            successful,
-            failed,
-        }
-    }
-
-    async fn parse_load_response(
-        client: &reqwest::Client,
-        url: &str,
-        api_key: Option<&str>,
-    ) -> isize {
-        let load_url = format!("{url}/get_load");
-        let mut req = client.get(&load_url).timeout(REQUEST_TIMEOUT);
-        if let Some(key) = api_key {
-            req = req.bearer_auth(key);
-        }
-
-        match req.send().await {
-            Ok(r) if r.status().is_success() => match r.json::<Value>().await {
-                Ok(Value::Array(arr)) => arr
-                    .iter()
-                    .filter_map(|e| e.get("num_tokens").and_then(|v| v.as_i64()))
-                    .sum::<i64>() as isize,
-                _ => -1,
-            },
-            _ => -1,
         }
     }
 

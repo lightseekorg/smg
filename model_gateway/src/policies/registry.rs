@@ -37,12 +37,29 @@ pub struct PolicyRegistry {
     /// When None, the registry works independently without mesh synchronization
     /// Uses RwLock for thread-safe access when setting mesh_sync after initialization
     mesh_sync: Arc<RwLock<OptionalMeshSyncManager>>,
+
+    /// Optional metrics store — required for MetricsDriven policy variant
+    metrics_store: Option<Arc<metrics_service::MetricsStore>>,
 }
 
 impl PolicyRegistry {
     /// Create a new PolicyRegistry with a default policy
     pub fn new(default_policy_config: PolicyConfig) -> Self {
-        let default_policy = Self::create_policy_from_config(&default_policy_config);
+        Self::new_with_store(default_policy_config, None)
+    }
+
+    /// Create a new PolicyRegistry with an optional MetricsStore.
+    ///
+    /// The `metrics_store` is required when using the `MetricsDriven` policy;
+    /// it is ignored for all other policy types.
+    pub fn new_with_store(
+        default_policy_config: PolicyConfig,
+        metrics_store: Option<Arc<metrics_service::MetricsStore>>,
+    ) -> Self {
+        let default_policy = PolicyFactory::create_from_config_with_store(
+            &default_policy_config,
+            metrics_store.clone(),
+        );
 
         Self {
             model_policies: Arc::new(DashMap::new()),
@@ -51,6 +68,7 @@ impl PolicyRegistry {
             prefill_policy: Arc::new(OnceLock::new()),
             decode_policy: Arc::new(OnceLock::new()),
             mesh_sync: Arc::new(RwLock::new(None)),
+            metrics_store,
         }
     }
 
@@ -212,8 +230,8 @@ impl PolicyRegistry {
     }
 
     /// Create a policy from a PolicyConfig (delegates to PolicyFactory)
-    fn create_policy_from_config(config: &PolicyConfig) -> Arc<dyn LoadBalancingPolicy> {
-        PolicyFactory::create_from_config(config)
+    fn create_policy_from_config(&self, config: &PolicyConfig) -> Arc<dyn LoadBalancingPolicy> {
+        PolicyFactory::create_from_config_with_store(config, self.metrics_store.clone())
     }
 
     /// Get current model->policy mappings (for debugging/monitoring)

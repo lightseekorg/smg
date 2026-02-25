@@ -28,6 +28,7 @@ tracing.workspace = true
 anyhow.workspace = true
 metrics = "0.22.3" 
 cel-interpreter.workspace = true
+urlencoding = "2"
 
 [lints]
 workspace = true

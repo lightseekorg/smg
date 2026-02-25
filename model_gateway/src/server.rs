@@ -425,12 +425,6 @@ async fn flush_cache(State(state): State<Arc<AppState>>, _req: Request) -> Respo
         .into_response()
 }
 
-async fn get_loads(State(state): State<Arc<AppState>>, _req: Request) -> Response {
-    WorkerManager::get_all_worker_loads(&state.context.worker_registry, &state.context.client)
-        .await
-        .into_response()
-}
-
 async fn create_worker(
     State(state): State<Arc<AppState>>,
     Json(config): Json<WorkerSpec>,
@@ -626,7 +620,6 @@ pub fn build_app(
     // Build admin routes with control plane auth if configured, otherwise use simple API key auth
     let admin_routes = Router::new()
         .route("/flush_cache", post(flush_cache))
-        .route("/get_loads", get(get_loads))
         .route("/parse/function_call", post(parse_function_call))
         .route("/parse/reasoning", post(parse_reasoning))
         .route("/wasm", post(add_wasm_module))

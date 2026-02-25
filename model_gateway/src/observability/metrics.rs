@@ -1532,7 +1532,7 @@ mod tests {
 /// start_metrics_observability_exporter(metrics_store);
 /// ```
 pub fn start_metrics_observability_exporter(metrics_store: Arc<metrics_service::MetricsStore>) {
-    // Register gauge descriptions once
+    // ── Core SMG worker fields ────────────────────────────────────────────────
     describe_gauge!(
         "smg_worker_kv_cache_tokens",
         "KV cache tokens currently used by the worker"
@@ -1544,6 +1544,190 @@ pub fn start_metrics_observability_exporter(metrics_store: Arc<metrics_service::
     describe_gauge!(
         "smg_worker_avg_tokens_per_req",
         "Rolling average of tokens per request"
+    );
+
+    // ── SGLang standard metrics ───────────────────────────────────────────────
+    // These flow in via `WorkerSnapshot.custom_metrics` (keyed by original Prometheus name)
+    // and are re-emitted as `smg_worker_<name>` gauges by `export_snapshot`.
+    // The `describe_gauge!` calls below add help-text to the Prometheus /metrics output.
+    describe_gauge!(
+        "smg_worker_sglang:cache_hit_rate",
+        "SGLang: KV cache hit rate (0-1)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:cache_miss_rate",
+        "SGLang: KV cache miss rate (0-1)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:num_running_reqs",
+        "SGLang: number of requests currently running"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:num_waiting_reqs",
+        "SGLang: number of requests waiting in queue"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:gen_throughput",
+        "SGLang: generation throughput (tokens/s)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:prompt_throughput",
+        "SGLang: prompt processing throughput (tokens/s)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:decode_throughput",
+        "SGLang: decode throughput (tokens/s)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:gpu_cache_usage_perc",
+        "SGLang: fraction of GPU KV cache in use (0-1)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:cpu_cache_usage_perc",
+        "SGLang: fraction of CPU KV cache in use (0-1)"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:avg_input_len",
+        "SGLang: rolling average input token length"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:avg_output_len",
+        "SGLang: rolling average output token length"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:total_requests_completed",
+        "SGLang: cumulative completed requests counter"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:num_queue_reqs",
+        "SGLang: number of requests in the batch queue"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:token_usage",
+        "SGLang: total input + output tokens processed"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:max_total_num_tokens",
+        "SGLang: maximum total token capacity"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:context_len",
+        "SGLang: current context window length"
+    );
+    describe_gauge!(
+        "smg_worker_sglang:eviction_rate",
+        "SGLang: fraction of KV-cache evictions per step"
+    );
+
+    // ── vLLM standard metrics ─────────────────────────────────────────────────
+    describe_gauge!(
+        "smg_worker_vllm:num_requests_running",
+        "vLLM: requests being actively processed"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:num_requests_swapped",
+        "vLLM: requests swapped to CPU"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:num_requests_waiting",
+        "vLLM: requests waiting for GPU memory"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:gpu_cache_usage_perc",
+        "vLLM: fraction of GPU KV cache slots in use (0-1)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:cpu_cache_usage_perc",
+        "vLLM: fraction of CPU KV cache slots in use (0-1)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:avg_prompt_throughput",
+        "vLLM: average prompt token throughput (tokens/s)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:avg_generation_throughput",
+        "vLLM: average generation token throughput (tokens/s)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:iteration_tokens_total",
+        "vLLM: cumulative iteration token count"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:request_prompt_tokens",
+        "vLLM: histogram of prompt token counts (last value)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:request_generation_tokens",
+        "vLLM: histogram of generation token counts (last value)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:cache_hit_rate",
+        "vLLM: prefix cache hit rate (0-1)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:lora_requests_info",
+        "vLLM: active LoRA adapters info (presence indicator)"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:spec_decode_draft_acceptance_rate",
+        "vLLM: speculative decoding draft acceptance rate"
+    );
+    describe_gauge!(
+        "smg_worker_vllm:spec_decode_efficiency",
+        "vLLM: speculative decoding efficiency"
+    );
+
+    // ── TensorRT-LLM standard metrics ─────────────────────────────────────────
+    // trtllm_inflight_reqs and trtllm_request_count_active are routed to the
+    // native `in_flight_requests` field by the DirectScraper; all others land
+    // in `custom_metrics` and are exported with sanitized names below.
+    describe_gauge!(
+        "smg_worker_trtllm_inflight_reqs",
+        "TRT-LLM: in-flight requests (routed to in_flight_requests)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_request_count_active",
+        "TRT-LLM: active request count (alias for inflight_reqs)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_kv_cache_utilization",
+        "TRT-LLM: KV cache utilization (0-1)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_kv_cache_block_reuse_ratio",
+        "TRT-LLM: KV cache block reuse ratio (RadixAttention)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_request_count_scheduled",
+        "TRT-LLM: requests currently scheduled"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_request_count_context",
+        "TRT-LLM: requests in context phase"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_request_count_generation",
+        "TRT-LLM: requests in generation phase"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_runtime_cpu_mem_usage",
+        "TRT-LLM: CPU memory usage (bytes)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_runtime_pinned_mem_usage",
+        "TRT-LLM: pinned CPU memory usage (bytes)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_runtime_gpu_mem_usage",
+        "TRT-LLM: GPU memory usage (bytes)"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_total_context_tokens",
+        "TRT-LLM: total tokens in context phase across all requests"
+    );
+    describe_gauge!(
+        "smg_worker_trtllm_tokens_per_iteration",
+        "TRT-LLM: output tokens generated per iteration"
     );
 
     #[expect(
@@ -1558,15 +1742,22 @@ pub fn start_metrics_observability_exporter(metrics_store: Arc<metrics_service::
             export_snapshot(snap);
         }
 
-        // Listen for updates
+        // Listen for updates — lag is logged but does not crash the exporter
         loop {
             match rx.recv().await {
                 Ok(snap) => export_snapshot(&snap),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!("metrics_observability_exporter: lagged by {} events", n);
+                    tracing::warn!(
+                        missed = n,
+                        "metrics_observability_exporter: lagged by {} snapshot event(s); \
+                         Prometheus gauges may lag real state briefly",
+                        n
+                    );
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    tracing::warn!("metrics_observability_exporter: EventBus closed");
+                    tracing::warn!(
+                        "metrics_observability_exporter: EventBus closed — exporter stopping"
+                    );
                     break;
                 }
             }
@@ -1585,9 +1776,11 @@ fn export_snapshot(snap: &metrics_service::WorkerSnapshot) {
         .set(snap.in_flight_requests as f64);
     metrics::gauge!("smg_worker_avg_tokens_per_req", "worker" => worker.to_string())
         .set(snap.avg_tokens_per_req as f64);
-    // Export any additional custom metrics
+
+    // Export all custom metrics (SGLang, vLLM, or user-defined)
+    // Name sanitization: colons → underscores, hyphens → underscores
     for (key, val) in &snap.custom_metrics {
-        let metric_name = format!("smg_worker_{}", key.replace('-', "_"));
+        let metric_name = format!("smg_worker_{}", key.replace([':', '-'], "_"));
         metrics::gauge!(metric_name, "worker" => worker.to_string()).set(*val);
     }
 }

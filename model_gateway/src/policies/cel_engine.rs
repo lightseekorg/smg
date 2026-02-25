@@ -10,8 +10,13 @@
 //! 4. **503**: returns no worker when all workers are unhealthy
 
 use std::{
+    any::Any,
     collections::HashMap,
-    sync::Arc,
+    fmt,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime},
 };
 
@@ -19,7 +24,12 @@ use cel_interpreter::{Context, Program, Value as CelValue};
 use metrics_service::{MetricsStore, WorkerSnapshot};
 use tracing::{debug, warn};
 
+use super::{LoadBalancingPolicy, SelectWorkerInfo};
 use crate::core::Worker;
+
+// ───────────────────────────────────────────────────────────────────────────
+// Public types
+// ───────────────────────────────────────────────────────────────────────────
 
 /// Policy decision from the CEL engine
 #[derive(Debug, Clone, PartialEq)]
@@ -45,16 +55,82 @@ pub struct PolicyResult {
     pub tier: SelectionTier,
 }
 
+/// Routing strategy for scoring workers
+#[derive(Clone)]
+pub enum RoutingStrategy {
+    /// Prefer the worker with fewest KV-cache tokens (primary strategy)
+    MinKvCacheTokens,
+    /// Prefer the worker with fewest in-flight requests
+    MinInFlight,
+    /// Evaluate a pre-compiled CEL expression.
+    ///
+    /// Build with [`RoutingStrategy::custom`] to compile once and reuse.
+    Custom {
+        /// Original expression string (for Debug / introspection)
+        expr: String,
+        /// Pre-compiled CEL program — zero allocation on the hot path
+        program: Arc<Program>,
+    },
+}
+
+impl RoutingStrategy {
+    /// Compile a CEL expression and return a `Custom` strategy.
+    ///
+    /// Returns an error string if the expression fails to parse/compile.
+    pub fn custom(expr: impl Into<String>) -> Result<Self, String> {
+        let expr = expr.into();
+        let program =
+            Program::compile(&expr).map_err(|e| format!("CEL compile error for '{expr}': {e}"))?;
+        Ok(Self::Custom {
+            expr,
+            program: Arc::new(program),
+        })
+    }
+}
+
+impl fmt::Debug for RoutingStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MinKvCacheTokens => write!(f, "MinKvCacheTokens"),
+            Self::MinInFlight => write!(f, "MinInFlight"),
+            Self::Custom { expr, .. } => f.debug_struct("Custom").field("expr", expr).finish(),
+        }
+    }
+}
+
+impl Default for RoutingStrategy {
+    fn default() -> Self {
+        Self::MinKvCacheTokens
+    }
+}
+
 /// CEL Policy Engine
 ///
 /// Evaluates routing policies by scoring worker snapshots from `MetricsStore`
 /// and falling back through tiers if fresh data is unavailable.
+///
+/// Also implements [`LoadBalancingPolicy`] so it can be used as a drop-in
+/// policy under the `"metrics_driven"` name.
 pub struct CelPolicyEngine {
     metrics_store: Arc<MetricsStore>,
     /// How old a snapshot can be and still be considered "fresh"
     fresh_threshold: Duration,
     /// How old a snapshot can be and still be considered "stale" (used as fallback)
     stale_threshold: Duration,
+    /// Routing strategy to use when this engine acts as a `LoadBalancingPolicy`
+    strategy: RoutingStrategy,
+    /// Round-robin counter for the fallback tier
+    rr_counter: AtomicUsize,
+}
+
+impl fmt::Debug for CelPolicyEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CelPolicyEngine")
+            .field("fresh_threshold", &self.fresh_threshold)
+            .field("stale_threshold", &self.stale_threshold)
+            .field("strategy", &self.strategy)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CelPolicyEngine {
@@ -67,6 +143,25 @@ impl CelPolicyEngine {
             metrics_store,
             fresh_threshold,
             stale_threshold,
+            strategy: RoutingStrategy::default(),
+            rr_counter: AtomicUsize::new(0),
+        }
+    }
+
+    /// Create with an explicit routing strategy (used when wiring as a
+    /// `LoadBalancingPolicy`).
+    pub fn with_strategy(
+        metrics_store: Arc<MetricsStore>,
+        fresh_threshold: Duration,
+        stale_threshold: Duration,
+        strategy: RoutingStrategy,
+    ) -> Self {
+        Self {
+            metrics_store,
+            fresh_threshold,
+            stale_threshold,
+            strategy,
+            rr_counter: AtomicUsize::new(0),
         }
     }
 
@@ -74,7 +169,7 @@ impl CelPolicyEngine {
     ///
     /// Falls through tiers:
     ///   Fresh → Stale → Round-Robin → 503
-    pub fn select_worker(
+    pub fn select_worker_with_strategy(
         &self,
         workers: &[Arc<dyn Worker>],
         strategy: &RoutingStrategy,
@@ -200,19 +295,17 @@ impl CelPolicyEngine {
                 in_flight.saturating_mul(avg)
             }
             RoutingStrategy::MinInFlight => snapshot.in_flight_requests as i64,
-            RoutingStrategy::Custom(expr) => self.evaluate_custom_expr(snapshot, expr),
+            RoutingStrategy::Custom { program, .. } => {
+                self.evaluate_compiled_expr(snapshot, program)
+            }
         }
     }
 
-    /// Evaluate a custom metric expression using CEL.
-    fn evaluate_custom_expr(&self, snapshot: &WorkerSnapshot, expr: &str) -> i64 {
-        // In a high-performance system, the CEL Program should be compiled once and cached
-        // in the RoutingStrategy enum. Since expr is passed as a string here, we parse it dynamically.
-        let program = match Program::compile(expr) {
-            Ok(p) => p,
-            Err(_) => return 1024, // Fallback on parse failure
-        };
-
+    /// Evaluate a **pre-compiled** CEL program against a snapshot.
+    ///
+    /// The `Program` is already compiled — this is O(1) setup + expression
+    /// evaluation cost, no allocation for parsing.
+    fn evaluate_compiled_expr(&self, snapshot: &WorkerSnapshot, program: &Program) -> i64 {
         let mut context = Context::default();
 
         // Expose standard fields to the CEL context
@@ -231,7 +324,6 @@ impl CelPolicyEngine {
 
         // Expose all custom metrics to the CEL context
         for (k, v) in &snapshot.custom_metrics {
-            // Scale floats to int for comparison or keep them as floats depending on CEL usage
             let _ = context.add_variable(k.as_str(), CelValue::Float(*v));
         }
 
@@ -242,29 +334,174 @@ impl CelPolicyEngine {
         }
     }
 
-    /// Round-robin fallback: just pick the first healthy worker.
+    /// Round-robin fallback: picks the next healthy worker in ring order.
     fn round_robin_fallback(&self, workers: &[Arc<dyn Worker>]) -> Option<usize> {
-        workers
+        let healthy: Vec<usize> = workers
             .iter()
             .enumerate()
-            .find(|(_, w)| w.is_healthy() && w.circuit_breaker().can_execute())
+            .filter(|(_, w)| w.is_healthy() && w.circuit_breaker().can_execute())
             .map(|(idx, _)| idx)
+            .collect();
+
+        if healthy.is_empty() {
+            return None;
+        }
+        let pos = self.rr_counter.fetch_add(1, Ordering::Relaxed) % healthy.len();
+        Some(healthy[pos])
     }
 }
 
-/// Routing strategy for scoring workers
-#[derive(Debug, Clone)]
-pub enum RoutingStrategy {
-    /// Prefer the worker with fewest KV-cache tokens (primary strategy)
-    MinKvCacheTokens,
-    /// Prefer the worker with fewest in-flight requests
-    MinInFlight,
-    /// Evaluate a custom CEL expression string
-    Custom(String),
+// LoadBalancingPolicy impl — makes CelPolicyEngine a plug-in policy
+
+impl LoadBalancingPolicy for CelPolicyEngine {
+    fn select_worker(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        _info: &SelectWorkerInfo,
+    ) -> Option<usize> {
+        let result = self.select_worker_with_strategy(workers, &self.strategy);
+        match result.decision {
+            PolicyDecision::SelectWorker(idx) => Some(idx),
+            PolicyDecision::NoWorker => None,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "metrics_driven"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
-impl Default for RoutingStrategy {
-    fn default() -> Self {
-        Self::MinKvCacheTokens
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use metrics_service::{EventBus, MetricSource, MetricsStore, WorkerSnapshot};
+
+    use super::*;
+
+    // helpers
+
+    fn make_store() -> Arc<MetricsStore> {
+        let bus = Arc::new(EventBus::new(64));
+        Arc::new(MetricsStore::new(bus, Duration::from_secs(60)))
+    }
+
+    fn make_engine(store: Arc<MetricsStore>) -> CelPolicyEngine {
+        CelPolicyEngine::new(store, Duration::from_secs(10), Duration::from_secs(60))
+    }
+
+    // A minimal Worker stub for testing
+    struct StubWorker {
+        url: String,
+        healthy: bool,
+    }
+
+    impl StubWorker {
+        fn new(url: &str) -> Arc<Self> {
+            Arc::new(Self {
+                url: url.to_string(),
+                healthy: true,
+            })
+        }
+    }
+
+    // We only need `url()` and `is_healthy()` for the engine's worker scan.
+    // The simplest approach: implement an empty LoadBalancingPolicy-compatible shim.
+    // Since Worker is a trait in `crate::core`, we test the scoring layer directly.
+
+    /// Push a fresh snapshot into the store for `url`.
+    fn push(store: &MetricsStore, url: &str, kv: isize, inflight: isize) {
+        let mut snap = WorkerSnapshot::new(url.to_string(), MetricSource::Piggyback);
+        snap.kv_cache_tokens = Some(kv);
+        snap.in_flight_requests = inflight;
+        store.update(snap);
+    }
+
+    // scoring tests (don't need real Worker objects)
+
+    #[test]
+    fn test_min_kv_cache_tokens_scoring() {
+        let store = make_store();
+        push(&store, "http://w1", 100, 5);
+        push(&store, "http://w2", 500, 1);
+
+        let engine = make_engine(Arc::clone(&store));
+
+        let snap1 = store.get("http://w1").unwrap();
+        let snap2 = store.get("http://w2").unwrap();
+
+        let score1 = engine.score_worker(&snap1, &RoutingStrategy::MinKvCacheTokens);
+        let score2 = engine.score_worker(&snap2, &RoutingStrategy::MinKvCacheTokens);
+
+        assert!(
+            score1 < score2,
+            "w1 (kv=100) should score lower than w2 (kv=500)"
+        );
+    }
+
+    #[test]
+    fn test_min_in_flight_scoring() {
+        let store = make_store();
+        push(&store, "http://w1", 50, 10);
+        push(&store, "http://w2", 200, 2);
+
+        let engine = make_engine(Arc::clone(&store));
+
+        let snap1 = store.get("http://w1").unwrap();
+        let snap2 = store.get("http://w2").unwrap();
+
+        let score1 = engine.score_worker(&snap1, &RoutingStrategy::MinInFlight);
+        let score2 = engine.score_worker(&snap2, &RoutingStrategy::MinInFlight);
+
+        // w2 has fewer in-flight (2 < 10) so it should score lower
+        assert!(
+            score2 < score1,
+            "w2 (inflight=2) should score lower than w1 (inflight=10)"
+        );
+    }
+
+    #[test]
+    fn test_cel_strategy_compilation() {
+        let strategy = RoutingStrategy::custom("in_flight_requests * 2");
+        assert!(
+            matches!(strategy, Ok(RoutingStrategy::Custom { .. })),
+            "Valid CEL expr should compile successfully"
+        );
+    }
+
+    #[test]
+    fn test_invalid_cel_strategy_compilation() {
+        let strategy = RoutingStrategy::custom("not.a.valid.cel.expr(((");
+        assert!(strategy.is_err(), "Invalid CEL expr should return an error");
+    }
+
+    #[test]
+    fn test_cel_scoring_with_compiled_program() {
+        let store = make_store();
+        push(&store, "http://w1", 0, 5);
+
+        let engine = make_engine(Arc::clone(&store));
+        let strategy = RoutingStrategy::custom("in_flight_requests").expect("should compile");
+
+        let snap = store.get("http://w1").unwrap();
+        let score = engine.score_worker(&snap, &strategy);
+        assert_eq!(score, 5, "CEL 'in_flight_requests' should return 5");
+    }
+
+    #[test]
+    fn test_routing_strategy_debug() {
+        let s = RoutingStrategy::MinKvCacheTokens;
+        assert_eq!(format!("{:?}", s), "MinKvCacheTokens");
+
+        let s = RoutingStrategy::MinInFlight;
+        assert_eq!(format!("{:?}", s), "MinInFlight");
+
+        let s = RoutingStrategy::custom("x + y").unwrap();
+        let dbg = format!("{:?}", s);
+        assert!(dbg.contains("Custom"), "Custom debug should mention Custom");
     }
 }
