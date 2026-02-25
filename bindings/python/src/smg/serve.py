@@ -232,8 +232,13 @@ class TrtllmWorkerLauncher(WorkerLauncher):
         ]
 
         # Add optional config file
+        # TRT-LLM Click options use underscores (e.g. --tensor_parallel_size)
+        # while SGLang/vLLM use hyphens. Normalize so users can pass either form.
+        normalized = [
+            "--" + a[2:].replace("-", "_") if a.startswith("--") else a for a in backend_args
+        ]
         cmd.extend(
-            self._filter_backend_args(backend_args, ["--model", "--model-path", "--host", "--port"])
+            self._filter_backend_args(normalized, ["--model", "--model_path", "--host", "--port"])
         )
 
         return cmd
