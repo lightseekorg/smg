@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use dashmap::{mapref::entry::Entry as MapEntry, DashMap};
 use parking_lot::{Mutex, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use super::{
     kv_store::KvStore,
@@ -98,18 +98,19 @@ impl CrdtOrMap {
         let _key_guard = key_lock.lock();
 
         let timestamp = self.clock.tick();
-        if !self.record_insert_metadata(&key, value.clone(), timestamp, self.replica_id) {
+        if !self.record_insert_metadata(&key, &value, timestamp, self.replica_id) {
             return self.store.get(&key).map(|bytes| bytes.to_vec());
         }
 
         let mut prev = None;
-        let value_for_store = value.clone();
+        let value_for_operation = value.clone();
         let _ = self.store.upsert(key.clone(), |current| {
             prev = current.map(|bytes| bytes.to_vec());
-            value_for_store
+            value
         });
 
-        let operation = Operation::insert(key.clone(), value, timestamp, self.replica_id);
+        let operation =
+            Operation::insert(key.clone(), value_for_operation, timestamp, self.replica_id);
         self.operation_log.write().append(operation);
 
         debug!(
@@ -132,7 +133,7 @@ impl CrdtOrMap {
         let updated_value = updater(current_value.as_deref());
         let timestamp = self.clock.tick();
 
-        if !self.record_insert_metadata(&key, updated_value.clone(), timestamp, self.replica_id) {
+        if !self.record_insert_metadata(&key, &updated_value, timestamp, self.replica_id) {
             return self.store.get(&key).unwrap_or_default();
         }
 
@@ -155,7 +156,6 @@ impl CrdtOrMap {
         let _key_guard = key_lock.lock();
 
         let timestamp = self.clock.tick();
-        let operation = Operation::remove(key.to_string(), timestamp, self.replica_id);
 
         debug!(
             "Remove: key={}, timestamp={}, replica={}",
@@ -163,12 +163,12 @@ impl CrdtOrMap {
         );
 
         let removed = if self.record_remove_metadata(key, timestamp, self.replica_id) {
+            let operation = Operation::remove(key.to_string(), timestamp, self.replica_id);
+            self.operation_log.write().append(operation);
             self.store.remove(key)
         } else {
             None
         };
-
-        self.operation_log.write().append(operation);
 
         removed
     }
@@ -186,6 +186,15 @@ impl CrdtOrMap {
     /// Get all key-value pairs
     pub fn all(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
         self.store.all()
+    }
+
+    /// Get number of live keys in the local store.
+    pub fn len(&self) -> usize {
+        self.store.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Get the replica ID
@@ -230,11 +239,35 @@ impl CrdtOrMap {
             self.replica_id
         );
 
+        let mut high_water_by_replica: HashMap<ReplicaId, u64> = HashMap::new();
+        {
+            let local_log = self.operation_log.read();
+            for operation in local_log.operations() {
+                high_water_by_replica
+                    .entry(operation.replica_id())
+                    .and_modify(|ts| *ts = (*ts).max(operation.timestamp()))
+                    .or_insert_with(|| operation.timestamp());
+            }
+        }
+
+        let mut unseen_operations: Vec<&Operation> = log
+            .operations()
+            .iter()
+            .filter(|operation| {
+                operation.timestamp()
+                    > high_water_by_replica
+                        .get(&operation.replica_id())
+                        .copied()
+                        .unwrap_or(0)
+            })
+            .collect();
+        unseen_operations.sort_by_key(|operation| (operation.timestamp(), operation.replica_id()));
+
         // Merge into local operation log
         self.operation_log.write().merge(log);
 
-        // Apply operations to update state
-        for operation in log.operations() {
+        // Apply only new operations in deterministic order.
+        for operation in unseen_operations {
             self.apply_operation(operation);
         }
     }
@@ -250,24 +283,41 @@ impl CrdtOrMap {
     // Internal methods for applying operations
     // ========================================================================
 
-    /// Apply insert (Add-wins semantic)
+    /// Apply insert (LWW semantic; newer tombstones can suppress older inserts).
     fn apply_insert(&self, key: &str, value: Vec<u8>, timestamp: u64, replica_id: ReplicaId) {
         let key_lock = self.key_lock_for(key);
         let _key_guard = key_lock.lock();
 
-        if self.record_insert_metadata(key, value.clone(), timestamp, replica_id) {
+        if self.record_insert_metadata(key, &value, timestamp, replica_id) {
             self.store.insert(key.to_string(), value);
+        }
+    }
+
+    fn compact_key_metadata(&self, key: &str, versions: &mut Vec<ValueMetadata>) {
+        if versions.len() <= 1 {
+            if versions.first().is_some_and(|winner| winner.is_tombstone) {
+                self.key_locks.remove(key);
+            }
+            return;
+        }
+
+        if let Some(winner) = versions.iter().max_by_key(|v| v.version_key()).cloned() {
+            versions.clear();
+            versions.push(winner.clone());
+            if winner.is_tombstone {
+                self.key_locks.remove(key);
+            }
         }
     }
 
     fn record_insert_metadata(
         &self,
         key: &str,
-        value: Vec<u8>,
+        value: &[u8],
         timestamp: u64,
         replica_id: ReplicaId,
     ) -> bool {
-        let new_metadata = ValueMetadata::new(value, timestamp, replica_id);
+        let new_metadata = ValueMetadata::new(value.to_vec(), timestamp, replica_id);
 
         match self.metadata.entry(key.to_string()) {
             MapEntry::Occupied(mut entry) => {
@@ -275,31 +325,22 @@ impl CrdtOrMap {
 
                 let has_existing_entry = versions
                     .iter()
-                    .any(|v| !v.is_tombstone && v.matches_version(timestamp, replica_id));
+                    .any(|v| v.matches_version(timestamp, replica_id));
                 if has_existing_entry {
+                    self.compact_key_metadata(key, versions);
                     return false;
                 }
 
-                let current_winner = versions
-                    .iter()
-                    .filter(|v| !v.is_tombstone)
-                    .max_by_key(|v| v.version_key());
+                let current_winner = versions.iter().max_by_key(|v| v.version_key());
 
                 if current_winner.is_some_and(|winner| winner.is_newer_than(timestamp, replica_id))
                 {
+                    self.compact_key_metadata(key, versions);
                     return false;
                 }
 
-                let has_newer_remove = versions
-                    .iter()
-                    .any(|v| v.is_tombstone && v.is_newer_than(timestamp, replica_id));
-                if has_newer_remove {
-                    warn!("Insert was overwritten by Remove: key={}", key);
-                    return false;
-                }
-
-                // Add-wins: only add if there is no newer remove.
                 versions.push(new_metadata);
+                self.compact_key_metadata(key, versions);
                 true
             }
             MapEntry::Vacant(entry) => {
@@ -331,21 +372,25 @@ impl CrdtOrMap {
                     .iter()
                     .any(|v| v.is_tombstone && v.matches_version(timestamp, replica_id));
                 if has_existing_entry {
+                    self.compact_key_metadata(key, versions);
                     return false;
                 }
 
-                let has_newer_insert = versions
+                let has_newer_version = versions
                     .iter()
-                    .any(|v| !v.is_tombstone && v.is_newer_than(timestamp, replica_id));
-                if has_newer_insert {
+                    .any(|v| v.is_newer_than(timestamp, replica_id));
+                if has_newer_version {
+                    self.compact_key_metadata(key, versions);
                     return false;
                 }
 
                 versions.push(tombstone);
+                self.compact_key_metadata(key, versions);
                 true
             }
             MapEntry::Vacant(entry) => {
                 entry.insert(vec![tombstone]);
+                self.key_locks.remove(key);
                 true
             }
         }

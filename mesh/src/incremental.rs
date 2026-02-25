@@ -103,15 +103,16 @@ impl IncrementalUpdateCollector {
 
             if current_version > last_sent_version {
                 if let Ok(serialized) = serde_json::to_vec(&state) {
+                    let key_for_last_sent = key.clone();
                     updates.push(StateUpdate {
-                        key: key.clone(),
+                        key,
                         value: serialized,
                         version: current_version,
                         actor: self.self_name.clone(),
                         timestamp,
                     });
 
-                    last_sent_map.insert(key.clone(), current_version);
+                    last_sent_map.insert(key_for_last_sent, current_version);
                     debug!(
                         "Collected {} update: {} (version: {})",
                         store_name,

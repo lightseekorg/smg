@@ -9,7 +9,7 @@ use tracing::debug;
 use super::{
     service::gossip::NodeStatus,
     stores::{
-        tree_state_key, PolicyState, RateLimitConfig, RateLimitStore, StateStores, WorkerState,
+        tree_state_key, PolicyState, RateLimitConfig, StateStores, WorkerState,
         GLOBAL_RATE_LIMIT_COUNTER_KEY, GLOBAL_RATE_LIMIT_KEY,
     },
     tree_ops::{TreeOperation, TreeState},
@@ -43,26 +43,28 @@ impl MeshSyncManager {
     ) {
         let key = worker_id.clone();
 
-        // Get current version if exists, otherwise start at 1
-        let current_version = self.stores.worker.get(&key).map(|s| s.version).unwrap_or(0);
-        let new_version = current_version + 1;
+        let updated_state = self.stores.worker.update(key, |current| {
+            let new_version = current
+                .map(|state| state.version)
+                .unwrap_or(0)
+                .saturating_add(1);
 
-        let state = WorkerState {
-            worker_id: worker_id.clone(),
-            model_id,
-            url,
-            health,
-            load,
-            version: new_version,
-        };
+            WorkerState {
+                worker_id: worker_id.clone(),
+                model_id,
+                url,
+                health,
+                load,
+                version: new_version,
+            }
+        });
 
-        // Use self node name as actor
-        let actor = self.self_name.clone();
-        self.stores.worker.insert(key, state, actor);
-        debug!(
-            "Synced worker state to mesh {} (version: {})",
-            worker_id, new_version
-        );
+        if let Some(state) = updated_state {
+            debug!(
+                "Synced worker state to mesh {} (version: {})",
+                state.worker_id, state.version
+            );
+        }
     }
 
     /// Remove worker state from mesh stores
@@ -246,7 +248,23 @@ impl MeshSyncManager {
     /// This keeps wire compatibility with incremental updates while
     /// reusing the existing OperationLog merge path.
     pub fn apply_remote_rate_limit_counter_value(&self, key: String, counter_value: i64) {
-        let log = RateLimitStore::operation_log_for_counter_value(key, counter_value);
+        self.apply_remote_rate_limit_counter_value_with_actor(
+            key,
+            "remote".to_string(),
+            counter_value,
+        );
+    }
+
+    pub fn apply_remote_rate_limit_counter_value_with_actor(
+        &self,
+        key: String,
+        actor: String,
+        counter_value: i64,
+    ) {
+        let log = self
+            .stores
+            .rate_limit
+            .operation_log_for_counter_value(key, actor, counter_value);
         self.apply_remote_rate_limit_counter(&log);
     }
 

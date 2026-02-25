@@ -686,17 +686,45 @@ impl Gossip for GossipService {
                                                     }
                                                 }
                                                 LocalStoreType::RateLimit => {
-                                                    // Deserialize and apply rate limit counter value
-                                                    if let Ok(counter_value) =
+                                                    if let Ok(log) = serde_json::from_slice::<
+                                                        super::crdt_kv::OperationLog,
+                                                    >(
+                                                        &state_update.value
+                                                    ) {
+                                                        if let Some(counter_value) = log
+                                                            .latest_counter_value(&state_update.key)
+                                                            .or_else(|| {
+                                                                log.latest_counter_value_any()
+                                                            })
+                                                        {
+                                                            sync_manager
+                                                                .apply_remote_rate_limit_counter_value_with_actor(
+                                                                    state_update.key.clone(),
+                                                                    state_update.actor.clone(),
+                                                                    counter_value,
+                                                                );
+                                                        } else {
+                                                            log::warn!(
+                                                                key = %state_update.key,
+                                                                "Rate-limit OperationLog does not contain a decodable counter value"
+                                                            );
+                                                        }
+                                                    } else if let Ok(counter_value) =
                                                         serde_json::from_slice::<i64>(
                                                             &state_update.value,
                                                         )
                                                     {
                                                         sync_manager
-                                                            .apply_remote_rate_limit_counter_value(
+                                                            .apply_remote_rate_limit_counter_value_with_actor(
                                                                 state_update.key.clone(),
+                                                                state_update.actor.clone(),
                                                                 counter_value,
                                                             );
+                                                    } else {
+                                                        log::warn!(
+                                                            key = %state_update.key,
+                                                            "Failed to decode rate-limit update as OperationLog or i64"
+                                                        );
                                                     }
                                                 }
                                             }
@@ -921,14 +949,36 @@ impl Gossip for GossipService {
                                                                 }
                                                             }
                                                             LocalStoreType::RateLimit => {
-                                                                // For rate limit counters, deserialize and apply
-                                                                if let Ok(counter_value) = serde_json::from_slice::<i64>(&entry.value) {
-                                                                    if let Some(ref sync_manager) = sync_manager {
+                                                                if let Some(ref sync_manager) = sync_manager {
+                                                                    if let Ok(counter_value) = serde_json::from_slice::<i64>(&entry.value) {
                                                                         sync_manager
-                                                                            .apply_remote_rate_limit_counter_value(
+                                                                            .apply_remote_rate_limit_counter_value_with_actor(
                                                                                 entry.key.clone(),
+                                                                                entry.actor.clone(),
                                                                                 counter_value,
                                                                             );
+                                                                    } else if let Ok(log) = serde_json::from_slice::<super::crdt_kv::OperationLog>(&entry.value) {
+                                                                        if let Some(counter_value) = log
+                                                                            .latest_counter_value(&entry.key)
+                                                                            .or_else(|| log.latest_counter_value_any())
+                                                                        {
+                                                                            sync_manager
+                                                                                .apply_remote_rate_limit_counter_value_with_actor(
+                                                                                    entry.key.clone(),
+                                                                                    entry.actor.clone(),
+                                                                                    counter_value,
+                                                                                );
+                                                                        } else {
+                                                                            log::warn!(
+                                                                                key = %entry.key,
+                                                                                "Snapshot OperationLog does not contain a decodable rate-limit counter"
+                                                                            );
+                                                                        }
+                                                                    } else {
+                                                                        log::warn!(
+                                                                            key = %entry.key,
+                                                                            "Failed to decode snapshot rate-limit entry as i64 or OperationLog"
+                                                                        );
                                                                     }
                                                                 }
                                                             }

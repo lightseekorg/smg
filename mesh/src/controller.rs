@@ -560,10 +560,16 @@ impl MeshController {
                                                         )
                                                     {
                                                         sync_manager
-                                                            .apply_remote_rate_limit_counter_value(
+                                                            .apply_remote_rate_limit_counter_value_with_actor(
                                                                 state_update.key.clone(),
+                                                                state_update.actor.clone(),
                                                                 counter_value,
                                                             );
+                                                    } else {
+                                                        log::warn!(
+                                                            key = %state_update.key,
+                                                            "Failed to decode rate-limit update as OperationLog or i64"
+                                                        );
                                                     }
                                                 }
                                             }

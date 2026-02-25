@@ -59,6 +59,11 @@ impl KvStore {
         self.store.contains_key(key)
     }
 
+    /// Number of keys in the store.
+    pub fn len(&self) -> usize {
+        self.store.len()
+    }
+
     /// Get all key-value pairs as a BTreeMap
     pub fn all(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
         self.store

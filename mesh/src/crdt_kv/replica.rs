@@ -63,14 +63,26 @@ impl LamportClock {
 
     /// Increment and return new timestamp
     pub fn tick(&self) -> u64 {
-        self.counter.fetch_add(1, Ordering::SeqCst) + 1
+        let mut current = self.counter.load(Ordering::SeqCst);
+        loop {
+            let new_value = current.saturating_add(1);
+            match self.counter.compare_exchange(
+                current,
+                new_value,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return new_value,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Update clock to max(local, remote) + 1
     pub fn update(&self, remote_timestamp: u64) -> u64 {
         let mut current = self.counter.load(Ordering::SeqCst);
         loop {
-            let new_value = current.max(remote_timestamp) + 1;
+            let new_value = current.max(remote_timestamp).saturating_add(1);
             match self.counter.compare_exchange(
                 current,
                 new_value,

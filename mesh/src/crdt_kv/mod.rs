@@ -9,7 +9,8 @@ mod replica;
 
 // Export core types
 pub use crdt::CrdtOrMap;
-pub use operation::OperationLog;
+pub use operation::{Operation, OperationLog};
+pub use replica::ReplicaId;
 
 #[cfg(test)]
 mod tests;

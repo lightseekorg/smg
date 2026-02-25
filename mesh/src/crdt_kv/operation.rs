@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -69,6 +69,10 @@ impl Operation {
             Self::Remove { replica_id, .. } => *replica_id,
         }
     }
+
+    fn operation_id(&self) -> (ReplicaId, u64) {
+        (self.replica_id(), self.timestamp())
+    }
 }
 
 // ============================================================================
@@ -82,6 +86,14 @@ pub struct OperationLog {
 }
 
 impl OperationLog {
+    fn decode_counter_payload(value: &[u8]) -> Option<i64> {
+        serde_json::from_slice::<i64>(value).ok().or_else(|| {
+            serde_json::from_slice::<HashMap<String, i64>>(value)
+                .ok()
+                .and_then(|map| map.get("value").copied())
+        })
+    }
+
     /// Create empty operation log
     pub fn new() -> Self {
         Self {
@@ -114,7 +126,7 @@ impl OperationLog {
         serde_json::to_vec(self)
     }
 
-    /// Deserialize from binary
+    /// Deserialize from JSON bytes
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice(bytes)
     }
@@ -129,12 +141,84 @@ impl OperationLog {
         self.operations.is_empty()
     }
 
+    fn latest_operations_by_key(&self) -> BTreeMap<String, Operation> {
+        let mut latest_by_key: BTreeMap<String, Operation> = BTreeMap::new();
+
+        for operation in &self.operations {
+            let key = operation.key().to_string();
+            match latest_by_key.get(&key) {
+                Some(current)
+                    if (current.timestamp(), current.replica_id())
+                        >= (operation.timestamp(), operation.replica_id()) => {}
+                _ => {
+                    latest_by_key.insert(key, operation.clone());
+                }
+            }
+        }
+
+        latest_by_key
+    }
+
+    /// Keep only latest operation per key to bound log growth.
+    pub fn compact(&mut self) {
+        self.operations = self
+            .latest_operations_by_key()
+            .into_values()
+            .collect::<Vec<_>>();
+        self.operations
+            .sort_by_key(|operation| (operation.timestamp(), operation.replica_id()));
+    }
+
+    /// Drop operations with timestamp <= watermark.
+    pub fn compact_up_to(&mut self, watermark: u64) {
+        self.operations
+            .retain(|operation| operation.timestamp() > watermark);
+    }
+
+    /// Build a latest-state snapshot and clear the operation log.
+    pub fn snapshot_and_truncate(&mut self) -> BTreeMap<String, Operation> {
+        let snapshot = self.latest_operations_by_key();
+        self.operations.clear();
+        snapshot
+    }
+
+    /// Decode the latest known counter value for a key from log payloads.
+    pub fn latest_counter_value(&self, key: &str) -> Option<i64> {
+        let latest = self
+            .operations
+            .iter()
+            .filter(|operation| operation.key() == key)
+            .max_by_key(|operation| (operation.timestamp(), operation.replica_id()))?;
+
+        match latest {
+            Operation::Insert { value, .. } => Self::decode_counter_payload(value),
+            Operation::Remove { .. } => None,
+        }
+    }
+
+    /// Decode the latest known counter value, regardless of key.
+    pub fn latest_counter_value_any(&self) -> Option<i64> {
+        let latest = self
+            .operations
+            .iter()
+            .max_by_key(|operation| (operation.timestamp(), operation.replica_id()))?;
+
+        match latest {
+            Operation::Insert { value, .. } => Self::decode_counter_payload(value),
+            Operation::Remove { .. } => None,
+        }
+    }
+
     /// Merge another operation log
     pub fn merge(&mut self, other: &OperationLog) {
-        let mut seen: HashSet<Operation> = self.operations.iter().cloned().collect();
+        let mut seen_ids: HashSet<(ReplicaId, u64)> = self
+            .operations
+            .iter()
+            .map(Operation::operation_id)
+            .collect();
 
         for operation in &other.operations {
-            if seen.insert(operation.clone()) {
+            if seen_ids.insert(operation.operation_id()) {
                 self.operations.push(operation.clone());
             }
         }
