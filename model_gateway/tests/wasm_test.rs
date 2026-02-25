@@ -536,7 +536,7 @@ async fn test_wasm_api_remove_module_not_found() {
     let (app, _app_context, _temp_dir) = create_test_app_with_wasm().await;
 
     // Try to remove a non-existent module
-    let fake_uuid = Uuid::new_v4();
+    let fake_uuid = Uuid::now_v7();
     let remove_response = app
         .oneshot(
             Request::builder()

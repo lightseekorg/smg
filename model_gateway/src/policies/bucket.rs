@@ -420,7 +420,7 @@ impl Bucket {
 
         self.load_total = self.load_total.saturating_sub(removed_load);
 
-        let id = Uuid::new_v4().to_string();
+        let id = Uuid::now_v7().to_string();
 
         self.t_req_loads.insert(id.clone(), char_cnt);
 

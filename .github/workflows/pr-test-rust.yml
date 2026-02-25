@@ -265,6 +265,7 @@ jobs:
             setup_brave: true
             parallel_opts: ""  # Cloud backend tests not compatible with parallel execution
             ignore_opts: ""
+            test_filter: "-m 'not external'"
           - name: e2e
             timeout: 20
             test_dirs: "e2e_test/router e2e_test/embeddings"

@@ -34,7 +34,7 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
     }
 
     // MCP tool loop path
-    let session_id = format!("msg_{}", uuid::Uuid::new_v4());
+    let session_id = format!("msg_{}", uuid::Uuid::now_v7());
     let mcp_servers = req_ctx.mcp_servers.take().unwrap_or_default();
     let session = McpToolSession::new(&router.mcp_orchestrator, mcp_servers, &session_id);
 

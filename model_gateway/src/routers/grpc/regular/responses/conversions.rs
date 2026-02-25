@@ -19,6 +19,7 @@ use openai_protocol::{
     },
     UNKNOWN_MODEL_ID,
 };
+use tracing::warn;
 
 use crate::routers::grpc::common::responses::utils::extract_tools_from_response_tools;
 
@@ -142,6 +143,14 @@ pub(crate) fn responses_to_chat(req: &ResponsesRequest) -> Result<ChatCompletion
                             content: MessageContent::Text(output.clone()),
                             tool_call_id: call_id.clone(),
                         });
+                    }
+                    ResponseInputOutputItem::McpApprovalResponse { .. }
+                    | ResponseInputOutputItem::McpApprovalRequest { .. } => {
+                        warn!(
+                            function = "responses_to_chat",
+                            "Approval item reached chat conversion"
+                        );
+                        return Err("Unsupported input item type".to_string());
                     }
                 }
             }

@@ -62,7 +62,7 @@ impl PipelineStage for GenerateRequestBuildingStage {
         let request_id = generate_request
             .rid
             .clone()
-            .unwrap_or_else(|| format!("gen-{}", Uuid::new_v4()));
+            .unwrap_or_else(|| format!("gen-{}", Uuid::now_v7()));
 
         // Build proto request using centralized dispatch
         let mut proto_request = builder_client

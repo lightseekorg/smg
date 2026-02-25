@@ -547,7 +547,7 @@ pub unsafe extern "C" fn sgl_multi_client_chat_completion_stream(
     };
 
     // Build GenerateRequest
-    let request_id = format!("chatcmpl-{}", Uuid::new_v4());
+    let request_id = format!("chatcmpl-{}", Uuid::now_v7());
     let proto_request = match client.build_generate_request_from_chat(
         request_id.clone(),
         &chat_request,

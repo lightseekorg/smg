@@ -59,7 +59,7 @@ bytemuck = { workspace = true, features = ["derive"] }
 reqwest = { workspace = true, features = ["stream", "blocking", "json", "rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
-uuid = { workspace = true, features = ["v4", "serde"] }
+uuid = { workspace = true, features = ["serde"] }
 
 # Workspace crates
 openai-protocol = { workspace = true, features = ["axum"] }
