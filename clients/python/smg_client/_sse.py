@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -25,7 +25,7 @@ class SseEvent:
     data: str
     event: str | None = None
 
-    def json(self) -> dict:
+    def json(self) -> Any:
         """Parse the data field as JSON."""
         return json.loads(self.data)
 
@@ -33,11 +33,21 @@ class SseEvent:
 def iter_sse_sync(response: httpx.Response) -> Iterator[SseEvent]:
     """Parse SSE events from a synchronous streaming response."""
     event_type: str | None = None
+    data_lines: list[str] = []
 
     for line in response.iter_lines():
         if not line:
-            # Empty line = event boundary, but we yield on data lines
+            # Empty line = dispatch current event
+            if data_lines:
+                data = "\n".join(data_lines)
+                data_lines.clear()
+                if data == "[DONE]":
+                    return
+                yield SseEvent(data=data, event=event_type)
             event_type = None
+            continue
+
+        if line.startswith(":"):
             continue
 
         if line.startswith("event:"):
@@ -45,25 +55,34 @@ def iter_sse_sync(response: httpx.Response) -> Iterator[SseEvent]:
             continue
 
         if line.startswith("data:"):
-            data = line[len("data:") :].strip()
-
-            if data == "[DONE]":
-                return
-
-            yield SseEvent(data=data, event=event_type)
-            event_type = None
+            value = line[len("data:") :]
+            data_lines.append(value[1:] if value.startswith(" ") else value)
             continue
 
-        # Lines starting with ":" are comments (keep-alive pings)
+    # Flush any remaining buffered data at stream end.
+    if data_lines:
+        data = "\n".join(data_lines)
+        if data != "[DONE]":
+            yield SseEvent(data=data, event=event_type)
 
 
 async def iter_sse_async(response: httpx.Response) -> AsyncIterator[SseEvent]:
     """Parse SSE events from an async streaming response."""
     event_type: str | None = None
+    data_lines: list[str] = []
 
     async for line in response.aiter_lines():
         if not line:
+            if data_lines:
+                data = "\n".join(data_lines)
+                data_lines.clear()
+                if data == "[DONE]":
+                    return
+                yield SseEvent(data=data, event=event_type)
             event_type = None
+            continue
+
+        if line.startswith(":"):
             continue
 
         if line.startswith("event:"):
@@ -71,11 +90,11 @@ async def iter_sse_async(response: httpx.Response) -> AsyncIterator[SseEvent]:
             continue
 
         if line.startswith("data:"):
-            data = line[len("data:") :].strip()
-
-            if data == "[DONE]":
-                return
-
-            yield SseEvent(data=data, event=event_type)
-            event_type = None
+            value = line[len("data:") :]
+            data_lines.append(value[1:] if value.startswith(" ") else value)
             continue
+
+    if data_lines:
+        data = "\n".join(data_lines)
+        if data != "[DONE]":
+            yield SseEvent(data=data, event=event_type)

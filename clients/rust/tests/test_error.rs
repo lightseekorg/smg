@@ -46,6 +46,20 @@ fn test_error_from_status_500() {
 }
 
 #[test]
+fn test_error_from_status_422_defaults_to_bad_request() {
+    let err = SmgError::from_status(422, "unprocessable entity");
+    match err {
+        SmgError::BadRequest {
+            status, message, ..
+        } => {
+            assert_eq!(status, 422);
+            assert_eq!(message, "unprocessable entity");
+        }
+        other => panic!("expected BadRequest, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_error_from_status_plain_text() {
     let err = SmgError::from_status(400, "not json");
     match err {

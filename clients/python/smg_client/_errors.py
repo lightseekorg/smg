@@ -1,6 +1,24 @@
-"""Error types for the SMG client."""
+"""Error types for the SMG client.
+
+Note: ``ConnectionError`` and ``TimeoutError`` intentionally shadow the Python
+builtins.  This follows the same pattern as the OpenAI Python client SDK.
+"""
 
 from __future__ import annotations
+
+__all__ = [
+    "SmgError",
+    "ApiError",
+    "BadRequestError",
+    "AuthenticationError",
+    "PermissionDeniedError",
+    "NotFoundError",
+    "RateLimitError",
+    "InternalServerError",
+    "ServiceUnavailableError",
+    "ConnectionError",
+    "TimeoutError",
+]
 
 
 class SmgError(Exception):
@@ -89,24 +107,27 @@ def raise_for_status(status_code: int, body: str) -> None:
     param = None
     code = None
 
-    try:
-        import json
+    import json
 
+    try:
         data = json.loads(body)
-        if "error" in data and isinstance(data["error"], dict):
-            err = data["error"]
-            message = err.get("message", body)
-            error_type = err.get("type")
-            param = err.get("param")
-            code = err.get("code")
-        elif "error" in data and isinstance(data["error"], str):
-            message = data["error"]
-        elif "type" in data and data.get("type") == "error":
-            # Anthropic-style error
-            err = data.get("error", {})
-            message = err.get("message", body)
-            error_type = err.get("type")
-    except (json.JSONDecodeError, KeyError):
+        if isinstance(data, dict):
+            if data.get("type") == "error":
+                # Anthropic-style: {"type": "error", "error": {"type": "...", "message": "..."}}
+                err = data.get("error", {})
+                if isinstance(err, dict):
+                    message = err.get("message", body)
+                    error_type = err.get("type")
+            elif "error" in data and isinstance(data["error"], dict):
+                # OpenAI-style: {"error": {"message": "...", "type": "...", ...}}
+                err = data["error"]
+                message = err.get("message", body)
+                error_type = err.get("type")
+                param = err.get("param")
+                code = err.get("code")
+            elif "error" in data and isinstance(data["error"], str):
+                message = data["error"]
+    except (json.JSONDecodeError, TypeError):
         pass
 
     cls = _STATUS_MAP.get(status_code, ApiError)

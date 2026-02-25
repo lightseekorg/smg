@@ -36,8 +36,10 @@ def _retry_delay(attempt: int, response: httpx.Response | None = None) -> float:
         retry_after = response.headers.get("Retry-After")
         if retry_after is not None:
             try:
-                return float(retry_after)
-            except ValueError:
+                value = float(retry_after)
+                if 0.0 <= value <= 300.0:
+                    return value
+            except (ValueError, OverflowError):
                 pass
     return min(2**attempt * 0.5, 30.0)
 
@@ -66,12 +68,13 @@ class SyncTransport:
         for attempt in range(self._config.max_retries + 1):
             try:
                 if stream:
-                    response = self._client.stream(method, path, json=json)
-                    # For streaming, return the context manager response directly
-                    resp = response.__enter__()
+                    req = self._client.build_request(method, path, json=json)
+                    resp = self._client.send(req, stream=True)
                     if resp.status_code >= 400:
-                        body = resp.read().decode()
-                        resp.close()
+                        try:
+                            body = resp.read().decode("utf-8", errors="replace")
+                        finally:
+                            resp.close()
                         if _should_retry(resp.status_code, attempt, self._config.max_retries):
                             time.sleep(_retry_delay(attempt, resp))
                             continue
@@ -134,11 +137,13 @@ class AsyncTransport:
         for attempt in range(self._config.max_retries + 1):
             try:
                 if stream:
-                    response = self._client.stream(method, path, json=json)
-                    resp = await response.__aenter__()
+                    req = self._client.build_request(method, path, json=json)
+                    resp = await self._client.send(req, stream=True)
                     if resp.status_code >= 400:
-                        body = (await resp.aread()).decode()
-                        await resp.aclose()
+                        try:
+                            body = (await resp.aread()).decode("utf-8", errors="replace")
+                        finally:
+                            await resp.aclose()
                         if _should_retry(resp.status_code, attempt, self._config.max_retries):
                             await asyncio.sleep(_retry_delay(attempt, resp))
                             continue

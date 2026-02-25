@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+from smg_client._errors import SmgError
 from smg_client._sse import iter_sse_async, iter_sse_sync
 
 if TYPE_CHECKING:
@@ -51,7 +52,8 @@ class AsyncStream(Generic[T]):
 
     Usage::
 
-        async with client.chat.completions.create_stream(req) as stream:
+        stream = await client.chat.completions.create_stream(req)
+        async with stream:
             async for chunk in stream:
                 print(chunk.choices[0].delta.content)
     """
@@ -88,8 +90,9 @@ class AnthropicSyncStream:
 
         with client.messages.create_stream(req) as stream:
             for event in stream:
-                if event.type == "content_block_delta":
-                    print(event.delta.text)
+                if event.get("type") == "content_block_delta":
+                    delta = event.get("delta", {})
+                    print(delta.get("text", ""))
     """
 
     def __init__(self, response: httpx.Response) -> None:
@@ -101,10 +104,15 @@ class AnthropicSyncStream:
 
     def __next__(self) -> dict:
         event = next(self._iterator)
-        data = event.json()
-        # Anthropic events have `type` in both the SSE event field and JSON body.
-        # The SSE event field is authoritative; ensure it's set in the parsed dict.
-        if event.event and "type" not in data:
+        try:
+            data = event.json()
+        except ValueError as e:
+            raise SmgError(f"Failed to parse SSE event data as JSON: {e}") from e
+        if not isinstance(data, dict):
+            raise SmgError(f"Expected JSON object in SSE event, got {type(data).__name__}")
+        # Anthropic events carry the type in the SSE event: field.
+        # This is authoritative — always override the JSON body's type.
+        if event.event:
             data["type"] = event.event
         return data
 
@@ -130,8 +138,13 @@ class AnthropicAsyncStream:
 
     async def __anext__(self) -> dict:
         event = await self._iterator.__anext__()
-        data = event.json()
-        if event.event and "type" not in data:
+        try:
+            data = event.json()
+        except ValueError as e:
+            raise SmgError(f"Failed to parse SSE event data as JSON: {e}") from e
+        if not isinstance(data, dict):
+            raise SmgError(f"Expected JSON object in SSE event, got {type(data).__name__}")
+        if event.event:
             data["type"] = event.event
         return data
 

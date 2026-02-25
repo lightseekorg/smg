@@ -31,7 +31,6 @@ tracing.workspace = true
 # Only used by this crate
 bytes = "1"
 tokio-stream = "0.1"
-pin-project-lite = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

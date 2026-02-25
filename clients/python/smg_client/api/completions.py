@@ -18,7 +18,7 @@ class SyncCompletions:
         self._transport = transport
 
     def create(self, **kwargs: Any) -> CompletionResponse:
-        kwargs.setdefault("stream", False)
+        kwargs["stream"] = False
         resp = self._transport.request("POST", "/v1/completions", json=kwargs)
         return CompletionResponse.model_validate_json(resp.content)
 
@@ -35,7 +35,7 @@ class AsyncCompletions:
         self._transport = transport
 
     async def create(self, **kwargs: Any) -> CompletionResponse:
-        kwargs.setdefault("stream", False)
+        kwargs["stream"] = False
         resp = await self._transport.request("POST", "/v1/completions", json=kwargs)
         return CompletionResponse.model_validate_json(resp.content)
 

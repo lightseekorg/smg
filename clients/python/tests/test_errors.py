@@ -7,7 +7,9 @@ from smg_client._errors import (
     BadRequestError,
     InternalServerError,
     NotFoundError,
+    PermissionDeniedError,
     RateLimitError,
+    ServiceUnavailableError,
     raise_for_status,
 )
 
@@ -56,7 +58,30 @@ def test_raise_for_status_anthropic_format():
     assert exc_info.value.message == "Bad input"
 
 
+def test_raise_for_status_403():
+    body = '{"error": {"message": "Forbidden", "type": "permission_error"}}'
+    with pytest.raises(PermissionDeniedError) as exc_info:
+        raise_for_status(403, body)
+    assert exc_info.value.message == "Forbidden"
+    assert exc_info.value.status_code == 403
+
+
+def test_raise_for_status_503():
+    with pytest.raises(ServiceUnavailableError) as exc_info:
+        raise_for_status(503, "Service Unavailable")
+    assert exc_info.value.status_code == 503
+
+
 def test_raise_for_status_plain_text():
     with pytest.raises(BadRequestError) as exc_info:
         raise_for_status(400, "plain error text")
     assert exc_info.value.message == "plain error text"
+
+
+def test_raise_for_status_scalar_json():
+    """Scalar JSON bodies (null, number, string, bool) must not crash."""
+    for body in ["null", "42", '"just a string"', "true"]:
+        with pytest.raises(BadRequestError) as exc_info:
+            raise_for_status(400, body)
+        # Falls through to raw body as message since it's not a dict
+        assert exc_info.value.message == body

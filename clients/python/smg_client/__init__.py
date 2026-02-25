@@ -21,6 +21,9 @@ Usage::
 
 from smg_client._client import AsyncSmgClient, SmgClient
 from smg_client._config import ClientConfig
+
+# ConnectionError and TimeoutError intentionally shadow Python builtins
+# (same pattern as the OpenAI Python client SDK).
 from smg_client._errors import (
     ApiError,
     AuthenticationError,

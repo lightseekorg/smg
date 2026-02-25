@@ -78,8 +78,7 @@ struct SchemaRef {
 
 /// Post-process a JSON value tree to fix schemars output for OpenAPI compatibility:
 /// 1. Rewrite `#/definitions/X` → `#/components/schemas/X`
-/// 2. Replace boolean `true` in anyOf/oneOf/allOf arrays with `{}` (empty = any)
-/// 3. Replace top-level boolean `true` values with `{}`
+/// 2. Replace boolean `true` in `anyOf`/`oneOf`/`allOf` arrays with `{}` (empty = any)
 fn fixup_schema(value: &mut Value) {
     match value {
         Value::String(s) => {
@@ -89,15 +88,23 @@ fn fixup_schema(value: &mut Value) {
         }
         Value::Array(arr) => {
             for item in arr.iter_mut() {
-                if *item == Value::Bool(true) {
-                    *item = Value::Object(serde_json::Map::new());
-                } else {
-                    fixup_schema(item);
-                }
+                fixup_schema(item);
             }
         }
         Value::Object(map) => {
-            for (_, v) in map.iter_mut() {
+            for (k, v) in map.iter_mut() {
+                if matches!(k.as_str(), "anyOf" | "oneOf" | "allOf") {
+                    if let Value::Array(arr) = v {
+                        for item in arr.iter_mut() {
+                            if *item == Value::Bool(true) {
+                                *item = Value::Object(serde_json::Map::new());
+                            } else {
+                                fixup_schema(item);
+                            }
+                        }
+                        continue;
+                    }
+                }
                 fixup_schema(v);
             }
         }
@@ -327,7 +334,7 @@ fn main() -> anyhow::Result<()> {
         openapi: "3.1.0".to_string(),
         info: Info {
             title: "SMG (Shepherd Model Gateway) API".to_string(),
-            version: "1.2.0".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             description: "OpenAI-compatible API with Anthropic Messages and SGLang native support"
                 .to_string(),
         },
@@ -340,7 +347,7 @@ fn main() -> anyhow::Result<()> {
         .nth(1)
         .unwrap_or_else(|| "clients/openapi/smg-openapi.yaml".to_string());
 
-    let yaml = serde_yaml::to_string(&doc)?;
+    let yaml = serde_yaml_ng::to_string(&doc)?;
 
     if output_path == "-" {
         write!(std::io::stdout(), "{yaml}")?;

@@ -26,7 +26,7 @@ class SyncCompletions:
         Returns:
             ChatCompletionResponse for non-streaming requests.
         """
-        kwargs.setdefault("stream", False)
+        kwargs["stream"] = False
         resp = self._transport.request("POST", "/v1/chat/completions", json=kwargs)
         return ChatCompletionResponse.model_validate_json(resp.content)
 
@@ -57,7 +57,7 @@ class AsyncCompletions:
 
     async def create(self, **kwargs: Any) -> ChatCompletionResponse:
         """Create a chat completion."""
-        kwargs.setdefault("stream", False)
+        kwargs["stream"] = False
         resp = await self._transport.request("POST", "/v1/chat/completions", json=kwargs)
         return ChatCompletionResponse.model_validate_json(resp.content)
 

@@ -18,6 +18,11 @@ impl Messages {
 
     /// Create a non-streaming message.
     pub async fn create(&self, request: &CreateMessageRequest) -> Result<Message, SmgError> {
+        if request.stream == Some(true) {
+            return Err(SmgError::Stream(
+                "Messages::create requires stream = false; use create_stream for streaming".into(),
+            ));
+        }
         let resp = self.transport.post("/v1/messages", request).await?;
         let body = resp.text().await.map_err(SmgError::Connection)?;
         serde_json::from_str(&body).map_err(SmgError::from)
@@ -32,6 +37,11 @@ impl Messages {
         &self,
         request: &CreateMessageRequest,
     ) -> Result<TypedStream<MessageStreamEvent>, SmgError> {
+        if request.stream != Some(true) {
+            return Err(SmgError::Stream(
+                "Messages::create_stream requires stream = true".into(),
+            ));
+        }
         let resp = self.transport.post_stream("/v1/messages", request).await?;
         let byte_stream = resp.bytes_stream();
         let raw_events = sse_stream(byte_stream);
@@ -48,13 +58,12 @@ impl Messages {
 fn inject_event_type(result: Result<SseEvent, SmgError>) -> Result<SseEvent, SmgError> {
     let mut event = result?;
     if let Some(ref event_type) = event.event {
-        // Try to parse and inject; if it fails, just pass through.
+        // The SSE `event:` field is authoritative for Anthropic — always override
+        // the JSON body's `type` to ensure serde tagged enum deserialization works.
         if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&event.data) {
             if let Some(obj) = value.as_object_mut() {
-                if !obj.contains_key("type") {
-                    obj.insert("type".to_string(), serde_json::json!(event_type));
-                    event.data = value.to_string();
-                }
+                obj.insert("type".to_string(), serde_json::json!(event_type));
+                event.data = value.to_string();
             }
         }
     }

@@ -150,3 +150,7 @@ site/
 
 # Compiled WASM test fixtures (rebuild with: ./wasm/tests/fixtures/build_fixtures.sh)
 wasm/tests/fixtures/*.wasm
+
+# Generated client SDK files (run `make generate-clients` to regenerate)
+clients/openapi/smg-openapi.yaml
+clients/python/smg_client/types/_generated.py

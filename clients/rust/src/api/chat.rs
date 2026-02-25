@@ -23,6 +23,11 @@ impl Chat {
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, SmgError> {
+        if request.stream {
+            return Err(SmgError::Stream(
+                "Chat::create requires stream = false; use create_stream for streaming".into(),
+            ));
+        }
         let resp = self.transport.post("/v1/chat/completions", request).await?;
         let body = resp.text().await.map_err(SmgError::Connection)?;
         serde_json::from_str(&body).map_err(SmgError::from)
@@ -51,6 +56,11 @@ impl Chat {
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<TypedStream<ChatCompletionStreamResponse>, SmgError> {
+        if !request.stream {
+            return Err(SmgError::Stream(
+                "Chat::create_stream requires stream = true".into(),
+            ));
+        }
         let resp = self
             .transport
             .post_stream("/v1/chat/completions", request)

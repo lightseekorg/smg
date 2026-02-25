@@ -8,7 +8,7 @@ pub enum SmgError {
     Connection(#[from] reqwest::Error),
 
     /// Server returned a 400 Bad Request.
-    #[error("bad request (400): {message}")]
+    #[error("bad request ({status}): {message}")]
     BadRequest {
         message: String,
         status: u16,
@@ -95,6 +95,12 @@ impl SmgError {
                 body: parsed,
             },
             429 => Self::RateLimit {
+                message,
+                status,
+                body: parsed,
+            },
+            // Catch-all for other 4xx client errors (e.g. 422).
+            402 | 405..=428 | 430..=499 => Self::BadRequest {
                 message,
                 status,
                 body: parsed,

@@ -23,7 +23,7 @@ class SyncMessages:
         Args:
             **kwargs: CreateMessageRequest fields (model, messages, max_tokens, etc.)
         """
-        kwargs.setdefault("stream", False)
+        kwargs["stream"] = False
         resp = self._transport.request("POST", "/v1/messages", json=kwargs)
         return Message.model_validate_json(resp.content)
 
@@ -57,7 +57,7 @@ class AsyncMessages:
         self._transport = transport
 
     async def create(self, **kwargs: Any) -> Message:
-        kwargs.setdefault("stream", False)
+        kwargs["stream"] = False
         resp = await self._transport.request("POST", "/v1/messages", json=kwargs)
         return Message.model_validate_json(resp.content)
 

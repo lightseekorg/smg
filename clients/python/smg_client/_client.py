@@ -102,10 +102,11 @@ class AsyncSmgClient:
                 messages=[{"role": "user", "content": "Hello"}],
             )
 
-            async with client.chat.completions.create_stream(
+            stream = await client.chat.completions.create_stream(
                 model="llama-3.1-8b",
                 messages=[{"role": "user", "content": "Hello"}],
-            ) as stream:
+            )
+            async with stream:
                 async for chunk in stream:
                     print(chunk.choices[0].delta.content, end="")
     """

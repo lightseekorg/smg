@@ -138,7 +138,7 @@ generate-openapi: ## Generate OpenAPI spec from Rust protocol types
 
 generate-python-types: generate-openapi ## Generate Python types from OpenAPI spec
 	@echo "Generating Python types..."
-	@uvx --from datamodel-code-generator datamodel-codegen \
+	@uvx --from 'datamodel-code-generator==0.54.0' datamodel-codegen \
 		--input clients/openapi/smg-openapi.yaml \
 		--input-file-type openapi \
 		--output clients/python/smg_client/types/_generated.py \
