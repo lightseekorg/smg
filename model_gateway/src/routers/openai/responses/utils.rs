@@ -230,7 +230,7 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
         }
         ResponseTool::WebSearchPreview(_) => serde_json::to_value(tool).ok(),
         ResponseTool::CodeInterpreter(_) => serde_json::to_value(tool).ok(),
-        _ => None,
+        ResponseTool::Function(_) => None,
     }
 }
 
