@@ -428,7 +428,6 @@ struct Router {
     model_path: Option<String>,
     tokenizer_path: Option<String>,
     chat_template: Option<String>,
-    served_model_name: Option<String>,
     tokenizer_cache_enable_l0: bool,
     tokenizer_cache_l0_max_entries: usize,
     tokenizer_cache_enable_l1: bool,
@@ -658,7 +657,6 @@ impl Router {
             .maybe_model_path(self.model_path.as_ref())
             .maybe_tokenizer_path(self.tokenizer_path.as_ref())
             .maybe_chat_template(self.chat_template.as_ref())
-            .maybe_served_model_name(self.served_model_name.as_ref())
             .maybe_oracle(oracle)
             .maybe_postgres(postgres_config)
             .maybe_redis(redis_config)
@@ -751,7 +749,6 @@ impl Router {
         model_path = None,
         tokenizer_path = None,
         chat_template = None,
-        served_model_name = None,
         tokenizer_cache_enable_l0 = false,
         tokenizer_cache_l0_max_entries = 10000,
         tokenizer_cache_enable_l1 = false,
@@ -844,7 +841,6 @@ impl Router {
         model_path: Option<String>,
         tokenizer_path: Option<String>,
         chat_template: Option<String>,
-        served_model_name: Option<String>,
         tokenizer_cache_enable_l0: bool,
         tokenizer_cache_l0_max_entries: usize,
         tokenizer_cache_enable_l1: bool,
@@ -947,7 +943,6 @@ impl Router {
             model_path,
             tokenizer_path,
             chat_template,
-            served_model_name,
             tokenizer_cache_enable_l0,
             tokenizer_cache_l0_max_entries,
             tokenizer_cache_enable_l1,

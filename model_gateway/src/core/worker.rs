@@ -256,16 +256,6 @@ pub trait Worker: Send + Sync + fmt::Debug {
             .unwrap_or(UNKNOWN_MODEL_ID)
     }
 
-    /// All names (primary model ID + aliases) this worker should be indexed/registered under.
-    fn model_names(&self) -> std::collections::HashSet<String> {
-        let primary = self.model_id().to_string();
-        let mut names = std::collections::HashSet::from([primary.clone()]);
-        if let Some(card) = self.metadata().spec.models.primary() {
-            names.extend(card.aliases.iter().cloned());
-        }
-        names
-    }
-
     /// Get the priority of this worker (higher value = higher priority)
     fn priority(&self) -> u32 {
         self.metadata().spec.priority
