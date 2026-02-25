@@ -83,10 +83,6 @@ impl LamportClock {
         }
     }
 
-    // /// Get current timestamp (without incrementing)
-    // pub fn now(&self) -> u64 {
-    //     self.counter.load(Ordering::SeqCst)
-    // }
 }
 
 impl Default for LamportClock {
