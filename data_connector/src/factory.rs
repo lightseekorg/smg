@@ -8,6 +8,8 @@ use url::Url;
 use crate::{
     config::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig},
     core::{ConversationItemStorage, ConversationStorage, ResponseStorage},
+    hooked::{HookedConversationItemStorage, HookedConversationStorage, HookedResponseStorage},
+    hooks::StorageHook,
     memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage},
     noop::{NoOpConversationItemStorage, NoOpConversationStorage, NoOpResponseStorage},
     oracle::{OracleConversationItemStorage, OracleConversationStorage, OracleResponseStorage},
@@ -34,6 +36,10 @@ pub struct StorageFactoryConfig<'a> {
     pub oracle: Option<&'a OracleConfig>,
     pub postgres: Option<&'a PostgresConfig>,
     pub redis: Option<&'a RedisConfig>,
+    /// Optional storage hook. When provided, all three storage backends are
+    /// wrapped in `Hooked*Storage` that runs before/after hooks around every
+    /// storage operation.
+    pub hook: Option<Arc<dyn StorageHook>>,
 }
 
 /// Create all three storage backends based on configuration.
@@ -47,22 +53,22 @@ pub struct StorageFactoryConfig<'a> {
 /// # Errors
 /// Returns error string if required configuration is missing or initialization fails
 pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageTuple, String> {
-    match config.backend {
+    let (resp, conv, items): StorageTuple = match config.backend {
         HistoryBackend::Memory => {
             info!("Initializing data connector: Memory");
-            Ok((
+            (
                 Arc::new(MemoryResponseStorage::new()),
                 Arc::new(MemoryConversationStorage::new()),
                 Arc::new(MemoryConversationItemStorage::new()),
-            ))
+            )
         }
         HistoryBackend::None => {
             info!("Initializing data connector: None (no persistence)");
-            Ok((
+            (
                 Arc::new(NoOpResponseStorage::new()),
                 Arc::new(NoOpConversationStorage::new()),
                 Arc::new(NoOpConversationItemStorage::new()),
-            ))
+            )
         }
         HistoryBackend::Oracle => {
             let oracle_cfg = config
@@ -77,7 +83,7 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageT
             let storages = create_oracle_storage(oracle_cfg)?;
 
             info!("Data connector initialized successfully: Oracle ATP");
-            Ok(storages)
+            storages
         }
         HistoryBackend::Postgres => {
             let postgres_cfg = config
@@ -102,8 +108,7 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageT
             let storages = create_postgres_storage(postgres_cfg).await?;
 
             info!("Data connector initialized successfully: Postgres");
-
-            Ok(storages)
+            storages
         }
         HistoryBackend::Redis => {
             let redis_cfg = config
@@ -128,9 +133,20 @@ pub async fn create_storage(config: StorageFactoryConfig<'_>) -> Result<StorageT
             let storages = create_redis_storage(redis_cfg)?;
 
             info!("Data connector initialized successfully: Redis");
-
-            Ok(storages)
+            storages
         }
+    };
+
+    // Wrap backends in hooked storage when a hook is provided
+    if let Some(hook) = config.hook {
+        info!("Wrapping storage backends with hook");
+        Ok((
+            Arc::new(HookedResponseStorage::new(resp, hook.clone())),
+            Arc::new(HookedConversationStorage::new(conv, hook.clone())),
+            Arc::new(HookedConversationItemStorage::new(items, hook)),
+        ))
+    } else {
+        Ok((resp, conv, items))
     }
 }
 
@@ -200,6 +216,7 @@ mod tests {
             oracle: None,
             postgres: None,
             redis: None,
+            hook: None,
         };
         let (resp, conv, items) = create_storage(config).await.unwrap();
 
@@ -243,6 +260,7 @@ mod tests {
             oracle: None,
             postgres: None,
             redis: None,
+            hook: None,
         };
         let (resp, conv, _items) = create_storage(config).await.unwrap();
 
@@ -265,6 +283,7 @@ mod tests {
             oracle: None,
             postgres: None,
             redis: None,
+            hook: None,
         };
         let err = create_storage(config).await.err().expect("should fail");
         assert!(err.contains("oracle configuration is required"));
@@ -277,6 +296,7 @@ mod tests {
             oracle: None,
             postgres: None,
             redis: None,
+            hook: None,
         };
         let err = create_storage(config).await.err().expect("should fail");
         assert!(err.contains("Postgres configuration is required"));
@@ -289,6 +309,7 @@ mod tests {
             oracle: None,
             postgres: None,
             redis: None,
+            hook: None,
         };
         let err = create_storage(config).await.err().expect("should fail");
         assert!(err.contains("Redis configuration is required"));

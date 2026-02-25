@@ -444,6 +444,7 @@ impl AppContextBuilder {
             oracle: config.oracle.as_ref(),
             postgres: config.postgres.as_ref(),
             redis: config.redis.as_ref(),
+            hook: None,
         };
         let (response_storage, conversation_storage, conversation_item_storage) =
             create_storage(storage_config).await?;
