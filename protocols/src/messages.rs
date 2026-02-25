@@ -19,7 +19,7 @@ use crate::validated::Normalizable;
 ///
 /// This is the main request type for `/v1/messages` endpoint.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate, schemars::JsonSchema)]
 #[validate(schema(function = "validate_mcp_config"))]
 pub struct CreateMessageRequest {
     /// The model that will complete your prompt.
@@ -116,7 +116,7 @@ fn validate_mcp_config(req: &CreateMessageRequest) -> Result<(), validator::Vali
 }
 
 /// Request metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Metadata {
     /// An external identifier for the user who is associated with the request.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -124,7 +124,7 @@ pub struct Metadata {
 }
 
 /// Service tier options
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceTier {
     Auto,
@@ -132,7 +132,7 @@ pub enum ServiceTier {
 }
 
 /// System content can be a string or an array of text blocks
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum SystemContent {
     String(String),
@@ -140,7 +140,7 @@ pub enum SystemContent {
 }
 
 /// A single input message in a conversation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct InputMessage {
     /// The role of the message sender (user or assistant)
     pub role: Role,
@@ -150,7 +150,7 @@ pub struct InputMessage {
 }
 
 /// Role of a message sender
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
@@ -158,7 +158,7 @@ pub enum Role {
 }
 
 /// Input content can be a string or an array of content blocks
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum InputContent {
     String(String),
@@ -170,7 +170,7 @@ pub enum InputContent {
 // ============================================================================
 
 /// Input content block types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputContentBlock {
     /// Text content
@@ -197,7 +197,7 @@ pub enum InputContentBlock {
 
 /// Text content block
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TextBlock {
     /// The text content
     pub text: String,
@@ -210,7 +210,7 @@ pub struct TextBlock {
 }
 
 /// Image content block
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ImageBlock {
     /// The image source
     pub source: ImageSource,
@@ -221,7 +221,7 @@ pub struct ImageBlock {
 }
 
 /// Image source (base64 or URL)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ImageSource {
     Base64 { media_type: String, data: String },
@@ -230,7 +230,7 @@ pub enum ImageSource {
 
 /// Document content block
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DocumentBlock {
     /// The document source
     pub source: DocumentSource,
@@ -249,7 +249,7 @@ pub struct DocumentBlock {
 }
 
 /// Document source (base64, text, or URL)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DocumentSource {
     Base64 { media_type: String, data: String },
@@ -259,7 +259,7 @@ pub enum DocumentSource {
 }
 
 /// Tool use block (in assistant messages)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolUseBlock {
     /// Unique identifier for this tool use
     pub id: String,
@@ -277,7 +277,7 @@ pub struct ToolUseBlock {
 
 /// Tool result block (in user messages)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolResultBlock {
     /// The ID of the tool use this is a result for
     pub tool_use_id: String,
@@ -293,7 +293,7 @@ pub struct ToolResultBlock {
 }
 
 /// Tool result content (string or blocks)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ToolResultContent {
     String(String),
@@ -301,7 +301,7 @@ pub enum ToolResultContent {
 }
 
 /// Content blocks allowed in tool results
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolResultContentBlock {
     Text(TextBlock),
@@ -311,7 +311,7 @@ pub enum ToolResultContentBlock {
 }
 
 /// Thinking block
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ThinkingBlock {
     /// The thinking content
     pub thinking: String,
@@ -321,14 +321,14 @@ pub struct ThinkingBlock {
 }
 
 /// Redacted thinking block
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RedactedThinkingBlock {
     /// The encrypted/redacted data
     pub data: String,
 }
 
 /// Server tool use block
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServerToolUseBlock {
     /// Unique identifier for this tool use
     pub id: String,
@@ -346,7 +346,7 @@ pub struct ServerToolUseBlock {
 
 /// Search result block
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SearchResultBlock {
     /// Source URL or identifier
     pub source: String,
@@ -365,7 +365,7 @@ pub struct SearchResultBlock {
 }
 
 /// Web search tool result block
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WebSearchToolResultBlock {
     /// The tool use ID this result is for
     pub tool_use_id: String,
@@ -379,7 +379,7 @@ pub struct WebSearchToolResultBlock {
 }
 
 /// Web search tool result content
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum WebSearchToolResultContent {
     Results(Vec<WebSearchResultBlock>),
@@ -387,7 +387,7 @@ pub enum WebSearchToolResultContent {
 }
 
 /// Web search result block
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WebSearchResultBlock {
     /// Title of the search result
     pub title: String,
@@ -404,7 +404,7 @@ pub struct WebSearchResultBlock {
 }
 
 /// Web search tool result error
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WebSearchToolResultError {
     #[serde(rename = "type")]
     pub error_type: String,
@@ -412,7 +412,7 @@ pub struct WebSearchToolResultError {
 }
 
 /// Web search tool result error codes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSearchToolResultErrorCode {
     InvalidToolInput,
@@ -423,21 +423,21 @@ pub enum WebSearchToolResultErrorCode {
 }
 
 /// Cache control configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CacheControl {
     Ephemeral,
 }
 
 /// Citations configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CitationsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 }
 
 /// Citation types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[expect(
     clippy::enum_variant_names,
@@ -452,7 +452,7 @@ pub enum Citation {
 }
 
 /// Character location citation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CharLocationCitation {
     pub cited_text: String,
     pub document_index: u32,
@@ -464,7 +464,7 @@ pub struct CharLocationCitation {
 }
 
 /// Page location citation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PageLocationCitation {
     pub cited_text: String,
     pub document_index: u32,
@@ -474,7 +474,7 @@ pub struct PageLocationCitation {
 }
 
 /// Content block location citation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ContentBlockLocationCitation {
     pub cited_text: String,
     pub document_index: u32,
@@ -484,7 +484,7 @@ pub struct ContentBlockLocationCitation {
 }
 
 /// Web search result location citation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WebSearchResultLocationCitation {
     pub cited_text: String,
     pub url: String,
@@ -493,7 +493,7 @@ pub struct WebSearchResultLocationCitation {
 }
 
 /// Search result location citation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SearchResultLocationCitation {
     pub cited_text: String,
     pub search_result_index: u32,
@@ -508,8 +508,9 @@ pub struct SearchResultLocationCitation {
 // ============================================================================
 
 /// Tool definition
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
+#[schemars(rename = "MessagesTool")]
 pub enum Tool {
     /// MCP toolset definition
     McpToolset(McpToolset),
@@ -525,7 +526,7 @@ pub enum Tool {
 
 /// Custom tool definition
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CustomTool {
     /// Name of the tool
     pub name: String,
@@ -546,7 +547,7 @@ pub struct CustomTool {
 
 /// JSON Schema for tool input
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct InputSchema {
     #[serde(rename = "type")]
     pub schema_type: String,
@@ -561,7 +562,7 @@ pub struct InputSchema {
 }
 
 /// Bash tool for computer use
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BashTool {
     #[serde(rename = "type")]
     pub tool_type: String, // "bash_20250124"
@@ -573,7 +574,7 @@ pub struct BashTool {
 }
 
 /// Text editor tool for computer use
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TextEditorTool {
     #[serde(rename = "type")]
     pub tool_type: String, // "text_editor_20250124", etc.
@@ -586,7 +587,7 @@ pub struct TextEditorTool {
 
 /// Web search tool
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WebSearchTool {
     #[serde(rename = "type")]
     pub tool_type: String, // "web_search_20250305"
@@ -606,7 +607,7 @@ pub struct WebSearchTool {
 
 /// User location for web search
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UserLocation {
     #[serde(rename = "type")]
     pub location_type: String, // "approximate"
@@ -626,8 +627,9 @@ pub struct UserLocation {
 
 /// How the model should use the provided tools
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[schemars(rename = "MessagesToolChoice")]
 pub enum ToolChoice {
     /// The model will automatically decide whether to use tools
     Auto {
@@ -651,7 +653,7 @@ pub enum ToolChoice {
 // ============================================================================
 
 /// Configuration for extended thinking
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ThinkingConfig {
     /// Enable extended thinking
@@ -668,7 +670,7 @@ pub enum ThinkingConfig {
 // ============================================================================
 
 /// Response message from the API
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Message {
     /// Unique object identifier
     pub id: String,
@@ -697,7 +699,7 @@ pub struct Message {
 }
 
 /// Output content block types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     /// Text content
@@ -743,7 +745,7 @@ pub enum ContentBlock {
 }
 
 /// Stop reasons
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
     /// The model reached a natural stopping point
@@ -762,7 +764,8 @@ pub enum StopReason {
 
 /// Billing and rate-limit usage
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(rename = "MessagesUsage")]
 pub struct Usage {
     /// The number of input tokens used
     pub input_tokens: u32,
@@ -787,14 +790,14 @@ pub struct Usage {
 }
 
 /// Cache creation breakdown
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CacheCreation {
     #[serde(flatten)]
     pub tokens_by_ttl: HashMap<String, u32>,
 }
 
 /// Server tool usage information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ServerToolUsage {
     pub web_search_requests: u32,
 }
@@ -804,7 +807,7 @@ pub struct ServerToolUsage {
 // ============================================================================
 
 /// Server-sent event wrapper
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessageStreamEvent {
     /// Start of a new message
@@ -836,7 +839,7 @@ pub enum MessageStreamEvent {
 
 /// Message delta for streaming updates
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MessageDelta {
     pub stop_reason: Option<StopReason>,
 
@@ -845,7 +848,7 @@ pub struct MessageDelta {
 
 /// Usage delta for streaming updates
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MessageDeltaUsage {
     pub output_tokens: u32,
 
@@ -859,7 +862,7 @@ pub struct MessageDeltaUsage {
 }
 
 /// Content block delta for streaming updates
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[expect(
     clippy::enum_variant_names,
@@ -883,7 +886,8 @@ pub enum ContentBlockDelta {
 // ============================================================================
 
 /// Error response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(rename = "MessagesErrorResponse")]
 pub struct ErrorResponse {
     #[serde(rename = "type")]
     pub error_type: String,
@@ -892,7 +896,7 @@ pub struct ErrorResponse {
 }
 
 /// API error types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[expect(
     clippy::enum_variant_names,
@@ -916,7 +920,7 @@ pub enum ApiError {
 
 /// Request to count tokens in a message
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CountMessageTokensRequest {
     /// The model to use for token counting
     pub model: String,
@@ -938,7 +942,7 @@ pub struct CountMessageTokensRequest {
 }
 
 /// Response from token counting
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CountMessageTokensResponse {
     pub input_tokens: u32,
 }
@@ -948,7 +952,7 @@ pub struct CountMessageTokensResponse {
 // ============================================================================
 
 /// Model information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelInfo {
     /// Object type (always "model")
     #[serde(rename = "type")]
@@ -965,7 +969,7 @@ pub struct ModelInfo {
 }
 
 /// List of models response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ListModelsResponse {
     pub data: Vec<ModelInfo>,
     pub has_more: bool,
@@ -979,7 +983,7 @@ pub struct ListModelsResponse {
 
 /// Container configuration for code execution (beta)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ContainerConfig {
     /// Container ID for reuse across requests
     pub id: Option<String>,
@@ -990,7 +994,7 @@ pub struct ContainerConfig {
 
 /// MCP server configuration (beta)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpServerConfig {
     /// Server type (always "url")
     #[serde(rename = "type", default = "McpServerConfig::default_type")]
@@ -1017,7 +1021,7 @@ impl McpServerConfig {
 
 /// MCP tool configuration
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpToolConfiguration {
     /// Whether to allow all tools
     pub enabled: Option<bool>,
@@ -1031,7 +1035,7 @@ pub struct McpToolConfiguration {
 // ============================================================================
 
 /// MCP tool use block (beta) - for assistant messages
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpToolUseBlock {
     /// Unique identifier for this tool use
     pub id: String,
@@ -1052,7 +1056,7 @@ pub struct McpToolUseBlock {
 
 /// MCP tool result block (beta) - for user messages
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpToolResultBlock {
     /// The ID of the tool use this is a result for
     pub tool_use_id: String,
@@ -1069,7 +1073,7 @@ pub struct McpToolResultBlock {
 
 /// MCP toolset definition (beta)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpToolset {
     #[serde(rename = "type")]
     pub toolset_type: String, // "mcp_toolset"
@@ -1089,7 +1093,7 @@ pub struct McpToolset {
 
 /// Default configuration for MCP tools
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpToolDefaultConfig {
     /// Whether tools are enabled
     pub enabled: Option<bool>,
@@ -1100,7 +1104,7 @@ pub struct McpToolDefaultConfig {
 
 /// Per-tool MCP configuration
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpToolConfig {
     /// Whether this tool is enabled
     pub enabled: Option<bool>,
@@ -1115,7 +1119,7 @@ pub struct McpToolConfig {
 
 /// Code execution tool (beta)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CodeExecutionTool {
     #[serde(rename = "type")]
     pub tool_type: String, // "code_execution_20250522" or "code_execution_20250825"
@@ -1136,7 +1140,7 @@ pub struct CodeExecutionTool {
 }
 
 /// Code execution result block (beta)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CodeExecutionResultBlock {
     /// Stdout output
     pub stdout: String,
@@ -1152,7 +1156,7 @@ pub struct CodeExecutionResultBlock {
 }
 
 /// Code execution output file reference
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CodeExecutionOutputBlock {
     #[serde(rename = "type")]
     pub block_type: String, // "code_execution_output"
@@ -1162,7 +1166,7 @@ pub struct CodeExecutionOutputBlock {
 }
 
 /// Code execution tool result block (beta)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CodeExecutionToolResultBlock {
     /// The ID of the tool use this is a result for
     pub tool_use_id: String,
@@ -1176,7 +1180,7 @@ pub struct CodeExecutionToolResultBlock {
 }
 
 /// Code execution tool result content
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum CodeExecutionToolResultContent {
     Success(CodeExecutionResultBlock),
@@ -1184,7 +1188,7 @@ pub enum CodeExecutionToolResultContent {
 }
 
 /// Code execution tool result error
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CodeExecutionToolResultError {
     #[serde(rename = "type")]
     pub error_type: String, // "code_execution_tool_result_error"
@@ -1193,7 +1197,7 @@ pub struct CodeExecutionToolResultError {
 }
 
 /// Code execution error codes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeExecutionToolResultErrorCode {
     Unavailable,
@@ -1203,7 +1207,7 @@ pub enum CodeExecutionToolResultErrorCode {
 }
 
 /// Bash code execution result block (beta)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BashCodeExecutionResultBlock {
     /// Stdout output
     pub stdout: String,
@@ -1219,7 +1223,7 @@ pub struct BashCodeExecutionResultBlock {
 }
 
 /// Bash code execution output file reference
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BashCodeExecutionOutputBlock {
     #[serde(rename = "type")]
     pub block_type: String, // "bash_code_execution_output"
@@ -1229,7 +1233,7 @@ pub struct BashCodeExecutionOutputBlock {
 }
 
 /// Bash code execution tool result block (beta)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BashCodeExecutionToolResultBlock {
     /// The ID of the tool use this is a result for
     pub tool_use_id: String,
@@ -1243,7 +1247,7 @@ pub struct BashCodeExecutionToolResultBlock {
 }
 
 /// Bash code execution tool result content
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum BashCodeExecutionToolResultContent {
     Success(BashCodeExecutionResultBlock),
@@ -1251,7 +1255,7 @@ pub enum BashCodeExecutionToolResultContent {
 }
 
 /// Bash code execution tool result error
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BashCodeExecutionToolResultError {
     #[serde(rename = "type")]
     pub error_type: String, // "bash_code_execution_tool_result_error"
@@ -1260,7 +1264,7 @@ pub struct BashCodeExecutionToolResultError {
 }
 
 /// Bash code execution error codes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BashCodeExecutionToolResultErrorCode {
     Unavailable,
@@ -1270,7 +1274,7 @@ pub enum BashCodeExecutionToolResultErrorCode {
 }
 
 /// Text editor code execution tool result block (beta)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TextEditorCodeExecutionToolResultBlock {
     /// The ID of the tool use this is a result for
     pub tool_use_id: String,
@@ -1284,7 +1288,7 @@ pub struct TextEditorCodeExecutionToolResultBlock {
 }
 
 /// Text editor code execution result content
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum TextEditorCodeExecutionToolResultContent {
     CreateResult(TextEditorCodeExecutionCreateResultBlock),
@@ -1294,14 +1298,14 @@ pub enum TextEditorCodeExecutionToolResultContent {
 }
 
 /// Text editor create result block
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TextEditorCodeExecutionCreateResultBlock {
     #[serde(rename = "type")]
     pub block_type: String, // "text_editor_code_execution_create_result"
 }
 
 /// Text editor str_replace result block
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TextEditorCodeExecutionStrReplaceResultBlock {
     #[serde(rename = "type")]
     pub block_type: String, // "text_editor_code_execution_str_replace_result"
@@ -1312,7 +1316,7 @@ pub struct TextEditorCodeExecutionStrReplaceResultBlock {
 }
 
 /// Text editor view result block
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TextEditorCodeExecutionViewResultBlock {
     #[serde(rename = "type")]
     pub block_type: String, // "text_editor_code_execution_view_result"
@@ -1322,7 +1326,7 @@ pub struct TextEditorCodeExecutionViewResultBlock {
 }
 
 /// Text editor code execution tool result error
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TextEditorCodeExecutionToolResultError {
     #[serde(rename = "type")]
     pub error_type: String,
@@ -1331,7 +1335,7 @@ pub struct TextEditorCodeExecutionToolResultError {
 }
 
 /// Text editor code execution error codes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TextEditorCodeExecutionToolResultErrorCode {
     Unavailable,
@@ -1346,7 +1350,7 @@ pub enum TextEditorCodeExecutionToolResultErrorCode {
 
 /// Web fetch tool (beta)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WebFetchTool {
     #[serde(rename = "type")]
     pub tool_type: String, // "web_fetch_20250305" or similar
@@ -1364,7 +1368,7 @@ pub struct WebFetchTool {
 }
 
 /// Web fetch result block (beta)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WebFetchResultBlock {
     #[serde(rename = "type")]
     pub block_type: String, // "web_fetch_result"
@@ -1381,7 +1385,7 @@ pub struct WebFetchResultBlock {
 }
 
 /// Web fetch tool result block (beta)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WebFetchToolResultBlock {
     /// The ID of the tool use this is a result for
     pub tool_use_id: String,
@@ -1395,7 +1399,7 @@ pub struct WebFetchToolResultBlock {
 }
 
 /// Web fetch tool result content
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum WebFetchToolResultContent {
     Success(WebFetchResultBlock),
@@ -1403,7 +1407,7 @@ pub enum WebFetchToolResultContent {
 }
 
 /// Web fetch tool result error
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WebFetchToolResultError {
     #[serde(rename = "type")]
     pub error_type: String, // "web_fetch_tool_result_error"
@@ -1412,7 +1416,7 @@ pub struct WebFetchToolResultError {
 }
 
 /// Web fetch error codes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebFetchToolResultErrorCode {
     InvalidToolInput,
@@ -1430,7 +1434,7 @@ pub enum WebFetchToolResultErrorCode {
 
 /// Tool search tool (beta)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolSearchTool {
     #[serde(rename = "type")]
     pub tool_type: String, // "tool_search_tool_regex" or "tool_search_tool_bm25"
@@ -1445,7 +1449,7 @@ pub struct ToolSearchTool {
 }
 
 /// Tool reference block (beta) - returned by tool search
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolReferenceBlock {
     #[serde(rename = "type")]
     pub block_type: String, // "tool_reference"
@@ -1459,7 +1463,7 @@ pub struct ToolReferenceBlock {
 }
 
 /// Tool search result block (beta)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolSearchResultBlock {
     #[serde(rename = "type")]
     pub block_type: String, // "tool_search_tool_search_result"
@@ -1473,7 +1477,7 @@ pub struct ToolSearchResultBlock {
 }
 
 /// Tool search tool result block (beta)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ToolSearchToolResultBlock {
     /// The ID of the tool use this is a result for
     pub tool_use_id: String,
@@ -1491,7 +1495,7 @@ pub struct ToolSearchToolResultBlock {
 // ============================================================================
 
 /// Container upload block (beta)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ContainerUploadBlock {
     #[serde(rename = "type")]
     pub block_type: String, // "container_upload"
@@ -1513,7 +1517,7 @@ pub struct ContainerUploadBlock {
 
 /// Memory tool (beta)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryTool {
     #[serde(rename = "type")]
     pub tool_type: String, // "memory_20250818"
@@ -1542,7 +1546,7 @@ pub struct MemoryTool {
 
 /// Computer use tool (beta)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ComputerUseTool {
     #[serde(rename = "type")]
     pub tool_type: String, // "computer_20241022" or "computer_20250124"
@@ -1570,7 +1574,7 @@ pub struct ComputerUseTool {
 // ============================================================================
 
 /// Beta input content block types (extends InputContentBlock)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BetaInputContentBlock {
     // Standard types
@@ -1607,7 +1611,7 @@ pub enum BetaInputContentBlock {
 
 /// Beta output content block types (extends ContentBlock)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BetaContentBlock {
     // Standard types
@@ -1689,7 +1693,7 @@ pub enum BetaContentBlock {
 }
 
 /// Beta tool definition (extends Tool)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum BetaTool {
     // Standard tools
@@ -1708,7 +1712,7 @@ pub enum BetaTool {
 }
 
 /// Server tool names for beta features
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BetaServerToolName {
     WebSearch,
@@ -1721,7 +1725,7 @@ pub enum BetaServerToolName {
 }
 
 /// Server tool caller types (beta)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerToolCaller {
     /// Direct caller (the model itself)

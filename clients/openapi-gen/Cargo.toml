@@ -1,0 +1,17 @@
+[package]
+name = "openapi-gen"
+version = "0.1.0"
+edition = "2021"
+description = "Generate OpenAPI 3.1 spec from openai-protocol types"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+openai-protocol = { path = "../../protocols" }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+
+[lints]
+workspace = true

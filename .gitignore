@@ -124,6 +124,9 @@ target/
 # Rust lib
 Cargo.lock
 
+# uv lock files
+uv.lock
+
 # Generated vision test fixtures (regenerate with: python multimodal/scripts/generate_vision_golden.py)
 multimodal/tests/fixtures/golden/
 

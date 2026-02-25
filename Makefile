@@ -20,6 +20,7 @@ endif
 
 .PHONY: help build test clean docs check fmt dev-setup pre-commit setup-sccache sccache-stats sccache-clean sccache-stop \
         python-dev python-build python-build-release python-install python-clean python-test python-check \
+        generate-openapi generate-python-types generate-clients \
         show-version bump-version check-versions
 
 help: ## Show this help message
@@ -128,6 +129,29 @@ python-check: ## Check Python package with twine
 	@pip install twine 2>/dev/null || true
 	@twine check $(PYTHON_DIR)/dist/*
 	@echo "Python package check passed!"
+
+# Client SDK code generation
+generate-openapi: ## Generate OpenAPI spec from Rust protocol types
+	@echo "Generating OpenAPI spec..."
+	@mkdir -p clients/openapi
+	@cargo run -p openapi-gen -- clients/openapi/smg-openapi.yaml
+
+generate-python-types: generate-openapi ## Generate Python types from OpenAPI spec
+	@echo "Generating Python types..."
+	@uvx --from datamodel-code-generator datamodel-codegen \
+		--input clients/openapi/smg-openapi.yaml \
+		--input-file-type openapi \
+		--output clients/python/smg_client/types/_generated.py \
+		--output-model-type pydantic_v2.BaseModel \
+		--use-annotated \
+		--field-constraints \
+		--target-python-version 3.10 \
+		--collapse-root-models \
+		--use-standard-collections \
+		--use-union-operator
+
+generate-clients: generate-python-types ## Generate all client SDK types
+	@echo "All client types generated!"
 
 # Combined shortcuts
 dev: python-dev ## Quick development setup (build Python bindings in dev mode)

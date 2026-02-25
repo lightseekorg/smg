@@ -8,7 +8,7 @@ use super::common::{GenerationRequest, UsageInfo};
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct EmbeddingRequest {
     /// ID of the model to use
     pub model: String,
@@ -56,14 +56,14 @@ impl GenerationRequest for EmbeddingRequest {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EmbeddingObject {
     pub object: String, // "embedding"
     pub embedding: Vec<f32>,
     pub index: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EmbeddingResponse {
     pub object: String, // "list"
     pub data: Vec<EmbeddingObject>,

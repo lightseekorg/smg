@@ -1,0 +1,42 @@
+[package]
+name = "smg-client"
+version = "0.1.0"
+edition = "2021"
+description = "Rust HTTP client for SMG (Shepherd Model Gateway)"
+license = "Apache-2.0"
+repository = "https://github.com/lightseekorg/smg"
+authors = [
+    "Simo Lin <linsimo.mark@gmail.com>",
+    "Chang Su <mckvtl@gmail.com>",
+    "Keyang Ru <rukeyang@gmail.com>",
+]
+keywords = ["smg", "llm", "api", "client", "openai"]
+categories = ["api-bindings"]
+
+[features]
+default = ["rustls"]
+rustls = ["reqwest/rustls-tls"]
+native-tls = ["reqwest/native-tls"]
+
+[dependencies]
+openai-protocol.workspace = true
+reqwest = { workspace = true, features = ["json", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tracing.workspace = true
+
+# Only used by this crate
+bytes = "1"
+tokio-stream = "0.1"
+pin-project-lite = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+wiremock = "0.6"
+serde_json.workspace = true
+
+[lints]
+workspace = true
