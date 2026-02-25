@@ -79,6 +79,7 @@ def _load(category: str) -> list[dict]:
     try:
         return load_bfcl_category(category, limit=BFCL_LIMIT)
     except FileNotFoundError:
+        logger.warning("BFCL data not found for category %r — run download_data.py", category)
         return []
 
 
@@ -98,6 +99,8 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
             + _load("parallel_multiple")
             + _load("irrelevance")
         )
+    if not _cases_cache:
+        pytest.skip("No BFCL data found — run: python e2e_test/bfcl/download_data.py")
     metafunc.parametrize("case", _cases_cache, ids=[c["id"] for c in _cases_cache])
 
 
