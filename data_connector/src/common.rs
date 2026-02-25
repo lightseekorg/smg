@@ -2,7 +2,41 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::core::ConversationMetadata;
+use crate::{core::ConversationMetadata, schema::SchemaConfig};
+
+/// Logical column names for the responses table, in canonical SELECT order.
+///
+/// Shared between Oracle and Postgres backends to build dynamic SELECT queries.
+/// The order here doesn't affect correctness (both backends read by name, not
+/// position), but having a single source prevents accidental divergence.
+pub(super) const RESPONSE_COLUMNS: &[&str] = &[
+    "id",
+    "conversation_id",
+    "previous_response_id",
+    "input",
+    "instructions",
+    "output",
+    "tool_calls",
+    "metadata",
+    "created_at",
+    "safety_identifier",
+    "model",
+    "raw_response",
+];
+
+/// Build the `SELECT col1, col2, ... FROM table` base query for responses.
+///
+/// Used by Oracle and Postgres to pre-build the SELECT prefix at construction
+/// time, avoiding repeated string formatting on every query.
+pub(super) fn build_response_select_base(schema: &SchemaConfig) -> String {
+    let s = &schema.responses;
+    let table = s.qualified_table(schema.owner.as_deref());
+    let cols: Vec<&str> = RESPONSE_COLUMNS
+        .iter()
+        .map(|&logical| s.col(logical))
+        .collect();
+    format!("SELECT {} FROM {table}", cols.join(", "))
+}
 
 /// Parse raw JSON string into `ConversationMetadata` (`JsonMap<String, Value>`).
 ///

@@ -261,19 +261,20 @@ impl WorkerRegistry {
 
         // Update model index for O(1) lookups using copy-on-write
         // This creates a new immutable snapshot with the added worker
-        let model_id = worker.model_id().to_string();
-        self.model_index
-            .entry(model_id.clone())
-            .and_modify(|existing| {
-                // Create new snapshot with the additional worker
-                let mut new_workers: Vec<Arc<dyn Worker>> = existing.iter().cloned().collect();
-                new_workers.push(worker.clone());
-                *existing = Arc::from(new_workers.into_boxed_slice());
-            })
-            .or_insert_with(|| Arc::from(vec![worker.clone()].into_boxed_slice()));
+        // Index primary model ID + all aliases for O(1) lookup by any name.
+        let all_names = worker.model_names();
 
-        // Rebuild hash ring for this model
-        self.rebuild_hash_ring(&model_id);
+        for name in &all_names {
+            self.model_index
+                .entry(name.clone())
+                .and_modify(|existing| {
+                    let mut new_workers: Vec<Arc<dyn Worker>> = existing.iter().cloned().collect();
+                    new_workers.push(worker.clone());
+                    *existing = Arc::from(new_workers.into_boxed_slice());
+                })
+                .or_insert_with(|| Arc::from(vec![worker.clone()].into_boxed_slice()));
+            self.rebuild_hash_ring(name);
+        }
 
         // Update type index (clone needed for DashMap key ownership)
         self.type_workers
@@ -329,18 +330,30 @@ impl WorkerRegistry {
             // Remove from model index using copy-on-write
             // Create new snapshot without the removed worker
             let worker_url = worker.url();
-            let model_id = worker.model_id().to_string();
-            if let Some(mut entry) = self.model_index.get_mut(&model_id) {
-                let new_workers: Vec<Arc<dyn Worker>> = entry
-                    .iter()
-                    .filter(|w| w.url() != worker_url)
-                    .cloned()
-                    .collect();
-                *entry = Arc::from(new_workers.into_boxed_slice());
-            }
 
-            // Rebuild hash ring for this model
-            self.rebuild_hash_ring(&model_id);
+            // Clean up primary model ID + all aliases from model_index.
+            let all_names = worker.model_names();
+
+            for name in &all_names {
+                let mut remove_entry = false;
+                if let Some(mut entry) = self.model_index.get_mut(name) {
+                    let new_workers: Vec<Arc<dyn Worker>> = entry
+                        .iter()
+                        .filter(|w| w.url() != worker_url)
+                        .cloned()
+                        .collect();
+                    if new_workers.is_empty() {
+                        remove_entry = true;
+                    } else {
+                        *entry = Arc::from(new_workers.into_boxed_slice());
+                    }
+                }
+                if remove_entry {
+                    self.model_index.remove(name);
+                }
+                // Rebuild hash ring for each name
+                self.rebuild_hash_ring(name);
+            }
 
             // Remove from type index
             if let Some(mut type_workers) = self.type_workers.get_mut(worker.worker_type()) {
@@ -506,13 +519,15 @@ impl WorkerRegistry {
             .collect()
     }
 
-    /// Get all model IDs with workers (lock-free)
+    /// Get primary model IDs with workers (lock-free).
+    /// Returns only the canonical model ID for each worker (not aliases), so the
+    /// list matches what clients should see on `/v1/models`.
     pub fn get_models(&self) -> Vec<String> {
-        self.model_index
-            .iter()
-            .filter(|entry| !entry.value().is_empty())
-            .map(|entry| entry.key().clone())
-            .collect()
+        let mut seen = std::collections::HashSet::new();
+        self.workers.iter().for_each(|entry| {
+            seen.insert(entry.value().model_id().to_string());
+        });
+        seen.into_iter().collect()
     }
 
     /// Get workers filtered by multiple criteria
@@ -577,12 +592,15 @@ impl WorkerRegistry {
     /// Get worker statistics (lock-free)
     pub fn stats(&self) -> WorkerRegistryStats {
         let total_workers = self.workers.len();
-        // Count models directly instead of allocating Vec via get_models() (lock-free)
-        let total_models = self
-            .model_index
-            .iter()
-            .filter(|entry| !entry.value().is_empty())
-            .count();
+        // Count distinct primary model IDs (not aliases) so metrics reflect
+        // the number of unique models served to clients, not index entries.
+        let total_models = {
+            let mut seen = std::collections::HashSet::new();
+            self.workers.iter().for_each(|entry| {
+                seen.insert(entry.value().model_id().to_string());
+            });
+            seen.len()
+        };
 
         let mut healthy_count = 0;
         let mut total_load = 0;

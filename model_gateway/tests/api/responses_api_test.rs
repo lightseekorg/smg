@@ -4,8 +4,9 @@ use axum::http::StatusCode;
 use openai_protocol::{
     common::{GenerationRequest, ToolChoice, ToolChoiceValue, UsageInfo},
     responses::{
-        ReasoningEffort, RequireApproval, ResponseInput, ResponseReasoningParam, ResponseTool,
-        ResponseToolType, ResponsesRequest, ServiceTier, Truncation,
+        CodeInterpreterTool, McpTool, ReasoningEffort, RequireApproval, ResponseInput,
+        ResponseReasoningParam, ResponseTool, ResponsesRequest, ServiceTier, Truncation,
+        WebSearchPreviewTool,
     },
 };
 use smg::{
@@ -81,17 +82,15 @@ async fn test_non_streaming_mcp_minimal_e2e_with_persistence() {
         stream: Some(false),
         temperature: Some(0.2),
         tool_choice: Some(ToolChoice::default()),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
-            function: None,
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
             authorization: None,
             headers: None,
-            server_label: Some("mock".to_string()),
+            server_label: "mock".to_string(),
             server_description: None,
             require_approval: None,
             allowed_tools: None,
-        }]),
+        })]),
         top_logprobs: Some(0),
         top_p: None,
         truncation: Some(Truncation::Disabled),
@@ -311,10 +310,9 @@ fn test_responses_request_creation() {
         stream: Some(false),
         temperature: Some(0.7),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::WebSearchPreview,
-            ..Default::default()
-        }]),
+        tools: Some(vec![ResponseTool::WebSearchPreview(
+            WebSearchPreviewTool::default(),
+        )]),
         top_logprobs: Some(5),
         top_p: Some(0.9),
         truncation: Some(Truncation::Disabled),
@@ -470,10 +468,9 @@ fn test_json_serialization() {
         stream: Some(true),
         temperature: Some(0.9),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::CodeInterpreter,
-            ..Default::default()
-        }]),
+        tools: Some(vec![ResponseTool::CodeInterpreter(
+            CodeInterpreterTool::default(),
+        )]),
         top_logprobs: Some(10),
         top_p: Some(0.8),
         truncation: Some(Truncation::Auto),
@@ -573,14 +570,15 @@ async fn test_multi_turn_loop_with_mcp() {
         stream: Some(false),
         temperature: Some(0.7),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
-            server_label: Some("mock".to_string()),
+            authorization: None,
+            headers: None,
+            server_label: "mock".to_string(),
             server_description: Some("Mock MCP server for testing".to_string()),
             require_approval: Some(RequireApproval::Never),
-            ..Default::default()
-        }]),
+            allowed_tools: None,
+        })]),
         top_logprobs: Some(0),
         top_p: Some(1.0),
         truncation: Some(Truncation::Disabled),
@@ -725,12 +723,15 @@ async fn test_max_tool_calls_limit() {
         stream: Some(false),
         temperature: Some(0.7),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
-            server_label: Some("mock".to_string()),
-            ..Default::default()
-        }]),
+            authorization: None,
+            headers: None,
+            server_label: "mock".to_string(),
+            server_description: None,
+            require_approval: None,
+            allowed_tools: None,
+        })]),
         top_logprobs: Some(0),
         top_p: Some(1.0),
         truncation: Some(Truncation::Disabled),
@@ -902,14 +903,15 @@ async fn test_streaming_with_mcp_tool_calls() {
         stream: Some(true), // KEY: Enable streaming
         temperature: Some(0.7),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
-            server_label: Some("mock".to_string()),
+            authorization: None,
+            headers: None,
+            server_label: "mock".to_string(),
             server_description: Some("Mock MCP for streaming test".to_string()),
             require_approval: Some(RequireApproval::Never),
-            ..Default::default()
-        }]),
+            allowed_tools: None,
+        })]),
         top_logprobs: Some(0),
         top_p: Some(1.0),
         truncation: Some(Truncation::Disabled),
@@ -1179,12 +1181,15 @@ async fn test_streaming_multi_turn_with_mcp() {
         stream: Some(true),
         temperature: Some(0.8),
         tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
-        tools: Some(vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
+        tools: Some(vec![ResponseTool::Mcp(McpTool {
             server_url: Some(mcp.url()),
-            server_label: Some("mock".to_string()),
-            ..Default::default()
-        }]),
+            authorization: None,
+            headers: None,
+            server_label: "mock".to_string(),
+            server_description: None,
+            require_approval: None,
+            allowed_tools: None,
+        })]),
         top_logprobs: Some(0),
         top_p: Some(1.0),
         truncation: Some(Truncation::Disabled),

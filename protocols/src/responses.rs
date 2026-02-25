@@ -20,41 +20,64 @@ use crate::{builders::ResponsesResponseBuilder, validated::Normalizable};
 // Response Tools (MCP and others)
 // ============================================================================
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseTool {
+    /// Function tool.
+    #[serde(rename = "function")]
+    Function(FunctionTool),
+
+    /// Built-in tool.
+    #[serde(rename = "web_search_preview")]
+    WebSearchPreview(WebSearchPreviewTool),
+
+    /// Built-in tool.
+    #[serde(rename = "code_interpreter")]
+    CodeInterpreter(CodeInterpreterTool),
+
+    /// MCP server tool.
+    #[serde(rename = "mcp")]
+    Mcp(McpTool),
+}
+
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ResponseTool {
-    #[serde(rename = "type")]
-    pub r#type: ResponseToolType,
-    // Function tool fields (used when type == "function")
-    // In Responses API, function fields are flattened at the top level
+#[serde(deny_unknown_fields)]
+pub struct FunctionTool {
+    /// Flatten to match Responses API tool JSON shape.
     #[serde(flatten)]
-    pub function: Option<Function>,
-    // MCP-specific fields (used when type == "mcp")
+    pub function: Function,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpTool {
     pub server_url: Option<String>,
     pub authorization: Option<String>,
     /// Custom headers to send to MCP server (from request payload, not HTTP headers)
     pub headers: Option<HashMap<String, String>>,
-    pub server_label: Option<String>,
+    pub server_label: String,
     pub server_description: Option<String>,
     /// Approval requirement configuration for MCP tools.
     pub require_approval: Option<RequireApproval>,
     pub allowed_tools: Option<Vec<String>>,
 }
 
-impl Default for ResponseTool {
-    fn default() -> Self {
-        Self {
-            r#type: ResponseToolType::WebSearchPreview,
-            function: None,
-            server_url: None,
-            authorization: None,
-            headers: None,
-            server_label: None,
-            server_description: None,
-            require_approval: None,
-            allowed_tools: None,
-        }
-    }
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchPreviewTool {
+    pub search_context_size: Option<String>,
+    pub user_location: Option<Value>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CodeInterpreterTool {
+    pub container: Option<Value>,
 }
 
 /// `require_approval` values.
@@ -63,15 +86,6 @@ impl Default for ResponseTool {
 pub enum RequireApproval {
     Always,
     Never,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum ResponseToolType {
-    Function,
-    WebSearchPreview,
-    CodeInterpreter,
-    Mcp,
 }
 
 // ============================================================================
@@ -965,8 +979,8 @@ fn validate_tool_choice_with_tools(request: &ResponsesRequest) -> Result<(), Val
     };
     let function_tool_names: Vec<&str> = tools
         .iter()
-        .filter_map(|t| match t.r#type {
-            ResponseToolType::Function => t.function.as_ref().map(|f| f.name.as_str()),
+        .filter_map(|t| match t {
+            ResponseTool::Function(ft) => Some(ft.function.name.as_str()),
             _ => None,
         })
         .collect();
@@ -1162,53 +1176,42 @@ fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), ValidationError
     let mut seen_mcp_labels: HashSet<String> = HashSet::new();
 
     for (idx, tool) in tools.iter().enumerate() {
-        match tool.r#type {
-            ResponseToolType::Function => {
-                if tool.function.is_none() {
-                    let mut e = ValidationError::new("function_tool_missing_function");
-                    e.message = Some("Function tool must have a function definition".into());
-                    return Err(e);
-                }
+        if let ResponseTool::Mcp(mcp) = tool {
+            let raw_label = mcp.server_label.as_str();
+            if raw_label.is_empty() {
+                let mut e = ValidationError::new("missing_required_parameter");
+                e.message = Some(
+                    format!("Missing required parameter: 'tools[{idx}].server_label'.").into(),
+                );
+                return Err(e);
             }
-            ResponseToolType::Mcp => {
-                let Some(raw_label) = tool.server_label.as_deref().filter(|s| !s.is_empty()) else {
-                    let mut e = ValidationError::new("missing_required_parameter");
-                    e.message = Some(
-                        format!("Missing required parameter: 'tools[{idx}].server_label'.").into(),
-                    );
-                    return Err(e);
-                };
 
-                // OpenAI spec-compatible validation: require a non-empty label that starts with a
-                // letter and contains only letters, digits, '-' and '_'.
-                let valid = raw_label.starts_with(|c: char| c.is_ascii_alphabetic())
-                    && raw_label
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-                if !valid {
-                    let mut e = ValidationError::new("invalid_server_label");
-                    e.message = Some(
-                        format!(
-                            "Invalid input {raw_label}: 'server_label' must start with a letter and consist of only letters, digits, '-' and '_'"
-                        )
-                        .into(),
-                    );
-                    return Err(e);
-                }
-
-                let normalized = raw_label.to_lowercase();
-                if !seen_mcp_labels.insert(normalized) {
-                    let mut e = ValidationError::new("mcp_tool_duplicate_server_label");
-                    e.message = Some(
-                        format!(
-                            "Duplicate MCP server_label '{raw_label}' found in 'tools' parameter."
-                        )
-                        .into(),
-                    );
-                    return Err(e);
-                }
+            // OpenAI spec-compatible validation: require a non-empty label that starts with a
+            // letter and contains only letters, digits, '-' and '_'.
+            let valid = raw_label.starts_with(|c: char| c.is_ascii_alphabetic())
+                && raw_label
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            if !valid {
+                let mut e = ValidationError::new("invalid_server_label");
+                e.message = Some(
+                    format!(
+                        "Invalid input {raw_label}: 'server_label' must start with a letter and consist of only letters, digits, '-' and '_'"
+                    )
+                    .into(),
+                );
+                return Err(e);
             }
-            _ => {}
+
+            let normalized = raw_label.to_lowercase();
+            if !seen_mcp_labels.insert(normalized) {
+                let mut e = ValidationError::new("mcp_tool_duplicate_server_label");
+                e.message = Some(
+                    format!("Duplicate MCP server_label '{raw_label}' found in 'tools' parameter.")
+                        .into(),
+                );
+                return Err(e);
+            }
         }
     }
     Ok(())

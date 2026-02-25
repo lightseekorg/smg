@@ -107,6 +107,7 @@ from JSON/YAML). Each database backend has a dedicated config struct.
 |-------|------|-------------|
 | `db_url` | `String` | Connection URL (`postgres://user:pass@host:port/dbname`). Validated for scheme, host, and database name. |
 | `pool_max` | `usize` | Maximum connections in the deadpool pool (default helper: 16). Must be > 0. |
+| `schema` | `Option<SchemaConfig>` | Optional schema customization. See [Schema Configuration](#schema-configuration). |
 
 Call `validate()` to check the URL before use.
 
@@ -117,6 +118,7 @@ Call `validate()` to check the URL before use.
 | `url` | `String` | -- | Connection URL (`redis://` or `rediss://`). |
 | `pool_max` | `usize` | 16 | Maximum pool connections. |
 | `retention_days` | `Option<u64>` | `Some(30)` | TTL in days for stored data. `None` disables expiration. |
+| `schema` | `Option<SchemaConfig>` | `None` | Optional schema customization. See [Schema Configuration](#schema-configuration). |
 
 Call `validate()` to check the URL before use.
 
@@ -132,6 +134,61 @@ Call `validate()` to check the URL before use.
 | `pool_min` | `usize` | 1 | Minimum pool connections. |
 | `pool_max` | `usize` | 16 | Maximum pool connections. |
 | `pool_timeout_secs` | `u64` | 30 | Connection acquisition timeout in seconds. |
+| `schema` | `Option<SchemaConfig>` | `None` | Optional schema customization. See [Schema Configuration](#schema-configuration). |
+
+### Schema Configuration
+
+All three database backends (Oracle, Postgres, Redis) accept an optional
+`SchemaConfig` that lets you customize table names and column names without
+modifying source code. When `schema` is omitted, all backends use their
+default table and column names — zero behavioral change.
+
+```yaml
+postgres:
+  db_url: "postgres://user:pass@localhost:5432/mydb"
+  pool_max: 16
+
+  schema:
+    owner: "myschema"           # Oracle: schema prefix (MYSCHEMA."TABLE")
+                                # Redis: key prefix ("myschema:conversation:{id}")
+                                # Postgres: ignored (use search_path for schema control)
+
+    conversations:
+      table: "my_conversations" # Overrides default "conversations"
+      columns:
+        id: "conv_id"           # Overrides column name "id" -> "conv_id"
+        metadata: "conv_meta"   # Overrides column name "metadata" -> "conv_meta"
+
+    responses:
+      table: "my_responses"
+      columns:
+        safety_identifier: "user_identifier"
+
+    conversation_items:
+      table: "my_items"
+
+    conversation_item_links:
+      table: "my_links"
+```
+
+`SchemaConfig` has two types:
+
+| Type | Fields | Purpose |
+|------|--------|---------|
+| `SchemaConfig` | `owner`, `conversations`, `responses`, `conversation_items`, `conversation_item_links` | Top-level config with an optional owner/prefix and per-table settings |
+| `TableConfig` | `table`, `columns` | Per-table config: physical table name and a map of logical-to-physical column name overrides |
+
+Key behaviors:
+
+- **`col(field)`** returns the physical column name for a logical field name.
+  If no override is configured, the logical name is returned unchanged.
+- **`qualified_table(owner)`** returns `OWNER."TABLE"` when an owner is set
+  (used by Oracle), or just the table name otherwise.
+- **Validation** runs at startup. All identifiers must match `[a-zA-Z0-9_]+`.
+  Invalid identifiers are rejected before any queries execute.
+- **Redis**: Only `owner` (key prefix) and `columns` (hash field names) affect
+  Redis behavior. The `table` field is ignored for Redis key patterns — keys
+  always use hardcoded entity names (`conversation`, `item`, `response`).
 
 ## Data Model
 
@@ -181,10 +238,10 @@ struct reconstructs the chronological sequence of related responses.
 ## Database Schema
 
 All database backends auto-create their schemas on first connection. The
-following tables are used:
+following default table names are used (configurable via `SchemaConfig`):
 
-| Table | Purpose |
-|-------|---------|
+| Default Table | Purpose |
+|---------------|---------|
 | `conversations` | Conversation records with metadata |
 | `conversation_items` | Individual items (messages, tool calls, etc.) |
 | `conversation_item_links` | Join table linking items to conversations with ordering (`added_at`) |
@@ -193,6 +250,11 @@ following tables are used:
 PostgreSQL additionally creates an index on
 `conversation_item_links(conversation_id, added_at)` for efficient
 cursor-based listing.
+
+Column names within each table can also be overridden via `SchemaConfig`. The
+config describes the existing database schema — it does not perform migrations.
+If you rename a column in config, the corresponding database column must
+already exist with that name.
 
 ## Testing
 

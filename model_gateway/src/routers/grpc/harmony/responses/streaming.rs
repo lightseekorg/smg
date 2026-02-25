@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::Response;
 use bytes::Bytes;
-use openai_protocol::responses::{ResponseToolType, ResponsesRequest};
+use openai_protocol::responses::ResponsesRequest;
 use serde_json::json;
 use smg_mcp::{McpServerBinding, McpToolSession};
 use tokio::sync::mpsc;
@@ -12,10 +12,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::{
-    common::{
-        build_mcp_tool_names_set, build_next_request_with_tools, load_previous_messages,
-        McpCallTracking,
-    },
+    common::{build_next_request_with_tools, load_previous_messages, McpCallTracking},
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools},
 };
 use crate::{
@@ -153,19 +150,6 @@ async fn execute_mcp_tool_loop_streaming(
         );
     }
 
-    // Build HashSet of MCP tool names for O(1) lookup during streaming
-    let mcp_tool_names: std::collections::HashSet<String> = current_request
-        .tools
-        .as_ref()
-        .map(|tools| {
-            tools
-                .iter()
-                .filter(|t| t.r#type == ResponseToolType::Mcp)
-                .filter_map(|t| t.function.as_ref().map(|f| f.name.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-
     let mut mcp_tracking = McpCallTracking::new();
 
     // Emit mcp_list_tools on first iteration
@@ -231,7 +215,6 @@ async fn execute_mcp_tool_loop_streaming(
             emitter,
             tx,
             Some(&session),
-            Some(&mcp_tool_names),
         )
         .await
         {
@@ -258,12 +241,10 @@ async fn execute_mcp_tool_loop_streaming(
                     "Tool calls found - separating MCP and function tools"
                 );
 
-                // Separate MCP and function tool calls based on tool type
-                let request_tools = current_request.tools.as_deref().unwrap_or(&[]);
-                let mcp_tool_names = build_mcp_tool_names_set(request_tools);
+                // Separate MCP and function tool calls based on session exposure.
                 let (mcp_tool_calls, function_tool_calls): (Vec<_>, Vec<_>) = tool_calls
                     .into_iter()
-                    .partition(|tc| mcp_tool_names.contains(tc.function.name.as_str()));
+                    .partition(|tc| session.has_exposed_tool(&tc.function.name));
 
                 debug!(
                     mcp_calls = mcp_tool_calls.len(),
@@ -433,7 +414,6 @@ async fn execute_without_mcp_streaming(
         execution_result,
         emitter,
         tx,
-        None,
         None,
     )
     .await

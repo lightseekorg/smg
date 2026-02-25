@@ -63,6 +63,9 @@ impl StepExecutor<LocalWorkerWorkflowData> for SubmitTokenizerJobStep {
         for worker in workers {
             let model_id = worker.model_id().to_string();
 
+            // Register tokenizer under primary name and all aliases.
+            let all_names = worker.model_names();
+
             // Get tokenizer path with fallback chain:
             // 1. Worker labels: tokenizer_path
             // 2. Worker labels: model_path
@@ -96,32 +99,31 @@ impl StepExecutor<LocalWorkerWorkflowData> for SubmitTokenizerJobStep {
             // The registry.load() handles deduplication gracefully (returns AlreadyExists).
             // This simplifies the code and ensures consistent behavior.
 
-            info!(
-                "Submitting tokenizer registration job for model {} from {}",
-                model_id, tokenizer_path
-            );
-
-            // Create tokenizer config request
-            let config = TokenizerConfigRequest {
-                id: TokenizerRegistry::generate_id(),
-                name: model_id.clone(),
-                source: tokenizer_path,
-                chat_template_path: chat_template.clone(),
-                cache_config: cache_config.clone(),
-                fail_on_duplicate: false,
-            };
-
-            // Submit job (fire-and-forget, don't wait for completion)
-            if let Err(e) = job_queue
-                .submit(Job::AddTokenizer {
-                    config: Box::new(config),
-                })
-                .await
-            {
-                warn!(
-                    "Failed to submit tokenizer job for model {}: {}",
-                    model_id, e
+            for name in all_names {
+                info!(
+                    "Submitting tokenizer registration job for model '{}' (source: {})",
+                    name, tokenizer_path
                 );
+
+                // Create tokenizer config request
+                let config = TokenizerConfigRequest {
+                    id: TokenizerRegistry::generate_id(),
+                    name: name.clone(),
+                    source: tokenizer_path.clone(),
+                    chat_template_path: chat_template.clone(),
+                    cache_config: cache_config.clone(),
+                    fail_on_duplicate: false,
+                };
+
+                // Submit job (fire-and-forget, don't wait for completion)
+                if let Err(e) = job_queue
+                    .submit(Job::AddTokenizer {
+                        config: Box::new(config),
+                    })
+                    .await
+                {
+                    warn!("Failed to submit tokenizer job for model '{}': {}", name, e);
+                }
             }
         }
 

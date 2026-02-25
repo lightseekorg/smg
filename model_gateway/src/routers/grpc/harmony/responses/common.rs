@@ -5,8 +5,7 @@ use openai_protocol::{
     common::{ToolCall, ToolChoice, ToolChoiceValue},
     responses::{
         ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
-        ResponseReasoningContent, ResponseTool, ResponseToolType, ResponsesRequest,
-        ResponsesResponse, StringOrContentParts,
+        ResponseReasoningContent, ResponsesRequest, ResponsesResponse, StringOrContentParts,
     },
 };
 use serde_json::{from_value, to_string, Value};
@@ -52,20 +51,6 @@ impl McpCallTracking {
     pub fn total_calls(&self) -> usize {
         self.tool_calls.len()
     }
-}
-
-/// Build a HashSet of MCP tool names for O(1) lookup
-///
-/// Creates a HashSet containing the names of all MCP tools in the request,
-/// allowing for efficient O(1) lookups when partitioning tool calls.
-pub(super) fn build_mcp_tool_names_set(
-    request_tools: &[ResponseTool],
-) -> std::collections::HashSet<&str> {
-    request_tools
-        .iter()
-        .filter(|t| t.r#type == ResponseToolType::Mcp)
-        .filter_map(|t| t.function.as_ref().map(|f| f.name.as_str()))
-        .collect()
 }
 
 /// Build next request with tool results appended to history
