@@ -54,8 +54,9 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
         let kv_connector = labels.remove("kv_connector");
         let kv_role = labels.remove("kv_role");
 
-        // Determine model_id: config.models > discovered labels > UNKNOWN_MODEL_ID
-        let model_id = config
+        // Determine backend-reported model_id:
+        // config.models > discovered labels["served_model_name"] > labels["model_id"] > labels["model_path"]
+        let backend_model_id = config
             .models
             .primary()
             .map(|m| m.id.clone())
@@ -64,7 +65,25 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
             .or_else(|| labels.get("model_path").cloned())
             .unwrap_or_else(|| UNKNOWN_MODEL_ID.to_string());
 
-        let model_card = build_model_card(&model_id, config, &labels);
+        // Build the card from backend_model_id so any user-configured metadata
+        // (context_length, tokenizer_path, model_type, …) keyed by the backend ID is preserved.
+        let mut model_card = build_model_card(&backend_model_id, config, &labels);
+
+        // Apply router-level served_model_name: rename the card's primary ID and keep
+        // the backend-reported name as an alias so both names continue to work.
+        // Skip aliasing UNKNOWN_MODEL_ID to avoid a meaningless "unknown" alias.
+        match app_context.router_config.served_model_name.as_deref() {
+            Some(sname)
+                if !sname.is_empty()
+                    && sname != backend_model_id
+                    && backend_model_id != UNKNOWN_MODEL_ID =>
+            {
+                model_card.aliases.push(backend_model_id);
+                model_card.aliases.retain(|a| a != sname);
+                model_card.id = sname.to_string();
+            }
+            _ => {}
+        };
 
         let runtime_type = match context.data.detected_runtime_type.as_deref() {
             Some(s) => s.parse::<RuntimeType>().unwrap_or(config.runtime_type),

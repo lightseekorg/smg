@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{
     app_context::AppContext,
-    routers::{error::bad_gateway, mcp_utils, RouterTrait},
+    routers::{error::bad_gateway, header_utils, mcp_utils, RouterTrait},
 };
 
 /// Router for Anthropic-specific APIs
@@ -88,7 +88,8 @@ impl RouterTrait for AnthropicRouter {
         let request = body.clone();
         let headers_owned = headers.cloned();
 
-        let mcp_servers = if request.has_mcp_toolset() {
+        let mcp_servers = if header_utils::is_smg_mcp_enabled(headers) && request.has_mcp_toolset()
+        {
             // Build per-server allowed tools from McpToolset entries in tools array.
             let toolset_allowed = mcp::collect_allowed_tools_per_server(request.tools.as_ref());
 

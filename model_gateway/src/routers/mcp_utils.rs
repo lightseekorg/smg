@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use openai_protocol::responses::{ResponseTool, ResponseToolType};
+use openai_protocol::responses::ResponseTool;
 use smg_mcp::{
     BuiltinToolType, McpOrchestrator, McpServerBinding, McpServerConfig, McpTransport,
     ResponseFormat,
@@ -151,10 +151,9 @@ pub fn collect_builtin_routing(
     let mut routing = Vec::new();
 
     for tool in tools {
-        let builtin_type = match tool.r#type {
-            ResponseToolType::WebSearchPreview => BuiltinToolType::WebSearchPreview,
-            ResponseToolType::CodeInterpreter => BuiltinToolType::CodeInterpreter,
-            // FileSearch is not in ResponseToolType yet, but we handle it if added
+        let builtin_type = match tool {
+            ResponseTool::WebSearchPreview(_) => BuiltinToolType::WebSearchPreview,
+            ResponseTool::CodeInterpreter(_) => BuiltinToolType::CodeInterpreter,
             _ => continue,
         };
 
@@ -192,9 +191,9 @@ pub fn collect_builtin_routing(
 pub fn extract_builtin_types(tools: &[ResponseTool]) -> Vec<BuiltinToolType> {
     tools
         .iter()
-        .filter_map(|t| match t.r#type {
-            ResponseToolType::WebSearchPreview => Some(BuiltinToolType::WebSearchPreview),
-            ResponseToolType::CodeInterpreter => Some(BuiltinToolType::CodeInterpreter),
+        .filter_map(|t| match t {
+            ResponseTool::WebSearchPreview(_) => Some(BuiltinToolType::WebSearchPreview),
+            ResponseTool::CodeInterpreter(_) => Some(BuiltinToolType::CodeInterpreter),
             _ => None,
         })
         .collect()
@@ -254,16 +253,15 @@ pub async fn ensure_request_mcp_client(
 ) -> Option<Vec<McpServerBinding>> {
     let inputs: Vec<McpServerInput> = tools
         .iter()
-        .filter(|t| matches!(t.r#type, ResponseToolType::Mcp))
-        .map(|tool| McpServerInput {
-            label: tool
-                .server_label
-                .clone()
-                .unwrap_or_else(|| "mcp".to_string()),
-            url: tool.server_url.clone(),
-            authorization: tool.authorization.clone(),
-            headers: tool.headers.clone().unwrap_or_default(),
-            allowed_tools: tool.allowed_tools.clone(),
+        .filter_map(|tool| match tool {
+            ResponseTool::Mcp(mcp) => Some(McpServerInput {
+                label: mcp.server_label.clone(),
+                url: mcp.server_url.clone(),
+                authorization: mcp.authorization.clone(),
+                headers: mcp.headers.clone().unwrap_or_default(),
+                allowed_tools: mcp.allowed_tools.clone(),
+            }),
+            _ => None,
         })
         .collect();
 
@@ -276,7 +274,13 @@ pub async fn ensure_request_mcp_client(
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use openai_protocol::responses::ResponseTool;
+    use openai_protocol::{
+        common::Function,
+        responses::{
+            CodeInterpreterTool, FunctionTool, McpTool, ResponseTool, WebSearchPreviewTool,
+        },
+    };
+    use serde_json::json;
     use smg_mcp::{McpConfig, ResponseFormatConfig, ToolConfig};
 
     use super::*;
@@ -335,10 +339,9 @@ mod tests {
     async fn test_collect_builtin_routing_with_configured_server() {
         let orchestrator = create_test_orchestrator_with_builtin().await;
 
-        let tools = vec![ResponseTool {
-            r#type: ResponseToolType::WebSearchPreview,
-            ..Default::default()
-        }];
+        let tools = vec![ResponseTool::WebSearchPreview(
+            WebSearchPreviewTool::default(),
+        )];
 
         let routing = collect_builtin_routing(&orchestrator, Some(&tools));
 
@@ -353,10 +356,9 @@ mod tests {
     async fn test_collect_builtin_routing_no_configured_server() {
         let orchestrator = create_test_orchestrator_no_builtin().await;
 
-        let tools = vec![ResponseTool {
-            r#type: ResponseToolType::WebSearchPreview,
-            ..Default::default()
-        }];
+        let tools = vec![ResponseTool::WebSearchPreview(
+            WebSearchPreviewTool::default(),
+        )];
 
         let routing = collect_builtin_routing(&orchestrator, Some(&tools));
 
@@ -368,11 +370,15 @@ mod tests {
     async fn test_collect_builtin_routing_ignores_mcp_tools() {
         let orchestrator = create_test_orchestrator_with_builtin().await;
 
-        let tools = vec![ResponseTool {
-            r#type: ResponseToolType::Mcp,
+        let tools = vec![ResponseTool::Mcp(McpTool {
             server_url: Some("http://example.com/mcp".to_string()),
-            ..Default::default()
-        }];
+            authorization: None,
+            headers: None,
+            server_label: "mcp".to_string(),
+            server_description: None,
+            require_approval: None,
+            allowed_tools: None,
+        })];
 
         let routing = collect_builtin_routing(&orchestrator, Some(&tools));
 
@@ -384,10 +390,14 @@ mod tests {
     async fn test_collect_builtin_routing_ignores_function_tools() {
         let orchestrator = create_test_orchestrator_with_builtin().await;
 
-        let tools = vec![ResponseTool {
-            r#type: ResponseToolType::Function,
-            ..Default::default()
-        }];
+        let tools = vec![ResponseTool::Function(FunctionTool {
+            function: Function {
+                name: "dummy".to_string(),
+                description: None,
+                parameters: json!({}),
+                strict: None,
+            },
+        })];
 
         let routing = collect_builtin_routing(&orchestrator, Some(&tools));
 
@@ -464,14 +474,8 @@ mod tests {
         let orchestrator = Arc::new(McpOrchestrator::new(config).await.unwrap());
 
         let tools = vec![
-            ResponseTool {
-                r#type: ResponseToolType::WebSearchPreview,
-                ..Default::default()
-            },
-            ResponseTool {
-                r#type: ResponseToolType::CodeInterpreter,
-                ..Default::default()
-            },
+            ResponseTool::WebSearchPreview(WebSearchPreviewTool::default()),
+            ResponseTool::CodeInterpreter(CodeInterpreterTool::default()),
         ];
 
         let routing = collect_builtin_routing(&orchestrator, Some(&tools));
@@ -510,10 +514,9 @@ mod tests {
         let orchestrator = create_test_orchestrator_with_builtin().await;
 
         // Request has web_search_preview tool (no server_url, not MCP type)
-        let tools = vec![ResponseTool {
-            r#type: ResponseToolType::WebSearchPreview,
-            ..Default::default()
-        }];
+        let tools = vec![ResponseTool::WebSearchPreview(
+            WebSearchPreviewTool::default(),
+        )];
 
         let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
@@ -534,10 +537,9 @@ mod tests {
         let orchestrator = create_test_orchestrator_no_builtin().await;
 
         // Request has web_search_preview tool
-        let tools = vec![ResponseTool {
-            r#type: ResponseToolType::WebSearchPreview,
-            ..Default::default()
-        }];
+        let tools = vec![ResponseTool::WebSearchPreview(
+            WebSearchPreviewTool::default(),
+        )];
 
         let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
@@ -550,10 +552,14 @@ mod tests {
         let orchestrator = create_test_orchestrator_with_builtin().await;
 
         // Request has only function tools (no MCP, no built-in)
-        let tools = vec![ResponseTool {
-            r#type: ResponseToolType::Function,
-            ..Default::default()
-        }];
+        let tools = vec![ResponseTool::Function(FunctionTool {
+            function: Function {
+                name: "dummy".to_string(),
+                description: None,
+                parameters: json!({}),
+                strict: None,
+            },
+        })];
 
         let result = ensure_request_mcp_client(&orchestrator, &tools).await;
 
@@ -568,14 +574,15 @@ mod tests {
 
         // Request has mixed tools: function + web_search_preview
         let tools = vec![
-            ResponseTool {
-                r#type: ResponseToolType::Function,
-                ..Default::default()
-            },
-            ResponseTool {
-                r#type: ResponseToolType::WebSearchPreview,
-                ..Default::default()
-            },
+            ResponseTool::Function(FunctionTool {
+                function: Function {
+                    name: "dummy".to_string(),
+                    description: None,
+                    parameters: json!({}),
+                    strict: None,
+                },
+            }),
+            ResponseTool::WebSearchPreview(WebSearchPreviewTool::default()),
         ];
 
         let result = ensure_request_mcp_client(&orchestrator, &tools).await;

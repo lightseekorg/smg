@@ -141,8 +141,8 @@ impl HarmonyPreparationStage {
         ctx: &mut RequestContext,
         request: &ResponsesRequest,
     ) -> Result<Option<Response>, Response> {
-        // Step 1: Extract function and MCP tools with schemas from ResponseTools
-        let mut function_tools = extract_tools_from_response_tools(request.tools.as_deref(), true);
+        // Step 1: Extract function tools with schemas from ResponseTools
+        let mut function_tools = extract_tools_from_response_tools(request.tools.as_deref());
 
         // Step 2: Filter tools based on tool_choice (AllowedTools or Function)
         // Note: Tool existence is already validated in ResponsesRequest::validate()

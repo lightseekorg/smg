@@ -21,6 +21,7 @@ mod noop;
 mod oracle;
 mod postgres;
 mod redis;
+pub mod schema;
 
 // Re-export config types
 // Re-export core types and traits
@@ -35,3 +36,5 @@ pub use config::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
 pub use factory::{create_storage, StorageFactoryConfig};
 // Re-export memory implementations for testing
 pub use memory::{MemoryConversationItemStorage, MemoryConversationStorage, MemoryResponseStorage};
+// Re-export schema config types
+pub use schema::{SchemaConfig, TableConfig};

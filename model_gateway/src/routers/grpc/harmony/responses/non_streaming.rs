@@ -19,8 +19,7 @@ use tracing::{debug, error, warn};
 
 use super::{
     common::{
-        build_mcp_tool_names_set, build_next_request_with_tools, inject_mcp_metadata,
-        load_previous_messages, McpCallTracking,
+        build_next_request_with_tools, inject_mcp_metadata, load_previous_messages, McpCallTracking,
     },
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools, ToolResult},
 };
@@ -168,12 +167,12 @@ async fn execute_with_mcp_loop(
                     "Tool calls found - separating MCP and function tools"
                 );
 
-                // Separate MCP and function tool calls based on tool type
-                let request_tools = current_request.tools.as_deref().unwrap_or(&[]);
-                let mcp_tool_names = build_mcp_tool_names_set(request_tools);
+                // Separate MCP and function tool calls based on session exposure.
+                // MCP tools are exposed to the model as function tools, so the only reliable
+                // discriminator is whether the name belongs to the MCP session.
                 let (mcp_tool_calls, function_tool_calls): (Vec<_>, Vec<_>) = tool_calls
                     .into_iter()
-                    .partition(|tc| mcp_tool_names.contains(tc.function.name.as_str()));
+                    .partition(|tc| session.has_exposed_tool(&tc.function.name));
 
                 debug!(
                     mcp_calls = mcp_tool_calls.len(),

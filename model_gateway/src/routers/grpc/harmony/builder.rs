@@ -17,8 +17,8 @@ use openai_protocol::{
     common::{ChatLogProbs, ContentPart, Tool},
     responses::{
         ReasoningEffort as ResponsesReasoningEffort, ResponseContentPart, ResponseInput,
-        ResponseInputOutputItem, ResponseReasoningContent, ResponseTool, ResponseToolType,
-        ResponsesRequest, StringOrContentParts,
+        ResponseInputOutputItem, ResponseReasoningContent, ResponseTool, ResponsesRequest,
+        StringOrContentParts,
     },
 };
 use tracing::{debug, trace, warn};
@@ -85,7 +85,7 @@ impl ToolLike for Tool {
     }
 
     fn is_custom(&self) -> bool {
-        matches!(self.tool_type.as_str(), "mcp" | "function")
+        matches!(self.tool_type.as_str(), "function")
     }
 
     fn to_tool_description(&self) -> Option<ToolDescription> {
@@ -101,26 +101,24 @@ impl ToolLike for Tool {
 impl ToolLike for ResponseTool {
     fn is_builtin(&self) -> bool {
         matches!(
-            self.r#type,
-            ResponseToolType::WebSearchPreview | ResponseToolType::CodeInterpreter
+            self,
+            ResponseTool::WebSearchPreview(_) | ResponseTool::CodeInterpreter(_)
         )
     }
 
     fn is_custom(&self) -> bool {
-        matches!(
-            self.r#type,
-            ResponseToolType::Mcp | ResponseToolType::Function
-        )
+        matches!(self, ResponseTool::Function(_))
     }
 
     fn to_tool_description(&self) -> Option<ToolDescription> {
-        self.function.as_ref().map(|func| {
-            ToolDescription::new(
-                func.name.clone(),
-                func.description.clone().unwrap_or_default(),
-                Some(func.parameters.clone()),
-            )
-        })
+        match self {
+            ResponseTool::Function(ft) => Some(ToolDescription::new(
+                ft.function.name.clone(),
+                ft.function.description.clone().unwrap_or_default(),
+                Some(ft.function.parameters.clone()),
+            )),
+            _ => None,
+        }
     }
 }
 
@@ -423,11 +421,11 @@ impl HarmonyBuilder {
                 .map(|tools| {
                     tools
                         .iter()
-                        .map(|tool| match tool.r#type {
-                            ResponseToolType::Function => "function",
-                            ResponseToolType::WebSearchPreview => "web_search_preview",
-                            ResponseToolType::CodeInterpreter => "code_interpreter",
-                            ResponseToolType::Mcp => "mcp",
+                        .map(|tool| match tool {
+                            ResponseTool::Function(_) => "function",
+                            ResponseTool::WebSearchPreview(_) => "web_search_preview",
+                            ResponseTool::CodeInterpreter(_) => "code_interpreter",
+                            ResponseTool::Mcp(_) => "mcp",
                         })
                         .collect()
                 })

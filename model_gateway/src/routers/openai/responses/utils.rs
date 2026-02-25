@@ -2,7 +2,7 @@
 
 use openai_protocol::{
     event_types::is_response_event,
-    responses::{ResponseTool, ResponseToolType, ResponsesRequest},
+    responses::{ResponseTool, ResponsesRequest},
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -208,19 +208,19 @@ pub(super) fn insert_optional_value<T: Serialize>(
 /// Handles MCP tools (with server metadata), web_search_preview, and code_interpreter.
 /// Returns None for function tools and other types that don't need restoration.
 pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
-    match tool.r#type {
-        ResponseToolType::Mcp if tool.server_url.is_some() => {
+    match tool {
+        ResponseTool::Mcp(mcp) => {
             let mut m = Map::new();
             m.insert("type".to_string(), json!("mcp"));
-            insert_optional_value(&mut m, "server_label", tool.server_label.as_ref());
-            insert_optional_value(&mut m, "server_url", tool.server_url.as_ref());
+            m.insert("server_label".to_string(), json!(&mcp.server_label));
+            insert_optional_value(&mut m, "server_url", mcp.server_url.as_ref());
             insert_optional_value(
                 &mut m,
                 "server_description",
-                tool.server_description.as_ref(),
+                mcp.server_description.as_ref(),
             );
-            insert_optional_value(&mut m, "require_approval", tool.require_approval.as_ref());
-            if let Some(allowed) = &tool.allowed_tools {
+            insert_optional_value(&mut m, "require_approval", mcp.require_approval.as_ref());
+            if let Some(allowed) = &mcp.allowed_tools {
                 m.insert(
                     "allowed_tools".to_string(),
                     Value::Array(allowed.iter().map(|s| json!(s)).collect()),
@@ -228,9 +228,9 @@ pub(super) fn response_tool_to_value(tool: &ResponseTool) -> Option<Value> {
             }
             Some(Value::Object(m))
         }
-        ResponseToolType::WebSearchPreview => Some(json!({"type": "web_search_preview"})),
-        ResponseToolType::CodeInterpreter => Some(json!({"type": "code_interpreter"})),
-        _ => None,
+        ResponseTool::WebSearchPreview(_) => serde_json::to_value(tool).ok(),
+        ResponseTool::CodeInterpreter(_) => serde_json::to_value(tool).ok(),
+        ResponseTool::Function(_) => None,
     }
 }
 

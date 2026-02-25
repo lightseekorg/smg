@@ -882,6 +882,7 @@ fn oracle_config_validation_accepts_dsn_only() {
             pool_min: 1,
             pool_max: 4,
             pool_timeout_secs: 30,
+            schema: None,
         })
         .build_unchecked();
 
@@ -901,6 +902,7 @@ fn oracle_config_validation_accepts_wallet_alias() {
             pool_min: 1,
             pool_max: 8,
             pool_timeout_secs: 45,
+            schema: None,
         })
         .build_unchecked();
 
@@ -922,6 +924,7 @@ fn oracle_config_validation_for_external_auth() {
             pool_min: 1,
             pool_max: 4,
             pool_timeout_secs: 30,
+            schema: None,
         })
         .build_unchecked();
 
@@ -940,6 +943,7 @@ fn oracle_config_validation_for_external_auth() {
             pool_min: 1,
             pool_max: 4,
             pool_timeout_secs: 30,
+            schema: None,
         })
         .build_unchecked();
 
