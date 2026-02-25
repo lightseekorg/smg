@@ -491,9 +491,12 @@ pub trait ResponseStorage: Send + Sync {
                 }
             }
 
-            // Cycle detection: stop if we've already visited this ID.
+            // Cycle detection: error if we've already visited this ID.
             if !seen.insert(lookup_id.clone()) {
-                break;
+                return Err(ResponseStorageError::InvalidChain(format!(
+                    "cycle detected at response {}",
+                    lookup_id.0
+                )));
             }
 
             let fetched = self.get_response(lookup_id).await?;
