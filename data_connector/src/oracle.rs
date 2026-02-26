@@ -83,13 +83,22 @@ impl OracleStore {
         }
 
         // Run versioned migrations after table creation
-        crate::versioning::run_oracle_migrations(
+        let applied = crate::versioning::run_oracle_migrations(
             &conn,
             &schema,
             &ORACLE_MIGRATIONS,
             schema.version,
             schema.auto_migrate,
         )?;
+
+        // Re-run init_schemas when migrations were applied so that indexes
+        // on newly-added columns (e.g. safety_identifier added by v1) are
+        // created in this startup cycle rather than requiring a restart.
+        if !applied.is_empty() {
+            for init_schema in init_schemas {
+                init_schema(&conn, &schema)?;
+            }
+        }
 
         drop(conn);
 

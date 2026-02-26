@@ -96,6 +96,15 @@ fn pending_migrations_error(
         pending.last().map_or(current, |m| m.version)
     );
 
+    let versions_insert = if backend == "oracle" {
+        format!(
+            "INSERT INTO {} (version, description) VALUES",
+            oracle_versions_table(schema),
+        )
+    } else {
+        format!("INSERT INTO {VERSIONS_TABLE} (version, description) VALUES")
+    };
+
     for m in pending {
         msg.push_str(&format!("\n  v{}: {}\n", m.version, m.description));
         let stmts = (m.up)(schema);
@@ -104,6 +113,12 @@ fn pending_migrations_error(
                 msg.push_str(&format!("    {stmt}\n"));
             }
         }
+        // Include the version-tracking INSERT so operators record the
+        // migration after applying the DDL manually.
+        msg.push_str(&format!(
+            "    {versions_insert} ({}, '{}');\n",
+            m.version, m.description,
+        ));
     }
 
     msg.push_str(&format!(
@@ -255,8 +270,15 @@ fn ensure_oracle_versions_table(
 
     if present == 0 {
         let ddl = oracle_create_versions_table(schema);
-        conn.execute(&ddl, &[])
-            .map_err(|e| format!("failed to create {VERSIONS_TABLE} table: {e}"))?;
+        if let Err(err) = conn.execute(&ddl, &[]) {
+            // ORA-00955: name is already used — another instance created
+            // the table between our check and this CREATE. Safe to ignore.
+            if err.db_error().is_some_and(|de| de.code() == 955) {
+                tracing::debug!("versions table created by concurrent instance, proceeding");
+            } else {
+                return Err(format!("failed to create {VERSIONS_TABLE} table: {err}"));
+            }
+        }
         conn.commit().map_err(|e| format!("commit failed: {e}"))?;
     }
     Ok(())
@@ -536,6 +558,10 @@ mod tests {
         assert!(
             err.contains("ALTER TABLE t ADD COLUMN x INT"),
             "should include SQL: {err}"
+        );
+        assert!(
+            err.contains("INSERT INTO _schema_versions"),
+            "should include version INSERT: {err}"
         );
         assert!(
             err.contains("auto_migrate: true"),
