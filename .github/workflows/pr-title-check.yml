@@ -1,0 +1,45 @@
+name: PR Title Check
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+concurrency:
+  group: pr-title-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check-pr-title:
+    name: Conventional Commit Title
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Validate PR title format
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          REGEX='^(feat|fix|chore|docs|refactor|test|ci|perf|lint|style|revert|build)(\([a-z0-9_./-]+\))?!?: .+'
+
+          if [[ ! "$PR_TITLE" =~ $REGEX ]]; then
+            echo "::error::PR title does not follow conventional commits format."
+            echo ""
+            echo "Expected format:"
+            echo "  type(scope): description"
+            echo "  type: description"
+            echo ""
+            echo "Allowed types: feat, fix, chore, docs, refactor, test, ci, perf, lint, style, revert, build"
+            echo ""
+            echo "Examples:"
+            echo "  feat(auth): add OAuth2 support"
+            echo "  fix: resolve null pointer in parser"
+            echo "  refactor(grpc): simplify connection pooling"
+            echo "  perf: optimize JSON streaming validation"
+            echo "  feat!: breaking change"
+            echo "  feat(api)!: breaking change with scope"
+            echo ""
+            echo "Your title: '$PR_TITLE'"
+            exit 1
+          fi
+
+          echo "✅ PR title is valid: '$PR_TITLE'"

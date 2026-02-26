@@ -52,6 +52,9 @@ pub struct RouterConfig {
     /// Overrides model_path tokenizer if provided
     pub tokenizer_path: Option<String>,
     pub chat_template: Option<String>,
+    /// Client-facing model name override; both this and the backend-reported name are accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_model_name: Option<String>,
     #[serde(default = "default_history_backend")]
     pub history_backend: HistoryBackend,
     /// Required when history_backend = "oracle"
@@ -524,6 +527,7 @@ impl Default for RouterConfig {
             model_path: None,
             tokenizer_path: None,
             chat_template: None,
+            served_model_name: None,
             history_backend: default_history_backend(),
             oracle: None,
             postgres: None,
