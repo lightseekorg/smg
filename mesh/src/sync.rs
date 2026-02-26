@@ -82,25 +82,34 @@ impl MeshSyncManager {
     /// Sync policy state to mesh stores
     pub fn sync_policy_state(&self, model_id: String, policy_type: String, config: Vec<u8>) {
         let key = format!("policy:{model_id}");
+        let model_id_for_update = model_id.clone();
 
-        // Get current version if exists, otherwise start at 1
-        let current_version = self.stores.policy.get(&key).map(|s| s.version).unwrap_or(0);
-        let new_version = current_version + 1;
+        let updated_state = self.stores.policy.update(key, move |current| {
+            let new_version = current
+                .map(|state| state.version)
+                .unwrap_or(0)
+                .saturating_add(1);
 
-        let state = PolicyState {
-            model_id: model_id.clone(),
-            policy_type,
-            config,
-            version: new_version,
-        };
+            PolicyState {
+                model_id: model_id_for_update,
+                policy_type,
+                config,
+                version: new_version,
+            }
+        });
 
-        // Use self node name as actor
-        let actor = self.self_name.clone();
-        self.stores.policy.insert(key, state, actor);
-        debug!(
-            "Synced policy state to mesh model={} (version: {})",
-            model_id, new_version
-        );
+        match updated_state {
+            Ok(Some(state)) => {
+                debug!(
+                    "Synced policy state to mesh model={} (version: {})",
+                    state.model_id, state.version
+                );
+            }
+            Ok(None) => {}
+            Err(err) => {
+                debug!(error = %err, model_id = %model_id, "Failed to sync policy state");
+            }
+        }
     }
 
     /// Remove policy state from mesh stores
@@ -252,7 +261,7 @@ impl MeshSyncManager {
 
     /// Apply remote rate-limit counter snapshot encoded as raw i64.
     /// This keeps wire compatibility with incremental updates while
-    /// reusing the existing OperationLog merge path.
+    /// applying actor-scoped snapshot payload directly.
     pub fn apply_remote_rate_limit_counter_value(&self, key: String, counter_value: i64) {
         self.apply_remote_rate_limit_counter_value_with_actor(
             key,
@@ -267,11 +276,18 @@ impl MeshSyncManager {
         actor: String,
         counter_value: i64,
     ) {
-        let log = self
-            .stores
-            .rate_limit
-            .operation_log_for_counter_value(key, actor, counter_value);
-        self.apply_remote_rate_limit_counter(&log);
+        if let Some((shard_key, payload)) =
+            super::stores::RateLimitStore::snapshot_payload_for_counter_value(
+                key,
+                actor,
+                counter_value,
+            )
+        {
+            self.stores
+                .rate_limit
+                .apply_counter_snapshot_payload(shard_key, &payload);
+            debug!("Applied remote rate-limit counter snapshot payload");
+        }
     }
 
     /// Get rate-limit value (aggregate from all owners)

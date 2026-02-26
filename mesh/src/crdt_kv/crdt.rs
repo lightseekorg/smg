@@ -106,16 +106,11 @@ impl CrdtOrMap {
             return;
         }
 
-        let can_remove = self.key_locks.get(key).is_some_and(|stored_lock| {
-            let lock_ref = stored_lock.value();
-            Arc::ptr_eq(lock_ref, key_lock)
-                && Arc::strong_count(lock_ref) <= 2
-                && lock_ref.try_lock().is_some()
+        let _ = self.key_locks.remove_if(key, |_, stored_lock| {
+            Arc::ptr_eq(stored_lock, key_lock)
+                && Arc::strong_count(stored_lock) <= 2
+                && stored_lock.try_lock().is_some()
         });
-
-        if can_remove {
-            self.key_locks.remove(key);
-        }
     }
 
     /// Insert key-value pair (transparent operation)

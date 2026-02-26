@@ -9,10 +9,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
 };
 
 use parking_lot::RwLock;
@@ -21,7 +18,7 @@ use tracing::debug;
 
 use super::{
     consistent_hash::ConsistentHashRing,
-    crdt_kv::{CrdtOrMap, Operation, OperationLog, ReplicaId},
+    crdt_kv::{CrdtOrMap, OperationLog},
 };
 
 // ============================================================================
@@ -374,8 +371,6 @@ pub struct RateLimitStore {
     counters: CrdtStore<CounterValue>,
     hash_ring: Arc<RwLock<ConsistentHashRing>>,
     self_name: String,
-    snapshot_replica_id: ReplicaId,
-    snapshot_clock: Arc<AtomicU64>,
 }
 
 impl RateLimitStore {
@@ -386,8 +381,6 @@ impl RateLimitStore {
             counters: CrdtStore::new(),
             hash_ring: Arc::new(RwLock::new(ConsistentHashRing::new())),
             self_name,
-            snapshot_replica_id: ReplicaId::new(),
-            snapshot_clock: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -506,14 +499,14 @@ impl RateLimitStore {
         );
     }
 
-    /// Build a minimal operation log for a counter snapshot.
-    /// This keeps the sync manager API compatible with OperationLog merge flow.
-    pub fn operation_log_for_counter_value(
-        &self,
+    /// Build serialized snapshot payload and shard key for a counter value.
+    ///
+    /// NOTE: This intentionally does not fabricate CRDT operation IDs.
+    pub fn snapshot_payload_for_counter_value(
         key: String,
         actor: String,
         counter_value: i64,
-    ) -> OperationLog {
+    ) -> Option<(String, Vec<u8>)> {
         let bytes = match (CounterValue {
             value: counter_value,
         })
@@ -522,24 +515,33 @@ impl RateLimitStore {
             Ok(bytes) => bytes,
             Err(err) => {
                 debug!(error = %err, "Failed to serialize rate-limit counter snapshot");
-                return OperationLog::new();
+                return None;
             }
         };
 
-        let timestamp = self
-            .snapshot_clock
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
         let shard_key = Self::shard_key(&key, &actor);
+        Some((shard_key, bytes))
+    }
 
-        let mut log = OperationLog::new();
-        log.append(Operation::insert(
-            shard_key,
-            bytes,
-            timestamp,
-            self.snapshot_replica_id,
-        ));
-        log
+    pub fn apply_counter_snapshot_payload(&self, shard_key: String, payload: &[u8]) {
+        let Some((base_key, _)) = Self::split_shard_key(&shard_key) else {
+            debug!(%shard_key, "Invalid rate-limit shard key in snapshot payload");
+            return;
+        };
+
+        if !self.is_owner(base_key) {
+            return;
+        }
+
+        let counter = match CounterValue::from_bytes(payload) {
+            Ok(counter) => counter,
+            Err(err) => {
+                debug!(error = %err, %shard_key, "Failed to decode rate-limit snapshot payload");
+                return;
+            }
+        };
+
+        let _ = self.counters.insert(shard_key, counter);
     }
 
     /// Get counter value
