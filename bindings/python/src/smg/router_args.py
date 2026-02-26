@@ -110,6 +110,8 @@ class RouterArgs:
     mcp_config_path: str | None = None
     # Backend selection
     backend: str = "sglang"
+    # Storage hooks (WASM)
+    storage_hook_wasm_path: str | None = None
     # History backend configuration
     history_backend: str = "memory"
     oracle_wallet_path: str | None = None
@@ -749,6 +751,12 @@ class RouterArgs:
             default=RouterArgs.backend,
             choices=["sglang", "openai", "anthropic"],
             help="Backend runtime to use (default: sglang)",
+        )
+        backend_group.add_argument(
+            f"--{prefix}storage-hook-wasm-path",
+            type=str,
+            default=None,
+            help="Path to a WASM component implementing storage hooks",
         )
         backend_group.add_argument(
             f"--{prefix}history-backend",

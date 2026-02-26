@@ -436,6 +436,7 @@ struct Router {
     reasoning_parser: Option<String>,
     tool_call_parser: Option<String>,
     mcp_config_path: Option<String>,
+    storage_hook_wasm_path: Option<String>,
     backend: BackendType,
     history_backend: HistoryBackendType,
     oracle_config: Option<PyOracleConfig>,
@@ -664,6 +665,7 @@ impl Router {
             .maybe_reasoning_parser(self.reasoning_parser.as_ref())
             .maybe_tool_call_parser(self.tool_call_parser.as_ref())
             .maybe_mcp_config_path(self.mcp_config_path.as_ref())
+            .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
             .dp_aware(self.dp_aware)
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
@@ -757,6 +759,7 @@ impl Router {
         reasoning_parser = None,
         tool_call_parser = None,
         mcp_config_path = None,
+        storage_hook_wasm_path = None,
         backend = BackendType::Sglang,
         history_backend = HistoryBackendType::Memory,
         oracle_config = None,
@@ -849,6 +852,7 @@ impl Router {
         reasoning_parser: Option<String>,
         tool_call_parser: Option<String>,
         mcp_config_path: Option<String>,
+        storage_hook_wasm_path: Option<String>,
         backend: BackendType,
         history_backend: HistoryBackendType,
         oracle_config: Option<PyOracleConfig>,
@@ -951,6 +955,7 @@ impl Router {
             reasoning_parser,
             tool_call_parser,
             mcp_config_path,
+            storage_hook_wasm_path,
             backend,
             history_backend,
             oracle_config,
