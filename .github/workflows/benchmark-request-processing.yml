@@ -37,23 +37,9 @@ permissions:
   contents: read
 
 jobs:
-  check-ci:
-    runs-on: ubuntu-latest
-    outputs:
-      should_run: ${{ steps.check.outputs.should_run }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          sparse-checkout: .github/actions/check-ci
-      - id: check
-        uses: ./.github/actions/check-ci
-
   benchmark:
     name: Request Processing
-    needs: check-ci
-    if: |
-      github.repository == 'lightseekorg/smg' &&
-      needs.check-ci.outputs.should_run == 'true'
+    if: github.repository == 'lightseekorg/smg'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

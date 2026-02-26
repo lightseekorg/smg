@@ -9,7 +9,7 @@ on:
       - "*.md"
   pull_request:
     branches: [ main ]
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
     paths-ignore:
       - "docs/**"
       - "mkdocs.yml"
@@ -29,22 +29,7 @@ env:
   GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.3
 
 jobs:
-  check-ci:
-    runs-on: k8s-runner-cpu
-    permissions:
-      contents: read
-    outputs:
-      should_run: ${{ steps.check.outputs.should_run }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          sparse-checkout: .github/actions/check-ci
-      - id: check
-        uses: ./.github/actions/check-ci
-
   python-lint:
-    needs: check-ci
-    if: needs.check-ci.outputs.should_run == 'true'
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
@@ -72,8 +57,6 @@ jobs:
         run: mypy bindings/python/ --config-file mypy.ini
 
   grpc-proto-build-check:
-    needs: check-ci
-    if: needs.check-ci.outputs.should_run == 'true'
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
@@ -100,8 +83,6 @@ jobs:
           python -c "from smg_grpc_proto import sglang_scheduler_pb2; print('OK')"
 
   build-wheel:
-    needs: check-ci
-    if: needs.check-ci.outputs.should_run == 'true'
     runs-on: k8s-runner-gpu
     permissions:
       contents: read
@@ -204,8 +185,6 @@ jobs:
           pytest -q tests --cov=smg --cov-config=.coveragerc --cov-report=term-missing --cov-fail-under=80
 
   unit-tests:
-    needs: check-ci
-    if: needs.check-ci.outputs.should_run == 'true'
     runs-on: k8s-runner-cpu
     permissions:
       contents: read
@@ -257,8 +236,8 @@ jobs:
 
   gateway-e2e:
     name: ${{ matrix.name }}
-    needs: [check-ci, build-wheel]
-    if: needs.check-ci.outputs.should_run == 'true'
+    needs: build-wheel
+    if: github.actor != 'dependabot[bot]'
     permissions:
       contents: read
     strategy:
@@ -411,8 +390,7 @@ jobs:
 
   go-unit-tests:
     name: go-unit-tests
-    needs: [check-ci, build-wheel]
-    if: needs.check-ci.outputs.should_run == 'true'
+    needs: build-wheel
     runs-on: k8s-runner-cpu
     timeout-minutes: 15
     permissions:
@@ -452,8 +430,8 @@ jobs:
 
   go-bindings-e2e:
     name: go-bindings-e2e
-    needs: [check-ci, build-wheel]
-    if: needs.check-ci.outputs.should_run == 'true'
+    needs: build-wheel
+    if: github.actor != 'dependabot[bot]'
     runs-on: k8s-runner-gpu
     timeout-minutes: 20
     permissions:
@@ -505,7 +483,7 @@ jobs:
 
   go-bindings-benchmark:
     name: go-bindings-benchmark
-    needs: [check-ci, build-wheel]
+    needs: build-wheel
     if: false  # Disabled
     runs-on: k8s-runner-gpu
     timeout-minutes: 32
@@ -568,17 +546,21 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [check-ci, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
+    needs: [python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
     steps:
       - name: Check CI result
         run: |
-          if [[ "${{ needs.check-ci.outputs.should_run }}" != "true" ]]; then
-            echo "CI was skipped (external contributor without run-ci label)"
-            exit 0
-          elif [[ "${{ needs.python-lint.result }}" == "failure" || "${{ needs.grpc-proto-build-check.result }}" == "failure" || "${{ needs.build-wheel.result }}" == "failure" || "${{ needs.python-unit-tests.result }}" == "failure" || "${{ needs.unit-tests.result }}" == "failure" || "${{ needs.gateway-e2e.result }}" == "failure" || "${{ needs.go-unit-tests.result }}" == "failure" || "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
+          if [[ "${{ needs.python-lint.result }}" == "failure" || \
+                "${{ needs.grpc-proto-build-check.result }}" == "failure" || \
+                "${{ needs.build-wheel.result }}" == "failure" || \
+                "${{ needs.python-unit-tests.result }}" == "failure" || \
+                "${{ needs.unit-tests.result }}" == "failure" || \
+                "${{ needs.gateway-e2e.result }}" == "failure" || \
+                "${{ needs.go-unit-tests.result }}" == "failure" || \
+                "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
             exit 1
           else
