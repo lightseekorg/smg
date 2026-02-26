@@ -337,7 +337,6 @@ pub enum RealtimeClientEvent {
     ResponseCancel,
     ResponseCreate,
     SessionUpdate,
-    TranscriptionSessionUpdate,
 }
 
 impl RealtimeClientEvent {
@@ -352,7 +351,6 @@ impl RealtimeClientEvent {
     pub const RESPONSE_CANCEL: &'static str = "response.cancel";
     pub const RESPONSE_CREATE: &'static str = "response.create";
     pub const SESSION_UPDATE: &'static str = "session.update";
-    pub const TRANSCRIPTION_SESSION_UPDATE: &'static str = "transcription_session.update";
 
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -367,7 +365,6 @@ impl RealtimeClientEvent {
             Self::ResponseCancel => Self::RESPONSE_CANCEL,
             Self::ResponseCreate => Self::RESPONSE_CREATE,
             Self::SessionUpdate => Self::SESSION_UPDATE,
-            Self::TranscriptionSessionUpdate => Self::TRANSCRIPTION_SESSION_UPDATE,
         }
     }
 }
