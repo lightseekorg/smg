@@ -163,6 +163,7 @@ class TestAddServeArgs:
         args = parser.parse_args(["--enable-token-usage-details"])
         assert args.enable_token_usage_details is True
 
+
 class TestImportBackendArgs:
     """Test _import_backend_args for each backend."""
 
