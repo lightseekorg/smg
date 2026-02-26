@@ -50,12 +50,18 @@ pub struct Migration {
 /// Name of the schema-versions tracking table.
 pub const VERSIONS_TABLE: &str = "_schema_versions";
 
+/// Oracle-qualified name for the versions table (always quoted since `_` prefix
+/// is invalid for unquoted Oracle identifiers).
+fn oracle_versions_table(schema: &SchemaConfig) -> String {
+    match &schema.owner {
+        Some(owner) => format!("{owner}.\"{VERSIONS_TABLE}\""),
+        None => format!("\"{VERSIONS_TABLE}\""),
+    }
+}
+
 /// Oracle DDL for creating the versions tracking table.
 pub fn oracle_create_versions_table(schema: &SchemaConfig) -> String {
-    let table = match &schema.owner {
-        Some(owner) => format!("{owner}.\"{VERSIONS_TABLE}\""),
-        None => VERSIONS_TABLE.to_string(),
-    };
+    let table = oracle_versions_table(schema);
     format!(
         "CREATE TABLE {table} (\
          version NUMBER(10) NOT NULL PRIMARY KEY, \
@@ -154,10 +160,7 @@ pub fn run_oracle_migrations(
         "applying schema migrations"
     );
 
-    let versions_table = match &schema.owner {
-        Some(owner) => format!("{owner}.\"{VERSIONS_TABLE}\""),
-        None => VERSIONS_TABLE.to_string(),
-    };
+    let versions_table = oracle_versions_table(schema);
 
     let mut applied = Vec::new();
     for migration in pending {
@@ -227,23 +230,23 @@ pub fn run_oracle_migrations(
 /// Uses `all_tables` with an owner filter when `schema.owner` is set,
 /// falling back to `user_tables` for the current user's schema.
 ///
-/// When an owner is specified, the DDL creates a quoted identifier
-/// (`OWNER."_schema_versions"`), which preserves lowercase in the catalog.
-/// Without an owner, Oracle folds the unquoted name to uppercase.
+/// The table is always created with a quoted identifier since `_` is not
+/// valid as the first character of an unquoted Oracle identifier. This
+/// preserves the lowercase name in the catalog.
 fn ensure_oracle_versions_table(
     conn: &oracle::Connection,
     schema: &SchemaConfig,
 ) -> Result<(), String> {
-    // When owner is set, the table is created with a quoted identifier
-    // (preserves lowercase). Without owner, Oracle folds to uppercase.
+    // The table is always created with a quoted identifier (preserves
+    // lowercase in Oracle's catalog) since `_` is invalid as the first
+    // character of an unquoted Oracle identifier.
     let check_sql = match &schema.owner {
         Some(owner) => format!(
             "SELECT COUNT(*) FROM all_tables WHERE owner = '{}' AND table_name = '{VERSIONS_TABLE}'",
             owner.to_ascii_uppercase()
         ),
         None => {
-            let table_upper = VERSIONS_TABLE.to_ascii_uppercase();
-            format!("SELECT COUNT(*) FROM user_tables WHERE table_name = '{table_upper}'")
+            format!("SELECT COUNT(*) FROM user_tables WHERE table_name = '{VERSIONS_TABLE}'")
         }
     };
     let present: i64 = conn
@@ -261,10 +264,7 @@ fn ensure_oracle_versions_table(
 
 /// Read the current (highest) schema version from the Oracle versions table.
 fn oracle_current_version(conn: &oracle::Connection, schema: &SchemaConfig) -> Result<u32, String> {
-    let versions_table = match &schema.owner {
-        Some(owner) => format!("{owner}.\"{VERSIONS_TABLE}\""),
-        None => VERSIONS_TABLE.to_string(),
-    };
+    let versions_table = oracle_versions_table(schema);
     let row: Option<i64> = conn
         .query_row_as_named(&format!("SELECT MAX(version) FROM {versions_table}"), &[])
         .map_err(|e| format!("failed to read current schema version: {e}"))?;
@@ -443,10 +443,28 @@ mod tests {
     use crate::schema::TableConfig;
 
     #[test]
+    fn oracle_versions_table_name_is_always_quoted() {
+        let no_owner = SchemaConfig::default();
+        assert_eq!(oracle_versions_table(&no_owner), "\"_schema_versions\"");
+
+        let with_owner = SchemaConfig {
+            owner: Some("ADMIN".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            oracle_versions_table(&with_owner),
+            "ADMIN.\"_schema_versions\""
+        );
+    }
+
+    #[test]
     fn oracle_versions_table_ddl_without_owner() {
         let schema = SchemaConfig::default();
         let ddl = oracle_create_versions_table(&schema);
-        assert!(ddl.contains("_schema_versions"));
+        assert!(
+            ddl.contains("\"_schema_versions\""),
+            "must be quoted for Oracle: {ddl}"
+        );
         assert!(ddl.contains("PRIMARY KEY"));
     }
 
