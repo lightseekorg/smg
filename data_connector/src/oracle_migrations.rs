@@ -37,9 +37,13 @@ fn oracle_v1_up(schema: &SchemaConfig) -> Vec<String> {
 fn oracle_v2_up(schema: &SchemaConfig) -> Vec<String> {
     let s = &schema.responses;
     // Don't drop USER_ID if a configured column maps to that name
+    // or if it's defined as an extra column.
     if s.columns
         .values()
         .any(|v| v.eq_ignore_ascii_case("USER_ID"))
+        || s.extra_columns
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("USER_ID"))
     {
         return vec![];
     }
@@ -105,5 +109,22 @@ mod tests {
             .insert("safety_identifier".to_string(), "USER_ID".to_string());
         let stmts = oracle_v2_up(&schema);
         assert!(stmts.is_empty(), "should skip drop when USER_ID is mapped");
+    }
+
+    #[test]
+    fn oracle_v2_up_skipped_when_extra_column_is_user_id() {
+        let mut schema = SchemaConfig::default();
+        schema.responses.extra_columns.insert(
+            "USER_ID".to_string(),
+            crate::schema::ColumnDef {
+                sql_type: "VARCHAR2(128)".to_string(),
+                default_value: None,
+            },
+        );
+        let stmts = oracle_v2_up(&schema);
+        assert!(
+            stmts.is_empty(),
+            "should skip drop when USER_ID is an extra column"
+        );
     }
 }

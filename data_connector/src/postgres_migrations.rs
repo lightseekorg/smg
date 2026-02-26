@@ -35,9 +35,13 @@ fn pg_v1_up(schema: &SchemaConfig) -> Vec<String> {
 fn pg_v2_up(schema: &SchemaConfig) -> Vec<String> {
     let s = &schema.responses;
     // Don't drop user_id if a configured column maps to that name
+    // or if it's defined as an extra column.
     if s.columns
         .values()
         .any(|v| v.eq_ignore_ascii_case("user_id"))
+        || s.extra_columns
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("user_id"))
     {
         return vec![];
     }
@@ -97,5 +101,22 @@ mod tests {
             .insert("safety_identifier".to_string(), "user_id".to_string());
         let stmts = pg_v2_up(&schema);
         assert!(stmts.is_empty(), "should skip drop when user_id is mapped");
+    }
+
+    #[test]
+    fn pg_v2_up_skipped_when_extra_column_is_user_id() {
+        let mut schema = SchemaConfig::default();
+        schema.responses.extra_columns.insert(
+            "user_id".to_string(),
+            crate::schema::ColumnDef {
+                sql_type: "VARCHAR(128)".to_string(),
+                default_value: None,
+            },
+        );
+        let stmts = pg_v2_up(&schema);
+        assert!(
+            stmts.is_empty(),
+            "should skip drop when user_id is an extra column"
+        );
     }
 }

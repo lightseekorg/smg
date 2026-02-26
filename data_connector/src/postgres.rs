@@ -85,9 +85,8 @@ impl PostgresStore {
         }
         let table = s.qualified_table(self.schema.owner.as_deref());
         let col = s.col("safety_identifier");
-        let idx_ddl = format!(
-            "CREATE INDEX IF NOT EXISTS responses_safety_idx ON {table} ({col});"
-        );
+        let idx_ddl =
+            format!("CREATE INDEX IF NOT EXISTS responses_safety_idx ON {table} ({col});");
         let client = self
             .pool
             .get()
@@ -916,9 +915,7 @@ impl PostgresResponseStorage {
                 s.col("safety_identifier")
             );
             if let Err(e) = client.batch_execute(&idx_ddl).await {
-                tracing::debug!(
-                    "deferred response index creation (column may not exist yet): {e}"
-                );
+                tracing::debug!("deferred response index creation (column may not exist yet): {e}");
             }
         }
 
