@@ -240,6 +240,12 @@ impl SchemaConfig {
                     "{label}.skip_columns: cannot skip 'id' — it is the primary key"
                 ));
             }
+            if !core.contains(&name.as_str()) {
+                return Err(format!(
+                    "{label}.skip_columns: '{name}' is not a recognized column \
+                     (known: {core:?})"
+                ));
+            }
         }
 
         Ok(())
@@ -775,6 +781,19 @@ mod tests {
         assert!(
             err2.contains("shadows a core column"),
             "unexpected: {err2}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unknown_skip_column() {
+        let mut cfg = SchemaConfig::default();
+        cfg.responses
+            .skip_columns
+            .insert("safty_identifier".to_string()); // typo
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("not a recognized column"),
+            "unexpected: {err}"
         );
     }
 
