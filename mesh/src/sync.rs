@@ -144,24 +144,37 @@ impl MeshSyncManager {
     /// The actor should be extracted from the state update context (e.g., from StateUpdate message)
     pub fn apply_remote_worker_state(&self, state: WorkerState, actor: Option<String>) {
         let key = state.worker_id.clone();
-        // Use provided actor, or fallback to a default if not available
-        // In practice, actor should come from the StateUpdate message
         let actor = actor.unwrap_or_else(|| "remote".to_string());
+        let mut current_version = 0;
 
-        // Check if we should update based on version
-        let current_version = self.stores.worker.get(&key).map(|s| s.version).unwrap_or(0);
+        let update_result = self.stores.worker.update_if(key, |current| {
+            current_version = current
+                .as_ref()
+                .map(|existing| existing.version)
+                .unwrap_or(0);
+            if state.version > current_version {
+                Some(state.clone())
+            } else {
+                None
+            }
+        });
 
-        if state.version > current_version {
-            self.stores.worker.insert(key, state.clone(), actor.clone());
-            debug!(
-                "Applied remote worker state update: {} (version: {} -> {})",
-                state.worker_id, current_version, state.version
-            );
-        } else {
-            debug!(
-                "Skipped remote worker state update: {} (version {} <= current {})",
-                state.worker_id, state.version, current_version
-            );
+        match update_result {
+            Ok((_, true)) => {
+                debug!(
+                    "Applied remote worker state update: {} (version: {} -> {})",
+                    state.worker_id, current_version, state.version
+                );
+            }
+            Ok((_, false)) => {
+                debug!(
+                    "Skipped remote worker state update: {} (version {} <= current {})",
+                    state.worker_id, state.version, current_version
+                );
+            }
+            Err(err) => {
+                debug!(error = %err, worker_id = %state.worker_id, actor = %actor, "Failed to apply remote worker state update");
+            }
         }
     }
 
@@ -169,23 +182,37 @@ impl MeshSyncManager {
     /// The actor should be extracted from the state update context (e.g., from StateUpdate message)
     pub fn apply_remote_policy_state(&self, state: PolicyState, actor: Option<String>) {
         let key = format!("policy:{}", state.model_id);
-        // Use provided actor, or fallback to a default if not available
         let actor = actor.unwrap_or_else(|| "remote".to_string());
+        let mut current_version = 0;
 
-        // Check if we should update based on version
-        let current_version = self.stores.policy.get(&key).map(|s| s.version).unwrap_or(0);
+        let update_result = self.stores.policy.update_if(key, |current| {
+            current_version = current
+                .as_ref()
+                .map(|existing| existing.version)
+                .unwrap_or(0);
+            if state.version > current_version {
+                Some(state.clone())
+            } else {
+                None
+            }
+        });
 
-        if state.version > current_version {
-            self.stores.policy.insert(key, state.clone(), actor.clone());
-            debug!(
-                "Applied remote policy state update: {} (version: {} -> {})",
-                state.model_id, current_version, state.version
-            );
-        } else {
-            debug!(
-                "Skipped remote policy state update: {} (version {} <= current {})",
-                state.model_id, state.version, current_version
-            );
+        match update_result {
+            Ok((_, true)) => {
+                debug!(
+                    "Applied remote policy state update: {} (version: {} -> {})",
+                    state.model_id, current_version, state.version
+                );
+            }
+            Ok((_, false)) => {
+                debug!(
+                    "Skipped remote policy state update: {} (version {} <= current {})",
+                    state.model_id, state.version, current_version
+                );
+            }
+            Err(err) => {
+                debug!(error = %err, model_id = %state.model_id, actor = %actor, "Failed to apply remote policy state update");
+            }
         }
     }
 
@@ -260,13 +287,12 @@ impl MeshSyncManager {
     }
 
     /// Apply remote rate-limit counter snapshot encoded as raw i64.
-    /// This keeps wire compatibility with incremental updates while
-    /// applying actor-scoped snapshot payload directly.
     pub fn apply_remote_rate_limit_counter_value(&self, key: String, counter_value: i64) {
-        self.apply_remote_rate_limit_counter_value_with_actor(
+        self.apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
             key,
             "remote".to_string(),
             counter_value,
+            0,
         );
     }
 
@@ -276,16 +302,31 @@ impl MeshSyncManager {
         actor: String,
         counter_value: i64,
     ) {
+        self.apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
+            key,
+            actor,
+            counter_value,
+            0,
+        );
+    }
+
+    pub fn apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
+        &self,
+        key: String,
+        actor: String,
+        counter_value: i64,
+        timestamp: u64,
+    ) {
         if let Some((shard_key, payload)) =
             super::stores::RateLimitStore::snapshot_payload_for_counter_value(
                 key,
-                actor,
+                actor.clone(),
                 counter_value,
             )
         {
             self.stores
                 .rate_limit
-                .apply_counter_snapshot_payload(shard_key, &payload);
+                .apply_counter_snapshot_payload(shard_key, &actor, timestamp, &payload);
             debug!("Applied remote rate-limit counter snapshot payload");
         }
     }
@@ -380,7 +421,9 @@ impl MeshSyncManager {
         };
 
         let actor = self.self_name.clone();
-        self.stores.policy.insert(key, state, actor);
+        if let Err(err) = self.stores.policy.insert(key, state, actor) {
+            return Err(format!("Failed to persist tree state: {err}"));
+        }
         debug!(
             "Synced tree operation to mesh: model={} (version: {})",
             model_id, new_version
@@ -409,35 +452,48 @@ impl MeshSyncManager {
         let key = tree_state_key(&model_id);
         let actor = actor.unwrap_or_else(|| "remote".to_string());
 
-        // Check if we should update based on version
-        let current_version = self.stores.policy.get(&key).map(|s| s.version).unwrap_or(0);
+        let serialized = match serde_json::to_vec(&tree_state) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                debug!(error = %err, model_id = %model_id, "Failed to serialize remote tree state");
+                return;
+            }
+        };
 
-        if tree_state.version > current_version {
-            // Serialize tree state
-            if let Ok(serialized) = serde_json::to_vec(&tree_state) {
-                let state = PolicyState {
+        let mut current_version = 0;
+        let update_result = self.stores.policy.update_if(key, |current| {
+            current_version = current
+                .as_ref()
+                .map(|existing| existing.version)
+                .unwrap_or(0);
+            if tree_state.version > current_version {
+                Some(PolicyState {
                     model_id: model_id.clone(),
                     policy_type: "tree_state".to_string(),
-                    config: serialized,
+                    config: serialized.clone(),
                     version: tree_state.version,
-                };
+                })
+            } else {
+                None
+            }
+        });
 
-                self.stores.policy.insert(key, state, actor.clone());
+        match update_result {
+            Ok((_, true)) => {
                 debug!(
                     "Applied remote tree state update: model={} (version: {} -> {})",
                     model_id, current_version, tree_state.version
                 );
-            } else {
+            }
+            Ok((_, false)) => {
                 debug!(
-                    "Failed to serialize remote tree state for model={}",
-                    model_id
+                    "Skipped remote tree state update: model={} (version {} <= current {})",
+                    model_id, tree_state.version, current_version
                 );
             }
-        } else {
-            debug!(
-                "Skipped remote tree state update: model={} (version {} <= current {})",
-                model_id, tree_state.version, current_version
-            );
+            Err(err) => {
+                debug!(error = %err, model_id = %model_id, actor = %actor, "Failed to apply remote tree state update");
+            }
         }
     }
 }
@@ -873,7 +929,7 @@ mod tests {
         let manager = create_test_manager("node1".to_string());
 
         // Add membership nodes
-        manager.stores.membership.insert(
+        let _ = manager.stores.membership.insert(
             "node1".to_string(),
             MembershipState {
                 name: "node1".to_string(),
@@ -885,7 +941,7 @@ mod tests {
             "node1".to_string(),
         );
 
-        manager.stores.membership.insert(
+        let _ = manager.stores.membership.insert(
             "node2".to_string(),
             MembershipState {
                 name: "node2".to_string(),
@@ -909,7 +965,7 @@ mod tests {
         let manager = create_test_manager("node1".to_string());
 
         // Setup membership
-        manager.stores.membership.insert(
+        let _ = manager.stores.membership.insert(
             "node1".to_string(),
             MembershipState {
                 name: "node1".to_string(),
@@ -921,7 +977,7 @@ mod tests {
             "node1".to_string(),
         );
 
-        manager.stores.membership.insert(
+        let _ = manager.stores.membership.insert(
             "node2".to_string(),
             MembershipState {
                 name: "node2".to_string(),
@@ -993,7 +1049,7 @@ mod tests {
             limit_per_second: 100,
         };
         let serialized = serde_json::to_vec(&config).unwrap();
-        manager.stores.app.insert(
+        let _ = manager.stores.app.insert(
             GLOBAL_RATE_LIMIT_KEY.to_string(),
             AppState {
                 key: GLOBAL_RATE_LIMIT_KEY.to_string(),
@@ -1016,7 +1072,7 @@ mod tests {
             limit_per_second: 10,
         };
         let serialized = serde_json::to_vec(&config).unwrap();
-        manager.stores.app.insert(
+        let _ = manager.stores.app.insert(
             GLOBAL_RATE_LIMIT_KEY.to_string(),
             AppState {
                 key: GLOBAL_RATE_LIMIT_KEY.to_string(),

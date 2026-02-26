@@ -375,7 +375,7 @@ mod tests {
         // Add some data to stores
         use super::super::stores::{MembershipState, PolicyState, WorkerState};
 
-        stores.membership.insert(
+        let _ = stores.membership.insert(
             "node1".to_string(),
             MembershipState {
                 name: "node1".to_string(),
@@ -387,7 +387,7 @@ mod tests {
             "test".to_string(),
         );
 
-        stores.worker.insert(
+        let _ = stores.worker.insert(
             "worker1".to_string(),
             WorkerState {
                 worker_id: "worker1".to_string(),
@@ -400,7 +400,7 @@ mod tests {
             "test".to_string(),
         );
 
-        stores.policy.insert(
+        let _ = stores.policy.insert(
             "policy1".to_string(),
             PolicyState {
                 model_id: "model1".to_string(),
@@ -475,7 +475,7 @@ mod tests {
 
         // Change state by adding data
         use super::super::stores::AppState;
-        stores.app.insert(
+        let _ = stores.app.insert(
             "app1".to_string(),
             AppState {
                 key: "app1".to_string(),
@@ -526,7 +526,7 @@ mod tests {
 
         // Add some data
         use super::super::stores::AppState;
-        stores.app.insert(
+        let _ = stores.app.insert(
             "app1".to_string(),
             AppState {
                 key: "app1".to_string(),

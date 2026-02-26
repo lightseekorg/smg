@@ -288,7 +288,7 @@ mod tests {
             load: 0.5,
             version: 1,
         };
-        stores.worker.insert(key, worker_state, "node1".to_string());
+        let _ = stores.worker.insert(key, worker_state, "node1".to_string());
 
         // Collect updates
         let updates = collector.collect_updates_for_store(StoreType::Worker);
@@ -316,7 +316,7 @@ mod tests {
             load: 0.8,
             version: 2,
         };
-        stores
+        let _ = stores
             .worker
             .insert(key2, worker_state2, "node1".to_string());
 
@@ -338,7 +338,7 @@ mod tests {
             config: b"config_data".to_vec(),
             version: 1,
         };
-        stores.policy.insert(key, policy_state, "node1".to_string());
+        let _ = stores.policy.insert(key, policy_state, "node1".to_string());
 
         let updates = collector.collect_updates_for_store(StoreType::Policy);
         assert_eq!(updates.len(), 1);
@@ -356,7 +356,7 @@ mod tests {
             value: b"app_value".to_vec(),
             version: 1,
         };
-        stores.app.insert(key, app_state, "node1".to_string());
+        let _ = stores.app.insert(key, app_state, "node1".to_string());
 
         let updates = collector.collect_updates_for_store(StoreType::App);
         assert_eq!(updates.len(), 1);
@@ -376,7 +376,7 @@ mod tests {
             version: 1,
             metadata: std::collections::BTreeMap::new(),
         };
-        stores
+        let _ = stores
             .membership
             .insert(key, membership_state, "node1".to_string());
 
@@ -392,7 +392,7 @@ mod tests {
 
         // Insert into multiple stores
         let worker_key = "worker1".to_string();
-        stores.worker.insert(
+        let _ = stores.worker.insert(
             worker_key,
             WorkerState {
                 worker_id: "worker1".to_string(),
@@ -406,7 +406,7 @@ mod tests {
         );
 
         let policy_key = "policy:model1".to_string();
-        stores.policy.insert(
+        let _ = stores.policy.insert(
             policy_key,
             PolicyState {
                 model_id: "model1".to_string(),
@@ -428,7 +428,7 @@ mod tests {
 
         // Insert and collect
         let key = "worker1".to_string();
-        stores.worker.insert(
+        let _ = stores.worker.insert(
             key,
             WorkerState {
                 worker_id: "worker1".to_string(),
@@ -493,7 +493,7 @@ mod tests {
         let key = "worker1".to_string();
 
         // Insert first version with explicit version number
-        stores.worker.insert(
+        let _ = stores.worker.insert(
             key.clone(),
             WorkerState {
                 worker_id: "worker1".to_string(),
@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(version1, 1);
 
         // Insert second version with incremented version number
-        stores.worker.insert(
+        let _ = stores.worker.insert(
             key.clone(),
             WorkerState {
                 worker_id: "worker1".to_string(),
@@ -531,7 +531,7 @@ mod tests {
         assert_eq!(version2, 2);
 
         // Insert third version with incremented version number
-        stores.worker.insert(
+        let _ = stores.worker.insert(
             key,
             WorkerState {
                 worker_id: "worker1".to_string(),

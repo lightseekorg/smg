@@ -12,13 +12,14 @@ use std::{
     sync::Arc,
 };
 
+use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tracing::debug;
 
 use super::{
     consistent_hash::ConsistentHashRing,
-    crdt_kv::{CrdtOrMap, OperationLog},
+    crdt_kv::{CrdtOrMap, Operation, OperationLog, ReplicaId},
 };
 
 // ============================================================================
@@ -77,22 +78,19 @@ impl<T: CrdtValue> CrdtStore<T> {
         })
     }
 
-    fn insert(&self, key: String, value: T) -> Option<T> {
-        let bytes = match value.to_bytes() {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                debug!(error = %err, %key, "Failed to serialize CRDT value");
-                return None;
-            }
-        };
+    fn insert(&self, key: String, value: T) -> Result<Option<T>, serde_json::Error> {
+        let bytes = value.to_bytes().map_err(|err| {
+            debug!(error = %err, %key, "Failed to serialize CRDT value");
+            err
+        })?;
 
-        self.inner.insert(key, bytes).and_then(|old_bytes| {
+        Ok(self.inner.insert(key, bytes).and_then(|old_bytes| {
             T::from_bytes(&old_bytes)
                 .map_err(|err| {
                     debug!(error = %err, "Failed to deserialize old CRDT value");
                 })
                 .ok()
-        })
+        }))
     }
 
     fn remove(&self, key: &str) -> Option<T> {
@@ -128,6 +126,33 @@ impl<T: CrdtValue> CrdtStore<T> {
                 err
             })
             .ok())
+    }
+
+    fn update_if<F>(&self, key: String, updater: F) -> Result<(Option<T>, bool), serde_json::Error>
+    where
+        F: FnOnce(Option<T>) -> Option<T>,
+    {
+        let (updated_bytes, changed) = self.inner.try_upsert_if(key, |current_bytes| {
+            let current = current_bytes.and_then(|bytes| {
+                T::from_bytes(bytes)
+                    .map_err(|err| {
+                        debug!(error = %err, "Failed to deserialize current CRDT value");
+                    })
+                    .ok()
+            });
+
+            let updated = updater(current);
+            updated.map(|value| value.to_bytes()).transpose()
+        })?;
+
+        let value = T::from_bytes(&updated_bytes)
+            .map_err(|err| {
+                debug!(error = %err, "Failed to deserialize conditionally updated CRDT value");
+                err
+            })
+            .ok();
+
+        Ok((value, changed))
     }
 
     fn len(&self) -> usize {
@@ -302,8 +327,13 @@ macro_rules! define_state_store {
             }
 
             // Backward-compatible actor parameter; the CRDT OR-Map no longer needs it.
-            pub fn insert(&self, key: String, value: $value_type, _actor: String) {
-                self.inner.insert(key, value);
+            pub fn insert(
+                &self,
+                key: String,
+                value: $value_type,
+                _actor: String,
+            ) -> Result<Option<$value_type>, serde_json::Error> {
+                self.inner.insert(key, value)
             }
 
             pub fn remove(&self, key: &str) {
@@ -327,6 +357,17 @@ macro_rules! define_state_store {
                 F: FnOnce(Option<$value_type>) -> $value_type,
             {
                 self.inner.update(key, updater)
+            }
+
+            pub fn update_if<F>(
+                &self,
+                key: String,
+                updater: F,
+            ) -> Result<(Option<$value_type>, bool), serde_json::Error>
+            where
+                F: FnOnce(Option<$value_type>) -> Option<$value_type>,
+            {
+                self.inner.update_if(key, updater)
             }
 
             pub fn len(&self) -> usize {
@@ -371,6 +412,7 @@ pub struct RateLimitStore {
     counters: CrdtStore<CounterValue>,
     hash_ring: Arc<RwLock<ConsistentHashRing>>,
     self_name: String,
+    actor_replica_ids: Arc<DashMap<String, ReplicaId>>,
 }
 
 impl RateLimitStore {
@@ -381,6 +423,7 @@ impl RateLimitStore {
             counters: CrdtStore::new(),
             hash_ring: Arc::new(RwLock::new(ConsistentHashRing::new())),
             self_name,
+            actor_replica_ids: Arc::new(DashMap::new()),
         }
     }
 
@@ -394,6 +437,14 @@ impl RateLimitStore {
 
     fn base_key(shard_key: &str) -> &str {
         Self::split_shard_key(shard_key).map_or(shard_key, |(base, _)| base)
+    }
+
+    fn replica_id_for_actor(&self, actor: &str) -> ReplicaId {
+        if let Ok(replica_id) = ReplicaId::from_string(actor) {
+            return replica_id;
+        }
+
+        *self.actor_replica_ids.entry(actor.to_string()).or_default()
     }
 
     fn aggregate_counter(&self, key: &str) -> Option<i64> {
@@ -491,12 +542,14 @@ impl RateLimitStore {
         }
 
         let shard_key = Self::shard_key(&key, &actor);
-        let _ = self.counters.insert(
+        if let Err(err) = self.counters.insert(
             shard_key,
             CounterValue {
                 value: counter_value,
             },
-        );
+        ) {
+            debug!(error = %err, %key, %actor, "Failed to set rate-limit counter snapshot");
+        }
     }
 
     /// Build serialized snapshot payload and shard key for a counter value.
@@ -523,7 +576,13 @@ impl RateLimitStore {
         Some((shard_key, bytes))
     }
 
-    pub fn apply_counter_snapshot_payload(&self, shard_key: String, payload: &[u8]) {
+    pub fn apply_counter_snapshot_payload(
+        &self,
+        shard_key: String,
+        actor: &str,
+        timestamp: u64,
+        payload: &[u8],
+    ) {
         let Some((base_key, _)) = Self::split_shard_key(&shard_key) else {
             debug!(%shard_key, "Invalid rate-limit shard key in snapshot payload");
             return;
@@ -533,15 +592,20 @@ impl RateLimitStore {
             return;
         }
 
-        let counter = match CounterValue::from_bytes(payload) {
-            Ok(counter) => counter,
-            Err(err) => {
-                debug!(error = %err, %shard_key, "Failed to decode rate-limit snapshot payload");
-                return;
-            }
-        };
+        if let Err(err) = CounterValue::from_bytes(payload) {
+            debug!(error = %err, %shard_key, "Failed to decode rate-limit snapshot payload");
+            return;
+        }
 
-        let _ = self.counters.insert(shard_key, counter);
+        let replica_id = self.replica_id_for_actor(actor);
+        let mut log = OperationLog::new();
+        log.append(Operation::insert(
+            shard_key,
+            payload.to_vec(),
+            timestamp,
+            replica_id,
+        ));
+        self.counters.merge(&log);
     }
 
     /// Get counter value
@@ -650,7 +714,7 @@ mod tests {
             metadata: BTreeMap::new(),
         };
 
-        store.insert(key.clone(), state.clone(), "node1".to_string());
+        let _ = store.insert(key.clone(), state.clone(), "node1".to_string());
         assert_eq!(store.get(&key).unwrap().name, "node1");
 
         store.remove(&key);
@@ -667,7 +731,7 @@ mod tests {
             version: 1,
         };
 
-        store.insert(key.clone(), state.clone(), "node1".to_string());
+        let _ = store.insert(key.clone(), state.clone(), "node1".to_string());
         assert_eq!(store.get(&key).unwrap().key, "app_key1");
     }
 
@@ -684,7 +748,7 @@ mod tests {
             version: 1,
         };
 
-        store.insert(key.clone(), state.clone(), "node1".to_string());
+        let _ = store.insert(key.clone(), state.clone(), "node1".to_string());
         assert_eq!(store.get(&key).unwrap().worker_id, "worker1");
     }
 
@@ -699,7 +763,7 @@ mod tests {
             version: 1,
         };
 
-        store.insert(key.clone(), state.clone(), "node1".to_string());
+        let _ = store.insert(key.clone(), state.clone(), "node1".to_string());
         assert_eq!(store.get(&key).unwrap().model_id, "model1");
     }
 

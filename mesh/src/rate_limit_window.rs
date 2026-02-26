@@ -137,7 +137,7 @@ mod tests {
             limit_per_second: 100,
         };
         let serialized = serde_json::to_vec(&config).unwrap();
-        stores.app.insert(
+        let _ = stores.app.insert(
             key.clone(),
             crate::stores::AppState {
                 key: GLOBAL_RATE_LIMIT_KEY.to_string(),
@@ -209,7 +209,7 @@ mod tests {
             version: 1,
             metadata: Default::default(),
         };
-        stores
+        let _ = stores
             .membership
             .insert(membership_key, membership_state, "test_node".to_string());
 

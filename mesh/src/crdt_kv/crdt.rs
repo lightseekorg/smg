@@ -189,7 +189,14 @@ impl CrdtOrMap {
         let key_guard = key_lock.lock();
 
         let current_value = self.store.get(&key);
-        let updated_value = updater(current_value.as_deref())?;
+        let updated_value = match updater(current_value.as_deref()) {
+            Ok(value) => value,
+            Err(err) => {
+                drop(key_guard);
+                self.try_cleanup_key_lock(&key, &key_lock);
+                return Err(err);
+            }
+        };
         let timestamp = self.clock.tick();
 
         let result =
@@ -212,6 +219,48 @@ impl CrdtOrMap {
         drop(key_guard);
         self.try_cleanup_key_lock(&key, &key_lock);
         Ok(result)
+    }
+
+    /// Fallible atomic upsert with conditional write. Returning `Ok(None)` skips CRDT write.
+    pub fn try_upsert_if<F, E>(&self, key: String, updater: F) -> Result<(Vec<u8>, bool), E>
+    where
+        F: FnOnce(Option<&[u8]>) -> Result<Option<Vec<u8>>, E>,
+    {
+        let key_lock = self.key_lock_for(&key);
+        let key_guard = key_lock.lock();
+
+        let current_value = self.store.get(&key);
+        let maybe_updated_value = match updater(current_value.as_deref()) {
+            Ok(value) => value,
+            Err(err) => {
+                drop(key_guard);
+                self.try_cleanup_key_lock(&key, &key_lock);
+                return Err(err);
+            }
+        };
+
+        let (result, changed) = if let Some(updated_value) = maybe_updated_value {
+            let timestamp = self.clock.tick();
+            if self.record_insert_metadata(&key, &updated_value, timestamp, self.replica_id) {
+                let operation = Operation::insert(
+                    key.clone(),
+                    updated_value.clone(),
+                    timestamp,
+                    self.replica_id,
+                );
+                self.store.insert(key.clone(), updated_value.clone());
+                self.operation_log.write().append(operation);
+                (updated_value, true)
+            } else {
+                (self.store.get(&key).unwrap_or_default(), false)
+            }
+        } else {
+            (self.store.get(&key).unwrap_or_default(), false)
+        };
+
+        drop(key_guard);
+        self.try_cleanup_key_lock(&key, &key_lock);
+        Ok((result, changed))
     }
 
     /// Remove key (transparent operation)

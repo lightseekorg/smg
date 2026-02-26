@@ -105,7 +105,7 @@ async fn test_rate_limit_cluster_consistency() {
     for stores in [&stores1, &stores2, &stores3] {
         for (i, &name) in node_names.iter().enumerate() {
             let key = name.to_string();
-            stores.membership.insert(
+            let _ = stores.membership.insert(
                 key,
                 MembershipState {
                     name: name.to_string(),
@@ -126,7 +126,7 @@ async fn test_rate_limit_cluster_consistency() {
     let serialized = serde_json::to_vec(&config).unwrap();
     let key = GLOBAL_RATE_LIMIT_KEY.to_string();
     for stores in [&stores1, &stores2, &stores3] {
-        stores.app.insert(
+        let _ = stores.app.insert(
             key.clone(),
             AppState {
                 key: GLOBAL_RATE_LIMIT_KEY.to_string(),
@@ -373,7 +373,7 @@ async fn test_rate_limit_window_reset() {
     };
     let serialized = serde_json::to_vec(&config).unwrap();
     let key = GLOBAL_RATE_LIMIT_KEY.to_string();
-    stores.app.insert(
+    let _ = stores.app.insert(
         key,
         AppState {
             key: GLOBAL_RATE_LIMIT_KEY.to_string(),

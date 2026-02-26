@@ -212,7 +212,7 @@ fn test_state_stores_basic_operations() {
         value: vec![1, 2, 3],
         version: 1,
     };
-    stores.app.insert(
+    let _ = stores.app.insert(
         "key1".to_string(),
         app_state.clone(),
         "test_node".to_string(),

@@ -496,11 +496,13 @@ impl MeshController {
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        stores.app.insert(
+                                                        if let Err(err) = stores.app.insert(
                                                             app_state.key.clone(),
                                                             app_state,
                                                             state_update.actor.clone(),
-                                                        );
+                                                        ) {
+                                                            log::warn!(error = %err, "Failed to apply app state update");
+                                                        }
                                                     }
                                                 }
                                                 LocalStoreType::Membership => {
@@ -510,11 +512,13 @@ impl MeshController {
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        stores.membership.insert(
+                                                        if let Err(err) = stores.membership.insert(
                                                             membership_state.name.clone(),
                                                             membership_state,
                                                             state_update.actor.clone(),
-                                                        );
+                                                        ) {
+                                                            log::warn!(error = %err, "Failed to apply membership state update");
+                                                        }
                                                     }
                                                 }
                                                 LocalStoreType::Worker => {
@@ -560,10 +564,11 @@ impl MeshController {
                                                         )
                                                     {
                                                         sync_manager
-                                                            .apply_remote_rate_limit_counter_value_with_actor(
+                                                            .apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
                                                                 state_update.key.clone(),
                                                                 state_update.actor.clone(),
                                                                 counter_value,
+                                                                state_update.timestamp,
                                                             );
                                                     } else {
                                                         log::warn!(

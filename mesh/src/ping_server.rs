@@ -658,11 +658,13 @@ impl Gossip for GossipService {
                                                     ) {
                                                         // Apply app state directly to the store
                                                         if let Some(ref stores) = stores {
-                                                            stores.app.insert(
+                                                            if let Err(err) = stores.app.insert(
                                                                 app_state.key.clone(),
                                                                 app_state,
                                                                 state_update.actor.clone(),
-                                                            );
+                                                            ) {
+                                                                log::warn!(error = %err, "Failed to apply app state update");
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -677,11 +679,15 @@ impl Gossip for GossipService {
                                                     {
                                                         // Apply membership state directly to the store
                                                         if let Some(ref stores) = stores {
-                                                            stores.membership.insert(
-                                                                membership_state.name.clone(),
-                                                                membership_state,
-                                                                state_update.actor.clone(),
-                                                            );
+                                                            if let Err(err) =
+                                                                stores.membership.insert(
+                                                                    membership_state.name.clone(),
+                                                                    membership_state,
+                                                                    state_update.actor.clone(),
+                                                                )
+                                                            {
+                                                                log::warn!(error = %err, "Failed to apply membership state update");
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -698,10 +704,11 @@ impl Gossip for GossipService {
                                                             })
                                                         {
                                                             sync_manager
-                                                                .apply_remote_rate_limit_counter_value_with_actor(
+                                                                .apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
                                                                     state_update.key.clone(),
                                                                     state_update.actor.clone(),
                                                                     counter_value,
+                                                                    state_update.timestamp,
                                                                 );
                                                         } else {
                                                             log::warn!(
@@ -715,10 +722,11 @@ impl Gossip for GossipService {
                                                         )
                                                     {
                                                         sync_manager
-                                                            .apply_remote_rate_limit_counter_value_with_actor(
+                                                            .apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
                                                                 state_update.key.clone(),
                                                                 state_update.actor.clone(),
                                                                 counter_value,
+                                                                state_update.timestamp,
                                                             );
                                                     } else {
                                                         log::warn!(
@@ -906,17 +914,17 @@ impl Gossip for GossipService {
                                                         match store_type {
                                                             LocalStoreType::Membership => {
                                                                 if let Ok(membership_state) = serde_json::from_slice::<super::stores::MembershipState>(&entry.value) {
-                                                                    stores.membership.insert(key, membership_state, entry.actor.clone());
+                                                                    let _ = stores.membership.insert(key, membership_state, entry.actor.clone());
                                                                 }
                                                             }
                                                             LocalStoreType::App => {
                                                                 if let Ok(app_state) = serde_json::from_slice::<super::stores::AppState>(&entry.value) {
-                                                                    stores.app.insert(key, app_state, entry.actor.clone());
+                                                                    let _ = stores.app.insert(key, app_state, entry.actor.clone());
                                                                 }
                                                             }
                                                             LocalStoreType::Worker => {
                                                                 if let Ok(worker_state) = serde_json::from_slice::<super::stores::WorkerState>(&entry.value) {
-                                                                    stores.worker.insert(key, worker_state.clone(), entry.actor.clone());
+                                                                    let _ = stores.worker.insert(key, worker_state.clone(), entry.actor.clone());
                                                                     // Also update sync manager if available
                                                                     if let Some(ref sync_manager) = sync_manager {
                                                                         sync_manager.apply_remote_worker_state(worker_state, Some(entry.actor.clone()));
@@ -925,7 +933,7 @@ impl Gossip for GossipService {
                                                             }
                                                             LocalStoreType::Policy => {
                                                                 if let Ok(policy_state) = serde_json::from_slice::<super::stores::PolicyState>(&entry.value) {
-                                                                    stores.policy.insert(key, policy_state.clone(), entry.actor.clone());
+                                                                    let _ = stores.policy.insert(key, policy_state.clone(), entry.actor.clone());
                                                                     // Also update sync manager if available
                                                                     if let Some(ref sync_manager) = sync_manager {
                                                                         // Check if this is a tree state update
@@ -956,10 +964,11 @@ impl Gossip for GossipService {
                                                                             .or_else(|| op_log.latest_counter_value_any())
                                                                         {
                                                                             sync_manager
-                                                                                .apply_remote_rate_limit_counter_value_with_actor(
+                                                                                .apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
                                                                                     entry.key.clone(),
                                                                                     entry.actor.clone(),
                                                                                     counter_value,
+                                                                                    entry.timestamp,
                                                                                 );
                                                                         } else {
                                                                             log::warn!(
@@ -969,10 +978,11 @@ impl Gossip for GossipService {
                                                                         }
                                                                     } else if let Ok(counter_value) = serde_json::from_slice::<i64>(&entry.value) {
                                                                         sync_manager
-                                                                            .apply_remote_rate_limit_counter_value_with_actor(
+                                                                            .apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
                                                                                 entry.key.clone(),
                                                                                 entry.actor.clone(),
                                                                                 counter_value,
+                                                                                entry.timestamp,
                                                                             );
                                                                     } else {
                                                                         log::warn!(

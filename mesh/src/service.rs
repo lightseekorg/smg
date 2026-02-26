@@ -231,7 +231,8 @@ impl MeshServerHandler {
         };
         self.stores
             .app
-            .insert(key.clone(), app_state, self.self_name.clone());
+            .insert(key.clone(), app_state, self.self_name.clone())
+            .map_err(|err| anyhow::anyhow!("Failed to persist app state for key {key}: {err}"))?;
 
         node.metadata.insert(key, value);
         node.version += 1;
