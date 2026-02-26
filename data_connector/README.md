@@ -153,6 +153,8 @@ postgres:
     owner: "myschema"           # Oracle: schema prefix (MYSCHEMA."TABLE")
                                 # Redis: key prefix ("myschema:conversation:{id}")
                                 # Postgres: ignored (use search_path for schema control)
+    version: 2                  # Skip migrations 1–2 (database already at v2)
+    auto_migrate: true          # Opt in to automatic migration (default: false)
 
     conversations:
       table: "my_conversations" # Overrides default "conversations"
@@ -176,7 +178,7 @@ postgres:
 
 | Type | Fields | Purpose |
 |------|--------|---------|
-| `SchemaConfig` | `owner`, `conversations`, `responses`, `conversation_items`, `conversation_item_links` | Top-level config with an optional owner/prefix and per-table settings |
+| `SchemaConfig` | `owner`, `version`, `auto_migrate`, `conversations`, `responses`, `conversation_items`, `conversation_item_links` | Top-level config with an optional owner/prefix, migration control, and per-table settings |
 | `TableConfig` | `table`, `columns` | Per-table config: physical table name and a map of logical-to-physical column name overrides |
 
 Key behaviors:
@@ -390,10 +392,67 @@ PostgreSQL additionally creates an index on
 `conversation_item_links(conversation_id, added_at)` for efficient
 cursor-based listing.
 
-Column names within each table can also be overridden via `SchemaConfig`. The
-config describes the existing database schema — it does not perform migrations.
+Column names within each table can also be overridden via `SchemaConfig`.
 If you rename a column in config, the corresponding database column must
 already exist with that name.
+
+### Schema Versioning
+
+The data connector includes a built-in migration system that tracks applied
+schema changes in a `_schema_versions` table. Each backend (Oracle, Postgres)
+defines its own migration list with backend-specific DDL. Redis has no
+structural schema and does not use migrations.
+
+**Safe by default**: `auto_migrate` defaults to `false`. When pending
+migrations are detected, startup **fails with the exact SQL statements**
+needed so you can review and apply them manually. Set `auto_migrate: true`
+to opt in to automatic migration.
+
+On startup:
+1. Tables are created if they don't exist (`CREATE TABLE` / `CREATE TABLE IF NOT EXISTS`)
+2. The `_schema_versions` tracking table is created
+3. Pending migrations are checked:
+   - If `auto_migrate: true` → migrations are applied automatically
+   - If `auto_migrate: false` (default) → startup fails with actionable SQL if migrations are pending
+
+Current migrations:
+
+| Version | Description |
+|---------|-------------|
+| 1 | Add `safety_identifier` column to responses |
+| 2 | Remove legacy `user_id` column from responses |
+
+#### Controlling migrations
+
+| Config field | Type | Default | Description |
+|---|---|---|---|
+| `auto_migrate` | `bool` | `false` | Set to `true` to apply migrations automatically on startup. When `false`, startup fails with the exact SQL if migrations are pending. |
+| `version` | `u32` (optional) | `None` | Starting version — migrations up to this number are skipped. Use when your database is already at a known version. |
+
+Example: opt in to automatic migration:
+
+```yaml
+oracle:
+  schema:
+    auto_migrate: true
+```
+
+Example: database already at version 2, skip those migrations:
+
+```yaml
+oracle:
+  schema:
+    version: 2
+    auto_migrate: true
+```
+
+#### Concurrency safety
+
+- **Postgres**: Uses `pg_advisory_lock` to serialize migrations across
+  concurrent application instances.
+- **Oracle**: DDL statements use PL/SQL exception handling for idempotency.
+  Duplicate version records from concurrent instances are detected and skipped
+  (ORA-00001).
 
 ## Testing
 

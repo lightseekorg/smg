@@ -28,8 +28,11 @@ use crate::{
         ListParams, NewConversation, NewConversationItem, ResponseId, ResponseResult,
         ResponseStorage, ResponseStorageError, SortOrder, StoredResponse,
     },
+    postgres_migrations::POSTGRES_MIGRATIONS,
     schema::SchemaConfig,
 };
+
+// ── Store ────────────────────────────────────────────────────────────────
 
 pub(crate) struct PostgresStore {
     pool: Pool,
@@ -54,6 +57,23 @@ impl PostgresStore {
             .map_err(|e| format!("Failed to build PostgreSQL connection pool: {e}"))?;
 
         Ok(Self { pool, schema })
+    }
+
+    /// Run versioned schema migrations after tables have been created.
+    pub(crate) async fn run_migrations(&self) -> Result<Vec<u32>, String> {
+        let mut client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| format!("failed to get connection for migrations: {e}"))?;
+        crate::versioning::run_postgres_migrations(
+            &mut client,
+            &self.schema,
+            &POSTGRES_MIGRATIONS,
+            self.schema.version,
+            self.schema.auto_migrate,
+        )
+        .await
     }
 }
 

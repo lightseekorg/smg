@@ -22,9 +22,12 @@ pub mod hooks;
 mod memory;
 mod noop;
 mod oracle;
+mod oracle_migrations;
 mod postgres;
+mod postgres_migrations;
 mod redis;
 pub mod schema;
+pub(crate) mod versioning;
 
 // Re-export config types
 // Re-export core types and traits
