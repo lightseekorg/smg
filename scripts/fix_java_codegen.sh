@@ -4,7 +4,7 @@
 # Fixes known codegen bugs when generating from OpenAPI 3.1 specs:
 #   1. List<X>.class  → List.class  (Java type erasure forbids parameterized .class)
 #   2. getList<X>()   → getListOfX() (angle brackets invalid in method names)
-#   3. = [a, b, ...]; → ;            (raw array literals aren't valid Java)
+#   3. = [a, b, ...]; → new ArrayList<>() (raw array literals aren't valid Java)
 #   4. Ctor(List<List<X>>) removed   (type erasure clash with Ctor(List<X>))
 #   5. = bareword;    → ;            (unquoted enum defaults aren't valid Java)
 #
@@ -37,24 +37,16 @@ while IFS= read -r -d '' file; do
             s{(get\w*)<([^()]+)>(\s*\()}{
                 my ($prefix, $inner, $suffix) = ($1, $2, $3);
                 # Sanitize the generic content into a valid Java identifier
-                $inner =~ s/[<>,\s]//g;
+                $inner =~ s/[^A-Za-z0-9_]//g;
                 "${prefix}Of${inner}${suffix}"
             }ge;
         ' "$file"
         changed=true
     fi
 
-    # 3. Raw array literal defaults:
-    #    Field declarations: List<X> foo = [a, b]; → List<X> foo;
-    #    Assignments:        this.foo = [a, b];    → this.foo = new ArrayList<>();
+    # 3. Raw array literal defaults: = [a, b, ...]; → = new ArrayList<>();
     if grep -q ' = \[' "$file"; then
-        perl -pi -e '
-            if (/this\.\w+\s*=\s*\[/) {
-                s/ = \[[^\]]*\];/ = new ArrayList<>();/g;
-            } else {
-                s/ = \[[^\]]*\];/;/g;
-            }
-        ' "$file"
+        perl -pi -e 's/ = \[[^\]]*\];/ = new ArrayList<>();/g' "$file"
         changed=true
     fi
 
