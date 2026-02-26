@@ -64,6 +64,7 @@ let config = StorageFactoryConfig {
     oracle: None,
     postgres: None,
     redis: None,
+    hook: None,
 };
 
 let (responses, conversations, items) = create_storage(config).await.unwrap();
@@ -107,6 +108,7 @@ from JSON/YAML). Each database backend has a dedicated config struct.
 |-------|------|-------------|
 | `db_url` | `String` | Connection URL (`postgres://user:pass@host:port/dbname`). Validated for scheme, host, and database name. |
 | `pool_max` | `usize` | Maximum connections in the deadpool pool (default helper: 16). Must be > 0. |
+| `schema` | `Option<SchemaConfig>` | Optional schema customization. See [Schema Configuration](#schema-configuration). |
 
 Call `validate()` to check the URL before use.
 
@@ -117,6 +119,7 @@ Call `validate()` to check the URL before use.
 | `url` | `String` | -- | Connection URL (`redis://` or `rediss://`). |
 | `pool_max` | `usize` | 16 | Maximum pool connections. |
 | `retention_days` | `Option<u64>` | `Some(30)` | TTL in days for stored data. `None` disables expiration. |
+| `schema` | `Option<SchemaConfig>` | `None` | Optional schema customization. See [Schema Configuration](#schema-configuration). |
 
 Call `validate()` to check the URL before use.
 
@@ -132,6 +135,199 @@ Call `validate()` to check the URL before use.
 | `pool_min` | `usize` | 1 | Minimum pool connections. |
 | `pool_max` | `usize` | 16 | Maximum pool connections. |
 | `pool_timeout_secs` | `u64` | 30 | Connection acquisition timeout in seconds. |
+| `schema` | `Option<SchemaConfig>` | `None` | Optional schema customization. See [Schema Configuration](#schema-configuration). |
+
+### Schema Configuration
+
+All three database backends (Oracle, Postgres, Redis) accept an optional
+`SchemaConfig` that lets you customize table names and column names without
+modifying source code. When `schema` is omitted, all backends use their
+default table and column names — zero behavioral change.
+
+```yaml
+postgres:
+  db_url: "postgres://user:pass@localhost:5432/mydb"
+  pool_max: 16
+
+  schema:
+    owner: "myschema"           # Oracle: schema prefix (MYSCHEMA."TABLE")
+                                # Redis: key prefix ("myschema:conversation:{id}")
+                                # Postgres: ignored (use search_path for schema control)
+
+    conversations:
+      table: "my_conversations" # Overrides default "conversations"
+      columns:
+        id: "conv_id"           # Overrides column name "id" -> "conv_id"
+        metadata: "conv_meta"   # Overrides column name "metadata" -> "conv_meta"
+
+    responses:
+      table: "my_responses"
+      columns:
+        safety_identifier: "user_identifier"
+
+    conversation_items:
+      table: "my_items"
+
+    conversation_item_links:
+      table: "my_links"
+```
+
+`SchemaConfig` has two types:
+
+| Type | Fields | Purpose |
+|------|--------|---------|
+| `SchemaConfig` | `owner`, `conversations`, `responses`, `conversation_items`, `conversation_item_links` | Top-level config with an optional owner/prefix and per-table settings |
+| `TableConfig` | `table`, `columns` | Per-table config: physical table name and a map of logical-to-physical column name overrides |
+
+Key behaviors:
+
+- **`col(field)`** returns the physical column name for a logical field name.
+  If no override is configured, the logical name is returned unchanged.
+- **`qualified_table(owner)`** returns `OWNER."TABLE"` when an owner is set
+  (used by Oracle), or just the table name otherwise.
+- **Validation** runs at startup. All identifiers must match `[a-zA-Z0-9_]+`.
+  Invalid identifiers are rejected before any queries execute.
+- **Redis**: Only `owner` (key prefix) and `columns` (hash field names) affect
+  Redis behavior. The `table` field is ignored for Redis key patterns — keys
+  always use hardcoded entity names (`conversation`, `item`, `response`).
+
+## Storage Hooks
+
+Hooks let you inject custom logic before and after storage operations without
+modifying backend code. Use cases include audit logging, multi-tenancy field
+population, PII redaction, and custom validation.
+
+### `StorageHook` Trait
+
+Implement the `StorageHook` trait (in `hooks.rs`):
+
+```rust
+#[async_trait]
+pub trait StorageHook: Send + Sync + 'static {
+    async fn before(
+        &self,
+        operation: StorageOperation,
+        context: Option<&RequestContext>,
+        payload: &Value,
+    ) -> Result<BeforeHookResult, HookError>;
+
+    async fn after(
+        &self,
+        operation: StorageOperation,
+        context: Option<&RequestContext>,
+        payload: &Value,
+        result: &Value,
+        extra: &ExtraColumns,
+    ) -> Result<ExtraColumns, HookError>;
+}
+```
+
+- `before()` returning `Continue(extra_columns)` proceeds with the operation.
+  The extra columns map is forwarded to the backend for persistence.
+- `before()` returning `Reject(reason)` aborts the operation with an error.
+- `before()` returning `Err(_)` logs a warning and **continues** (non-fatal).
+- `after()` receives the result and extra columns from `before()`. It can
+  return modified extra columns for the caller.
+
+### Wiring a Hook
+
+Pass the hook to `create_storage()` via `StorageFactoryConfig`:
+
+```rust
+let hook = Arc::new(MyHook::new());
+let config = StorageFactoryConfig {
+    backend: &HistoryBackend::Postgres,
+    postgres: Some(pg_config),
+    hook: Some(hook),
+    ..Default::default()
+};
+let (responses, conversations, items) = create_storage(config).await?;
+```
+
+### Request Context
+
+`RequestContext` is a per-request key-value bag (populated from HTTP headers,
+middleware, etc.) made available to hooks via tokio task-local storage:
+
+```rust
+use data_connector::context::{with_request_context, RequestContext};
+
+let mut ctx = RequestContext::new();
+ctx.set("tenant_id", "acme-corp");
+ctx.set("user_id", "user-42");
+
+// Run storage operations with context available to hooks
+with_request_context(ctx, async {
+    conversations.create_conversation(input).await
+}).await;
+```
+
+### Extra Columns
+
+Extra columns let hooks persist custom fields alongside core data. They are
+defined in `SchemaConfig` and populated by hook `before()` calls.
+
+```yaml
+schema:
+  responses:
+    extra_columns:
+      TENANT_ID:
+        sql_type: "VARCHAR(128)"
+      STORED_BY:
+        sql_type: "VARCHAR(128)"
+        default_value: "system"   # Used when hook doesn't provide a value
+  conversations:
+    extra_columns:
+      TENANT_ID:
+        sql_type: "VARCHAR(128)"
+      CREATED_BY:
+        sql_type: "VARCHAR(128)"
+```
+
+Value resolution order for each extra column on write:
+1. Hook-provided value from `ExtraColumns` (via `before()` result)
+2. `default_value` from `ColumnDef` in schema config
+3. `NULL` (if neither is available)
+
+Extra columns are write-side enrichment (audit trail, tenant ID, etc.). They
+are included in DDL for schema creation and in INSERT statements, but are
+**not** read back into `StoredResponse`/`Conversation`/`ConversationItem`
+structs on SELECT.
+
+### Skip Columns
+
+Skip columns let you omit core columns from DDL, INSERT, and SELECT
+statements. This is useful when migrating to a schema that doesn't have all
+default columns.
+
+```yaml
+schema:
+  responses:
+    skip_columns:
+      - raw_response
+      - safety_identifier
+```
+
+Skipped columns use default values when reading (e.g. `None` for optional
+fields, empty collections for lists/maps, `Value::Null` for JSON).
+
+### WASM Storage Hooks
+
+For sandboxed, language-agnostic hooks, use the WASM Component Model bridge.
+The WIT interface is in `wasm/src/interface/storage/storage-hooks.wit` and
+the Rust bridge is `WasmStorageHook` in the `smg-wasm` crate (behind the
+`storage-hooks` feature flag).
+
+```rust
+use smg_wasm::WasmStorageHook;  // requires: smg-wasm with "storage-hooks" feature
+
+let wasm_bytes = std::fs::read("path/to/storage_hook.component.wasm")?;
+let hook = WasmStorageHook::new(&wasm_bytes)?;
+// Use Arc::new(hook) in StorageFactoryConfig
+```
+
+See `examples/wasm/wasm-guest-storage-hook/` for a complete guest example
+demonstrating multi-tenancy and audit trail extra columns.
 
 ## Data Model
 
@@ -181,10 +377,10 @@ struct reconstructs the chronological sequence of related responses.
 ## Database Schema
 
 All database backends auto-create their schemas on first connection. The
-following tables are used:
+following default table names are used (configurable via `SchemaConfig`):
 
-| Table | Purpose |
-|-------|---------|
+| Default Table | Purpose |
+|---------------|---------|
 | `conversations` | Conversation records with metadata |
 | `conversation_items` | Individual items (messages, tool calls, etc.) |
 | `conversation_item_links` | Join table linking items to conversations with ordering (`added_at`) |
@@ -193,6 +389,11 @@ following tables are used:
 PostgreSQL additionally creates an index on
 `conversation_item_links(conversation_id, added_at)` for efficient
 cursor-based listing.
+
+Column names within each table can also be overridden via `SchemaConfig`. The
+config describes the existing database schema — it does not perform migrations.
+If you rename a column in config, the corresponding database column must
+already exist with that name.
 
 ## Testing
 

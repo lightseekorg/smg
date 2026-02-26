@@ -123,6 +123,11 @@ class SglangWorkerLauncher(WorkerLauncher):
         if getattr(args, "connection_mode", "grpc") == "grpc":
             cmd.append("--grpc-mode")
 
+        if getattr(args, "connection_mode", "grpc") == "http" and getattr(
+            args, "enable_token_usage_details", False
+        ):
+            cmd.append("--enable-cache-report")
+
         cmd.extend(self._filter_backend_args(backend_args, ["--model-path", "--host", "--port"]))
         return cmd
 
@@ -138,7 +143,7 @@ class VllmWorkerLauncher(WorkerLauncher):
     ) -> list[str]:
         vllm_entry_points = (
             "vllm.entrypoints.grpc_server"
-            if getattr(args, "connection_mode", "grpc") == "grpc"
+            if args.connection_mode == "grpc"
             else "vllm.entrypoints.openai.api_server"
         )
 
@@ -153,6 +158,11 @@ class VllmWorkerLauncher(WorkerLauncher):
             "--port",
             str(port),
         ]
+        if getattr(args, "connection_mode", "grpc") == "http" and getattr(
+            args, "enable_token_usage_details", False
+        ):
+            cmd.append("--enable-prompt-tokens-details")
+
         cmd.extend(self._filter_backend_args(backend_args, ["--model", "--host", "--port"]))
 
         return cmd
@@ -433,6 +443,11 @@ def add_serve_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=300,
         help="Seconds to wait for workers to become healthy (default: 300)",
+    )
+    group.add_argument(
+        "--enable-token-usage-details",
+        action="store_true",
+        help="Enable detailed token usage reporting (if supported by backend and router)",
     )
 
 

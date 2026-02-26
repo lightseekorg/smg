@@ -27,6 +27,7 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 serde_with.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+schemars.workspace = true
 # Only used by protocols
 validator = { version = "0.20.0", features = ["derive"] }
 

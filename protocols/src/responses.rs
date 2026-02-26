@@ -20,58 +20,72 @@ use crate::{builders::ResponsesResponseBuilder, validated::Normalizable};
 // Response Tools (MCP and others)
 // ============================================================================
 
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseTool {
+    /// Function tool.
+    #[serde(rename = "function")]
+    Function(FunctionTool),
+
+    /// Built-in tool.
+    #[serde(rename = "web_search_preview")]
+    WebSearchPreview(WebSearchPreviewTool),
+
+    /// Built-in tool.
+    #[serde(rename = "code_interpreter")]
+    CodeInterpreter(CodeInterpreterTool),
+
+    /// MCP server tool.
+    #[serde(rename = "mcp")]
+    Mcp(McpTool),
+}
+
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ResponseTool {
-    #[serde(rename = "type")]
-    pub r#type: ResponseToolType,
-    // Function tool fields (used when type == "function")
-    // In Responses API, function fields are flattened at the top level
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FunctionTool {
+    /// Flatten to match Responses API tool JSON shape.
     #[serde(flatten)]
-    pub function: Option<Function>,
-    // MCP-specific fields (used when type == "mcp")
+    pub function: Function,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct McpTool {
     pub server_url: Option<String>,
     pub authorization: Option<String>,
     /// Custom headers to send to MCP server (from request payload, not HTTP headers)
     pub headers: Option<HashMap<String, String>>,
-    pub server_label: Option<String>,
+    pub server_label: String,
     pub server_description: Option<String>,
     /// Approval requirement configuration for MCP tools.
     pub require_approval: Option<RequireApproval>,
     pub allowed_tools: Option<Vec<String>>,
 }
 
-impl Default for ResponseTool {
-    fn default() -> Self {
-        Self {
-            r#type: ResponseToolType::WebSearchPreview,
-            function: None,
-            server_url: None,
-            authorization: None,
-            headers: None,
-            server_label: None,
-            server_description: None,
-            require_approval: None,
-            allowed_tools: None,
-        }
-    }
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchPreviewTool {
+    pub search_context_size: Option<String>,
+    pub user_location: Option<Value>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CodeInterpreterTool {
+    pub container: Option<Value>,
 }
 
 /// `require_approval` values.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RequireApproval {
     Always,
     Never,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum ResponseToolType {
-    Function,
-    WebSearchPreview,
-    CodeInterpreter,
-    Mcp,
 }
 
 // ============================================================================
@@ -79,7 +93,7 @@ pub enum ResponseToolType {
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ResponseReasoningParam {
     #[serde(default = "default_reasoning_effort")]
     pub effort: Option<ReasoningEffort>,
@@ -94,7 +108,7 @@ fn default_reasoning_effort() -> Option<ReasoningEffort> {
     Some(ReasoningEffort::Medium)
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
     Minimal,
@@ -103,7 +117,7 @@ pub enum ReasoningEffort {
     High,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningSummary {
     Auto,
@@ -116,14 +130,14 @@ pub enum ReasoningSummary {
 // ============================================================================
 
 /// Content can be either a simple string or array of content parts (for SimpleInputMessage)
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum StringOrContentParts {
     String(String),
     Array(Vec<ResponseContentPart>),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseInputOutputItem {
@@ -190,7 +204,7 @@ pub enum ResponseInputOutputItem {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseContentPart {
@@ -209,7 +223,7 @@ pub enum ResponseContentPart {
     Unknown,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseReasoningContent {
@@ -219,7 +233,7 @@ pub enum ResponseReasoningContent {
 
 /// MCP Tool information for the mcp_list_tools output item
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct McpToolInfo {
     pub name: String,
     pub description: Option<String>,
@@ -228,7 +242,7 @@ pub struct McpToolInfo {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseOutputItem {
@@ -307,7 +321,7 @@ pub enum ResponseOutputItem {
 // ============================================================================
 
 /// Status for web search tool calls.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSearchCallStatus {
     InProgress,
@@ -317,7 +331,7 @@ pub enum WebSearchCallStatus {
 }
 
 /// Action performed during a web search.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WebSearchAction {
     Search {
@@ -338,7 +352,7 @@ pub enum WebSearchAction {
 }
 
 /// A source returned from web search.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct WebSearchSource {
     #[serde(rename = "type")]
     pub source_type: String,
@@ -346,7 +360,7 @@ pub struct WebSearchSource {
 }
 
 /// Status for code interpreter tool calls.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeInterpreterCallStatus {
     InProgress,
@@ -357,7 +371,7 @@ pub enum CodeInterpreterCallStatus {
 }
 
 /// Output from code interpreter execution.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CodeInterpreterOutput {
     Logs { logs: String },
@@ -365,7 +379,7 @@ pub enum CodeInterpreterOutput {
 }
 
 /// Status for file search tool calls.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FileSearchCallStatus {
     InProgress,
@@ -377,7 +391,7 @@ pub enum FileSearchCallStatus {
 
 /// A result from file search.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FileSearchResult {
     pub file_id: String,
     pub filename: String,
@@ -390,8 +404,9 @@ pub struct FileSearchResult {
 // Configuration Enums
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(rename = "ResponsesServiceTier")]
 pub enum ServiceTier {
     #[default]
     Auto,
@@ -401,7 +416,7 @@ pub enum ServiceTier {
     Priority,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Truncation {
     Auto,
@@ -409,7 +424,7 @@ pub enum Truncation {
     Disabled,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseStatus {
     Queued,
@@ -420,7 +435,7 @@ pub enum ResponseStatus {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ReasoningInfo {
     pub effort: Option<String>,
     pub summary: Option<String>,
@@ -431,7 +446,7 @@ pub struct ReasoningInfo {
 // ============================================================================
 
 /// Text configuration for structured output requests
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct TextConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<TextFormat>,
@@ -439,7 +454,7 @@ pub struct TextConfig {
 
 /// Text format: text (default), json_object (legacy), or json_schema (recommended)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum TextFormat {
     #[serde(rename = "text")]
@@ -457,7 +472,7 @@ pub enum TextFormat {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IncludeField {
     #[serde(rename = "code_interpreter_call.outputs")]
@@ -480,7 +495,7 @@ pub enum IncludeField {
 
 /// OpenAI Responses API usage format (different from standard UsageInfo)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ResponseUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -489,19 +504,19 @@ pub struct ResponseUsage {
     pub output_tokens_details: Option<OutputTokensDetails>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ResponsesUsage {
     Classic(UsageInfo),
     Modern(ResponseUsage),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct InputTokensDetails {
     pub cached_tokens: u32,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct OutputTokensDetails {
     pub reasoning_tokens: u32,
 }
@@ -551,7 +566,7 @@ impl ResponseUsage {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ResponsesGetParams {
     #[serde(default)]
     pub include: Vec<String>,
@@ -611,7 +626,7 @@ fn default_top_p() -> Option<f32> {
 // Request/Response Types
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Validate, schemars::JsonSchema)]
 #[validate(schema(function = "validate_responses_cross_parameters"))]
 pub struct ResponsesRequest {
     /// Run the request in the background
@@ -756,7 +771,7 @@ pub struct ResponsesRequest {
     pub repetition_penalty: f32,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ResponseInput {
     Items(Vec<ResponseInputOutputItem>),
@@ -965,8 +980,8 @@ fn validate_tool_choice_with_tools(request: &ResponsesRequest) -> Result<(), Val
     };
     let function_tool_names: Vec<&str> = tools
         .iter()
-        .filter_map(|t| match t.r#type {
-            ResponseToolType::Function => t.function.as_ref().map(|f| f.name.as_str()),
+        .filter_map(|t| match t {
+            ResponseTool::Function(ft) => Some(ft.function.name.as_str()),
             _ => None,
         })
         .collect();
@@ -1162,53 +1177,42 @@ fn validate_response_tools(tools: &[ResponseTool]) -> Result<(), ValidationError
     let mut seen_mcp_labels: HashSet<String> = HashSet::new();
 
     for (idx, tool) in tools.iter().enumerate() {
-        match tool.r#type {
-            ResponseToolType::Function => {
-                if tool.function.is_none() {
-                    let mut e = ValidationError::new("function_tool_missing_function");
-                    e.message = Some("Function tool must have a function definition".into());
-                    return Err(e);
-                }
+        if let ResponseTool::Mcp(mcp) = tool {
+            let raw_label = mcp.server_label.as_str();
+            if raw_label.is_empty() {
+                let mut e = ValidationError::new("missing_required_parameter");
+                e.message = Some(
+                    format!("Missing required parameter: 'tools[{idx}].server_label'.").into(),
+                );
+                return Err(e);
             }
-            ResponseToolType::Mcp => {
-                let Some(raw_label) = tool.server_label.as_deref().filter(|s| !s.is_empty()) else {
-                    let mut e = ValidationError::new("missing_required_parameter");
-                    e.message = Some(
-                        format!("Missing required parameter: 'tools[{idx}].server_label'.").into(),
-                    );
-                    return Err(e);
-                };
 
-                // OpenAI spec-compatible validation: require a non-empty label that starts with a
-                // letter and contains only letters, digits, '-' and '_'.
-                let valid = raw_label.starts_with(|c: char| c.is_ascii_alphabetic())
-                    && raw_label
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-                if !valid {
-                    let mut e = ValidationError::new("invalid_server_label");
-                    e.message = Some(
-                        format!(
-                            "Invalid input {raw_label}: 'server_label' must start with a letter and consist of only letters, digits, '-' and '_'"
-                        )
-                        .into(),
-                    );
-                    return Err(e);
-                }
-
-                let normalized = raw_label.to_lowercase();
-                if !seen_mcp_labels.insert(normalized) {
-                    let mut e = ValidationError::new("mcp_tool_duplicate_server_label");
-                    e.message = Some(
-                        format!(
-                            "Duplicate MCP server_label '{raw_label}' found in 'tools' parameter."
-                        )
-                        .into(),
-                    );
-                    return Err(e);
-                }
+            // OpenAI spec-compatible validation: require a non-empty label that starts with a
+            // letter and contains only letters, digits, '-' and '_'.
+            let valid = raw_label.starts_with(|c: char| c.is_ascii_alphabetic())
+                && raw_label
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            if !valid {
+                let mut e = ValidationError::new("invalid_server_label");
+                e.message = Some(
+                    format!(
+                        "Invalid input {raw_label}: 'server_label' must start with a letter and consist of only letters, digits, '-' and '_'"
+                    )
+                    .into(),
+                );
+                return Err(e);
             }
-            _ => {}
+
+            let normalized = raw_label.to_lowercase();
+            if !seen_mcp_labels.insert(normalized) {
+                let mut e = ValidationError::new("mcp_tool_duplicate_server_label");
+                e.message = Some(
+                    format!("Duplicate MCP server_label '{raw_label}' found in 'tools' parameter.")
+                        .into(),
+                );
+                return Err(e);
+            }
         }
     }
     Ok(())
@@ -1271,7 +1275,7 @@ pub fn generate_id(prefix: &str) -> String {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ResponsesResponse {
     /// Response ID
     pub id: String,

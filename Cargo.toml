@@ -1,5 +1,5 @@
 [workspace]
-members = ["model_gateway", "protocols", "reasoning_parser", "tool_parser", "workflow", "tokenizer", "auth", "mcp", "kv_index", "data_connector", "multimodal", "wasm", "mesh", "grpc_client", "bindings/python", "bindings/golang"]
+members = ["model_gateway", "protocols", "reasoning_parser", "tool_parser", "workflow", "tokenizer", "auth", "mcp", "kv_index", "data_connector", "multimodal", "wasm", "mesh", "grpc_client", "bindings/python", "bindings/golang", "clients/rust", "clients/openapi-gen"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -51,6 +51,7 @@ wasmtime-wasi = "41.0"
 tokio-util = { version = "0.7", features = ["rt"] }
 scopeguard = "1.2"
 bitflags = "2.10.0"
+schemars = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

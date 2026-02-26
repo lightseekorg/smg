@@ -5,7 +5,7 @@ use super::common::StringOrArray;
 
 /// Sampling parameters for text generation
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize, Default, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, Validate, schemars::JsonSchema)]
 #[validate(schema(function = "validate_sampling_params"))]
 pub struct SamplingParams {
     /// Temperature for sampling (must be >= 0.0, no upper limit)

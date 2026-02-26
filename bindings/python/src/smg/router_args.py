@@ -97,6 +97,8 @@ class RouterArgs:
     model_path: str | None = None
     tokenizer_path: str | None = None
     chat_template: str | None = None
+    # Override/alias the model name exposed to clients (while backend loads from model_path)
+    served_model_name: str | None = None
     # Tokenizer cache configuration
     tokenizer_cache_enable_l0: bool = False
     tokenizer_cache_l0_max_entries: int = 10000
@@ -108,6 +110,8 @@ class RouterArgs:
     mcp_config_path: str | None = None
     # Backend selection
     backend: str = "sglang"
+    # Storage hooks (WASM)
+    storage_hook_wasm_path: str | None = None
     # History backend configuration
     history_backend: str = "memory"
     oracle_wallet_path: str | None = None
@@ -683,6 +687,17 @@ class RouterArgs:
             help="Chat template path (optional)",
         )
         tokenizer_group.add_argument(
+            f"--{prefix}served-model-name",
+            type=str,
+            default=None,
+            help=(
+                "Override the model name exposed to clients. When set, requests using this "
+                "name are routed to the worker even though the backend was loaded from "
+                "model_path. Both the original name (from backend discovery) and this alias "
+                "will be accepted."
+            ),
+        )
+        tokenizer_group.add_argument(
             f"--{prefix}tokenizer-cache-enable-l0",
             action="store_true",
             default=RouterArgs.tokenizer_cache_enable_l0,
@@ -736,6 +751,12 @@ class RouterArgs:
             default=RouterArgs.backend,
             choices=["sglang", "openai", "anthropic"],
             help="Backend runtime to use (default: sglang)",
+        )
+        backend_group.add_argument(
+            f"--{prefix}storage-hook-wasm-path",
+            type=str,
+            default=None,
+            help="Path to a WASM component implementing storage hooks",
         )
         backend_group.add_argument(
             f"--{prefix}history-backend",

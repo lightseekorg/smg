@@ -151,6 +151,18 @@ class TestAddServeArgs:
         args = parser.parse_args([])
         assert args.host == "127.0.0.1"
 
+    def test_enable_token_usage_details_default_false(self):
+        parser = argparse.ArgumentParser()
+        add_serve_args(parser)
+        args = parser.parse_args([])
+        assert args.enable_token_usage_details is False
+
+    def test_enable_token_usage_details_enabled(self):
+        parser = argparse.ArgumentParser()
+        add_serve_args(parser)
+        args = parser.parse_args(["--enable-token-usage-details"])
+        assert args.enable_token_usage_details is True
+
 
 class TestImportBackendArgs:
     """Test _import_backend_args for each backend."""
@@ -444,6 +456,21 @@ class TestSglangWorkerLauncher:
         assert "--grpc-mode" not in cmd
         for arg in backend_args:
             assert arg in cmd
+        assert "--enable-cache-report" not in cmd
+
+    def test_build_command_http_mode_with_token_usage_details(self):
+        """When connection_mode is http and enable_token_usage_details is True,
+        --enable-cache-report should be present."""
+        launcher = SglangWorkerLauncher()
+        args = argparse.Namespace(
+            model_path="/tmp/model", connection_mode="http", enable_token_usage_details=True
+        )
+        backend_args = ["--trust-remote-code"]
+        cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
+        assert "--grpc-mode" not in cmd
+        for arg in backend_args:
+            assert arg in cmd
+        assert "--enable-cache-report" in cmd
 
     def test_worker_url_grpc_mode(self):
         launcher = SglangWorkerLauncher()
@@ -502,6 +529,33 @@ class TestVllmWorkerLauncher:
             result = launcher.health_check(args, "127.0.0.1", 32000, 5.0)
         assert result is True
         mock.assert_called_once_with("127.0.0.1", 32000, 5.0)
+
+    def test_build_command_http_mode(self):
+        """When connection_mode is http, --grpc-mode should not be present."""
+        launcher = VllmWorkerLauncher()
+        args = argparse.Namespace(model="/tmp/model", connection_mode="http")
+        backend_args = ["--trust-remote-code"]
+        cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
+        assert "vllm.entrypoints.openai.api_server" in cmd
+        assert "vllm.entrypoints.grpc_server" not in cmd
+        for arg in backend_args:
+            assert arg in cmd
+        assert "--enable-prompt-tokens-details" not in cmd
+
+    def test_build_command_http_mode_with_token_usage_details(self):
+        """When connection_mode is http and enable_token_usage_details is True,
+        --enable-prompt-tokens-details should be present."""
+        launcher = VllmWorkerLauncher()
+        args = argparse.Namespace(
+            model="/tmp/model", connection_mode="http", enable_token_usage_details=True
+        )
+        backend_args = ["--trust-remote-code"]
+        cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
+        assert "vllm.entrypoints.openai.api_server" in cmd
+        assert "vllm.entrypoints.grpc_server" not in cmd
+        for arg in backend_args:
+            assert arg in cmd
+        assert "--enable-prompt-tokens-details" in cmd
 
 
 class TestTrtllmWorkerLauncher:

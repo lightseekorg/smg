@@ -1,7 +1,7 @@
 //! Harmony streaming response processor
 
 use std::{
-    collections::{hash_map::Entry::Vacant, HashMap, HashSet},
+    collections::{hash_map::Entry::Vacant, HashMap},
     io,
     sync::Arc,
     time::Instant,
@@ -552,10 +552,10 @@ impl HarmonyStreamingProcessor {
 
     /// Process streaming chunks for Responses API iteration.
     ///
-    /// When MCP context is provided (session, mcp_tool_names):
+    /// When MCP context is provided (session):
     /// - MCP tools with `ResponseFormat::WebSearchCall` → `web_search_call.*` events
     /// - Other MCP tools → `mcp_call.*` events
-    /// - Function tools (not in mcp_tool_names) → `function_call.*` events
+    /// - Other tools → `function_call.*` events
     ///
     /// When no MCP context is provided, all tool calls are treated as function calls.
     pub async fn process_responses_iteration_stream(
@@ -563,24 +563,15 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
-        mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         match execution_result {
             context::ExecutionResult::Single { stream } => {
                 debug!("Processing Responses API single stream mode");
-                Self::process_decode_stream(stream, emitter, tx, session, mcp_tool_names).await
+                Self::process_decode_stream(stream, emitter, tx, session).await
             }
             context::ExecutionResult::Dual { prefill, decode } => {
                 debug!("Processing Responses API dual stream mode");
-                Self::process_responses_dual_stream(
-                    prefill,
-                    *decode,
-                    emitter,
-                    tx,
-                    session,
-                    mcp_tool_names,
-                )
-                .await
+                Self::process_responses_dual_stream(prefill, *decode, emitter, tx, session).await
             }
             context::ExecutionResult::Embedding { .. } => {
                 Err("Embeddings not supported in Responses API streaming".to_string())
@@ -594,7 +585,6 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
-        mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         // Phase 1: Drain prefill stream
         while let Some(result) = prefill_stream.next().await {
@@ -602,8 +592,7 @@ impl HarmonyStreamingProcessor {
         }
 
         // Phase 2: Process decode stream
-        let result =
-            Self::process_decode_stream(decode_stream, emitter, tx, session, mcp_tool_names).await;
+        let result = Self::process_decode_stream(decode_stream, emitter, tx, session).await;
 
         prefill_stream.mark_completed();
         result
@@ -615,7 +604,6 @@ impl HarmonyStreamingProcessor {
         emitter: &mut ResponseStreamEventEmitter,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
         session: Option<&McpToolSession<'_>>,
-        mcp_tool_names: Option<&HashSet<String>>,
     ) -> Result<ResponsesIterationResult, String> {
         let mut parser =
             HarmonyParserAdapter::new().map_err(|e| format!("Failed to create parser: {e}"))?;
@@ -743,20 +731,14 @@ impl HarmonyStreamingProcessor {
                                     .map(|n| n.as_str())
                                     .unwrap_or("");
 
-                                // Determine response_format based on MCP context
-                                let response_format = if let Some(names) = mcp_tool_names {
-                                    if names.contains(tool_name) {
-                                        Some(
-                                            session
-                                                .map(|s| s.tool_response_format(tool_name))
-                                                .unwrap_or(ResponseFormat::Passthrough),
-                                        )
+                                // Determine response_format based on MCP context.
+                                let response_format = session.and_then(|s| {
+                                    if s.has_exposed_tool(tool_name) {
+                                        Some(s.tool_response_format(tool_name))
                                     } else {
-                                        None // Function tool
+                                        None
                                     }
-                                } else {
-                                    None // No MCP context, treat as function tool
-                                };
+                                });
 
                                 // Determine output item type and JSON type string
                                 let output_item_type =

@@ -21,7 +21,7 @@ use openai_protocol::{
         is_function_call_type, is_response_event, CodeInterpreterCallEvent, FileSearchCallEvent,
         FunctionCallEvent, ItemType, McpEvent, OutputItemEvent, ResponseEvent, WebSearchCallEvent,
     },
-    responses::{ResponseToolType, ResponsesRequest},
+    responses::{ResponseTool, ResponsesRequest},
 };
 use serde_json::{json, Value};
 use smg_mcp::{McpOrchestrator, McpServerBinding, McpToolSession, ResponseFormat};
@@ -103,11 +103,7 @@ pub(super) fn apply_event_transformations_inplace(
                     .original_request
                     .tools
                     .as_ref()
-                    .map(|tools| {
-                        tools
-                            .iter()
-                            .any(|t| matches!(t.r#type, ResponseToolType::Mcp))
-                    })
+                    .map(|tools| tools.iter().any(|t| matches!(t, ResponseTool::Mcp(_))))
                     .unwrap_or(false);
 
                 if requested_mcp {
@@ -192,7 +188,7 @@ fn build_mcp_tools_value(original_body: &ResponsesRequest) -> Option<Value> {
     let tools = original_body.tools.as_ref()?;
     let mcp_tools: Vec<Value> = tools
         .iter()
-        .filter(|t| matches!(t.r#type, ResponseToolType::Mcp))
+        .filter(|t| matches!(t, ResponseTool::Mcp(_)))
         .filter_map(response_tool_to_value)
         .collect();
 

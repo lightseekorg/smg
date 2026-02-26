@@ -23,7 +23,7 @@ use crate::{
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "role")]
 pub enum ChatMessage {
     #[serde(rename = "system")]
@@ -59,7 +59,7 @@ pub enum ChatMessage {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum MessageContent {
     Text(String),
@@ -140,7 +140,7 @@ impl MessageContent {
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize, Default, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, Validate, schemars::JsonSchema)]
 #[validate(schema(function = "validate_chat_cross_parameters"))]
 pub struct ChatCompletionRequest {
     /// A list of messages comprising the conversation so far
@@ -657,7 +657,7 @@ impl GenerationRequest for ChatCompletionRequest {
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatCompletionResponse {
     pub id: String,
     pub object: String, // "chat.completion"
@@ -679,7 +679,7 @@ impl ChatCompletionResponse {
 }
 
 /// Response message structure for ChatCompletionResponse (different from request ChatMessage)
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatCompletionMessage {
     pub role: String, // Always "assistant" for responses
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -691,7 +691,7 @@ pub struct ChatCompletionMessage {
     // Note: refusal, annotations, audio are not added yet
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatChoice {
     pub index: u32,
     pub message: ChatCompletionMessage,
@@ -707,7 +707,7 @@ pub struct ChatChoice {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatCompletionStreamResponse {
     pub id: String,
     pub object: String, // "chat.completion.chunk"
@@ -729,7 +729,7 @@ impl ChatCompletionStreamResponse {
 }
 
 /// Delta structure for streaming chat completion responses
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatMessageDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
@@ -740,7 +740,7 @@ pub struct ChatMessageDelta {
     pub reasoning_content: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatStreamChoice {
     pub index: u32,
     pub delta: ChatMessageDelta,

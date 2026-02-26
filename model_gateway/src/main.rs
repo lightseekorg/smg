@@ -399,6 +399,10 @@ struct CliArgs {
     #[arg(long, help_heading = "Tokenizer")]
     chat_template: Option<String>,
 
+    /// Client-facing model name override; both this and the backend-reported name are accepted.
+    #[arg(long, help_heading = "Tokenizer")]
+    served_model_name: Option<String>,
+
     /// Enable L0 (exact match) tokenizer cache
     #[arg(long, default_value_t = false, help_heading = "Tokenizer")]
     tokenizer_cache_enable_l0: bool,
@@ -440,6 +444,10 @@ struct CliArgs {
     /// Enable WebAssembly support
     #[arg(long, default_value_t = false, help_heading = "Backend")]
     enable_wasm: bool,
+
+    /// Path to a WASM component implementing storage hooks
+    #[arg(long, help_heading = "Backend")]
+    storage_hook_wasm_path: Option<String>,
 
     // ==================== Oracle Database ====================
     /// Path to Oracle ATP wallet directory
@@ -854,6 +862,7 @@ impl CliArgs {
             pool_min,
             pool_max,
             pool_timeout_secs,
+            schema: None,
         })
     }
 
@@ -862,7 +871,11 @@ impl CliArgs {
         let pool_max = self
             .postgres_pool_max_size
             .unwrap_or_else(PostgresConfig::default_pool_max);
-        let pcf = PostgresConfig { db_url, pool_max };
+        let pcf = PostgresConfig {
+            db_url,
+            pool_max,
+            schema: None,
+        };
         pcf.validate().map_err(|e| ConfigError::ValidationFailed {
             reason: e.to_string(),
         })?;
@@ -883,6 +896,7 @@ impl CliArgs {
             url,
             pool_max,
             retention_days,
+            schema: None,
         };
         rcf.validate().map_err(|e| ConfigError::ValidationFailed {
             reason: e.to_string(),
@@ -1052,6 +1066,7 @@ impl CliArgs {
             .maybe_model_path(self.model_path.as_ref())
             .maybe_tokenizer_path(self.tokenizer_path.as_ref())
             .maybe_chat_template(self.chat_template.as_ref())
+            .maybe_served_model_name(self.served_model_name.as_ref())
             .maybe_oracle(oracle)
             .maybe_postgres(postgres)
             .maybe_redis(redis)
@@ -1062,6 +1077,7 @@ impl CliArgs {
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
             .enable_wasm(self.enable_wasm)
+            .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
             .igw(self.enable_igw)
             .maybe_server_cert_and_key(self.tls_cert_path.as_ref(), self.tls_key_path.as_ref());
 

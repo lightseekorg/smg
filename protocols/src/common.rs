@@ -43,7 +43,7 @@ pub trait GenerationRequest: Send + Sync {
 // ============================================================================
 
 /// A type that can be either a single string or an array of strings
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum StringOrArray {
     String(String),
@@ -174,7 +174,7 @@ pub fn validate_stop(stop: &StringOrArray) -> Result<(), validator::ValidationEr
 // Content Parts (for multimodal messages)
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum ContentPart {
     #[serde(rename = "text")]
@@ -185,14 +185,14 @@ pub enum ContentPart {
     VideoUrl { video_url: VideoUrl },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct ImageUrl {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>, // "auto", "low", or "high"
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 pub struct VideoUrl {
     pub url: String,
 }
@@ -201,7 +201,7 @@ pub struct VideoUrl {
 // Response Format (for structured outputs)
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum ResponseFormat {
     #[serde(rename = "text")]
@@ -212,7 +212,7 @@ pub enum ResponseFormat {
     JsonSchema { json_schema: JsonSchemaFormat },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct JsonSchemaFormat {
     pub name: String,
     pub schema: Value,
@@ -224,14 +224,14 @@ pub struct JsonSchemaFormat {
 // Streaming
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct StreamOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include_usage: Option<bool>,
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ToolCallDelta {
     pub index: u32,
     pub id: Option<String>,
@@ -241,7 +241,7 @@ pub struct ToolCallDelta {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FunctionCallDelta {
     pub name: Option<String>,
     pub arguments: Option<String>,
@@ -252,7 +252,7 @@ pub struct FunctionCallDelta {
 // ============================================================================
 
 /// Tool choice value for simple string options
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolChoiceValue {
     Auto,
@@ -261,7 +261,7 @@ pub enum ToolChoiceValue {
 }
 
 /// Tool choice for both Chat Completion and Responses APIs
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ToolChoice {
     Value(ToolChoiceValue),
@@ -296,7 +296,7 @@ impl ToolChoice {
 }
 
 /// Function choice specification for ToolChoice::Function
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FunctionChoice {
     pub name: String,
 }
@@ -305,7 +305,7 @@ pub struct FunctionChoice {
 ///
 /// Represents a reference to a specific tool in the allowed_tools array.
 /// Different tool types have different required fields.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ToolReference {
@@ -371,7 +371,7 @@ impl ToolReference {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct Tool {
     #[serde(rename = "type")]
     pub tool_type: String, // "function"
@@ -379,7 +379,7 @@ pub struct Tool {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct Function {
     pub name: String,
     pub description: Option<String>,
@@ -388,7 +388,7 @@ pub struct Function {
     pub strict: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ToolCall {
     pub id: String,
     #[serde(rename = "type")]
@@ -447,7 +447,47 @@ impl<'de> Deserialize<'de> for FunctionCall {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+impl schemars::JsonSchema for FunctionCall {
+    fn schema_name() -> String {
+        "FunctionCall".to_string()
+    }
+    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        use schemars::schema::*;
+        // FunctionCall is either "none", "auto", or {"name": "..."}
+        let string_schema = SchemaObject {
+            instance_type: Some(InstanceType::String.into()),
+            enum_values: Some(vec!["none".into(), "auto".into()]),
+            ..Default::default()
+        };
+        let object_schema = SchemaObject {
+            instance_type: Some(InstanceType::Object.into()),
+            object: Some(Box::new(ObjectValidation {
+                properties: {
+                    let mut map = schemars::Map::new();
+                    map.insert("name".to_string(), gen.subschema_for::<String>());
+                    map
+                },
+                required: {
+                    let mut set = std::collections::BTreeSet::new();
+                    set.insert("name".to_string());
+                    set
+                },
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        SchemaObject {
+            subschemas: Some(Box::new(SubschemaValidation {
+                any_of: Some(vec![string_schema.into(), object_schema.into()]),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .into()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FunctionCallResponse {
     pub name: String,
     #[serde(default)]
@@ -458,7 +498,7 @@ pub struct FunctionCallResponse {
 // Usage and Logging
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct Usage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -489,14 +529,14 @@ impl Usage {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct CompletionTokensDetails {
     pub reasoning_tokens: Option<u32>,
 }
 
 /// Usage information (used by rerank and other endpoints)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct UsageInfo {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -505,12 +545,12 @@ pub struct UsageInfo {
     pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct PromptTokenUsageInfo {
     pub cached_tokens: u32,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct LogProbs {
     pub tokens: Vec<String>,
     pub token_logprobs: Vec<Option<f32>>,
@@ -518,7 +558,7 @@ pub struct LogProbs {
     pub text_offset: Vec<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ChatLogProbs {
     Detailed {
@@ -528,7 +568,7 @@ pub enum ChatLogProbs {
     Raw(Value),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatLogProbsContent {
     pub token: String,
     pub logprob: f32,
@@ -536,7 +576,7 @@ pub struct ChatLogProbsContent {
     pub top_logprobs: Vec<TopLogProb>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct TopLogProb {
     pub token: String,
     pub logprob: f32,
@@ -547,13 +587,13 @@ pub struct TopLogProb {
 // Error Types
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ErrorResponse {
     pub error: ErrorDetail,
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ErrorDetail {
     pub message: String,
     #[serde(rename = "type")]
@@ -566,7 +606,7 @@ pub struct ErrorDetail {
 // Input Types
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum InputIds {
     Single(Vec<i32>),
@@ -574,7 +614,7 @@ pub enum InputIds {
 }
 
 /// LoRA adapter path - can be single path or batch of paths (SGLang extension)
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum LoRAPath {
     Single(Option<String>),
@@ -584,7 +624,7 @@ pub enum LoRAPath {
 // ============================================================================
 // Redacted Types
 // ============================================================================
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Redacted(pub String);
 
 impl std::fmt::Debug for Redacted {
@@ -599,7 +639,7 @@ impl std::fmt::Debug for Redacted {
 
 /// Reference to a prompt template and its variables.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ResponsePrompt {
     pub id: String,
     pub variables: Option<HashMap<String, PromptVariable>>,
@@ -610,7 +650,7 @@ pub struct ResponsePrompt {
 ///
 /// Variant order matters for `#[serde(untagged)]`: a bare JSON string succeeds
 /// as `String`; a JSON object falls through to `Typed`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum PromptVariable {
     String(String),
@@ -619,7 +659,7 @@ pub enum PromptVariable {
 
 /// Typed prompt variable input.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[expect(
     clippy::enum_variant_names,
@@ -644,7 +684,7 @@ pub enum PromptVariableTyped {
 }
 
 /// Image detail level for [`PromptVariableTyped::InputImage`].
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Detail {
     Low,

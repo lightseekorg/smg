@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::schema::SchemaConfig;
+
 /// History backend configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -33,6 +35,9 @@ pub struct OracleConfig {
     pub pool_max: usize,
     #[serde(default = "default_pool_timeout_secs")]
     pub pool_timeout_secs: u64,
+    /// Optional schema customization (table names, column names, extra columns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<SchemaConfig>,
 }
 
 impl OracleConfig {
@@ -71,6 +76,7 @@ impl std::fmt::Debug for OracleConfig {
             .field("pool_min", &self.pool_min)
             .field("pool_max", &self.pool_max)
             .field("pool_timeout_secs", &self.pool_timeout_secs)
+            .field("schema", &self.schema)
             .finish()
     }
 }
@@ -82,6 +88,9 @@ pub struct PostgresConfig {
     pub db_url: String,
     // Database pool max size
     pub pool_max: usize,
+    /// Optional schema customization (table names, column names, extra columns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<SchemaConfig>,
 }
 
 impl PostgresConfig {
@@ -131,6 +140,9 @@ pub struct RedisConfig {
     // Connection pool max size
     #[serde(default = "default_redis_pool_max")]
     pub pool_max: usize,
+    /// Optional schema customization (key prefix, field names, extra fields).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<SchemaConfig>,
     // Data retention in days. If None, data persists indefinitely.
     #[serde(default = "default_redis_retention_days")]
     pub retention_days: Option<u64>,
@@ -185,6 +197,7 @@ mod tests {
         let cfg = PostgresConfig {
             db_url: "postgres://user:pass@localhost:5432/mydb".to_string(),
             pool_max: 16,
+            schema: None,
         };
         cfg.validate()
             .expect("valid postgres URL should pass validation");
@@ -195,6 +208,7 @@ mod tests {
         let cfg = PostgresConfig {
             db_url: "postgresql://user:pass@localhost/mydb".to_string(),
             pool_max: 8,
+            schema: None,
         };
         cfg.validate()
             .expect("postgresql:// scheme should also be accepted");
@@ -205,6 +219,7 @@ mod tests {
         let cfg = PostgresConfig {
             db_url: "  ".to_string(),
             pool_max: 16,
+            schema: None,
         };
         let err = cfg.validate().expect_err("empty URL should fail");
         assert!(
@@ -218,6 +233,7 @@ mod tests {
         let cfg = PostgresConfig {
             db_url: "mysql://user:pass@localhost/mydb".to_string(),
             pool_max: 16,
+            schema: None,
         };
         let err = cfg.validate().expect_err("mysql scheme should be rejected");
         assert!(
@@ -232,6 +248,7 @@ mod tests {
         let cfg = PostgresConfig {
             db_url: "postgres:///mydb".to_string(),
             pool_max: 16,
+            schema: None,
         };
         let err = cfg.validate().expect_err("missing host should fail");
         assert!(
@@ -245,6 +262,7 @@ mod tests {
         let cfg = PostgresConfig {
             db_url: "postgres://user:pass@localhost".to_string(),
             pool_max: 16,
+            schema: None,
         };
         let err = cfg
             .validate()
@@ -260,6 +278,7 @@ mod tests {
         let cfg = PostgresConfig {
             db_url: "postgres://user:pass@localhost/mydb".to_string(),
             pool_max: 0,
+            schema: None,
         };
         let err = cfg.validate().expect_err("pool_max=0 should fail");
         assert!(
@@ -276,6 +295,7 @@ mod tests {
             url: "redis://:password@localhost:6379/0".to_string(),
             pool_max: 16,
             retention_days: Some(30),
+            schema: None,
         };
         cfg.validate()
             .expect("valid redis URL should pass validation");
@@ -287,6 +307,7 @@ mod tests {
             url: "rediss://:password@redis.example.com:6380".to_string(),
             pool_max: 8,
             retention_days: None,
+            schema: None,
         };
         cfg.validate()
             .expect("rediss:// scheme should also be accepted");
@@ -298,6 +319,7 @@ mod tests {
             url: String::new(),
             pool_max: 16,
             retention_days: Some(30),
+            schema: None,
         };
         let err = cfg.validate().expect_err("empty URL should fail");
         assert!(
@@ -312,6 +334,7 @@ mod tests {
             url: "http://localhost:6379".to_string(),
             pool_max: 16,
             retention_days: Some(30),
+            schema: None,
         };
         let err = cfg.validate().expect_err("http scheme should be rejected");
         assert!(
@@ -326,6 +349,7 @@ mod tests {
             url: "redis:///0".to_string(),
             pool_max: 16,
             retention_days: Some(30),
+            schema: None,
         };
         let err = cfg.validate().expect_err("missing host should fail");
         assert!(
@@ -340,6 +364,7 @@ mod tests {
             url: "redis://localhost:6379".to_string(),
             pool_max: 0,
             retention_days: Some(30),
+            schema: None,
         };
         let err = cfg.validate().expect_err("pool_max=0 should fail");
         assert!(

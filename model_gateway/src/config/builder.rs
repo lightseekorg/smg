@@ -353,6 +353,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn maybe_storage_hook_wasm_path(mut self, path: Option<&str>) -> Self {
+        self.config.storage_hook_wasm_path = path.map(|p| p.to_string());
+        self
+    }
+
     pub fn model_path<S: Into<String>>(mut self, path: S) -> Self {
         self.config.model_path = Some(path.into());
         self
@@ -523,6 +528,17 @@ impl RouterConfigBuilder {
 
     pub fn maybe_chat_template(mut self, template: Option<impl Into<String>>) -> Self {
         self.config.chat_template = template.map(|t| t.into());
+        self
+    }
+
+    pub fn served_model_name<S: Into<String>>(mut self, name: S) -> Self {
+        self.config.served_model_name = Some(name.into());
+        self
+    }
+
+    /// Set served_model_name if Some, clear if None.
+    pub fn maybe_served_model_name(mut self, name: Option<impl Into<String>>) -> Self {
+        self.config.served_model_name = name.map(|n| n.into());
         self
     }
 
