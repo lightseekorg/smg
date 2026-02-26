@@ -60,6 +60,22 @@ impl Transport {
         self.send_with_retry(req, Some(body)).await
     }
 
+    /// Send a PUT request with a JSON body with retry.
+    pub(crate) async fn put<T: Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> Result<Response, SmgError> {
+        let req = self.client.put(self.url(path));
+        self.send_with_retry(req, Some(body)).await
+    }
+
+    /// Send a DELETE request with retry.
+    pub(crate) async fn delete(&self, path: &str) -> Result<Response, SmgError> {
+        let req = self.client.delete(self.url(path));
+        self.send_with_retry(req, None::<()>).await
+    }
+
     /// Send a POST request for streaming (no retry once connected).
     ///
     /// Streaming requests are not retried because once the server starts generating

@@ -1,6 +1,10 @@
 pub mod chat;
+pub mod classify;
 pub mod completions;
 pub mod embeddings;
 pub mod messages;
 pub mod models;
+pub mod parser;
 pub mod rerank;
+pub mod responses;
+pub mod workers;

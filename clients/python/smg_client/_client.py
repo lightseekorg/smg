@@ -5,6 +5,7 @@ from __future__ import annotations
 from smg_client._config import ClientConfig
 from smg_client._transport import AsyncTransport, SyncTransport
 from smg_client.api.chat import AsyncChat, SyncChat
+from smg_client.api.classify import AsyncClassify, SyncClassify
 from smg_client.api.completions import (
     AsyncCompletions as AsyncLegacyCompletions,
 )
@@ -14,7 +15,10 @@ from smg_client.api.completions import (
 from smg_client.api.embeddings import AsyncEmbeddings, SyncEmbeddings
 from smg_client.api.messages import AsyncMessages, SyncMessages
 from smg_client.api.models import AsyncModels, SyncModels
+from smg_client.api.parser import AsyncParser, SyncParser
 from smg_client.api.rerank import AsyncRerank, SyncRerank
+from smg_client.api.responses import AsyncResponses, SyncResponses
+from smg_client.api.workers import AsyncWorkers, SyncWorkers
 
 
 class SmgClient:
@@ -74,11 +78,15 @@ class SmgClient:
         self._transport = SyncTransport(config)
 
         self.chat = SyncChat(self._transport)
+        self.classify = SyncClassify(self._transport)
         self.completions = SyncLegacyCompletions(self._transport)
         self.embeddings = SyncEmbeddings(self._transport)
         self.messages = SyncMessages(self._transport)
         self.models = SyncModels(self._transport)
+        self.parser = SyncParser(self._transport)
         self.rerank = SyncRerank(self._transport)
+        self.responses = SyncResponses(self._transport)
+        self.workers = SyncWorkers(self._transport)
 
     def close(self) -> None:
         """Close the underlying HTTP client."""
@@ -129,11 +137,15 @@ class AsyncSmgClient:
         self._transport = AsyncTransport(config)
 
         self.chat = AsyncChat(self._transport)
+        self.classify = AsyncClassify(self._transport)
         self.completions = AsyncLegacyCompletions(self._transport)
         self.embeddings = AsyncEmbeddings(self._transport)
         self.messages = AsyncMessages(self._transport)
         self.models = AsyncModels(self._transport)
+        self.parser = AsyncParser(self._transport)
         self.rerank = AsyncRerank(self._transport)
+        self.responses = AsyncResponses(self._transport)
+        self.workers = AsyncWorkers(self._transport)
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""

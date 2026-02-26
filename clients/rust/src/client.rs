@@ -1,7 +1,8 @@
 use crate::{
     api::{
-        chat::Chat, completions::Completions, embeddings::Embeddings, messages::Messages,
-        models::Models, rerank::Rerank,
+        chat::Chat, classify::Classify, completions::Completions, embeddings::Embeddings,
+        messages::Messages, models::Models, parser::Parser, rerank::Rerank, responses::Responses,
+        workers::Workers,
     },
     config::ClientConfig,
     transport::Transport,
@@ -70,5 +71,25 @@ impl SmgClient {
     /// Access the rerank API (`/v1/rerank`).
     pub fn rerank(&self) -> Rerank {
         Rerank::new(self.transport.clone())
+    }
+
+    /// Access the classify API (`/v1/classify`).
+    pub fn classify(&self) -> Classify {
+        Classify::new(self.transport.clone())
+    }
+
+    /// Access the responses API (`/v1/responses`).
+    pub fn responses(&self) -> Responses {
+        Responses::new(self.transport.clone())
+    }
+
+    /// Access the parser API (`/parse/*`).
+    pub fn parser(&self) -> Parser {
+        Parser::new(self.transport.clone())
+    }
+
+    /// Access the workers API (`/workers`).
+    pub fn workers(&self) -> Workers {
+        Workers::new(self.transport.clone())
     }
 }
