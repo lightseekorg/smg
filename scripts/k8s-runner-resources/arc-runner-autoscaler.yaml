@@ -8,7 +8,7 @@ spec:
     kind: RunnerDeployment
     name: arc-runner-gpu-h100
 
-  minReplicas: 12
+  minReplicas: 11
   maxReplicas: 20
 
   metrics:

@@ -281,9 +281,8 @@ jobs:
             extra_deps: ""
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
-            setup_oracle: true
-            setup_brave: true
-            parallel_opts: ""  # Cloud backend tests not compatible with parallel execution
+            setup_agentic_deps: true
+            parallel_opts: ""
             ignore_opts: ""
             test_filter: "-m 'not external'"
           - name: e2e
@@ -339,32 +338,13 @@ jobs:
             runner: 4-gpu-h100
     runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
     timeout-minutes: ${{ matrix.timeout }}
-    services:
-      oracle-db:
-        image: ${{ matrix.setup_oracle && 'gvenzl/oracle-free:23-slim-faststart' || '' }}
-        ports:
-          - 1521:1521
-        env:
-          ORACLE_PASSWORD: oracle
-        options: >-
-          --health-cmd "healthcheck.sh"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-      brave-search-server:
-        image: ${{ matrix.setup_brave && 'shoofio/brave-search-mcp-sse:1.0.10' || '' }}
-        ports:
-          - 8001:8080
-        env:
-          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
-        options: >-
-          --health-cmd "nc -z localhost 8080"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 3
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Check shared services
+        if: matrix.setup_agentic_deps
+        run: bash scripts/ci_agentic_svc_deps.sh check --oracle oracle-db --brave brave-search
 
       - name: Setup vLLM backend
         if: matrix.setup_vllm
@@ -401,42 +381,11 @@ jobs:
         if: matrix.upload_benchmarks
         run: docker pull ${{ env.GENAI_BENCH_IMAGE }}
 
-      - name: Setup Oracle Instant Client
-        if: matrix.setup_oracle
+      - name: Setup Oracle
+        if: matrix.setup_agentic_deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip wget
-          sudo apt-get install -y libaio1t64 || sudo apt-get install -y libaio1
-          # Copy libaio into Instant Client dir so it's on LD_LIBRARY_PATH
-          LIBAIO_PATH=$(find /usr/lib -name "libaio.so*" -type f 2>/dev/null | head -1)
-          INSTANT_CLIENT_DIR="$HOME/instant-client"
-          INSTANT_CLIENT_ZIP="instantclient-basic-linux.x64-23.26.1.0.0.zip"
-
-          if [ ! -d "$INSTANT_CLIENT_DIR/instantclient_23_26" ]; then
-            echo "Downloading Oracle Instant Client..."
-            mkdir -p "$INSTANT_CLIENT_DIR"
-            cd "$INSTANT_CLIENT_DIR"
-            wget https://download.oracle.com/otn_software/linux/instantclient/2326100/$INSTANT_CLIENT_ZIP
-            unzip $INSTANT_CLIENT_ZIP
-            rm $INSTANT_CLIENT_ZIP
-          else
-            echo "Oracle Instant Client already exists, skipping download"
-          fi
-
-          # Ensure libaio.so.1 is findable via LD_LIBRARY_PATH
-          if [ -n "$LIBAIO_PATH" ]; then
-            cp "$LIBAIO_PATH" "$INSTANT_CLIENT_DIR/instantclient_23_26/"
-            ln -sf "$INSTANT_CLIENT_DIR/instantclient_23_26/$(basename $LIBAIO_PATH)" "$INSTANT_CLIENT_DIR/instantclient_23_26/libaio.so.1"
-          fi
-
-          echo "LD_LIBRARY_PATH=$HOME/instant-client/instantclient_23_26:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-
-      - name: Set Oracle connection environment
-        if: matrix.setup_oracle
-        run: |
-          echo "ATP_USER=system" >> $GITHUB_ENV
-          echo "ATP_PASSWORD=oracle" >> $GITHUB_ENV
-          echo "ATP_DSN=localhost:1521/FREEPDB1" >> $GITHUB_ENV
+          bash scripts/ci_agentic_svc_deps.sh setup-oracle-client
+          bash scripts/ci_agentic_svc_deps.sh create-oracle-user oracle-db
 
       - name: Run E2E tests
         env:
@@ -444,9 +393,14 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          BRAVE_MCP_HOST: ${{ matrix.setup_agentic_deps && 'brave-search' || '' }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
+
+      - name: Cleanup Oracle test user
+        if: always() && matrix.setup_agentic_deps
+        run: bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-user oracle-db
 
       - name: Upload benchmark results
         if: matrix.upload_benchmarks && success()

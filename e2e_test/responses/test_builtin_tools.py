@@ -4,7 +4,7 @@ Tests for built-in tool routing (web_search_preview, code_interpreter, file_sear
 that are routed through MCP servers with response format transformation.
 
 Prerequisites:
-- Brave MCP Server running on port 8001 (set up in CI via pr-test-rust.yml)
+- Brave MCP Server running on port 8080 (set up in CI via pr-test-rust.yml)
 - OPENAI_API_KEY environment variable set for cloud backend tests
 """
 
@@ -19,11 +19,9 @@ import time
 import openai
 import pytest
 import yaml
+from infra import BRAVE_MCP_HOST, BRAVE_MCP_PORT, BRAVE_MCP_URL
 
 logger = logging.getLogger(__name__)
-
-BRAVE_MCP_PORT = 8001
-BRAVE_MCP_URL = f"http://localhost:{BRAVE_MCP_PORT}/sse"
 
 WEB_SEARCH_PREVIEW_TOOL = {"type": "web_search_preview"}
 
@@ -43,7 +41,7 @@ WEB_SEARCH_PROMPT = (
 def is_brave_server_available() -> bool:
     """Check if Brave MCP server is running on expected port."""
     try:
-        with socket.create_connection(("localhost", BRAVE_MCP_PORT), timeout=1):
+        with socket.create_connection((BRAVE_MCP_HOST, BRAVE_MCP_PORT), timeout=1):
             return True
     except (TimeoutError, OSError):
         return False
@@ -86,12 +84,11 @@ def mcp_config_file():
 
 @pytest.fixture(scope="module")
 def require_brave_server():
-    """Skip tests if Brave MCP server is not available."""
+    """Fail if Brave MCP server is not available."""
     if not is_brave_server_available():
-        pytest.skip(
+        pytest.fail(
             f"Brave MCP server not available on port {BRAVE_MCP_PORT}. "
-            "Run: docker run -d -p 8001:8080 -e BRAVE_API_KEY=<key> "
-            "shoofio/brave-search-mcp-sse:1.0.10"
+            "Ensure the brave-search service is running."
         )
 
 
@@ -306,11 +303,11 @@ class TestBuiltinToolsLocalBackend:
 # Full Integration Tests (require Brave MCP server + proper gateway config)
 # =============================================================================
 # These tests run in CI where:
-# 1. Brave MCP server runs on port 8001
+# 1. Brave MCP server runs on port 8080
 # 2. Gateway is configured with builtin_type: web_search_preview via fixture
 #
 # To run locally:
-# 1. Start Brave MCP: docker run -d -p 8001:8080 -e BRAVE_API_KEY=<key> shoofio/brave-search-mcp-sse:1.0.10
+# 1. Start Brave MCP: docker run -d -p 8080:8080 -e BRAVE_API_KEY=<key> shoofio/brave-search-mcp-sse:1.0.10
 # 2. Set OPENAI_API_KEY environment variable
 # 3. Run: pytest e2e_test/responses/test_builtin_tools.py::TestBuiltinToolRouting -v
 
@@ -324,7 +321,7 @@ class TestBuiltinToolRouting:
     3. Response contains web_search_call (not mcp_call)
 
     Requires:
-    - Brave MCP server on port 8001
+    - Brave MCP server on port 8080
     - OPENAI_API_KEY environment variable
     """
 
@@ -627,7 +624,7 @@ class TestBuiltinToolRoutingGrpc:
     3. Response contains web_search_call (not mcp_call)
 
     Requires:
-    - Brave MCP server on port 8001
+    - Brave MCP server on port 8080
     - gRPC worker available in model_pool
     """
 
