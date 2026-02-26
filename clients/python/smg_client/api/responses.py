@@ -25,6 +25,7 @@ class SyncResponses:
         return ResponsesResponse.model_validate_json(resp.content)
 
     def delete(self, response_id: str) -> None:
+        """Delete a response. Note: not yet implemented on the server (returns 501)."""
         self._transport.request("DELETE", f"/v1/responses/{response_id}")
 
     def cancel(self, response_id: str) -> ResponsesResponse:
@@ -55,6 +56,7 @@ class AsyncResponses:
         return ResponsesResponse.model_validate_json(resp.content)
 
     async def delete(self, response_id: str) -> None:
+        """Delete a response. Note: not yet implemented on the server (returns 501)."""
         await self._transport.request("DELETE", f"/v1/responses/{response_id}")
 
     async def cancel(self, response_id: str) -> ResponsesResponse:

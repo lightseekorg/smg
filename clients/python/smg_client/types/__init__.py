@@ -51,9 +51,7 @@ try:
         Usage,
         UsageInfo,
         VideoUrl,
-        WorkerApiResponse,
         WorkerInfo,
-        WorkerListResponse,
         WorkerSpec,
         WorkerUpdateRequest,
     )

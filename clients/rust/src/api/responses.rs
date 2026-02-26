@@ -30,6 +30,8 @@ impl Responses {
     }
 
     /// Delete a response by ID.
+    ///
+    /// Note: this endpoint is not yet implemented on the server (returns 501).
     pub async fn delete(&self, response_id: &str) -> Result<(), SmgError> {
         self.transport
             .delete(&format!("/v1/responses/{response_id}"))

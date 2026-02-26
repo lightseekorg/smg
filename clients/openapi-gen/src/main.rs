@@ -86,7 +86,6 @@ struct Response {
     content: Option<BTreeMap<String, MediaType>>,
 }
 
-
 // ============================================================================
 // Schema collection
 // ============================================================================
@@ -386,7 +385,7 @@ fn main() -> anyhow::Result<()> {
         MediaType {
             schema: serde_json::json!({
                 "type": "object",
-                "description": "List of input items (structure varies by item type)"
+                "description": "Paginated list envelope with {object, data, first_id, last_id, has_more}"
             }),
         },
     );
@@ -448,12 +447,81 @@ fn main() -> anyhow::Result<()> {
     );
 
     // ---- Workers ----
+    // Note: worker mutation endpoints return 202 Accepted with ad-hoc JSON
+    // (not WorkerApiResponse), and list returns a different stats shape than
+    // WorkerListResponse. We use inline schemas matching the actual server responses.
     use openai_protocol::worker::*;
     let worker_spec_name = collect_schema(&schema_for!(WorkerSpec), &mut schemas)?;
     let worker_info_name = collect_schema(&schema_for!(WorkerInfo), &mut schemas)?;
-    let worker_list_name = collect_schema(&schema_for!(WorkerListResponse), &mut schemas)?;
     let worker_update_name = collect_schema(&schema_for!(WorkerUpdateRequest), &mut schemas)?;
-    let worker_resp_name = collect_schema(&schema_for!(WorkerApiResponse), &mut schemas)?;
+
+    // Inline schema for 202 Accepted mutation responses
+    let worker_accepted_schema = serde_json::json!({
+        "type": "object",
+        "description": "202 Accepted response with {status, worker_id, message/url/location}",
+        "properties": {
+            "status": {"type": "string"},
+            "worker_id": {"type": "string"},
+            "message": {"type": "string"},
+            "url": {"type": "string"},
+            "location": {"type": "string"}
+        }
+    });
+    let worker_accepted_response = |desc: &str| -> BTreeMap<String, Response> {
+        let mut responses = BTreeMap::new();
+        let mut content = BTreeMap::new();
+        content.insert(
+            "application/json".to_string(),
+            MediaType {
+                schema: worker_accepted_schema.clone(),
+            },
+        );
+        responses.insert(
+            "202".to_string(),
+            Response {
+                description: desc.to_string(),
+                content: Some(content),
+            },
+        );
+        responses
+    };
+
+    // Inline schema for worker list response
+    let worker_list_schema = serde_json::json!({
+        "type": "object",
+        "description": "Worker list with stats",
+        "properties": {
+            "workers": {
+                "type": "array",
+                "items": { "$ref": format!("#/components/schemas/{worker_info_name}") }
+            },
+            "total": {"type": "integer"},
+            "stats": {
+                "type": "object",
+                "properties": {
+                    "prefill_count": {"type": "integer"},
+                    "decode_count": {"type": "integer"},
+                    "regular_count": {"type": "integer"}
+                }
+            }
+        }
+    });
+    let mut worker_list_content = BTreeMap::new();
+    worker_list_content.insert(
+        "application/json".to_string(),
+        MediaType {
+            schema: worker_list_schema,
+        },
+    );
+    let mut worker_list_responses = BTreeMap::new();
+    worker_list_responses.insert(
+        "200".to_string(),
+        Response {
+            description: "List all workers".to_string(),
+            content: Some(worker_list_content),
+        },
+    );
+
     // POST + GET /workers
     paths.insert(
         "/workers".to_string(),
@@ -463,14 +531,14 @@ fn main() -> anyhow::Result<()> {
                 "List all workers",
                 None,
                 None,
-                json_response(&worker_list_name, "List all workers"),
+                worker_list_responses,
             )),
             post: Some(operation(
                 "createWorker",
                 "Register a new worker",
                 None,
                 Some(json_body(&worker_spec_name)),
-                json_response(&worker_resp_name, "Register a new worker"),
+                worker_accepted_response("Worker creation accepted"),
             )),
             ..PathItem::default()
         },
@@ -492,14 +560,14 @@ fn main() -> anyhow::Result<()> {
                 "Update a worker",
                 Some(worker_id_param.clone()),
                 Some(json_body(&worker_update_name)),
-                json_response(&worker_resp_name, "Update a worker"),
+                worker_accepted_response("Worker update accepted"),
             )),
             delete: Some(operation(
                 "deleteWorker",
                 "Remove a worker",
                 Some(worker_id_param),
                 None,
-                json_response(&worker_resp_name, "Remove a worker"),
+                worker_accepted_response("Worker deletion accepted"),
             )),
             ..PathItem::default()
         },
