@@ -169,6 +169,21 @@ pub enum RoutingMode {
         prefill_policy: Option<PolicyConfig>,
         #[serde(skip_serializing_if = "Option::is_none")]
         decode_policy: Option<PolicyConfig>,
+        /// Pre-prefill worker URLs with optional bootstrap ports (cold request warming)
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pre_prefill_urls: Vec<(String, Option<u16>)>,
+        /// Decode URLs paired with pre-prefill workers
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pre_prefill_decode_urls: Vec<String>,
+        /// Cache match ratio threshold below which a request is considered "cold"
+        #[serde(default = "default_pre_prefill_match_threshold")]
+        pre_prefill_match_threshold: f32,
+        /// Minimum unmatched characters to trigger pre-prefill routing
+        #[serde(default = "default_pre_prefill_unmatched_chars_threshold")]
+        pre_prefill_unmatched_chars_threshold: usize,
+        /// Minimum total tokens (chars as proxy) for pre-prefill eligibility
+        #[serde(default = "default_pre_prefill_min_tokens")]
+        pre_prefill_min_tokens: usize,
     },
     #[serde(rename = "openai")]
     OpenAI { worker_urls: Vec<String> },
@@ -187,8 +202,15 @@ impl RoutingMode {
             RoutingMode::PrefillDecode {
                 prefill_urls,
                 decode_urls,
+                pre_prefill_urls,
+                pre_prefill_decode_urls,
                 ..
-            } => prefill_urls.len() + decode_urls.len(),
+            } => {
+                prefill_urls.len()
+                    + decode_urls.len()
+                    + pre_prefill_urls.len()
+                    + pre_prefill_decode_urls.len()
+            }
             RoutingMode::OpenAI { worker_urls } => worker_urls.len(),
             RoutingMode::Anthropic { worker_urls } => worker_urls.len(),
         }
@@ -318,6 +340,18 @@ fn default_manual_eviction_interval_secs() -> u64 {
 
 fn default_manual_max_idle_secs() -> u64 {
     4 * 3600
+}
+
+pub(crate) fn default_pre_prefill_match_threshold() -> f32 {
+    0.1
+}
+
+pub(crate) fn default_pre_prefill_unmatched_chars_threshold() -> usize {
+    10000
+}
+
+pub(crate) fn default_pre_prefill_min_tokens() -> usize {
+    10000
 }
 
 impl PolicyConfig {
@@ -701,6 +735,11 @@ mod tests {
             decode_urls: vec!["http://decode1".to_string()],
             prefill_policy: None,
             decode_policy: None,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
+            pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
+            pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
+            pre_prefill_min_tokens: default_pre_prefill_min_tokens(),
         };
         assert!(pd.is_pd_mode());
     }
@@ -728,6 +767,11 @@ mod tests {
             ],
             prefill_policy: None,
             decode_policy: None,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
+            pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
+            pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
+            pre_prefill_min_tokens: default_pre_prefill_min_tokens(),
         };
         assert_eq!(pd.worker_count(), 5);
 
@@ -751,6 +795,11 @@ mod tests {
             decode_urls: vec!["http://decode1".to_string()],
             prefill_policy: None,
             decode_policy: None,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
+            pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
+            pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
+            pre_prefill_min_tokens: default_pre_prefill_min_tokens(),
         };
         let json = serde_json::to_string(&pd).unwrap();
         assert!(json.contains("\"type\":\"prefill_decode\""));
@@ -1218,6 +1267,11 @@ mod tests {
             decode_policy: Some(PolicyConfig::PowerOfTwo {
                 load_check_interval_secs: 60,
             }),
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
+            pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
+            pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
+            pre_prefill_min_tokens: default_pre_prefill_min_tokens(),
         };
 
         let main_policy = PolicyConfig::Random;
@@ -1246,6 +1300,11 @@ mod tests {
                 max_tree_size: 1000,
             }),
             decode_policy: None,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
+            pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
+            pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
+            pre_prefill_min_tokens: default_pre_prefill_min_tokens(),
         };
 
         let main_policy = PolicyConfig::RoundRobin;
@@ -1270,6 +1329,11 @@ mod tests {
             decode_policy: Some(PolicyConfig::PowerOfTwo {
                 load_check_interval_secs: 60,
             }),
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
+            pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
+            pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
+            pre_prefill_min_tokens: default_pre_prefill_min_tokens(),
         };
 
         let main_policy = PolicyConfig::Random;
@@ -1292,6 +1356,11 @@ mod tests {
             decode_urls: vec!["http://decode1".to_string()],
             prefill_policy: None,
             decode_policy: None,
+            pre_prefill_urls: vec![],
+            pre_prefill_decode_urls: vec![],
+            pre_prefill_match_threshold: default_pre_prefill_match_threshold(),
+            pre_prefill_unmatched_chars_threshold: default_pre_prefill_unmatched_chars_threshold(),
+            pre_prefill_min_tokens: default_pre_prefill_min_tokens(),
         };
 
         let main_policy = PolicyConfig::CacheAware {

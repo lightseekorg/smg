@@ -220,7 +220,13 @@ impl RouterManager {
         let best_router_id = workers
             .iter()
             .map(|w| {
-                let is_pd = matches!(w.worker_type(), WorkerType::Prefill | WorkerType::Decode);
+                let is_pd = matches!(
+                    w.worker_type(),
+                    WorkerType::Prefill
+                        | WorkerType::Decode
+                        | WorkerType::PrePrefill
+                        | WorkerType::PrePrefillDecode
+                );
                 let is_grpc = matches!(w.connection_mode(), ConnectionMode::Grpc);
                 let is_external = matches!(w.metadata().spec.runtime_type, RuntimeType::External);
 
