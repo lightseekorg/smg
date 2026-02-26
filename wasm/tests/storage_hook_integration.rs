@@ -8,8 +8,7 @@
 
 #![cfg(feature = "storage-hooks")]
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use serde_json::json;
 use smg_data_connector::{
@@ -220,8 +219,10 @@ async fn wasm_hook_extra_columns_match_schema_config_declarations() -> TestResul
             // multi-tenant response storage.  Verify the hook output keys
             // align with what the schema config expects.
             let extra_keys: std::collections::HashSet<&String> = extra.keys().collect();
-            let expected_keys: std::collections::HashSet<String> =
-                ["TENANT_ID", "STORED_BY"].iter().map(|s| (*s).to_string()).collect();
+            let expected_keys: std::collections::HashSet<String> = ["TENANT_ID", "STORED_BY"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
             let expected_refs: std::collections::HashSet<&String> = expected_keys.iter().collect();
 
             assert_eq!(
@@ -250,13 +251,23 @@ async fn wasm_hook_works_across_multiple_operation_types() -> TestResult {
 
     let store_payload = json!({"id": "resp_001"});
     let store_result = hook
-        .before(StorageOperation::StoreResponse, Some(&store_ctx), &store_payload)
+        .before(
+            StorageOperation::StoreResponse,
+            Some(&store_ctx),
+            &store_payload,
+        )
         .await?;
 
     match &store_result {
         BeforeHookResult::Continue(extra) => {
-            assert!(extra.contains_key("TENANT_ID"), "StoreResponse should include TENANT_ID");
-            assert!(extra.contains_key("STORED_BY"), "StoreResponse should include STORED_BY");
+            assert!(
+                extra.contains_key("TENANT_ID"),
+                "StoreResponse should include TENANT_ID"
+            );
+            assert!(
+                extra.contains_key("STORED_BY"),
+                "StoreResponse should include STORED_BY"
+            );
         }
         BeforeHookResult::Reject(reason) => {
             panic!("StoreResponse expected Continue, got Reject: {reason}");
@@ -271,7 +282,11 @@ async fn wasm_hook_works_across_multiple_operation_types() -> TestResult {
 
     let conv_payload = json!({});
     let conv_result = hook
-        .before(StorageOperation::CreateConversation, Some(&conv_ctx), &conv_payload)
+        .before(
+            StorageOperation::CreateConversation,
+            Some(&conv_ctx),
+            &conv_payload,
+        )
         .await?;
 
     match &conv_result {
@@ -294,7 +309,10 @@ async fn wasm_hook_works_across_multiple_operation_types() -> TestResult {
 
     match &get_result {
         BeforeHookResult::Continue(extra) => {
-            assert!(extra.is_empty(), "GetResponse should return empty extra columns");
+            assert!(
+                extra.is_empty(),
+                "GetResponse should return empty extra columns"
+            );
         }
         BeforeHookResult::Reject(reason) => {
             panic!("GetResponse expected Continue, got Reject: {reason}");
@@ -374,10 +392,7 @@ async fn wasm_hook_rejection_includes_reason() -> TestResult {
 
     match result {
         BeforeHookResult::Reject(reason) => {
-            assert!(
-                !reason.is_empty(),
-                "rejection reason should not be empty"
-            );
+            assert!(!reason.is_empty(), "rejection reason should not be empty");
             assert!(
                 reason.contains("tenant_id"),
                 "rejection reason should mention tenant_id, got: {reason}"

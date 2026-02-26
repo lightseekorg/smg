@@ -763,10 +763,7 @@ mod tests {
             },
         );
         let err = cfg.validate().unwrap_err();
-        assert!(
-            err.contains("shadows a core column"),
-            "unexpected: {err}"
-        );
+        assert!(err.contains("shadows a core column"), "unexpected: {err}");
 
         // Also check a conversation core column
         let mut cfg2 = SchemaConfig::default();
@@ -778,10 +775,7 @@ mod tests {
             },
         );
         let err2 = cfg2.validate().unwrap_err();
-        assert!(
-            err2.contains("shadows a core column"),
-            "unexpected: {err2}"
-        );
+        assert!(err2.contains("shadows a core column"), "unexpected: {err2}");
     }
 
     #[test]
@@ -791,10 +785,7 @@ mod tests {
             .skip_columns
             .insert("safty_identifier".to_string()); // typo
         let err = cfg.validate().unwrap_err();
-        assert!(
-            err.contains("not a recognized column"),
-            "unexpected: {err}"
-        );
+        assert!(err.contains("not a recognized column"), "unexpected: {err}");
     }
 
     #[test]

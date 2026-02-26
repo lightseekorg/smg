@@ -439,24 +439,24 @@ impl AppContextBuilder {
 
     /// Create all storage backends using the factory function
     async fn with_storage(mut self, config: &RouterConfig) -> Result<Self, String> {
-        let hook: Option<Arc<dyn smg_data_connector::hooks::StorageHook>> = match &config
-            .storage_hook_wasm_path
-        {
-            Some(path) => {
-                let bytes = tokio::fs::read(path)
-                    .await
-                    .map_err(|e| format!("failed to read WASM storage hook at {path}: {e}"))?;
-                let wasm_hook = tokio::task::spawn_blocking(move || {
-                    smg_wasm::WasmStorageHook::new(&bytes)
-                })
-                .await
-                .map_err(|e| format!("WASM compilation task panicked: {e}"))?
-                .map_err(|e| format!("failed to compile WASM storage hook at {path}: {e}"))?;
-                debug!("loaded WASM storage hook from {path}");
-                Some(Arc::new(wasm_hook))
-            }
-            None => None,
-        };
+        let hook: Option<Arc<dyn smg_data_connector::hooks::StorageHook>> =
+            match &config.storage_hook_wasm_path {
+                Some(path) => {
+                    let bytes = tokio::fs::read(path)
+                        .await
+                        .map_err(|e| format!("failed to read WASM storage hook at {path}: {e}"))?;
+                    let wasm_hook =
+                        tokio::task::spawn_blocking(move || smg_wasm::WasmStorageHook::new(&bytes))
+                            .await
+                            .map_err(|e| format!("WASM compilation task panicked: {e}"))?
+                            .map_err(|e| {
+                                format!("failed to compile WASM storage hook at {path}: {e}")
+                            })?;
+                    debug!("loaded WASM storage hook from {path}");
+                    Some(Arc::new(wasm_hook))
+                }
+                None => None,
+            };
 
         let storage_config = StorageFactoryConfig {
             backend: &config.history_backend,

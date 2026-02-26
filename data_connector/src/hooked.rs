@@ -1291,10 +1291,7 @@ mod tests {
         assert_eq!(hook.after_calls(), 2);
 
         // Delete all responses for user-1
-        let deleted = hooked
-            .delete_identifier_responses("user-1")
-            .await
-            .unwrap();
+        let deleted = hooked.delete_identifier_responses("user-1").await.unwrap();
         assert_eq!(deleted, 2, "should delete both responses");
         assert_eq!(hook.before_calls(), 3);
         assert_eq!(hook.after_calls(), 3);

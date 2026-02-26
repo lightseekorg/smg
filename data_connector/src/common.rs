@@ -541,8 +541,7 @@ mod tests {
 
     #[test]
     fn skip_columns_and_extra_columns_together() {
-        use crate::hooks::ExtraColumns;
-        use crate::schema::ColumnDef;
+        use crate::{hooks::ExtraColumns, schema::ColumnDef};
 
         let mut cfg = SchemaConfig::default();
         cfg.responses
@@ -590,7 +589,10 @@ mod tests {
 
         // Core columns that are not skipped must still be present
         for col in &["id", "input", "output", "model", "conversation_id"] {
-            assert!(sql.contains(col), "core column '{col}' should remain: {sql}");
+            assert!(
+                sql.contains(col),
+                "core column '{col}' should remain: {sql}"
+            );
         }
 
         // extra_column_defs returns both extra columns
@@ -661,7 +663,12 @@ mod tests {
         // Note: "id" is a substring of other column names, so we check more carefully
         // by looking at the column list portion. "input" could be substring of "user_input".
         // We check that the original logical names aren't used as standalone columns.
-        let cols_part = sql.strip_prefix("SELECT ").unwrap().split(" FROM ").next().unwrap();
+        let cols_part = sql
+            .strip_prefix("SELECT ")
+            .unwrap()
+            .split(" FROM ")
+            .next()
+            .unwrap();
         let col_list: Vec<&str> = cols_part.split(", ").collect();
         assert!(
             !col_list.contains(&"id"),
@@ -686,8 +693,7 @@ mod tests {
 
     #[test]
     fn extra_columns_in_insert_column_list() {
-        use crate::hooks::ExtraColumns;
-        use crate::schema::ColumnDef;
+        use crate::{hooks::ExtraColumns, schema::ColumnDef};
 
         let mut cfg = SchemaConfig::default();
         // Remap id → resp_id
@@ -753,28 +759,16 @@ mod tests {
     #[test]
     fn value_to_sql_string_conversions() {
         // String → string as-is
-        assert_eq!(
-            value_to_sql_string(&json!("hello")),
-            "hello"
-        );
+        assert_eq!(value_to_sql_string(&json!("hello")), "hello");
 
         // Number → "42"
-        assert_eq!(
-            value_to_sql_string(&json!(42)),
-            "42"
-        );
+        assert_eq!(value_to_sql_string(&json!(42)), "42");
 
         // Bool → "true"
-        assert_eq!(
-            value_to_sql_string(&json!(true)),
-            "true"
-        );
+        assert_eq!(value_to_sql_string(&json!(true)), "true");
 
         // Null → "null"
-        assert_eq!(
-            value_to_sql_string(&json!(null)),
-            "null"
-        );
+        assert_eq!(value_to_sql_string(&json!(null)), "null");
 
         // Object → JSON string
         let obj = json!({"key": "value"});

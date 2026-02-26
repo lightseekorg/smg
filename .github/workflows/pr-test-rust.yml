@@ -205,6 +205,11 @@ jobs:
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
 
+      - name: Build WASM test fixtures
+        run: |
+          source "$HOME/.cargo/env"
+          bash wasm/tests/fixtures/build_fixtures.sh
+
       - name: Run lint
         run: |
           source "$HOME/.cargo/env"

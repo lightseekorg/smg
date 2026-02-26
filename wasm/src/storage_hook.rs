@@ -185,7 +185,10 @@ impl StorageHook for WasmStorageHook {
         // The task is aborted immediately after the WASM call completes,
         // so it is safe for the gateway to shut down without waiting for it.
         let epoch_engine = self.engine.clone();
-        #[expect(clippy::disallowed_methods, reason = "epoch ticker is aborted after WASM call")]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "epoch ticker is aborted after WASM call"
+        )]
         let ticker = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             epoch_engine.increment_epoch();
@@ -234,7 +237,10 @@ impl StorageHook for WasmStorageHook {
         // The task is aborted immediately after the WASM call completes,
         // so it is safe for the gateway to shut down without waiting for it.
         let epoch_engine = self.engine.clone();
-        #[expect(clippy::disallowed_methods, reason = "epoch ticker is aborted after WASM call")]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "epoch ticker is aborted after WASM call"
+        )]
         let ticker = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             epoch_engine.increment_epoch();
