@@ -471,11 +471,20 @@ fn render_chat_template(
     // Convert messages to minijinja::Value (messages already processed by router)
     let minijinja_messages: Vec<Value> = messages.iter().map(Value::from_serialize).collect();
 
+    // Use Value::UNDEFINED for missing optional params so they are truly "undefined"
+    // in the template context, matching HuggingFace Python behavior. Many chat templates
+    // use `{% if tools is defined %}` guards — passing null (none) instead of undefined
+    // would bypass those guards since `none` IS defined, causing `tools | length` to fail.
+    let tools_value = params.tools.map_or(Value::UNDEFINED, Value::from_serialize);
+    let documents_value = params
+        .documents
+        .map_or(Value::UNDEFINED, Value::from_serialize);
+
     let base_context = context! {
         messages => &minijinja_messages,
         add_generation_prompt => params.add_generation_prompt,
-        tools => params.tools,
-        documents => params.documents,
+        tools => tools_value,
+        documents => documents_value,
     };
 
     // Merge with template_kwargs if provided
