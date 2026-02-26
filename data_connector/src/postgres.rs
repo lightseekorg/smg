@@ -16,10 +16,11 @@ use tokio_postgres::{NoTls, Row};
 
 use crate::{
     common::{
-        build_response_select_base, parse_json_value, parse_metadata, parse_raw_response,
-        parse_tool_calls,
+        build_response_select_base, extra_column_defs, parse_json_value, parse_metadata,
+        parse_raw_response, parse_tool_calls, resolve_extra_column_values,
     },
     config::PostgresConfig,
+    context::current_extra_columns,
     core::{
         make_item_id, Conversation, ConversationId, ConversationItem, ConversationItemId,
         ConversationItemResult, ConversationItemStorage, ConversationItemStorageError,
@@ -74,11 +75,14 @@ impl PostgresConversationStorage {
         let s = &store.schema.conversations;
         let table = s.qualified_table(store.schema.owner.as_deref());
 
-        let col_defs = [
-            format!("{} VARCHAR(64) PRIMARY KEY", s.col("id")),
-            format!("{} TIMESTAMPTZ", s.col("created_at")),
-            format!("{} JSON", s.col("metadata")),
-        ];
+        let mut col_defs = vec![format!("{} VARCHAR(64) PRIMARY KEY", s.col("id"))];
+        if !s.is_skipped("created_at") {
+            col_defs.push(format!("{} TIMESTAMPTZ", s.col("created_at")));
+        }
+        if !s.is_skipped("metadata") {
+            col_defs.push(format!("{} JSON", s.col("metadata")));
+        }
+        col_defs.extend(extra_column_defs(s));
 
         let ddl = format!(
             "CREATE TABLE IF NOT EXISTS {table} ({});",
@@ -122,12 +126,33 @@ impl ConversationStorage for PostgresConversationStorage {
 
         let s = &self.store.schema.conversations;
         let table = s.qualified_table(self.store.schema.owner.as_deref());
-        let col_id = s.col("id");
-        let col_created = s.col("created_at");
-        let col_meta = s.col("metadata");
 
+        let mut col_names: Vec<&str> = vec![s.col("id")];
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&id_str];
+        if !s.is_skipped("created_at") {
+            col_names.push(s.col("created_at"));
+            params.push(&created_at);
+        }
+        if !s.is_skipped("metadata") {
+            col_names.push(s.col("metadata"));
+            params.push(&metadata_json);
+        }
+
+        // Append extra columns from hooks or defaults
+        let hook_extra = current_extra_columns().unwrap_or_default();
+        let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(s, &hook_extra);
+        for (name, val) in &extra_cols {
+            col_names.push(*name);
+            params.push(val);
+        }
+
+        let placeholders: String = (1..=params.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
-            "INSERT INTO {table} ({col_id}, {col_created}, {col_meta}) VALUES ($1, $2, $3)"
+            "INSERT INTO {table} ({}) VALUES ({placeholders})",
+            col_names.join(", ")
         );
 
         let client = self
@@ -137,7 +162,7 @@ impl ConversationStorage for PostgresConversationStorage {
             .await
             .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         client
-            .execute(&sql, &[&id_str, &created_at, &metadata_json])
+            .execute(&sql, &params)
             .await
             .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
         Ok(conversation)
@@ -150,11 +175,19 @@ impl ConversationStorage for PostgresConversationStorage {
         let s = &self.store.schema.conversations;
         let table = s.qualified_table(self.store.schema.owner.as_deref());
         let col_id = s.col("id");
-        let col_created = s.col("created_at");
-        let col_meta = s.col("metadata");
 
-        let sql =
-            format!("SELECT {col_id}, {col_created}, {col_meta} FROM {table} WHERE {col_id} = $1");
+        let mut select_cols = vec![col_id.to_string()];
+        if !s.is_skipped("created_at") {
+            select_cols.push(s.col("created_at").to_string());
+        }
+        if !s.is_skipped("metadata") {
+            select_cols.push(s.col("metadata").to_string());
+        }
+
+        let sql = format!(
+            "SELECT {} FROM {table} WHERE {col_id} = $1",
+            select_cols.join(", ")
+        );
 
         let client = self
             .store
@@ -170,9 +203,17 @@ impl ConversationStorage for PostgresConversationStorage {
             return Ok(None);
         }
         let row = &rows[0];
-        let id_str: String = row.get(col_id);
-        let created_at: DateTime<Utc> = row.get(col_created);
-        let metadata_json: Option<String> = row.get(col_meta);
+        let id_str: String = row.get(s.col("id"));
+        let created_at: DateTime<Utc> = if s.is_skipped("created_at") {
+            Utc::now()
+        } else {
+            row.get(s.col("created_at"))
+        };
+        let metadata_json: Option<String> = if s.is_skipped("metadata") {
+            None
+        } else {
+            row.get(s.col("metadata"))
+        };
         let metadata = Self::parse_metadata(metadata_json)?;
         Ok(Some(Conversation::with_parts(
             ConversationId(id_str),
@@ -186,17 +227,9 @@ impl ConversationStorage for PostgresConversationStorage {
         id: &ConversationId,
         metadata: Option<ConversationMetadata>,
     ) -> Result<Option<Conversation>, ConversationStorageError> {
-        let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
-
         let s = &self.store.schema.conversations;
         let table = s.qualified_table(self.store.schema.owner.as_deref());
         let col_id = s.col("id");
-        let col_meta = s.col("metadata");
-        let col_created = s.col("created_at");
-
-        let sql = format!(
-            "UPDATE {table} SET {col_meta} = $1 WHERE {col_id} = $2 RETURNING {col_created}"
-        );
 
         let client = self
             .store
@@ -204,15 +237,54 @@ impl ConversationStorage for PostgresConversationStorage {
             .get()
             .await
             .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
-        let rows = client
-            .query(&sql, &[&metadata_json, &id.0.as_str()])
-            .await
-            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
-        if rows.is_empty() {
-            return Ok(None);
+
+        if s.is_skipped("metadata") {
+            // Nothing to update — just verify the row exists
+            let sql = format!("SELECT 1 FROM {table} WHERE {col_id} = $1");
+            let rows = client
+                .query(&sql, &[&id.0.as_str()])
+                .await
+                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            if rows.is_empty() {
+                return Ok(None);
+            }
+            let created_at = Utc::now();
+            return Ok(Some(Conversation::with_parts(
+                ConversationId(id.0.clone()),
+                created_at,
+                metadata,
+            )));
         }
-        let row = &rows[0];
-        let created_at: DateTime<Utc> = row.get(col_created);
+
+        let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
+        let col_meta = s.col("metadata");
+
+        let (_, created_at) = if s.is_skipped("created_at") {
+            let sql = format!("UPDATE {table} SET {col_meta} = $1 WHERE {col_id} = $2");
+            let rows_affected = client
+                .execute(&sql, &[&metadata_json, &id.0.as_str()])
+                .await
+                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            if rows_affected == 0 {
+                return Ok(None);
+            }
+            (sql, Utc::now())
+        } else {
+            let col_created = s.col("created_at");
+            let sql = format!(
+                "UPDATE {table} SET {col_meta} = $1 WHERE {col_id} = $2 RETURNING {col_created}"
+            );
+            let rows = client
+                .query(&sql, &[&metadata_json, &id.0.as_str()])
+                .await
+                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            if rows.is_empty() {
+                return Ok(None);
+            }
+            let created_at: DateTime<Utc> = rows[0].get(col_created);
+            (sql, created_at)
+        };
+
         Ok(Some(Conversation::with_parts(
             ConversationId(id.0.clone()),
             created_at,
@@ -255,15 +327,21 @@ impl PostgresConversationItemStorage {
         let links_table = sl.qualified_table(schema.owner.as_deref());
 
         // ── conversation_items DDL ──
-        let item_col_defs = [
-            format!("{} VARCHAR(64) PRIMARY KEY", si.col("id")),
-            format!("{} VARCHAR(64)", si.col("response_id")),
-            format!("{} VARCHAR(32) NOT NULL", si.col("item_type")),
-            format!("{} VARCHAR(32)", si.col("role")),
-            format!("{} JSON", si.col("content")),
-            format!("{} VARCHAR(32)", si.col("status")),
-            format!("{} TIMESTAMPTZ", si.col("created_at")),
+        let mut item_col_defs = vec![format!("{} VARCHAR(64) PRIMARY KEY", si.col("id"))];
+        let item_core_cols: [(&str, &str); 6] = [
+            ("response_id", "VARCHAR(64)"),
+            ("item_type", "VARCHAR(32) NOT NULL"),
+            ("role", "VARCHAR(32)"),
+            ("content", "JSON"),
+            ("status", "VARCHAR(32)"),
+            ("created_at", "TIMESTAMPTZ"),
         ];
+        for (logical, sql_type) in &item_core_cols {
+            if !si.is_skipped(logical) {
+                item_col_defs.push(format!("{} {sql_type}", si.col(logical)));
+            }
+        }
+        item_col_defs.extend(extra_column_defs(si));
 
         // ── conversation_item_links DDL ──
         let col_conv_id = sl.col("conversation_id");
@@ -275,6 +353,7 @@ impl PostgresConversationItemStorage {
             format!("{col_item_id} VARCHAR(64) NOT NULL"),
             format!("{col_added_at} TIMESTAMPTZ"),
         ];
+        link_col_defs.extend(extra_column_defs(sl));
         link_col_defs.push(format!(
             "CONSTRAINT pk_conv_item_link PRIMARY KEY ({col_conv_id}, {col_item_id})"
         ));
@@ -321,28 +400,50 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         let si = &self.store.schema.conversation_items;
         let table = si.qualified_table(self.store.schema.owner.as_deref());
 
-        let col_id = si.col("id");
-        let col_response_id = si.col("response_id");
-        let col_item_type = si.col("item_type");
-        let col_role = si.col("role");
-        let col_content = si.col("content");
-        let col_status = si.col("status");
-        let col_created_at = si.col("created_at");
+        // Build dynamic column/param lists, respecting skip_columns
+        let mut col_names: Vec<&str> = vec![si.col("id")];
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&id.0];
+        if !si.is_skipped("response_id") {
+            col_names.push(si.col("response_id"));
+            params.push(&response_id);
+        }
+        if !si.is_skipped("item_type") {
+            col_names.push(si.col("item_type"));
+            params.push(&item_type);
+        }
+        if !si.is_skipped("role") {
+            col_names.push(si.col("role"));
+            params.push(&role);
+        }
+        if !si.is_skipped("content") {
+            col_names.push(si.col("content"));
+            params.push(&content_json);
+        }
+        if !si.is_skipped("status") {
+            col_names.push(si.col("status"));
+            params.push(&status);
+        }
+        if !si.is_skipped("created_at") {
+            col_names.push(si.col("created_at"));
+            params.push(&created_at);
+        }
 
+        // Append extra columns from hooks or defaults
+        let hook_extra = current_extra_columns().unwrap_or_default();
+        let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(si, &hook_extra);
+        for (name, val) in &extra_cols {
+            col_names.push(*name);
+            params.push(val);
+        }
+
+        let placeholders: String = (1..=params.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
-            "INSERT INTO {table} ({col_id}, {col_response_id}, {col_item_type}, {col_role}, {col_content}, {col_status}, {col_created_at}) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)"
+            "INSERT INTO {table} ({}) VALUES ({placeholders})",
+            col_names.join(", ")
         );
-
-        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![
-            &id.0,
-            &response_id,
-            &item_type,
-            &role,
-            &content_json,
-            &status,
-            &created_at,
-        ];
 
         let client = self
             .store
@@ -373,12 +474,30 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
     ) -> ConversationItemResult<()> {
         let sl = &self.store.schema.conversation_item_links;
         let table = sl.qualified_table(self.store.schema.owner.as_deref());
-        let col_conv = sl.col("conversation_id");
-        let col_item = sl.col("item_id");
-        let col_added = sl.col("added_at");
 
+        let mut col_names: Vec<&str> = vec![
+            sl.col("conversation_id"),
+            sl.col("item_id"),
+            sl.col("added_at"),
+        ];
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+            vec![&conversation_id.0, &item_id.0, &added_at];
+
+        // Append extra columns from hooks or defaults
+        let hook_extra = current_extra_columns().unwrap_or_default();
+        let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(sl, &hook_extra);
+        for (name, val) in &extra_cols {
+            col_names.push(*name);
+            params.push(val);
+        }
+
+        let placeholders: String = (1..=params.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
-            "INSERT INTO {table} ({col_conv}, {col_item}, {col_added}) VALUES ($1, $2, $3)"
+            "INSERT INTO {table} ({}) VALUES ({placeholders})",
+            col_names.join(", ")
         );
 
         let client = self
@@ -388,10 +507,7 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         client
-            .execute(
-                &sql,
-                &[&conversation_id.0.as_str(), &item_id.0.as_str(), &added_at],
-            )
+            .execute(&sql, &params)
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         Ok(())
@@ -442,10 +558,9 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
             None
         };
 
-        // Build select columns from items table (prefixed with i.)
-        let mut select_cols = Vec::new();
+        // Build select columns from items table (prefixed with i.), respecting skip_columns
+        let mut select_cols = vec![format!("i.{}", si.col("id"))];
         for field in &[
-            "id",
             "response_id",
             "item_type",
             "role",
@@ -453,7 +568,9 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
             "status",
             "created_at",
         ] {
-            select_cols.push(format!("i.{}", si.col(field)));
+            if !si.is_skipped(field) {
+                select_cols.push(format!("i.{}", si.col(field)));
+            }
         }
 
         let mut sql = format!(
@@ -504,23 +621,39 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
                 .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?
         };
 
-        let col_id = si.col("id");
-        let col_resp_id = si.col("response_id");
-        let col_item_type = si.col("item_type");
-        let col_role = si.col("role");
-        let col_content = si.col("content");
-        let col_status = si.col("status");
-        let col_created_at = si.col("created_at");
-
         let mut out = Vec::new();
         for row in rows {
-            let id: String = row.get(col_id);
-            let resp_id: Option<String> = row.get(col_resp_id);
-            let item_type: String = row.get(col_item_type);
-            let role: Option<String> = row.get(col_role);
-            let content_raw: Option<String> = row.get(col_content);
-            let status: Option<String> = row.get(col_status);
-            let created_at: DateTime<Utc> = row.get(col_created_at);
+            let id: String = row.get(si.col("id"));
+            let resp_id: Option<String> = if si.is_skipped("response_id") {
+                None
+            } else {
+                row.get(si.col("response_id"))
+            };
+            let item_type: String = if si.is_skipped("item_type") {
+                String::new()
+            } else {
+                row.get(si.col("item_type"))
+            };
+            let role: Option<String> = if si.is_skipped("role") {
+                None
+            } else {
+                row.get(si.col("role"))
+            };
+            let content_raw: Option<String> = if si.is_skipped("content") {
+                None
+            } else {
+                row.get(si.col("content"))
+            };
+            let status: Option<String> = if si.is_skipped("status") {
+                None
+            } else {
+                row.get(si.col("status"))
+            };
+            let created_at: DateTime<Utc> = if si.is_skipped("created_at") {
+                Utc::now()
+            } else {
+                row.get(si.col("created_at"))
+            };
 
             let content = match content_raw {
                 Some(s) => serde_json::from_str(&s).map_err(ConversationItemStorageError::from)?,
@@ -547,9 +680,8 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         let table = si.qualified_table(self.store.schema.owner.as_deref());
         let col_id = si.col("id");
 
-        let mut select_cols = Vec::new();
+        let mut select_cols = vec![si.col("id").to_string()];
         for field in &[
-            "id",
             "response_id",
             "item_type",
             "role",
@@ -557,7 +689,9 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
             "status",
             "created_at",
         ] {
-            select_cols.push(si.col(field).to_string());
+            if !si.is_skipped(field) {
+                select_cols.push(si.col(field).to_string());
+            }
         }
 
         let sql = format!(
@@ -580,12 +714,36 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         } else {
             let row = &rows[0];
             let id: String = row.get(si.col("id"));
-            let response_id: Option<String> = row.get(si.col("response_id"));
-            let item_type: String = row.get(si.col("item_type"));
-            let role: Option<String> = row.get(si.col("role"));
-            let content_raw: Option<String> = row.get(si.col("content"));
-            let status: Option<String> = row.get(si.col("status"));
-            let created_at: DateTime<Utc> = row.get(si.col("created_at"));
+            let response_id: Option<String> = if si.is_skipped("response_id") {
+                None
+            } else {
+                row.get(si.col("response_id"))
+            };
+            let item_type: String = if si.is_skipped("item_type") {
+                String::new()
+            } else {
+                row.get(si.col("item_type"))
+            };
+            let role: Option<String> = if si.is_skipped("role") {
+                None
+            } else {
+                row.get(si.col("role"))
+            };
+            let content_raw: Option<String> = if si.is_skipped("content") {
+                None
+            } else {
+                row.get(si.col("content"))
+            };
+            let status: Option<String> = if si.is_skipped("status") {
+                None
+            } else {
+                row.get(si.col("status"))
+            };
+            let created_at: DateTime<Utc> = if si.is_skipped("created_at") {
+                Utc::now()
+            } else {
+                row.get(si.col("created_at"))
+            };
 
             let content = match content_raw {
                 Some(s) => serde_json::from_str(&s)
@@ -668,29 +826,38 @@ impl PostgresResponseStorage {
         let s = &schema.responses;
         let table = s.qualified_table(schema.owner.as_deref());
 
-        let col_defs = vec![
-            format!("{} VARCHAR(64) PRIMARY KEY", s.col("id")),
-            format!("{} VARCHAR(64)", s.col("conversation_id")),
-            format!("{} VARCHAR(64)", s.col("previous_response_id")),
-            format!("{} JSON", s.col("input")),
-            format!("{} TEXT", s.col("instructions")),
-            format!("{} JSON", s.col("output")),
-            format!("{} JSON", s.col("tool_calls")),
-            format!("{} JSON", s.col("metadata")),
-            format!("{} TIMESTAMPTZ", s.col("created_at")),
-            format!("{} VARCHAR(128)", s.col("safety_identifier")),
-            format!("{} VARCHAR(128)", s.col("model")),
-            format!("{} JSON", s.col("raw_response")),
+        // Build DDL column definitions, filtering out skip_columns and appending extras
+        let mut col_defs = vec![format!("{} VARCHAR(64) PRIMARY KEY", s.col("id"))];
+        let core_cols: [(&str, &str); 11] = [
+            ("conversation_id", "VARCHAR(64)"),
+            ("previous_response_id", "VARCHAR(64)"),
+            ("input", "JSON"),
+            ("instructions", "TEXT"),
+            ("output", "JSON"),
+            ("tool_calls", "JSON"),
+            ("metadata", "JSON"),
+            ("created_at", "TIMESTAMPTZ"),
+            ("safety_identifier", "VARCHAR(128)"),
+            ("model", "VARCHAR(128)"),
+            ("raw_response", "JSON"),
         ];
+        for (logical, sql_type) in &core_cols {
+            if !s.is_skipped(logical) {
+                col_defs.push(format!("{} {sql_type}", s.col(logical)));
+            }
+        }
+        col_defs.extend(extra_column_defs(s));
 
         let mut ddl = format!(
             "CREATE TABLE IF NOT EXISTS {table} ({});",
             col_defs.join(", "),
         );
-        ddl.push_str(&format!(
-            "\nCREATE INDEX IF NOT EXISTS responses_safety_idx ON {table} ({});",
-            s.col("safety_identifier")
-        ));
+        if !s.is_skipped("safety_identifier") {
+            ddl.push_str(&format!(
+                "\nCREATE INDEX IF NOT EXISTS responses_safety_idx ON {table} ({});",
+                s.col("safety_identifier")
+            ));
+        }
 
         let client = store
             .pool
@@ -713,17 +880,61 @@ impl PostgresResponseStorage {
         let s = &schema.responses;
 
         let id: String = row.get(s.col("id"));
-        let conversation_id: Option<String> = row.get(s.col("conversation_id"));
-        let previous: Option<String> = row.get(s.col("previous_response_id"));
-        let input_json: Option<String> = row.get(s.col("input"));
-        let instructions: Option<String> = row.get(s.col("instructions"));
-        let output_json: Option<String> = row.get(s.col("output"));
-        let tool_calls_json: Option<String> = row.get(s.col("tool_calls"));
-        let metadata_json: Option<String> = row.get(s.col("metadata"));
-        let created_at: DateTime<Utc> = row.get(s.col("created_at"));
-        let safety_identifier: Option<String> = row.get(s.col("safety_identifier"));
-        let model: Option<String> = row.get(s.col("model"));
-        let raw_response_json: Option<String> = row.get(s.col("raw_response"));
+        let conversation_id: Option<String> = if s.is_skipped("conversation_id") {
+            None
+        } else {
+            row.get(s.col("conversation_id"))
+        };
+        let previous: Option<String> = if s.is_skipped("previous_response_id") {
+            None
+        } else {
+            row.get(s.col("previous_response_id"))
+        };
+        let input_json: Option<String> = if s.is_skipped("input") {
+            None
+        } else {
+            row.get(s.col("input"))
+        };
+        let instructions: Option<String> = if s.is_skipped("instructions") {
+            None
+        } else {
+            row.get(s.col("instructions"))
+        };
+        let output_json: Option<String> = if s.is_skipped("output") {
+            None
+        } else {
+            row.get(s.col("output"))
+        };
+        let tool_calls_json: Option<String> = if s.is_skipped("tool_calls") {
+            None
+        } else {
+            row.get(s.col("tool_calls"))
+        };
+        let metadata_json: Option<String> = if s.is_skipped("metadata") {
+            None
+        } else {
+            row.get(s.col("metadata"))
+        };
+        let created_at: DateTime<Utc> = if s.is_skipped("created_at") {
+            Utc::now()
+        } else {
+            row.get(s.col("created_at"))
+        };
+        let safety_identifier: Option<String> = if s.is_skipped("safety_identifier") {
+            None
+        } else {
+            row.get(s.col("safety_identifier"))
+        };
+        let model: Option<String> = if s.is_skipped("model") {
+            None
+        } else {
+            row.get(s.col("model"))
+        };
+        let raw_response_json: Option<String> = if s.is_skipped("raw_response") {
+            None
+        } else {
+            row.get(s.col("raw_response"))
+        };
 
         let previous_response_id = previous.map(ResponseId);
         let tool_calls = parse_tool_calls(tool_calls_json)?;
@@ -776,39 +987,71 @@ impl ResponseStorage for PostgresResponseStorage {
         let s = &self.store.schema.responses;
         let table = s.qualified_table(self.store.schema.owner.as_deref());
 
-        let col_id = s.col("id");
-        let col_prev = s.col("previous_response_id");
-        let col_input = s.col("input");
-        let col_instructions = s.col("instructions");
-        let col_output = s.col("output");
-        let col_tool_calls = s.col("tool_calls");
-        let col_metadata = s.col("metadata");
-        let col_created_at = s.col("created_at");
-        let col_safety = s.col("safety_identifier");
-        let col_model = s.col("model");
-        let col_conv = s.col("conversation_id");
-        let col_raw = s.col("raw_response");
+        // Build dynamic column/param lists, skipping configured skip_columns
+        let mut col_names: Vec<&str> = vec![s.col("id")];
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![&response_id.0];
 
+        if !s.is_skipped("conversation_id") {
+            col_names.push(s.col("conversation_id"));
+            params.push(&conversation_id);
+        }
+        if !s.is_skipped("previous_response_id") {
+            col_names.push(s.col("previous_response_id"));
+            params.push(&previous_id);
+        }
+        if !s.is_skipped("input") {
+            col_names.push(s.col("input"));
+            params.push(&input);
+        }
+        if !s.is_skipped("instructions") {
+            col_names.push(s.col("instructions"));
+            params.push(&instructions);
+        }
+        if !s.is_skipped("output") {
+            col_names.push(s.col("output"));
+            params.push(&output);
+        }
+        if !s.is_skipped("tool_calls") {
+            col_names.push(s.col("tool_calls"));
+            params.push(&tool_calls_value);
+        }
+        if !s.is_skipped("metadata") {
+            col_names.push(s.col("metadata"));
+            params.push(&metadata_value);
+        }
+        if !s.is_skipped("created_at") {
+            col_names.push(s.col("created_at"));
+            params.push(&created_at);
+        }
+        if !s.is_skipped("safety_identifier") {
+            col_names.push(s.col("safety_identifier"));
+            params.push(&safety_identifier);
+        }
+        if !s.is_skipped("model") {
+            col_names.push(s.col("model"));
+            params.push(&model);
+        }
+        if !s.is_skipped("raw_response") {
+            col_names.push(s.col("raw_response"));
+            params.push(&raw_response);
+        }
+
+        // Append extra columns from hooks or defaults
+        let hook_extra = current_extra_columns().unwrap_or_default();
+        let extra_cols: Vec<(&str, Option<String>)> = resolve_extra_column_values(s, &hook_extra);
+        for (name, val) in &extra_cols {
+            col_names.push(*name);
+            params.push(val);
+        }
+
+        let placeholders: String = (1..=params.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let sql = format!(
-            "INSERT INTO {table} ({col_id}, {col_prev}, {col_input}, {col_instructions}, {col_output}, \
-             {col_tool_calls}, {col_metadata}, {col_created_at}, {col_safety}, {col_model}, {col_conv}, {col_raw}) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
+            "INSERT INTO {table} ({}) VALUES ({placeholders})",
+            col_names.join(", ")
         );
-
-        let params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![
-            &response_id.0,
-            &previous_id,
-            &input,
-            &instructions,
-            &output,
-            &tool_calls_value,
-            &metadata_value,
-            &created_at,
-            &safety_identifier,
-            &model,
-            &conversation_id,
-            &raw_response,
-        ];
 
         let client = self
             .store
@@ -876,8 +1119,19 @@ impl ResponseStorage for PostgresResponseStorage {
         limit: Option<usize>,
     ) -> ResponseResult<Vec<StoredResponse>> {
         let s = &self.store.schema.responses;
+
+        // safety_identifier must exist to filter by it
+        if s.is_skipped("safety_identifier") {
+            return Ok(vec![]);
+        }
+
         let col_safety = s.col("safety_identifier");
-        let col_created = s.col("created_at");
+
+        let order_clause = if s.is_skipped("created_at") {
+            String::new()
+        } else {
+            format!(" ORDER BY {} DESC", s.col("created_at"))
+        };
 
         let client = self
             .store
@@ -888,7 +1142,7 @@ impl ResponseStorage for PostgresResponseStorage {
         let rows = if let Some(l) = limit {
             let l_i64: i64 = l as i64;
             let sql = format!(
-                "{} WHERE {col_safety} = $1 ORDER BY {col_created} DESC LIMIT $2",
+                "{} WHERE {col_safety} = $1{order_clause} LIMIT $2",
                 self.select_base,
             );
             client
@@ -896,10 +1150,7 @@ impl ResponseStorage for PostgresResponseStorage {
                 .await
                 .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?
         } else {
-            let sql = format!(
-                "{} WHERE {col_safety} = $1 ORDER BY {col_created} DESC",
-                self.select_base,
-            );
+            let sql = format!("{} WHERE {col_safety} = $1{order_clause}", self.select_base,);
             client
                 .query(&sql, &[&identifier])
                 .await
@@ -919,6 +1170,12 @@ impl ResponseStorage for PostgresResponseStorage {
 
     async fn delete_identifier_responses(&self, identifier: &str) -> ResponseResult<usize> {
         let s = &self.store.schema.responses;
+
+        // safety_identifier must exist to filter by it
+        if s.is_skipped("safety_identifier") {
+            return Ok(0);
+        }
+
         let table = s.qualified_table(self.store.schema.owner.as_deref());
         let col_safety = s.col("safety_identifier");
 

@@ -4,9 +4,10 @@
 //! When no schema config is provided, all defaults match the current
 //! hardcoded behavior — zero behavioral change.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Types
@@ -41,6 +42,30 @@ pub struct TableConfig {
     /// Fields not listed here use their logical name unchanged.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub columns: HashMap<String, String>,
+
+    /// Extra columns to include in DDL, INSERT, and SELECT statements.
+    /// Populated by hooks at runtime; schema config declares the column
+    /// definitions so backends know the SQL type and default value.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra_columns: HashMap<String, ColumnDef>,
+
+    /// Logical column names to omit from DDL, INSERT, and SELECT.
+    /// Use when the physical schema lacks a standard column
+    /// (e.g. a team's RESPONSES table has no `safety_identifier`).
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub skip_columns: HashSet<String>,
+}
+
+/// Column definition for extra (user-defined) columns declared in schema config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ColumnDef {
+    /// SQL type string, e.g. `"VARCHAR2(256)"` or `"TEXT"`.
+    pub sql_type: String,
+
+    /// Default value used on INSERT when no hook provides a value.
+    /// `None` means NULL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<Value>,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -80,6 +105,13 @@ impl TableConfig {
         self.columns.get(field).map(String::as_str).unwrap_or(field)
     }
 
+    /// Returns `true` if `field` is in the `skip_columns` set.
+    ///
+    /// Skipped columns are omitted from DDL, INSERT, and SELECT statements.
+    pub fn is_skipped(&self, field: &str) -> bool {
+        self.skip_columns.contains(field)
+    }
+
     /// Fully qualified table name, e.g. `ADMIN."MY_TABLE"` with an owner
     /// or just `my_table` without.
     ///
@@ -117,6 +149,18 @@ impl SchemaConfig {
             for val in tc.columns.values_mut() {
                 val.make_ascii_uppercase();
             }
+            // Uppercase extra column keys (the physical column names in Oracle).
+            // We must collect keys first to avoid borrowing conflicts.
+            let keys: Vec<String> = tc.extra_columns.keys().cloned().collect();
+            for key in keys {
+                if let Some(def) = tc.extra_columns.remove(&key) {
+                    tc.extra_columns.insert(key.to_ascii_uppercase(), def);
+                }
+            }
+            // NOTE: skip_columns are NOT uppercased. They are logical field
+            // names used in is_skipped() checks throughout the backends, and
+            // callers always pass lowercase literals (e.g. "safety_identifier").
+            // Uppercasing them would break the case-sensitive HashSet lookup.
         }
     }
 
@@ -152,7 +196,92 @@ impl SchemaConfig {
                 .map_err(|e| format!("{label}.columns value '{physical}': {e}"))?;
         }
 
+        for (name, def) in &tc.extra_columns {
+            validate_identifier(name)
+                .map_err(|e| format!("{label}.extra_columns key '{name}': {e}"))?;
+            if def.sql_type.is_empty() {
+                return Err(format!(
+                    "{label}.extra_columns['{name}']: sql_type must not be empty"
+                ));
+            }
+            validate_sql_type(&def.sql_type)
+                .map_err(|e| format!("{label}.extra_columns['{name}'].sql_type: {e}"))?;
+        }
+
+        // Reject extra_columns that shadow core column names (case-insensitive,
+        // since Oracle normalizes to uppercase)
+        let core = core_columns_for(label);
+        for name in tc.extra_columns.keys() {
+            let upper = name.to_ascii_uppercase();
+            if core.iter().any(|c| c.to_ascii_uppercase() == upper) {
+                return Err(format!(
+                    "{label}.extra_columns: '{name}' shadows a core column name"
+                ));
+            }
+        }
+
+        // Detect case-insensitive collisions between extra_columns keys
+        // (e.g. "tenant_id" and "TENANT_ID" would collide after uppercase_for_oracle)
+        let mut folded: HashSet<String> = HashSet::new();
+        for name in tc.extra_columns.keys() {
+            let upper = name.to_ascii_uppercase();
+            if !folded.insert(upper) {
+                return Err(format!(
+                    "{label}.extra_columns: case-insensitive collision on '{name}' \
+                     (Oracle normalizes identifiers to uppercase)"
+                ));
+            }
+        }
+
+        for name in &tc.skip_columns {
+            validate_identifier(name).map_err(|e| format!("{label}.skip_columns '{name}': {e}"))?;
+            if name == "id" {
+                return Err(format!(
+                    "{label}.skip_columns: cannot skip 'id' — it is the primary key"
+                ));
+            }
+            if !core.contains(&name.as_str()) {
+                return Err(format!(
+                    "{label}.skip_columns: '{name}' is not a recognized column \
+                     (known: {core:?})"
+                ));
+            }
+        }
+
         Ok(())
+    }
+}
+
+/// Core logical column names for each table, used by validation to reject
+/// `extra_columns` that would shadow built-in fields.
+fn core_columns_for(label: &str) -> &'static [&'static str] {
+    match label {
+        "conversations" => &["id", "created_at", "metadata"],
+        "responses" => &[
+            "id",
+            "conversation_id",
+            "previous_response_id",
+            "input",
+            "instructions",
+            "output",
+            "tool_calls",
+            "metadata",
+            "created_at",
+            "safety_identifier",
+            "model",
+            "raw_response",
+        ],
+        "conversation_items" => &[
+            "id",
+            "response_id",
+            "item_type",
+            "role",
+            "content",
+            "status",
+            "created_at",
+        ],
+        "conversation_item_links" => &["conversation_id", "item_id", "added_at"],
+        _ => &[],
     }
 }
 
@@ -173,6 +302,35 @@ fn validate_identifier(name: &str) -> Result<(), String> {
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(format!(
             "invalid identifier '{name}' — only ASCII alphanumeric and underscores allowed"
+        ));
+    }
+    Ok(())
+}
+
+/// Maximum length for a `sql_type` string in a `ColumnDef`.
+const MAX_SQL_TYPE_LEN: usize = 64;
+
+/// Validate a `sql_type` string for use in DDL.
+///
+/// Accepts only characters needed for standard SQL type declarations:
+/// alphanumeric, underscore, space, parentheses, comma, period.
+/// Examples: `VARCHAR(128)`, `TIMESTAMP WITH TIME ZONE`, `NUMBER(10,2)`.
+fn validate_sql_type(sql_type: &str) -> Result<(), String> {
+    if sql_type.trim().is_empty() {
+        return Err("sql_type must not be whitespace-only".to_string());
+    }
+    if sql_type.len() > MAX_SQL_TYPE_LEN {
+        return Err(format!(
+            "sql_type '{sql_type}' exceeds maximum length of {MAX_SQL_TYPE_LEN} characters"
+        ));
+    }
+    if !sql_type
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ' ' | '(' | ')' | ',' | '.'))
+    {
+        return Err(format!(
+            "invalid sql_type '{sql_type}' — only ASCII alphanumeric, underscore, space, \
+             parentheses, comma, and period are allowed"
         ));
     }
     Ok(())
@@ -377,5 +535,280 @@ mod tests {
     fn serde_deserialize_empty_object_uses_defaults() {
         let cfg: SchemaConfig = serde_json::from_str("{}").expect("deserialize empty");
         assert_eq!(cfg, SchemaConfig::default());
+    }
+
+    // ── is_skipped() ─────────────────────────────────────────────────────
+
+    #[test]
+    fn is_skipped_returns_false_by_default() {
+        let tc = TableConfig::with_table("t");
+        assert!(!tc.is_skipped("id"));
+        assert!(!tc.is_skipped("safety_identifier"));
+    }
+
+    #[test]
+    fn is_skipped_returns_true_for_configured_fields() {
+        let mut tc = TableConfig::with_table("t");
+        tc.skip_columns.insert("safety_identifier".to_string());
+        tc.skip_columns.insert("raw_response".to_string());
+        assert!(tc.is_skipped("safety_identifier"));
+        assert!(tc.is_skipped("raw_response"));
+        assert!(!tc.is_skipped("id"));
+    }
+
+    // ── extra_columns ────────────────────────────────────────────────────
+
+    #[test]
+    fn extra_columns_default_is_empty() {
+        let tc = TableConfig::with_table("t");
+        assert!(tc.extra_columns.is_empty());
+    }
+
+    #[test]
+    fn validate_accepts_valid_extra_columns() {
+        let mut cfg = SchemaConfig::default();
+        cfg.conversations.extra_columns.insert(
+            "EXPIRES_AT".to_string(),
+            ColumnDef {
+                sql_type: "TIMESTAMP".to_string(),
+                default_value: None,
+            },
+        );
+        cfg.validate().expect("should be valid");
+    }
+
+    #[test]
+    fn validate_rejects_invalid_extra_column_name() {
+        let mut cfg = SchemaConfig::default();
+        cfg.conversations.extra_columns.insert(
+            "bad;col".to_string(),
+            ColumnDef {
+                sql_type: "TEXT".to_string(),
+                default_value: None,
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("extra_columns key") && err.contains("invalid identifier"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_sql_type() {
+        let mut cfg = SchemaConfig::default();
+        cfg.conversations.extra_columns.insert(
+            "MY_COL".to_string(),
+            ColumnDef {
+                sql_type: String::new(),
+                default_value: None,
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("sql_type must not be empty"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_invalid_skip_column_name() {
+        let mut cfg = SchemaConfig::default();
+        cfg.responses.skip_columns.insert("bad;col".to_string());
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("skip_columns") && err.contains("invalid identifier"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_valid_skip_columns() {
+        let mut cfg = SchemaConfig::default();
+        cfg.responses
+            .skip_columns
+            .insert("safety_identifier".to_string());
+        cfg.validate().expect("should be valid");
+    }
+
+    #[test]
+    fn validate_rejects_skip_id() {
+        let mut cfg = SchemaConfig::default();
+        cfg.responses.skip_columns.insert("id".to_string());
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("cannot skip 'id'") && err.contains("primary key"),
+            "unexpected: {err}"
+        );
+    }
+
+    // ── validate_sql_type ─────────────────────────────────────────────────
+
+    #[test]
+    fn validate_accepts_valid_sql_types() {
+        let mut cfg = SchemaConfig::default();
+        for sql_type in [
+            "VARCHAR(128)",
+            "TEXT",
+            "TIMESTAMP",
+            "TIMESTAMP WITH TIME ZONE",
+            "NUMBER(10,2)",
+            "VARCHAR2(256)",
+            "BIGINT",
+        ] {
+            cfg.conversations.extra_columns.insert(
+                "TEST_COL".to_string(),
+                ColumnDef {
+                    sql_type: sql_type.to_string(),
+                    default_value: None,
+                },
+            );
+            cfg.validate()
+                .unwrap_or_else(|e| panic!("sql_type '{sql_type}' should be valid: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_sql_injection_in_sql_type() {
+        let mut cfg = SchemaConfig::default();
+        cfg.conversations.extra_columns.insert(
+            "MY_COL".to_string(),
+            ColumnDef {
+                sql_type: "TEXT); DROP TABLE responses; --".to_string(),
+                default_value: None,
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("sql_type") && err.contains("invalid"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_overly_long_sql_type() {
+        let mut cfg = SchemaConfig::default();
+        cfg.conversations.extra_columns.insert(
+            "MY_COL".to_string(),
+            ColumnDef {
+                sql_type: "A".repeat(65),
+                default_value: None,
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("sql_type") && err.contains("exceeds maximum length"),
+            "unexpected: {err}"
+        );
+    }
+
+    // ── uppercase_for_oracle with extra_columns ──────────────────────────
+
+    #[test]
+    fn uppercase_for_oracle_converts_extra_column_keys() {
+        let mut cfg = SchemaConfig::default();
+        cfg.conversations.extra_columns.insert(
+            "expires_at".to_string(),
+            ColumnDef {
+                sql_type: "TIMESTAMP".to_string(),
+                default_value: None,
+            },
+        );
+        cfg.uppercase_for_oracle();
+        assert!(cfg.conversations.extra_columns.contains_key("EXPIRES_AT"));
+        assert!(!cfg.conversations.extra_columns.contains_key("expires_at"));
+    }
+
+    #[test]
+    fn uppercase_for_oracle_preserves_skip_column_names_lowercase() {
+        let mut cfg = SchemaConfig::default();
+        cfg.responses
+            .skip_columns
+            .insert("safety_identifier".to_string());
+        cfg.uppercase_for_oracle();
+        // skip_columns must stay lowercase — backends call is_skipped("safety_identifier")
+        assert!(cfg.responses.skip_columns.contains("safety_identifier"));
+        assert!(!cfg.responses.skip_columns.contains("SAFETY_IDENTIFIER"));
+    }
+
+    // ── Serde roundtrip with extra_columns and skip_columns ──────────────
+
+    #[test]
+    fn serde_roundtrip_with_extra_and_skip() {
+        let mut cfg = SchemaConfig::default();
+        cfg.conversations.extra_columns.insert(
+            "EXPIRES_AT".to_string(),
+            ColumnDef {
+                sql_type: "TIMESTAMP".to_string(),
+                default_value: Some(Value::String("2099-01-01".to_string())),
+            },
+        );
+        cfg.responses
+            .skip_columns
+            .insert("safety_identifier".to_string());
+
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let restored: SchemaConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(cfg, restored);
+    }
+
+    #[test]
+    fn validate_rejects_extra_column_shadowing_core_column() {
+        let mut cfg = SchemaConfig::default();
+        cfg.responses.extra_columns.insert(
+            "CREATED_AT".to_string(),
+            ColumnDef {
+                sql_type: "TIMESTAMP".to_string(),
+                default_value: None,
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("shadows a core column"), "unexpected: {err}");
+
+        // Also check a conversation core column
+        let mut cfg2 = SchemaConfig::default();
+        cfg2.conversations.extra_columns.insert(
+            "metadata".to_string(),
+            ColumnDef {
+                sql_type: "TEXT".to_string(),
+                default_value: None,
+            },
+        );
+        let err2 = cfg2.validate().unwrap_err();
+        assert!(err2.contains("shadows a core column"), "unexpected: {err2}");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_skip_column() {
+        let mut cfg = SchemaConfig::default();
+        cfg.responses
+            .skip_columns
+            .insert("safty_identifier".to_string()); // typo
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("not a recognized column"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_case_colliding_extra_columns() {
+        let mut cfg = SchemaConfig::default();
+        cfg.conversations.extra_columns.insert(
+            "tenant_id".to_string(),
+            ColumnDef {
+                sql_type: "TEXT".to_string(),
+                default_value: None,
+            },
+        );
+        cfg.conversations.extra_columns.insert(
+            "TENANT_ID".to_string(),
+            ColumnDef {
+                sql_type: "TEXT".to_string(),
+                default_value: None,
+            },
+        );
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("case-insensitive collision"),
+            "unexpected: {err}"
+        );
     }
 }

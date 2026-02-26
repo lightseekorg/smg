@@ -6,7 +6,7 @@ use smg::*;
 use smg_auth as auth;
 
 // Define the enums with PyO3 bindings
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug)]
 pub enum PolicyType {
     Random,
@@ -19,7 +19,7 @@ pub enum PolicyType {
     PrefixHash,
 }
 
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug)]
 pub enum BackendType {
     Sglang,
@@ -27,7 +27,7 @@ pub enum BackendType {
     Anthropic,
 }
 
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug)]
 pub enum HistoryBackendType {
     Memory,
@@ -37,7 +37,7 @@ pub enum HistoryBackendType {
     Redis,
 }
 
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug, Default)]
 pub enum PyRole {
     Admin,
@@ -54,7 +54,7 @@ impl PyRole {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyApiKeyEntry {
     #[pyo3(get, set)]
@@ -87,7 +87,7 @@ impl PyApiKeyEntry {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyJwtConfig {
     #[pyo3(get, set)]
@@ -146,7 +146,7 @@ impl PyJwtConfig {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PyControlPlaneAuthConfig {
     #[pyo3(get, set)]
@@ -188,7 +188,7 @@ impl PyControlPlaneAuthConfig {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, PartialEq)]
 pub struct PyOracleConfig {
     #[pyo3(get, set)]
@@ -288,7 +288,7 @@ impl PyOracleConfig {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PyRedisConfig {
     #[pyo3(get, set)]
@@ -327,7 +327,7 @@ impl PyRedisConfig {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PyPostgresConfig {
     #[pyo3(get, set)]
@@ -360,7 +360,7 @@ impl PyPostgresConfig {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone, PartialEq)]
 struct Router {
     host: String,
@@ -436,6 +436,7 @@ struct Router {
     reasoning_parser: Option<String>,
     tool_call_parser: Option<String>,
     mcp_config_path: Option<String>,
+    storage_hook_wasm_path: Option<String>,
     backend: BackendType,
     history_backend: HistoryBackendType,
     oracle_config: Option<PyOracleConfig>,
@@ -664,6 +665,7 @@ impl Router {
             .maybe_reasoning_parser(self.reasoning_parser.as_ref())
             .maybe_tool_call_parser(self.tool_call_parser.as_ref())
             .maybe_mcp_config_path(self.mcp_config_path.as_ref())
+            .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
             .dp_aware(self.dp_aware)
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
@@ -757,6 +759,7 @@ impl Router {
         reasoning_parser = None,
         tool_call_parser = None,
         mcp_config_path = None,
+        storage_hook_wasm_path = None,
         backend = BackendType::Sglang,
         history_backend = HistoryBackendType::Memory,
         oracle_config = None,
@@ -849,6 +852,7 @@ impl Router {
         reasoning_parser: Option<String>,
         tool_call_parser: Option<String>,
         mcp_config_path: Option<String>,
+        storage_hook_wasm_path: Option<String>,
         backend: BackendType,
         history_backend: HistoryBackendType,
         oracle_config: Option<PyOracleConfig>,
@@ -951,6 +955,7 @@ impl Router {
             reasoning_parser,
             tool_call_parser,
             mcp_config_path,
+            storage_hook_wasm_path,
             backend,
             history_backend,
             oracle_config,

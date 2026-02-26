@@ -26,10 +26,11 @@ use super::core::{
 };
 use crate::{
     common::{
-        build_response_select_base, parse_json_value, parse_metadata, parse_raw_response,
-        parse_tool_calls,
+        build_response_select_base, extra_column_defs, parse_json_value, parse_metadata,
+        parse_raw_response, parse_tool_calls, resolve_extra_column_values,
     },
     config::OracleConfig,
+    context::current_extra_columns,
     schema::SchemaConfig,
 };
 // ============================================================================
@@ -297,11 +298,14 @@ impl OracleConversationStorage {
             .map_err(map_oracle_error)?;
 
         if exists == 0 {
-            let col_defs = [
-                format!("{} VARCHAR2(64) PRIMARY KEY", s.col("id")),
-                format!("{} TIMESTAMP WITH TIME ZONE", s.col("created_at")),
-                format!("{} CLOB", s.col("metadata")),
-            ];
+            let mut col_defs = vec![format!("{} VARCHAR2(64) PRIMARY KEY", s.col("id"))];
+            if !s.is_skipped("created_at") {
+                col_defs.push(format!("{} TIMESTAMP WITH TIME ZONE", s.col("created_at")));
+            }
+            if !s.is_skipped("metadata") {
+                col_defs.push(format!("{} CLOB", s.col("metadata")));
+            }
+            col_defs.extend(extra_column_defs(s));
 
             conn.execute(
                 &format!("CREATE TABLE {table} ({})", col_defs.join(", ")),
@@ -336,20 +340,35 @@ impl ConversationStorage for OracleConversationStorage {
             .map(serde_json::to_string)
             .transpose()?;
         let schema = self.store.schema.clone();
+        // Capture extra columns before spawn_blocking (task-locals don't propagate)
+        let hook_extra = current_extra_columns().unwrap_or_default();
 
         self.store
             .execute(move |conn| {
                 let s = &schema.conversations;
                 let table = s.qualified_table(schema.owner.as_deref());
-                let col_id = s.col("id");
-                let col_created = s.col("created_at");
-                let col_meta = s.col("metadata");
 
-                let columns = [col_id, col_created, col_meta];
+                let mut columns: Vec<&str> = vec![s.col("id")];
+                let mut params: Vec<&dyn ToSql> = vec![&id_str];
+                if !s.is_skipped("created_at") {
+                    columns.push(s.col("created_at"));
+                    params.push(&created_at);
+                }
+                if !s.is_skipped("metadata") {
+                    columns.push(s.col("metadata"));
+                    params.push(&metadata_json);
+                }
+
+                // Append extra columns from hooks or defaults
+                let extra_cols: Vec<(&str, Option<String>)> =
+                    resolve_extra_column_values(s, &hook_extra);
+                for (name, val) in &extra_cols {
+                    columns.push(*name);
+                    params.push(val);
+                }
+
                 let placeholders: Vec<String> =
-                    (1..=columns.len()).map(|i| format!(":{i}")).collect();
-                let params: Vec<&dyn ToSql> = vec![&id_str, &created_at, &metadata_json];
-
+                    (1..=params.len()).map(|i| format!(":{i}")).collect();
                 let sql = format!(
                     "INSERT INTO {table} ({}) VALUES ({})",
                     columns.join(", "),
@@ -377,22 +396,35 @@ impl ConversationStorage for OracleConversationStorage {
                 let s = &schema.conversations;
                 let table = s.qualified_table(schema.owner.as_deref());
                 let col_id = s.col("id");
-                let col_created = s.col("created_at");
-                let col_meta = s.col("metadata");
+
+                let mut select_cols = vec![col_id.to_string()];
+                if !s.is_skipped("created_at") {
+                    select_cols.push(s.col("created_at").to_string());
+                }
+                if !s.is_skipped("metadata") {
+                    select_cols.push(s.col("metadata").to_string());
+                }
 
                 let sql = format!(
-                    "SELECT {col_id}, {col_created}, {col_meta} FROM {table} WHERE {col_id} = :1"
+                    "SELECT {} FROM {table} WHERE {col_id} = :1",
+                    select_cols.join(", ")
                 );
                 let mut stmt = conn.statement(&sql).build().map_err(map_oracle_error)?;
                 let mut rows = stmt.query(&[&lookup]).map_err(map_oracle_error)?;
 
                 if let Some(row_res) = rows.next() {
                     let row = row_res.map_err(map_oracle_error)?;
-                    let id: String = row.get(col_id).map_err(map_oracle_error)?;
-                    let created_at: DateTime<Utc> =
-                        row.get(col_created).map_err(map_oracle_error)?;
-                    let metadata_raw: Option<String> =
-                        row.get(col_meta).map_err(map_oracle_error)?;
+                    let id: String = row.get(s.col("id")).map_err(map_oracle_error)?;
+                    let created_at: DateTime<Utc> = if s.is_skipped("created_at") {
+                        Utc::now()
+                    } else {
+                        row.get(s.col("created_at")).map_err(map_oracle_error)?
+                    };
+                    let metadata_raw: Option<String> = if s.is_skipped("metadata") {
+                        None
+                    } else {
+                        row.get(s.col("metadata")).map_err(map_oracle_error)?
+                    };
                     let metadata = Self::parse_metadata(metadata_raw).map_err(|e| e.to_string())?;
                     Ok(Some(Conversation::with_parts(
                         ConversationId(id),
@@ -422,9 +454,44 @@ impl ConversationStorage for OracleConversationStorage {
                 let s = &schema.conversations;
                 let table = s.qualified_table(schema.owner.as_deref());
                 let col_id = s.col("id");
-                let col_meta = s.col("metadata");
-                let col_created = s.col("created_at");
 
+                if s.is_skipped("metadata") {
+                    // Nothing to update — just verify the row exists
+                    let sql = format!("SELECT COUNT(*) FROM {table} WHERE {col_id} = :1");
+                    let count: i64 = conn
+                        .query_row_as(&sql, &[&id_str])
+                        .map_err(map_oracle_error)?;
+                    return if count > 0 {
+                        Ok(Some(Conversation::with_parts(
+                            conversation_id,
+                            Utc::now(),
+                            metadata,
+                        )))
+                    } else {
+                        Ok(None)
+                    };
+                }
+
+                let col_meta = s.col("metadata");
+
+                if s.is_skipped("created_at") {
+                    let sql = format!("UPDATE {table} SET {col_meta} = :1 WHERE {col_id} = :2");
+                    let stmt = conn
+                        .execute(&sql, &[&metadata_json, &id_str])
+                        .map_err(map_oracle_error)?;
+                    let rows = stmt.row_count().map_err(map_oracle_error)?;
+                    return if rows == 0 {
+                        Ok(None)
+                    } else {
+                        Ok(Some(Conversation::with_parts(
+                            conversation_id,
+                            Utc::now(),
+                            metadata,
+                        )))
+                    };
+                }
+
+                let col_created = s.col("created_at");
                 let sql = format!(
                     "UPDATE {table} SET {col_meta} = :1 \
                      WHERE {col_id} = :2 \
@@ -517,15 +584,21 @@ impl OracleConversationItemStorage {
             .map_err(map_oracle_error)?;
 
         if exists_items == 0 {
-            let col_defs = [
-                format!("{} VARCHAR2(64) PRIMARY KEY", si.col("id")),
-                format!("{} VARCHAR2(64)", si.col("response_id")),
-                format!("{} VARCHAR2(32) NOT NULL", si.col("item_type")),
-                format!("{} VARCHAR2(32)", si.col("role")),
-                format!("{} CLOB", si.col("content")),
-                format!("{} VARCHAR2(32)", si.col("status")),
-                format!("{} TIMESTAMP WITH TIME ZONE", si.col("created_at")),
+            let mut col_defs = vec![format!("{} VARCHAR2(64) PRIMARY KEY", si.col("id"))];
+            let item_core_cols: [(&str, &str); 6] = [
+                ("response_id", "VARCHAR2(64)"),
+                ("item_type", "VARCHAR2(32) NOT NULL"),
+                ("role", "VARCHAR2(32)"),
+                ("content", "CLOB"),
+                ("status", "VARCHAR2(32)"),
+                ("created_at", "TIMESTAMP WITH TIME ZONE"),
             ];
+            for (logical, sql_type) in &item_core_cols {
+                if !si.is_skipped(logical) {
+                    col_defs.push(format!("{} {sql_type}", si.col(logical)));
+                }
+            }
+            col_defs.extend(extra_column_defs(si));
 
             conn.execute(
                 &format!("CREATE TABLE {si_table} ({})", col_defs.join(", ")),
@@ -555,12 +628,15 @@ impl OracleConversationItemStorage {
             let pk_name = format!("PK_{}", sl.table);
             let idx_name = format!("{}_CONV_IDX", sl.table);
 
-            let col_defs = [
+            let mut col_defs = vec![
                 format!("{col_cid} VARCHAR2(64) NOT NULL"),
                 format!("{col_iid} VARCHAR2(64) NOT NULL"),
                 format!("{col_added} TIMESTAMP WITH TIME ZONE"),
-                format!("CONSTRAINT {pk_name} PRIMARY KEY ({col_cid}, {col_iid})"),
             ];
+            col_defs.extend(extra_column_defs(sl));
+            col_defs.push(format!(
+                "CONSTRAINT {pk_name} PRIMARY KEY ({col_cid}, {col_iid})"
+            ));
 
             conn.execute(
                 &format!("CREATE TABLE {sl_table} ({})", col_defs.join(", ")),
@@ -603,40 +679,50 @@ impl ConversationItemStorage for OracleConversationItemStorage {
         let cl_role = role.clone();
         let cl_status = status.clone();
         let schema = self.store.schema.clone();
+        let hook_extra = current_extra_columns().unwrap_or_default();
 
         self.store
             .execute(move |conn| {
                 let si = &schema.conversation_items;
                 let table = si.qualified_table(schema.owner.as_deref());
-                let col_id = si.col("id");
-                let col_resp = si.col("response_id");
-                let col_type = si.col("item_type");
-                let col_role = si.col("role");
-                let col_content = si.col("content");
-                let col_status = si.col("status");
-                let col_created = si.col("created_at");
 
-                let columns = [
-                    col_id,
-                    col_resp,
-                    col_type,
-                    col_role,
-                    col_content,
-                    col_status,
-                    col_created,
-                ];
+                let mut columns: Vec<&str> = vec![si.col("id")];
+                let mut params: Vec<&dyn ToSql> = vec![&id_str];
+                if !si.is_skipped("response_id") {
+                    columns.push(si.col("response_id"));
+                    params.push(&cl_response_id);
+                }
+                if !si.is_skipped("item_type") {
+                    columns.push(si.col("item_type"));
+                    params.push(&cl_item_type);
+                }
+                if !si.is_skipped("role") {
+                    columns.push(si.col("role"));
+                    params.push(&cl_role);
+                }
+                if !si.is_skipped("content") {
+                    columns.push(si.col("content"));
+                    params.push(&content_json);
+                }
+                if !si.is_skipped("status") {
+                    columns.push(si.col("status"));
+                    params.push(&cl_status);
+                }
+                if !si.is_skipped("created_at") {
+                    columns.push(si.col("created_at"));
+                    params.push(&created_at);
+                }
+
+                // Append extra columns from hooks or defaults
+                let extra_cols: Vec<(&str, Option<String>)> =
+                    resolve_extra_column_values(si, &hook_extra);
+                for (name, val) in &extra_cols {
+                    columns.push(*name);
+                    params.push(val);
+                }
+
                 let placeholders: Vec<String> =
-                    (1..=columns.len()).map(|i| format!(":{i}")).collect();
-                let params: Vec<&dyn ToSql> = vec![
-                    &id_str,
-                    &cl_response_id,
-                    &cl_item_type,
-                    &cl_role,
-                    &content_json,
-                    &cl_status,
-                    &created_at,
-                ];
-
+                    (1..=params.len()).map(|i| format!(":{i}")).collect();
                 let sql = format!(
                     "INSERT INTO {table} ({}) VALUES ({})",
                     columns.join(", "),
@@ -668,20 +754,35 @@ impl ConversationItemStorage for OracleConversationItemStorage {
         let cid = conversation_id.0.clone();
         let iid = item_id.0.clone();
         let schema = self.store.schema.clone();
+        let hook_extra = current_extra_columns().unwrap_or_default();
 
         self.store
             .execute(move |conn| {
                 let sl = &schema.conversation_item_links;
                 let table = sl.qualified_table(schema.owner.as_deref());
-                let col_cid = sl.col("conversation_id");
-                let col_iid = sl.col("item_id");
-                let col_added = sl.col("added_at");
 
+                let mut columns: Vec<&str> = vec![
+                    sl.col("conversation_id"),
+                    sl.col("item_id"),
+                    sl.col("added_at"),
+                ];
+                let mut params: Vec<&dyn ToSql> = vec![&cid, &iid, &added_at];
+
+                let extra_cols: Vec<(&str, Option<String>)> =
+                    resolve_extra_column_values(sl, &hook_extra);
+                for (name, val) in &extra_cols {
+                    columns.push(*name);
+                    params.push(val);
+                }
+
+                let placeholders: Vec<String> =
+                    (1..=params.len()).map(|i| format!(":{i}")).collect();
                 let sql = format!(
-                    "INSERT INTO {table} ({col_cid}, {col_iid}, {col_added}) VALUES (:1, :2, :3)"
+                    "INSERT INTO {table} ({}) VALUES ({})",
+                    columns.join(", "),
+                    placeholders.join(", ")
                 );
-                conn.execute(&sql, &[&cid, &iid, &added_at])
-                    .map_err(map_oracle_error)?;
+                conn.execute(&sql, &params[..]).map_err(map_oracle_error)?;
                 Ok(())
             })
             .await
@@ -745,22 +846,30 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                     let si_table = si.qualified_table(schema.owner.as_deref());
                     let sl_table = sl.qualified_table(schema.owner.as_deref());
                     let si_col_id = si.col("id");
-                    let si_col_resp = si.col("response_id");
-                    let si_col_type = si.col("item_type");
-                    let si_col_role = si.col("role");
-                    let si_col_content = si.col("content");
-                    let si_col_status = si.col("status");
-                    let si_col_created = si.col("created_at");
                     let sl_col_cid = sl.col("conversation_id");
                     let sl_col_iid = sl.col("item_id");
                     let sl_col_added = sl.col("added_at");
 
+                    // Build SELECT column list dynamically, respecting skip_columns
+                    let mut select_cols = vec![format!("i.{si_col_id}")];
+                    for field in &[
+                        "response_id",
+                        "item_type",
+                        "role",
+                        "content",
+                        "status",
+                        "created_at",
+                    ] {
+                        if !si.is_skipped(field) {
+                            select_cols.push(format!("i.{}", si.col(field)));
+                        }
+                    }
+
                     let mut sql = format!(
-                        "SELECT i.{si_col_id}, i.{si_col_resp}, i.{si_col_type}, \
-                         i.{si_col_role}, i.{si_col_content}, i.{si_col_status}, i.{si_col_created} \
-                         FROM {sl_table} l \
+                        "SELECT {} FROM {sl_table} l \
                          JOIN {si_table} i ON i.{si_col_id} = l.{sl_col_iid} \
-                         WHERE l.{sl_col_cid} = :cid"
+                         WHERE l.{sl_col_cid} = :cid",
+                        select_cols.join(", "),
                     );
 
                     if let Some((_ts, _iid)) = &after_key {
@@ -795,29 +904,58 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                     }
                     params_vec.push(("limit", &limit));
 
-                    let rows_iter =
-                        conn.query_named(&sql, &params_vec).map_err(map_oracle_error)?;
+                    let rows_iter = conn
+                        .query_named(&sql, &params_vec)
+                        .map_err(map_oracle_error)?;
 
                     let mut items = Vec::new();
                     for row_res in rows_iter {
                         let row = row_res.map_err(map_oracle_error)?;
-                        let content_raw: Option<String> =
-                            row.get(si_col_content).map_err(map_oracle_error)?;
-                        let content: Value = match content_raw {
-                            Some(s) => serde_json::from_str(&s).map_err(|e| e.to_string())?,
-                            None => Value::Null,
+                        let id: String = row.get(si_col_id).map_err(map_oracle_error)?;
+                        let response_id: Option<String> = if si.is_skipped("response_id") {
+                            None
+                        } else {
+                            row.get(si.col("response_id")).map_err(map_oracle_error)?
+                        };
+                        let item_type: String = if si.is_skipped("item_type") {
+                            String::new()
+                        } else {
+                            row.get(si.col("item_type")).map_err(map_oracle_error)?
+                        };
+                        let role: Option<String> = if si.is_skipped("role") {
+                            None
+                        } else {
+                            row.get(si.col("role")).map_err(map_oracle_error)?
+                        };
+                        let content: Value = if si.is_skipped("content") {
+                            Value::Null
+                        } else {
+                            let raw: Option<String> =
+                                row.get(si.col("content")).map_err(map_oracle_error)?;
+                            match raw {
+                                Some(s) => serde_json::from_str(&s).map_err(|e| e.to_string())?,
+                                None => Value::Null,
+                            }
+                        };
+                        let status: Option<String> = if si.is_skipped("status") {
+                            None
+                        } else {
+                            row.get(si.col("status")).map_err(map_oracle_error)?
+                        };
+                        let created_at: DateTime<Utc> = if si.is_skipped("created_at") {
+                            Utc::now()
+                        } else {
+                            row.get(si.col("created_at")).map_err(map_oracle_error)?
                         };
 
                         items.push(ConversationItem {
-                            id: ConversationItemId(
-                                row.get(si_col_id).map_err(map_oracle_error)?,
-                            ),
-                            response_id: row.get(si_col_resp).map_err(map_oracle_error)?,
-                            item_type: row.get(si_col_type).map_err(map_oracle_error)?,
-                            role: row.get(si_col_role).map_err(map_oracle_error)?,
+                            id: ConversationItemId(id),
+                            response_id,
+                            item_type,
+                            role,
                             content,
-                            status: row.get(si_col_status).map_err(map_oracle_error)?,
-                            created_at: row.get(si_col_created).map_err(map_oracle_error)?,
+                            status,
+                            created_at,
                         });
                     }
                     Ok(items)
@@ -839,17 +977,24 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                 let si = &schema.conversation_items;
                 let table = si.qualified_table(schema.owner.as_deref());
                 let col_id = si.col("id");
-                let col_resp = si.col("response_id");
-                let col_type = si.col("item_type");
-                let col_role = si.col("role");
-                let col_content = si.col("content");
-                let col_status = si.col("status");
-                let col_created = si.col("created_at");
+
+                let mut select_cols = vec![col_id.to_string()];
+                for field in &[
+                    "response_id",
+                    "item_type",
+                    "role",
+                    "content",
+                    "status",
+                    "created_at",
+                ] {
+                    if !si.is_skipped(field) {
+                        select_cols.push(si.col(field).to_string());
+                    }
+                }
 
                 let sql = format!(
-                    "SELECT {col_id}, {col_resp}, {col_type}, {col_role}, \
-                     {col_content}, {col_status}, {col_created} \
-                     FROM {table} WHERE {col_id} = :1"
+                    "SELECT {} FROM {table} WHERE {col_id} = :1",
+                    select_cols.join(", "),
                 );
                 let mut stmt = conn.statement(&sql).build().map_err(map_oracle_error)?;
                 let mut rows = stmt.query(&[&iid]).map_err(map_oracle_error)?;
@@ -857,19 +1002,40 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                 if let Some(row_res) = rows.next() {
                     let row = row_res.map_err(map_oracle_error)?;
                     let id: String = row.get(col_id).map_err(map_oracle_error)?;
-                    let response_id: Option<String> =
-                        row.get(col_resp).map_err(map_oracle_error)?;
-                    let item_type: String = row.get(col_type).map_err(map_oracle_error)?;
-                    let role: Option<String> = row.get(col_role).map_err(map_oracle_error)?;
-                    let content_raw: Option<String> =
-                        row.get(col_content).map_err(map_oracle_error)?;
-                    let status: Option<String> = row.get(col_status).map_err(map_oracle_error)?;
-                    let created_at: DateTime<Utc> =
-                        row.get(col_created).map_err(map_oracle_error)?;
-
-                    let content = match content_raw {
-                        Some(s) => serde_json::from_str(&s).map_err(|e| e.to_string())?,
-                        None => Value::Null,
+                    let response_id: Option<String> = if si.is_skipped("response_id") {
+                        None
+                    } else {
+                        row.get(si.col("response_id")).map_err(map_oracle_error)?
+                    };
+                    let item_type: String = if si.is_skipped("item_type") {
+                        String::new()
+                    } else {
+                        row.get(si.col("item_type")).map_err(map_oracle_error)?
+                    };
+                    let role: Option<String> = if si.is_skipped("role") {
+                        None
+                    } else {
+                        row.get(si.col("role")).map_err(map_oracle_error)?
+                    };
+                    let content: Value = if si.is_skipped("content") {
+                        Value::Null
+                    } else {
+                        let raw: Option<String> =
+                            row.get(si.col("content")).map_err(map_oracle_error)?;
+                        match raw {
+                            Some(s) => serde_json::from_str(&s).map_err(|e| e.to_string())?,
+                            None => Value::Null,
+                        }
+                    };
+                    let status: Option<String> = if si.is_skipped("status") {
+                        None
+                    } else {
+                        row.get(si.col("status")).map_err(map_oracle_error)?
+                    };
+                    let created_at: DateTime<Utc> = if si.is_skipped("created_at") {
+                        Utc::now()
+                    } else {
+                        row.get(si.col("created_at")).map_err(map_oracle_error)?
                     };
 
                     Ok(Some(ConversationItem {
@@ -976,20 +1142,26 @@ impl OracleResponseStorage {
             .map_err(map_oracle_error)?;
 
         if exists == 0 {
-            let col_defs = vec![
-                format!("{} VARCHAR2(64) PRIMARY KEY", s.col("id")),
-                format!("{} VARCHAR2(64)", s.col("conversation_id")),
-                format!("{} VARCHAR2(64)", s.col("previous_response_id")),
-                format!("{} CLOB", s.col("input")),
-                format!("{} CLOB", s.col("instructions")),
-                format!("{} CLOB", s.col("output")),
-                format!("{} CLOB", s.col("tool_calls")),
-                format!("{} CLOB", s.col("metadata")),
-                format!("{} TIMESTAMP WITH TIME ZONE", s.col("created_at")),
-                format!("{} VARCHAR2(128)", s.col("safety_identifier")),
-                format!("{} VARCHAR2(128)", s.col("model")),
-                format!("{} CLOB", s.col("raw_response")),
+            let mut col_defs = vec![format!("{} VARCHAR2(64) PRIMARY KEY", s.col("id"))];
+            let core_cols: [(&str, &str); 11] = [
+                ("conversation_id", "VARCHAR2(64)"),
+                ("previous_response_id", "VARCHAR2(64)"),
+                ("input", "CLOB"),
+                ("instructions", "CLOB"),
+                ("output", "CLOB"),
+                ("tool_calls", "CLOB"),
+                ("metadata", "CLOB"),
+                ("created_at", "TIMESTAMP WITH TIME ZONE"),
+                ("safety_identifier", "VARCHAR2(128)"),
+                ("model", "VARCHAR2(128)"),
+                ("raw_response", "CLOB"),
             ];
+            for (logical, sql_type) in &core_cols {
+                if !s.is_skipped(logical) {
+                    col_defs.push(format!("{} {sql_type}", s.col(logical)));
+                }
+            }
+            col_defs.extend(extra_column_defs(s));
 
             conn.execute(
                 &format!("CREATE TABLE {table} ({})", col_defs.join(", ")),
@@ -997,27 +1169,33 @@ impl OracleResponseStorage {
             )
             .map_err(map_oracle_error)?;
         } else {
-            Self::alter_safety_identifier_column(conn, schema)?;
+            if !s.is_skipped("safety_identifier") {
+                Self::alter_safety_identifier_column(conn, schema)?;
+            }
             Self::remove_user_id_column_if_exists(conn, schema)?;
         }
 
-        let prev = s.col("previous_response_id");
-        let prev_idx = format!("{}_PREV_IDX", s.table);
-        create_index_if_missing(
-            conn,
-            &s.table,
-            &prev_idx,
-            &format!("CREATE INDEX {prev_idx} ON {table}({prev})"),
-        )?;
+        if !s.is_skipped("previous_response_id") {
+            let prev = s.col("previous_response_id");
+            let prev_idx = format!("{}_PREV_IDX", s.table);
+            create_index_if_missing(
+                conn,
+                &s.table,
+                &prev_idx,
+                &format!("CREATE INDEX {prev_idx} ON {table}({prev})"),
+            )?;
+        }
 
-        let safety = s.col("safety_identifier");
-        let user_idx = format!("{}_USER_IDX", s.table);
-        create_index_if_missing(
-            conn,
-            &s.table,
-            &user_idx,
-            &format!("CREATE INDEX {user_idx} ON {table}({safety})"),
-        )?;
+        if !s.is_skipped("safety_identifier") {
+            let safety = s.col("safety_identifier");
+            let user_idx = format!("{}_USER_IDX", s.table);
+            create_index_if_missing(
+                conn,
+                &s.table,
+                &user_idx,
+                &format!("CREATE INDEX {user_idx} ON {table}({safety})"),
+            )?;
+        }
 
         Ok(())
     }
@@ -1114,27 +1292,65 @@ impl OracleResponseStorage {
         let col_created = s.col("created_at");
 
         let id: String = row.get(col_id).map_err(map_oracle_error)?;
-        let created_at: DateTime<Utc> = row.get(col_created).map_err(map_oracle_error)?;
+        let created_at: DateTime<Utc> = if s.is_skipped("created_at") {
+            Utc::now()
+        } else {
+            row.get(col_created).map_err(map_oracle_error)?
+        };
 
-        let previous: Option<String> = row
-            .get(s.col("previous_response_id"))
-            .map_err(map_oracle_error)?;
-        let input_json: Option<String> = row.get(s.col("input")).map_err(map_oracle_error)?;
-        let instructions: Option<String> =
-            row.get(s.col("instructions")).map_err(map_oracle_error)?;
-        let output_json: Option<String> = row.get(s.col("output")).map_err(map_oracle_error)?;
-        let tool_calls_json: Option<String> =
-            row.get(s.col("tool_calls")).map_err(map_oracle_error)?;
-        let metadata_json: Option<String> = row.get(s.col("metadata")).map_err(map_oracle_error)?;
-        let safety_identifier: Option<String> = row
-            .get(s.col("safety_identifier"))
-            .map_err(map_oracle_error)?;
-        let model: Option<String> = row.get(s.col("model")).map_err(map_oracle_error)?;
-        let conversation_id: Option<String> = row
-            .get(s.col("conversation_id"))
-            .map_err(map_oracle_error)?;
-        let raw_response_json: Option<String> =
-            row.get(s.col("raw_response")).map_err(map_oracle_error)?;
+        let previous: Option<String> = if s.is_skipped("previous_response_id") {
+            None
+        } else {
+            row.get(s.col("previous_response_id"))
+                .map_err(map_oracle_error)?
+        };
+        let input_json: Option<String> = if s.is_skipped("input") {
+            None
+        } else {
+            row.get(s.col("input")).map_err(map_oracle_error)?
+        };
+        let instructions: Option<String> = if s.is_skipped("instructions") {
+            None
+        } else {
+            row.get(s.col("instructions")).map_err(map_oracle_error)?
+        };
+        let output_json: Option<String> = if s.is_skipped("output") {
+            None
+        } else {
+            row.get(s.col("output")).map_err(map_oracle_error)?
+        };
+        let tool_calls_json: Option<String> = if s.is_skipped("tool_calls") {
+            None
+        } else {
+            row.get(s.col("tool_calls")).map_err(map_oracle_error)?
+        };
+        let metadata_json: Option<String> = if s.is_skipped("metadata") {
+            None
+        } else {
+            row.get(s.col("metadata")).map_err(map_oracle_error)?
+        };
+        let safety_identifier: Option<String> = if s.is_skipped("safety_identifier") {
+            None
+        } else {
+            row.get(s.col("safety_identifier"))
+                .map_err(map_oracle_error)?
+        };
+        let model: Option<String> = if s.is_skipped("model") {
+            None
+        } else {
+            row.get(s.col("model")).map_err(map_oracle_error)?
+        };
+        let conversation_id: Option<String> = if s.is_skipped("conversation_id") {
+            None
+        } else {
+            row.get(s.col("conversation_id"))
+                .map_err(map_oracle_error)?
+        };
+        let raw_response_json: Option<String> = if s.is_skipped("raw_response") {
+            None
+        } else {
+            row.get(s.col("raw_response")).map_err(map_oracle_error)?
+        };
 
         let previous_response_id = previous.map(ResponseId);
         let tool_calls = parse_tool_calls(tool_calls_json)?;
@@ -1191,13 +1407,15 @@ impl ResponseStorage for OracleResponseStorage {
         let json_metadata = serde_json::to_string(&metadata)?;
         let json_raw_response = serde_json::to_string(&raw_response)?;
         let schema = self.store.schema.clone();
+        // Capture extra columns before spawn_blocking (task-locals don't propagate)
+        let hook_extra = current_extra_columns().unwrap_or_default();
 
         self.store
             .execute(move |conn| {
                 let s = &schema.responses;
                 let table = s.qualified_table(schema.owner.as_deref());
 
-                // Build column list and placeholders dynamically
+                // Build column list and params dynamically, respecting skip_columns
                 let logical_fields: &[(&str, &dyn ToSql)] = &[
                     ("id", &response_id_str),
                     ("previous_response_id", &previous_id),
@@ -1216,7 +1434,19 @@ impl ResponseStorage for OracleResponseStorage {
                 let mut columns = Vec::new();
                 let mut params: Vec<&dyn ToSql> = Vec::new();
                 for &(logical, val) in logical_fields {
+                    // Always include id (primary key), skip others if configured
+                    if logical != "id" && s.is_skipped(logical) {
+                        continue;
+                    }
                     columns.push(s.col(logical));
+                    params.push(val);
+                }
+
+                // Append extra columns from hooks or defaults
+                let extra_cols: Vec<(&str, Option<String>)> =
+                    resolve_extra_column_values(s, &hook_extra);
+                for (name, val) in &extra_cols {
+                    columns.push(*name);
                     params.push(val);
                 }
 
@@ -1293,16 +1523,34 @@ impl ResponseStorage for OracleResponseStorage {
         self.store
             .execute(move |conn| {
                 let s = &schema.responses;
-                let col_safety = s.col("safety_identifier");
-                let col_created = s.col("created_at");
 
-                let sql = if let Some(limit) = limit {
-                    format!(
-                        "SELECT * FROM ({select_base} WHERE {col_safety} = :1 \
-                         ORDER BY {col_created} DESC) WHERE ROWNUM <= {limit}"
-                    )
+                // If safety_identifier is skipped, we cannot filter by identifier
+                if s.is_skipped("safety_identifier") {
+                    return Ok(Vec::new());
+                }
+
+                let col_safety = s.col("safety_identifier");
+
+                let sql = if s.is_skipped("created_at") {
+                    // No created_at column — omit ORDER BY
+                    if let Some(limit) = limit {
+                        format!(
+                            "SELECT * FROM ({select_base} WHERE {col_safety} = :1) \
+                             WHERE ROWNUM <= {limit}"
+                        )
+                    } else {
+                        format!("{select_base} WHERE {col_safety} = :1")
+                    }
                 } else {
-                    format!("{select_base} WHERE {col_safety} = :1 ORDER BY {col_created} DESC")
+                    let col_created = s.col("created_at");
+                    if let Some(limit) = limit {
+                        format!(
+                            "SELECT * FROM ({select_base} WHERE {col_safety} = :1 \
+                             ORDER BY {col_created} DESC) WHERE ROWNUM <= {limit}"
+                        )
+                    } else {
+                        format!("{select_base} WHERE {col_safety} = :1 ORDER BY {col_created} DESC")
+                    }
                 };
 
                 let mut stmt = conn.statement(&sql).build().map_err(map_oracle_error)?;
@@ -1326,6 +1574,11 @@ impl ResponseStorage for OracleResponseStorage {
     ) -> Result<usize, ResponseStorageError> {
         let identifier = identifier.to_string();
         let schema = self.store.schema.clone();
+
+        let schema_check = self.store.schema.clone();
+        if schema_check.responses.is_skipped("safety_identifier") {
+            return Ok(0);
+        }
 
         let affected = self
             .store

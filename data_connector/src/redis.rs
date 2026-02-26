@@ -6,7 +6,7 @@
 //! 3. RedisConversationItemStorage
 //! 4. RedisResponseStorage
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -15,8 +15,12 @@ use redis::AsyncCommands;
 use serde_json::Value;
 
 use crate::{
-    common::{parse_json_value, parse_metadata, parse_raw_response, parse_tool_calls},
+    common::{
+        parse_json_value, parse_metadata, parse_raw_response, parse_tool_calls,
+        resolve_extra_column_values,
+    },
     config::RedisConfig,
+    context::current_extra_columns,
     core::{
         make_item_id, Conversation, ConversationId, ConversationItem, ConversationItemId,
         ConversationItemResult, ConversationItemStorage, ConversationItemStorageError,
@@ -113,9 +117,21 @@ impl ConversationStorage for RedisConversationStorage {
 
         let mut pipe = redis::pipe();
         pipe.hset(&key, s.col("id"), id_str);
-        pipe.hset(&key, s.col("created_at"), created_at.to_rfc3339());
-        if let Some(meta) = metadata_json {
-            pipe.hset(&key, s.col("metadata"), meta);
+        if !s.is_skipped("created_at") {
+            pipe.hset(&key, s.col("created_at"), created_at.to_rfc3339());
+        }
+        if !s.is_skipped("metadata") {
+            if let Some(meta) = metadata_json {
+                pipe.hset(&key, s.col("metadata"), meta);
+            }
+        }
+
+        // Append extra columns from hooks or defaults
+        let hook_extra = current_extra_columns().unwrap_or_default();
+        for (name, val) in resolve_extra_column_values(s, &hook_extra) {
+            if let Some(v) = val {
+                pipe.hset(&key, name, v);
+            }
         }
 
         if let Some(days) = self.store.retention_days {
@@ -134,8 +150,6 @@ impl ConversationStorage for RedisConversationStorage {
         id: &ConversationId,
     ) -> Result<Option<Conversation>, ConversationStorageError> {
         let s = &self.store.schema.conversations;
-        let col_created = s.col("created_at");
-        let col_meta = s.col("metadata");
 
         let id_str = id.0.as_str();
         let key = self.conversation_key(id_str);
@@ -154,18 +168,27 @@ impl ConversationStorage for RedisConversationStorage {
             return Ok(None);
         }
 
-        let (created_at_str, metadata_json): (String, Option<String>) = redis::pipe()
-            .hget(&key, col_created)
-            .hget(&key, col_meta)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+        let created_at = if s.is_skipped("created_at") {
+            Utc::now()
+        } else {
+            let created_at_str: String = conn
+                .hget(&key, s.col("created_at"))
+                .await
+                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            DateTime::parse_from_rfc3339(&created_at_str)
+                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?
+                .with_timezone(&Utc)
+        };
 
-        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?
-            .with_timezone(&Utc);
-
-        let metadata = Self::parse_metadata(metadata_json)?;
+        let metadata = if s.is_skipped("metadata") {
+            None
+        } else {
+            let metadata_json: Option<String> = conn
+                .hget(&key, s.col("metadata"))
+                .await
+                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            Self::parse_metadata(metadata_json)?
+        };
 
         Ok(Some(Conversation::with_parts(
             id.clone(),
@@ -180,8 +203,6 @@ impl ConversationStorage for RedisConversationStorage {
         metadata: Option<ConversationMetadata>,
     ) -> Result<Option<Conversation>, ConversationStorageError> {
         let s = &self.store.schema.conversations;
-        let col_meta = s.col("metadata");
-        let col_created = s.col("created_at");
 
         let id_str = id.0.as_str();
         let key = self.conversation_key(id_str);
@@ -200,25 +221,33 @@ impl ConversationStorage for RedisConversationStorage {
             return Ok(None);
         }
 
-        let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
+        if !s.is_skipped("metadata") {
+            let col_meta = s.col("metadata");
+            let metadata_json = metadata.as_ref().map(serde_json::to_string).transpose()?;
 
-        if let Some(meta) = metadata_json {
-            conn.hset::<_, _, _, ()>(&key, col_meta, meta)
-                .await
-                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
-        } else {
-            conn.hdel::<_, _, ()>(&key, col_meta)
-                .await
-                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            if let Some(meta) = metadata_json {
+                conn.hset::<_, _, _, ()>(&key, col_meta, meta)
+                    .await
+                    .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            } else {
+                conn.hdel::<_, _, ()>(&key, col_meta)
+                    .await
+                    .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            }
         }
 
-        let created_at_str: String = conn
-            .hget(&key, col_created)
-            .await
-            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
-        let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-            .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?
-            .with_timezone(&Utc);
+        let created_at = if s.is_skipped("created_at") {
+            Utc::now()
+        } else {
+            let col_created = s.col("created_at");
+            let created_at_str: String = conn
+                .hget(&key, col_created)
+                .await
+                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?;
+            DateTime::parse_from_rfc3339(&created_at_str)
+                .map_err(|e| ConversationStorageError::StorageError(e.to_string()))?
+                .with_timezone(&Utc)
+        };
 
         Ok(Some(Conversation::with_parts(
             id.clone(),
@@ -275,9 +304,10 @@ impl RedisConversationItemStorage {
 
     /// Parse a Redis hash map into a `ConversationItem`, returning errors for
     /// corrupted data instead of silently substituting defaults.
+    /// Fields listed in `skip_columns` use defaults since they were not stored.
     fn build_item_from_map(
         &self,
-        map: &std::collections::HashMap<String, String>,
+        map: &HashMap<String, String>,
         fallback_id: &str,
     ) -> Result<ConversationItem, ConversationItemStorageError> {
         let si = &self.store.schema.conversation_items;
@@ -289,42 +319,65 @@ impl RedisConversationItemStorage {
                 .unwrap_or_else(|| fallback_id.to_string()),
         );
 
-        let response_id = map.get(si.col("response_id")).cloned();
-
-        let col_item_type = si.col("item_type");
-        let item_type = map
-            .get(col_item_type)
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .ok_or_else(|| {
-                ConversationItemStorageError::StorageError(format!(
-                    "item {fallback_id} missing {col_item_type}"
-                ))
-            })?;
-
-        let role = map.get(si.col("role")).cloned();
-        let status = map.get(si.col("status")).cloned();
-
-        let content = match map.get(si.col("content")) {
-            Some(s) => {
-                serde_json::from_str(s).map_err(ConversationItemStorageError::SerializationError)?
-            }
-            None => Value::Null,
+        let response_id = if si.is_skipped("response_id") {
+            None
+        } else {
+            map.get(si.col("response_id")).cloned()
         };
 
-        let col_created = si.col("created_at");
-        let created_at_str = map.get(col_created).ok_or_else(|| {
-            ConversationItemStorageError::StorageError(format!(
-                "item {fallback_id} missing {col_created}"
-            ))
-        })?;
-        let created_at = DateTime::parse_from_rfc3339(created_at_str)
-            .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|e| {
+        let item_type = if si.is_skipped("item_type") {
+            "message".to_string()
+        } else {
+            let col_item_type = si.col("item_type");
+            map.get(col_item_type)
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .ok_or_else(|| {
+                    ConversationItemStorageError::StorageError(format!(
+                        "item {fallback_id} missing {col_item_type}"
+                    ))
+                })?
+        };
+
+        let role = if si.is_skipped("role") {
+            None
+        } else {
+            map.get(si.col("role")).cloned()
+        };
+
+        let status = if si.is_skipped("status") {
+            None
+        } else {
+            map.get(si.col("status")).cloned()
+        };
+
+        let content = if si.is_skipped("content") {
+            Value::Null
+        } else {
+            match map.get(si.col("content")) {
+                Some(s) => serde_json::from_str(s)
+                    .map_err(ConversationItemStorageError::SerializationError)?,
+                None => Value::Null,
+            }
+        };
+
+        let created_at = if si.is_skipped("created_at") {
+            Utc::now()
+        } else {
+            let col_created = si.col("created_at");
+            let created_at_str = map.get(col_created).ok_or_else(|| {
                 ConversationItemStorageError::StorageError(format!(
-                    "item {fallback_id} invalid {col_created}: {e}"
+                    "item {fallback_id} missing {col_created}"
                 ))
             })?;
+            DateTime::parse_from_rfc3339(created_at_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|e| {
+                    ConversationItemStorageError::StorageError(format!(
+                        "item {fallback_id} invalid {col_created}: {e}"
+                    ))
+                })?
+        };
 
         Ok(ConversationItem {
             id,
@@ -380,18 +433,38 @@ impl ConversationItemStorage for RedisConversationItemStorage {
         let mut pipe = redis::pipe();
 
         pipe.hset(&key, si.col("id"), id_str);
-        if let Some(rid) = &conversation_item.response_id {
-            pipe.hset(&key, si.col("response_id"), rid);
+        if !si.is_skipped("response_id") {
+            if let Some(rid) = &conversation_item.response_id {
+                pipe.hset(&key, si.col("response_id"), rid);
+            }
         }
-        pipe.hset(&key, si.col("item_type"), &conversation_item.item_type);
-        if let Some(r) = &conversation_item.role {
-            pipe.hset(&key, si.col("role"), r);
+        if !si.is_skipped("item_type") {
+            pipe.hset(&key, si.col("item_type"), &conversation_item.item_type);
         }
-        pipe.hset(&key, si.col("content"), &content_json);
-        if let Some(s) = &conversation_item.status {
-            pipe.hset(&key, si.col("status"), s);
+        if !si.is_skipped("role") {
+            if let Some(r) = &conversation_item.role {
+                pipe.hset(&key, si.col("role"), r);
+            }
         }
-        pipe.hset(&key, si.col("created_at"), created_at.to_rfc3339());
+        if !si.is_skipped("content") {
+            pipe.hset(&key, si.col("content"), &content_json);
+        }
+        if !si.is_skipped("status") {
+            if let Some(s) = &conversation_item.status {
+                pipe.hset(&key, si.col("status"), s);
+            }
+        }
+        if !si.is_skipped("created_at") {
+            pipe.hset(&key, si.col("created_at"), created_at.to_rfc3339());
+        }
+
+        // Append extra columns from hooks or defaults
+        let hook_extra = current_extra_columns().unwrap_or_default();
+        for (name, val) in resolve_extra_column_values(si, &hook_extra) {
+            if let Some(v) = val {
+                pipe.hset(&key, name, v);
+            }
+        }
 
         if let Some(days) = self.store.retention_days {
             pipe.expire(&key, (days * 24 * 60 * 60) as i64);
@@ -500,7 +573,7 @@ impl ConversationItemStorage for RedisConversationItemStorage {
             pipe.hgetall(self.item_key(iid));
         }
 
-        let results: Vec<std::collections::HashMap<String, String>> = pipe
+        let results: Vec<HashMap<String, String>> = pipe
             .query_async(&mut conn)
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
@@ -530,7 +603,7 @@ impl ConversationItemStorage for RedisConversationItemStorage {
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
 
-        let map: std::collections::HashMap<String, String> = conn
+        let map: HashMap<String, String> = conn
             .hgetall(&key)
             .await
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
@@ -612,9 +685,10 @@ impl RedisResponseStorage {
     }
 
     /// Build a `StoredResponse` from the Redis hash map returned by `HGETALL`.
+    /// Fields listed in `skip_columns` use defaults since they were not stored.
     fn build_response_from_map(
         &self,
-        map: std::collections::HashMap<String, String>,
+        map: HashMap<String, String>,
         fallback_id: &str,
     ) -> Result<StoredResponse, ResponseStorageError> {
         let s = &self.store.schema.responses;
@@ -626,39 +700,82 @@ impl RedisResponseStorage {
                 .unwrap_or_else(|| fallback_id.to_string()),
         );
 
-        let previous_response_id = map
-            .get(s.col("previous_response_id"))
-            .map(|v| ResponseId(v.clone()));
-        let conversation_id = map.get(s.col("conversation_id")).cloned();
+        let previous_response_id = if s.is_skipped("previous_response_id") {
+            None
+        } else {
+            map.get(s.col("previous_response_id"))
+                .map(|v| ResponseId(v.clone()))
+        };
+        let conversation_id = if s.is_skipped("conversation_id") {
+            None
+        } else {
+            map.get(s.col("conversation_id")).cloned()
+        };
 
-        let input = parse_json_value(map.get(s.col("input")).cloned())
-            .map_err(ResponseStorageError::StorageError)?;
-        let instructions = map.get(s.col("instructions")).cloned();
-        let output = parse_json_value(map.get(s.col("output")).cloned())
-            .map_err(ResponseStorageError::StorageError)?;
-        let tool_calls = parse_tool_calls(map.get(s.col("tool_calls")).cloned())
-            .map_err(ResponseStorageError::StorageError)?;
-        let metadata = parse_metadata(map.get(s.col("metadata")).cloned())
-            .map_err(ResponseStorageError::StorageError)?;
+        let input = if s.is_skipped("input") {
+            Value::Array(vec![])
+        } else {
+            parse_json_value(map.get(s.col("input")).cloned())
+                .map_err(ResponseStorageError::StorageError)?
+        };
+        let instructions = if s.is_skipped("instructions") {
+            None
+        } else {
+            map.get(s.col("instructions")).cloned()
+        };
+        let output = if s.is_skipped("output") {
+            Value::Array(vec![])
+        } else {
+            parse_json_value(map.get(s.col("output")).cloned())
+                .map_err(ResponseStorageError::StorageError)?
+        };
+        let tool_calls = if s.is_skipped("tool_calls") {
+            Vec::new()
+        } else {
+            parse_tool_calls(map.get(s.col("tool_calls")).cloned())
+                .map_err(ResponseStorageError::StorageError)?
+        };
+        let metadata = if s.is_skipped("metadata") {
+            HashMap::new()
+        } else {
+            parse_metadata(map.get(s.col("metadata")).cloned())
+                .map_err(ResponseStorageError::StorageError)?
+        };
 
-        let col_created = s.col("created_at");
-        let created_at_str = map.get(col_created).ok_or_else(|| {
-            ResponseStorageError::StorageError(format!(
-                "response {fallback_id} missing {col_created}"
-            ))
-        })?;
-        let created_at = DateTime::parse_from_rfc3339(created_at_str)
-            .map(|dt| dt.with_timezone(&Utc))
-            .map_err(|e| {
+        let created_at = if s.is_skipped("created_at") {
+            Utc::now()
+        } else {
+            let col_created = s.col("created_at");
+            let created_at_str = map.get(col_created).ok_or_else(|| {
                 ResponseStorageError::StorageError(format!(
-                    "response {fallback_id} invalid {col_created}: {e}"
+                    "response {fallback_id} missing {col_created}"
                 ))
             })?;
+            DateTime::parse_from_rfc3339(created_at_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|e| {
+                    ResponseStorageError::StorageError(format!(
+                        "response {fallback_id} invalid {col_created}: {e}"
+                    ))
+                })?
+        };
 
-        let safety_identifier = map.get(s.col("safety_identifier")).cloned();
-        let model = map.get(s.col("model")).cloned();
-        let raw_response = parse_raw_response(map.get(s.col("raw_response")).cloned())
-            .map_err(ResponseStorageError::StorageError)?;
+        let safety_identifier = if s.is_skipped("safety_identifier") {
+            None
+        } else {
+            map.get(s.col("safety_identifier")).cloned()
+        };
+        let model = if s.is_skipped("model") {
+            None
+        } else {
+            map.get(s.col("model")).cloned()
+        };
+        let raw_response = if s.is_skipped("raw_response") {
+            Value::Null
+        } else {
+            parse_raw_response(map.get(s.col("raw_response")).cloned())
+                .map_err(ResponseStorageError::StorageError)?
+        };
 
         Ok(StoredResponse {
             id,
@@ -704,27 +821,57 @@ impl ResponseStorage for RedisResponseStorage {
         let mut pipe = redis::pipe();
 
         pipe.hset(&key, sr.col("id"), response_id_str);
-        if let Some(prev) = &response.previous_response_id {
-            pipe.hset(&key, sr.col("previous_response_id"), &prev.0);
+        if !sr.is_skipped("previous_response_id") {
+            if let Some(prev) = &response.previous_response_id {
+                pipe.hset(&key, sr.col("previous_response_id"), &prev.0);
+            }
         }
-        pipe.hset(&key, sr.col("input"), &json_input);
-        if let Some(inst) = &response.instructions {
-            pipe.hset(&key, sr.col("instructions"), inst);
+        if !sr.is_skipped("conversation_id") {
+            if let Some(cid) = &response.conversation_id {
+                pipe.hset(&key, sr.col("conversation_id"), cid);
+            }
         }
-        pipe.hset(&key, sr.col("output"), &json_output);
-        pipe.hset(&key, sr.col("tool_calls"), &json_tool_calls);
-        pipe.hset(&key, sr.col("metadata"), &json_metadata);
-        pipe.hset(&key, sr.col("created_at"), response.created_at.to_rfc3339());
-        if let Some(safety) = &response.safety_identifier {
-            pipe.hset(&key, sr.col("safety_identifier"), safety);
+        if !sr.is_skipped("input") {
+            pipe.hset(&key, sr.col("input"), &json_input);
         }
-        if let Some(model) = &response.model {
-            pipe.hset(&key, sr.col("model"), model);
+        if !sr.is_skipped("instructions") {
+            if let Some(inst) = &response.instructions {
+                pipe.hset(&key, sr.col("instructions"), inst);
+            }
         }
-        if let Some(cid) = &response.conversation_id {
-            pipe.hset(&key, sr.col("conversation_id"), cid);
+        if !sr.is_skipped("output") {
+            pipe.hset(&key, sr.col("output"), &json_output);
         }
-        pipe.hset(&key, sr.col("raw_response"), &json_raw_response);
+        if !sr.is_skipped("tool_calls") {
+            pipe.hset(&key, sr.col("tool_calls"), &json_tool_calls);
+        }
+        if !sr.is_skipped("metadata") {
+            pipe.hset(&key, sr.col("metadata"), &json_metadata);
+        }
+        if !sr.is_skipped("created_at") {
+            pipe.hset(&key, sr.col("created_at"), response.created_at.to_rfc3339());
+        }
+        if !sr.is_skipped("safety_identifier") {
+            if let Some(safety) = &response.safety_identifier {
+                pipe.hset(&key, sr.col("safety_identifier"), safety);
+            }
+        }
+        if !sr.is_skipped("model") {
+            if let Some(model) = &response.model {
+                pipe.hset(&key, sr.col("model"), model);
+            }
+        }
+        if !sr.is_skipped("raw_response") {
+            pipe.hset(&key, sr.col("raw_response"), &json_raw_response);
+        }
+
+        // Append extra columns from hooks or defaults
+        let hook_extra = current_extra_columns().unwrap_or_default();
+        for (name, val) in resolve_extra_column_values(sr, &hook_extra) {
+            if let Some(v) = val {
+                pipe.hset(&key, name, v);
+            }
+        }
 
         if let Some(days) = self.store.retention_days {
             pipe.expire(&key, (days * 24 * 60 * 60) as i64);
@@ -735,12 +882,14 @@ impl ResponseStorage for RedisResponseStorage {
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
 
         // Index by safety identifier if present
-        if let Some(safety) = &response.safety_identifier {
-            let safety_key = self.safety_key(safety);
-            let score = response.created_at.timestamp_millis() as f64;
-            conn.zadd::<_, _, _, ()>(safety_key, response_id_str, score)
-                .await
-                .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+        if !sr.is_skipped("safety_identifier") {
+            if let Some(safety) = &response.safety_identifier {
+                let safety_key = self.safety_key(safety);
+                let score = response.created_at.timestamp_millis() as f64;
+                conn.zadd::<_, _, _, ()>(safety_key, response_id_str, score)
+                    .await
+                    .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+            }
         }
 
         Ok(response_id)
@@ -759,7 +908,7 @@ impl ResponseStorage for RedisResponseStorage {
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
 
-        let map: std::collections::HashMap<String, String> = conn
+        let map: HashMap<String, String> = conn
             .hgetall(&key)
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
@@ -773,7 +922,6 @@ impl ResponseStorage for RedisResponseStorage {
 
     async fn delete_response(&self, response_id: &ResponseId) -> ResponseResult<()> {
         let sr = &self.store.schema.responses;
-        let col_safety = sr.col("safety_identifier");
 
         let id = response_id.0.as_str();
         let key = self.response_key(id);
@@ -784,18 +932,26 @@ impl ResponseStorage for RedisResponseStorage {
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
 
-        let (safety, ()): (Option<String>, ()) = redis::pipe()
-            .atomic()
-            .hget(&key, col_safety)
-            .del(&key)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
-
-        if let Some(s) = safety {
-            conn.zrem::<_, _, ()>(self.safety_key(&s), id)
+        if sr.is_skipped("safety_identifier") {
+            conn.del::<_, ()>(&key)
                 .await
                 .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+        } else {
+            let col_safety = sr.col("safety_identifier");
+
+            let (safety, ()): (Option<String>, ()) = redis::pipe()
+                .atomic()
+                .hget(&key, col_safety)
+                .del(&key)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+
+            if let Some(s) = safety {
+                conn.zrem::<_, _, ()>(self.safety_key(&s), id)
+                    .await
+                    .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+            }
         }
 
         Ok(())
@@ -806,6 +962,11 @@ impl ResponseStorage for RedisResponseStorage {
         identifier: &str,
         limit: Option<usize>,
     ) -> ResponseResult<Vec<StoredResponse>> {
+        let sr = &self.store.schema.responses;
+        if sr.is_skipped("safety_identifier") {
+            return Ok(Vec::new());
+        }
+
         let key = self.safety_key(identifier);
         let mut conn = self
             .store
@@ -833,7 +994,7 @@ impl ResponseStorage for RedisResponseStorage {
             pipe.hgetall(self.response_key(id));
         }
 
-        let results: Vec<std::collections::HashMap<String, String>> = pipe
+        let results: Vec<HashMap<String, String>> = pipe
             .query_async(&mut conn)
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
@@ -851,6 +1012,11 @@ impl ResponseStorage for RedisResponseStorage {
     }
 
     async fn delete_identifier_responses(&self, identifier: &str) -> ResponseResult<usize> {
+        let sr = &self.store.schema.responses;
+        if sr.is_skipped("safety_identifier") {
+            return Ok(0);
+        }
+
         let key = self.safety_key(identifier);
         let mut conn = self
             .store

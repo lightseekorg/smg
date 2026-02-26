@@ -445,6 +445,10 @@ struct CliArgs {
     #[arg(long, default_value_t = false, help_heading = "Backend")]
     enable_wasm: bool,
 
+    /// Path to a WASM component implementing storage hooks
+    #[arg(long, help_heading = "Backend")]
+    storage_hook_wasm_path: Option<String>,
+
     // ==================== Oracle Database ====================
     /// Path to Oracle ATP wallet directory
     #[arg(long, env = "ATP_WALLET_PATH", help_heading = "Oracle Database")]
@@ -1073,6 +1077,7 @@ impl CliArgs {
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
             .enable_wasm(self.enable_wasm)
+            .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
             .igw(self.enable_igw)
             .maybe_server_cert_and_key(self.tls_cert_path.as_ref(), self.tls_key_path.as_ref());
 

@@ -64,6 +64,7 @@ let config = StorageFactoryConfig {
     oracle: None,
     postgres: None,
     redis: None,
+    hook: None,
 };
 
 let (responses, conversations, items) = create_storage(config).await.unwrap();
@@ -189,6 +190,144 @@ Key behaviors:
 - **Redis**: Only `owner` (key prefix) and `columns` (hash field names) affect
   Redis behavior. The `table` field is ignored for Redis key patterns — keys
   always use hardcoded entity names (`conversation`, `item`, `response`).
+
+## Storage Hooks
+
+Hooks let you inject custom logic before and after storage operations without
+modifying backend code. Use cases include audit logging, multi-tenancy field
+population, PII redaction, and custom validation.
+
+### `StorageHook` Trait
+
+Implement the `StorageHook` trait (in `hooks.rs`):
+
+```rust
+#[async_trait]
+pub trait StorageHook: Send + Sync + 'static {
+    async fn before(
+        &self,
+        operation: StorageOperation,
+        context: Option<&RequestContext>,
+        payload: &Value,
+    ) -> Result<BeforeHookResult, HookError>;
+
+    async fn after(
+        &self,
+        operation: StorageOperation,
+        context: Option<&RequestContext>,
+        payload: &Value,
+        result: &Value,
+        extra: &ExtraColumns,
+    ) -> Result<ExtraColumns, HookError>;
+}
+```
+
+- `before()` returning `Continue(extra_columns)` proceeds with the operation.
+  The extra columns map is forwarded to the backend for persistence.
+- `before()` returning `Reject(reason)` aborts the operation with an error.
+- `before()` returning `Err(_)` logs a warning and **continues** (non-fatal).
+- `after()` receives the result and extra columns from `before()`. It can
+  return modified extra columns for the caller.
+
+### Wiring a Hook
+
+Pass the hook to `create_storage()` via `StorageFactoryConfig`:
+
+```rust
+let hook = Arc::new(MyHook::new());
+let config = StorageFactoryConfig {
+    backend: &HistoryBackend::Postgres,
+    postgres: Some(pg_config),
+    hook: Some(hook),
+    ..Default::default()
+};
+let (responses, conversations, items) = create_storage(config).await?;
+```
+
+### Request Context
+
+`RequestContext` is a per-request key-value bag (populated from HTTP headers,
+middleware, etc.) made available to hooks via tokio task-local storage:
+
+```rust
+use data_connector::context::{with_request_context, RequestContext};
+
+let mut ctx = RequestContext::new();
+ctx.set("tenant_id", "acme-corp");
+ctx.set("user_id", "user-42");
+
+// Run storage operations with context available to hooks
+with_request_context(ctx, async {
+    conversations.create_conversation(input).await
+}).await;
+```
+
+### Extra Columns
+
+Extra columns let hooks persist custom fields alongside core data. They are
+defined in `SchemaConfig` and populated by hook `before()` calls.
+
+```yaml
+schema:
+  responses:
+    extra_columns:
+      TENANT_ID:
+        sql_type: "VARCHAR(128)"
+      STORED_BY:
+        sql_type: "VARCHAR(128)"
+        default_value: "system"   # Used when hook doesn't provide a value
+  conversations:
+    extra_columns:
+      TENANT_ID:
+        sql_type: "VARCHAR(128)"
+      CREATED_BY:
+        sql_type: "VARCHAR(128)"
+```
+
+Value resolution order for each extra column on write:
+1. Hook-provided value from `ExtraColumns` (via `before()` result)
+2. `default_value` from `ColumnDef` in schema config
+3. `NULL` (if neither is available)
+
+Extra columns are write-side enrichment (audit trail, tenant ID, etc.). They
+are included in DDL for schema creation and in INSERT statements, but are
+**not** read back into `StoredResponse`/`Conversation`/`ConversationItem`
+structs on SELECT.
+
+### Skip Columns
+
+Skip columns let you omit core columns from DDL, INSERT, and SELECT
+statements. This is useful when migrating to a schema that doesn't have all
+default columns.
+
+```yaml
+schema:
+  responses:
+    skip_columns:
+      - raw_response
+      - safety_identifier
+```
+
+Skipped columns use default values when reading (e.g. `None` for optional
+fields, empty collections for lists/maps, `Value::Null` for JSON).
+
+### WASM Storage Hooks
+
+For sandboxed, language-agnostic hooks, use the WASM Component Model bridge.
+The WIT interface is in `wasm/src/interface/storage/storage-hooks.wit` and
+the Rust bridge is `WasmStorageHook` in the `smg-wasm` crate (behind the
+`storage-hooks` feature flag).
+
+```rust
+use smg_wasm::WasmStorageHook;  // requires: smg-wasm with "storage-hooks" feature
+
+let wasm_bytes = std::fs::read("path/to/storage_hook.component.wasm")?;
+let hook = WasmStorageHook::new(&wasm_bytes)?;
+// Use Arc::new(hook) in StorageFactoryConfig
+```
+
+See `examples/wasm/wasm-guest-storage-hook/` for a complete guest example
+demonstrating multi-tenancy and audit trail extra columns.
 
 ## Data Model
 

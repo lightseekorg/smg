@@ -9,6 +9,10 @@ pub mod module;
 pub mod module_manager;
 pub mod runtime;
 pub mod spec;
+#[cfg(feature = "storage-hooks")]
+pub mod storage_hook;
+#[cfg(feature = "storage-hooks")]
+mod storage_spec;
 pub mod types;
 
 // Re-export commonly used types
@@ -22,4 +26,6 @@ pub use module::{
 pub use module_manager::WasmModuleManager;
 pub use runtime::WasmRuntime;
 pub use spec::{apply_modify_action_to_headers, build_wasm_headers_from_axum_headers, smg, Smg};
+#[cfg(feature = "storage-hooks")]
+pub use storage_hook::WasmStorageHook;
 pub use types::{WasiState, WasmComponentInput, WasmComponentOutput};
