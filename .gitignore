@@ -154,3 +154,9 @@ wasm/tests/fixtures/*.wasm
 # Generated client SDK files (run `make generate-clients` to regenerate)
 clients/openapi/smg-openapi.yaml
 clients/python/smg_client/types/_generated.py
+clients/java/src/
+clients/java/.openapi-generator/
+clients/java/target/
+clients/java/build.sbt
+clients/java/gradle.properties
+openapitools.json

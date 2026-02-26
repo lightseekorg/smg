@@ -32,9 +32,7 @@ class AsyncParser:
         self._transport = transport
 
     async def parse_function_call(self, **kwargs: Any) -> ParseFunctionCallResponse:
-        resp = await self._transport.request(
-            "POST", "/parse/function_call", json=kwargs
-        )
+        resp = await self._transport.request("POST", "/parse/function_call", json=kwargs)
         return ParseFunctionCallResponse.model_validate_json(resp.content)
 
     async def separate_reasoning(self, **kwargs: Any) -> SeparateReasoningResponse:

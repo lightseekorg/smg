@@ -67,9 +67,7 @@ class AsyncWorkers:
 
     async def update(self, worker_id: str, **kwargs: Any) -> Any:
         """Update a worker. Returns 202 with {status, worker_id, message}."""
-        resp = await self._transport.request(
-            "PUT", f"/workers/{worker_id}", json=kwargs
-        )
+        resp = await self._transport.request("PUT", f"/workers/{worker_id}", json=kwargs)
         return resp.json()
 
     async def delete(self, worker_id: str) -> Any:

@@ -29,15 +29,11 @@ class SyncResponses:
         self._transport.request("DELETE", f"/v1/responses/{response_id}")
 
     def cancel(self, response_id: str) -> ResponsesResponse:
-        resp = self._transport.request(
-            "POST", f"/v1/responses/{response_id}/cancel", json={}
-        )
+        resp = self._transport.request("POST", f"/v1/responses/{response_id}/cancel", json={})
         return ResponsesResponse.model_validate_json(resp.content)
 
     def list_input_items(self, response_id: str) -> Any:
-        resp = self._transport.request(
-            "GET", f"/v1/responses/{response_id}/input_items"
-        )
+        resp = self._transport.request("GET", f"/v1/responses/{response_id}/input_items")
         return resp.json()
 
 
@@ -60,13 +56,9 @@ class AsyncResponses:
         await self._transport.request("DELETE", f"/v1/responses/{response_id}")
 
     async def cancel(self, response_id: str) -> ResponsesResponse:
-        resp = await self._transport.request(
-            "POST", f"/v1/responses/{response_id}/cancel", json={}
-        )
+        resp = await self._transport.request("POST", f"/v1/responses/{response_id}/cancel", json={})
         return ResponsesResponse.model_validate_json(resp.content)
 
     async def list_input_items(self, response_id: str) -> Any:
-        resp = await self._transport.request(
-            "GET", f"/v1/responses/{response_id}/input_items"
-        )
+        resp = await self._transport.request("GET", f"/v1/responses/{response_id}/input_items")
         return resp.json()
