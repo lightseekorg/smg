@@ -151,6 +151,17 @@ class TestAddServeArgs:
         args = parser.parse_args([])
         assert args.host == "127.0.0.1"
 
+    def test_enable_token_usage_details_default_false(self):
+        parser = argparse.ArgumentParser()
+        add_serve_args(parser)
+        args = parser.parse_args([])
+        assert args.enable_token_usage_details is False
+
+    def test_enable_token_usage_details_enabled(self):
+        parser = argparse.ArgumentParser()
+        add_serve_args(parser)
+        args = parser.parse_args(["--enable-token-usage-details"])
+        assert args.enable_token_usage_details is True
 
 class TestImportBackendArgs:
     """Test _import_backend_args for each backend."""
@@ -524,7 +535,8 @@ class TestVllmWorkerLauncher:
         args = argparse.Namespace(model="/tmp/model", connection_mode="http")
         backend_args = ["--trust-remote-code"]
         cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
-        assert "--grpc-mode" not in cmd
+        assert "vllm.entrypoints.openai.api_server" in cmd
+        assert "vllm.entrypoints.grpc_server" not in cmd
         for arg in backend_args:
             assert arg in cmd
         assert "--enable-prompt-tokens-details" not in cmd
@@ -538,7 +550,8 @@ class TestVllmWorkerLauncher:
         )
         backend_args = ["--trust-remote-code"]
         cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
-        assert "--grpc-mode" not in cmd
+        assert "vllm.entrypoints.openai.api_server" in cmd
+        assert "vllm.entrypoints.grpc_server" not in cmd
         for arg in backend_args:
             assert arg in cmd
         assert "--enable-prompt-tokens-details" in cmd
