@@ -12,6 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(feature = "axum")]
 use serde_json::{json, Value};
@@ -26,7 +27,9 @@ pub const DEFAULT_WORKER_COST: f32 = 1.0;
 // ── Enums ────────────────────────────────────────────────────────────
 
 /// Worker type classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkerType {
     /// Regular worker for standard routing.
@@ -65,7 +68,9 @@ impl std::str::FromStr for WorkerType {
 }
 
 /// Connection mode for worker communication.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ConnectionMode {
     /// HTTP/REST connection.
@@ -85,7 +90,9 @@ impl std::fmt::Display for ConnectionMode {
 }
 
 /// Runtime implementation type for workers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeType {
     /// SGLang runtime (default).
@@ -133,7 +140,7 @@ impl std::str::FromStr for RuntimeType {
 /// Different providers have different API formats and requirements.
 /// `None` (when used as `Option<ProviderType>`) means native/passthrough —
 /// no transformation needed (local SGLang backends).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderType {
     /// OpenAI API — strip SGLang-specific fields.
@@ -229,7 +236,7 @@ fn default_max_connection_attempts() -> u32 {
 // ── Health check config ─────────────────────────────────────────────
 
 /// Health check configuration shared across protocol and runtime layers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HealthCheckConfig {
     /// Health check timeout in seconds (default: 30).
     #[serde(default = "default_health_check_timeout")]
@@ -361,6 +368,17 @@ impl<'de> Deserialize<'de> for WorkerModels {
     }
 }
 
+/// JsonSchema: wire format is `Vec<ModelCard>`.
+impl JsonSchema for WorkerModels {
+    fn schema_name() -> String {
+        "WorkerModels".to_string()
+    }
+
+    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        Vec::<ModelCard>::json_schema(gen)
+    }
+}
+
 // ── Core identity ────────────────────────────────────────────────────
 
 /// Core worker identity and configuration.
@@ -372,7 +390,7 @@ impl<'de> Deserialize<'de> for WorkerModels {
 /// Fields use `#[serde(default)]` so the same struct works for both input
 /// (partial config from user) and output (fully resolved state).
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerSpec {
     /// Worker URL.
     pub url: String,
@@ -482,7 +500,7 @@ impl WorkerSpec {
 
 /// Worker information for API responses.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerInfo {
     /// Worker unique identifier.
     pub id: String,
@@ -515,7 +533,7 @@ impl WorkerInfo {
 }
 
 /// Job status for async control plane operations
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct JobStatus {
     pub job_type: String,
     pub worker_url: String,
@@ -569,7 +587,7 @@ impl JobStatus {
 }
 
 /// Worker list response
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerListResponse {
     pub workers: Vec<WorkerInfo>,
     pub total: usize,
@@ -577,7 +595,7 @@ pub struct WorkerListResponse {
 }
 
 /// Worker statistics
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerStats {
     pub total_workers: usize,
     pub healthy_workers: usize,
@@ -587,7 +605,7 @@ pub struct WorkerStats {
 }
 
 /// Worker statistics by type
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerTypeStats {
     pub regular: usize,
     pub prefill: usize,
@@ -602,7 +620,7 @@ pub struct WorkerTypeStats {
 /// where `#[serde(default)]` on [`HealthCheckConfig`] would silently reset
 /// unspecified fields to defaults.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HealthCheckUpdate {
     pub timeout_secs: Option<u64>,
     pub check_interval_secs: Option<u64>,
@@ -642,7 +660,7 @@ impl HealthCheckUpdate {
 
 /// Worker update request
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerUpdateRequest {
     /// Update priority
     pub priority: Option<u32>,
@@ -663,7 +681,7 @@ pub struct WorkerUpdateRequest {
 // ── Response types ──────────────────────────────────────────────────
 
 /// Generic API response
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerApiResponse {
     pub success: bool,
     pub message: String,
@@ -673,7 +691,7 @@ pub struct WorkerApiResponse {
 }
 
 /// Error response
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkerErrorResponse {
     pub error: String,
     pub code: String,

@@ -10,7 +10,7 @@ use super::common::*;
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct CompletionRequest {
     /// ID of the model to use (required for OpenAI, optional for some implementations, such as SGLang)
     pub model: String,
@@ -145,7 +145,7 @@ impl GenerationRequest for CompletionRequest {
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct CompletionResponse {
     pub id: String,
     pub object: String, // "text_completion"
@@ -156,7 +156,7 @@ pub struct CompletionResponse {
     pub system_fingerprint: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct CompletionChoice {
     pub text: String,
     pub index: u32,
@@ -168,7 +168,7 @@ pub struct CompletionChoice {
     pub matched_stop: Option<Value>, // Can be string or integer
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct CompletionStreamResponse {
     pub id: String,
     pub object: String, // "text_completion"
@@ -179,7 +179,7 @@ pub struct CompletionStreamResponse {
     pub system_fingerprint: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct CompletionStreamChoice {
     pub text: String,
     pub index: u32,

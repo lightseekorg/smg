@@ -4,7 +4,7 @@ metadata:
   name: arc-runner-gpu-h100
   namespace: actions-runner-system
 spec:
-  replicas: 12
+  replicas: 11
   template:
     spec:
       ephemeral: true
@@ -16,7 +16,7 @@ spec:
 
       nodeSelector:
         nvidia.com/gpu: "true"
-        beta.kubernetes.io/instance-type: BM.GPU.H100.8
+        node.kubernetes.io/instance-type: BM.GPU.H100.8
 
       tolerations:
         - key: "nvidia.com/gpu"
@@ -44,9 +44,7 @@ spec:
         - name: docker-sock
           emptyDir: {}
         - name: docker-storage
-          hostPath:
-            path: /var/lib/dind-storage
-            type: DirectoryOrCreate
+          emptyDir: {}
         - name: dshm
           emptyDir:
             medium: Memory
@@ -99,7 +97,7 @@ spec:
 
       nodeSelector:
         nvidia.com/gpu: "true"
-        beta.kubernetes.io/instance-type: BM.GPU.A10.4
+        node.kubernetes.io/instance-type: BM.GPU.A10.4
 
       tolerations:
         - key: "nvidia.com/gpu"
@@ -127,9 +125,7 @@ spec:
         - name: docker-sock
           emptyDir: {}
         - name: docker-storage
-          hostPath:
-            path: /var/lib/dind-storage
-            type: DirectoryOrCreate
+          emptyDir: {}
         - name: dshm
           emptyDir:
             medium: Memory

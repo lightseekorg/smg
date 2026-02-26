@@ -14,6 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from infra import BRAVE_MCP_URL
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,7 @@ BRAVE_MCP_TOOL = {
     "type": "mcp",
     "server_label": "brave",
     "server_description": "A Tool to do web search",
-    "server_url": "http://localhost:8001/sse",
+    "server_url": BRAVE_MCP_URL,
     "require_approval": "never",
 }
 

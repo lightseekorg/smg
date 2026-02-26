@@ -5,17 +5,17 @@ including non-streaming and streaming modes, in both SMG-handled and passthrough
 
 Requirements:
 - ANTHROPIC_API_KEY environment variable must be set
-- For smg_handled mode: MCP server must be running (configure via MCP_SERVER_URL)
+- For smg_handled mode: Brave MCP server must be running (see BRAVE_MCP_URL in infra.constants)
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 
 import pytest
+from infra import BRAVE_MCP_URL
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +37,8 @@ class McpTestConfig:
 
 # SMG-handled MCP: x-smg-mcp header present, SMG orchestrates tool loop
 SMG_HANDLED = McpTestConfig(
-    server_name=os.environ.get("MCP_SERVER_NAME", "brave"),
-    server_url=os.environ.get("MCP_SERVER_URL", "http://localhost:8001/sse"),
+    server_name="brave",
+    server_url=BRAVE_MCP_URL,
     headers={
         "anthropic-beta": "mcp-client-2025-11-20",
         "x-smg-mcp": "enabled",

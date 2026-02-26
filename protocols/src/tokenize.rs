@@ -14,7 +14,7 @@ use super::UNKNOWN_MODEL_ID;
 /// Request schema for the /v1/tokenize endpoint
 ///
 /// Supports both single string and batch tokenization.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct TokenizeRequest {
     /// Model name for tokenizer selection
     #[serde(default = "default_model_name")]
@@ -25,7 +25,7 @@ pub struct TokenizeRequest {
 }
 
 /// Response schema for the /v1/tokenize endpoint
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TokenizeResponse {
     /// Token IDs - single list for single input, nested list for batch
     pub tokens: TokensResult,
@@ -38,7 +38,7 @@ pub struct TokenizeResponse {
 }
 
 /// Token IDs result - either single or batch
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum TokensResult {
     Single(Vec<u32>),
@@ -46,7 +46,7 @@ pub enum TokensResult {
 }
 
 /// Count result - either single or batch
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum CountResult {
     Single(i32),
@@ -60,7 +60,7 @@ pub enum CountResult {
 /// Request schema for the /v1/detokenize endpoint
 ///
 /// Supports both single sequence and batch detokenization.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct DetokenizeRequest {
     /// Model name for tokenizer selection
     #[serde(default = "default_model_name")]
@@ -75,7 +75,7 @@ pub struct DetokenizeRequest {
 }
 
 /// Token input - either single sequence or batch
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum TokensInput {
     /// Single sequence of token IDs
@@ -100,14 +100,14 @@ impl TokensInput {
 }
 
 /// Response schema for the /v1/detokenize endpoint
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DetokenizeResponse {
     /// Decoded text - single string for single input, list for batch
     pub text: TextResult,
 }
 
 /// Text result - either single or batch
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum TextResult {
     Single(String),
@@ -119,7 +119,7 @@ pub enum TextResult {
 // ============================================================================
 
 /// Request schema for adding a tokenizer
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct AddTokenizerRequest {
     /// Name to register the tokenizer under
     pub name: String,
@@ -133,7 +133,7 @@ pub struct AddTokenizerRequest {
 }
 
 /// Response schema for adding a tokenizer (async)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AddTokenizerResponse {
     /// Unique identifier for the tokenizer (UUID)
     pub id: String,
@@ -146,13 +146,13 @@ pub struct AddTokenizerResponse {
 }
 
 /// Response schema for listing tokenizers
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ListTokenizersResponse {
     pub tokenizers: Vec<TokenizerInfo>,
 }
 
 /// Information about a registered tokenizer
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TokenizerInfo {
     /// Unique identifier (UUID)
     pub id: String,
@@ -164,14 +164,14 @@ pub struct TokenizerInfo {
 }
 
 /// Request schema for removing a tokenizer
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct RemoveTokenizerRequest {
     /// Name of the tokenizer to remove
     pub name: String,
 }
 
 /// Response schema for removing a tokenizer
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RemoveTokenizerResponse {
     pub success: bool,
     pub message: String,
@@ -182,7 +182,8 @@ pub struct RemoveTokenizerResponse {
 // ============================================================================
 
 /// String or array of strings (for flexible input)
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[schemars(rename = "TokenizeStringOrArray")]
 #[serde(untagged)]
 pub enum StringOrArray {
     Single(String),

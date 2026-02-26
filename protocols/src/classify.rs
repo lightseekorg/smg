@@ -17,7 +17,7 @@ use super::common::{GenerationRequest, UsageInfo};
 
 /// Classification request - compatible with vLLM's /v1/classify API
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ClassifyRequest {
     /// ID of the model to use
     pub model: String,
@@ -68,7 +68,7 @@ impl GenerationRequest for ClassifyRequest {
 // ============================================================================
 
 /// Single classification result
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ClassifyData {
     /// Index of this result (for batch requests)
     pub index: u32,
@@ -81,7 +81,7 @@ pub struct ClassifyData {
 }
 
 /// Classification response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ClassifyResponse {
     /// Unique request ID (format: "classify-{uuid}")
     pub id: String,

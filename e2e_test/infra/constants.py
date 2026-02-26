@@ -1,5 +1,6 @@
 """Constants and enums for E2E test infrastructure."""
 
+import os
 from enum import StrEnum
 
 
@@ -113,6 +114,9 @@ ENV_SHOW_WORKER_LOGS = "SHOW_WORKER_LOGS"
 
 # Network
 DEFAULT_HOST = "127.0.0.1"
+BRAVE_MCP_PORT = 8080
+BRAVE_MCP_HOST = os.environ.get("BRAVE_MCP_HOST") or DEFAULT_HOST
+BRAVE_MCP_URL = f"http://{BRAVE_MCP_HOST}:{BRAVE_MCP_PORT}/sse"
 
 # Timeouts (seconds)
 DEFAULT_STARTUP_TIMEOUT = 300

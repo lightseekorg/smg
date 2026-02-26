@@ -20,7 +20,7 @@ use crate::{builders::ResponsesResponseBuilder, validated::Normalizable};
 // Response Tools (MCP and others)
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseTool {
@@ -42,7 +42,7 @@ pub enum ResponseTool {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FunctionTool {
     /// Flatten to match Responses API tool JSON shape.
@@ -51,7 +51,7 @@ pub struct FunctionTool {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct McpTool {
     pub server_url: Option<String>,
@@ -66,7 +66,7 @@ pub struct McpTool {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WebSearchPreviewTool {
     pub search_context_size: Option<String>,
@@ -74,14 +74,14 @@ pub struct WebSearchPreviewTool {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CodeInterpreterTool {
     pub container: Option<Value>,
 }
 
 /// `require_approval` values.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RequireApproval {
     Always,
@@ -93,7 +93,7 @@ pub enum RequireApproval {
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ResponseReasoningParam {
     #[serde(default = "default_reasoning_effort")]
     pub effort: Option<ReasoningEffort>,
@@ -108,7 +108,7 @@ fn default_reasoning_effort() -> Option<ReasoningEffort> {
     Some(ReasoningEffort::Medium)
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
     Minimal,
@@ -117,7 +117,7 @@ pub enum ReasoningEffort {
     High,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningSummary {
     Auto,
@@ -130,14 +130,14 @@ pub enum ReasoningSummary {
 // ============================================================================
 
 /// Content can be either a simple string or array of content parts (for SimpleInputMessage)
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum StringOrContentParts {
     String(String),
     Array(Vec<ResponseContentPart>),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseInputOutputItem {
@@ -204,7 +204,7 @@ pub enum ResponseInputOutputItem {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseContentPart {
@@ -223,7 +223,7 @@ pub enum ResponseContentPart {
     Unknown,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseReasoningContent {
@@ -233,7 +233,7 @@ pub enum ResponseReasoningContent {
 
 /// MCP Tool information for the mcp_list_tools output item
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct McpToolInfo {
     pub name: String,
     pub description: Option<String>,
@@ -242,7 +242,7 @@ pub struct McpToolInfo {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseOutputItem {
@@ -321,7 +321,7 @@ pub enum ResponseOutputItem {
 // ============================================================================
 
 /// Status for web search tool calls.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSearchCallStatus {
     InProgress,
@@ -331,7 +331,7 @@ pub enum WebSearchCallStatus {
 }
 
 /// Action performed during a web search.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WebSearchAction {
     Search {
@@ -352,7 +352,7 @@ pub enum WebSearchAction {
 }
 
 /// A source returned from web search.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct WebSearchSource {
     #[serde(rename = "type")]
     pub source_type: String,
@@ -360,7 +360,7 @@ pub struct WebSearchSource {
 }
 
 /// Status for code interpreter tool calls.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeInterpreterCallStatus {
     InProgress,
@@ -371,7 +371,7 @@ pub enum CodeInterpreterCallStatus {
 }
 
 /// Output from code interpreter execution.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CodeInterpreterOutput {
     Logs { logs: String },
@@ -379,7 +379,7 @@ pub enum CodeInterpreterOutput {
 }
 
 /// Status for file search tool calls.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FileSearchCallStatus {
     InProgress,
@@ -391,7 +391,7 @@ pub enum FileSearchCallStatus {
 
 /// A result from file search.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FileSearchResult {
     pub file_id: String,
     pub filename: String,
@@ -404,8 +404,9 @@ pub struct FileSearchResult {
 // Configuration Enums
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(rename = "ResponsesServiceTier")]
 pub enum ServiceTier {
     #[default]
     Auto,
@@ -415,7 +416,7 @@ pub enum ServiceTier {
     Priority,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Truncation {
     Auto,
@@ -423,7 +424,7 @@ pub enum Truncation {
     Disabled,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseStatus {
     Queued,
@@ -434,7 +435,7 @@ pub enum ResponseStatus {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ReasoningInfo {
     pub effort: Option<String>,
     pub summary: Option<String>,
@@ -445,7 +446,7 @@ pub struct ReasoningInfo {
 // ============================================================================
 
 /// Text configuration for structured output requests
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct TextConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<TextFormat>,
@@ -453,7 +454,7 @@ pub struct TextConfig {
 
 /// Text format: text (default), json_object (legacy), or json_schema (recommended)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum TextFormat {
     #[serde(rename = "text")]
@@ -471,7 +472,7 @@ pub enum TextFormat {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IncludeField {
     #[serde(rename = "code_interpreter_call.outputs")]
@@ -494,7 +495,7 @@ pub enum IncludeField {
 
 /// OpenAI Responses API usage format (different from standard UsageInfo)
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ResponseUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
@@ -503,19 +504,19 @@ pub struct ResponseUsage {
     pub output_tokens_details: Option<OutputTokensDetails>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ResponsesUsage {
     Classic(UsageInfo),
     Modern(ResponseUsage),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct InputTokensDetails {
     pub cached_tokens: u32,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct OutputTokensDetails {
     pub reasoning_tokens: u32,
 }
@@ -565,7 +566,7 @@ impl ResponseUsage {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ResponsesGetParams {
     #[serde(default)]
     pub include: Vec<String>,
@@ -625,7 +626,7 @@ fn default_top_p() -> Option<f32> {
 // Request/Response Types
 // ============================================================================
 
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Validate, schemars::JsonSchema)]
 #[validate(schema(function = "validate_responses_cross_parameters"))]
 pub struct ResponsesRequest {
     /// Run the request in the background
@@ -770,7 +771,7 @@ pub struct ResponsesRequest {
     pub repetition_penalty: f32,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ResponseInput {
     Items(Vec<ResponseInputOutputItem>),
@@ -1274,7 +1275,7 @@ pub fn generate_id(prefix: &str) -> String {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ResponsesResponse {
     /// Response ID
     pub id: String,
