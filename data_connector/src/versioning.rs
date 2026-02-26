@@ -226,17 +226,25 @@ pub fn run_oracle_migrations(
 ///
 /// Uses `all_tables` with an owner filter when `schema.owner` is set,
 /// falling back to `user_tables` for the current user's schema.
+///
+/// When an owner is specified, the DDL creates a quoted identifier
+/// (`OWNER."_schema_versions"`), which preserves lowercase in the catalog.
+/// Without an owner, Oracle folds the unquoted name to uppercase.
 fn ensure_oracle_versions_table(
     conn: &oracle::Connection,
     schema: &SchemaConfig,
 ) -> Result<(), String> {
-    let table_upper = VERSIONS_TABLE.to_ascii_uppercase();
+    // When owner is set, the table is created with a quoted identifier
+    // (preserves lowercase). Without owner, Oracle folds to uppercase.
     let check_sql = match &schema.owner {
         Some(owner) => format!(
-            "SELECT COUNT(*) FROM all_tables WHERE owner = '{}' AND table_name = '{table_upper}'",
+            "SELECT COUNT(*) FROM all_tables WHERE owner = '{}' AND table_name = '{VERSIONS_TABLE}'",
             owner.to_ascii_uppercase()
         ),
-        None => format!("SELECT COUNT(*) FROM user_tables WHERE table_name = '{table_upper}'"),
+        None => {
+            let table_upper = VERSIONS_TABLE.to_ascii_uppercase();
+            format!("SELECT COUNT(*) FROM user_tables WHERE table_name = '{table_upper}'")
+        }
     };
     let present: i64 = conn
         .query_row_as(&check_sql, &[])

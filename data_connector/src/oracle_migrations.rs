@@ -36,6 +36,13 @@ fn oracle_v1_up(schema: &SchemaConfig) -> Vec<String> {
 
 fn oracle_v2_up(schema: &SchemaConfig) -> Vec<String> {
     let s = &schema.responses;
+    // Don't drop USER_ID if a configured column maps to that name
+    if s.columns
+        .values()
+        .any(|v| v.eq_ignore_ascii_case("USER_ID"))
+    {
+        return vec![];
+    }
     let table = s.qualified_table(schema.owner.as_deref());
     // PL/SQL block: ORA-00904 = "invalid identifier" (column doesn't exist)
     vec![format!(
@@ -87,5 +94,16 @@ mod tests {
         assert_eq!(stmts.len(), 1);
         assert!(stmts[0].contains("DROP"), "got: {}", stmts[0]);
         assert!(stmts[0].contains("USER_ID"), "got: {}", stmts[0]);
+    }
+
+    #[test]
+    fn oracle_v2_up_skipped_when_column_maps_to_user_id() {
+        let mut schema = SchemaConfig::default();
+        schema
+            .responses
+            .columns
+            .insert("safety_identifier".to_string(), "USER_ID".to_string());
+        let stmts = oracle_v2_up(&schema);
+        assert!(stmts.is_empty(), "should skip drop when USER_ID is mapped");
     }
 }

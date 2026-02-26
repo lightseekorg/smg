@@ -34,6 +34,13 @@ fn pg_v1_up(schema: &SchemaConfig) -> Vec<String> {
 
 fn pg_v2_up(schema: &SchemaConfig) -> Vec<String> {
     let s = &schema.responses;
+    // Don't drop user_id if a configured column maps to that name
+    if s.columns
+        .values()
+        .any(|v| v.eq_ignore_ascii_case("user_id"))
+    {
+        return vec![];
+    }
     let table = s.qualified_table(schema.owner.as_deref());
     vec![format!("ALTER TABLE {table} DROP COLUMN IF EXISTS user_id")]
 }
@@ -79,5 +86,16 @@ mod tests {
         let stmts = pg_v2_up(&schema);
         assert_eq!(stmts.len(), 1);
         assert!(stmts[0].contains("IF EXISTS"), "got: {}", stmts[0]);
+    }
+
+    #[test]
+    fn pg_v2_up_skipped_when_column_maps_to_user_id() {
+        let mut schema = SchemaConfig::default();
+        schema
+            .responses
+            .columns
+            .insert("safety_identifier".to_string(), "user_id".to_string());
+        let stmts = pg_v2_up(&schema);
+        assert!(stmts.is_empty(), "should skip drop when user_id is mapped");
     }
 }

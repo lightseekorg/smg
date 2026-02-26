@@ -1546,7 +1546,8 @@ fn create_index_if_missing(
             if let Some(db_err) = err.db_error() {
                 // ORA-00955: name is already used by an existing object
                 // ORA-01408: such column list already indexed
-                if db_err.code() != 955 && db_err.code() != 1408 {
+                // ORA-00904: invalid identifier (column not yet added by migration)
+                if db_err.code() != 955 && db_err.code() != 1408 && db_err.code() != 904 {
                     return Err(map_oracle_error(err));
                 }
             } else {
