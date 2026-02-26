@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use openai_protocol::messages::{InputContent, InputMessage, Message, Role};
+use openai_protocol::messages::{ContentBlock, InputContent, InputMessage, Message, Role};
 use smg_mcp::McpToolSession;
 use tracing::warn;
 
@@ -42,6 +42,7 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
     mcp::inject_mcp_tools_into_request(&mut req_ctx.request, &session);
 
     let mut all_mcp_calls: Vec<mcp::McpToolCall> = Vec::new();
+    let mut prior_content_blocks: Vec<ContentBlock> = Vec::new();
 
     let mut message = match send_one_request(router, &req_ctx).await {
         Ok(m) => m,
@@ -54,13 +55,19 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
         let result = mcp::IterationResult::from_message(&message);
         match mcp::process_iteration(&result, &session, &req_ctx.model_id).await {
             mcp::ToolLoopAction::Done => {
-                let final_message = mcp::rebuild_response_with_mcp_blocks(message, &all_mcp_calls);
+                let final_message = mcp::rebuild_response_with_mcp_blocks(
+                    message,
+                    &all_mcp_calls,
+                    &prior_content_blocks,
+                );
                 return (StatusCode::OK, Json(final_message)).into_response();
             }
             mcp::ToolLoopAction::Error(msg) => {
                 return error::bad_gateway("mcp_tool_loop_error", msg);
             }
             mcp::ToolLoopAction::Continue(cont) => {
+                // Collect content blocks from this iteration for the final response
+                prior_content_blocks.extend(message.content.clone());
                 all_mcp_calls.extend(cont.mcp_calls);
                 req_ctx.request.messages.push(InputMessage {
                     role: Role::Assistant,
@@ -82,7 +89,8 @@ pub(crate) async fn execute(router: &RouterContext, mut req_ctx: RequestContext)
     // Max iterations — check if the last response completed naturally
     let result = mcp::IterationResult::from_message(&message);
     if result.tool_use_blocks.is_empty() {
-        let final_message = mcp::rebuild_response_with_mcp_blocks(message, &all_mcp_calls);
+        let final_message =
+            mcp::rebuild_response_with_mcp_blocks(message, &all_mcp_calls, &prior_content_blocks);
         return (StatusCode::OK, Json(final_message)).into_response();
     }
 

@@ -193,6 +193,10 @@ pub enum InputContentBlock {
     SearchResult(SearchResultBlock),
     /// Web search tool result block
     WebSearchToolResult(WebSearchToolResultBlock),
+    /// Tool search tool result block
+    ToolSearchToolResult(ToolSearchToolResultBlock),
+    /// Tool reference block
+    ToolReference(ToolReferenceBlock),
 }
 
 /// Text content block
@@ -510,12 +514,21 @@ pub struct SearchResultLocationCitation {
 /// Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "ToolSearch matches Anthropic API naming"
+)]
 #[schemars(rename = "MessagesTool")]
 pub enum Tool {
     /// MCP toolset definition
     McpToolset(McpToolset),
-    /// Custom tool definition
+    /// Custom tool definition (must come before ToolSearch: CustomTool requires
+    /// `input_schema` which acts as a discriminator — ToolSearchTool JSON lacks
+    /// it and falls through, while CustomTool JSON with "type" would incorrectly
+    /// match ToolSearchTool's less-restrictive shape if tried first)
     Custom(CustomTool),
+    /// Tool search tool
+    ToolSearch(ToolSearchTool),
     /// Bash tool (computer use)
     Bash(BashTool),
     /// Text editor tool (computer use)
@@ -540,6 +553,9 @@ pub struct CustomTool {
 
     /// JSON schema for the tool's input
     pub input_schema: InputSchema,
+
+    /// Whether to defer loading this tool
+    pub defer_loading: Option<bool>,
 
     /// Cache control for this tool
     pub cache_control: Option<CacheControl>,
@@ -728,6 +744,17 @@ pub enum ContentBlock {
     WebSearchToolResult {
         tool_use_id: String,
         content: WebSearchToolResultContent,
+    },
+    /// Tool search tool result
+    ToolSearchToolResult {
+        tool_use_id: String,
+        content: ToolSearchResultContent,
+    },
+    /// Tool reference (returned by tool search)
+    ToolReference {
+        tool_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
     },
     /// MCP tool use (beta) - model requesting tool execution via MCP
     McpToolUse {
@@ -1462,18 +1489,14 @@ pub struct ToolReferenceBlock {
     pub description: Option<String>,
 }
 
-/// Tool search result block (beta)
+/// Tool search result content — wraps tool references returned by tool search
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ToolSearchResultBlock {
+pub struct ToolSearchResultContent {
     #[serde(rename = "type")]
     pub block_type: String, // "tool_search_tool_search_result"
 
-    /// Tool name
-    pub tool_name: String,
-
-    /// Relevance score
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub score: Option<f64>,
+    /// Tool references found by the search
+    pub tool_references: Vec<ToolReferenceBlock>,
 }
 
 /// Tool search tool result block (beta)
@@ -1483,7 +1506,7 @@ pub struct ToolSearchToolResultBlock {
     pub tool_use_id: String,
 
     /// The search results
-    pub content: Vec<ToolSearchResultBlock>,
+    pub content: ToolSearchResultContent,
 
     /// Cache control for this block
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1677,7 +1700,7 @@ pub enum BetaContentBlock {
     // Beta tool search types
     ToolSearchToolResult {
         tool_use_id: String,
-        content: Vec<ToolSearchResultBlock>,
+        content: ToolSearchResultContent,
     },
     ToolReference {
         tool_name: String,
@@ -1733,4 +1756,174 @@ pub enum ServerToolCaller {
     /// Code execution caller
     #[serde(rename = "code_execution_20250825")]
     CodeExecution20250825,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json;
+
+    use super::*;
+
+    #[test]
+    fn test_tool_mcp_toolset_defer_loading_deserialization() {
+        let json = r#"{
+            "type": "mcp_toolset",
+            "mcp_server_name": "brave",
+            "default_config": {"defer_loading": true}
+        }"#;
+
+        let tool: Tool = serde_json::from_str(json).expect("Failed to deserialize McpToolset Tool");
+        match tool {
+            Tool::McpToolset(ts) => {
+                assert_eq!(ts.mcp_server_name, "brave");
+                let default_config = ts.default_config.expect("default_config should be Some");
+                assert_eq!(default_config.defer_loading, Some(true));
+            }
+            other => panic!(
+                "Expected McpToolset, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn test_tool_search_tool_deserialization() {
+        let json = r#"{
+            "type": "tool_search_tool_regex_20251119",
+            "name": "tool_search_tool_regex"
+        }"#;
+
+        let tool: Tool = serde_json::from_str(json).expect("Failed to deserialize ToolSearch Tool");
+        match tool {
+            Tool::ToolSearch(ts) => {
+                assert_eq!(ts.name, "tool_search_tool_regex");
+                assert_eq!(ts.tool_type, "tool_search_tool_regex_20251119");
+            }
+            other => panic!(
+                "Expected ToolSearch, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn test_content_block_tool_search_tool_result_deserialization() {
+        let json = r#"{
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srvtoolu_015dw5iXvktXLmqwpyzo4Dp2",
+            "content": {
+                "type": "tool_search_tool_search_result",
+                "tool_references": [
+                    {"type": "tool_reference", "tool_name": "get_weather"}
+                ]
+            }
+        }"#;
+
+        let block: ContentBlock = serde_json::from_str(json)
+            .expect("Failed to deserialize tool_search_tool_result ContentBlock");
+        match block {
+            ContentBlock::ToolSearchToolResult {
+                tool_use_id,
+                content,
+            } => {
+                assert_eq!(tool_use_id, "srvtoolu_015dw5iXvktXLmqwpyzo4Dp2");
+                assert_eq!(content.tool_references.len(), 1);
+                assert_eq!(content.tool_references[0].tool_name, "get_weather");
+            }
+            _ => panic!("Expected ToolSearchToolResult variant"),
+        }
+    }
+
+    #[test]
+    fn test_content_block_server_tool_use_deserialization() {
+        let json = r#"{
+            "type": "server_tool_use",
+            "id": "srvtoolu_015dw5iXvktXLmqwpyzo4Dp2",
+            "name": "tool_search_tool_regex",
+            "input": {"query": "weather"}
+        }"#;
+
+        let block: ContentBlock =
+            serde_json::from_str(json).expect("Failed to deserialize server_tool_use ContentBlock");
+        match block {
+            ContentBlock::ServerToolUse { id, name, input: _ } => {
+                assert_eq!(id, "srvtoolu_015dw5iXvktXLmqwpyzo4Dp2");
+                assert_eq!(name, "tool_search_tool_regex");
+            }
+            _ => panic!("Expected ServerToolUse variant"),
+        }
+    }
+
+    #[test]
+    fn test_content_block_tool_reference_deserialization() {
+        let json = r#"{
+            "type": "tool_reference",
+            "tool_name": "get_weather",
+            "description": "Get the weather for a location"
+        }"#;
+
+        let block: ContentBlock =
+            serde_json::from_str(json).expect("Failed to deserialize tool_reference ContentBlock");
+        match block {
+            ContentBlock::ToolReference {
+                tool_name,
+                description,
+            } => {
+                assert_eq!(tool_name, "get_weather");
+                assert_eq!(description.unwrap(), "Get the weather for a location");
+            }
+            _ => panic!("Expected ToolReference variant"),
+        }
+    }
+
+    #[test]
+    fn test_full_message_with_tool_search_flow_deserialization() {
+        // Simulates the full response from Anthropic API with tool search flow
+        let json = r#"{
+            "id": "msg_01TEST",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5-20250929",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_015dw5iXvktXLmqwpyzo4Dp2",
+                    "name": "tool_search_tool_regex",
+                    "input": {"query": "weather"}
+                },
+                {
+                    "type": "tool_search_tool_result",
+                    "tool_use_id": "srvtoolu_015dw5iXvktXLmqwpyzo4Dp2",
+                    "content": {
+                        "type": "tool_search_tool_search_result",
+                        "tool_references": [
+                            {"type": "tool_reference", "tool_name": "get_weather"}
+                        ]
+                    }
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01ABC",
+                    "name": "get_weather",
+                    "input": {"location": "San Francisco"}
+                }
+            ],
+            "stop_reason": "tool_use",
+            "stop_sequence": null,
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50
+            }
+        }"#;
+
+        let msg: Message = serde_json::from_str(json)
+            .expect("Failed to deserialize Message with tool search flow");
+        assert_eq!(msg.content.len(), 3);
+        assert!(matches!(msg.content[0], ContentBlock::ServerToolUse { .. }));
+        assert!(matches!(
+            msg.content[1],
+            ContentBlock::ToolSearchToolResult { .. }
+        ));
+        assert!(matches!(msg.content[2], ContentBlock::ToolUse { .. }));
+    }
 }
