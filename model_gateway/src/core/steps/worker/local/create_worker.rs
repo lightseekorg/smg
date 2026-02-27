@@ -69,14 +69,11 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
         // Per-worker override from pod metadata (--model-id-from).
         // Replaces the primary model ID; the backend-discovered name becomes an alias.
         if let Some(ref override_id) = config.model_id_override {
-            if !override_id.is_empty()
-                && *override_id != model_id
-                && model_id != UNKNOWN_MODEL_ID
-            {
-                model_card.aliases.push(model_id.clone());
-                model_card.aliases.retain(|a| a != override_id);
-                model_card.id.clone_from(override_id);
-            } else if !override_id.is_empty() && model_id == UNKNOWN_MODEL_ID {
+            if !override_id.is_empty() && *override_id != model_id {
+                if model_id != UNKNOWN_MODEL_ID {
+                    model_card.aliases.push(model_id.clone());
+                    model_card.aliases.retain(|a| a != override_id);
+                }
                 model_card.id.clone_from(override_id);
             }
         }
