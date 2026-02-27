@@ -60,6 +60,7 @@ def make_custom_tool(
 def make_mcp_toolset(
     server_name: str,
     default_defer_loading: bool | None = None,
+    default_enabled: bool | None = None,
     tool_overrides: dict[str, dict] | None = None,
 ) -> dict:
     """Build an mcp_toolset tool entry with optional defer_loading config."""
@@ -67,8 +68,13 @@ def make_mcp_toolset(
         "type": "mcp_toolset",
         "mcp_server_name": server_name,
     }
+    default_config: dict = {}
     if default_defer_loading is not None:
-        entry["default_config"] = {"defer_loading": default_defer_loading}
+        default_config["defer_loading"] = default_defer_loading
+    if default_enabled is not None:
+        default_config["enabled"] = default_enabled
+    if default_config:
+        entry["default_config"] = default_config
     if tool_overrides:
         entry["configs"] = tool_overrides
     return entry
@@ -289,6 +295,8 @@ class TestToolSearchWithMcp:
             make_mcp_toolset(
                 MCP_SERVER_NAME,
                 default_defer_loading=True,
+                default_enabled=False,
+                tool_overrides={"brave_web_search": {"enabled": True}},
             ),
         ]
 
@@ -358,6 +366,8 @@ class TestToolSearchWithMcp:
             make_mcp_toolset(
                 MCP_SERVER_NAME,
                 default_defer_loading=True,
+                default_enabled=False,
+                tool_overrides={"brave_web_search": {"enabled": True}},
             ),
         ]
 
