@@ -240,8 +240,7 @@ def pytest_collection_modifyitems(
         #   - is parametrized with at least one local backend, or
         #   - is an e2e test with no explicit backends (defaults to local)
         if model_id and (
-            (backends and any(b in _LOCAL_BACKENDS for b in backends))
-            or (is_e2e and not backends)
+            (backends and any(b in _LOCAL_BACKENDS for b in backends)) or (is_e2e and not backends)
         ):
             _item_model_affinity[item.nodeid] = model_id
         else:
