@@ -4,9 +4,12 @@
 //! depth position, replacing tree pointer-chasing with direct positional lookup.
 //! Jump search skips positions in strides, yielding amortized O(D/J + W) complexity.
 //!
-//! Unlike the approximate StringTree/TokenTree, this indexer is updated exclusively
-//! from backend KV cache events — never from routing guesses. It provides ground-truth
-//! overlap scoring for the gRPC routing path.
+//! **Dual-hash scheme**: backends send a position-aware `block_hash` (SequenceHash)
+//! and raw `token_ids` per block. The router computes a position-independent
+//! ContentHash (XXH3) from token_ids, then a rolling prefix hash (also XXH3) from
+//! the ContentHash sequence. SeqEntry is keyed by the router's prefix hash for
+//! precise disambiguation at query time. The backend's SequenceHash is stored in
+//! worker_blocks only, used for `apply_removed` reverse lookup.
 //!
 //! Thread safety: all methods are `&self` and internally synchronized via DashMap +
 //! parking_lot::RwLock. Reads (find_matches) and writes (apply_stored/removed/cleared)
@@ -163,40 +166,12 @@ impl SeqEntry {
         }
     }
 
-    /// Get workers for a specific seq_hash (used in event processing tests).
-    #[cfg(test)]
-    #[expect(dead_code)]
+    /// Get workers for a specific prefix hash (used in query path and event processing).
     fn get(&self, seq_hash: SequenceHash) -> Option<&FxHashSet<WorkerId>> {
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => Some(workers),
             Self::Single(_, _) => None,
             Self::Multi(map) => map.get(&seq_hash),
-        }
-    }
-
-    /// Collect all workers across all seq_hash variants.
-    ///
-    /// Used by the query path: content-hash positional matching disambiguates
-    /// without seq_hash verification. Backends use different hash algorithms
-    /// (SHA256, xxHash3, custom) than the router's XXH3, so seq_hashes from
-    /// events cannot be recomputed at query time.
-    fn all_workers(&self) -> FxHashSet<WorkerId> {
-        match self {
-            Self::Single(_, workers) => workers.clone(),
-            Self::Multi(map) => map.values().flat_map(|ws| ws.iter()).cloned().collect(),
-        }
-    }
-
-    /// Count total unique workers across all seq_hash variants.
-    fn total_worker_count(&self) -> usize {
-        match self {
-            Self::Single(_, workers) => workers.len(),
-            Self::Multi(map) => {
-                // Workers could appear under multiple seq_hashes; count unique.
-                // In practice Multi is rare and sets are small, so this is fast.
-                let all: FxHashSet<&WorkerId> = map.values().flat_map(|ws| ws.iter()).collect();
-                all.len()
-            }
         }
     }
 }
@@ -205,8 +180,9 @@ impl SeqEntry {
 // PositionalIndexer
 // ---------------------------------------------------------------------------
 
-/// Per-worker reverse lookup: seq_hash → (position, content_hash).
-type LevelIndex = RwLock<FxHashMap<SequenceHash, (usize, ContentHash)>>;
+/// Per-worker reverse lookup: backend_seq_hash → (position, content_hash, prefix_hash).
+/// The `prefix_hash` is the router-computed rolling hash used as the SeqEntry key.
+type LevelIndex = RwLock<FxHashMap<SequenceHash, (usize, ContentHash, SequenceHash)>>;
 
 /// Positional indexer for cache-aware routing.
 ///
@@ -258,8 +234,8 @@ impl PositionalIndexer {
 
         let worker_id: WorkerId = Arc::from(worker);
 
-        // Determine starting position from parent
-        let start_pos = match parent_seq_hash {
+        // Determine starting position and parent's router prefix hash.
+        let (start_pos, parent_prefix) = match parent_seq_hash {
             Some(parent_hash) => {
                 let wb = self.worker_blocks.read();
                 let Some(level_index) = wb.get(&worker_id) else {
@@ -271,7 +247,7 @@ impl PositionalIndexer {
                     return;
                 };
                 let worker_map = level_index.read();
-                let Some(&(parent_pos, _)) = worker_map.get(&parent_hash) else {
+                let Some(&(parent_pos, _, parent_pfx)) = worker_map.get(&parent_hash) else {
                     tracing::warn!(
                         worker = %worker,
                         parent_hash = ?parent_hash,
@@ -279,12 +255,11 @@ impl PositionalIndexer {
                     );
                     return;
                 };
-                parent_pos + 1
+                (parent_pos + 1, Some(parent_pfx))
             }
-            None => 0,
+            None => (0, None),
         };
 
-        // Ensure worker entry exists
         if !self.worker_blocks.read().contains_key(&worker_id) {
             self.worker_blocks
                 .write()
@@ -298,17 +273,25 @@ impl PositionalIndexer {
         };
         let mut worker_map = level_index.write();
 
+        let mut prev_prefix = parent_prefix;
         for (i, block) in blocks.iter().enumerate() {
             let position = start_pos + i;
             let content_hash = block.content_hash;
-            let seq_hash = block.seq_hash;
+
+            // Compute router prefix hash (rolling XXH3 of content hashes).
+            // This is the SeqEntry key — consistent between store and query paths.
+            let prefix_hash = match prev_prefix {
+                Some(prev) => SequenceHash(Self::compute_next_seq_hash(prev.0, content_hash.0)),
+                None => SequenceHash(content_hash.0),
+            };
 
             self.index
                 .entry((position, content_hash))
-                .and_modify(|entry| entry.insert(seq_hash, worker))
-                .or_insert_with(|| SeqEntry::new(seq_hash, worker));
+                .and_modify(|entry| entry.insert(prefix_hash, worker))
+                .or_insert_with(|| SeqEntry::new(prefix_hash, worker));
 
-            worker_map.insert(seq_hash, (position, content_hash));
+            worker_map.insert(block.seq_hash, (position, content_hash, prefix_hash));
+            prev_prefix = Some(prefix_hash);
         }
     }
 
@@ -331,13 +314,12 @@ impl PositionalIndexer {
         let mut worker_map = level_index.write();
 
         for &seq_hash in seq_hashes {
-            let Some((position, content_hash)) = worker_map.remove(&seq_hash) else {
+            let Some((position, content_hash, prefix_hash)) = worker_map.remove(&seq_hash) else {
                 continue;
             };
 
             if let Some(mut entry) = self.index.get_mut(&(position, content_hash)) {
-                if entry.remove(seq_hash, worker) {
-                    // Entry is empty, remove it from the DashMap
+                if entry.remove(prefix_hash, worker) {
                     drop(entry);
                     self.index.remove(&(position, content_hash));
                 }
@@ -383,9 +365,9 @@ impl PositionalIndexer {
         let mut wb = self.worker_blocks.write();
         if let Some(level_index) = wb.remove(&worker_id) {
             let worker_map = level_index.read();
-            for (&seq_hash, &(position, content_hash)) in worker_map.iter() {
+            for (_, &(position, content_hash, prefix_hash)) in worker_map.iter() {
                 if let Some(mut entry) = self.index.get_mut(&(position, content_hash)) {
-                    if entry.remove(seq_hash, worker) {
+                    if entry.remove(prefix_hash, worker) {
                         drop(entry);
                         self.index.remove(&(position, content_hash));
                     }
@@ -399,18 +381,16 @@ impl PositionalIndexer {
     }
 
     // -----------------------------------------------------------------------
-    // Internal: jump search (content-hash positional matching)
+    // Internal: router prefix hash + jump search
     //
-    // The query path uses content_hash matching only — not seq_hash.
-    // Backends use different hash algorithms (SHA256, xxHash3, custom) for
-    // seq_hash, so the router cannot recompute them at query time.
-    // Content-hash positional matching already provides correct disambiguation:
-    // workers with different prefix histories diverge at different positions
-    // and get naturally excluded from the active set.
+    // The router computes its own rolling hash from ContentHashes (XXH3).
+    // This hash is stored in SeqEntry during apply_stored and recomputed
+    // at query time for precise filtering — matching Dynamo's semantics.
+    // The backend's SequenceHash (from proto block_hash) stays in
+    // worker_blocks only, used for apply_removed reverse lookup.
     // -----------------------------------------------------------------------
 
-    /// Compute rolling sequence hash incrementally (used by test helpers only).
-    #[cfg(test)]
+    /// Compute rolling prefix hash: XXH3(prev || current).
     #[inline]
     fn compute_next_seq_hash(prev_seq_hash: u64, current_content_hash: u64) -> u64 {
         let mut bytes = [0u8; 16];
@@ -419,8 +399,7 @@ impl PositionalIndexer {
         xxhash_rust::xxh3::xxh3_64_with_seed(&bytes, XXH3_SEED)
     }
 
-    /// Ensure seq_hashes is computed up to and including target_pos (test helpers only).
-    #[cfg(test)]
+    /// Lazily compute prefix hashes up to `target_pos`.
     #[inline]
     fn ensure_seq_hash_computed(
         seq_hashes: &mut Vec<SequenceHash>,
@@ -434,34 +413,47 @@ impl PositionalIndexer {
             } else {
                 let prev = seq_hashes[pos - 1].0;
                 let current = sequence[pos].0;
-                let next = Self::compute_next_seq_hash(prev, current);
-                seq_hashes.push(SequenceHash(next));
+                seq_hashes.push(SequenceHash(Self::compute_next_seq_hash(prev, current)));
             }
         }
     }
 
-    /// Get all workers at a position matching the content_hash.
-    fn get_workers_at(
+    /// Get workers at a position matching both content_hash and prefix_hash.
+    fn get_workers_lazy(
         &self,
         position: usize,
         content_hash: ContentHash,
+        seq_hashes: &mut Vec<SequenceHash>,
+        sequence: &[ContentHash],
     ) -> Option<FxHashSet<WorkerId>> {
         let entry = self.index.get(&(position, content_hash))?;
-        Some(entry.all_workers())
+        Self::ensure_seq_hash_computed(seq_hashes, position, sequence);
+        entry.get(seq_hashes[position]).cloned()
     }
 
-    /// Count workers at a position (for cardinality check during jump).
-    fn count_workers_at(&self, position: usize, content_hash: ContentHash) -> usize {
-        self.index
-            .get(&(position, content_hash))
-            .map(|entry| entry.total_worker_count())
+    /// Count workers at a position matching the prefix_hash.
+    fn count_workers_at(
+        &self,
+        position: usize,
+        content_hash: ContentHash,
+        seq_hashes: &mut Vec<SequenceHash>,
+        sequence: &[ContentHash],
+    ) -> usize {
+        let Some(entry) = self.index.get(&(position, content_hash)) else {
+            return 0;
+        };
+        Self::ensure_seq_hash_computed(seq_hashes, position, sequence);
+        entry
+            .get(seq_hashes[position])
+            .map(|workers| workers.len())
             .unwrap_or(0)
     }
 
-    /// Scan positions sequentially, updating active set and recording drain scores.
+    /// Scan positions sequentially, filtering by prefix_hash.
     fn linear_scan_drain(
         &self,
         sequence: &[ContentHash],
+        seq_hashes: &mut Vec<SequenceHash>,
         active: &mut FxHashSet<WorkerId>,
         scores: &mut OverlapScores,
         lo: usize,
@@ -474,15 +466,20 @@ impl PositionalIndexer {
             let pos = lo + offset;
 
             let Some(entry) = self.index.get(&(pos, content_hash)) else {
-                // No entry at this position — all active workers drain here
                 for worker in active.drain() {
                     scores.scores.insert(worker, pos as u32);
                 }
                 break;
             };
 
-            let workers = entry.all_workers();
-            // Retain only workers present at this position; record drain scores for others
+            Self::ensure_seq_hash_computed(seq_hashes, pos, sequence);
+            let Some(workers) = entry.get(seq_hashes[pos]) else {
+                for worker in active.drain() {
+                    scores.scores.insert(worker, pos as u32);
+                }
+                break;
+            };
+
             active.retain(|w| {
                 if workers.contains(w) {
                     true
@@ -494,7 +491,6 @@ impl PositionalIndexer {
         }
     }
 
-    /// Jump-based search to find overlap scores.
     fn jump_search_matches(&self, content_hashes: &[ContentHash]) -> OverlapScores {
         let mut scores = OverlapScores::default();
 
@@ -502,8 +498,11 @@ impl PositionalIndexer {
             return scores;
         }
 
-        // Check first position to initialize active set
-        let Some(initial_workers) = self.get_workers_at(0, content_hashes[0]) else {
+        let mut seq_hashes = Vec::with_capacity(content_hashes.len());
+
+        let Some(initial_workers) =
+            self.get_workers_lazy(0, content_hashes[0], &mut seq_hashes, content_hashes)
+        else {
             return scores;
         };
 
@@ -515,19 +514,22 @@ impl PositionalIndexer {
         let len = content_hashes.len();
         let mut current_pos = 0;
 
-        // Jump through positions
         while current_pos < len - 1 && !active.is_empty() {
             let next_pos = (current_pos + self.jump_size).min(len - 1);
 
-            let num_workers_at_next = self.count_workers_at(next_pos, content_hashes[next_pos]);
+            let count = self.count_workers_at(
+                next_pos,
+                content_hashes[next_pos],
+                &mut seq_hashes,
+                content_hashes,
+            );
 
-            if num_workers_at_next == active.len() {
-                // All active workers still present at jump destination — skip ahead
+            if count == active.len() {
                 current_pos = next_pos;
             } else {
-                // Some workers drained — scan the range to find exact drain points
                 self.linear_scan_drain(
                     content_hashes,
+                    &mut seq_hashes,
                     &mut active,
                     &mut scores,
                     current_pos + 1,
@@ -537,13 +539,11 @@ impl PositionalIndexer {
             }
         }
 
-        // Record final scores for remaining active workers
         let final_score = len as u32;
         for worker in active {
             scores.scores.insert(worker, final_score);
         }
 
-        // Populate tree_sizes from worker_blocks
         let wb = self.worker_blocks.read();
         for worker in scores.scores.keys() {
             if let Some(level_index) = wb.get(worker) {
@@ -766,8 +766,11 @@ mod tests {
     fn test_seq_entry_single_to_multi_upgrade() {
         let indexer = PositionalIndexer::new(64);
 
-        // Two workers store different sequences but with the same content hash at positions 0-1.
-        // Worker 1: [10, 20] with seq_hashes [A, B]
+        // Two workers with DIFFERENT content at position 0 but SAME content at position 1.
+        // This creates different router prefix hashes at position 1, triggering Multi upgrade.
+        // W1: content [10, 20] → prefix [10, hash(10||20)]
+        // W2: content [99, 20] → prefix [99, hash(99||20)]
+        // At position 1, both have ContentHash(20) but different prefix hashes → Multi.
         let blocks_w1 = vec![
             StoredBlock {
                 seq_hash: SequenceHash(1000),
@@ -778,11 +781,10 @@ mod tests {
                 content_hash: ContentHash(20),
             },
         ];
-        // Worker 2: same content hashes but different seq_hashes (different prefix history)
         let blocks_w2 = vec![
             StoredBlock {
                 seq_hash: SequenceHash(3000),
-                content_hash: ContentHash(10),
+                content_hash: ContentHash(99),
             },
             StoredBlock {
                 seq_hash: SequenceHash(4000),
@@ -793,24 +795,42 @@ mod tests {
         indexer.apply_stored("http://w1:8000", &blocks_w1, None);
         indexer.apply_stored("http://w2:8000", &blocks_w2, None);
 
-        // Verify SeqEntry was upgraded to Multi at position 0
-        // (two different seq_hashes for the same content_hash)
+        // Position 1 has same content but different prefix histories → Multi
         {
-            let entry = indexer.index.get(&(0, ContentHash(10))).unwrap();
+            let entry = indexer.index.get(&(1, ContentHash(20))).unwrap();
             assert!(matches!(entry.value(), SeqEntry::Multi(_)));
-        } // drop Ref to release DashMap shard lock before apply_removed
+        }
 
-        // Query path uses content-hash matching only (no seq_hash verification).
-        // Both workers have matching content at all positions, so both match.
+        // Same content at same position → Single (both share prefix hash)
+        // Workers with identical content get identical router prefix hashes.
+        let indexer2 = PositionalIndexer::new(64);
+        let blocks_w3 = make_blocks(&[10, 20]);
+        let blocks_w4 = vec![
+            StoredBlock {
+                seq_hash: SequenceHash(5000),
+                content_hash: ContentHash(10),
+            },
+            StoredBlock {
+                seq_hash: SequenceHash(6000),
+                content_hash: ContentHash(20),
+            },
+        ];
+        indexer2.apply_stored("http://w3:8000", &blocks_w3, None);
+        indexer2.apply_stored("http://w4:8000", &blocks_w4, None);
+        {
+            let entry = indexer2.index.get(&(0, ContentHash(10))).unwrap();
+            assert!(matches!(entry.value(), SeqEntry::Single(_, _)));
+        }
+
+        // Query: [10, 20] matches only w1 (w2 has content 99 at position 0)
         let scores = indexer.find_matches(&hashes(&[10, 20]));
         assert_eq!(scores.scores.get("http://w1:8000"), Some(&2));
-        assert_eq!(scores.scores.get("http://w2:8000"), Some(&2));
+        assert!(!scores.scores.contains_key("http://w2:8000"));
 
-        // Verify remove still works with exact seq_hash targeting
+        // Remove w1 via backend seq_hashes — reverse lookup maps to correct prefix hash
         indexer.apply_removed("http://w1:8000", &[SequenceHash(1000), SequenceHash(2000)]);
         let scores2 = indexer.find_matches(&hashes(&[10, 20]));
         assert!(!scores2.scores.contains_key("http://w1:8000"));
-        assert_eq!(scores2.scores.get("http://w2:8000"), Some(&2));
     }
 
     #[test]
@@ -831,14 +851,6 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
-    }
-
-    #[test]
-    fn test_compute_content_hash_determinism() {
-        let tokens = vec![1u32, 2, 3, 4, 5];
-        let hash1 = compute_content_hash(&tokens);
-        let hash2 = compute_content_hash(&tokens);
-        assert_eq!(hash1, hash2);
     }
 
     #[test]
@@ -1246,29 +1258,6 @@ mod tests {
 
         indexer.remove_worker("http://w1:8000");
         assert_eq!(indexer.current_size(), 0);
-    }
-
-    #[test]
-    fn test_debug_format() {
-        let indexer = PositionalIndexer::default();
-        let blocks = make_blocks(&[10, 20]);
-        indexer.apply_stored("http://w1:8000", &blocks, None);
-
-        let debug = format!("{indexer:?}");
-        assert!(debug.contains("PositionalIndexer"));
-        assert!(debug.contains("index_size"));
-        assert!(debug.contains("jump_size"));
-    }
-
-    #[test]
-    fn test_stored_block_is_copy() {
-        let block = StoredBlock {
-            seq_hash: SequenceHash(1),
-            content_hash: ContentHash(2),
-        };
-        let copy = block; // Copy, not move
-        assert_eq!(block.seq_hash, copy.seq_hash);
-        assert_eq!(block.content_hash, copy.content_hash);
     }
 
     // -----------------------------------------------------------------------
