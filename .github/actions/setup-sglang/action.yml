@@ -12,16 +12,19 @@ runs:
       id: sglang-cache
       uses: actions/cache/restore@v4
       with:
-        path: ~/.local/share/uv/cache
+        path: /tmp/uv-cache
         key: sglang-uv-${{ runner.os }}-${{ hashFiles('scripts/ci_install_sglang.sh') }}
 
     - name: Install SGLang
       shell: bash
-      run: bash scripts/ci_install_sglang.sh
+      run: |
+        export UV_CACHE_DIR=/tmp/uv-cache
+        mkdir -p "$UV_CACHE_DIR"
+        bash scripts/ci_install_sglang.sh
 
     - name: Save SGLang uv cache
       if: steps.sglang-cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
-        path: ~/.local/share/uv/cache
+        path: /tmp/uv-cache
         key: sglang-uv-${{ runner.os }}-${{ hashFiles('scripts/ci_install_sglang.sh') }}
