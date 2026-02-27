@@ -174,6 +174,11 @@ class TestToolSearchPassthrough:
         assert smg_resp.id is not None
         assert smg_resp.role == "assistant"
         assert len(smg_resp.content) > 0
+        smg_block_types = [getattr(b, "type", None) for b in smg_resp.content]
+        assert "server_tool_use" in smg_block_types
+        assert "tool_search_tool_result" in smg_block_types
+        assert "tool_use" in smg_block_types
+        assert smg_resp.stop_reason == "tool_use"
 
     def test_tool_search_with_deferred_tools_streaming(self, setup_backend):
         """Streaming variant of tool search passthrough."""
@@ -381,6 +386,12 @@ class TestToolSearchWithMcp:
         )
         assert smg_resp.id is not None
         assert len(smg_resp.content) > 0
+        smg_block_types = [getattr(b, "type", None) for b in smg_resp.content]
+        assert "server_tool_use" in smg_block_types
+        assert "tool_search_tool_result" in smg_block_types
+        assert "mcp_tool_use" in smg_block_types
+        assert "mcp_tool_result" in smg_block_types
+        assert smg_resp.stop_reason == "end_turn"
 
     def test_mcp_tools_with_deferred_loading_streaming(self, setup_backend):
         """Streaming variant: tool_search + deferred MCP tools via SMG."""

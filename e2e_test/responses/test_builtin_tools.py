@@ -447,7 +447,7 @@ class TestMcpWebSearchStreamingEvents:
         """Ensure Brave server is available for these tests."""
         pass
 
-    def test_mcp_web_search_streaming_events(self, setup_backend, smg):
+    def test_mcp_web_search_streaming_events(self, setup_backend):
         """Test that MCP web search produces proper streaming events.
 
         This verifies the baseline MCP streaming behavior that built-in

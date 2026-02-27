@@ -281,6 +281,7 @@ class TestMcpToolPassthrough:
         )
         assert smg_resp.id is not None
         assert smg_resp.role == "assistant"
+        assert len(smg_resp.content) > 0
 
     def test_mcp_passthrough_streaming(self, setup_backend, smg):
         """Test MCP passthrough with SSE streaming."""
