@@ -366,11 +366,17 @@ async fn execute_mcp_tool_loop_streaming(
                 .await;
 
                 // Emit response.completed with usage
-                let usage_json = json!({
+                let mut usage_json = json!({
                     "input_tokens": usage.prompt_tokens,
                     "output_tokens": usage.completion_tokens,
                     "total_tokens": usage.total_tokens,
                 });
+                if let Some(details) = &usage.prompt_tokens_details {
+                    if details.cached_tokens > 0 {
+                        usage_json["input_tokens_details"] =
+                            json!({ "cached_tokens": details.cached_tokens });
+                    }
+                }
                 let event = emitter.emit_completed(Some(&usage_json));
                 emitter.send_event_best_effort(&event, tx);
                 return;
@@ -446,11 +452,16 @@ async fn execute_without_mcp_streaming(
     .await;
 
     // Emit response.completed with usage
-    let usage_json = json!({
+    let mut usage_json = json!({
         "input_tokens": usage.prompt_tokens,
         "output_tokens": usage.completion_tokens,
         "total_tokens": usage.total_tokens,
     });
+    if let Some(details) = &usage.prompt_tokens_details {
+        if details.cached_tokens > 0 {
+            usage_json["input_tokens_details"] = json!({ "cached_tokens": details.cached_tokens });
+        }
+    }
     let event = emitter.emit_completed(Some(&usage_json));
     emitter.send_event_best_effort(&event, tx);
 }

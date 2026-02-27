@@ -1139,7 +1139,11 @@ impl HarmonyStreamingProcessor {
                         input_tokens: prompt_tokens,
                         output_tokens: completion_tokens,
                         total_tokens: prompt_tokens + completion_tokens,
-                        input_tokens_details: Some(InputTokensDetails { cached_tokens }),
+                        input_tokens_details: if cached_tokens > 0 {
+                            Some(InputTokensDetails { cached_tokens })
+                        } else {
+                            None
+                        },
                         output_tokens_details: if reasoning_token_count > 0 {
                             Some(OutputTokensDetails {
                                 reasoning_tokens: reasoning_token_count,

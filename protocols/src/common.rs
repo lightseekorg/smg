@@ -521,7 +521,9 @@ impl Usage {
 
     /// Add cached token details to this Usage
     pub fn with_cached_tokens(mut self, cached_tokens: u32) -> Self {
-        self.prompt_tokens_details = Some(PromptTokenUsageInfo { cached_tokens });
+        if cached_tokens > 0 {
+            self.prompt_tokens_details = Some(PromptTokenUsageInfo { cached_tokens });
+        }
         self
     }
 
