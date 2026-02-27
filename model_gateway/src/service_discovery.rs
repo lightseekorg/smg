@@ -525,7 +525,8 @@ async fn handle_pod_event(
             let mut spec = WorkerSpec::new(worker_url.clone());
             spec.worker_type = worker_type;
             spec.bootstrap_port = bootstrap_port;
-            spec.model_id_override.clone_from(&pod_info.model_id_override);
+            spec.model_id_override
+                .clone_from(&pod_info.model_id_override);
             spec.api_key.clone_from(&app_context.router_config.api_key);
             // Health config is resolved at worker build time from router
             // defaults + per-worker overrides (spec.health).
@@ -1654,7 +1655,13 @@ mod tests {
 
     #[test]
     fn test_pod_info_from_pod_with_model_id_override() {
-        let mut pod = create_k8s_pod(Some("test-pod"), Some("10.0.0.1"), Some("Running"), Some("True"), None);
+        let mut pod = create_k8s_pod(
+            Some("test-pod"),
+            Some("10.0.0.1"),
+            Some("Running"),
+            Some("True"),
+            None,
+        );
         pod.metadata.namespace = Some("team-a".to_string());
 
         let config = ServiceDiscoveryConfig {
@@ -1668,11 +1675,16 @@ mod tests {
 
     #[test]
     fn test_pod_info_from_pod_without_model_id_source() {
-        let pod = create_k8s_pod(Some("test-pod"), Some("10.0.0.1"), Some("Running"), Some("True"), None);
+        let pod = create_k8s_pod(
+            Some("test-pod"),
+            Some("10.0.0.1"),
+            Some("Running"),
+            Some("True"),
+            None,
+        );
 
         let config = ServiceDiscoveryConfig::default();
         let info = PodInfo::from_pod(&pod, Some(&config)).unwrap();
         assert_eq!(info.model_id_override, None);
     }
-
 }
