@@ -53,7 +53,7 @@ def create_mcp_config() -> dict:
         "servers": [
             {
                 "name": "brave-builtin",
-                "protocol": "sse",
+                "protocol": "streamable",
                 "url": BRAVE_MCP_URL,
                 "builtin_type": "web_search_preview",
                 "builtin_tool_name": "brave_web_search",
