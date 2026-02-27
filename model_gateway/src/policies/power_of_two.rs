@@ -115,7 +115,7 @@ impl LoadBalancingPolicy for PowerOfTwoPolicy {
 
     fn update_loads(&self, loads: &HashMap<String, WorkerLoadResponse>) {
         if let Ok(mut cached) = self.cached_loads.write() {
-            cached.clone_from(loads);
+            cached.extend(loads.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
     }
 

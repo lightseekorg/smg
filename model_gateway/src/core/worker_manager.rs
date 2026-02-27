@@ -254,7 +254,8 @@ impl WorkerManager {
         };
 
         match grpc_client.get_loads().await {
-            Ok(load) => Some(load),
+            Ok(load) if !load.loads.is_empty() => Some(load),
+            Ok(_) => None,
             Err(e) => {
                 debug!("gRPC GetLoads failed for {}: {e}", worker.url());
                 None
@@ -507,8 +508,14 @@ impl LoadMonitor {
                 policy.update_loads(&group_loads);
             }
 
-            // Atomically merge into the shared watch channel (groups don't clobber each other)
+            // Atomically merge into the shared watch channel.
+            // Remove all group URLs first to clear stale entries from workers
+            // that failed this tick, then insert successful loads.
+            let all_group_urls: Vec<String> = workers.iter().map(|w| w.url().to_string()).collect();
             tx.send_modify(|map| {
+                for url in &all_group_urls {
+                    map.remove(url);
+                }
                 map.extend(group_loads);
             });
         }
