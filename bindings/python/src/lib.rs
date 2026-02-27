@@ -557,6 +557,7 @@ impl Router {
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),
                 router_selector: HashMap::new(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
+                model_id_source: None,
             })
         } else {
             None
@@ -996,6 +997,7 @@ impl Router {
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),
                 router_selector: HashMap::new(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
+                model_id_source: None,
             })
         } else {
             None

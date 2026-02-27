@@ -359,6 +359,9 @@ pub struct DiscoveryConfig {
     /// Annotation key to read mesh port from Router Pods
     #[serde(default = "default_router_mesh_port_annotation")]
     pub router_mesh_port_annotation: String,
+    /// Source for per-worker model_id override: "namespace", "label:<key>", or "annotation:<key>"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id_source: Option<String>,
 }
 
 fn default_router_mesh_port_annotation() -> String {
@@ -378,6 +381,7 @@ impl Default for DiscoveryConfig {
             bootstrap_port_annotation: "sglang.ai/bootstrap-port".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: default_router_mesh_port_annotation(),
+            model_id_source: None,
         }
     }
 }
@@ -905,6 +909,7 @@ mod tests {
             bootstrap_port_annotation: "custom.io/port".to_string(),
             router_selector: HashMap::new(),
             router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
+            model_id_source: None,
         };
 
         assert!(config.enabled);
@@ -1183,6 +1188,7 @@ mod tests {
                 bootstrap_port_annotation: "mycompany.io/bootstrap".to_string(),
                 router_selector: HashMap::new(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
+                model_id_source: None,
             })
             .enable_metrics("::", 9999) // IPv6 any
             .enable_trace("localhost:4317")
