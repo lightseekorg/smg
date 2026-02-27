@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
+use openai_protocol::{
+    chat::ChatCompletionRequest, generate::GenerateRequest, worker::WorkerLoadResponse,
+};
 use smg_grpc_client::{
     tokenizer_bundle, tokenizer_bundle::StreamBundle, SglangSchedulerClient, TrtllmServiceClient,
     VllmEngineClient,
@@ -159,14 +161,15 @@ impl GrpcClient {
         }
     }
 
-    /// Get the total token load from the backend.
-    /// Only supported for SGLang backends. Returns summed num_used_tokens across all DP ranks.
-    pub async fn get_loads(&self) -> Result<isize, Box<dyn std::error::Error + Send + Sync>> {
+    /// Get the full load response from the backend.
+    /// Only supported for SGLang backends. Returns per-DP-rank load metrics.
+    pub async fn get_loads(
+        &self,
+    ) -> Result<WorkerLoadResponse, Box<dyn std::error::Error + Send + Sync>> {
         match self {
             Self::Sglang(client) => {
                 let resp = client.get_loads(vec!["core".to_string()]).await?;
-                let total: i32 = resp.loads.iter().map(|l| l.num_used_tokens).sum();
-                Ok(total as isize)
+                Ok(WorkerLoadResponse::from(resp))
             }
             _ => Err("GetLoads RPC not supported for this backend".into()),
         }

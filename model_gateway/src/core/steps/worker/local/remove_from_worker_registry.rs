@@ -10,6 +10,7 @@ use crate::{
     core::{
         steps::workflow_data::WorkerRemovalWorkflowData,
         worker::{ConnectionModeExt, WorkerTypeExt},
+        WorkerGroupKey,
     },
     observability::metrics::Metrics,
 };
@@ -74,7 +75,8 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
         }
 
         // Update Layer 3 worker pool size metrics for unique configurations
-        for (worker_type, connection_mode, model_id) in unique_configs {
+        // and notify LoadMonitor when groups become empty
+        for (worker_type, connection_mode, model_id) in &unique_configs {
             // Get labels before moving values into get_workers_filtered
             let worker_type_label = worker_type.as_metric_label();
             let connection_mode_label = connection_mode.as_metric_label();
@@ -82,9 +84,9 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
             let pool_size = app_context
                 .worker_registry
                 .get_workers_filtered(
-                    Some(&model_id),
-                    Some(worker_type),
-                    Some(connection_mode),
+                    Some(model_id),
+                    Some(*worker_type),
+                    Some(*connection_mode),
                     None,
                     false,
                 )
@@ -93,9 +95,21 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
             Metrics::set_worker_pool_size(
                 worker_type_label,
                 connection_mode_label,
-                &model_id,
+                model_id,
                 pool_size,
             );
+
+            // If the group is now empty, stop its load monitor
+            if pool_size == 0 {
+                if let Some(ref load_monitor) = app_context.load_monitor {
+                    let key = WorkerGroupKey {
+                        model_id: model_id.clone(),
+                        worker_type: *worker_type,
+                        connection_mode: *connection_mode,
+                    };
+                    load_monitor.on_group_removed(&key).await;
+                }
+            }
         }
 
         Ok(StepResult::Success)

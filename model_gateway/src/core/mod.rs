@@ -32,7 +32,7 @@ pub use job_queue::{Job, JobQueue, JobQueueConfig};
 pub use openai_protocol::{
     model_card::ModelCard,
     model_type::{Endpoint, ModelType},
-    worker::ProviderType,
+    worker::{ProviderType, WorkerGroupKey},
 };
 pub use retry::{is_retryable_status, RetryExecutor};
 pub use worker::{
