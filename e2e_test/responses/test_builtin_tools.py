@@ -235,6 +235,7 @@ class TestBuiltinToolsCloudBackend:
             input=WEB_SEARCH_PROMPT,
             tools=[WEB_SEARCH_PREVIEW_TOOL],
         )
+        assert smg_resp.error is None
         assert smg_resp.id is not None
         assert smg_resp.status in ("completed", "incomplete")
 
@@ -306,6 +307,7 @@ class TestBuiltinToolsLocalBackend:
             input=WEB_SEARCH_PROMPT,
             tools=[WEB_SEARCH_PREVIEW_TOOL],
         )
+        assert smg_resp.error is None
         assert smg_resp.id is not None
         assert smg_resp.status in ("completed", "incomplete")
 
@@ -341,6 +343,7 @@ class TestBuiltinToolsLocalBackend:
             input="What's the weather in Seattle?",
             tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
         )
+        assert smg_resp.error is None
         assert smg_resp.id is not None
 
 
