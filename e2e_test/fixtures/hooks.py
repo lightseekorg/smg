@@ -38,7 +38,8 @@ _needs_default_model: bool = False
 # Track model affinity for each test item (nodeid -> model_id or None for cloud tests)
 _item_model_affinity: dict[str, str | None] = {}
 
-# Backends that require local GPU workers
+# Backends that require local GPU workers.
+# Matches ConnectionMode values (infra/constants.py) plus their pd_ prefixed variants.
 _LOCAL_BACKENDS = frozenset({"grpc", "http", "pd_grpc", "pd_http"})
 
 
