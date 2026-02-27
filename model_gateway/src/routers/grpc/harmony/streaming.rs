@@ -609,7 +609,14 @@ impl HarmonyStreamingProcessor {
         }
 
         // Phase 2: Process decode stream
-        let result = Self::process_decode_stream(decode_stream, emitter, tx, session, None, prefill_cached_tokens).await;
+        let result = Self::process_decode_stream(
+            decode_stream,
+            emitter,
+            tx,
+            session,
+            prefill_cached_tokens,
+        )
+        .await;
 
         prefill_stream.mark_completed();
         result
