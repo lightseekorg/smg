@@ -12,10 +12,15 @@
 //! - Efficient prefix matching with match counts
 
 mod common;
+mod event_tree;
 mod string_tree;
 mod token_tree;
 
 pub use common::{MatchResult, TenantId};
+pub use event_tree::{
+    compute_content_hash, ContentHash, OverlapScores, PositionalIndexer, SequenceHash, StoredBlock,
+    WorkerId,
+};
 // Re-export under names matching old tree.rs API for easier migration
 pub use string_tree::Tree;
 pub use string_tree::{
