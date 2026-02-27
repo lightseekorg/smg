@@ -1548,7 +1548,7 @@ mod tests {
         let source = ModelIdSource::parse("annotation:serving.example.com/model-id").unwrap();
         match source {
             ModelIdSource::Annotation(key) => {
-                assert_eq!(key, "serving.example.com/model-id")
+                assert_eq!(key, "serving.example.com/model-id");
             }
             _ => panic!("Expected Annotation variant"),
         }
