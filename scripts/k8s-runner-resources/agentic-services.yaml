@@ -126,3 +126,77 @@ spec:
   ports:
     - port: 8080
       targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: brave-search-official
+  namespace: actions-runner-system
+  labels:
+    app: brave-search-official
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: brave-search-official
+  template:
+    metadata:
+      labels:
+        app: brave-search-official
+    spec:
+      containers:
+        - name: brave-search
+          image: mcp/brave-search
+          ports:
+            - containerPort: 8080
+          env:
+            - name: BRAVE_MCP_TRANSPORT
+              value: http
+            - name: BRAVE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: brave-api-key
+                  key: api-key
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /mcp
+              port: 8080
+              httpHeaders:
+                - name: Accept
+                  value: "application/json, text/event-stream"
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /mcp
+              port: 8080
+              httpHeaders:
+                - name: Accept
+                  value: "application/json, text/event-stream"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: brave-search-official
+  namespace: actions-runner-system
+  labels:
+    app: brave-search-official
+spec:
+  selector:
+    app: brave-search-official
+  ports:
+    - port: 8080
+      targetPort: 8080
