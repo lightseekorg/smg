@@ -87,7 +87,10 @@ pub struct ColumnDef {
 // ────────────────────────────────────────────────────────────────────────────
 
 fn default_auto_migrate() -> bool {
-    false
+    std::env::var("DB_AUTO_MIGRATE")
+        .ok()
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
 }
 
 impl Default for SchemaConfig {
@@ -95,7 +98,7 @@ impl Default for SchemaConfig {
         Self {
             owner: None,
             version: None,
-            auto_migrate: false,
+            auto_migrate: default_auto_migrate(),
             conversations: TableConfig::with_table("conversations"),
             responses: TableConfig::with_table("responses"),
             conversation_items: TableConfig::with_table("conversation_items"),
