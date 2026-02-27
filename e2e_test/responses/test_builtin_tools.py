@@ -179,7 +179,10 @@ class TestBuiltinVsMcpComparison:
 
         resp = client.responses.create(
             model=model,
-            input="Search the web for Python programming language. Set count to 1 to get only one result and give a one sentence summary.",
+            input=(
+                "Search the web for Python programming language. "
+                "Set count to 1 to get only one result and give a one sentence summary."
+            ),
             tools=[BRAVE_MCP_TOOL],
             stream=False,
         )
@@ -415,7 +418,10 @@ class TestMcpWebSearchStreamingEvents:
 
         resp = client.responses.create(
             model=model,
-            input="Search the web for Python programming language. Set count to 1 to get only one result and give a one sentence summary.",
+            input=(
+                "Search the web for Python programming language. "
+                "Set count to 1 to get only one result and give a one sentence summary."
+            ),
             tools=[BRAVE_MCP_TOOL],
             stream=True,
         )

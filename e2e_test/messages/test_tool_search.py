@@ -306,7 +306,10 @@ class TestToolSearchWithMcp:
             messages=[
                 {
                     "role": "user",
-                    "content": "Search the web for 'Anthropic Claude'. Set count to 1 to get only one result, and give a one sentence summary.",
+                    "content": (
+                        "Search the web for 'Anthropic Claude'. Set count to 1 "
+                        "to get only one result, and give a one sentence summary."
+                    ),
                 }
             ],
             extra_headers={
@@ -381,7 +384,10 @@ class TestToolSearchWithMcp:
             messages=[
                 {
                     "role": "user",
-                    "content": "Search the web for 'Anthropic Claude'. Set count to 1 to get only one result, and give a one sentence summary.",
+                    "content": (
+                        "Search the web for 'Anthropic Claude'. Set count to 1 "
+                        "to get only one result, and give a one sentence summary."
+                    ),
                 }
             ],
             extra_headers={
