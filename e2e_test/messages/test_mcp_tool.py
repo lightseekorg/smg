@@ -15,6 +15,7 @@ import logging
 from dataclasses import dataclass
 
 import pytest
+from conftest import smg_compare
 from infra import BRAVE_MCP_URL
 
 logger = logging.getLogger(__name__)
@@ -202,16 +203,17 @@ class TestMcpTool:
         assert_non_streaming_mcp_response(response, model, cfg.server_name)
 
         # SmgClient comparison
-        smg_resp = smg.messages.create(
-            model=model,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": cfg.prompt}],
-            extra_headers=cfg.headers,
-            extra_body=_extra_body(cfg),
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.role == "assistant"
-        assert len(smg_resp.content) > 0
+        with smg_compare():
+            smg_resp = smg.messages.create(
+                model=model,
+                max_tokens=1024,
+                messages=[{"role": "user", "content": cfg.prompt}],
+                extra_headers=cfg.headers,
+                extra_body=_extra_body(cfg),
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.role == "assistant"
+            assert len(smg_resp.content) > 0
 
     def test_mcp_streaming(self, setup_backend, smg):
         """Test MCP tool execution with SSE streaming."""
@@ -230,16 +232,17 @@ class TestMcpTool:
         assert_streaming_mcp_response(*results)
 
         # SmgClient streaming comparison
-        with smg.messages.stream(
-            model=model,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": cfg.prompt}],
-            extra_headers=cfg.headers,
-            extra_body=_extra_body(cfg),
-        ) as smg_stream:
-            smg_results = collect_streaming_events(smg_stream)
+        with smg_compare():
+            with smg.messages.stream(
+                model=model,
+                max_tokens=1024,
+                messages=[{"role": "user", "content": cfg.prompt}],
+                extra_headers=cfg.headers,
+                extra_body=_extra_body(cfg),
+            ) as smg_stream:
+                smg_results = collect_streaming_events(smg_stream)
 
-        assert_streaming_mcp_response(*smg_results)
+            assert_streaming_mcp_response(*smg_results)
 
 
 # =============================================================================
@@ -272,16 +275,17 @@ class TestMcpToolPassthrough:
         assert_non_streaming_mcp_response(response, model, cfg.server_name)
 
         # SmgClient comparison
-        smg_resp = smg.messages.create(
-            model=model,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": cfg.prompt}],
-            extra_headers=cfg.headers,
-            extra_body=_extra_body(cfg),
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.role == "assistant"
-        assert len(smg_resp.content) > 0
+        with smg_compare():
+            smg_resp = smg.messages.create(
+                model=model,
+                max_tokens=1024,
+                messages=[{"role": "user", "content": cfg.prompt}],
+                extra_headers=cfg.headers,
+                extra_body=_extra_body(cfg),
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.role == "assistant"
+            assert len(smg_resp.content) > 0
 
     def test_mcp_passthrough_streaming(self, setup_backend, smg):
         """Test MCP passthrough with SSE streaming."""
@@ -300,13 +304,14 @@ class TestMcpToolPassthrough:
         assert_streaming_mcp_response(*results)
 
         # SmgClient streaming comparison
-        with smg.messages.stream(
-            model=model,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": cfg.prompt}],
-            extra_headers=cfg.headers,
-            extra_body=_extra_body(cfg),
-        ) as smg_stream:
-            smg_results = collect_streaming_events(smg_stream)
+        with smg_compare():
+            with smg.messages.stream(
+                model=model,
+                max_tokens=1024,
+                messages=[{"role": "user", "content": cfg.prompt}],
+                extra_headers=cfg.headers,
+                extra_body=_extra_body(cfg),
+            ) as smg_stream:
+                smg_results = collect_streaming_events(smg_stream)
 
-        assert_streaming_mcp_response(*smg_results)
+            assert_streaming_mcp_response(*smg_results)

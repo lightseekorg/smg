@@ -14,6 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -98,36 +99,37 @@ class TestIgnoreEOS:
         )
 
         # SmgClient comparison
-        smg_resp_default = smg.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": "Count from 1 to 20."},
-            ],
-            temperature=0,
-            max_tokens=max_tokens,
-            extra_body={"ignore_eos": False},
-        )
-        smg_resp_ignore = smg.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": "Count from 1 to 20."},
-            ],
-            temperature=0,
-            max_tokens=max_tokens,
-            extra_body={"ignore_eos": True},
-        )
-        smg_default_tokens = len(tokenizer.encode(smg_resp_default.choices[0].message.content))
-        smg_ignore_tokens = len(tokenizer.encode(smg_resp_ignore.choices[0].message.content))
-        assert smg_ignore_tokens > smg_default_tokens or smg_ignore_tokens >= max_tokens, (
-            f"SmgClient: ignore_eos did not generate more tokens: "
-            f"{smg_ignore_tokens} vs {smg_default_tokens}"
-        )
-        assert smg_resp_ignore.choices[0].finish_reason == "length", (
-            f"SmgClient: Expected finish_reason='length', "
-            f"got {smg_resp_ignore.choices[0].finish_reason}"
-        )
+        with smg_compare():
+            smg_resp_default = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Count from 1 to 20."},
+                ],
+                temperature=0,
+                max_tokens=max_tokens,
+                extra_body={"ignore_eos": False},
+            )
+            smg_resp_ignore = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Count from 1 to 20."},
+                ],
+                temperature=0,
+                max_tokens=max_tokens,
+                extra_body={"ignore_eos": True},
+            )
+            smg_default_tokens = len(tokenizer.encode(smg_resp_default.choices[0].message.content))
+            smg_ignore_tokens = len(tokenizer.encode(smg_resp_ignore.choices[0].message.content))
+            assert smg_ignore_tokens > smg_default_tokens or smg_ignore_tokens >= max_tokens, (
+                f"SmgClient: ignore_eos did not generate more tokens: "
+                f"{smg_ignore_tokens} vs {smg_default_tokens}"
+            )
+            assert smg_resp_ignore.choices[0].finish_reason == "length", (
+                f"SmgClient: Expected finish_reason='length', "
+                f"got {smg_resp_ignore.choices[0].finish_reason}"
+            )
 
 
 # =============================================================================
@@ -193,16 +195,17 @@ class TestLargeMaxNewTokens:
             )
 
         # SmgClient comparison
-        smg_resp = smg.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "Please repeat the word 'hello' for 100 times."},
-            ],
-            temperature=0,
-            max_tokens=256,
-        )
-        assert smg_resp.choices[0].message.content, "SmgClient: returned empty content"
-        assert smg_resp.choices[0].finish_reason in ("stop", "length"), (
-            f"SmgClient: unexpected finish_reason: {smg_resp.choices[0].finish_reason}"
-        )
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {"role": "user", "content": "Please repeat the word 'hello' for 100 times."},
+                ],
+                temperature=0,
+                max_tokens=256,
+            )
+            assert smg_resp.choices[0].message.content, "SmgClient: returned empty content"
+            assert smg_resp.choices[0].finish_reason in ("stop", "length"), (
+                f"SmgClient: unexpected finish_reason: {smg_resp.choices[0].finish_reason}"
+            )

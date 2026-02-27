@@ -19,6 +19,7 @@ import time
 import openai
 import pytest
 import yaml
+from conftest import smg_compare
 from infra import BRAVE_MCP_HOST, BRAVE_MCP_PORT, BRAVE_MCP_URL
 
 logger = logging.getLogger(__name__)
@@ -195,14 +196,15 @@ class TestBuiltinVsMcpComparison:
         )
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input="Search the web for Python programming language.",
-            tools=[BRAVE_MCP_TOOL],
-        )
-        assert smg_resp.error is None, f"SmgClient error: {smg_resp.error}"
-        assert smg_resp.id is not None
-        assert smg_resp.status in ("completed", "incomplete")
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="Search the web for Python programming language.",
+                tools=[BRAVE_MCP_TOOL],
+            )
+            assert smg_resp.error is None, f"SmgClient error: {smg_resp.error}"
+            assert smg_resp.id is not None
+            assert smg_resp.status in ("completed", "incomplete")
 
 
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
@@ -230,14 +232,15 @@ class TestBuiltinToolsCloudBackend:
         assert resp.status in ("completed", "incomplete")
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input=WEB_SEARCH_PROMPT,
-            tools=[WEB_SEARCH_PREVIEW_TOOL],
-        )
-        assert smg_resp.error is None
-        assert smg_resp.id is not None
-        assert smg_resp.status in ("completed", "incomplete")
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=WEB_SEARCH_PROMPT,
+                tools=[WEB_SEARCH_PREVIEW_TOOL],
+            )
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status in ("completed", "incomplete")
 
     def test_mixed_builtin_and_function_tools(self, setup_backend, smg):
         """Test mixing web_search_preview with function tools."""
@@ -267,13 +270,14 @@ class TestBuiltinToolsCloudBackend:
         assert resp.id is not None
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input="What's the weather in Seattle?",
-            tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
-        )
-        assert smg_resp.error is None
-        assert smg_resp.id is not None
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What's the weather in Seattle?",
+                tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
+            )
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
 
 
 @pytest.mark.e2e
@@ -302,14 +306,15 @@ class TestBuiltinToolsLocalBackend:
         assert resp.id is not None
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input=WEB_SEARCH_PROMPT,
-            tools=[WEB_SEARCH_PREVIEW_TOOL],
-        )
-        assert smg_resp.error is None
-        assert smg_resp.id is not None
-        assert smg_resp.status in ("completed", "incomplete")
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=WEB_SEARCH_PROMPT,
+                tools=[WEB_SEARCH_PREVIEW_TOOL],
+            )
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status in ("completed", "incomplete")
 
     def test_mixed_builtin_and_function_tools(self, setup_backend, smg):
         """Test mixing web_search_preview with function tools on local backend."""
@@ -338,13 +343,14 @@ class TestBuiltinToolsLocalBackend:
         assert resp.id is not None
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input="What's the weather in Seattle?",
-            tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
-        )
-        assert smg_resp.error is None
-        assert smg_resp.id is not None
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What's the weather in Seattle?",
+                tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
+            )
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
 
 
 # =============================================================================

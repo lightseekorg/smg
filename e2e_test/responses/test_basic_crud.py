@@ -12,6 +12,7 @@ import time
 
 import openai
 import pytest
+from conftest import smg_compare
 from openai import OpenAI
 from openai.types import responses
 
@@ -87,18 +88,19 @@ class TestResponseCRUD:
         assert len(input_resp.data) > 0
 
         # SmgClient comparison
-        smg_create = smg.responses.create(model=model, input="Hello, world!")
-        assert smg_create.id is not None
-        assert smg_create.error is None
-        assert smg_create.status == "completed"
-        assert len(smg_create.output_text) > 0
-        # Get response
-        smg_get = smg.responses.retrieve(response_id=smg_create.id)
-        assert smg_get.id == smg_create.id
-        assert smg_get.status == "completed"
-        # List input items
-        smg_items = smg.responses.input_items.list(response_id=smg_create.id)
-        assert smg_items is not None
+        with smg_compare():
+            smg_create = smg.responses.create(model=model, input="Hello, world!")
+            assert smg_create.id is not None
+            assert smg_create.error is None
+            assert smg_create.status == "completed"
+            assert len(smg_create.output_text) > 0
+            # Get response
+            smg_get = smg.responses.retrieve(response_id=smg_create.id)
+            assert smg_get.id == smg_create.id
+            assert smg_get.status == "completed"
+            # List input items
+            smg_items = smg.responses.input_items.list(response_id=smg_create.id)
+            assert smg_items is not None
 
     @pytest.mark.skip(reason="TODO: Add delete response feature")
     def test_delete_response(self, setup_backend, smg):
@@ -177,18 +179,19 @@ class TestResponseCRUDOracleStorage:
         assert len(input_resp.data) > 0
 
         # SmgClient comparison
-        smg_create = smg.responses.create(model=model, input="Hello, world!")
-        assert smg_create.id is not None
-        assert smg_create.error is None
-        assert smg_create.status == "completed"
-        assert len(smg_create.output_text) > 0
-        # Get response
-        smg_get = smg.responses.retrieve(response_id=smg_create.id)
-        assert smg_get.id == smg_create.id
-        assert smg_get.status == "completed"
-        # List input items
-        smg_items = smg.responses.input_items.list(response_id=smg_create.id)
-        assert smg_items is not None
+        with smg_compare():
+            smg_create = smg.responses.create(model=model, input="Hello, world!")
+            assert smg_create.id is not None
+            assert smg_create.error is None
+            assert smg_create.status == "completed"
+            assert len(smg_create.output_text) > 0
+            # Get response
+            smg_get = smg.responses.retrieve(response_id=smg_create.id)
+            assert smg_get.id == smg_create.id
+            assert smg_get.status == "completed"
+            # List input items
+            smg_items = smg.responses.input_items.list(response_id=smg_create.id)
+            assert smg_items is not None
 
     @pytest.mark.skip(reason="TODO: Add delete response feature")
     def test_delete_response(self, setup_backend, smg):

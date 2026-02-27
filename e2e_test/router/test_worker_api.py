@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from conftest import smg_compare
 from infra import ConnectionMode, Gateway, ModelPool
 
 logger = logging.getLogger(__name__)
@@ -48,9 +49,10 @@ class TestWorkerAPI:
             assert worker.url, "Worker should have a URL"
 
         # SmgClient comparison
-        smg_workers = smg.workers.list()
-        assert smg_workers["total"] >= 1, "SmgClient: expected at least one worker"
-        assert len(smg_workers["workers"]) >= 1
+        with smg_compare():
+            smg_workers = smg.workers.list()
+            assert smg_workers["total"] >= 1, "SmgClient: expected at least one worker"
+            assert len(smg_workers["workers"]) >= 1
 
     def test_list_models(self, setup_backend, smg):
         """Test listing models via /v1/models endpoint."""
@@ -65,8 +67,9 @@ class TestWorkerAPI:
             assert "id" in m, "Model should have an id"
 
         # SmgClient comparison
-        smg_models = smg.models.list()
-        assert len(smg_models.data) >= 1, "SmgClient: expected at least one model"
+        with smg_compare():
+            smg_models = smg.models.list()
+            assert len(smg_models.data) >= 1, "SmgClient: expected at least one model"
 
     def test_health_endpoint(self, setup_backend, smg):
         """Test health check endpoint."""

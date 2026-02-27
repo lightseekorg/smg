@@ -11,6 +11,7 @@ import json
 import logging
 
 import pytest
+from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -109,10 +110,11 @@ class TestStructuredOutputCloud:
             assert "output" in step
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(**params)
-        assert smg_resp.error is None
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(**params)
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
 
 # =============================================================================
@@ -212,10 +214,11 @@ class TestStructuredOutputHarmony:
             assert "output" in step
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(**params)
-        assert smg_resp.error is None
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(**params)
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
 
 # =============================================================================
@@ -300,7 +303,8 @@ class TestSimpleSchemaStructuredOutput:
         assert output_json["answer"], "Answer is empty"
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(**params)
-        assert smg_resp.error is None
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(**params)
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"

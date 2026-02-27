@@ -14,6 +14,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from conftest import smg_compare
 from infra import BRAVE_MCP_URL
 
 logger = logging.getLogger(__name__)
@@ -217,9 +218,10 @@ class TestToolCallingCloud:
         assert "baby otter" in full_text or "aquarius" in full_text
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(model=model, input=input_list[:2], tools=tools)
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(model=model, input=input_list[:2], tools=tools)
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_mcp_basic_tool_call(self, setup_backend, smg):
         """Test basic MCP tool call (non-streaming)."""
@@ -270,13 +272,14 @@ class TestToolCallingCloud:
                     assert len(content_item.text) > 0
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input=MCP_TEST_PROMPT,
-            tools=[BRAVE_MCP_TOOL],
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=MCP_TEST_PROMPT,
+                tools=[BRAVE_MCP_TOOL],
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_mcp_basic_tool_call_streaming(self, setup_backend, smg):
         """Test basic MCP tool call (streaming)."""
@@ -392,13 +395,14 @@ class TestToolCallingCloud:
             assert mcp_call.server_label == "brave"
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input=MCP_TEST_PROMPT,
-            tools=[DEEPWIKI_MCP_TOOL, BRAVE_MCP_TOOL],
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=MCP_TEST_PROMPT,
+                tools=[DEEPWIKI_MCP_TOOL, BRAVE_MCP_TOOL],
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_mcp_multi_server_tool_call_streaming(self, setup_backend, smg):
         """Test MCP tool call with multiple MCP servers (streaming)."""
@@ -583,14 +587,15 @@ class TestToolChoiceHarmony:
         )
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input="What is the weather in Seattle?",
-            tools=tools,
-            tool_choice="auto",
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What is the weather in Seattle?",
+                tools=tools,
+                tool_choice="auto",
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_tool_choice_required(self, setup_backend, smg):
         """Test tool_choice="required" forces the model to call at least one tool."""
@@ -616,14 +621,15 @@ class TestToolChoiceHarmony:
         )
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input="What is 15 * 23?",
-            tools=tools,
-            tool_choice="required",
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What is 15 * 23?",
+                tools=tools,
+                tool_choice="required",
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_tool_choice_specific_function(self, setup_backend, smg):
         """Test tool_choice with specific function name forces that function to be called."""
@@ -650,14 +656,15 @@ class TestToolChoiceHarmony:
         )
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input="What's happening in the news today?",
-            tools=tools,
-            tool_choice={"type": "function", "function": {"name": "search_web"}},
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What's happening in the news today?",
+                tools=tools,
+                tool_choice={"type": "function", "function": {"name": "search_web"}},
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_tool_choice_streaming(self, setup_backend, smg):
         """Test tool_choice parameter works correctly with streaming."""
@@ -713,17 +720,18 @@ class TestToolChoiceHarmony:
         assert len(mcp_calls) > 0, "tool_choice='auto' should allow MCP tool calls"
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input=(
-                "What transport protocols does the 2025-03-26 version of the MCP spec "
-                "(modelcontextprotocol/modelcontextprotocol) support?"
-            ),
-            tools=tools,
-            tool_choice="auto",
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=(
+                    "What transport protocols does the 2025-03-26 version of the MCP spec "
+                    "(modelcontextprotocol/modelcontextprotocol) support?"
+                ),
+                tools=tools,
+                tool_choice="auto",
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_tool_choice_mixed_function_and_mcp(self, setup_backend, smg):
         """Test tool_choice with mixed function and MCP tools."""
@@ -751,14 +759,15 @@ class TestToolChoiceHarmony:
         assert len(mcp_calls) == 0, "Should only call specified function, not MCP tools"
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input="Search for information about Python",
-            tools=tools,
-            tool_choice={"type": "function", "function": {"name": "local_search"}},
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="Search for information about Python",
+                tools=tools,
+                tool_choice={"type": "function", "function": {"name": "local_search"}},
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_basic_function_call(self, setup_backend, smg):
         """Test basic function calling workflow."""
@@ -794,13 +803,14 @@ class TestToolChoiceHarmony:
         assert args["sign"].lower() == "aquarius"
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input=input_list,
-            tools=tools,
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=input_list,
+                tools=tools,
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_mcp_basic_tool_call(self, setup_backend, smg):
         """Test basic MCP tool call (non-streaming)."""
@@ -834,13 +844,14 @@ class TestToolChoiceHarmony:
             assert mcp_call.server_label == "brave"
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input=MCP_TEST_PROMPT,
-            tools=[BRAVE_MCP_TOOL],
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=MCP_TEST_PROMPT,
+                tools=[BRAVE_MCP_TOOL],
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_mcp_basic_tool_call_streaming(self, setup_backend, smg):
         """Test basic MCP tool call (streaming)."""
@@ -896,14 +907,15 @@ class TestToolChoiceHarmony:
         assert "astra-7" in args["system_name"].lower()
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input="Give me diagnostics for the Astra-7 Core Reactor.",
-            tools=[BRAVE_MCP_TOOL, SYSTEM_DIAGNOSTICS_FUNCTION],
-            tool_choice="auto",
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="Give me diagnostics for the Astra-7 Core Reactor.",
+                tools=[BRAVE_MCP_TOOL, SYSTEM_DIAGNOSTICS_FUNCTION],
+                tool_choice="auto",
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_mixed_mcp_and_function_tools_streaming(self, setup_backend, smg):
         """Test mixed MCP and function tools (streaming)."""
@@ -964,13 +976,14 @@ class TestToolChoiceHarmony:
             assert mcp_call.server_label == "brave"
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input=MCP_TEST_PROMPT,
-            tools=[DEEPWIKI_MCP_TOOL, BRAVE_MCP_TOOL],
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=MCP_TEST_PROMPT,
+                tools=[DEEPWIKI_MCP_TOOL, BRAVE_MCP_TOOL],
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_mcp_multi_server_tool_call_streaming(self, setup_backend, smg):
         """Test MCP tool call with multiple MCP servers (streaming)."""
@@ -1054,14 +1067,15 @@ class TestToolChoiceLocal:
         assert len(function_calls) > 0
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input="What is the weather in Seattle?",
-            tools=tools,
-            tool_choice="auto",
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What is the weather in Seattle?",
+                tools=tools,
+                tool_choice="auto",
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_tool_choice_required(self, setup_backend, smg):
         """Test tool_choice="required" forces the model to call at least one tool."""
@@ -1084,14 +1098,15 @@ class TestToolChoiceLocal:
         assert len(function_calls) > 0
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input="What is 15 * 23?",
-            tools=tools,
-            tool_choice="required",
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What is 15 * 23?",
+                tools=tools,
+                tool_choice="required",
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_tool_choice_specific_function(self, setup_backend, smg):
         """Test tool_choice with specific function name forces that function to be called."""
@@ -1115,14 +1130,15 @@ class TestToolChoiceLocal:
         assert function_calls[0].name == "search_web"
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input="What's happening in the news today?",
-            tools=tools,
-            tool_choice={"type": "function", "function": {"name": "search_web"}},
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What's happening in the news today?",
+                tools=tools,
+                tool_choice={"type": "function", "function": {"name": "search_web"}},
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_mcp_basic_tool_call(self, setup_backend, smg):
         """Test basic MCP tool call (non-streaming)."""
@@ -1149,13 +1165,14 @@ class TestToolChoiceLocal:
         assert len(mcp_calls) > 0
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input=MCP_TEST_PROMPT,
-            tools=[BRAVE_MCP_TOOL],
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=MCP_TEST_PROMPT,
+                tools=[BRAVE_MCP_TOOL],
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_mcp_basic_tool_call_streaming(self, setup_backend, smg):
         """Test basic MCP tool call (streaming)."""
@@ -1205,17 +1222,18 @@ class TestToolChoiceLocal:
         assert len(mcp_calls) > 0, "tool_choice='auto' should allow MCP tool calls"
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input=(
-                "What transport protocols does the 2025-03-26 version of the MCP spec "
-                "(modelcontextprotocol/modelcontextprotocol) support?"
-            ),
-            tools=tools,
-            tool_choice="auto",
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=(
+                    "What transport protocols does the 2025-03-26 version of the MCP spec "
+                    "(modelcontextprotocol/modelcontextprotocol) support?"
+                ),
+                tools=tools,
+                tool_choice="auto",
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_tool_choice_mixed_function_and_mcp(self, setup_backend, smg):
         """Test tool_choice with mixed function and MCP tools."""
@@ -1243,14 +1261,15 @@ class TestToolChoiceLocal:
         assert len(mcp_calls) == 0, "Should only call specified function, not MCP tools"
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input="Search for information about Python",
-            tools=tools,
-            tool_choice={"type": "function", "function": {"name": "local_search"}},
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="Search for information about Python",
+                tools=tools,
+                tool_choice={"type": "function", "function": {"name": "local_search"}},
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_mixed_mcp_and_function_tools(self, setup_backend, smg):
         """Test mixed MCP and function tools (non-streaming)."""
@@ -1281,14 +1300,15 @@ class TestToolChoiceLocal:
         assert "astra-7" in args["system_name"].lower()
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input="Give me diagnostics for the Astra-7 Core Reactor.",
-            tools=[BRAVE_MCP_TOOL, SYSTEM_DIAGNOSTICS_FUNCTION],
-            tool_choice="auto",
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="Give me diagnostics for the Astra-7 Core Reactor.",
+                tools=[BRAVE_MCP_TOOL, SYSTEM_DIAGNOSTICS_FUNCTION],
+                tool_choice="auto",
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_mixed_mcp_and_function_tools_streaming(self, setup_backend, smg):
         """Test mixed MCP and function tools (streaming)."""
@@ -1349,13 +1369,14 @@ class TestToolChoiceLocal:
             assert mcp_call.server_label == "brave"
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(
-            model=model,
-            input=MCP_TEST_PROMPT,
-            tools=[DEEPWIKI_MCP_TOOL, BRAVE_MCP_TOOL],
-        )
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=MCP_TEST_PROMPT,
+                tools=[DEEPWIKI_MCP_TOOL, BRAVE_MCP_TOOL],
+            )
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_mcp_multi_server_tool_call_streaming(self, setup_backend, smg):
         """Test MCP tool call with multiple MCP servers (streaming)."""

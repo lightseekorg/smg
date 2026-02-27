@@ -11,6 +11,7 @@ import json
 import logging
 
 import pytest
+from conftest import smg_compare
 from infra import is_trtllm
 
 logger = logging.getLogger(__name__)
@@ -37,23 +38,24 @@ class TestChatCompletion:
         self._run_chat_completion(client, model, logprobs, parallel_sample_num)
 
         # SmgClient comparison
-        smg_resp = smg.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant"},
-                {
-                    "role": "user",
-                    "content": "What is the capital of France? Answer in a few words.",
-                },
-            ],
-            temperature=0,
-            logprobs=logprobs is not None and logprobs > 0,
-            top_logprobs=logprobs,
-            n=parallel_sample_num,
-        )
-        assert len(smg_resp.choices) == parallel_sample_num
-        assert smg_resp.choices[0].message.role == "assistant"
-        assert isinstance(smg_resp.choices[0].message.content, str)
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {
+                        "role": "user",
+                        "content": "What is the capital of France? Answer in a few words.",
+                    },
+                ],
+                temperature=0,
+                logprobs=logprobs is not None and logprobs > 0,
+                top_logprobs=logprobs,
+                n=parallel_sample_num,
+            )
+            assert len(smg_resp.choices) == parallel_sample_num
+            assert smg_resp.choices[0].message.role == "assistant"
+            assert isinstance(smg_resp.choices[0].message.content, str)
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
@@ -65,23 +67,24 @@ class TestChatCompletion:
         self._run_chat_completion_stream(client, model, logprobs, parallel_sample_num)
 
         # SmgClient streaming comparison
-        content_pieces = []
-        with smg.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "What is the capital of France?"},
-            ],
-            temperature=0,
-            logprobs=logprobs is not None and logprobs > 0,
-            top_logprobs=logprobs,
-            n=parallel_sample_num,
-            stream=True,
-        ) as stream:
-            for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    content_pieces.append(chunk.choices[0].delta.content)
-        assert len(content_pieces) > 0, "SmgClient stream should produce content"
+        with smg_compare():
+            content_pieces = []
+            with smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {"role": "user", "content": "What is the capital of France?"},
+                ],
+                temperature=0,
+                logprobs=logprobs is not None and logprobs > 0,
+                top_logprobs=logprobs,
+                n=parallel_sample_num,
+                stream=True,
+            ) as stream:
+                for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        content_pieces.append(chunk.choices[0].delta.content)
+            assert len(content_pieces) > 0, "SmgClient stream should produce content"
 
     @pytest.mark.skip_for_runtime(
         "trtllm",
@@ -115,20 +118,21 @@ class TestChatCompletion:
         assert isinstance(js_obj["population"], int)
 
         # SmgClient comparison
-        smg_resp = smg.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "Introduce the capital of France."},
-            ],
-            temperature=0,
-            max_tokens=128,
-            extra_body={"regex": regex},
-        )
-        smg_text = smg_resp.choices[0].message.content
-        smg_obj = json.loads(smg_text)
-        assert isinstance(smg_obj["name"], str)
-        assert isinstance(smg_obj["population"], int)
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {"role": "user", "content": "Introduce the capital of France."},
+                ],
+                temperature=0,
+                max_tokens=128,
+                extra_body={"regex": regex},
+            )
+            smg_text = smg_resp.choices[0].message.content
+            smg_obj = json.loads(smg_text)
+            assert isinstance(smg_obj["name"], str)
+            assert isinstance(smg_obj["population"], int)
 
     def test_penalty(self, setup_backend, smg):
         """Test frequency penalty parameter."""
@@ -148,17 +152,18 @@ class TestChatCompletion:
         assert isinstance(text, str)
 
         # SmgClient comparison
-        smg_resp = smg.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "Introduce the capital of France."},
-            ],
-            temperature=0,
-            max_tokens=32,
-            frequency_penalty=1.0,
-        )
-        assert isinstance(smg_resp.choices[0].message.content, str)
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {"role": "user", "content": "Introduce the capital of France."},
+                ],
+                temperature=0,
+                max_tokens=32,
+                frequency_penalty=1.0,
+            )
+            assert isinstance(smg_resp.choices[0].message.content, str)
 
     def test_response_prefill(self, setup_backend, smg):
         """Test assistant message prefill with continue_final_message."""
@@ -193,13 +198,14 @@ convenient hands-free control to your smart devices.
         assert response.choices[0].message.content.strip().startswith('"name": "SmartHome Mini",')
 
         # SmgClient comparison
-        smg_resp = smg.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant"},
-                {
-                    "role": "user",
-                    "content": """
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {
+                        "role": "user",
+                        "content": """
 Extract the name, size, price, and color from this product description as a JSON object:
 
 <description>
@@ -209,16 +215,16 @@ voice or app—no matter where you place it in your home. This affordable little
 convenient hands-free control to your smart devices.
 </description>
 """,
-                },
-                {
-                    "role": "assistant",
-                    "content": "{\n",
-                },
-            ],
-            temperature=0,
-            extra_body={"continue_final_message": True},
-        )
-        assert smg_resp.choices[0].message.content.strip().startswith('"name": "SmartHome Mini",')
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "{\n",
+                    },
+                ],
+                temperature=0,
+                extra_body={"continue_final_message": True},
+            )
+            assert smg_resp.choices[0].message.content.strip().startswith('"name": "SmartHome Mini",')
 
     def test_streaming_token_count_matches_chunks(self, setup_backend, smg):
         """Test that streaming completion_tokens matches the number of content chunks.
@@ -276,27 +282,28 @@ convenient hands-free control to your smart devices.
         )
 
         # SmgClient streaming comparison
-        smg_content_count = 0
-        smg_usage_tokens = None
-        with smg.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "You are a helpful AI assistant"},
-                {"role": "user", "content": "What is the capital of France?"},
-            ],
-            temperature=0,
-            max_tokens=50,
-            stream=True,
-            stream_options={"include_usage": True},
-        ) as stream:
-            for chunk in stream:
-                if chunk.usage is not None:
-                    smg_usage_tokens = chunk.usage.completion_tokens
-                    continue
-                if chunk.choices and chunk.choices[0].delta.content:
-                    smg_content_count += 1
-        assert smg_usage_tokens is not None, "SmgClient: no usage chunk received"
-        assert smg_content_count > 0, "SmgClient: no content chunks"
+        with smg_compare():
+            smg_content_count = 0
+            smg_usage_tokens = None
+            with smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {"role": "user", "content": "What is the capital of France?"},
+                ],
+                temperature=0,
+                max_tokens=50,
+                stream=True,
+                stream_options={"include_usage": True},
+            ) as stream:
+                for chunk in stream:
+                    if chunk.usage is not None:
+                        smg_usage_tokens = chunk.usage.completion_tokens
+                        continue
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        smg_content_count += 1
+            assert smg_usage_tokens is not None, "SmgClient: no usage chunk received"
+            assert smg_content_count > 0, "SmgClient: no content chunks"
 
     def test_model_list(self, setup_backend, smg):
         """Test listing available models."""
@@ -306,8 +313,9 @@ convenient hands-free control to your smart devices.
         assert len(models) == 1
 
         # SmgClient comparison
-        smg_models = smg.models.list()
-        assert len(smg_models.data) == 1
+        with smg_compare():
+            smg_models = smg.models.list()
+            assert len(smg_models.data) == 1
 
     @pytest.mark.skip(reason="Skipping retrieve model test as it is not supported by the router")
     def test_retrieve_model(self, setup_backend, smg):
@@ -342,20 +350,21 @@ convenient hands-free control to your smart devices.
         assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
 
         # SmgClient comparison
-        smg_resp = smg.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "user", "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"},
-            ],
-            temperature=0,
-            max_tokens=50,
-            stop=[","],
-        )
-        assert smg_resp.choices[0].finish_reason == "stop"
-        smg_content = smg_resp.choices[0].message.content
-        assert "," not in smg_content, (
-            f"SmgClient: stop sequence ',' should not appear: {smg_content}"
-        )
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "user", "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"},
+                ],
+                temperature=0,
+                max_tokens=50,
+                stop=[","],
+            )
+            assert smg_resp.choices[0].finish_reason == "stop"
+            smg_content = smg_resp.choices[0].message.content
+            assert "," not in smg_content, (
+                f"SmgClient: stop sequence ',' should not appear: {smg_content}"
+            )
 
     def test_stop_sequences_stream(self, setup_backend, smg):
         """Test that stop sequences work in streaming mode."""
@@ -390,32 +399,33 @@ convenient hands-free control to your smart devices.
         assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
 
         # SmgClient streaming comparison
-        with smg.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
-                },
-            ],
-            temperature=0,
-            max_tokens=50,
-            stop=[","],
-            stream=True,
-        ) as stream:
-            smg_chunks = list(stream)
-        smg_finish = [
-            c.choices[0].finish_reason
-            for c in smg_chunks
-            if c.choices and c.choices[0].finish_reason
-        ]
-        assert "stop" in smg_finish
-        smg_text = "".join(
-            c.choices[0].delta.content
-            for c in smg_chunks
-            if c.choices and c.choices[0].delta.content
-        )
-        assert "," not in smg_text
+        with smg_compare():
+            with smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
+                    },
+                ],
+                temperature=0,
+                max_tokens=50,
+                stop=[","],
+                stream=True,
+            ) as stream:
+                smg_chunks = list(stream)
+            smg_finish = [
+                c.choices[0].finish_reason
+                for c in smg_chunks
+                if c.choices and c.choices[0].finish_reason
+            ]
+            assert "stop" in smg_finish
+            smg_text = "".join(
+                c.choices[0].delta.content
+                for c in smg_chunks
+                if c.choices and c.choices[0].delta.content
+            )
+            assert "," not in smg_text
 
     # -------------------------------------------------------------------------
     # Helper methods

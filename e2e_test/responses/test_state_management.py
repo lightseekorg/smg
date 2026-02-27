@@ -12,6 +12,7 @@ import logging
 
 import openai
 import pytest
+from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +39,11 @@ class TestStateManagementCloud:
         assert resp.usage is not None
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(model=model, input="What is 2+2?")
-        assert smg_resp.error is None
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(model=model, input="What is 2+2?")
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_streaming_response(self, setup_backend, smg):
         """Test streaming response."""
@@ -89,19 +91,20 @@ class TestStateManagementCloud:
         assert "Bob" in resp3.output_text
 
         # SmgClient comparison — validate previous_response_id chaining
-        smg_resp1 = smg.responses.create(
-            model=model, input="My name is Alice and my friend is Bob. Remember it."
-        )
-        assert smg_resp1.error is None
-        assert smg_resp1.id is not None
-        assert smg_resp1.status == "completed"
+        with smg_compare():
+            smg_resp1 = smg.responses.create(
+                model=model, input="My name is Alice and my friend is Bob. Remember it."
+            )
+            assert smg_resp1.error is None
+            assert smg_resp1.id is not None
+            assert smg_resp1.status == "completed"
 
-        smg_resp2 = smg.responses.create(
-            model=model, input="What is my name", previous_response_id=smg_resp1.id
-        )
-        assert smg_resp2.error is None
-        assert smg_resp2.status == "completed"
-        assert "Alice" in smg_resp2.output_text
+            smg_resp2 = smg.responses.create(
+                model=model, input="What is my name", previous_response_id=smg_resp1.id
+            )
+            assert smg_resp2.error is None
+            assert smg_resp2.status == "completed"
+            assert "Alice" in smg_resp2.output_text
 
     def test_conversation_with_multiple_turns(self, setup_backend, smg):
         """Test state management using conversation ID."""
@@ -211,10 +214,11 @@ class TestStateManagementLocal:
         assert resp.usage is not None
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(model=model, input="What is 2+2?")
-        assert smg_resp.error is None
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(model=model, input="What is 2+2?")
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_streaming_response(self, setup_backend, smg):
         """Test streaming response."""
@@ -262,19 +266,20 @@ class TestStateManagementLocal:
         assert "Bob" in resp3.output_text
 
         # SmgClient comparison — validate previous_response_id chaining
-        smg_resp1 = smg.responses.create(
-            model=model, input="My name is Alice and my friend is Bob. Remember it."
-        )
-        assert smg_resp1.error is None
-        assert smg_resp1.id is not None
-        assert smg_resp1.status == "completed"
+        with smg_compare():
+            smg_resp1 = smg.responses.create(
+                model=model, input="My name is Alice and my friend is Bob. Remember it."
+            )
+            assert smg_resp1.error is None
+            assert smg_resp1.id is not None
+            assert smg_resp1.status == "completed"
 
-        smg_resp2 = smg.responses.create(
-            model=model, input="What is my name", previous_response_id=smg_resp1.id
-        )
-        assert smg_resp2.error is None
-        assert smg_resp2.status == "completed"
-        assert "Alice" in smg_resp2.output_text
+            smg_resp2 = smg.responses.create(
+                model=model, input="What is my name", previous_response_id=smg_resp1.id
+            )
+            assert smg_resp2.error is None
+            assert smg_resp2.status == "completed"
+            assert "Alice" in smg_resp2.output_text
 
     def test_mutually_exclusive_parameters(self, setup_backend, smg):
         """Test that previous_response_id and conversation are mutually exclusive."""
@@ -329,10 +334,11 @@ class TestStateManagementHarmony:
         assert resp.usage is not None
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(model=model, input="What is 2+2?")
-        assert smg_resp.error is None
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(model=model, input="What is 2+2?")
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_streaming_response(self, setup_backend, smg):
         """Test streaming response."""
@@ -380,19 +386,20 @@ class TestStateManagementHarmony:
         assert "Bob" in resp3.output_text
 
         # SmgClient comparison — validate previous_response_id chaining
-        smg_resp1 = smg.responses.create(
-            model=model, input="My name is Alice and my friend is Bob. Remember it."
-        )
-        assert smg_resp1.error is None
-        assert smg_resp1.id is not None
-        assert smg_resp1.status == "completed"
+        with smg_compare():
+            smg_resp1 = smg.responses.create(
+                model=model, input="My name is Alice and my friend is Bob. Remember it."
+            )
+            assert smg_resp1.error is None
+            assert smg_resp1.id is not None
+            assert smg_resp1.status == "completed"
 
-        smg_resp2 = smg.responses.create(
-            model=model, input="What is my name", previous_response_id=smg_resp1.id
-        )
-        assert smg_resp2.error is None
-        assert smg_resp2.status == "completed"
-        assert "Alice" in smg_resp2.output_text
+            smg_resp2 = smg.responses.create(
+                model=model, input="What is my name", previous_response_id=smg_resp1.id
+            )
+            assert smg_resp2.error is None
+            assert smg_resp2.status == "completed"
+            assert "Alice" in smg_resp2.output_text
 
     def test_mutually_exclusive_parameters(self, setup_backend, smg):
         """Test that previous_response_id and conversation are mutually exclusive."""

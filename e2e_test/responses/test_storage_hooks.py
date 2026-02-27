@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +45,16 @@ class TestResponsesWithStorageHook:
         assert get_resp.status == "completed"
 
         # SmgClient comparison
-        smg_create = smg.responses.create(model=model, input="Hello with hooks!")
-        assert smg_create.id is not None
-        assert smg_create.error is None
-        assert smg_create.status == "completed"
-        assert len(smg_create.output_text) > 0
-        # Get response
-        smg_get = smg.responses.retrieve(response_id=smg_create.id)
-        assert smg_get.id == smg_create.id
-        assert smg_get.status == "completed"
+        with smg_compare():
+            smg_create = smg.responses.create(model=model, input="Hello with hooks!")
+            assert smg_create.id is not None
+            assert smg_create.error is None
+            assert smg_create.status == "completed"
+            assert len(smg_create.output_text) > 0
+            # Get response
+            smg_get = smg.responses.retrieve(response_id=smg_create.id)
+            assert smg_get.id == smg_create.id
+            assert smg_get.status == "completed"
 
     def test_conversation_with_previous_response_with_hook(self, setup_backend, smg):
         """Multi-turn conversation works with hooks active."""
@@ -79,9 +81,10 @@ class TestResponsesWithStorageHook:
         assert get2.id == resp2.id
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(model=model, input="What is 2+2?")
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        with smg_compare():
+            smg_resp = smg.responses.create(model=model, input="What is 2+2?")
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
 
     def test_input_items_list_with_hook(self, setup_backend, smg):
         """Input items listing works with hooks active."""
@@ -96,8 +99,9 @@ class TestResponsesWithStorageHook:
         assert len(input_items.data) > 0
 
         # SmgClient comparison
-        smg_resp = smg.responses.create(model=model, input="Hello!")
-        assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
-        smg_items = smg.responses.input_items.list(response_id=smg_resp.id)
-        assert smg_items is not None
+        with smg_compare():
+            smg_resp = smg.responses.create(model=model, input="Hello!")
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
+            smg_items = smg.responses.input_items.list(response_id=smg_resp.id)
+            assert smg_items is not None
