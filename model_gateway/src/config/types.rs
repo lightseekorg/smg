@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use openai_protocol::worker::HealthCheckConfig as ProtocolHealthCheckConfig;
 use serde::{Deserialize, Serialize};
 // Re-export storage config types from data_connector
-pub use smg_data_connector::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
+pub use smg_data_connector::{
+    HistoryBackend, OracleConfig, PostgresConfig, RedisConfig, SchemaConfig,
+};
 
 use super::{validation::ConfigValidator, ConfigResult};
 use crate::core::ConnectionMode;
