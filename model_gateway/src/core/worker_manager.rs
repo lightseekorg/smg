@@ -345,9 +345,11 @@ impl LoadMonitor {
             return;
         }
 
+        // Floor at 1s to prevent tight-loop DoS from a zero interval.
         let interval = interval
-            .map(Duration::from_secs)
-            .unwrap_or(self.default_interval);
+            .map(|s| Duration::from_secs(s.max(1)))
+            .unwrap_or(self.default_interval)
+            .max(Duration::from_secs(1));
 
         info!("Starting load monitor for group {key} with interval {interval:?}");
 
@@ -377,7 +379,10 @@ impl LoadMonitor {
     }
 
     /// Stop polling for a worker group and clean up its entries from the shared load map.
-    pub async fn on_group_removed(&self, key: &WorkerGroupKey) {
+    ///
+    /// `worker_urls` must be provided by the caller because this is called *after*
+    /// workers have been removed from the registry (so we can't look them up).
+    pub async fn on_group_removed(&self, key: &WorkerGroupKey, worker_urls: &[String]) {
         let handle = {
             let mut handles = self.group_handles.lock().await;
             handles.remove(key)
@@ -386,19 +391,13 @@ impl LoadMonitor {
             info!("Stopping load monitor for group {key}");
             handle.abort();
             let _ = handle.await;
+        }
 
-            // Remove stale load entries for workers in this group
-            let group_workers = self.worker_registry.get_workers_filtered(
-                Some(&key.model_id),
-                Some(key.worker_type),
-                Some(key.connection_mode),
-                None,
-                false,
-            );
-            let worker_urls: Vec<String> =
-                group_workers.iter().map(|w| w.url().to_string()).collect();
+        // Remove stale load entries regardless of whether a handle was found,
+        // since entries could exist from a previous monitoring cycle.
+        if !worker_urls.is_empty() {
             self.tx.send_modify(|map| {
-                for url in &worker_urls {
+                for url in worker_urls {
                     map.remove(url);
                 }
             });

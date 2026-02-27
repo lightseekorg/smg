@@ -1,6 +1,6 @@
 //! Step to remove workers from worker registry.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use tracing::{debug, warn};
@@ -38,19 +38,28 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
             worker_urls.len()
         );
 
-        // Collect unique worker configurations before removal for pool size updates
-        let unique_configs: HashSet<_> = worker_urls
-            .iter()
-            .filter_map(|url| app_context.worker_registry.get_by_url(url))
-            .map(|w| {
+        // Collect unique worker configurations and their URLs before removal.
+        // We need the URLs pre-removal so LoadMonitor can clean up stale load entries.
+        let mut urls_by_group: HashMap<
+            (
+                openai_protocol::worker::WorkerType,
+                openai_protocol::worker::ConnectionMode,
+                String,
+            ),
+            Vec<String>,
+        > = HashMap::new();
+        for url in worker_urls {
+            if let Some(w) = app_context.worker_registry.get_by_url(url) {
                 let meta = w.metadata();
-                (
+                let key = (
                     meta.spec.worker_type,
                     meta.spec.connection_mode,
                     w.model_id().to_string(),
-                )
-            })
-            .collect();
+                );
+                urls_by_group.entry(key).or_default().push(url.clone());
+            }
+        }
+        let unique_configs: HashSet<_> = urls_by_group.keys().cloned().collect();
 
         let mut removed_count = 0;
         for worker_url in worker_urls {
@@ -99,7 +108,7 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
                 pool_size,
             );
 
-            // If the group is now empty, stop its load monitor
+            // If the group is now empty, stop its load monitor and clean up entries
             if pool_size == 0 {
                 if let Some(ref load_monitor) = app_context.load_monitor {
                     let key = WorkerGroupKey {
@@ -107,7 +116,11 @@ impl StepExecutor<WorkerRemovalWorkflowData> for RemoveFromWorkerRegistryStep {
                         worker_type: *worker_type,
                         connection_mode: *connection_mode,
                     };
-                    load_monitor.on_group_removed(&key).await;
+                    let removed_urls = urls_by_group
+                        .get(&(*worker_type, *connection_mode, model_id.clone()))
+                        .map(|v| v.as_slice())
+                        .unwrap_or_default();
+                    load_monitor.on_group_removed(&key, removed_urls).await;
                 }
             }
         }
