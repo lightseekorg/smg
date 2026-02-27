@@ -113,6 +113,7 @@ PD disaggregation mode:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sys
 from importlib.util import find_spec
@@ -209,8 +210,6 @@ from fixtures import (
     pytest_sessionfinish,
     setup_backend,
 )
-import contextlib
-
 from smg_client import SmgClient
 from smg_client._errors import SmgError
 

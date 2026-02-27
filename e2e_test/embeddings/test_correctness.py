@@ -24,8 +24,8 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
-from conftest import smg_compare
 import torch.nn.functional as F
+from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
