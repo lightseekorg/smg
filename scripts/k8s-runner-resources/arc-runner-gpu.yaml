@@ -46,7 +46,7 @@ spec:
         - name: docker-storage
           emptyDir:
             medium: Memory
-            sizeLimit: 8Gi
+            sizeLimit: 4Gi
         - name: dshm
           emptyDir:
             medium: Memory
