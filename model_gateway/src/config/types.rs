@@ -21,6 +21,8 @@ pub struct RouterConfig {
     pub request_timeout_secs: u64,
     pub worker_startup_timeout_secs: u64,
     pub worker_startup_check_interval_secs: u64,
+    #[serde(default = "default_load_monitor_interval_secs")]
+    pub load_monitor_interval_secs: u64,
     pub dp_aware: bool,
     pub api_key: Option<String>,
     pub discovery: Option<DiscoveryConfig>,
@@ -52,9 +54,6 @@ pub struct RouterConfig {
     /// Overrides model_path tokenizer if provided
     pub tokenizer_path: Option<String>,
     pub chat_template: Option<String>,
-    /// Client-facing model name override; both this and the backend-reported name are accepted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub served_model_name: Option<String>,
     #[serde(default = "default_history_backend")]
     pub history_backend: HistoryBackend,
     /// Required when history_backend = "oracle"
@@ -109,6 +108,10 @@ pub struct TokenizerCacheConfig {
     pub enable_l1: bool,
     #[serde(default = "default_l1_max_memory")]
     pub l1_max_memory: usize,
+}
+
+fn default_load_monitor_interval_secs() -> u64 {
+    10
 }
 
 fn default_enable_l0() -> bool {
@@ -508,6 +511,7 @@ impl Default for RouterConfig {
             request_timeout_secs: 1800,        // 30 minutes
             worker_startup_timeout_secs: 1800, // 30 minutes for large model loading
             worker_startup_check_interval_secs: 30,
+            load_monitor_interval_secs: 10,
             dp_aware: false,
             api_key: None,
             discovery: None,
@@ -531,7 +535,6 @@ impl Default for RouterConfig {
             model_path: None,
             tokenizer_path: None,
             chat_template: None,
-            served_model_name: None,
             history_backend: default_history_backend(),
             oracle: None,
             postgres: None,
@@ -635,6 +638,7 @@ mod tests {
         assert_eq!(config.request_timeout_secs, 1800);
         assert_eq!(config.worker_startup_timeout_secs, 1800);
         assert_eq!(config.worker_startup_check_interval_secs, 30);
+        assert_eq!(config.load_monitor_interval_secs, 10);
         assert!(config.discovery.is_none());
         assert!(config.metrics.is_none());
         assert!(config.trace_config.is_none());

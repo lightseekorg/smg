@@ -25,6 +25,20 @@ pub struct SchemaConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
 
+    /// Starting schema version. Set this when your database already has
+    /// migrations applied (e.g. `version: 3` skips migrations 1–3).
+    /// `None` means start from 0 (apply all migrations).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+
+    /// Whether to run schema migrations automatically on startup.
+    /// Defaults to `false` (safe by default). When `false` and pending
+    /// migrations are detected, startup fails with the exact SQL statements
+    /// needed so you can review and apply them manually.
+    /// Set to `true` to opt in to automatic migration.
+    #[serde(default = "default_auto_migrate")]
+    pub auto_migrate: bool,
+
     pub conversations: TableConfig,
     pub responses: TableConfig,
     pub conversation_items: TableConfig,
@@ -72,10 +86,19 @@ pub struct ColumnDef {
 // Defaults
 // ────────────────────────────────────────────────────────────────────────────
 
+fn default_auto_migrate() -> bool {
+    std::env::var("DB_AUTO_MIGRATE")
+        .ok()
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
+}
+
 impl Default for SchemaConfig {
     fn default() -> Self {
         Self {
             owner: None,
+            version: None,
+            auto_migrate: default_auto_migrate(),
             conversations: TableConfig::with_table("conversations"),
             responses: TableConfig::with_table("responses"),
             conversation_items: TableConfig::with_table("conversation_items"),
@@ -535,6 +558,38 @@ mod tests {
     fn serde_deserialize_empty_object_uses_defaults() {
         let cfg: SchemaConfig = serde_json::from_str("{}").expect("deserialize empty");
         assert_eq!(cfg, SchemaConfig::default());
+    }
+
+    // ── version / auto_migrate serde ────────────────────────────────────
+
+    #[test]
+    fn serde_roundtrip_with_version_and_auto_migrate() {
+        let cfg = SchemaConfig {
+            version: Some(3),
+            auto_migrate: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let restored: SchemaConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.version, Some(3));
+        assert!(!restored.auto_migrate);
+    }
+
+    #[test]
+    fn serde_defaults_version_none_and_auto_migrate_false() {
+        let cfg: SchemaConfig = serde_json::from_str("{}").expect("deserialize empty");
+        assert_eq!(cfg.version, None);
+        assert!(!cfg.auto_migrate);
+    }
+
+    #[test]
+    fn serde_version_none_is_omitted_from_json() {
+        let cfg = SchemaConfig::default();
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        assert!(
+            !json.contains("version"),
+            "version:None should be skipped: {json}"
+        );
     }
 
     // ── is_skipped() ─────────────────────────────────────────────────────

@@ -491,7 +491,7 @@ impl AppContextBuilder {
                 .ok_or_else(|| "policy_registry must be set before load monitor".to_string())?
                 .clone(),
             client.clone(),
-            config.worker_startup_check_interval_secs,
+            config.load_monitor_interval_secs,
         )));
         Ok(self)
     }

@@ -41,6 +41,7 @@ rustls-pemfile = "2.2"
 tokio-stream = "0.1"
 tonic = { version = "0.14.2", features = ["gzip", "transport", "tls-ring"] }
 tonic-prost = "0.14.2"
+uuid = { workspace = true, features = ["v4"] }
 
 # Workspace crates
 kv-index.workspace = true

@@ -496,13 +496,13 @@ impl MeshController {
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        stores.app.insert(
-                                                            super::crdt::SKey(
-                                                                app_state.key.clone(),
-                                                            ),
+                                                        if let Err(err) = stores.app.insert(
+                                                            app_state.key.clone(),
                                                             app_state,
                                                             state_update.actor.clone(),
-                                                        );
+                                                        ) {
+                                                            log::warn!(error = %err, "Failed to apply app state update");
+                                                        }
                                                     }
                                                 }
                                                 LocalStoreType::Membership => {
@@ -512,13 +512,13 @@ impl MeshController {
                                                     >(
                                                         &state_update.value
                                                     ) {
-                                                        stores.membership.insert(
-                                                            super::crdt::SKey(
-                                                                membership_state.name.clone(),
-                                                            ),
+                                                        if let Err(err) = stores.membership.insert(
+                                                            membership_state.name.clone(),
                                                             membership_state,
                                                             state_update.actor.clone(),
-                                                        );
+                                                        ) {
+                                                            log::warn!(error = %err, "Failed to apply membership state update");
+                                                        }
                                                     }
                                                 }
                                                 LocalStoreType::Worker => {
@@ -550,18 +550,30 @@ impl MeshController {
                                                     }
                                                 }
                                                 LocalStoreType::RateLimit => {
-                                                    // Deserialize and apply rate limit counter
-                                                    if let Ok(counter) = serde_json::from_slice::<
-                                                        super::crdt::CRDTPNCounter,
-                                                    >(
-                                                        &state_update.value
-                                                    ) {
-                                                        let sync_counter =
-                                                            super::crdt::SyncPNCounter::new();
-                                                        sync_counter.merge(&counter);
-                                                        sync_manager.apply_remote_rate_limit_counter(
-                                                            state_update.key.clone(),
-                                                            &sync_counter,
+                                                    // Backward-compatible rate-limit decoding:
+                                                    // old payloads may send OperationLog, newer ones send raw i64.
+                                                    if let Ok(log) = serde_json::from_slice::<
+                                                        super::crdt_kv::OperationLog,
+                                                    >(&state_update.value)
+                                                    {
+                                                        sync_manager
+                                                            .apply_remote_rate_limit_counter(&log);
+                                                    } else if let Ok(counter_value) =
+                                                        serde_json::from_slice::<i64>(
+                                                            &state_update.value,
+                                                        )
+                                                    {
+                                                        sync_manager
+                                                            .apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
+                                                                state_update.key.clone(),
+                                                                state_update.actor.clone(),
+                                                                counter_value,
+                                                                state_update.timestamp,
+                                                            );
+                                                    } else {
+                                                        log::warn!(
+                                                            key = %state_update.key,
+                                                            "Failed to decode rate-limit update as OperationLog or i64"
                                                         );
                                                     }
                                                 }

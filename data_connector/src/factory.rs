@@ -178,9 +178,18 @@ async fn create_postgres_storage(postgres_cfg: &PostgresConfig) -> Result<Storag
     let postgres_conv = PostgresConversationStorage::new(store.clone())
         .await
         .map_err(|err| format!("failed to initialize Postgres conversation storage: {err}"))?;
-    let postgres_item = PostgresConversationItemStorage::new(store)
+    let postgres_item = PostgresConversationItemStorage::new(store.clone())
         .await
         .map_err(|err| format!("failed to initialize Postgres conversation item storage: {err}"))?;
+
+    // Run versioned migrations after all tables are created
+    let applied = store.run_migrations().await?;
+
+    // Re-create indexes that were deferred during init because
+    // migration-added columns did not yet exist.
+    if !applied.is_empty() {
+        store.ensure_response_indexes().await?;
+    }
 
     Ok((
         Arc::new(postgres_resp),

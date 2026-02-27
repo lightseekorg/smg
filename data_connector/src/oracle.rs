@@ -31,8 +31,10 @@ use crate::{
     },
     config::OracleConfig,
     context::current_extra_columns,
+    oracle_migrations::ORACLE_MIGRATIONS,
     schema::SchemaConfig,
 };
+
 // ============================================================================
 // PART 1: OracleStore Helper + Common Utilities
 // ============================================================================
@@ -79,6 +81,25 @@ impl OracleStore {
         for init_schema in init_schemas {
             init_schema(&conn, &schema)?;
         }
+
+        // Run versioned migrations after table creation
+        let applied = crate::versioning::run_oracle_migrations(
+            &conn,
+            &schema,
+            &ORACLE_MIGRATIONS,
+            schema.version,
+            schema.auto_migrate,
+        )?;
+
+        // Re-run init_schemas when migrations were applied so that indexes
+        // on newly-added columns (e.g. safety_identifier added by v1) are
+        // created in this startup cycle rather than requiring a restart.
+        if !applied.is_empty() {
+            for init_schema in init_schemas {
+                init_schema(&conn, &schema)?;
+            }
+        }
+
         drop(conn);
 
         // Create connection pool
@@ -1168,11 +1189,6 @@ impl OracleResponseStorage {
                 &[],
             )
             .map_err(map_oracle_error)?;
-        } else {
-            if !s.is_skipped("safety_identifier") {
-                Self::alter_safety_identifier_column(conn, schema)?;
-            }
-            Self::remove_user_id_column_if_exists(conn, schema)?;
         }
 
         if !s.is_skipped("previous_response_id") {
@@ -1195,92 +1211,6 @@ impl OracleResponseStorage {
                 &user_idx,
                 &format!("CREATE INDEX {user_idx} ON {table}({safety})"),
             )?;
-        }
-
-        Ok(())
-    }
-
-    fn alter_safety_identifier_column(
-        conn: &Connection,
-        schema: &SchemaConfig,
-    ) -> Result<(), String> {
-        let s = &schema.responses;
-        let col_safety = s.col("safety_identifier");
-        // Table and column names are already uppercased by OracleStore::new().
-        let col_upper = col_safety.to_uppercase();
-        let table = s.qualified_table(schema.owner.as_deref());
-
-        let present: i64 = conn
-            .query_row_as(
-                &format!(
-                    "SELECT COUNT(*) FROM user_tab_columns \
-                     WHERE table_name = '{}' AND column_name = '{col_upper}'",
-                    s.table
-                ),
-                &[],
-            )
-            .map_err(map_oracle_error)?;
-
-        if present == 0 {
-            if let Err(err) = conn.execute(
-                &format!("ALTER TABLE {table} ADD ({col_safety} VARCHAR2(128))"),
-                &[],
-            ) {
-                let present_after: i64 = conn
-                    .query_row_as(
-                        &format!(
-                            "SELECT COUNT(*) FROM user_tab_columns \
-                             WHERE table_name = '{}' AND column_name = '{col_upper}'",
-                            s.table
-                        ),
-                        &[],
-                    )
-                    .map_err(map_oracle_error)?;
-                if present_after == 0 {
-                    return Err(map_oracle_error(err));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn remove_user_id_column_if_exists(
-        conn: &Connection,
-        schema: &SchemaConfig,
-    ) -> Result<(), String> {
-        // Table and column names are already uppercased by OracleStore::new().
-        let s = &schema.responses;
-        let table = s.qualified_table(schema.owner.as_deref());
-
-        let present: i64 = conn
-            .query_row_as(
-                &format!(
-                    "SELECT COUNT(*) FROM user_tab_columns \
-                     WHERE table_name = '{}' AND column_name = 'USER_ID'",
-                    s.table
-                ),
-                &[],
-            )
-            .map_err(map_oracle_error)?;
-
-        if present > 0 {
-            if let Err(err) = conn.execute(&format!("ALTER TABLE {table} DROP COLUMN USER_ID"), &[])
-            {
-                let present_after: i64 = conn
-                    .query_row_as(
-                        &format!(
-                            "SELECT COUNT(*) FROM user_tab_columns \
-                             WHERE table_name = '{}' AND column_name = 'USER_ID'",
-                            s.table
-                        ),
-                        &[],
-                    )
-                    .map_err(map_oracle_error)?;
-                if present_after > 0 {
-                    return Err(map_oracle_error(err));
-                }
-            }
         }
 
         Ok(())
@@ -1625,7 +1555,8 @@ fn create_index_if_missing(
             if let Some(db_err) = err.db_error() {
                 // ORA-00955: name is already used by an existing object
                 // ORA-01408: such column list already indexed
-                if db_err.code() != 955 && db_err.code() != 1408 {
+                // ORA-00904: invalid identifier (column not yet added by migration)
+                if db_err.code() != 955 && db_err.code() != 1408 && db_err.code() != 904 {
                     return Err(map_oracle_error(err));
                 }
             } else {

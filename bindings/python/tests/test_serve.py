@@ -173,7 +173,7 @@ class TestImportBackendArgs:
         args, backend_args = parser.parse_known_args(
             ["--model", "/path/to/model", "--config", "/path/to/config.yml"]
         )
-        assert args.model == "/path/to/model"
+        assert args.model_path == "/path/to/model"
         assert "--config" in backend_args
         assert "/path/to/config.yml" in backend_args
 
@@ -199,13 +199,13 @@ class TestAddTrtllmStubArgs:
         parser = argparse.ArgumentParser()
         _add_trtllm_stub_args(parser)
         args = parser.parse_args(["--model", "/tmp/model"])
-        assert args.model == "/tmp/model"
+        assert args.model_path == "/tmp/model"
 
     def test_model_default_is_none(self):
         parser = argparse.ArgumentParser()
         _add_trtllm_stub_args(parser)
         args = parser.parse_args([])
-        assert args.model is None
+        assert args.model_path is None
 
 
 class TestParseServeArgs:
@@ -217,7 +217,7 @@ class TestParseServeArgs:
         )
         assert backend == "trtllm"
         assert args.backend == "trtllm"
-        assert args.model == "/tmp/m"
+        assert args.model_path == "/tmp/m"
         assert "--config" in backend_args  # config should be in backend_args
         assert "/tmp/config.yml" in backend_args
 
@@ -314,7 +314,7 @@ class TestParseServeArgs:
             ]
         )
         assert backend == "trtllm"
-        assert args.model == "/some/path"
+        assert args.model_path == "/some/path"
 
     def test_unknown_arg_rejected_in_pass2(self):
         """Unknown args should be rejected by the full parser in pass 2."""
@@ -533,7 +533,7 @@ class TestVllmWorkerLauncher:
     def test_build_command_http_mode(self):
         """When connection_mode is http, --grpc-mode should not be present."""
         launcher = VllmWorkerLauncher()
-        args = argparse.Namespace(model="/tmp/model", connection_mode="http")
+        args = argparse.Namespace(model_path="/tmp/model", connection_mode="http")
         backend_args = ["--trust-remote-code"]
         cmd = launcher.build_command(args, backend_args, "127.0.0.1", 31000)
         assert "vllm.entrypoints.openai.api_server" in cmd
@@ -563,7 +563,7 @@ class TestTrtllmWorkerLauncher:
 
     def test_build_command(self):
         launcher = TrtllmWorkerLauncher()
-        args = argparse.Namespace(model="/tmp/model", connection_mode="grpc")
+        args = argparse.Namespace(model_path="/tmp/model", connection_mode="grpc")
         backend_args = ["--config", "/tmp/config.yml"]
         cmd = launcher.build_command(args, backend_args, "0.0.0.0", 50051)
         assert "tensorrt_llm.commands.serve" in cmd
@@ -578,7 +578,7 @@ class TestTrtllmWorkerLauncher:
 
     def test_build_command_rejects_http_mode(self):
         launcher = TrtllmWorkerLauncher()
-        args = argparse.Namespace(model="/tmp/model", connection_mode="http")
+        args = argparse.Namespace(model_path="/tmp/model", connection_mode="http")
         backend_args = ["--config", "/tmp/config.yml"]
         with pytest.raises(ValueError, match="TensorRT-LLM backend only supports grpc"):
             launcher.build_command(args, backend_args, "0.0.0.0", 50051)

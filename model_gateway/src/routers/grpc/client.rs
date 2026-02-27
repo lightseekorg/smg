@@ -156,6 +156,19 @@ impl GrpcClient {
         }
     }
 
+    /// Get the total token load from the backend.
+    /// Only supported for SGLang backends. Returns summed num_used_tokens across all DP ranks.
+    pub async fn get_loads(&self) -> Result<isize, Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            Self::Sglang(client) => {
+                let resp = client.get_loads(vec!["core".to_string()]).await?;
+                let total: i32 = resp.loads.iter().map(|l| l.num_used_tokens).sum();
+                Ok(total as isize)
+            }
+            _ => Err("GetLoads RPC not supported for this backend".into()),
+        }
+    }
+
     pub async fn get_server_info(
         &self,
     ) -> Result<ServerInfo, Box<dyn std::error::Error + Send + Sync>> {

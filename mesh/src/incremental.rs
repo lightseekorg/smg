@@ -12,10 +12,38 @@ use parking_lot::RwLock;
 use tracing::{debug, trace};
 
 use super::{
-    crdt::SKey,
     service::gossip::StateUpdate,
     stores::{AppState, MembershipState, PolicyState, StateStores, StoreType, WorkerState},
 };
+
+/// Trait for extracting version from state types
+trait Versioned {
+    fn version(&self) -> u64;
+}
+
+impl Versioned for WorkerState {
+    fn version(&self) -> u64 {
+        self.version
+    }
+}
+
+impl Versioned for PolicyState {
+    fn version(&self) -> u64 {
+        self.version
+    }
+}
+
+impl Versioned for AppState {
+    fn version(&self) -> u64 {
+        self.version
+    }
+}
+
+impl Versioned for MembershipState {
+    fn version(&self) -> u64 {
+        self.version
+    }
+}
 
 /// Tracks the last sent version for each key in each store
 #[derive(Debug, Clone, Default)]
@@ -24,7 +52,7 @@ struct LastSentVersions {
     policy: HashMap<String, u64>,
     app: HashMap<String, u64>,
     membership: HashMap<String, u64>,
-    rate_limit: HashMap<String, u64>, // Track last sent timestamp for rate limit counters
+    rate_limit: HashMap<String, u64>, // Track last sent timestamp for rate limit counter shards
 }
 
 /// Incremental update collector
@@ -55,61 +83,42 @@ impl IncrementalUpdateCollector {
             .as_nanos() as u64
     }
 
+    fn rate_limit_last_sent_key(key: &str, actor: &str) -> String {
+        format!("{key}::actor:{actor}")
+    }
+
     /// Helper function to collect updates for stores with serializable state
     fn collect_serializable_updates<S>(
         &self,
-        all_items: std::collections::BTreeMap<SKey, S>,
-        get_metadata: impl Fn(&SKey) -> Option<(u64, String)>,
+        all_items: std::collections::BTreeMap<String, S>,
         last_sent_map: &mut HashMap<String, u64>,
         store_name: &str,
         get_id: impl Fn(&S) -> String,
     ) -> Vec<StateUpdate>
     where
-        S: serde::Serialize,
+        S: serde::Serialize + Versioned,
     {
         let mut updates = Vec::new();
         let timestamp = Self::current_timestamp();
 
         for (key, state) in all_items {
-            let key_str = key.as_str().to_string();
-
-            // Get both version and actor from metadata
-            let (current_version, actor) = match get_metadata(&key) {
-                Some((v, a)) => (v, a),
-                None => continue, // Skip if no metadata
-            };
-
-            // Only collect updates where we are the actor (local updates)
-            if actor != self.self_name {
-                debug!(
-                    "Skipping {} update: {} (actor: {}, self: {}, not local)",
-                    store_name,
-                    get_id(&state),
-                    actor,
-                    self.self_name
-                );
-                continue;
-            }
-
-            let last_sent_version = last_sent_map.get(&key_str).copied().unwrap_or(0);
+            let current_version = state.version();
+            let last_sent_version = last_sent_map.get(&key).copied().unwrap_or(0);
 
             if current_version > last_sent_version {
                 if let Ok(serialized) = serde_json::to_vec(&state) {
                     updates.push(StateUpdate {
-                        key: key_str.clone(),
+                        key,
                         value: serialized,
                         version: current_version,
                         actor: self.self_name.clone(),
                         timestamp,
                     });
-
-                    last_sent_map.insert(key_str, current_version);
                     debug!(
-                        "Collected {} update: {} (version: {}, actor: {})",
+                        "Collected {} update: {} (version: {})",
                         store_name,
                         get_id(&state),
-                        current_version,
-                        actor
+                        current_version
                     );
                 }
             }
@@ -125,10 +134,8 @@ impl IncrementalUpdateCollector {
         match store_type {
             StoreType::Worker => {
                 let all_workers = self.stores.worker.all();
-                let get_metadata = |key: &SKey| self.stores.worker.get_metadata(key);
                 updates = self.collect_serializable_updates(
                     all_workers,
-                    get_metadata,
                     &mut last_sent.worker,
                     "worker",
                     |state: &WorkerState| state.worker_id.clone(),
@@ -136,10 +143,8 @@ impl IncrementalUpdateCollector {
             }
             StoreType::Policy => {
                 let all_policies = self.stores.policy.all();
-                let get_metadata = |key: &SKey| self.stores.policy.get_metadata(key);
                 updates = self.collect_serializable_updates(
                     all_policies,
-                    get_metadata,
                     &mut last_sent.policy,
                     "policy",
                     |state: &PolicyState| state.model_id.clone(),
@@ -147,10 +152,8 @@ impl IncrementalUpdateCollector {
             }
             StoreType::App => {
                 let all_apps = self.stores.app.all();
-                let get_metadata = |key: &SKey| self.stores.app.get_metadata(key);
                 updates = self.collect_serializable_updates(
                     all_apps,
-                    get_metadata,
                     &mut last_sent.app,
                     "app",
                     |state: &AppState| state.key.clone(),
@@ -158,40 +161,43 @@ impl IncrementalUpdateCollector {
             }
             StoreType::Membership => {
                 let all_members = self.stores.membership.all();
-                let get_metadata = |key: &SKey| self.stores.membership.get_metadata(key);
                 updates = self.collect_serializable_updates(
                     all_members,
-                    get_metadata,
                     &mut last_sent.membership,
                     "membership",
                     |state: &MembershipState| state.name.clone(),
                 );
             }
             StoreType::RateLimit => {
-                let rate_limit_keys = self.stores.rate_limit.keys();
                 let current_timestamp = Self::current_timestamp();
 
-                for key in rate_limit_keys {
-                    if self.stores.rate_limit.is_owner(&key) {
-                        if let Some(counter) = self.stores.rate_limit.get_counter(&key) {
-                            let last_sent_timestamp =
-                                last_sent.rate_limit.get(&key).copied().unwrap_or(0);
+                for (key, actor, counter_value) in self.stores.rate_limit.all_shards() {
+                    if !self.stores.rate_limit.is_owner(&key) {
+                        continue;
+                    }
 
-                            // Only send if at least 1 second has passed since last send
-                            if current_timestamp > last_sent_timestamp + 1_000_000_000 {
-                                if let Ok(serialized) = serde_json::to_vec(&counter.snapshot()) {
-                                    let key_str = key.clone();
-                                    updates.push(StateUpdate {
-                                        key: key_str.clone(),
-                                        value: serialized,
-                                        version: current_timestamp,
-                                        actor: self.self_name.clone(),
-                                        timestamp: current_timestamp,
-                                    });
-                                    last_sent.rate_limit.insert(key_str, current_timestamp);
-                                    trace!("Collected rate limit counter update: {}", key);
-                                }
-                            }
+                    let shard_last_sent_key = Self::rate_limit_last_sent_key(&key, &actor);
+                    let last_sent_timestamp = last_sent
+                        .rate_limit
+                        .get(&shard_last_sent_key)
+                        .copied()
+                        .unwrap_or(0);
+
+                    // Only send if at least 1 second has passed since last send.
+                    if current_timestamp > last_sent_timestamp + 1_000_000_000 {
+                        if let Ok(serialized) = serde_json::to_vec(&counter_value) {
+                            updates.push(StateUpdate {
+                                key: key.clone(),
+                                value: serialized,
+                                version: current_timestamp,
+                                actor: actor.clone(),
+                                timestamp: current_timestamp,
+                            });
+                            trace!(
+                                "Collected rate limit counter shard update: {} actor={}",
+                                key,
+                                actor
+                            );
                         }
                     }
                 }
@@ -229,16 +235,28 @@ impl IncrementalUpdateCollector {
     /// Mark updates as sent (called after successful transmission)
     pub fn mark_sent(&self, store_type: StoreType, updates: &[StateUpdate]) {
         let mut last_sent = self.last_sent.write();
-        let target_map = match store_type {
-            StoreType::Worker => &mut last_sent.worker,
-            StoreType::Policy => &mut last_sent.policy,
-            StoreType::App => &mut last_sent.app,
-            StoreType::Membership => &mut last_sent.membership,
-            StoreType::RateLimit => &mut last_sent.rate_limit,
-        };
 
         for update in updates {
-            target_map.insert(update.key.clone(), update.version);
+            match store_type {
+                StoreType::Worker => {
+                    last_sent.worker.insert(update.key.clone(), update.version);
+                }
+                StoreType::Policy => {
+                    last_sent.policy.insert(update.key.clone(), update.version);
+                }
+                StoreType::App => {
+                    last_sent.app.insert(update.key.clone(), update.version);
+                }
+                StoreType::Membership => {
+                    last_sent
+                        .membership
+                        .insert(update.key.clone(), update.version);
+                }
+                StoreType::RateLimit => {
+                    let shard_key = Self::rate_limit_last_sent_key(&update.key, &update.actor);
+                    last_sent.rate_limit.insert(shard_key, update.version);
+                }
+            }
         }
     }
 }
@@ -261,7 +279,7 @@ mod tests {
         let stores = collector.stores.clone();
 
         // Insert a worker state
-        let key = SKey::new("worker1".to_string());
+        let key = "worker1".to_string();
         let worker_state = WorkerState {
             worker_id: "worker1".to_string(),
             model_id: "model1".to_string(),
@@ -270,7 +288,7 @@ mod tests {
             load: 0.5,
             version: 1,
         };
-        stores.worker.insert(key, worker_state, "node1".to_string());
+        let _ = stores.worker.insert(key, worker_state, "node1".to_string());
 
         // Collect updates
         let updates = collector.collect_updates_for_store(StoreType::Worker);
@@ -279,12 +297,17 @@ mod tests {
         assert_eq!(updates[0].version, 1);
         assert_eq!(updates[0].actor, "node1");
 
-        // Collect again - should be empty (already sent)
+        // Collect again before mark_sent - should still include pending updates.
         let updates2 = collector.collect_updates_for_store(StoreType::Worker);
-        assert_eq!(updates2.len(), 0);
+        assert_eq!(updates2.len(), 1);
+
+        // Mark transmission success and verify it is no longer collected.
+        collector.mark_sent(StoreType::Worker, &updates2);
+        let updates_after_mark = collector.collect_updates_for_store(StoreType::Worker);
+        assert_eq!(updates_after_mark.len(), 0);
 
         // Update worker state
-        let key2 = SKey::new("worker1".to_string());
+        let key2 = "worker1".to_string();
         let worker_state2 = WorkerState {
             worker_id: "worker1".to_string(),
             model_id: "model1".to_string(),
@@ -293,7 +316,7 @@ mod tests {
             load: 0.8,
             version: 2,
         };
-        stores
+        let _ = stores
             .worker
             .insert(key2, worker_state2, "node1".to_string());
 
@@ -308,14 +331,14 @@ mod tests {
         let collector = create_test_collector("node1".to_string());
         let stores = collector.stores.clone();
 
-        let key = SKey::new("policy:model1".to_string());
+        let key = "policy:model1".to_string();
         let policy_state = PolicyState {
             model_id: "model1".to_string(),
             policy_type: "cache_aware".to_string(),
             config: b"config_data".to_vec(),
             version: 1,
         };
-        stores.policy.insert(key, policy_state, "node1".to_string());
+        let _ = stores.policy.insert(key, policy_state, "node1".to_string());
 
         let updates = collector.collect_updates_for_store(StoreType::Policy);
         assert_eq!(updates.len(), 1);
@@ -327,13 +350,13 @@ mod tests {
         let collector = create_test_collector("node1".to_string());
         let stores = collector.stores.clone();
 
-        let key = SKey::new("app_key1".to_string());
+        let key = "app_key1".to_string();
         let app_state = AppState {
             key: "app_key1".to_string(),
             value: b"app_value".to_vec(),
             version: 1,
         };
-        stores.app.insert(key, app_state, "node1".to_string());
+        let _ = stores.app.insert(key, app_state, "node1".to_string());
 
         let updates = collector.collect_updates_for_store(StoreType::App);
         assert_eq!(updates.len(), 1);
@@ -345,7 +368,7 @@ mod tests {
         let collector = create_test_collector("node1".to_string());
         let stores = collector.stores.clone();
 
-        let key = SKey::new("node2".to_string());
+        let key = "node2".to_string();
         let membership_state = MembershipState {
             name: "node2".to_string(),
             address: "127.0.0.1:8001".to_string(),
@@ -353,7 +376,7 @@ mod tests {
             version: 1,
             metadata: std::collections::BTreeMap::new(),
         };
-        stores
+        let _ = stores
             .membership
             .insert(key, membership_state, "node1".to_string());
 
@@ -368,8 +391,8 @@ mod tests {
         let stores = collector.stores.clone();
 
         // Insert into multiple stores
-        let worker_key = SKey::new("worker1".to_string());
-        stores.worker.insert(
+        let worker_key = "worker1".to_string();
+        let _ = stores.worker.insert(
             worker_key,
             WorkerState {
                 worker_id: "worker1".to_string(),
@@ -382,8 +405,8 @@ mod tests {
             "node1".to_string(),
         );
 
-        let policy_key = SKey::new("policy:model1".to_string());
-        stores.policy.insert(
+        let policy_key = "policy:model1".to_string();
+        let _ = stores.policy.insert(
             policy_key,
             PolicyState {
                 model_id: "model1".to_string(),
@@ -404,8 +427,8 @@ mod tests {
         let stores = collector.stores.clone();
 
         // Insert and collect
-        let key = SKey::new("worker1".to_string());
-        stores.worker.insert(
+        let key = "worker1".to_string();
+        let _ = stores.worker.insert(
             key,
             WorkerState {
                 worker_id: "worker1".to_string(),
@@ -467,10 +490,10 @@ mod tests {
         let collector = create_test_collector("node1".to_string());
         let stores = collector.stores.clone();
 
-        let key = SKey::new("worker1".to_string());
+        let key = "worker1".to_string();
 
-        // Insert first version (will be version 1 in store)
-        stores.worker.insert(
+        // Insert first version with explicit version number
+        let _ = stores.worker.insert(
             key.clone(),
             WorkerState {
                 worker_id: "worker1".to_string(),
@@ -478,7 +501,7 @@ mod tests {
                 url: "http://localhost:8000".to_string(),
                 health: true,
                 load: 0.5,
-                version: 1, // Note: CRDT will use this but increment internally
+                version: 1,
             },
             "node1".to_string(),
         );
@@ -486,10 +509,10 @@ mod tests {
         let updates1 = collector.collect_updates_for_store(StoreType::Worker);
         assert_eq!(updates1.len(), 1);
         let version1 = updates1[0].version;
-        assert!(version1 >= 1);
+        assert_eq!(version1, 1);
 
-        // Insert second version (will increment from version1)
-        stores.worker.insert(
+        // Insert second version with incremented version number
+        let _ = stores.worker.insert(
             key.clone(),
             WorkerState {
                 worker_id: "worker1".to_string(),
@@ -497,7 +520,7 @@ mod tests {
                 url: "http://localhost:8000".to_string(),
                 health: false,
                 load: 0.8,
-                version: 2, // Note: CRDT will increment internally
+                version: 2,
             },
             "node1".to_string(),
         );
@@ -505,10 +528,10 @@ mod tests {
         let updates2 = collector.collect_updates_for_store(StoreType::Worker);
         assert_eq!(updates2.len(), 1);
         let version2 = updates2[0].version;
-        assert!(version2 > version1);
+        assert_eq!(version2, 2);
 
-        // Insert again - should increment version and be collected
-        stores.worker.insert(
+        // Insert third version with incremented version number
+        let _ = stores.worker.insert(
             key,
             WorkerState {
                 worker_id: "worker1".to_string(),
@@ -516,15 +539,14 @@ mod tests {
                 url: "http://localhost:8000".to_string(),
                 health: true,
                 load: 0.3,
-                version: 1, // Note: CRDT ignores this and increments internally
+                version: 3,
             },
             "node1".to_string(),
         );
 
         let updates3 = collector.collect_updates_for_store(StoreType::Worker);
-        // Should collect because version was incremented (version2 + 1 > version2)
         assert_eq!(updates3.len(), 1);
         let version3 = updates3[0].version;
-        assert!(version3 > version2);
+        assert_eq!(version3, 3);
     }
 }

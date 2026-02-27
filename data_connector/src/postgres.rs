@@ -28,8 +28,11 @@ use crate::{
         ListParams, NewConversation, NewConversationItem, ResponseId, ResponseResult,
         ResponseStorage, ResponseStorageError, SortOrder, StoredResponse,
     },
+    postgres_migrations::POSTGRES_MIGRATIONS,
     schema::SchemaConfig,
 };
+
+// ── Store ────────────────────────────────────────────────────────────────
 
 pub(crate) struct PostgresStore {
     pool: Pool,
@@ -54,6 +57,46 @@ impl PostgresStore {
             .map_err(|e| format!("Failed to build PostgreSQL connection pool: {e}"))?;
 
         Ok(Self { pool, schema })
+    }
+
+    /// Run versioned schema migrations after tables have been created.
+    pub(crate) async fn run_migrations(&self) -> Result<Vec<u32>, String> {
+        let mut client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| format!("failed to get connection for migrations: {e}"))?;
+        crate::versioning::run_postgres_migrations(
+            &mut client,
+            &self.schema,
+            &POSTGRES_MIGRATIONS,
+            self.schema.version,
+            self.schema.auto_migrate,
+        )
+        .await
+    }
+
+    /// Create indexes that may have been deferred during init because
+    /// migration-added columns did not yet exist.
+    pub(crate) async fn ensure_response_indexes(&self) -> Result<(), String> {
+        let s = &self.schema.responses;
+        if s.is_skipped("safety_identifier") {
+            return Ok(());
+        }
+        let table = s.qualified_table(self.schema.owner.as_deref());
+        let col = s.col("safety_identifier");
+        let idx_ddl =
+            format!("CREATE INDEX IF NOT EXISTS responses_safety_idx ON {table} ({col});");
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| format!("failed to get connection for index creation: {e}"))?;
+        client
+            .batch_execute(&idx_ddl)
+            .await
+            .map_err(|e| format!("failed to create response index: {e}"))?;
+        Ok(())
     }
 }
 
@@ -848,16 +891,10 @@ impl PostgresResponseStorage {
         }
         col_defs.extend(extra_column_defs(s));
 
-        let mut ddl = format!(
+        let table_ddl = format!(
             "CREATE TABLE IF NOT EXISTS {table} ({});",
             col_defs.join(", "),
         );
-        if !s.is_skipped("safety_identifier") {
-            ddl.push_str(&format!(
-                "\nCREATE INDEX IF NOT EXISTS responses_safety_idx ON {table} ({});",
-                s.col("safety_identifier")
-            ));
-        }
 
         let client = store
             .pool
@@ -865,9 +902,22 @@ impl PostgresResponseStorage {
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
         client
-            .batch_execute(&ddl)
+            .batch_execute(&table_ddl)
             .await
             .map_err(|e| ResponseStorageError::StorageError(e.to_string()))?;
+
+        // Index creation is separate so legacy tables missing migrated
+        // columns (e.g. safety_identifier) don't block startup. Indexes
+        // are retried after migrations via ensure_response_indexes().
+        if !s.is_skipped("safety_identifier") {
+            let idx_ddl = format!(
+                "CREATE INDEX IF NOT EXISTS responses_safety_idx ON {table} ({});",
+                s.col("safety_identifier")
+            );
+            if let Err(e) = client.batch_execute(&idx_ddl).await {
+                tracing::debug!("deferred response index creation (column may not exist yet): {e}");
+            }
+        }
 
         let select_base = build_response_select_base(&store.schema);
         Ok(Self { store, select_base })

@@ -218,6 +218,10 @@ struct CliArgs {
     #[arg(long, default_value_t = 30, help_heading = "PD Disaggregation")]
     worker_startup_check_interval: u64,
 
+    /// Interval in seconds between load monitor checks for PowerOfTwo routing
+    #[arg(long, default_value_t = 10, help_heading = "Load Monitoring")]
+    load_monitor_interval: u64,
+
     // ==================== Service Discovery (Kubernetes) ====================
     /// Enable Kubernetes service discovery
     #[arg(
@@ -388,7 +392,7 @@ struct CliArgs {
 
     // ==================== Tokenizer ====================
     /// Model path for loading tokenizer (HuggingFace ID or local path)
-    #[arg(long, help_heading = "Tokenizer")]
+    #[arg(long, alias = "model", help_heading = "Tokenizer")]
     model_path: Option<String>,
 
     /// Explicit tokenizer path (overrides model_path)
@@ -398,10 +402,6 @@ struct CliArgs {
     /// Chat template path
     #[arg(long, help_heading = "Tokenizer")]
     chat_template: Option<String>,
-
-    /// Client-facing model name override; both this and the backend-reported name are accepted.
-    #[arg(long, help_heading = "Tokenizer")]
-    served_model_name: Option<String>,
 
     /// Enable L0 (exact match) tokenizer cache
     #[arg(long, default_value_t = false, help_heading = "Tokenizer")]
@@ -1021,6 +1021,7 @@ impl CliArgs {
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
+            .load_monitor_interval_secs(self.load_monitor_interval)
             .max_concurrent_requests(self.max_concurrent_requests)
             .queue_size(self.queue_size)
             .queue_timeout_secs(self.queue_timeout_secs)
@@ -1066,7 +1067,6 @@ impl CliArgs {
             .maybe_model_path(self.model_path.as_ref())
             .maybe_tokenizer_path(self.tokenizer_path.as_ref())
             .maybe_chat_template(self.chat_template.as_ref())
-            .maybe_served_model_name(self.served_model_name.as_ref())
             .maybe_oracle(oracle)
             .maybe_postgres(postgres)
             .maybe_redis(redis)

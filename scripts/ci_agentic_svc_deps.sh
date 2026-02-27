@@ -109,6 +109,7 @@ PYEOF
     echo "ATP_USER=$TEST_USER" >> "$GITHUB_ENV"
     echo "ATP_PASSWORD=$TEST_PASS" >> "$GITHUB_ENV"
     echo "ATP_DSN=$oracle_dsn" >> "$GITHUB_ENV"
+    echo "DB_AUTO_MIGRATE=true" >> "$GITHUB_ENV"
 }
 
 cmd_cleanup_oracle_user() {

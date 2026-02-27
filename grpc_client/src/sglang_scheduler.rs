@@ -285,6 +285,23 @@ impl SglangSchedulerClient {
         Ok(response.into_inner())
     }
 
+    /// Get load metrics from the scheduler
+    pub async fn get_loads(
+        &self,
+        include: Vec<String>,
+    ) -> Result<proto::GetLoadsResponse, Box<dyn std::error::Error + Send + Sync>> {
+        debug!("Requesting load metrics");
+        let request = Request::new(proto::GetLoadsRequest {
+            dp_rank: None,
+            include,
+        });
+
+        let mut client = self.client.clone();
+        let response = client.get_loads(request).await?;
+        debug!("Load metrics response received");
+        Ok(response.into_inner())
+    }
+
     /// Build a single SGLang EmbedRequest
     #[expect(
         clippy::unused_self,

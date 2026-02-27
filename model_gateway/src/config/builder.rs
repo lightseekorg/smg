@@ -182,6 +182,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn load_monitor_interval_secs(mut self, interval: u64) -> Self {
+        self.config.load_monitor_interval_secs = interval;
+        self
+    }
+
     // ==================== Rate Limiting ====================
 
     pub fn max_concurrent_requests(mut self, max: i32) -> Self {
@@ -528,17 +533,6 @@ impl RouterConfigBuilder {
 
     pub fn maybe_chat_template(mut self, template: Option<impl Into<String>>) -> Self {
         self.config.chat_template = template.map(|t| t.into());
-        self
-    }
-
-    pub fn served_model_name<S: Into<String>>(mut self, name: S) -> Self {
-        self.config.served_model_name = Some(name.into());
-        self
-    }
-
-    /// Set served_model_name if Some, clear if None.
-    pub fn maybe_served_model_name(mut self, name: Option<impl Into<String>>) -> Self {
-        self.config.served_model_name = name.map(|n| n.into());
         self
     }
 

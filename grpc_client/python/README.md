@@ -7,6 +7,7 @@ Protocol Buffer definitions for [SMG](https://github.com/lightseekorg/smg) (Shep
 
 This package provides pre-compiled Python gRPC stubs for:
 - **SGLang** scheduler service (`sglang_scheduler.proto`)
+- **SGLang** encoder service (`sglang_encoder.proto`)
 - **vLLM** engine service (`vllm_engine.proto`)
 - **TensorRT-LLM** service (`trtllm_service.proto`)
 
@@ -22,6 +23,7 @@ Requires `grpcio>=1.78.0` and `protobuf>=5.26.0`.
 
 ```python
 from smg_grpc_proto import sglang_scheduler_pb2, sglang_scheduler_pb2_grpc
+from smg_grpc_proto import sglang_encoder_pb2, sglang_encoder_pb2_grpc
 from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
 from smg_grpc_proto import trtllm_service_pb2, trtllm_service_pb2_grpc
 ```

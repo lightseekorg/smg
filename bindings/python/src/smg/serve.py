@@ -223,7 +223,7 @@ class TrtllmWorkerLauncher(WorkerLauncher):
             sys.executable,
             "-m",
             "tensorrt_llm.commands.serve",
-            getattr(args, "model", ""),
+            getattr(args, "model_path", ""),
             "--grpc",
             "--host",
             host,
@@ -232,7 +232,14 @@ class TrtllmWorkerLauncher(WorkerLauncher):
         ]
 
         # Add optional config file
-        cmd.extend(self._filter_backend_args(backend_args, ["--model", "--host", "--port"]))
+        # TRT-LLM Click options use underscores (e.g. --tensor_parallel_size)
+        # while SGLang/vLLM use hyphens. Normalize so users can pass either form.
+        normalized = [
+            "--" + a[2:].replace("-", "_") if a.startswith("--") else a for a in backend_args
+        ]
+        cmd.extend(
+            self._filter_backend_args(normalized, ["--model", "--model_path", "--host", "--port"])
+        )
 
         return cmd
 
@@ -372,7 +379,13 @@ def _add_trtllm_stub_args(parser: argparse.ArgumentParser) -> None:
     TP size is read from the config file, not passed as CLI argument.
     """
     group = parser.add_argument_group("TensorRT-LLM Options")
-    group.add_argument("--model", type=str, help="Model path (HuggingFace ID or local path)")
+    group.add_argument(
+        "--model",
+        "--model-path",
+        dest="model_path",
+        type=str,
+        help="Model path (HuggingFace ID or local path)",
+    )
     group.add_argument("--tp_size", type=int, help="Tensor parallel size (overrides config file)")
 
 

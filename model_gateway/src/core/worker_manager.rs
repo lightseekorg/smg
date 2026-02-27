@@ -170,24 +170,22 @@ impl WorkerManager {
         let futures: Vec<_> = workers
             .iter()
             .map(|worker| {
-                let url = worker.url().to_string();
-                let api_key = worker.api_key().cloned();
                 let worker_type = match worker.worker_type() {
                     WorkerType::Regular => None,
                     WorkerType::Prefill => Some("prefill".to_string()),
                     WorkerType::Decode => Some("decode".to_string()),
                 };
-                let is_http = matches!(worker.connection_mode(), ConnectionMode::Http);
+                let connection_mode = worker.connection_mode();
                 let client = client.clone();
+                let worker = Arc::clone(worker);
 
                 async move {
-                    let load = if is_http {
-                        Self::parse_load_response(&client, &url, api_key.as_deref()).await
-                    } else {
-                        -1
+                    let load = match connection_mode {
+                        ConnectionMode::Http => Self::fetch_http_load(&client, &worker).await,
+                        ConnectionMode::Grpc => Self::fetch_grpc_load(&worker).await,
                     };
                     WorkerLoadInfo {
-                        worker: url,
+                        worker: worker.url().to_string(),
                         worker_type,
                         load,
                     }
@@ -207,26 +205,56 @@ impl WorkerManager {
         }
     }
 
-    async fn parse_load_response(
-        client: &reqwest::Client,
-        url: &str,
-        api_key: Option<&str>,
-    ) -> isize {
-        let load_url = format!("{url}/get_load");
+    /// Fetch load via HTTP using the /v1/loads endpoint.
+    /// Sums num_used_tokens across all DP ranks.
+    async fn fetch_http_load(client: &reqwest::Client, worker: &Arc<dyn Worker>) -> isize {
+        let url = worker.url();
+        let load_url = format!("{url}/v1/loads?include=core");
         let mut req = client.get(&load_url).timeout(REQUEST_TIMEOUT);
-        if let Some(key) = api_key {
+        if let Some(key) = worker.api_key() {
             req = req.bearer_auth(key);
         }
 
-        match req.send().await {
-            Ok(r) if r.status().is_success() => match r.json::<Value>().await {
-                Ok(Value::Array(arr)) => arr
-                    .iter()
-                    .filter_map(|e| e.get("num_tokens").and_then(|v| v.as_i64()))
-                    .sum::<i64>() as isize,
-                _ => -1,
-            },
-            _ => -1,
+        let resp = match req.send().await {
+            Ok(r) if r.status().is_success() => r,
+            _ => return -1,
+        };
+
+        if let Ok(body) = resp.json::<Value>().await {
+            body.get("loads")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|e| e.get("num_used_tokens").and_then(|v| v.as_i64()))
+                        .sum::<i64>() as isize
+                })
+                .unwrap_or(-1)
+        } else {
+            -1
+        }
+    }
+
+    /// Fetch load via gRPC using the GetLoads RPC.
+    /// Only supported for SGLang backends.
+    async fn fetch_grpc_load(worker: &Arc<dyn Worker>) -> isize {
+        let grpc_client = match worker.get_grpc_client().await {
+            Ok(Some(client)) => client,
+            Ok(None) => {
+                debug!("No gRPC client for worker {}", worker.url());
+                return -1;
+            }
+            Err(e) => {
+                debug!("Failed to get gRPC client for {}: {e}", worker.url());
+                return -1;
+            }
+        };
+
+        match grpc_client.get_loads().await {
+            Ok(load) => load,
+            Err(e) => {
+                debug!("gRPC GetLoads failed for {}: {e}", worker.url());
+                -1
+            }
         }
     }
 

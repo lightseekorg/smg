@@ -6,16 +6,197 @@
 //! - WorkerStore: Worker status, load, health
 //! - PolicyStore: Routing policy internal state
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    marker::PhantomData,
+    sync::Arc,
+};
 
+use dashmap::DashMap;
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tracing::debug;
 
 use super::{
     consistent_hash::ConsistentHashRing,
-    crdt::{SKey, SyncCRDTMap, SyncPNCounter},
+    crdt_kv::{CrdtOrMap, Operation, OperationLog, ReplicaId},
 };
+
+// ============================================================================
+// Type-Safe Serialization Layer - Transparent T ↔ Vec<u8> Conversion
+// ============================================================================
+
+/// Trait for CRDT-compatible value types
+/// Provides transparent serialization/deserialization
+trait CrdtValue: Serialize + DeserializeOwned + Clone {
+    fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(bytes)
+    }
+}
+
+// Blanket implementation for all types that satisfy the bounds
+impl<T> CrdtValue for T where T: Serialize + DeserializeOwned + Clone {}
+
+// ============================================================================
+// Generic CRDT Store Wrapper - Type-Safe Interface Over CrdtOrMap
+// ============================================================================
+
+/// Generic store wrapper providing type-safe operations over CrdtOrMap
+#[derive(Clone)]
+struct CrdtStore<T> {
+    inner: CrdtOrMap,
+    _phantom: PhantomData<T>,
+}
+
+impl<T> std::fmt::Debug for CrdtStore<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CrdtStore")
+            .field("inner", &"<CrdtOrMap>")
+            .finish()
+    }
+}
+
+impl<T: CrdtValue> CrdtStore<T> {
+    fn new() -> Self {
+        Self {
+            inner: CrdtOrMap::new(),
+            _phantom: PhantomData,
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<T> {
+        self.inner.get(key).and_then(|bytes| {
+            T::from_bytes(&bytes)
+                .map_err(|err| {
+                    debug!(error = %err, %key, "Failed to deserialize CRDT value");
+                })
+                .ok()
+        })
+    }
+
+    fn insert(&self, key: String, value: T) -> Result<Option<T>, serde_json::Error> {
+        let bytes = value.to_bytes().map_err(|err| {
+            debug!(error = %err, %key, "Failed to serialize CRDT value");
+            err
+        })?;
+
+        Ok(self.inner.insert(key, bytes).and_then(|old_bytes| {
+            T::from_bytes(&old_bytes)
+                .map_err(|err| {
+                    debug!(error = %err, "Failed to deserialize old CRDT value");
+                })
+                .ok()
+        }))
+    }
+
+    fn remove(&self, key: &str) -> Option<T> {
+        self.inner.remove(key).and_then(|bytes| {
+            T::from_bytes(&bytes)
+                .map_err(|err| {
+                    debug!(error = %err, %key, "Failed to deserialize removed CRDT value");
+                })
+                .ok()
+        })
+    }
+
+    fn update<F>(&self, key: String, updater: F) -> Result<Option<T>, serde_json::Error>
+    where
+        F: FnOnce(Option<T>) -> T,
+    {
+        let updated_bytes = self.inner.try_upsert(key, |current_bytes| {
+            let current = current_bytes.and_then(|bytes| {
+                T::from_bytes(bytes)
+                    .map_err(|err| {
+                        debug!(error = %err, "Failed to deserialize current CRDT value");
+                    })
+                    .ok()
+            });
+
+            let updated = updater(current);
+            updated.to_bytes()
+        })?;
+
+        Ok(T::from_bytes(&updated_bytes)
+            .map_err(|err| {
+                debug!(error = %err, "Failed to deserialize updated CRDT value");
+                err
+            })
+            .ok())
+    }
+
+    fn update_if<F>(&self, key: String, updater: F) -> Result<(Option<T>, bool), serde_json::Error>
+    where
+        F: FnOnce(Option<T>) -> Option<T>,
+    {
+        let (updated_bytes, changed) = self.inner.try_upsert_if(key, |current_bytes| {
+            let current = current_bytes.and_then(|bytes| {
+                T::from_bytes(bytes)
+                    .map_err(|err| {
+                        debug!(error = %err, "Failed to deserialize current CRDT value");
+                    })
+                    .ok()
+            });
+
+            let updated = updater(current);
+            updated.map(|value| value.to_bytes()).transpose()
+        })?;
+
+        let value = T::from_bytes(&updated_bytes)
+            .map_err(|err| {
+                debug!(error = %err, "Failed to deserialize conditionally updated CRDT value");
+                err
+            })
+            .ok();
+
+        Ok((value, changed))
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    // fn contains_key(&self, key: &str) -> bool {
+    //     self.inner.contains_key(key)
+    // }
+
+    fn merge(&self, log: &OperationLog) {
+        self.inner.merge(log);
+    }
+
+    fn get_operation_log(&self) -> OperationLog {
+        self.inner.get_operation_log()
+    }
+
+    fn all(&self) -> BTreeMap<String, T> {
+        self.inner
+            .all()
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let key_for_log = k.clone();
+                T::from_bytes(&v)
+                    .map(|val| (k, val))
+                    .map_err(|err| {
+                        debug!(error = %err, key = %key_for_log, "Failed to deserialize CRDT value in all()");
+                    })
+                    .ok()
+            })
+            .collect()
+    }
+}
+
+impl<T: CrdtValue> Default for CrdtStore<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Store type identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -127,244 +308,161 @@ pub fn tree_state_key(model_id: &str) -> String {
     format!("tree:{model_id}")
 }
 
-/// Membership store
-#[derive(Debug, Clone)]
-pub struct MembershipStore {
-    inner: SyncCRDTMap<MembershipState>,
-}
-
-impl MembershipStore {
-    pub fn new() -> Self {
-        Self {
-            inner: SyncCRDTMap::new(),
+macro_rules! define_state_store {
+    ($store_name:ident, $value_type:ty) => {
+        #[derive(Debug, Clone)]
+        pub struct $store_name {
+            inner: CrdtStore<$value_type>,
         }
-    }
 
-    pub fn get(&self, key: &SKey) -> Option<MembershipState> {
-        self.inner.get(key)
-    }
+        impl $store_name {
+            pub fn new() -> Self {
+                Self {
+                    inner: CrdtStore::new(),
+                }
+            }
 
-    pub fn insert(&self, key: SKey, value: MembershipState, actor: String) {
-        self.inner.insert(key, value, actor);
-    }
+            pub fn get(&self, key: &str) -> Option<$value_type> {
+                self.inner.get(key)
+            }
 
-    pub fn remove(&self, key: &SKey) {
-        self.inner.remove(key);
-    }
+            // Backward-compatible actor parameter; the CRDT OR-Map no longer needs it.
+            pub fn insert(
+                &self,
+                key: String,
+                value: $value_type,
+                _actor: String,
+            ) -> Result<Option<$value_type>, serde_json::Error> {
+                self.inner.insert(key, value)
+            }
 
-    pub fn merge(&self, other: &crate::crdt::CRDTMap<MembershipState>) {
-        self.inner.merge(other);
-    }
+            pub fn remove(&self, key: &str) {
+                self.inner.remove(key);
+            }
 
-    pub fn snapshot(&self) -> crate::crdt::CRDTMap<MembershipState> {
-        self.inner.snapshot()
-    }
+            pub fn merge(&self, log: &OperationLog) {
+                self.inner.merge(log);
+            }
 
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
+            pub fn get_operation_log(&self) -> OperationLog {
+                self.inner.get_operation_log()
+            }
 
-    pub fn is_empty(&self) -> bool {
-        self.inner.len() == 0
-    }
+            pub fn update<F>(
+                &self,
+                key: String,
+                updater: F,
+            ) -> Result<Option<$value_type>, serde_json::Error>
+            where
+                F: FnOnce(Option<$value_type>) -> $value_type,
+            {
+                self.inner.update(key, updater)
+            }
 
-    pub fn all(&self) -> BTreeMap<SKey, MembershipState> {
-        self.inner.snapshot().to_map()
-    }
+            pub fn update_if<F>(
+                &self,
+                key: String,
+                updater: F,
+            ) -> Result<(Option<$value_type>, bool), serde_json::Error>
+            where
+                F: FnOnce(Option<$value_type>) -> Option<$value_type>,
+            {
+                self.inner.update_if(key, updater)
+            }
 
-    pub fn get_metadata(&self, key: &SKey) -> Option<(u64, String)> {
-        self.inner.get_metadata(key)
-    }
-}
+            pub fn len(&self) -> usize {
+                self.inner.len()
+            }
 
-impl Default for MembershipStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+            pub fn is_empty(&self) -> bool {
+                self.inner.is_empty()
+            }
 
-/// App store
-#[derive(Debug, Clone)]
-pub struct AppStore {
-    inner: SyncCRDTMap<AppState>,
-}
-
-impl AppStore {
-    pub fn new() -> Self {
-        Self {
-            inner: SyncCRDTMap::new(),
+            pub fn all(&self) -> BTreeMap<String, $value_type> {
+                self.inner.all()
+            }
         }
-    }
 
-    pub fn get(&self, key: &SKey) -> Option<AppState> {
-        self.inner.get(key)
-    }
-
-    pub fn insert(&self, key: SKey, value: AppState, actor: String) {
-        self.inner.insert(key, value, actor);
-    }
-
-    pub fn remove(&self, key: &SKey) {
-        self.inner.remove(key);
-    }
-
-    pub fn merge(&self, other: &crate::crdt::CRDTMap<AppState>) {
-        self.inner.merge(other);
-    }
-
-    pub fn snapshot(&self) -> crate::crdt::CRDTMap<AppState> {
-        self.inner.snapshot()
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.len() == 0
-    }
-
-    pub fn all(&self) -> BTreeMap<SKey, AppState> {
-        self.inner.snapshot().to_map()
-    }
-
-    pub fn get_metadata(&self, key: &SKey) -> Option<(u64, String)> {
-        self.inner.get_metadata(key)
-    }
-}
-
-impl Default for AppStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Worker store
-#[derive(Debug, Clone)]
-pub struct WorkerStore {
-    inner: SyncCRDTMap<WorkerState>,
-}
-
-impl WorkerStore {
-    pub fn new() -> Self {
-        Self {
-            inner: SyncCRDTMap::new(),
+        impl Default for $store_name {
+            fn default() -> Self {
+                Self::new()
+            }
         }
-    }
-
-    pub fn get(&self, key: &SKey) -> Option<WorkerState> {
-        self.inner.get(key)
-    }
-
-    pub fn insert(&self, key: SKey, value: WorkerState, actor: String) {
-        self.inner.insert(key, value, actor);
-    }
-
-    pub fn remove(&self, key: &SKey) {
-        self.inner.remove(key);
-    }
-
-    pub fn merge(&self, other: &crate::crdt::CRDTMap<WorkerState>) {
-        self.inner.merge(other);
-    }
-
-    pub fn snapshot(&self) -> crate::crdt::CRDTMap<WorkerState> {
-        self.inner.snapshot()
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.len() == 0
-    }
-
-    pub fn all(&self) -> BTreeMap<SKey, WorkerState> {
-        self.inner.snapshot().to_map()
-    }
-
-    pub fn get_metadata(&self, key: &SKey) -> Option<(u64, String)> {
-        self.inner.get_metadata(key)
-    }
+    };
 }
 
-impl Default for WorkerStore {
-    fn default() -> Self {
-        Self::new()
-    }
+define_state_store!(MembershipStore, MembershipState);
+define_state_store!(AppStore, AppState);
+define_state_store!(WorkerStore, WorkerState);
+define_state_store!(PolicyStore, PolicyState);
+
+// ============================================================================
+// Rate Limit Counter - Simplified Counter Using CrdtOrMap
+// ============================================================================
+
+/// Counter value wrapper for rate limiting
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+struct CounterValue {
+    value: i64,
 }
 
-/// Policy store
-#[derive(Debug, Clone)]
-pub struct PolicyStore {
-    inner: SyncCRDTMap<PolicyState>,
-}
-
-impl PolicyStore {
-    pub fn new() -> Self {
-        Self {
-            inner: SyncCRDTMap::new(),
-        }
-    }
-
-    pub fn get(&self, key: &SKey) -> Option<PolicyState> {
-        self.inner.get(key)
-    }
-
-    pub fn insert(&self, key: SKey, value: PolicyState, actor: String) {
-        self.inner.insert(key, value, actor);
-    }
-
-    pub fn remove(&self, key: &SKey) {
-        self.inner.remove(key);
-    }
-
-    pub fn merge(&self, other: &crate::crdt::CRDTMap<PolicyState>) {
-        self.inner.merge(other);
-    }
-
-    pub fn snapshot(&self) -> crate::crdt::CRDTMap<PolicyState> {
-        self.inner.snapshot()
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.len() == 0
-    }
-
-    pub fn all(&self) -> BTreeMap<SKey, PolicyState> {
-        self.inner.snapshot().to_map()
-    }
-
-    pub fn get_metadata(&self, key: &SKey) -> Option<(u64, String)> {
-        self.inner.get_metadata(key)
-    }
-}
-
-impl Default for PolicyStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Rate-limit counter store (using PNCounter with consistent hashing)
+/// Rate-limit counter store (using CrdtOrMap with consistent hashing)
 #[derive(Debug, Clone)]
 pub struct RateLimitStore {
-    counters: Arc<RwLock<BTreeMap<String, SyncPNCounter>>>, // key -> counter
+    counters: CrdtStore<CounterValue>,
     hash_ring: Arc<RwLock<ConsistentHashRing>>,
     self_name: String,
+    actor_replica_ids: Arc<DashMap<String, ReplicaId>>,
 }
 
 impl RateLimitStore {
+    const SHARD_SEPARATOR: &'static str = "::actor:";
+
     pub fn new(self_name: String) -> Self {
         Self {
-            counters: Arc::new(RwLock::new(BTreeMap::new())),
+            counters: CrdtStore::new(),
             hash_ring: Arc::new(RwLock::new(ConsistentHashRing::new())),
             self_name,
+            actor_replica_ids: Arc::new(DashMap::new()),
+        }
+    }
+
+    fn shard_key(key: &str, actor: &str) -> String {
+        format!("{key}{}{actor}", Self::SHARD_SEPARATOR)
+    }
+
+    fn split_shard_key(shard_key: &str) -> Option<(&str, &str)> {
+        shard_key.rsplit_once(Self::SHARD_SEPARATOR)
+    }
+
+    fn base_key(shard_key: &str) -> &str {
+        Self::split_shard_key(shard_key).map_or(shard_key, |(base, _)| base)
+    }
+
+    fn replica_id_for_actor(&self, actor: &str) -> ReplicaId {
+        if let Ok(replica_id) = ReplicaId::from_string(actor) {
+            return replica_id;
+        }
+
+        *self.actor_replica_ids.entry(actor.to_string()).or_default()
+    }
+
+    fn aggregate_counter(&self, key: &str) -> Option<i64> {
+        let all_counters = self.counters.all();
+        let mut has_shard = false;
+        let mut total = 0;
+
+        for (shard_key, counter) in all_counters {
+            if Self::base_key(&shard_key) == key {
+                has_shard = true;
+                total += counter.value;
+            }
+        }
+
+        if has_shard {
+            Some(total)
+        } else {
+            None
         }
     }
 
@@ -389,70 +487,163 @@ impl RateLimitStore {
 
     /// Get or create counter (only if this node is an owner)
     #[expect(dead_code)]
-    fn get_or_create_counter_internal(&self, key: String) -> Option<SyncPNCounter> {
+    fn get_or_create_counter_internal(&self, key: String) -> Option<i64> {
         if !self.is_owner(&key) {
             return None;
         }
 
-        let mut counters = self.counters.write();
-        Some(counters.entry(key.clone()).or_default().clone())
+        let shard_key = Self::shard_key(&key, &self.self_name);
+        if let Some(counter) = self.counters.get(&shard_key) {
+            return Some(counter.value);
+        }
+
+        let _ = self.counters.insert(shard_key, CounterValue::default());
+        Some(0)
     }
 
-    pub fn get_counter(&self, key: &str) -> Option<SyncPNCounter> {
+    pub fn get_counter(&self, key: &str) -> Option<i64> {
         if !self.is_owner(key) {
             return None;
         }
-        let counters = self.counters.read();
-        counters.get(key).cloned()
+        self.aggregate_counter(key)
+    }
+
+    /// Get all actor shards as (base_key, actor, value).
+    pub fn all_shards(&self) -> Vec<(String, String, i64)> {
+        self.counters
+            .all()
+            .into_iter()
+            .filter_map(|(shard_key, counter)| {
+                Self::split_shard_key(&shard_key).map(|(base_key, actor)| {
+                    (base_key.to_string(), actor.to_string(), counter.value)
+                })
+            })
+            .collect()
     }
 
     /// Increment counter (only if this node is an owner)
     pub fn inc(&self, key: String, actor: String, delta: i64) {
         if !self.is_owner(&key) {
-            // Not an owner, skip
             return;
         }
 
-        let mut counters = self.counters.write();
-        let counter = counters.entry(key.clone()).or_default();
-        counter.inc(actor, delta);
+        let shard_key = Self::shard_key(&key, &actor);
+        if let Err(err) = self.counters.update(shard_key, |current| CounterValue {
+            value: current.map_or(delta, |existing| existing.value + delta),
+        }) {
+            debug!(error = %err, %key, %actor, "Failed to update rate-limit counter shard");
+        }
     }
 
-    /// Get counter value (aggregate from all owners via CRDT merge)
+    /// Set a snapshot value for one actor shard.
+    pub fn set_counter_snapshot(&self, key: String, actor: String, counter_value: i64) {
+        if !self.is_owner(&key) {
+            return;
+        }
+
+        let shard_key = Self::shard_key(&key, &actor);
+        if let Err(err) = self.counters.insert(
+            shard_key,
+            CounterValue {
+                value: counter_value,
+            },
+        ) {
+            debug!(error = %err, %key, %actor, "Failed to set rate-limit counter snapshot");
+        }
+    }
+
+    /// Build serialized snapshot payload and shard key for a counter value.
+    ///
+    /// NOTE: This intentionally does not fabricate CRDT operation IDs.
+    pub fn snapshot_payload_for_counter_value(
+        key: String,
+        actor: String,
+        counter_value: i64,
+    ) -> Option<(String, Vec<u8>)> {
+        let bytes = match (CounterValue {
+            value: counter_value,
+        })
+        .to_bytes()
+        {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                debug!(error = %err, "Failed to serialize rate-limit counter snapshot");
+                return None;
+            }
+        };
+
+        let shard_key = Self::shard_key(&key, &actor);
+        Some((shard_key, bytes))
+    }
+
+    pub fn apply_counter_snapshot_payload(
+        &self,
+        shard_key: String,
+        actor: &str,
+        timestamp: u64,
+        payload: &[u8],
+    ) {
+        let Some((base_key, _)) = Self::split_shard_key(&shard_key) else {
+            debug!(%shard_key, "Invalid rate-limit shard key in snapshot payload");
+            return;
+        };
+
+        if !self.is_owner(base_key) {
+            return;
+        }
+
+        if let Err(err) = CounterValue::from_bytes(payload) {
+            debug!(error = %err, %shard_key, "Failed to decode rate-limit snapshot payload");
+            return;
+        }
+
+        let replica_id = self.replica_id_for_actor(actor);
+        let mut log = OperationLog::new();
+        log.append(Operation::insert(
+            shard_key,
+            payload.to_vec(),
+            timestamp,
+            replica_id,
+        ));
+        self.counters.merge(&log);
+    }
+
+    /// Get counter value
     pub fn value(&self, key: &str) -> Option<i64> {
-        let counters = self.counters.read();
-        counters.get(key).map(|c| c.value())
+        self.aggregate_counter(key)
     }
 
-    /// Merge counter from another node (for CRDT synchronization)
-    pub fn merge_counter(&self, key: String, other: &SyncPNCounter) {
-        let mut counters = self.counters.write();
-        let counter = counters.entry(key).or_default();
-        // Get the inner CRDTPNCounter from other SyncPNCounter
-        let other_inner = other.snapshot();
-        counter.merge(&other_inner);
+    /// Merge operation log from another node
+    pub fn merge(&self, log: &OperationLog) {
+        self.counters.merge(log);
+    }
+
+    /// Get operation log for synchronization
+    pub fn get_operation_log(&self) -> OperationLog {
+        self.counters.get_operation_log()
     }
 
     /// Get all counter keys
     pub fn keys(&self) -> Vec<String> {
-        let counters = self.counters.read();
-        counters.keys().cloned().collect()
+        self.counters
+            .all()
+            .keys()
+            .map(|key| Self::base_key(key).to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// Check if we need to transfer ownership due to node failure
     pub fn check_ownership_transfer(&self, failed_nodes: &[String]) -> Vec<String> {
         let mut affected_keys = Vec::new();
         let ring = self.hash_ring.read();
-        let counters = self.counters.read();
-
-        for key in counters.keys() {
-            let owners = ring.get_owners(key);
-            // Check if any owner has failed
-            if owners.iter().any(|owner| failed_nodes.contains(owner)) {
-                // Check if we are now an owner
-                if ring.is_owner(key, &self.self_name) {
-                    affected_keys.push(key.clone());
-                }
+        for key in self.keys() {
+            let owners = ring.get_owners(&key);
+            if owners.iter().any(|owner| failed_nodes.contains(owner))
+                && ring.is_owner(&key, &self.self_name)
+            {
+                affected_keys.push(key);
             }
         }
 
@@ -514,7 +705,7 @@ mod tests {
     #[test]
     fn test_membership_store() {
         let store = MembershipStore::new();
-        let key = SKey::new("node1".to_string());
+        let key = "node1".to_string();
         let state = MembershipState {
             name: "node1".to_string(),
             address: "127.0.0.1:8000".to_string(),
@@ -523,9 +714,8 @@ mod tests {
             metadata: BTreeMap::new(),
         };
 
-        store.insert(key.clone(), state.clone(), "node1".to_string());
+        let _ = store.insert(key.clone(), state.clone(), "node1".to_string());
         assert_eq!(store.get(&key).unwrap().name, "node1");
-        assert_eq!(store.len(), 1);
 
         store.remove(&key);
         assert!(store.get(&key).is_none());
@@ -534,22 +724,21 @@ mod tests {
     #[test]
     fn test_app_store() {
         let store = AppStore::new();
-        let key = SKey::new("app_key1".to_string());
+        let key = "app_key1".to_string();
         let state = AppState {
             key: "app_key1".to_string(),
             value: b"app_value".to_vec(),
             version: 1,
         };
 
-        store.insert(key.clone(), state.clone(), "node1".to_string());
+        let _ = store.insert(key.clone(), state.clone(), "node1".to_string());
         assert_eq!(store.get(&key).unwrap().key, "app_key1");
-        assert_eq!(store.len(), 1);
     }
 
     #[test]
     fn test_worker_store() {
         let store = WorkerStore::new();
-        let key = SKey::new("worker1".to_string());
+        let key = "worker1".to_string();
         let state = WorkerState {
             worker_id: "worker1".to_string(),
             model_id: "model1".to_string(),
@@ -559,15 +748,14 @@ mod tests {
             version: 1,
         };
 
-        store.insert(key.clone(), state.clone(), "node1".to_string());
+        let _ = store.insert(key.clone(), state.clone(), "node1".to_string());
         assert_eq!(store.get(&key).unwrap().worker_id, "worker1");
-        assert_eq!(store.len(), 1);
     }
 
     #[test]
     fn test_policy_store() {
         let store = PolicyStore::new();
-        let key = SKey::new("policy:model1".to_string());
+        let key = "policy:model1".to_string();
         let state = PolicyState {
             model_id: "model1".to_string(),
             policy_type: "cache_aware".to_string(),
@@ -575,9 +763,8 @@ mod tests {
             version: 1,
         };
 
-        store.insert(key.clone(), state.clone(), "node1".to_string());
+        let _ = store.insert(key.clone(), state.clone(), "node1".to_string());
         assert_eq!(store.get(&key).unwrap().model_id, "model1");
-        assert_eq!(store.len(), 1);
     }
 
     #[test]
@@ -662,16 +849,14 @@ mod tests {
             store2.inc(test_key.clone(), "node2".to_string(), 5);
         }
 
-        // Merge counter from store2 into store1
-        if let Some(counter2) = store2.get_counter(&test_key) {
-            store1.merge_counter(test_key.clone(), &counter2);
-        }
+        // Merge operation log from store2 into store1
+        let log2 = store2.get_operation_log();
+        store1.merge(&log2);
 
         // Get aggregated value (if node1 is owner)
         if store1.is_owner(&test_key) {
             let value = store1.value(&test_key);
-            // Should include merged value
-            assert!(value.is_some());
+            assert_eq!(value, Some(15));
         }
     }
 

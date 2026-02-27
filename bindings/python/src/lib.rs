@@ -369,6 +369,7 @@ struct Router {
     policy: PolicyType,
     worker_startup_timeout_secs: u64,
     worker_startup_check_interval: u64,
+    load_monitor_interval: u64,
     cache_threshold: f32,
     balance_abs_threshold: usize,
     balance_rel_threshold: f32,
@@ -428,7 +429,6 @@ struct Router {
     model_path: Option<String>,
     tokenizer_path: Option<String>,
     chat_template: Option<String>,
-    served_model_name: Option<String>,
     tokenizer_cache_enable_l0: bool,
     tokenizer_cache_l0_max_entries: usize,
     tokenizer_cache_enable_l1: bool,
@@ -615,6 +615,7 @@ impl Router {
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
+            .load_monitor_interval_secs(self.load_monitor_interval)
             .max_concurrent_requests(self.max_concurrent_requests)
             .queue_size(self.queue_size)
             .queue_timeout_secs(self.queue_timeout_secs)
@@ -658,7 +659,6 @@ impl Router {
             .maybe_model_path(self.model_path.as_ref())
             .maybe_tokenizer_path(self.tokenizer_path.as_ref())
             .maybe_chat_template(self.chat_template.as_ref())
-            .maybe_served_model_name(self.served_model_name.as_ref())
             .maybe_oracle(oracle)
             .maybe_postgres(postgres_config)
             .maybe_redis(redis_config)
@@ -693,6 +693,7 @@ impl Router {
         port = 3001,
         worker_startup_timeout_secs = 600,
         worker_startup_check_interval = 30,
+        load_monitor_interval = 10,
         cache_threshold = 0.3,
         balance_abs_threshold = 64,
         balance_rel_threshold = 1.5,
@@ -751,7 +752,6 @@ impl Router {
         model_path = None,
         tokenizer_path = None,
         chat_template = None,
-        served_model_name = None,
         tokenizer_cache_enable_l0 = false,
         tokenizer_cache_l0_max_entries = 10000,
         tokenizer_cache_enable_l1 = false,
@@ -786,6 +786,7 @@ impl Router {
         port: u16,
         worker_startup_timeout_secs: u64,
         worker_startup_check_interval: u64,
+        load_monitor_interval: u64,
         cache_threshold: f32,
         balance_abs_threshold: usize,
         balance_rel_threshold: f32,
@@ -844,7 +845,6 @@ impl Router {
         model_path: Option<String>,
         tokenizer_path: Option<String>,
         chat_template: Option<String>,
-        served_model_name: Option<String>,
         tokenizer_cache_enable_l0: bool,
         tokenizer_cache_l0_max_entries: usize,
         tokenizer_cache_enable_l1: bool,
@@ -888,6 +888,7 @@ impl Router {
             policy,
             worker_startup_timeout_secs,
             worker_startup_check_interval,
+            load_monitor_interval,
             cache_threshold,
             balance_abs_threshold,
             balance_rel_threshold,
@@ -947,7 +948,6 @@ impl Router {
             model_path,
             tokenizer_path,
             chat_template,
-            served_model_name,
             tokenizer_cache_enable_l0,
             tokenizer_cache_l0_max_entries,
             tokenizer_cache_enable_l1,
