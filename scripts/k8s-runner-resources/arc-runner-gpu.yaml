@@ -44,7 +44,9 @@ spec:
         - name: docker-sock
           emptyDir: {}
         - name: docker-storage
-          emptyDir: {}
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
         - name: dshm
           emptyDir:
             medium: Memory
@@ -70,9 +72,18 @@ spec:
           image: fra.ocir.io/idqj093njucb/docker:dind
           securityContext:
             privileged: true  # Required for DinD
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
           env:
             - name: DOCKER_TLS_CERTDIR
               value: ""  # Disables TLS for shared socket use
+            - name: DOCKER_DRIVER
+              value: overlay2
           volumeMounts:
             - name: docker-sock
               mountPath: /var/run
