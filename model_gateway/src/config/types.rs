@@ -21,6 +21,7 @@ pub struct RouterConfig {
     pub request_timeout_secs: u64,
     pub worker_startup_timeout_secs: u64,
     pub worker_startup_check_interval_secs: u64,
+    #[serde(default = "default_load_monitor_interval_secs")]
     pub load_monitor_interval_secs: u64,
     pub dp_aware: bool,
     pub api_key: Option<String>,
@@ -110,6 +111,10 @@ pub struct TokenizerCacheConfig {
     pub enable_l1: bool,
     #[serde(default = "default_l1_max_memory")]
     pub l1_max_memory: usize,
+}
+
+fn default_load_monitor_interval_secs() -> u64 {
+    10
 }
 
 fn default_enable_l0() -> bool {

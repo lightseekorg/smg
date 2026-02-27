@@ -215,40 +215,44 @@ impl WorkerManager {
             req = req.bearer_auth(key);
         }
 
-        match req.send().await {
-            Ok(r) if r.status().is_success() => match r.json::<Value>().await {
-                Ok(body) => body
-                    .get("loads")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|e| e.get("num_used_tokens").and_then(|v| v.as_i64()))
-                            .sum::<i64>() as isize
-                    })
-                    .unwrap_or(-1),
-                _ => -1,
-            },
-            _ => -1,
+        let resp = match req.send().await {
+            Ok(r) if r.status().is_success() => r,
+            _ => return -1,
+        };
+
+        if let Ok(body) = resp.json::<Value>().await {
+            body.get("loads")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|e| e.get("num_used_tokens").and_then(|v| v.as_i64()))
+                        .sum::<i64>() as isize
+                })
+                .unwrap_or(-1)
+        } else {
+            -1
         }
     }
 
     /// Fetch load via gRPC using the GetLoads RPC.
     /// Only supported for SGLang backends.
     async fn fetch_grpc_load(worker: &Arc<dyn Worker>) -> isize {
-        match worker.get_grpc_client().await {
-            Ok(Some(grpc_client)) => match grpc_client.get_loads().await {
-                Ok(load) => load,
-                Err(e) => {
-                    debug!("gRPC GetLoads failed for {}: {e}", worker.url());
-                    -1
-                }
-            },
+        let grpc_client = match worker.get_grpc_client().await {
+            Ok(Some(client)) => client,
             Ok(None) => {
                 debug!("No gRPC client for worker {}", worker.url());
-                -1
+                return -1;
             }
             Err(e) => {
                 debug!("Failed to get gRPC client for {}: {e}", worker.url());
+                return -1;
+            }
+        };
+
+        match grpc_client.get_loads().await {
+            Ok(load) => load,
+            Err(e) => {
+                debug!("gRPC GetLoads failed for {}: {e}", worker.url());
                 -1
             }
         }
