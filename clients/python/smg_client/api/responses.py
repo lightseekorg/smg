@@ -4,19 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from smg_client._helpers import prepare_body
 from smg_client.types import ResponsesResponse
 
 if TYPE_CHECKING:
     from smg_client._transport import AsyncTransport, SyncTransport
-
-
-def _prepare_body(kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str] | None]:
-    """Extract extra_body and extra_headers from kwargs, merge extra_body into body."""
-    extra_body = kwargs.pop("extra_body", None)
-    extra_headers = kwargs.pop("extra_headers", None)
-    if extra_body:
-        kwargs.update(extra_body)
-    return kwargs, extra_headers
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +66,7 @@ class SyncResponses:
         self.input_items = SyncInputItems(transport)
 
     def create(self, **kwargs: Any) -> ResponsesResponse:
-        body, extra_headers = _prepare_body(kwargs)
+        body, extra_headers = prepare_body(kwargs)
         resp = self._transport.request("POST", "/v1/responses", json=body, headers=extra_headers)
         return ResponsesResponse.model_validate_json(resp.content)
 
@@ -118,7 +110,7 @@ class AsyncResponses:
         self.input_items = AsyncInputItems(transport)
 
     async def create(self, **kwargs: Any) -> ResponsesResponse:
-        body, extra_headers = _prepare_body(kwargs)
+        body, extra_headers = prepare_body(kwargs)
         resp = await self._transport.request(
             "POST", "/v1/responses", json=body, headers=extra_headers
         )

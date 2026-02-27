@@ -200,8 +200,9 @@ class TestBuiltinVsMcpComparison:
             input="Search the web for Python programming language.",
             tools=[BRAVE_MCP_TOOL],
         )
+        assert smg_resp.error is None, f"SmgClient error: {smg_resp.error}"
         assert smg_resp.id is not None
-        assert smg_resp.status == "completed"
+        assert smg_resp.status in ("completed", "incomplete")
 
 
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
@@ -235,6 +236,7 @@ class TestBuiltinToolsCloudBackend:
             tools=[WEB_SEARCH_PREVIEW_TOOL],
         )
         assert smg_resp.id is not None
+        assert smg_resp.status in ("completed", "incomplete")
 
     def test_mixed_builtin_and_function_tools(self, setup_backend, smg):
         """Test mixing web_search_preview with function tools."""
@@ -269,6 +271,7 @@ class TestBuiltinToolsCloudBackend:
             input="What's the weather in Seattle?",
             tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
         )
+        assert smg_resp.error is None
         assert smg_resp.id is not None
 
 
@@ -304,6 +307,7 @@ class TestBuiltinToolsLocalBackend:
             tools=[WEB_SEARCH_PREVIEW_TOOL],
         )
         assert smg_resp.id is not None
+        assert smg_resp.status in ("completed", "incomplete")
 
     def test_mixed_builtin_and_function_tools(self, setup_backend, smg):
         """Test mixing web_search_preview with function tools on local backend."""

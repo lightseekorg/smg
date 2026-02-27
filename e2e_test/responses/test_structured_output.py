@@ -110,6 +110,7 @@ class TestStructuredOutputCloud:
 
         # SmgClient comparison
         smg_resp = smg.responses.create(**params)
+        assert smg_resp.error is None
         assert smg_resp.id is not None
         assert smg_resp.status == "completed"
 
@@ -212,6 +213,7 @@ class TestStructuredOutputHarmony:
 
         # SmgClient comparison
         smg_resp = smg.responses.create(**params)
+        assert smg_resp.error is None
         assert smg_resp.id is not None
         assert smg_resp.status == "completed"
 
@@ -299,5 +301,6 @@ class TestSimpleSchemaStructuredOutput:
 
         # SmgClient comparison
         smg_resp = smg.responses.create(**params)
+        assert smg_resp.error is None
         assert smg_resp.id is not None
         assert smg_resp.status == "completed"

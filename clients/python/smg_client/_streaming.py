@@ -163,6 +163,7 @@ class AnthropicSyncStream:
         self._response = response
         self._iterator = iter_sse_sync(response)
         self._text_parts: list[str] = []
+        self._content_blocks: dict[int, dict[str, Any]] = {}
         self._final_message_data: dict[str, Any] | None = None
         self._consumed = False
 
@@ -178,17 +179,35 @@ class AnthropicSyncStream:
     def _accumulate(self, obj: EventObject) -> None:
         """Track text deltas and final message data for get_final_text/get_final_message."""
         event_type = getattr(obj, "type", None)
-        if event_type == "content_block_delta":
+        if event_type == "content_block_start":
+            # Track all content blocks (text, tool_use, etc.) for get_final_message
+            block = getattr(obj, "content_block", None)
+            if block and self._final_message_data is not None:
+                self._content_blocks[getattr(obj, "index", len(self._content_blocks))] = (
+                    block._data.copy()
+                )
+        elif event_type == "content_block_delta":
             delta = getattr(obj, "delta", None)
             if delta and getattr(delta, "type", None) == "text_delta":
                 text = getattr(delta, "text", "")
                 if text:
                     self._text_parts.append(text)
+                    # Update the corresponding content block
+                    idx = getattr(obj, "index", None)
+                    if idx is not None and idx in self._content_blocks:
+                        block = self._content_blocks[idx]
+                        block["text"] = block.get("text", "") + text
+            elif delta and getattr(delta, "type", None) == "input_json_delta":
+                # Accumulate tool input JSON for tool_use blocks
+                idx = getattr(obj, "index", None)
+                if idx is not None and idx in self._content_blocks:
+                    block = self._content_blocks[idx]
+                    partial = getattr(delta, "partial_json", "")
+                    block.setdefault("_input_json_parts", []).append(partial)
         elif event_type == "message_start":
             msg = getattr(obj, "message", None)
             if msg:
                 self._final_message_data = msg._data.copy()
-                # Initialize content as empty list, will be built up
                 self._final_message_data["content"] = []
         elif event_type == "message_delta":
             delta = getattr(obj, "delta", None)
@@ -217,6 +236,31 @@ class AnthropicSyncStream:
         self._drain()
         return "".join(self._text_parts)
 
+    def _finalize_content(self) -> None:
+        """Build final message content from accumulated content blocks."""
+        if self._final_message_data is None:
+            return
+        if self._content_blocks:
+            import json as _json
+
+            content = []
+            for idx in sorted(self._content_blocks):
+                block = self._content_blocks[idx]
+                # Assemble tool_use input from accumulated JSON fragments
+                parts = block.pop("_input_json_parts", None)
+                if parts:
+                    try:
+                        block["input"] = _json.loads("".join(parts))
+                    except (ValueError, TypeError):
+                        block["input"] = {}
+                content.append(block)
+            self._final_message_data["content"] = content
+        elif self._text_parts:
+            # Fallback: if no content_block_start events were received
+            self._final_message_data["content"] = [
+                {"type": "text", "text": "".join(self._text_parts)}
+            ]
+
     def get_final_message(self) -> Any:
         """Return the final message assembled from stream events.
 
@@ -227,17 +271,14 @@ class AnthropicSyncStream:
         if self._final_message_data is None:
             raise SmgError("No message_start event received in stream")
 
-        # Build content from accumulated text
-        if self._text_parts and not self._final_message_data.get("content"):
-            self._final_message_data["content"] = [
-                {"type": "text", "text": "".join(self._text_parts)}
-            ]
+        # Build content from accumulated content blocks
+        self._finalize_content()
 
         try:
             from smg_client.types import Message
 
             return Message.model_validate(self._final_message_data)
-        except Exception:
+        except (ImportError, ValueError):
             return EventObject(self._final_message_data)
 
     def __enter__(self) -> AnthropicSyncStream:
@@ -260,6 +301,7 @@ class AnthropicAsyncStream:
         self._response = response
         self._iterator = iter_sse_async(response)
         self._text_parts: list[str] = []
+        self._content_blocks: dict[int, dict[str, Any]] = {}
         self._final_message_data: dict[str, Any] | None = None
         self._consumed = False
 
@@ -275,12 +317,28 @@ class AnthropicAsyncStream:
     def _accumulate(self, obj: EventObject) -> None:
         """Track text deltas and final message data."""
         event_type = getattr(obj, "type", None)
-        if event_type == "content_block_delta":
+        if event_type == "content_block_start":
+            block = getattr(obj, "content_block", None)
+            if block and self._final_message_data is not None:
+                self._content_blocks[getattr(obj, "index", len(self._content_blocks))] = (
+                    block._data.copy()
+                )
+        elif event_type == "content_block_delta":
             delta = getattr(obj, "delta", None)
             if delta and getattr(delta, "type", None) == "text_delta":
                 text = getattr(delta, "text", "")
                 if text:
                     self._text_parts.append(text)
+                    idx = getattr(obj, "index", None)
+                    if idx is not None and idx in self._content_blocks:
+                        block = self._content_blocks[idx]
+                        block["text"] = block.get("text", "") + text
+            elif delta and getattr(delta, "type", None) == "input_json_delta":
+                idx = getattr(obj, "index", None)
+                if idx is not None and idx in self._content_blocks:
+                    block = self._content_blocks[idx]
+                    partial = getattr(delta, "partial_json", "")
+                    block.setdefault("_input_json_parts", []).append(partial)
         elif event_type == "message_start":
             msg = getattr(obj, "message", None)
             if msg:
@@ -309,22 +367,42 @@ class AnthropicAsyncStream:
         await self._drain()
         return "".join(self._text_parts)
 
+    def _finalize_content(self) -> None:
+        """Build final message content from accumulated content blocks."""
+        if self._final_message_data is None:
+            return
+        if self._content_blocks:
+            import json as _json
+
+            content = []
+            for idx in sorted(self._content_blocks):
+                block = self._content_blocks[idx]
+                parts = block.pop("_input_json_parts", None)
+                if parts:
+                    try:
+                        block["input"] = _json.loads("".join(parts))
+                    except (ValueError, TypeError):
+                        block["input"] = {}
+                content.append(block)
+            self._final_message_data["content"] = content
+        elif self._text_parts:
+            self._final_message_data["content"] = [
+                {"type": "text", "text": "".join(self._text_parts)}
+            ]
+
     async def get_final_message(self) -> Any:
         """Return the final message assembled from stream events."""
         await self._drain()
         if self._final_message_data is None:
             raise SmgError("No message_start event received in stream")
 
-        if self._text_parts and not self._final_message_data.get("content"):
-            self._final_message_data["content"] = [
-                {"type": "text", "text": "".join(self._text_parts)}
-            ]
+        self._finalize_content()
 
         try:
             from smg_client.types import Message
 
             return Message.model_validate(self._final_message_data)
-        except Exception:
+        except (ImportError, ValueError):
             return EventObject(self._final_message_data)
 
     async def __aenter__(self) -> AnthropicAsyncStream:

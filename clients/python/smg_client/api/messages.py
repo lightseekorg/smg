@@ -4,20 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from smg_client._helpers import prepare_body
 from smg_client._streaming import AnthropicAsyncStream, AnthropicSyncStream
 from smg_client.types import Message
 
 if TYPE_CHECKING:
     from smg_client._transport import AsyncTransport, SyncTransport
-
-
-def _prepare_body(kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str] | None]:
-    """Extract extra_body and extra_headers from kwargs, merge extra_body into body."""
-    extra_body = kwargs.pop("extra_body", None)
-    extra_headers = kwargs.pop("extra_headers", None)
-    if extra_body:
-        kwargs.update(extra_body)
-    return kwargs, extra_headers
 
 
 class SyncMessages:
@@ -48,7 +40,7 @@ class SyncMessages:
                 extra_headers: Dict merged into request headers.
         """
         kwargs.pop("stream", None)
-        body, extra_headers = _prepare_body(kwargs)
+        body, extra_headers = prepare_body(kwargs)
         body["stream"] = False
         resp = self._transport.request("POST", "/v1/messages", json=body, headers=extra_headers)
         return Message.model_validate_json(resp.content)
@@ -74,7 +66,7 @@ class SyncMessages:
                 extra_headers: Dict merged into request headers.
         """
         kwargs.pop("stream", None)
-        body, extra_headers = _prepare_body(kwargs)
+        body, extra_headers = prepare_body(kwargs)
         body["stream"] = True
         resp = self._transport.request(
             "POST", "/v1/messages", json=body, stream=True, headers=extra_headers
@@ -98,7 +90,7 @@ class AsyncMessages:
     async def create(self, **kwargs: Any) -> Message:
         """Create a message (non-streaming)."""
         kwargs.pop("stream", None)
-        body, extra_headers = _prepare_body(kwargs)
+        body, extra_headers = prepare_body(kwargs)
         body["stream"] = False
         resp = await self._transport.request(
             "POST", "/v1/messages", json=body, headers=extra_headers
@@ -108,7 +100,7 @@ class AsyncMessages:
     async def stream(self, **kwargs: Any) -> AnthropicAsyncStream:
         """Create a streaming message (Anthropic SDK compat)."""
         kwargs.pop("stream", None)
-        body, extra_headers = _prepare_body(kwargs)
+        body, extra_headers = prepare_body(kwargs)
         body["stream"] = True
         resp = await self._transport.request(
             "POST", "/v1/messages", json=body, stream=True, headers=extra_headers

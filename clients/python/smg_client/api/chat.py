@@ -2,22 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, overload
+from typing import TYPE_CHECKING, Any, Literal, overload
 
+from smg_client._helpers import prepare_body
 from smg_client._streaming import AsyncStream, SyncStream
 from smg_client.types import ChatCompletionResponse, ChatCompletionStreamResponse
 
 if TYPE_CHECKING:
     from smg_client._transport import AsyncTransport, SyncTransport
-
-
-def _prepare_body(kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str] | None]:
-    """Extract extra_body and extra_headers from kwargs, merge extra_body into body."""
-    extra_body = kwargs.pop("extra_body", None)
-    extra_headers = kwargs.pop("extra_headers", None)
-    if extra_body:
-        kwargs.update(extra_body)
-    return kwargs, extra_headers
 
 
 class SyncCompletions:
@@ -38,10 +30,10 @@ class SyncCompletions:
         self._transport = transport
 
     @overload
-    def create(self, *, stream: bool = ..., **kwargs: Any) -> ChatCompletionResponse: ...
+    def create(self, *, stream: Literal[False] = ..., **kwargs: Any) -> ChatCompletionResponse: ...
     @overload
     def create(
-        self, *, stream: bool = ..., **kwargs: Any
+        self, *, stream: Literal[True], **kwargs: Any
     ) -> SyncStream[ChatCompletionStreamResponse]: ...
 
     def create(
@@ -59,7 +51,7 @@ class SyncCompletions:
             ChatCompletionResponse for non-streaming, SyncStream for streaming.
         """
         is_stream = kwargs.pop("stream", False)
-        body, extra_headers = _prepare_body(kwargs)
+        body, extra_headers = prepare_body(kwargs)
         body["stream"] = is_stream
 
         if is_stream:
@@ -95,12 +87,21 @@ class AsyncCompletions:
     def __init__(self, transport: AsyncTransport) -> None:
         self._transport = transport
 
+    @overload
+    async def create(
+        self, *, stream: Literal[False] = ..., **kwargs: Any
+    ) -> ChatCompletionResponse: ...
+    @overload
+    async def create(
+        self, *, stream: Literal[True], **kwargs: Any
+    ) -> AsyncStream[ChatCompletionStreamResponse]: ...
+
     async def create(
         self, **kwargs: Any
     ) -> ChatCompletionResponse | AsyncStream[ChatCompletionStreamResponse]:
         """Create a chat completion."""
         is_stream = kwargs.pop("stream", False)
-        body, extra_headers = _prepare_body(kwargs)
+        body, extra_headers = prepare_body(kwargs)
         body["stream"] = is_stream
 
         if is_stream:

@@ -164,8 +164,16 @@ class TestToolSearchPassthrough:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
-        # SmgClient: Tool search tests use extra_body with custom tool formats
-        # which SmgClient doesn't support. Skipping SmgClient comparison.
+        # SmgClient comparison
+        smg_resp = smg.messages.create(
+            model=model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "What's the weather like in Tokyo?"}],
+            extra_body={"tools": tools},
+        )
+        assert smg_resp.id is not None
+        assert smg_resp.role == "assistant"
+        assert len(smg_resp.content) > 0
 
     def test_tool_search_with_deferred_tools_streaming(self, setup_backend, smg):
         """Streaming variant of tool search passthrough."""
@@ -245,8 +253,8 @@ class TestToolSearchPassthrough:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
-        # SmgClient: Tool search tests use extra_body with custom tool formats
-        # which SmgClient doesn't support. Skipping SmgClient comparison.
+        # SmgClient: streaming tool search comparison not validated here
+        # (non-streaming comparison above covers SmgClient parity)
 
 
 # =============================================================================
@@ -355,8 +363,24 @@ class TestToolSearchWithMcp:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
-        # SmgClient: MCP + tool search tests require custom headers (x-smg-mcp)
-        # and extra_body which SmgClient doesn't support. Skipping SmgClient comparison.
+        # SmgClient comparison
+        smg_resp = smg.messages.create(
+            model=model,
+            max_tokens=2048,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Search the web for 'Anthropic Claude' and give me a brief summary",
+                }
+            ],
+            extra_headers={"x-smg-mcp": "enabled"},
+            extra_body={
+                "tools": tools,
+                "mcp_servers": [{"type": "url", "name": MCP_SERVER_NAME, "url": MCP_SERVER_URL}],
+            },
+        )
+        assert smg_resp.id is not None
+        assert len(smg_resp.content) > 0
 
     def test_mcp_tools_with_deferred_loading_streaming(self, setup_backend, smg):
         """Streaming variant: tool_search + deferred MCP tools via SMG."""
@@ -438,5 +462,5 @@ class TestToolSearchWithMcp:
         text_blocks = [b for b in content_blocks if b.type == "text"]
         assert len(text_blocks) >= 1, f"Expected at least 1 text block, got: {len(text_blocks)}"
 
-        # SmgClient: MCP + tool search tests require custom headers (x-smg-mcp)
-        # and extra_body which SmgClient doesn't support. Skipping SmgClient comparison.
+        # SmgClient: streaming MCP + tool search comparison not validated here
+        # (non-streaming comparison above covers SmgClient parity)

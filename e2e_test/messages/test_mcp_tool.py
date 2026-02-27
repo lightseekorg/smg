@@ -201,8 +201,17 @@ class TestMcpTool:
 
         assert_non_streaming_mcp_response(response, model, cfg.server_name)
 
-        # SmgClient: MCP tests require custom headers (anthropic-beta, x-smg-mcp)
-        # which SmgClient doesn't support per-request. Skipping SmgClient comparison.
+        # SmgClient comparison
+        smg_resp = smg.messages.create(
+            model=model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": cfg.prompt}],
+            extra_headers=cfg.headers,
+            extra_body=_extra_body(cfg),
+        )
+        assert smg_resp.id is not None
+        assert smg_resp.role == "assistant"
+        assert len(smg_resp.content) > 0
 
     def test_mcp_streaming(self, setup_backend, smg):
         """Test MCP tool execution with SSE streaming."""
@@ -220,8 +229,17 @@ class TestMcpTool:
 
         assert_streaming_mcp_response(*results)
 
-        # SmgClient: MCP tests require custom headers (anthropic-beta, x-smg-mcp)
-        # which SmgClient doesn't support per-request. Skipping SmgClient comparison.
+        # SmgClient streaming comparison
+        with smg.messages.stream(
+            model=model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": cfg.prompt}],
+            extra_headers=cfg.headers,
+            extra_body=_extra_body(cfg),
+        ) as smg_stream:
+            smg_results = collect_streaming_events(smg_stream)
+
+        assert_streaming_mcp_response(*smg_results)
 
 
 # =============================================================================
@@ -253,8 +271,16 @@ class TestMcpToolPassthrough:
 
         assert_non_streaming_mcp_response(response, model, cfg.server_name)
 
-        # SmgClient: MCP tests require custom headers (anthropic-beta, x-smg-mcp)
-        # which SmgClient doesn't support per-request. Skipping SmgClient comparison.
+        # SmgClient comparison
+        smg_resp = smg.messages.create(
+            model=model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": cfg.prompt}],
+            extra_headers=cfg.headers,
+            extra_body=_extra_body(cfg),
+        )
+        assert smg_resp.id is not None
+        assert smg_resp.role == "assistant"
 
     def test_mcp_passthrough_streaming(self, setup_backend, smg):
         """Test MCP passthrough with SSE streaming."""
@@ -272,5 +298,14 @@ class TestMcpToolPassthrough:
 
         assert_streaming_mcp_response(*results)
 
-        # SmgClient: MCP tests require custom headers (anthropic-beta, x-smg-mcp)
-        # which SmgClient doesn't support per-request. Skipping SmgClient comparison.
+        # SmgClient streaming comparison
+        with smg.messages.stream(
+            model=model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": cfg.prompt}],
+            extra_headers=cfg.headers,
+            extra_body=_extra_body(cfg),
+        ) as smg_stream:
+            smg_results = collect_streaming_events(smg_stream)
+
+        assert_streaming_mcp_response(*smg_results)

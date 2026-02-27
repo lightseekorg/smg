@@ -87,8 +87,10 @@ def _responses_output_text(self: ResponsesResponse) -> str:
                     if part_type
                     else ""
                 )
-                if type_str == "output_text" and hasattr(part, "text"):
-                    texts.append(part.text)
+                if type_str == "output_text":
+                    text = getattr(part, "text", None)
+                    if text is not None:
+                        texts.append(text)
     return "".join(texts)
 
 
