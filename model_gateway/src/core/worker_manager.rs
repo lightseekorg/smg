@@ -10,13 +10,14 @@ use futures::{
     stream::{self, StreamExt},
 };
 use http::StatusCode;
-use openai_protocol::worker::{FlushCacheResult, WorkerLoadInfo, WorkerLoadsResult};
-use serde_json::Value;
+use openai_protocol::worker::{
+    FlushCacheResult, WorkerGroupKey, WorkerLoadInfo, WorkerLoadResponse, WorkerLoadsResult,
+};
 use tokio::{
     sync::{watch, Mutex},
     task::JoinHandle,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::{
     core::{
@@ -180,14 +181,19 @@ impl WorkerManager {
                 let worker = Arc::clone(worker);
 
                 async move {
-                    let load = match connection_mode {
+                    let details = match connection_mode {
                         ConnectionMode::Http => Self::fetch_http_load(&client, &worker).await,
                         ConnectionMode::Grpc => Self::fetch_grpc_load(&worker).await,
                     };
+                    let load = details
+                        .as_ref()
+                        .map(|d| d.total_used_tokens() as isize)
+                        .unwrap_or(-1);
                     WorkerLoadInfo {
                         worker: worker.url().to_string(),
                         worker_type,
                         load,
+                        details,
                     }
                 }
             })
@@ -206,8 +212,11 @@ impl WorkerManager {
     }
 
     /// Fetch load via HTTP using the /v1/loads endpoint.
-    /// Sums num_used_tokens across all DP ranks.
-    async fn fetch_http_load(client: &reqwest::Client, worker: &Arc<dyn Worker>) -> isize {
+    /// Returns the full `WorkerLoadResponse` or `None` on failure.
+    async fn fetch_http_load(
+        client: &reqwest::Client,
+        worker: &Arc<dyn Worker>,
+    ) -> Option<WorkerLoadResponse> {
         let url = worker.url();
         let load_url = format!("{url}/v1/loads?include=core");
         let mut req = client.get(&load_url).timeout(REQUEST_TIMEOUT);
@@ -217,43 +226,39 @@ impl WorkerManager {
 
         let resp = match req.send().await {
             Ok(r) if r.status().is_success() => r,
-            _ => return -1,
+            _ => return None,
         };
 
-        if let Ok(body) = resp.json::<Value>().await {
-            body.get("loads")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|e| e.get("num_used_tokens").and_then(|v| v.as_i64()))
-                        .sum::<i64>() as isize
-                })
-                .unwrap_or(-1)
-        } else {
-            -1
+        let response: WorkerLoadResponse = resp.json().await.ok()?;
+
+        if response.loads.is_empty() {
+            return None;
         }
+
+        Some(response)
     }
 
     /// Fetch load via gRPC using the GetLoads RPC.
     /// Only supported for SGLang backends.
-    async fn fetch_grpc_load(worker: &Arc<dyn Worker>) -> isize {
+    async fn fetch_grpc_load(worker: &Arc<dyn Worker>) -> Option<WorkerLoadResponse> {
         let grpc_client = match worker.get_grpc_client().await {
             Ok(Some(client)) => client,
             Ok(None) => {
                 debug!("No gRPC client for worker {}", worker.url());
-                return -1;
+                return None;
             }
             Err(e) => {
                 debug!("Failed to get gRPC client for {}: {e}", worker.url());
-                return -1;
+                return None;
             }
         };
 
         match grpc_client.get_loads().await {
-            Ok(load) => load,
+            Ok(load) if !load.loads.is_empty() => Some(load),
+            Ok(_) => None,
             Err(e) => {
                 debug!("gRPC GetLoads failed for {}: {e}", worker.url());
-                -1
+                None
             }
         }
     }
@@ -295,15 +300,19 @@ impl WorkerManager {
     }
 }
 
-/// Load monitoring service that periodically fetches worker loads
+/// Load monitoring service that periodically fetches worker loads.
+///
+/// Maintains separate polling loops per worker group (model_id × worker_type × connection_mode).
+/// Groups are started/stopped automatically when workers are registered/removed.
 pub struct LoadMonitor {
     worker_registry: Arc<WorkerRegistry>,
     policy_registry: Arc<PolicyRegistry>,
     client: reqwest::Client,
-    interval: Duration,
-    tx: watch::Sender<HashMap<String, isize>>,
-    rx: watch::Receiver<HashMap<String, isize>>,
-    monitor_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    default_interval: Duration,
+    tx: watch::Sender<HashMap<String, WorkerLoadResponse>>,
+    rx: watch::Receiver<HashMap<String, WorkerLoadResponse>>,
+    /// Per-group polling handles
+    group_handles: Arc<Mutex<HashMap<WorkerGroupKey, JoinHandle<()>>>>,
 }
 
 impl LoadMonitor {
@@ -311,7 +320,7 @@ impl LoadMonitor {
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
         client: reqwest::Client,
-        interval_secs: u64,
+        default_interval_secs: u64,
     ) -> Self {
         let (tx, rx) = watch::channel(HashMap::new());
 
@@ -319,64 +328,114 @@ impl LoadMonitor {
             worker_registry,
             policy_registry,
             client,
-            interval: Duration::from_secs(interval_secs),
+            default_interval: Duration::from_secs(default_interval_secs),
             tx,
             rx,
-            monitor_handle: Arc::new(Mutex::new(None)),
+            group_handles: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub async fn start(&self) {
-        let mut handle_guard = self.monitor_handle.lock().await;
-        if handle_guard.is_some() {
-            debug!("Load monitoring already running");
+    /// Start polling for a worker group. If the group already has a running loop, this is a no-op.
+    ///
+    /// `interval` is the per-worker override from `WorkerSpec.load_monitor_interval_secs`.
+    /// Falls back to `self.default_interval` when `None`.
+    pub async fn on_group_added(&self, key: WorkerGroupKey, interval: Option<u64>) {
+        let mut handles = self.group_handles.lock().await;
+        if handles.contains_key(&key) {
+            debug!("Load monitor group already running: {key}");
             return;
         }
 
-        info!(
-            "Starting load monitoring with interval: {:?}",
-            self.interval
-        );
+        // Floor at 1s to prevent tight-loop DoS from a zero interval.
+        let interval = interval
+            .map(|s| Duration::from_secs(s.max(1)))
+            .unwrap_or(self.default_interval)
+            .max(Duration::from_secs(1));
+
+        info!("Starting load monitor for group {key} with interval {interval:?}");
 
         let worker_registry = Arc::clone(&self.worker_registry);
         let policy_registry = Arc::clone(&self.policy_registry);
         let client = self.client.clone();
-        let interval = self.interval;
         let tx = self.tx.clone();
+        let group_key = key.clone();
 
         #[expect(
             clippy::disallowed_methods,
-            reason = "Load monitor loop: runs for the lifetime of the gateway, handle is stored and abort() is called on shutdown"
+            reason = "Load monitor loop: runs for the lifetime of the group, handle is stored and abort() is called on removal"
         )]
         let handle = tokio::spawn(async move {
-            Self::monitor_loop(worker_registry, policy_registry, client, interval, tx).await;
+            Self::group_monitor_loop(
+                group_key,
+                worker_registry,
+                policy_registry,
+                client,
+                interval,
+                tx,
+            )
+            .await;
         });
 
-        *handle_guard = Some(handle);
+        handles.insert(key, handle);
     }
 
-    pub async fn stop(&self) {
+    /// Stop polling for a worker group and clean up its entries from the shared load map.
+    ///
+    /// `worker_urls` must be provided by the caller because this is called *after*
+    /// workers have been removed from the registry (so we can't look them up).
+    pub async fn on_group_removed(&self, key: &WorkerGroupKey, worker_urls: &[String]) {
         let handle = {
-            let mut handle_guard = self.monitor_handle.lock().await;
-            handle_guard.take()
+            let mut handles = self.group_handles.lock().await;
+            handles.remove(key)
         };
         if let Some(handle) = handle {
-            info!("Stopping load monitoring");
+            info!("Stopping load monitor for group {key}");
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        // Remove stale load entries regardless of whether a handle was found,
+        // since entries could exist from a previous monitoring cycle.
+        if !worker_urls.is_empty() {
+            self.tx.send_modify(|map| {
+                for url in worker_urls {
+                    map.remove(url);
+                }
+            });
+        }
+    }
+
+    /// Stop all group polling loops.
+    pub async fn stop(&self) {
+        let handles: HashMap<WorkerGroupKey, JoinHandle<()>> = {
+            let mut guard = self.group_handles.lock().await;
+            std::mem::take(&mut *guard)
+        };
+
+        if handles.is_empty() {
+            return;
+        }
+
+        info!("Stopping all {} load monitor groups", handles.len());
+        for (key, handle) in handles {
+            debug!("Stopping load monitor group: {key}");
             handle.abort();
             let _ = handle.await;
         }
     }
 
-    pub fn subscribe(&self) -> watch::Receiver<HashMap<String, isize>> {
+    pub fn subscribe(&self) -> watch::Receiver<HashMap<String, WorkerLoadResponse>> {
         self.rx.clone()
     }
 
-    async fn monitor_loop(
+    /// Polling loop for a single worker group.
+    async fn group_monitor_loop(
+        group_key: WorkerGroupKey,
         worker_registry: Arc<WorkerRegistry>,
         policy_registry: Arc<PolicyRegistry>,
         client: reqwest::Client,
         interval: Duration,
-        tx: watch::Sender<HashMap<String, isize>>,
+        tx: watch::Sender<HashMap<String, WorkerLoadResponse>>,
     ) {
         let mut interval_timer = tokio::time::interval(interval);
 
@@ -384,45 +443,95 @@ impl LoadMonitor {
             interval_timer.tick().await;
 
             let power_of_two_policies = policy_registry.get_all_power_of_two_policies();
-
             if power_of_two_policies.is_empty() {
-                debug!("No PowerOfTwo policies found, skipping load fetch");
+                debug!("No PowerOfTwo policies found, skipping load fetch for group {group_key}");
                 continue;
             }
 
-            let result = WorkerManager::get_all_worker_loads(&worker_registry, &client).await;
+            // Get workers for this specific group
+            let workers = worker_registry.get_workers_filtered(
+                Some(&group_key.model_id),
+                Some(group_key.worker_type),
+                Some(group_key.connection_mode),
+                None,
+                false,
+            );
 
-            let mut loads = HashMap::new();
-            for load_info in result.loads {
-                loads.insert(load_info.worker, load_info.load);
+            if workers.is_empty() {
+                debug!("No workers in group {group_key}, skipping");
+                continue;
             }
 
-            if loads.is_empty() {
-                warn!("No loads fetched from workers");
-            } else {
-                debug!(
-                    "Fetched loads from {} workers, updating {} PowerOfTwo policies",
-                    loads.len(),
-                    power_of_two_policies.len()
-                );
-                for policy in &power_of_two_policies {
-                    policy.update_loads(&loads);
+            // Fetch loads for all workers in this group
+            let futures: Vec<_> = workers
+                .iter()
+                .map(|worker| {
+                    let client = client.clone();
+                    let worker = Arc::clone(worker);
+                    let connection_mode = group_key.connection_mode;
+
+                    async move {
+                        let response = match connection_mode {
+                            ConnectionMode::Http => {
+                                WorkerManager::fetch_http_load(&client, &worker).await
+                            }
+                            ConnectionMode::Grpc => WorkerManager::fetch_grpc_load(&worker).await,
+                        };
+                        (worker.url().to_string(), response)
+                    }
+                })
+                .collect();
+
+            let results = future::join_all(futures).await;
+
+            // Collect successful loads
+            let mut group_loads: HashMap<String, WorkerLoadResponse> = HashMap::new();
+            for (url, response) in results {
+                if let Some(load) = response {
+                    group_loads.insert(url, load);
                 }
-                let _ = tx.send(loads);
             }
+
+            if group_loads.is_empty() {
+                debug!("No loads fetched for group {group_key}");
+                continue;
+            }
+
+            debug!(
+                "Fetched loads from {}/{} workers in group {group_key}",
+                group_loads.len(),
+                workers.len()
+            );
+
+            // Update policies with this group's loads
+            for policy in &power_of_two_policies {
+                policy.update_loads(&group_loads);
+            }
+
+            // Atomically merge into the shared watch channel.
+            // Remove all group URLs first to clear stale entries from workers
+            // that failed this tick, then insert successful loads.
+            let all_group_urls: Vec<String> = workers.iter().map(|w| w.url().to_string()).collect();
+            tx.send_modify(|map| {
+                for url in &all_group_urls {
+                    map.remove(url);
+                }
+                map.extend(group_loads);
+            });
         }
     }
 
+    /// Check if any group polling loop is running.
     pub async fn is_running(&self) -> bool {
-        let handle_guard = self.monitor_handle.lock().await;
-        handle_guard.is_some()
+        let handles = self.group_handles.lock().await;
+        !handles.is_empty()
     }
 }
 
 impl Drop for LoadMonitor {
     fn drop(&mut self) {
-        if let Ok(mut handle_guard) = self.monitor_handle.try_lock() {
-            if let Some(handle) = handle_guard.take() {
+        if let Ok(mut handles) = self.group_handles.try_lock() {
+            for (_, handle) in handles.drain() {
                 handle.abort();
             }
         }

@@ -33,6 +33,9 @@ service SglangScheduler {
   // Get tokenizer artifacts for remote construction
   rpc GetTokenizer(smg.grpc.common.GetTokenizerRequest) returns (stream smg.grpc.common.GetTokenizerChunk);
 
+  // Subscribe to KV cache events (server-streaming)
+  rpc SubscribeKvEvents(smg.grpc.common.SubscribeKvEventsRequest)
+      returns (stream smg.grpc.common.KvEventBatch);
 }
 
 // =====================

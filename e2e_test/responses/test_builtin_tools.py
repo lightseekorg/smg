@@ -30,11 +30,12 @@ BRAVE_MCP_TOOL = {
     "server_label": "brave",
     "server_url": BRAVE_MCP_URL,
     "require_approval": "never",
+    "allowed_tools": ["brave_web_search"],
 }
 
 WEB_SEARCH_PROMPT = (
-    "Search the web for information about the Rust programming language. "
-    "Use your web search tool and provide a brief summary."
+    "Search the web for the Rust programming language. "
+    "Set count to 1 to get only one result, and give a one sentence summary."
 )
 
 
@@ -53,7 +54,7 @@ def create_mcp_config() -> dict:
         "servers": [
             {
                 "name": "brave-builtin",
-                "protocol": "sse",
+                "protocol": "streamable",
                 "url": BRAVE_MCP_URL,
                 "builtin_type": "web_search_preview",
                 "builtin_tool_name": "brave_web_search",
@@ -178,7 +179,10 @@ class TestBuiltinVsMcpComparison:
 
         resp = client.responses.create(
             model=model,
-            input="Search the web for Python programming language.",
+            input=(
+                "Search the web for Python programming language. "
+                "Set count to 1 to get only one result and give a one sentence summary."
+            ),
             tools=[BRAVE_MCP_TOOL],
             stream=False,
         )
@@ -414,7 +418,10 @@ class TestMcpWebSearchStreamingEvents:
 
         resp = client.responses.create(
             model=model,
-            input="Search the web for Python programming language.",
+            input=(
+                "Search the web for Python programming language. "
+                "Set count to 1 to get only one result and give a one sentence summary."
+            ),
             tools=[BRAVE_MCP_TOOL],
             stream=True,
         )

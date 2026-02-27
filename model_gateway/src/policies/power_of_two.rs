@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use openai_protocol::worker::WorkerLoadResponse;
 use rand::Rng;
 use tracing::debug;
 
@@ -18,7 +19,7 @@ use crate::core::Worker;
 #[derive(Debug)]
 pub struct PowerOfTwoPolicy {
     /// Cached load information from external monitoring
-    cached_loads: RwLock<HashMap<String, isize>>,
+    cached_loads: RwLock<HashMap<String, WorkerLoadResponse>>,
 }
 
 impl PowerOfTwoPolicy {
@@ -60,25 +61,29 @@ impl LoadBalancingPolicy for PowerOfTwoPolicy {
         // Access cached loads safely
         let loads_guard = self.cached_loads.read().ok();
 
-        // Try to get high-fidelity token loads for BOTH workers
-        let load1_tokens = loads_guard
-            .as_ref()
-            .and_then(|m| m.get(worker1.url()).copied());
-        let load2_tokens = loads_guard
-            .as_ref()
-            .and_then(|m| m.get(worker2.url()).copied());
+        // Try to get high-fidelity token usage for BOTH workers
+        let load1_response = loads_guard.as_ref().and_then(|m| m.get(worker1.url()));
+        let load2_response = loads_guard.as_ref().and_then(|m| m.get(worker2.url()));
 
         // If either worker is missing token data (e.g. monitor failure),
         // we must degrade BOTH to request counts to ensure fairness.
-        let (load1, load2) = match (load1_tokens, load2_tokens) {
-            (Some(t1), Some(t2)) => {
-                // Both have token data. Compare Tokens.
-                (t1, t2)
+        let (load1, load2, metric_label) = match (load1_response, load2_response) {
+            (Some(r1), Some(r2)) => {
+                // Both have load data. Compare by token usage ratio (0.0–1.0).
+                (
+                    r1.effective_token_usage(),
+                    r2.effective_token_usage(),
+                    "token_usage",
+                )
             }
             _ => {
-                // If One or both are missing token data.
+                // One or both are missing load data.
                 // Fallback to local request counts for BOTH.
-                (worker1.load() as isize, worker2.load() as isize)
+                (
+                    worker1.load() as f64,
+                    worker2.load() as f64,
+                    "request_count",
+                )
             }
         };
 
@@ -90,7 +95,7 @@ impl LoadBalancingPolicy for PowerOfTwoPolicy {
         };
 
         debug!(
-            "Power-of-two selection: {}={} vs {}={} -> selected {}",
+            "Power-of-two selection ({metric_label}): {}={:.4} vs {}={:.4} -> selected {}",
             worker1.url(),
             load1,
             worker2.url(),
@@ -108,9 +113,9 @@ impl LoadBalancingPolicy for PowerOfTwoPolicy {
         "power_of_two"
     }
 
-    fn update_loads(&self, loads: &HashMap<String, isize>) {
+    fn update_loads(&self, loads: &HashMap<String, WorkerLoadResponse>) {
         if let Ok(mut cached) = self.cached_loads.write() {
-            cached.clone_from(loads);
+            cached.extend(loads.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
     }
 
@@ -127,8 +132,31 @@ impl Default for PowerOfTwoPolicy {
 
 #[cfg(test)]
 mod tests {
+    use openai_protocol::worker::SchedulerLoadSnapshot;
+
     use super::*;
     use crate::core::{BasicWorkerBuilder, WorkerType};
+
+    /// Create a `WorkerLoadResponse` with a single DP rank at the given token_usage ratio.
+    fn make_load(token_usage: f64) -> WorkerLoadResponse {
+        WorkerLoadResponse {
+            timestamp: String::new(),
+            dp_rank_count: 1,
+            loads: vec![SchedulerLoadSnapshot {
+                dp_rank: 0,
+                num_running_reqs: 0,
+                num_waiting_reqs: 0,
+                num_total_reqs: 0,
+                num_used_tokens: 0,
+                max_total_num_tokens: 0,
+                token_usage,
+                gen_throughput: 0.0,
+                cache_hit_rate: 0.0,
+                utilization: 0.0,
+                max_running_requests: 0,
+            }],
+        }
+    }
 
     #[test]
     fn test_power_of_two_selection() {
@@ -155,7 +183,7 @@ mod tests {
         let workers: Vec<Arc<dyn Worker>> =
             vec![Arc::new(worker1), Arc::new(worker2), Arc::new(worker3)];
 
-        // Run multiple selections
+        // Run multiple selections (no cached loads → fallback to request counts)
         let mut selected_counts = [0; 3];
         let info = SelectWorkerInfo::default();
         for _ in 0..100 {
@@ -185,13 +213,13 @@ mod tests {
             ),
         ];
 
-        // Update cached loads
+        // Update cached loads: w1 at 80% usage, w2 at 10% usage
         let mut loads = HashMap::new();
-        loads.insert("http://w1:8000".to_string(), 100);
-        loads.insert("http://w2:8000".to_string(), 10);
+        loads.insert("http://w1:8000".to_string(), make_load(0.8));
+        loads.insert("http://w2:8000".to_string(), make_load(0.1));
         policy.update_loads(&loads);
 
-        // Should prefer worker2 with lower cached load
+        // Should prefer worker2 with lower token usage
         let mut w2_selected = 0;
         let info = SelectWorkerInfo::default();
         for _ in 0..50 {
@@ -252,7 +280,7 @@ mod tests {
         // 4. Simulate LoadMonitor update:
         // Only Worker A gets a token report. Worker B is missing (e.g. monitor failure).
         let mut loads = HashMap::new();
-        loads.insert("http://worker_a:8000".to_string(), 50_000); // 50k tokens load
+        loads.insert("http://worker_a:8000".to_string(), make_load(0.9));
         policy.update_loads(&loads);
 
         // 5. Run selection
@@ -262,7 +290,7 @@ mod tests {
 
         // 6. Verify the Fix
         // Logic:
-        // - Worker A has token load (50k) but Worker B has NO token load.
+        // - Worker A has token load data but Worker B does NOT.
         // - Policy should fallback to request counts for BOTH.
         // - A has 0 requests, B has 5 requests.
         // - 0 <= 5, so A should be selected.
@@ -270,9 +298,7 @@ mod tests {
         if selected_idx == 0 {
             println!("Bug Fixed: System correctly fell back to request counts and selected idle Worker A.");
         } else {
-            println!(
-                "Bug PERSISTS: Selected Worker B (Load: 5 reqs) over Worker A (Load: 50k tokens)"
-            );
+            println!("Bug PERSISTS: Selected Worker B (Load: 5 reqs) over Worker A");
         }
 
         // Assert that the CORRECT worker (A, index 0) is selected
@@ -281,6 +307,7 @@ mod tests {
             "The policy failed to handle incompatible metrics. Should select idle Worker A."
         );
     }
+
     #[test]
     #[expect(clippy::print_stdout, reason = "test diagnostic output")]
     fn test_power_of_two_edge_cases() {
@@ -301,17 +328,17 @@ mod tests {
             Arc::new(w)
         };
 
-        //  Scenario 1: Happy Path (Both have Token Data)
-        // Worker A: 10 requests, but only 1,000 tokens (Light usage) -> Should be CHOSEN
-        // Worker B:  2 requests, but 100,000 tokens (Heavy usage) -> Should be AVOIDED
-        // This proves we use high-fidelity metrics when available, ignoring request counts.
+        // Scenario 1: Happy Path (Both have token_usage data)
+        // Worker A: 10 requests, but only 10% token usage (Light) -> Should be CHOSEN
+        // Worker B:  2 requests, but 90% token usage (Heavy) -> Should be AVOIDED
+        // This proves we use token_usage ratio when available, ignoring request counts.
         let w_a = create_worker("http://a:8000", 10);
         let w_b = create_worker("http://b:8000", 2);
         let workers_1: Vec<Arc<dyn Worker>> = vec![w_a.clone(), w_b.clone()];
 
         let mut loads_1 = HashMap::new();
-        loads_1.insert("http://a:8000".to_string(), 1_000);
-        loads_1.insert("http://b:8000".to_string(), 100_000);
+        loads_1.insert("http://a:8000".to_string(), make_load(0.1));
+        loads_1.insert("http://b:8000".to_string(), make_load(0.9));
         policy.update_loads(&loads_1);
 
         let idx_1 = policy
@@ -319,11 +346,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             idx_1, 0,
-            "Happy Path Failed: Should select Worker A (fewer tokens) despite higher request count"
+            "Happy Path Failed: Should select Worker A (lower token_usage) despite higher request count"
         );
 
-        // Scenario 2: Partial Failure (Worker A has tokens, Worker B is missing)
-        // Worker A: 10 requests, 1,000 tokens (Cached)
+        // Scenario 2: Partial Failure (Worker A has data, Worker B is missing)
+        // Worker A: 10 requests, 10% token_usage (Cached)
         // Worker B:  2 requests, MISSING cache
         // Logic: Fallback to requests -> Compare 10 (A) vs 2 (B) -> Select B
         let w_c = create_worker("http://c:8000", 10);
@@ -331,7 +358,7 @@ mod tests {
         let workers_2: Vec<Arc<dyn Worker>> = vec![w_c.clone(), w_d.clone()];
 
         let mut loads_2 = HashMap::new();
-        loads_2.insert("http://c:8000".to_string(), 1_000);
+        loads_2.insert("http://c:8000".to_string(), make_load(0.1));
         // http://d:8000 is MISSING
         policy.update_loads(&loads_2);
 
@@ -340,9 +367,9 @@ mod tests {
             .unwrap();
         assert_eq!(idx_2, 1, "Partial Fail 1 Failed: Should fallback to requests and select Worker B (fewer requests)");
 
-        // Scenario 3: Partial Failure (Worker A is missing, Worker B has tokens)
+        // Scenario 3: Partial Failure (Worker A is missing, Worker B has data)
         // Worker A:  2 requests, MISSING cache
-        // Worker B: 10 requests, 1,000 tokens (Cached)
+        // Worker B: 10 requests, 10% token_usage (Cached)
         // Logic: Fallback to requests -> Compare 2 (A) vs 10 (B) -> Select A
         let w_e = create_worker("http://e:8000", 2);
         let w_f = create_worker("http://f:8000", 10);
@@ -350,7 +377,7 @@ mod tests {
 
         let mut loads_3 = HashMap::new();
         // http://e:8000 is MISSING
-        loads_3.insert("http://f:8000".to_string(), 1_000);
+        loads_3.insert("http://f:8000".to_string(), make_load(0.1));
         policy.update_loads(&loads_3);
 
         let idx_3 = policy

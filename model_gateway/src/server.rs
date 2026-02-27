@@ -926,9 +926,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         Some(hc)
     };
 
-    if let Some(ref load_monitor) = app_context.load_monitor {
-        load_monitor.start().await;
-        debug!("Started LoadMonitor for PowerOfTwo policies");
+    // LoadMonitor groups are started dynamically when workers are registered.
+    // No explicit start() needed — see RegisterWorkersStep.
+    if app_context.load_monitor.is_some() {
+        debug!("LoadMonitor initialized (groups start on worker registration)");
     }
 
     let (limiter, processor) = middleware::ConcurrencyLimiter::new(

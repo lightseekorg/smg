@@ -66,26 +66,32 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: brave-search
+  name: brave-search-mcp
   namespace: actions-runner-system
   labels:
-    app: brave-search
+    app: brave-search-mcp
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: brave-search
+      app: brave-search-mcp
   template:
     metadata:
       labels:
-        app: brave-search
+        app: brave-search-mcp
     spec:
       containers:
-        - name: brave-search
-          image: shoofio/brave-search-mcp-sse:1.0.10
+        - name: brave-search-mcp
+          image: mcp/brave-search:latest
           ports:
             - containerPort: 8080
           env:
+            - name: BRAVE_MCP_TRANSPORT
+              value: http
+            - name: BRAVE_MCP_PORT
+              value: "8080"
+            - name: BRAVE_MCP_ENABLED_TOOLS
+              value: "brave_web_search brave_local_search"
             - name: BRAVE_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -99,14 +105,16 @@ spec:
               cpu: 500m
               memory: 256Mi
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /ping
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /ping
               port: 8080
             initialDelaySeconds: 15
             periodSeconds: 10
@@ -116,13 +124,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: brave-search
+  name: brave-search-mcp
   namespace: actions-runner-system
   labels:
-    app: brave-search
+    app: brave-search-mcp
 spec:
   selector:
-    app: brave-search
+    app: brave-search-mcp
   ports:
     - port: 8080
       targetPort: 8080

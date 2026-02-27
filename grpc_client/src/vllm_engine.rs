@@ -260,6 +260,7 @@ impl VllmEngineClient {
     }
 
     crate::impl_get_tokenizer!();
+    crate::impl_subscribe_kv_events!();
 
     /// Build a single vLLM GenerateRequest from OpenAI ChatCompletionRequest
     #[expect(

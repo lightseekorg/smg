@@ -43,7 +43,10 @@ SMG_HANDLED = McpTestConfig(
         "anthropic-beta": "mcp-client-2025-11-20",
         "x-smg-mcp": "enabled",
     },
-    prompt="search the web for 'Anthropic Claude AI' and give me a brief summary",
+    prompt=(
+        "search the web for 'Anthropic Claude AI'. Set count to 1 to get "
+        "only one result, and give a one sentence summary."
+    ),
 )
 
 # Passthrough MCP: no x-smg-mcp header, request forwarded to Anthropic backend

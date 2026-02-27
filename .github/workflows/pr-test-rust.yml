@@ -323,7 +323,7 @@ jobs:
 
       - name: Check shared services
         if: matrix.setup_agentic_deps
-        run: bash scripts/ci_agentic_svc_deps.sh check --oracle oracle-db --brave brave-search
+        run: bash scripts/ci_agentic_svc_deps.sh check --oracle oracle-db --brave brave-search-mcp
 
       - name: Setup vLLM backend
         if: matrix.setup_vllm
@@ -372,7 +372,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
-          BRAVE_MCP_HOST: ${{ matrix.setup_agentic_deps && 'brave-search' || '' }}
+          BRAVE_MCP_HOST: ${{ matrix.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO

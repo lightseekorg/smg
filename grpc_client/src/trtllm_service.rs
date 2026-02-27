@@ -259,6 +259,7 @@ impl TrtllmServiceClient {
     }
 
     crate::impl_get_tokenizer!();
+    crate::impl_subscribe_kv_events!();
 
     /// Build a TensorRT-LLM GenerateRequest from OpenAI ChatCompletionRequest
     #[expect(

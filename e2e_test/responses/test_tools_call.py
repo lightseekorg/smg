@@ -117,6 +117,7 @@ BRAVE_MCP_TOOL = {
     "server_description": "A Tool to do web search",
     "server_url": BRAVE_MCP_URL,
     "require_approval": "never",
+    "allowed_tools": ["brave_web_search"],
 }
 
 DEEPWIKI_MCP_TOOL = {
@@ -127,8 +128,8 @@ DEEPWIKI_MCP_TOOL = {
 }
 
 MCP_TEST_PROMPT = (
-    "show me some news about sglang router, use the tool to just search "
-    "one result and return one sentence response"
+    "Search the web for 'Python programming language'. Set count to 1 to "
+    "get only one result and return one sentence response."
 )
 
 
