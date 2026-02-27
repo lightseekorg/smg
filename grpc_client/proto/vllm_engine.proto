@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package vllm.grpc.engine;
 
+import "common.proto";
+
 // Service definition for vLLM engine communication
 // This protocol is designed for efficient binary communication between
 // the Rust router and vLLM Python engine (AsyncLLM).
@@ -23,6 +25,9 @@ service VllmEngine {
 
   // Get server information
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+
+  // Get tokenizer artifacts for remote construction
+  rpc GetTokenizer(smg.grpc.common.GetTokenizerRequest) returns (stream smg.grpc.common.GetTokenizerChunk);
 }
 
 // =====================

@@ -258,6 +258,8 @@ impl TrtllmServiceClient {
         Ok(response.into_inner())
     }
 
+    crate::impl_get_tokenizer!();
+
     /// Build a TensorRT-LLM GenerateRequest from OpenAI ChatCompletionRequest
     #[expect(
         clippy::unused_self,

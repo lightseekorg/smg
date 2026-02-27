@@ -302,6 +302,8 @@ impl SglangSchedulerClient {
         Ok(response.into_inner())
     }
 
+    crate::impl_get_tokenizer!();
+
     /// Build a single SGLang EmbedRequest
     #[expect(
         clippy::unused_self,
