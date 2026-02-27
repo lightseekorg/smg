@@ -117,6 +117,7 @@ BRAVE_MCP_TOOL = {
     "server_description": "A Tool to do web search",
     "server_url": BRAVE_MCP_URL,
     "require_approval": "never",
+    "allowed_tools": ["brave_web_search"],
 }
 
 DEEPWIKI_MCP_TOOL = {

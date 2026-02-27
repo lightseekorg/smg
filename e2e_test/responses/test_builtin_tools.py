@@ -30,6 +30,7 @@ BRAVE_MCP_TOOL = {
     "server_label": "brave",
     "server_url": BRAVE_MCP_URL,
     "require_approval": "never",
+    "allowed_tools": ["brave_web_search"],
 }
 
 WEB_SEARCH_PROMPT = (
