@@ -48,6 +48,33 @@ macro_rules! impl_get_tokenizer {
 }
 pub(crate) use impl_get_tokenizer;
 
+/// Shared `subscribe_kv_events()` implementation for all engine clients.
+///
+/// Each engine's generated proto client has a `subscribe_kv_events` RPC method
+/// with identical signature (using common proto types). This macro provides
+/// the wrapper that returns a `tonic::Streaming<KvEventBatch>`.
+macro_rules! impl_subscribe_kv_events {
+    () => {
+        /// Subscribe to KV cache events from the backend.
+        /// Returns a long-lived server-streaming response.
+        pub async fn subscribe_kv_events(
+            &self,
+            start_sequence_number: u64,
+        ) -> Result<
+            tonic::Streaming<$crate::common_proto::KvEventBatch>,
+            Box<dyn std::error::Error + Send + Sync>,
+        > {
+            let request = tonic::Request::new($crate::common_proto::SubscribeKvEventsRequest {
+                start_sequence_number,
+            });
+            let mut client = self.client.clone();
+            let response = client.subscribe_kv_events(request).await?;
+            Ok(response.into_inner())
+        }
+    };
+}
+pub(crate) use impl_subscribe_kv_events;
+
 /// Trait for injecting trace context into gRPC metadata.
 ///
 /// Implement this trait to enable distributed tracing across gRPC calls.

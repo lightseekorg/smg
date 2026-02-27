@@ -175,6 +175,21 @@ impl GrpcClient {
         }
     }
 
+    /// Subscribe to KV cache events (all backends).
+    pub async fn subscribe_kv_events(
+        &self,
+        start_seq: u64,
+    ) -> Result<
+        tonic::Streaming<smg_grpc_client::common_proto::KvEventBatch>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        match self {
+            Self::Sglang(client) => client.subscribe_kv_events(start_seq).await,
+            Self::Vllm(client) => client.subscribe_kv_events(start_seq).await,
+            Self::Trtllm(client) => client.subscribe_kv_events(start_seq).await,
+        }
+    }
+
     pub async fn get_server_info(
         &self,
     ) -> Result<ServerInfo, Box<dyn std::error::Error + Send + Sync>> {
