@@ -34,8 +34,8 @@ BRAVE_MCP_TOOL = {
 }
 
 WEB_SEARCH_PROMPT = (
-    "Search the web for information about the Rust programming language. "
-    "Use your web search tool and provide a brief summary."
+    "Search the web for the Rust programming language. "
+    "Set count to 1 to get only one result, and give a one sentence summary."
 )
 
 
@@ -179,7 +179,7 @@ class TestBuiltinVsMcpComparison:
 
         resp = client.responses.create(
             model=model,
-            input="Search the web for Python programming language.",
+            input="Search the web for Python programming language. Set count to 1 to get only one result and give a one sentence summary.",
             tools=[BRAVE_MCP_TOOL],
             stream=False,
         )
@@ -415,7 +415,7 @@ class TestMcpWebSearchStreamingEvents:
 
         resp = client.responses.create(
             model=model,
-            input="Search the web for Python programming language.",
+            input="Search the web for Python programming language. Set count to 1 to get only one result and give a one sentence summary.",
             tools=[BRAVE_MCP_TOOL],
             stream=True,
         )

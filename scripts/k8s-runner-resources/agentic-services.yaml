@@ -152,6 +152,10 @@ spec:
           env:
             - name: BRAVE_MCP_TRANSPORT
               value: http
+            - name: BRAVE_MCP_PORT
+              value: "8080"
+            - name: BRAVE_MCP_ENABLED_TOOLS
+              value: "brave_web_search brave_local_search"
             - name: BRAVE_API_KEY
               valueFrom:
                 secretKeyRef:
