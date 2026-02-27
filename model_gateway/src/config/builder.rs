@@ -182,6 +182,11 @@ impl RouterConfigBuilder {
         self
     }
 
+    pub fn load_monitor_interval_secs(mut self, interval: u64) -> Self {
+        self.config.load_monitor_interval_secs = interval;
+        self
+    }
+
     // ==================== Rate Limiting ====================
 
     pub fn max_concurrent_requests(mut self, max: i32) -> Self {

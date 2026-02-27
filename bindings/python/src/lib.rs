@@ -369,6 +369,7 @@ struct Router {
     policy: PolicyType,
     worker_startup_timeout_secs: u64,
     worker_startup_check_interval: u64,
+    load_monitor_interval: u64,
     cache_threshold: f32,
     balance_abs_threshold: usize,
     balance_rel_threshold: f32,
@@ -615,6 +616,7 @@ impl Router {
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
+            .load_monitor_interval_secs(self.load_monitor_interval)
             .max_concurrent_requests(self.max_concurrent_requests)
             .queue_size(self.queue_size)
             .queue_timeout_secs(self.queue_timeout_secs)
@@ -693,6 +695,7 @@ impl Router {
         port = 3001,
         worker_startup_timeout_secs = 600,
         worker_startup_check_interval = 30,
+        load_monitor_interval = 10,
         cache_threshold = 0.3,
         balance_abs_threshold = 64,
         balance_rel_threshold = 1.5,
@@ -786,6 +789,7 @@ impl Router {
         port: u16,
         worker_startup_timeout_secs: u64,
         worker_startup_check_interval: u64,
+        load_monitor_interval: u64,
         cache_threshold: f32,
         balance_abs_threshold: usize,
         balance_rel_threshold: f32,
@@ -888,6 +892,7 @@ impl Router {
             policy,
             worker_startup_timeout_secs,
             worker_startup_check_interval,
+            load_monitor_interval,
             cache_threshold,
             balance_abs_threshold,
             balance_rel_threshold,

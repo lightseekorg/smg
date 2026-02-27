@@ -21,6 +21,7 @@ pub struct RouterConfig {
     pub request_timeout_secs: u64,
     pub worker_startup_timeout_secs: u64,
     pub worker_startup_check_interval_secs: u64,
+    pub load_monitor_interval_secs: u64,
     pub dp_aware: bool,
     pub api_key: Option<String>,
     pub discovery: Option<DiscoveryConfig>,
@@ -508,6 +509,7 @@ impl Default for RouterConfig {
             request_timeout_secs: 1800,        // 30 minutes
             worker_startup_timeout_secs: 1800, // 30 minutes for large model loading
             worker_startup_check_interval_secs: 30,
+            load_monitor_interval_secs: 10,
             dp_aware: false,
             api_key: None,
             discovery: None,
@@ -635,6 +637,7 @@ mod tests {
         assert_eq!(config.request_timeout_secs, 1800);
         assert_eq!(config.worker_startup_timeout_secs, 1800);
         assert_eq!(config.worker_startup_check_interval_secs, 30);
+        assert_eq!(config.load_monitor_interval_secs, 10);
         assert!(config.discovery.is_none());
         assert!(config.metrics.is_none());
         assert!(config.trace_config.is_none());

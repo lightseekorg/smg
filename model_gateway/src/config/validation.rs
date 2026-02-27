@@ -329,6 +329,14 @@ impl ConfigValidator {
             });
         }
 
+        if config.load_monitor_interval_secs == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "load_monitor_interval_secs".to_string(),
+                value: config.load_monitor_interval_secs.to_string(),
+                reason: "Must be > 0".to_string(),
+            });
+        }
+
         Ok(())
     }
 

@@ -30,6 +30,7 @@ class RouterArgs:
     decode_policy: str | None = None  # Specific policy for decode nodes in PD mode
     worker_startup_timeout_secs: int = 1800
     worker_startup_check_interval: int = 30
+    load_monitor_interval: int = 10
     cache_threshold: float = 0.3
     balance_abs_threshold: int = 64
     balance_rel_threshold: float = 1.5
@@ -401,6 +402,14 @@ class RouterArgs:
             type=int,
             default=RouterArgs.worker_startup_check_interval,
             help="Interval in seconds between checks for worker startup",
+        )
+
+        # Load monitoring
+        parser.add_argument(
+            f"--{prefix}load-monitor-interval",
+            type=int,
+            default=RouterArgs.load_monitor_interval,
+            help="Interval in seconds between load monitor checks for PowerOfTwo routing (default: 10)",
         )
 
         # Logging configuration
