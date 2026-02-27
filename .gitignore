@@ -153,7 +153,8 @@ wasm/tests/fixtures/*.wasm
 
 # Generated client SDK files (run `make generate-clients` to regenerate)
 clients/openapi/smg-openapi.yaml
-clients/python/smg_client/types/_generated.py
+# NOTE: _generated.py is committed (needed by smg_client package in CI).
+# Re-generate with: make generate-python-types
 clients/java/src/
 clients/java/.openapi-generator/
 clients/java/target/
