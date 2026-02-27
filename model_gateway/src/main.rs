@@ -6,8 +6,8 @@ use smg::{
     config::{
         CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
         HistoryBackend, ManualAssignmentMode, MetricsConfig, OracleConfig, PolicyConfig,
-        PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RoutingMode, SchemaConfig,
-        TokenizerCacheConfig, TraceConfig,
+        PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RoutingMode, TokenizerCacheConfig,
+        TraceConfig,
     },
     core::ConnectionMode,
     observability::{
@@ -491,12 +491,6 @@ struct CliArgs {
     #[arg(long, env = "ATP_POOL_TIMEOUT_SECS", help_heading = "Oracle Database")]
     oracle_pool_timeout_secs: Option<u64>,
 
-    // ==================== Schema Migration ====================
-    /// Enable automatic schema migration on startup.
-    /// When false (default), startup fails with actionable SQL if migrations are pending.
-    #[arg(long, env = "DB_AUTO_MIGRATE", default_value_t = false, help_heading = "Database")]
-    db_auto_migrate: bool,
-
     // ==================== PostgreSQL Database ====================
     /// PostgreSQL database connection URL
     #[arg(long, help_heading = "PostgreSQL Database")]
@@ -859,15 +853,6 @@ impl CliArgs {
             .oracle_pool_timeout_secs
             .unwrap_or_else(OracleConfig::default_pool_timeout_secs);
 
-        let schema = if self.db_auto_migrate {
-            Some(SchemaConfig {
-                auto_migrate: true,
-                ..Default::default()
-            })
-        } else {
-            None
-        };
-
         Ok(OracleConfig {
             wallet_path,
             connect_descriptor,
@@ -877,7 +862,7 @@ impl CliArgs {
             pool_min,
             pool_max,
             pool_timeout_secs,
-            schema,
+            schema: None,
         })
     }
 
@@ -886,18 +871,10 @@ impl CliArgs {
         let pool_max = self
             .postgres_pool_max_size
             .unwrap_or_else(PostgresConfig::default_pool_max);
-        let schema = if self.db_auto_migrate {
-            Some(SchemaConfig {
-                auto_migrate: true,
-                ..Default::default()
-            })
-        } else {
-            None
-        };
         let pcf = PostgresConfig {
             db_url,
             pool_max,
-            schema,
+            schema: None,
         };
         pcf.validate().map_err(|e| ConfigError::ValidationFailed {
             reason: e.to_string(),
