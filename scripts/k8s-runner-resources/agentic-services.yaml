@@ -81,8 +81,8 @@ spec:
         app: brave-search-mcp
     spec:
       containers:
-        - name: brave-search
-          image: mcp/brave-search
+        - name: brave-search-mcp
+          image: mcp/brave-search:latest
           ports:
             - containerPort: 8080
           env:
