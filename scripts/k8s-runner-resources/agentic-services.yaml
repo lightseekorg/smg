@@ -166,22 +166,16 @@ spec:
               memory: 256Mi
           readinessProbe:
             httpGet:
-              path: /mcp
+              path: /ping
               port: 8080
-              httpHeaders:
-                - name: Accept
-                  value: "application/json, text/event-stream"
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /mcp
+              path: /ping
               port: 8080
-              httpHeaders:
-                - name: Accept
-                  value: "application/json, text/event-stream"
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 5
