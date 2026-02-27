@@ -136,6 +136,7 @@ class TestEmbeddingBasic:
         """
         backend, model, client, gateway = setup_backend
 
+        oai_succeeded = False
         try:
             response = client.embeddings.create(
                 model=model,
@@ -143,18 +144,19 @@ class TestEmbeddingBasic:
             )
             # If it succeeds, verify structure
             assert len(response.data) >= 1
+            oai_succeeded = True
             logger.info("Empty string embedding succeeded")
         except Exception as e:
             # Some models may reject empty strings - that's acceptable
             logger.info("Empty string embedding rejected: %s", e)
 
-        # SmgClient comparison - same behavior expected
-        try:
+        # SmgClient comparison - must match OpenAI client behavior
+        if oai_succeeded:
             smg_resp = smg.embeddings.create(model=model, input="")
             assert len(smg_resp.data) >= 1
-            logger.info("SmgClient empty string embedding succeeded")
-        except Exception as e:
-            logger.info("SmgClient empty string embedding rejected: %s", e)
+        else:
+            with pytest.raises(Exception):
+                smg.embeddings.create(model=model, input="")
 
     def test_embedding_unicode(self, setup_backend, smg):
         """Test embedding with unicode characters.

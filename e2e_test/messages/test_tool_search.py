@@ -175,7 +175,7 @@ class TestToolSearchPassthrough:
         assert smg_resp.role == "assistant"
         assert len(smg_resp.content) > 0
 
-    def test_tool_search_with_deferred_tools_streaming(self, setup_backend, smg):
+    def test_tool_search_with_deferred_tools_streaming(self, setup_backend):
         """Streaming variant of tool search passthrough."""
         _, model, client, _ = setup_backend
 
@@ -382,7 +382,7 @@ class TestToolSearchWithMcp:
         assert smg_resp.id is not None
         assert len(smg_resp.content) > 0
 
-    def test_mcp_tools_with_deferred_loading_streaming(self, setup_backend, smg):
+    def test_mcp_tools_with_deferred_loading_streaming(self, setup_backend):
         """Streaming variant: tool_search + deferred MCP tools via SMG."""
         _, model, client, _ = setup_backend
 
