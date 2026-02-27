@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 import pytest
 import requests
+from infra import BRAVE_MCP_URL
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +248,7 @@ class TestToolSearchPassthrough:
 # =============================================================================
 
 
-MCP_SERVER_URL = os.environ.get("MCP_TOOL_SEARCH_SERVER_URL", "http://localhost:8001/sse")
+MCP_SERVER_URL = os.environ.get("MCP_TOOL_SEARCH_SERVER_URL", BRAVE_MCP_URL)
 MCP_SERVER_NAME = os.environ.get("MCP_TOOL_SEARCH_SERVER_NAME", "brave")
 
 
