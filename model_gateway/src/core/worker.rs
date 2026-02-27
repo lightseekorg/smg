@@ -640,10 +640,12 @@ impl Worker for BasicWorker {
 
     fn models(&self) -> Vec<ModelCard> {
         let overridden = self.models_override.load();
-        if !overridden.is_wildcard() {
-            return overridden.all().to_vec();
-        }
-        self.metadata.spec.models.all().to_vec()
+        let source = if overridden.is_wildcard() {
+            self.metadata.spec.models.all()
+        } else {
+            overridden.all()
+        };
+        source.to_vec()
     }
 
     fn supports_model(&self, model_id: &str) -> bool {
@@ -665,10 +667,7 @@ impl Worker for BasicWorker {
     }
 
     fn has_models_discovered(&self) -> bool {
-        if !self.models_override.load().is_wildcard() {
-            return true;
-        }
-        !self.metadata.spec.models.is_wildcard()
+        !self.models_override.load().is_wildcard() || !self.metadata.spec.models.is_wildcard()
     }
 
     async fn get_grpc_client(&self) -> WorkerResult<Option<Arc<GrpcClient>>> {
@@ -1767,5 +1766,29 @@ mod tests {
         drop(guard2);
         assert_eq!(worker.load(), 0);
         assert_eq!(worker.worker_routing_key_load().value(), 0);
+    }
+
+    #[test]
+    fn test_lazy_discovered_models_override_wildcard() {
+        let worker = BasicWorkerBuilder::new("http://test:8080").build();
+
+        // Wildcard worker starts with no models listed, but accepts any model
+        assert!(worker.models().is_empty());
+        assert!(!worker.has_models_discovered());
+        assert!(worker.supports_model("gpt-4o-mini")); // wildcard accepts anything
+
+        // Simulate lazy discovery via set_models
+        let discovered = vec![
+            ModelCard::new("gpt-4o-mini"),
+            ModelCard::new("text-embedding-3-small"),
+        ];
+        worker.set_models(discovered);
+
+        let ids: Vec<String> = worker.models().into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec!["gpt-4o-mini", "text-embedding-3-small"]);
+        assert!(worker.supports_model("gpt-4o-mini"));
+        assert!(worker.supports_model("text-embedding-3-small"));
+        assert!(!worker.supports_model("non-existent-model"));
+        assert!(worker.has_models_discovered());
     }
 }
