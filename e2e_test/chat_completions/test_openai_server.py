@@ -224,7 +224,9 @@ convenient hands-free control to your smart devices.
                 temperature=0,
                 extra_body={"continue_final_message": True},
             )
-            assert smg_resp.choices[0].message.content.strip().startswith('"name": "SmartHome Mini",')
+            assert (
+                smg_resp.choices[0].message.content.strip().startswith('"name": "SmartHome Mini",')
+            )
 
     def test_streaming_token_count_matches_chunks(self, setup_backend, smg):
         """Test that streaming completion_tokens matches the number of content chunks.
@@ -354,7 +356,10 @@ convenient hands-free control to your smart devices.
             smg_resp = smg.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "user", "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"},
+                    {
+                        "role": "user",
+                        "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
+                    },
                 ],
                 temperature=0,
                 max_tokens=50,

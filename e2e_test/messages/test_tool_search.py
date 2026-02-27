@@ -384,7 +384,9 @@ class TestToolSearchWithMcp:
                 extra_headers={"x-smg-mcp": "enabled"},
                 extra_body={
                     "tools": tools,
-                    "mcp_servers": [{"type": "url", "name": MCP_SERVER_NAME, "url": MCP_SERVER_URL}],
+                    "mcp_servers": [
+                        {"type": "url", "name": MCP_SERVER_NAME, "url": MCP_SERVER_URL}
+                    ],
                 },
             )
             assert smg_resp.id is not None

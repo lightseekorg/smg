@@ -175,7 +175,9 @@ class TestToolUseBasic:
                             {
                                 "type": "tool_result",
                                 "tool_use_id": smg_tool.id,
-                                "content": json.dumps({"temperature": "22°C", "condition": "sunny"}),
+                                "content": json.dumps(
+                                    {"temperature": "22°C", "condition": "sunny"}
+                                ),
                             }
                         ],
                     },

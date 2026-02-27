@@ -177,7 +177,9 @@ class TestOpenAIServerFunctionCalling:
             assert isinstance(smg_tool_calls, list) and len(smg_tool_calls) > 0, (
                 "SmgClient: tool_calls should be a non-empty list"
             )
-            assert smg_tool_calls[0].function.name == "add", "SmgClient: Function name should be 'add'"
+            assert smg_tool_calls[0].function.name == "add", (
+                "SmgClient: Function name should be 'add'"
+            )
 
     def test_function_calling_streaming_simple(self, setup_backend, smg):
         """Test: Whether the function name can be correctly recognized in streaming mode.
