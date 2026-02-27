@@ -12,6 +12,8 @@
 //! parking_lot::RwLock. Reads (find_matches) and writes (apply_stored/removed/cleared)
 //! can proceed concurrently.
 
+use std::sync::Arc;
+
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
@@ -45,7 +47,8 @@ impl From<u64> for SequenceHash {
 }
 
 /// Worker identifier (URL string in SMG).
-pub type WorkerId = String;
+/// Uses `Arc<str>` for cheap cloning on hot paths (same pattern as `TenantId`).
+pub type WorkerId = Arc<str>;
 
 /// A block from a store event, carrying both hash representations.
 #[derive(Debug, Clone, Copy)]
@@ -66,10 +69,14 @@ pub struct OverlapScores {
 }
 
 /// Compute content hash from token IDs (position-independent).
-/// Uses XXH3-64 with standard seed for fast, non-cryptographic hashing.
+/// Uses XXH3-64 streaming hasher with standard seed — avoids intermediate allocation.
 pub fn compute_content_hash(token_ids: &[u32]) -> ContentHash {
-    let bytes: Vec<u8> = token_ids.iter().flat_map(|&t| t.to_le_bytes()).collect();
-    ContentHash(xxhash_rust::xxh3::xxh3_64_with_seed(&bytes, XXH3_SEED))
+    use std::hash::Hasher;
+    let mut hasher = xxhash_rust::xxh3::Xxh3::with_seed(XXH3_SEED);
+    for &t in token_ids {
+        hasher.write(&t.to_le_bytes());
+    }
+    ContentHash(hasher.finish())
 }
 
 // ---------------------------------------------------------------------------
@@ -89,33 +96,34 @@ enum SeqEntry {
 }
 
 impl SeqEntry {
-    fn new(seq_hash: SequenceHash, worker: WorkerId) -> Self {
+    fn new(seq_hash: SequenceHash, worker: &str) -> Self {
         let mut workers = FxHashSet::default();
-        workers.insert(worker);
+        workers.insert(Arc::from(worker));
         Self::Single(seq_hash, workers)
     }
 
     /// Insert a worker for a given seq_hash, upgrading to Multi if needed.
-    fn insert(&mut self, seq_hash: SequenceHash, worker: WorkerId) {
+    fn insert(&mut self, seq_hash: SequenceHash, worker: &str) {
+        let worker_id: WorkerId = Arc::from(worker);
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => {
-                workers.insert(worker);
+                workers.insert(worker_id);
             }
             Self::Single(existing_hash, existing_workers) => {
                 let mut map = FxHashMap::with_capacity_and_hasher(2, FxBuildHasher);
                 map.insert(*existing_hash, std::mem::take(existing_workers));
-                map.entry(seq_hash).or_default().insert(worker);
+                map.entry(seq_hash).or_default().insert(worker_id);
                 *self = Self::Multi(map);
             }
             Self::Multi(map) => {
-                map.entry(seq_hash).or_default().insert(worker);
+                map.entry(seq_hash).or_default().insert(worker_id);
             }
         }
     }
 
     /// Remove a worker from a given seq_hash.
     /// Returns true if the entry is now completely empty and should be removed.
-    fn remove(&mut self, seq_hash: SequenceHash, worker: &WorkerId) -> bool {
+    fn remove(&mut self, seq_hash: SequenceHash, worker: &str) -> bool {
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => {
                 workers.remove(worker);
@@ -199,7 +207,7 @@ impl PositionalIndexer {
             return;
         }
 
-        let worker_id = worker.to_string();
+        let worker_id: WorkerId = Arc::from(worker);
 
         // Determine starting position from parent
         let start_pos = match parent_seq_hash {
@@ -248,8 +256,8 @@ impl PositionalIndexer {
 
             self.index
                 .entry((position, content_hash))
-                .and_modify(|entry| entry.insert(seq_hash, worker_id.clone()))
-                .or_insert_with(|| SeqEntry::new(seq_hash, worker_id.clone()));
+                .and_modify(|entry| entry.insert(seq_hash, worker))
+                .or_insert_with(|| SeqEntry::new(seq_hash, worker));
 
             worker_map.insert(seq_hash, (position, content_hash));
         }
@@ -259,7 +267,7 @@ impl PositionalIndexer {
     ///
     /// `seq_hashes`: position-aware block hashes to remove (from proto).
     pub fn apply_removed(&self, worker: &str, seq_hashes: &[SequenceHash]) {
-        let worker_id = worker.to_string();
+        let worker_id: WorkerId = Arc::from(worker);
 
         let wb = self.worker_blocks.read();
         let Some(level_index) = wb.get(&worker_id) else {
@@ -279,7 +287,7 @@ impl PositionalIndexer {
             };
 
             if let Some(mut entry) = self.index.get_mut(&(position, content_hash)) {
-                if entry.remove(seq_hash, &worker_id) {
+                if entry.remove(seq_hash, worker) {
                     // Entry is empty, remove it from the DashMap
                     drop(entry);
                     self.index.remove(&(position, content_hash));
@@ -321,14 +329,14 @@ impl PositionalIndexer {
     // -----------------------------------------------------------------------
 
     fn remove_or_clear_worker(&self, worker: &str, keep_worker: bool) {
-        let worker_id = worker.to_string();
+        let worker_id: WorkerId = Arc::from(worker);
 
         let mut wb = self.worker_blocks.write();
         if let Some(level_index) = wb.remove(&worker_id) {
             let worker_map = level_index.read();
             for (&seq_hash, &(position, content_hash)) in worker_map.iter() {
                 if let Some(mut entry) = self.index.get_mut(&(position, content_hash)) {
-                    if entry.remove(seq_hash, &worker_id) {
+                    if entry.remove(seq_hash, worker) {
                         drop(entry);
                         self.index.remove(&(position, content_hash));
                     }
@@ -427,10 +435,9 @@ impl PositionalIndexer {
 
             let Some(entry) = self.index.get(&(pos, sequence[pos])) else {
                 // No entry at this position — all active workers drain here
-                for worker in active.iter() {
-                    scores.scores.insert(worker.clone(), pos as u32);
+                for worker in active.drain() {
+                    scores.scores.insert(worker, pos as u32);
                 }
-                active.clear();
                 break;
             };
 
@@ -451,10 +458,9 @@ impl PositionalIndexer {
                 }
                 None => {
                     // seq_hash doesn't match — all active workers drain
-                    for worker in active.iter() {
-                        scores.scores.insert(worker.clone(), pos as u32);
+                    for worker in active.drain() {
+                        scores.scores.insert(worker, pos as u32);
                     }
-                    active.clear();
                 }
             }
         }
@@ -525,7 +531,7 @@ impl PositionalIndexer {
             if let Some(level_index) = wb.get(worker) {
                 scores
                     .tree_sizes
-                    .insert(worker.clone(), level_index.read().len());
+                    .insert(Arc::clone(worker), level_index.read().len());
             }
         }
 
@@ -790,8 +796,6 @@ mod tests {
 
     #[test]
     fn test_concurrent_find_matches() {
-        use std::sync::Arc;
-
         let indexer = Arc::new(PositionalIndexer::new(64));
         let blocks = make_blocks(&[10, 20, 30]);
         indexer.apply_stored("http://w1:8000", &blocks, None);
@@ -967,7 +971,7 @@ mod tests {
         assert_eq!(scores.scores.len(), 10);
         for i in 0..10 {
             let worker = format!("http://w{i}:8000");
-            assert_eq!(scores.scores.get(&worker), Some(&3));
+            assert_eq!(scores.scores.get(worker.as_str()), Some(&3));
         }
     }
 
@@ -1072,8 +1076,6 @@ mod tests {
 
     #[test]
     fn test_concurrent_read_write() {
-        use std::sync::Arc;
-
         let indexer = Arc::new(PositionalIndexer::new(4));
         let content: Vec<u64> = (1..=20).collect();
         let blocks = make_blocks(&content);
