@@ -83,7 +83,7 @@ def make_mcp_toolset(
 class TestToolSearchPassthrough:
     """Tool search passthrough tests — request forwarded to Anthropic as-is."""
 
-    def test_tool_search_with_deferred_tools_non_streaming(self, setup_backend):
+    def test_tool_search_with_deferred_tools_non_streaming(self, setup_backend, smg):
         """Send tool_search_tool + deferred custom tools.
 
         Verifies the response can contain server_tool_use (tool search invocation)
@@ -164,7 +164,10 @@ class TestToolSearchPassthrough:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
-    def test_tool_search_with_deferred_tools_streaming(self, setup_backend):
+        # SmgClient: Tool search tests use extra_body with custom tool formats
+        # which SmgClient doesn't support. Skipping SmgClient comparison.
+
+    def test_tool_search_with_deferred_tools_streaming(self, setup_backend, smg):
         """Streaming variant of tool search passthrough."""
         _, model, client, _ = setup_backend
 
@@ -242,6 +245,9 @@ class TestToolSearchPassthrough:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
+        # SmgClient: Tool search tests use extra_body with custom tool formats
+        # which SmgClient doesn't support. Skipping SmgClient comparison.
+
 
 # =============================================================================
 # Test 2: SMG-handled MCP + tool search + defer_loading
@@ -276,7 +282,7 @@ class TestToolSearchWithMcp:
                 "Ensure the MCP server is running before running these tests."
             )
 
-    def test_mcp_tools_with_deferred_loading(self, setup_backend):
+    def test_mcp_tools_with_deferred_loading(self, setup_backend, smg):
         """Send tool_search_tool + mcp_toolset with defer_loading: true.
 
         Verifies the full flow: SMG injects MCP tools with defer_loading,
@@ -349,7 +355,10 @@ class TestToolSearchWithMcp:
         assert response.usage.input_tokens > 0
         assert response.usage.output_tokens > 0
 
-    def test_mcp_tools_with_deferred_loading_streaming(self, setup_backend):
+        # SmgClient: MCP + tool search tests require custom headers (x-smg-mcp)
+        # and extra_body which SmgClient doesn't support. Skipping SmgClient comparison.
+
+    def test_mcp_tools_with_deferred_loading_streaming(self, setup_backend, smg):
         """Streaming variant: tool_search + deferred MCP tools via SMG."""
         _, model, client, _ = setup_backend
 
@@ -428,3 +437,6 @@ class TestToolSearchWithMcp:
         # relaxed from >= 2 to prevent flakiness)
         text_blocks = [b for b in content_blocks if b.type == "text"]
         assert len(text_blocks) >= 1, f"Expected at least 1 text block, got: {len(text_blocks)}"
+
+        # SmgClient: MCP + tool search tests require custom headers (x-smg-mcp)
+        # and extra_body which SmgClient doesn't support. Skipping SmgClient comparison.

@@ -196,6 +196,7 @@ def pytest_runtest_logstart(nodeid: str, location: tuple) -> None:
 
 # Import fixtures - pytest discovers these by name
 # Import hooks - pytest discovers these by name
+import pytest
 from fixtures import (
     backend_router,
     model_base_url,
@@ -208,6 +209,17 @@ from fixtures import (
     pytest_sessionfinish,
     setup_backend,
 )
+from smg_client import SmgClient
+
+
+@pytest.fixture
+def smg(setup_backend):
+    """SmgClient pointing at the same gateway as setup_backend."""
+    _, _, _, gateway = setup_backend
+    client = SmgClient(base_url=gateway.base_url)
+    yield client
+    client.close()
+
 
 # Re-export for pytest discovery
 __all__ = [
@@ -224,4 +236,5 @@ __all__ = [
     "model_base_url",
     "setup_backend",
     "backend_router",
+    "smg",
 ]

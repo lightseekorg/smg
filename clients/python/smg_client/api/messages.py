@@ -11,43 +11,82 @@ if TYPE_CHECKING:
     from smg_client._transport import AsyncTransport, SyncTransport
 
 
+def _prepare_body(kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str] | None]:
+    """Extract extra_body and extra_headers from kwargs, merge extra_body into body."""
+    extra_body = kwargs.pop("extra_body", None)
+    extra_headers = kwargs.pop("extra_headers", None)
+    if extra_body:
+        kwargs.update(extra_body)
+    return kwargs, extra_headers
+
+
 class SyncMessages:
-    """Synchronous Anthropic Messages API."""
+    """Synchronous Anthropic Messages API.
+
+    Matches the Anthropic SDK interface::
+
+        # Non-streaming
+        msg = client.messages.create(model="claude-3-5-sonnet", ...)
+
+        # Streaming
+        with client.messages.stream(model="claude-3-5-sonnet", ...) as stream:
+            for event in stream:
+                if event.type == "content_block_delta":
+                    print(event.delta.text)
+            text = stream.get_final_text()
+    """
 
     def __init__(self, transport: SyncTransport) -> None:
         self._transport = transport
 
     def create(self, **kwargs: Any) -> Message:
-        """Create a message.
+        """Create a message (non-streaming).
 
         Args:
             **kwargs: CreateMessageRequest fields (model, messages, max_tokens, etc.)
+                extra_body: Dict merged into the request body.
+                extra_headers: Dict merged into request headers.
         """
-        kwargs["stream"] = False
-        resp = self._transport.request("POST", "/v1/messages", json=kwargs)
+        kwargs.pop("stream", None)
+        body, extra_headers = _prepare_body(kwargs)
+        body["stream"] = False
+        resp = self._transport.request("POST", "/v1/messages", json=body, headers=extra_headers)
         return Message.model_validate_json(resp.content)
 
-    def create_stream(self, **kwargs: Any) -> AnthropicSyncStream:
+    def stream(self, **kwargs: Any) -> AnthropicSyncStream:
         """Create a streaming message.
 
-        Returns an AnthropicSyncStream that yields event dicts with a ``type`` field.
+        Returns an AnthropicSyncStream context manager matching the Anthropic SDK::
 
-        Usage::
-
-            with client.messages.create_stream(
+            with client.messages.stream(
                 model="claude-3-5-sonnet",
                 max_tokens=1024,
                 messages=[{"role": "user", "content": "Hello"}],
             ) as stream:
                 for event in stream:
-                    if event["type"] == "content_block_delta":
-                        delta = event.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            print(delta["text"], end="")
+                    if event.type == "content_block_delta":
+                        print(event.delta.text, end="")
+                text = stream.get_final_text()
+
+        Args:
+            **kwargs: CreateMessageRequest fields.
+                extra_body: Dict merged into the request body.
+                extra_headers: Dict merged into request headers.
         """
-        kwargs["stream"] = True
-        resp = self._transport.request("POST", "/v1/messages", json=kwargs, stream=True)
+        kwargs.pop("stream", None)
+        body, extra_headers = _prepare_body(kwargs)
+        body["stream"] = True
+        resp = self._transport.request(
+            "POST", "/v1/messages", json=body, stream=True, headers=extra_headers
+        )
         return AnthropicSyncStream(resp)
+
+    def create_stream(self, **kwargs: Any) -> AnthropicSyncStream:
+        """Create a streaming message (backward-compat alias).
+
+        Prefer ``stream(...)`` for Anthropic SDK compatibility.
+        """
+        return self.stream(**kwargs)
 
 
 class AsyncMessages:
@@ -57,11 +96,25 @@ class AsyncMessages:
         self._transport = transport
 
     async def create(self, **kwargs: Any) -> Message:
-        kwargs["stream"] = False
-        resp = await self._transport.request("POST", "/v1/messages", json=kwargs)
+        """Create a message (non-streaming)."""
+        kwargs.pop("stream", None)
+        body, extra_headers = _prepare_body(kwargs)
+        body["stream"] = False
+        resp = await self._transport.request(
+            "POST", "/v1/messages", json=body, headers=extra_headers
+        )
         return Message.model_validate_json(resp.content)
 
-    async def create_stream(self, **kwargs: Any) -> AnthropicAsyncStream:
-        kwargs["stream"] = True
-        resp = await self._transport.request("POST", "/v1/messages", json=kwargs, stream=True)
+    async def stream(self, **kwargs: Any) -> AnthropicAsyncStream:
+        """Create a streaming message (Anthropic SDK compat)."""
+        kwargs.pop("stream", None)
+        body, extra_headers = _prepare_body(kwargs)
+        body["stream"] = True
+        resp = await self._transport.request(
+            "POST", "/v1/messages", json=body, stream=True, headers=extra_headers
+        )
         return AnthropicAsyncStream(resp)
+
+    async def create_stream(self, **kwargs: Any) -> AnthropicAsyncStream:
+        """Create a streaming message (backward-compat alias)."""
+        return await self.stream(**kwargs)

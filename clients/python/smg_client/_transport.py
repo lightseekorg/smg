@@ -62,13 +62,14 @@ class SyncTransport:
         *,
         json: Any = None,
         stream: bool = False,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         last_exc: Exception | None = None
 
         for attempt in range(self._config.max_retries + 1):
             try:
                 if stream:
-                    req = self._client.build_request(method, path, json=json)
+                    req = self._client.build_request(method, path, json=json, headers=headers)
                     resp = self._client.send(req, stream=True)
                     if resp.status_code >= 400:
                         try:
@@ -81,7 +82,7 @@ class SyncTransport:
                         raise_for_status(resp.status_code, body)
                     return resp
 
-                response_obj = self._client.request(method, path, json=json)
+                response_obj = self._client.request(method, path, json=json, headers=headers)
                 if response_obj.status_code >= 400:
                     if _should_retry(response_obj.status_code, attempt, self._config.max_retries):
                         time.sleep(_retry_delay(attempt, response_obj))
@@ -129,6 +130,7 @@ class AsyncTransport:
         *,
         json: Any = None,
         stream: bool = False,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         import asyncio
 
@@ -137,7 +139,7 @@ class AsyncTransport:
         for attempt in range(self._config.max_retries + 1):
             try:
                 if stream:
-                    req = self._client.build_request(method, path, json=json)
+                    req = self._client.build_request(method, path, json=json, headers=headers)
                     resp = await self._client.send(req, stream=True)
                     if resp.status_code >= 400:
                         try:
@@ -150,7 +152,7 @@ class AsyncTransport:
                         raise_for_status(resp.status_code, body)
                     return resp
 
-                response_obj = await self._client.request(method, path, json=json)
+                response_obj = await self._client.request(method, path, json=json, headers=headers)
                 if response_obj.status_code >= 400:
                     if _should_retry(response_obj.status_code, attempt, self._config.max_retries):
                         await asyncio.sleep(_retry_delay(attempt, response_obj))

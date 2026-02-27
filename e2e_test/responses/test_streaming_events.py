@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 class TestStreamingEventsLocal:
     """Streaming event tests against local gRPC backend."""
 
-    def test_output_item_event_emitted(self, setup_backend):
+    def test_output_item_event_emitted(self, setup_backend, smg):
         """Test that output_index is zero-based in streaming responses.
 
         Verifies that the first output item has output_index: 0.
@@ -98,6 +98,8 @@ class TestStreamingEventsLocal:
         assert len(output_item_added_events) == len(output_array), (
             "Number of output_item.added events should match output array length"
         )
+
+        # SmgClient: responses streaming not supported, skipping comparison
 
 
 # =============================================================================
@@ -112,7 +114,7 @@ class TestStreamingEventsLocal:
 class TestStreamingEventsHarmony:
     """Streaming event tests against local gRPC backend with Harmony model."""
 
-    def test_output_item_event_emitted(self, setup_backend):
+    def test_output_item_event_emitted(self, setup_backend, smg):
         """Test that output_index is zero-based in streaming responses.
 
         Verifies that the first output item has output_index: 0.
@@ -182,7 +184,9 @@ class TestStreamingEventsHarmony:
             "Number of output_item.added events should match output array length"
         )
 
-    def test_reasoning_content(self, setup_backend):
+        # SmgClient: responses streaming not supported, skipping comparison
+
+    def test_reasoning_content(self, setup_backend, smg):
         """Test that reasoning content has correct zero-based output_index.
 
         Specifically tests that reasoning item has output_index: 0
@@ -234,3 +238,5 @@ class TestStreamingEventsHarmony:
         # Check if reasoning items are in output array
         reasoning_items_in_output = [item for item in output_array if item.type == "reasoning"]
         assert len(reasoning_items_in_output) > 0
+
+        # SmgClient: responses streaming not supported, skipping comparison

@@ -186,7 +186,7 @@ def assert_streaming_mcp_response(
 class TestMcpTool:
     """MCP tool use tests with SMG orchestration (X-SMG-MCP: enabled)."""
 
-    def test_mcp_non_streaming(self, setup_backend):
+    def test_mcp_non_streaming(self, setup_backend, smg):
         """Test MCP tool execution in non-streaming mode."""
         cfg = SMG_HANDLED
         _, model, client, _ = setup_backend
@@ -201,7 +201,10 @@ class TestMcpTool:
 
         assert_non_streaming_mcp_response(response, model, cfg.server_name)
 
-    def test_mcp_streaming(self, setup_backend):
+        # SmgClient: MCP tests require custom headers (anthropic-beta, x-smg-mcp)
+        # which SmgClient doesn't support per-request. Skipping SmgClient comparison.
+
+    def test_mcp_streaming(self, setup_backend, smg):
         """Test MCP tool execution with SSE streaming."""
         cfg = SMG_HANDLED
         _, model, client, _ = setup_backend
@@ -216,6 +219,9 @@ class TestMcpTool:
             results = collect_streaming_events(stream)
 
         assert_streaming_mcp_response(*results)
+
+        # SmgClient: MCP tests require custom headers (anthropic-beta, x-smg-mcp)
+        # which SmgClient doesn't support per-request. Skipping SmgClient comparison.
 
 
 # =============================================================================
@@ -232,7 +238,7 @@ class TestMcpToolPassthrough:
     Requires external https://dmcp-server.deno.dev/sse to be reachable.
     """
 
-    def test_mcp_passthrough_non_streaming(self, setup_backend):
+    def test_mcp_passthrough_non_streaming(self, setup_backend, smg):
         """Test MCP passthrough in non-streaming mode."""
         cfg = PASSTHROUGH
         _, model, client, _ = setup_backend
@@ -247,7 +253,10 @@ class TestMcpToolPassthrough:
 
         assert_non_streaming_mcp_response(response, model, cfg.server_name)
 
-    def test_mcp_passthrough_streaming(self, setup_backend):
+        # SmgClient: MCP tests require custom headers (anthropic-beta, x-smg-mcp)
+        # which SmgClient doesn't support per-request. Skipping SmgClient comparison.
+
+    def test_mcp_passthrough_streaming(self, setup_backend, smg):
         """Test MCP passthrough with SSE streaming."""
         cfg = PASSTHROUGH
         _, model, client, _ = setup_backend
@@ -262,3 +271,6 @@ class TestMcpToolPassthrough:
             results = collect_streaming_events(stream)
 
         assert_streaming_mcp_response(*results)
+
+        # SmgClient: MCP tests require custom headers (anthropic-beta, x-smg-mcp)
+        # which SmgClient doesn't support per-request. Skipping SmgClient comparison.

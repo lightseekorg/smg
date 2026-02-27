@@ -60,3 +60,36 @@ except ModuleNotFoundError as _e:
         "smg_client.types._generated not found. "
         "Run 'make generate-clients' to generate the types module."
     ) from _e
+
+
+# ---------------------------------------------------------------------------
+# Extend auto-generated types with SDK-compatible properties
+# ---------------------------------------------------------------------------
+
+
+@property  # type: ignore[misc]
+def _responses_output_text(self: ResponsesResponse) -> str:
+    """Concatenate text from all output_text content parts (OpenAI SDK compat).
+
+    Iterates over output items of type "message" and collects text from
+    content parts whose type is "output_text".
+    """
+    texts: list[str] = []
+    for item in self.output or []:
+        if (
+            getattr(item, "type", None)
+            and str(item.type.value if hasattr(item.type, "value") else item.type) == "message"
+        ):
+            for part in getattr(item, "content", []):
+                part_type = getattr(part, "type", None)
+                type_str = (
+                    str(part_type.value if hasattr(part_type, "value") else part_type)
+                    if part_type
+                    else ""
+                )
+                if type_str == "output_text" and hasattr(part, "text"):
+                    texts.append(part.text)
+    return "".join(texts)
+
+
+ResponsesResponse.output_text = _responses_output_text

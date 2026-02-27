@@ -10,19 +10,89 @@ if TYPE_CHECKING:
     from smg_client._transport import AsyncTransport, SyncTransport
 
 
-class SyncResponses:
-    """Synchronous responses API."""
+def _prepare_body(kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str] | None]:
+    """Extract extra_body and extra_headers from kwargs, merge extra_body into body."""
+    extra_body = kwargs.pop("extra_body", None)
+    extra_headers = kwargs.pop("extra_headers", None)
+    if extra_body:
+        kwargs.update(extra_body)
+    return kwargs, extra_headers
+
+
+# ---------------------------------------------------------------------------
+# input_items sub-namespace (matches OpenAI SDK: client.responses.input_items.list(...))
+# ---------------------------------------------------------------------------
+
+
+class SyncInputItems:
+    """Synchronous input_items namespace for responses."""
 
     def __init__(self, transport: SyncTransport) -> None:
         self._transport = transport
 
+    def list(self, *, response_id: str) -> Any:
+        """List input items for a response.
+
+        Args:
+            response_id: The response ID to list input items for.
+        """
+        resp = self._transport.request("GET", f"/v1/responses/{response_id}/input_items")
+        return resp.json()
+
+
+class AsyncInputItems:
+    """Async input_items namespace for responses."""
+
+    def __init__(self, transport: AsyncTransport) -> None:
+        self._transport = transport
+
+    async def list(self, *, response_id: str) -> Any:
+        """List input items for a response."""
+        resp = await self._transport.request("GET", f"/v1/responses/{response_id}/input_items")
+        return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# Main responses API
+# ---------------------------------------------------------------------------
+
+
+class SyncResponses:
+    """Synchronous responses API.
+
+    Matches the OpenAI SDK interface::
+
+        resp = client.responses.create(model="...", input="Hello")
+        print(resp.output_text)
+
+        retrieved = client.responses.retrieve(response_id=resp.id)
+        items = client.responses.input_items.list(response_id=resp.id)
+    """
+
+    def __init__(self, transport: SyncTransport) -> None:
+        self._transport = transport
+        self.input_items = SyncInputItems(transport)
+
     def create(self, **kwargs: Any) -> ResponsesResponse:
-        resp = self._transport.request("POST", "/v1/responses", json=kwargs)
+        body, extra_headers = _prepare_body(kwargs)
+        resp = self._transport.request("POST", "/v1/responses", json=body, headers=extra_headers)
+        return ResponsesResponse.model_validate_json(resp.content)
+
+    def retrieve(self, *, response_id: str) -> ResponsesResponse:
+        """Retrieve a response by ID.
+
+        Args:
+            response_id: The response ID to retrieve.
+        """
+        resp = self._transport.request("GET", f"/v1/responses/{response_id}")
         return ResponsesResponse.model_validate_json(resp.content)
 
     def get(self, response_id: str) -> ResponsesResponse:
-        resp = self._transport.request("GET", f"/v1/responses/{response_id}")
-        return ResponsesResponse.model_validate_json(resp.content)
+        """Retrieve a response by ID (backward-compat alias).
+
+        Prefer ``retrieve(response_id=...)`` for OpenAI SDK compatibility.
+        """
+        return self.retrieve(response_id=response_id)
 
     def delete(self, response_id: str) -> None:
         """Delete a response. Note: not yet implemented on the server (returns 501)."""
@@ -33,8 +103,11 @@ class SyncResponses:
         return ResponsesResponse.model_validate_json(resp.content)
 
     def list_input_items(self, response_id: str) -> Any:
-        resp = self._transport.request("GET", f"/v1/responses/{response_id}/input_items")
-        return resp.json()
+        """List input items (backward-compat alias).
+
+        Prefer ``input_items.list(response_id=...)`` for OpenAI SDK compatibility.
+        """
+        return self.input_items.list(response_id=response_id)
 
 
 class AsyncResponses:
@@ -42,17 +115,26 @@ class AsyncResponses:
 
     def __init__(self, transport: AsyncTransport) -> None:
         self._transport = transport
+        self.input_items = AsyncInputItems(transport)
 
     async def create(self, **kwargs: Any) -> ResponsesResponse:
-        resp = await self._transport.request("POST", "/v1/responses", json=kwargs)
+        body, extra_headers = _prepare_body(kwargs)
+        resp = await self._transport.request(
+            "POST", "/v1/responses", json=body, headers=extra_headers
+        )
         return ResponsesResponse.model_validate_json(resp.content)
 
-    async def get(self, response_id: str) -> ResponsesResponse:
+    async def retrieve(self, *, response_id: str) -> ResponsesResponse:
+        """Retrieve a response by ID."""
         resp = await self._transport.request("GET", f"/v1/responses/{response_id}")
         return ResponsesResponse.model_validate_json(resp.content)
 
+    async def get(self, response_id: str) -> ResponsesResponse:
+        """Retrieve a response by ID (backward-compat alias)."""
+        return await self.retrieve(response_id=response_id)
+
     async def delete(self, response_id: str) -> None:
-        """Delete a response. Note: not yet implemented on the server (returns 501)."""
+        """Delete a response."""
         await self._transport.request("DELETE", f"/v1/responses/{response_id}")
 
     async def cancel(self, response_id: str) -> ResponsesResponse:
@@ -60,5 +142,5 @@ class AsyncResponses:
         return ResponsesResponse.model_validate_json(resp.content)
 
     async def list_input_items(self, response_id: str) -> Any:
-        resp = await self._transport.request("GET", f"/v1/responses/{response_id}/input_items")
-        return resp.json()
+        """List input items (backward-compat alias)."""
+        return await self.input_items.list(response_id=response_id)
