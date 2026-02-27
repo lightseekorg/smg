@@ -17,7 +17,7 @@ use llm_tokenizer::{
     traits::Tokenizer,
 };
 use serde::{Deserialize, Serialize};
-use smg_grpc_client::{archive_ops, stream_bundle::StreamBundle};
+use smg_grpc_client::{tokenizer_bundle, tokenizer_bundle::StreamBundle};
 use tracing::{debug, error, info, warn};
 use wfaas::{
     BackoffStrategy, FailureAction, RetryPolicy, StepDefinition, StepExecutor, StepId, StepResult,
@@ -212,7 +212,7 @@ fn with_optional_cache(
 }
 
 fn load_tokenizer_from_bundle(bundle: &StreamBundle) -> Result<Arc<dyn Tokenizer>, String> {
-    archive_ops::with_extracted_bundle(bundle, |tokenizer_dir| {
+    tokenizer_bundle::with_extracted_bundle(bundle, |tokenizer_dir| {
         let tokenizer_path = tokenizer_dir.to_string_lossy().into_owned();
         info!(
             "Tokenizer extracted from temporary path: {}",

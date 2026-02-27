@@ -15,10 +15,7 @@ use openai_protocol::{
 use tonic::{transport::Channel, Request, Streaming};
 use tracing::{debug, warn};
 
-use crate::{
-    stream_bundle::{collect_bundle_from_rpc, StreamBundle},
-    BoxedTraceInjector, NoopTraceInjector,
-};
+use crate::{BoxedTraceInjector, NoopTraceInjector};
 
 // Include the generated protobuf code
 #[expect(clippy::allow_attributes)]
@@ -261,18 +258,7 @@ impl TrtllmServiceClient {
         Ok(response.into_inner())
     }
 
-    pub async fn get_tokenizer(
-        &self,
-    ) -> Result<StreamBundle, Box<dyn std::error::Error + Send + Sync>> {
-        let request = Request::new(proto::GetTokenizerRequest {});
-        let mut client = self.client.clone();
-        collect_bundle_from_rpc(
-            client.get_tokenizer(request),
-            |chunk| (chunk.data, chunk.sha256),
-            Duration::from_secs(120),
-        )
-        .await
-    }
+    crate::impl_get_tokenizer!();
 
     /// Build a TensorRT-LLM GenerateRequest from OpenAI ChatCompletionRequest
     #[expect(

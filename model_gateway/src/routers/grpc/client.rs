@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use openai_protocol::{chat::ChatCompletionRequest, generate::GenerateRequest};
 use smg_grpc_client::{
-    archive_ops, stream_bundle::StreamBundle, SglangSchedulerClient, TrtllmServiceClient,
+    tokenizer_bundle, tokenizer_bundle::StreamBundle, SglangSchedulerClient, TrtllmServiceClient,
     VllmEngineClient,
 };
 
@@ -194,7 +194,7 @@ impl GrpcClient {
             Self::Trtllm(client) => client.get_tokenizer().await,
         }?;
 
-        archive_ops::validate_bundle_sha256(&bundle).map_err(|e| {
+        tokenizer_bundle::validate_bundle_sha256(&bundle).map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Tokenizer bundle SHA256 validation failed: {e}"),

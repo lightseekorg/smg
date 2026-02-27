@@ -1,0 +1,13 @@
+syntax = "proto3";
+package smg.grpc.common;
+
+// =====================
+// Tokenizer
+// =====================
+
+message GetTokenizerRequest {}
+
+message GetTokenizerChunk {
+  bytes data = 1;       // Raw zip bytes (concatenate all chunks)
+  string sha256 = 2;    // SHA-256 fingerprint; set on final chunk only, empty on previous
+}
