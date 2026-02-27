@@ -56,13 +56,45 @@ class WorkerLauncher(ABC):
         return 1
 
     def gpu_env(self, args: argparse.Namespace, dp_rank: int, env: dict | None = None) -> dict:
-        """Build env dict with CUDA_VISIBLE_DEVICES for this worker's dp_rank."""
+        """Build env dict with CUDA_VISIBLE_DEVICES for this worker's dp_rank.
+
+        Three cases:
+        - User set CUDA_VISIBLE_DEVICES, dp_size == 1 (default): pass through unchanged.
+        - User set CUDA_VISIBLE_DEVICES, dp_size > 1: treat it as the GPU pool and
+          slice out this worker's share by dp_rank and tp_size.
+        - User did not set CUDA_VISIBLE_DEVICES: auto-assign using absolute indices
+          (original behaviour).
+        """
         env = dict(env) if env is not None else os.environ.copy()
-        tp_size = self._get_tp_size(args)
-        base_gpu = dp_rank * tp_size
-        gpu_ids = range(base_gpu, base_gpu + tp_size)
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
         env["PYTHONUNBUFFERED"] = "1"
+
+        tp_size = self._get_tp_size(args)
+        parent_cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+
+        if not parent_cvd:
+            # No user restriction — auto-assign by absolute index.
+            base = dp_rank * tp_size
+            env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(base, base + tp_size))
+            return env
+
+        dp_size = getattr(args, "data_parallel_size", 1)
+        if dp_size == 1:
+            # Single worker — pass the user's value through unchanged.
+            return env
+
+        # Multiple workers — slice the user's GPU pool by dp_rank and tp_size.
+        visible = [g.strip() for g in parent_cvd.split(",")]
+        base = dp_rank * tp_size
+        indices = list(range(base, base + tp_size))
+        try:
+            gpu_ids = [visible[i] for i in indices]
+        except IndexError:
+            raise RuntimeError(
+                f"dp_rank={dp_rank} with tp_size={tp_size} requires GPU indices "
+                f"{indices}, but CUDA_VISIBLE_DEVICES only lists "
+                f"{len(visible)} device(s): {parent_cvd}"
+            )
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids)
         return env
 
     def _filter_backend_args(self, backend_args: list[str], filter_args: list[str]) -> list[str]:
