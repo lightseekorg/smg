@@ -367,6 +367,7 @@ fn build_raw_multimodal_data(images: &[Arc<ImageFrame>]) -> MultimodalData {
         model_specific_tensors: HashMap::new(),
         im_token_id: None,
         mm_placeholders: Vec::new(),
+        mm_hashes: Vec::new(),
     }
 }
 
@@ -501,6 +502,7 @@ fn build_multimodal_data(
         model_specific_tensors,
         im_token_id,
         mm_placeholders,
+        mm_hashes: Vec::new(),
     }
 }
 

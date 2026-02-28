@@ -23,7 +23,8 @@ use smg_grpc_client::{
 ///
 /// Each backend client converts this into its own proto format:
 /// - SGLang: full pixel_values + model_specific_tensors + placeholders
-/// - vLLM: raw image bytes only (vLLM handles preprocessing internally)
+/// - vLLM: full pixel_values + model_specific_tensors + placeholders + mm_hashes
+/// - TRT-LLM: raw image bytes only (TRT-LLM handles preprocessing internally)
 #[derive(Debug, Clone)]
 pub struct MultimodalData {
     /// Raw image bytes (JPEG/PNG) for each image
@@ -38,6 +39,8 @@ pub struct MultimodalData {
     pub im_token_id: Option<u32>,
     /// Placeholder offsets: where each image's tokens are in input_ids
     pub mm_placeholders: Vec<(u32, u32)>, // (offset, length)
+    /// Per-image blake3 hex hashes for encoder output caching (vLLM only)
+    pub mm_hashes: Vec<String>,
 }
 
 /// Raw tensor bytes with shape and dtype metadata.
@@ -93,8 +96,38 @@ impl MultimodalData {
 
     /// Convert to vLLM proto MultimodalInputs, consuming self to avoid clones.
     pub fn into_vllm_proto(self) -> vllm::MultimodalInputs {
+        let model_specific_tensors = self
+            .model_specific_tensors
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    vllm::TensorData {
+                        data: v.data,
+                        shape: v.shape,
+                        dtype: v.dtype,
+                    },
+                )
+            })
+            .collect();
+
+        let mm_placeholders = self
+            .mm_placeholders
+            .into_iter()
+            .map(|(offset, length)| vllm::PlaceholderRange { offset, length })
+            .collect();
+
         vllm::MultimodalInputs {
             image_data: self.image_data,
+            pixel_values: Some(vllm::TensorData {
+                data: self.pixel_values,
+                shape: self.pixel_values_shape,
+                dtype: "float32".to_string(),
+            }),
+            model_specific_tensors,
+            im_token_id: self.im_token_id,
+            mm_placeholders,
+            mm_hashes: self.mm_hashes,
         }
     }
 
