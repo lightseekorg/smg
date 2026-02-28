@@ -1,6 +1,6 @@
 //! Conversation CRUD handlers for the /v1/conversations API - shared across routers
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use axum::{
     http::StatusCode,
@@ -13,7 +13,7 @@ use smg_data_connector::{
     Conversation, ConversationId, ConversationItem, ConversationItemId, ConversationItemStorage,
     ConversationStorage, ListParams, NewConversation, NewConversationItem, SortOrder,
 };
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::routers::persistence_utils::item_to_json;
 
@@ -327,12 +327,15 @@ pub async fn create_conversation_items(
     let mut created_items = Vec::new();
     let mut warnings = Vec::new();
     let mut link_pairs = Vec::new();
+    let mut seen_ids = HashSet::new();
     let added_at = Utc::now();
 
     for item_val in items_array {
         match process_item(item_storage, &conversation_id, item_val, added_at).await {
             Ok((item_json, item_id, warning)) => {
-                link_pairs.push((item_id, added_at));
+                if seen_ids.insert(item_id.0.clone()) {
+                    link_pairs.push((item_id, added_at));
+                }
                 created_items.push(item_json);
                 if let Some(w) = warning {
                     warnings.push(w);
@@ -344,7 +347,7 @@ pub async fn create_conversation_items(
 
     // Batch-link all items in a single operation
     if let Err(e) = item_storage.link_items(&conversation_id, &link_pairs).await {
-        warn!("Failed to batch-link items: {e}");
+        return internal_error(format!("Failed to link items to conversation: {e}"));
     }
 
     let mut response = json!({

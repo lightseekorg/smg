@@ -276,7 +276,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
             serde_json::json!({ "conversation_id": conversation_id, "items_count": items.len() });
         let extra = run_before(
             &*self.hook,
-            StorageOperation::LinkItem,
+            StorageOperation::LinkItems,
             &payload,
             ConversationItemStorageError::StorageError,
         )
@@ -288,7 +288,7 @@ impl ConversationItemStorage for HookedConversationItemStorage {
 
         run_after(
             &*self.hook,
-            StorageOperation::LinkItem,
+            StorageOperation::LinkItems,
             &payload,
             &serde_json::Value::Null,
             &extra,

@@ -153,17 +153,13 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
         items: &[(ConversationItemId, DateTime<Utc>)],
     ) -> ConversationItemResult<()> {
         let mut store = self.inner.write();
+        let links = store.links.entry(conversation_id.clone()).or_default();
         for (item_id, added_at) in items {
-            store
-                .links
-                .entry(conversation_id.clone())
-                .or_default()
-                .insert((added_at.timestamp(), item_id.0.clone()), item_id.clone());
-            store
-                .rev_index
-                .entry(conversation_id.clone())
-                .or_default()
-                .insert(item_id.0.clone(), (added_at.timestamp(), item_id.0.clone()));
+            links.insert((added_at.timestamp(), item_id.0.clone()), item_id.clone());
+        }
+        let rev = store.rev_index.entry(conversation_id.clone()).or_default();
+        for (item_id, added_at) in items {
+            rev.insert(item_id.0.clone(), (added_at.timestamp(), item_id.0.clone()));
         }
         Ok(())
     }

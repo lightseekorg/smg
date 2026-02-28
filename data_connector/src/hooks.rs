@@ -42,6 +42,7 @@ pub enum StorageOperation {
     // ── ConversationItemStorage ──────────────────────────────────────────
     CreateItem,
     LinkItem,
+    LinkItems,
     ListItems,
     GetItem,
     IsItemLinked,

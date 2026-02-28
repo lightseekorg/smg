@@ -110,6 +110,7 @@ fn to_wit_operation(op: StorageOperation) -> WitOperation {
         StorageOperation::DeleteConversation => WitOperation::DeleteConversation,
         StorageOperation::CreateItem => WitOperation::CreateItem,
         StorageOperation::LinkItem => WitOperation::LinkItem,
+        StorageOperation::LinkItems => WitOperation::LinkItems,
         StorageOperation::ListItems => WitOperation::ListItems,
         StorageOperation::GetItem => WitOperation::GetItem,
         StorageOperation::IsItemLinked => WitOperation::IsItemLinked,

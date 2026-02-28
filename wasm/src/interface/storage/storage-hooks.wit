@@ -16,6 +16,7 @@ interface storage-hook-types {
         delete-conversation,
         create-item,
         link-item,
+        link-items,
         list-items,
         get-item,
         is-item-linked,
