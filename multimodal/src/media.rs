@@ -204,6 +204,8 @@ impl MediaConnector {
             .await
             .map_err(MediaConnectorError::Blocking)??;
 
-        Ok(Arc::new(ImageFrame::new(image, bytes, detail, source, hash)))
+        Ok(Arc::new(ImageFrame::new(
+            image, bytes, detail, source, hash,
+        )))
     }
 }
