@@ -222,6 +222,30 @@ impl HarmonyParserAdapter {
         (analysis, commentary, final_text)
     }
 
+    /// Extract the stop string from a matched_stop JSON value.
+    ///
+    /// Returns `Some(string)` for `MatchedStopStr` values, `None` for token IDs
+    /// or absent values (token ID stops are handled at the proto level).
+    fn extract_stop_string(matched_stop: &Option<serde_json::Value>) -> Option<String> {
+        matched_stop
+            .as_ref()
+            .and_then(|v| v.as_str().map(String::from))
+    }
+
+    /// Strip a trailing stop sequence from text.
+    ///
+    /// The gRPC backend includes stop tokens in `output_ids`, so the Harmony
+    /// tokenizer decodes them into the text.  The regular router uses
+    /// `StopSequenceDecoder` to strip them; this method provides the
+    /// equivalent for the Harmony pipeline.
+    fn trim_stop_sequence(text: &mut String, stop: &str) {
+        if !stop.is_empty() {
+            if let Some(trimmed) = text.strip_suffix(stop) {
+                text.truncate(trimmed.len());
+            }
+        }
+    }
+
     /// Parse complete response
     ///
     /// Parses all output token IDs and returns the complete channel output
@@ -266,6 +290,17 @@ impl HarmonyParserAdapter {
 
         // Check for incomplete content in parser state
         Self::handle_incomplete_content(&self.parser, &mut analysis, &mut final_text);
+
+        // Strip matched stop string from text output.
+        // The backend includes stop tokens in output_ids, so the Harmony parser
+        // decodes them into text. The regular router strips them via
+        // StopSequenceDecoder; we must do the equivalent here.
+        if let Some(stop_str) = Self::extract_stop_string(&matched_stop) {
+            Self::trim_stop_sequence(&mut final_text, &stop_str);
+            if let Some(ref mut a) = analysis {
+                Self::trim_stop_sequence(a, &stop_str);
+            }
+        }
 
         // Determine finish reason: override to "tool_calls" if commentary has tool calls
         let final_finish_reason = if commentary.is_some() {
@@ -497,6 +532,14 @@ impl HarmonyParserAdapter {
 
         // Check for remaining incomplete content
         Self::handle_incomplete_content(&self.parser, &mut analysis, &mut final_text);
+
+        // Strip matched stop string (see parse_complete for rationale)
+        if let Some(stop_str) = Self::extract_stop_string(&matched_stop) {
+            Self::trim_stop_sequence(&mut final_text, &stop_str);
+            if let Some(ref mut a) = analysis {
+                Self::trim_stop_sequence(a, &stop_str);
+            }
+        }
 
         // Determine finish reason: override to "tool_calls" if commentary has tool calls
         let final_finish_reason = if commentary.is_some() {
