@@ -83,6 +83,8 @@ impl ModelRegistry {
             specs: vec![
                 LazySpec::new("llama4", || Box::new(Llama4Spec)),
                 LazySpec::new("llava", || Box::new(LlavaSpec)),
+                // Qwen3-VL must be registered before QwenVL so "qwen3" matches first.
+                LazySpec::new("qwen3_vl", || Box::new(Qwen3VLVisionSpec)),
                 LazySpec::new("qwen_vl", || Box::new(QwenVLVisionSpec)),
                 LazySpec::new("phi3_v", || Box::new(Phi3VisionSpec)),
             ],
@@ -184,6 +186,112 @@ impl ModelProcessorSpec for LlavaSpec {
                 PromptReplacement::repeated(Modality::Image, &token, token_id, count)
             })
             .collect())
+    }
+}
+
+struct Qwen3VLVisionSpec;
+
+impl Qwen3VLVisionSpec {
+    fn pad_token_id(metadata: &ModelMetadata) -> RegistryResult<TokenId> {
+        metadata
+            .config_u32(&["image_token_id"])
+            .map(|v| v as TokenId)
+            .ok_or_else(|| ModelRegistryError::MissingConfigField {
+                field: "image_token_id".to_string(),
+            })
+    }
+
+    fn start_token_id(metadata: &ModelMetadata) -> RegistryResult<TokenId> {
+        metadata
+            .config_u32(&["vision_start_token_id"])
+            .map(|v| v as TokenId)
+            .ok_or_else(|| ModelRegistryError::MissingConfigField {
+                field: "vision_start_token_id".to_string(),
+            })
+    }
+
+    fn end_token_id(metadata: &ModelMetadata) -> RegistryResult<TokenId> {
+        metadata
+            .config_u32(&["vision_end_token_id"])
+            .map(|v| v as TokenId)
+            .ok_or_else(|| ModelRegistryError::MissingConfigField {
+                field: "vision_end_token_id".to_string(),
+            })
+    }
+
+    fn patch_grid(metadata: &ModelMetadata, size: ImageSize) -> (usize, usize) {
+        let patch = metadata
+            .config_u32(&["vision_config", "patch_size"])
+            .unwrap_or(16);
+        let cols = size.width.div_ceil(patch) as usize;
+        let rows = size.height.div_ceil(patch) as usize;
+        (rows, cols)
+    }
+}
+
+impl ModelProcessorSpec for Qwen3VLVisionSpec {
+    fn name(&self) -> &'static str {
+        "qwen3_vl"
+    }
+
+    fn matches(&self, metadata: &ModelMetadata) -> bool {
+        let id = metadata.model_id.to_ascii_lowercase();
+        id.contains("qwen3") && id.contains("vl")
+    }
+
+    fn placeholder_token(&self, metadata: &ModelMetadata) -> RegistryResult<String> {
+        let token_id = Self::pad_token_id(metadata)? as u32;
+        metadata
+            .tokenizer
+            .id_to_token(token_id)
+            .ok_or_else(|| ModelRegistryError::TokenNotFound {
+                token: format!("image_token_id:{token_id}"),
+            })
+    }
+
+    fn placeholder_token_id(&self, metadata: &ModelMetadata) -> RegistryResult<TokenId> {
+        Self::pad_token_id(metadata)
+    }
+
+    fn modality_limits(
+        &self,
+        _metadata: &ModelMetadata,
+    ) -> RegistryResult<HashMap<Modality, usize>> {
+        Ok(HashMap::from([(Modality::Image, 10)]))
+    }
+
+    fn processor_kwargs(&self, _metadata: &ModelMetadata) -> RegistryResult<Value> {
+        Ok(json!({}))
+    }
+
+    fn prompt_replacements(
+        &self,
+        metadata: &ModelMetadata,
+        image_sizes: &[ImageSize],
+    ) -> RegistryResult<Vec<PromptReplacement>> {
+        let start_token_id = Self::start_token_id(metadata)?;
+        let pad_token_id = Self::pad_token_id(metadata)?;
+        let end_token_id = Self::end_token_id(metadata)?;
+        let placeholder_token = self.placeholder_token(metadata)?;
+        Ok(image_sizes
+            .iter()
+            .map(|size| {
+                let (rows, cols) = Self::patch_grid(metadata, *size);
+                let pad_len = rows * cols;
+                let mut tokens = Vec::with_capacity(pad_len + 2);
+                tokens.push(start_token_id);
+                tokens.extend(std::iter::repeat_n(pad_token_id, pad_len));
+                tokens.push(end_token_id);
+                PromptReplacement::sequence(Modality::Image, &placeholder_token, tokens)
+            })
+            .collect())
+    }
+
+    fn field_layouts(&self) -> HashMap<String, FieldLayout> {
+        HashMap::from([
+            ("pixel_values".to_string(), FieldLayout::Batched),
+            ("image_grid_thw".to_string(), FieldLayout::Batched),
+        ])
     }
 }
 
@@ -571,6 +679,55 @@ mod tests {
         assert_eq!(replacements[0].tokens.len(), 1025);
         assert_eq!(replacements[0].tokens[0], 151652);
         assert_eq!(replacements[0].tokens[1], 151654);
+    }
+
+    #[test]
+    fn qwen3_vl_includes_end_token() {
+        let tokenizer = TestTokenizer::new(&[("<image>", 999)]);
+        let config = json!({
+            "model_type": "qwen3_vl",
+            "vision_start_token_id": 151652,
+            "image_token_id": 151655,
+            "vision_end_token_id": 151653,
+            "vision_config": {"patch_size": 16}
+        });
+        let metadata = ModelMetadata {
+            model_id: "Qwen3-VL-7B",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).expect("qwen3 spec");
+        assert_eq!(spec.name(), "qwen3_vl");
+        let replacements = spec
+            .prompt_replacements(&metadata, &[ImageSize::new(448, 448)])
+            .unwrap();
+        // 448/16 = 28 patches => 784 pad tokens + 1 start + 1 end = 786
+        assert_eq!(replacements[0].tokens.len(), 786);
+        assert_eq!(replacements[0].tokens[0], 151652); // start
+        assert_eq!(replacements[0].tokens[1], 151655); // pad (image_token_id)
+        assert_eq!(*replacements[0].tokens.last().unwrap(), 151653); // end
+    }
+
+    #[test]
+    fn qwen2_vl_does_not_match_qwen3() {
+        let tokenizer = TestTokenizer::new(&[("<image>", 999)]);
+        let config = json!({
+            "model_type": "qwen3_vl",
+            "vision_start_token_id": 151652,
+            "image_token_id": 151655,
+            "vision_end_token_id": 151653,
+            "vision_config": {"patch_size": 16}
+        });
+        let metadata = ModelMetadata {
+            model_id: "Qwen3-VL-7B",
+            tokenizer: &tokenizer,
+            config: &config,
+        };
+        let registry = ModelRegistry::new();
+        let spec = registry.lookup(&metadata).expect("should match qwen3");
+        // Must match qwen3_vl spec, not qwen_vl
+        assert_eq!(spec.name(), "qwen3_vl");
     }
 
     #[test]
