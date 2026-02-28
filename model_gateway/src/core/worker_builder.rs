@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use arc_swap::ArcSwap;
 use openai_protocol::{
     model_card::ModelCard,
     worker::{HealthCheckConfig, WorkerModels, WorkerSpec},
@@ -183,7 +184,7 @@ impl BasicWorkerBuilder {
     pub fn build(mut self) -> BasicWorker {
         use std::sync::{
             atomic::{AtomicBool, AtomicUsize},
-            Arc, RwLock as StdRwLock,
+            Arc,
         };
 
         use tokio::sync::OnceCell;
@@ -230,7 +231,7 @@ impl BasicWorkerBuilder {
             ),
             metadata,
             grpc_client,
-            models_override: Arc::new(StdRwLock::new(None)),
+            models_override: Arc::new(ArcSwap::from_pointee(WorkerModels::Wildcard)),
         }
     }
 }

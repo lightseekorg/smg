@@ -2,11 +2,12 @@ use std::{
     fmt,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, LazyLock, RwLock as StdRwLock,
+        Arc, LazyLock,
     },
     time::Duration,
 };
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::body::Body;
 // Re-export protocol types as the canonical types for the gateway
@@ -353,8 +354,8 @@ pub trait Worker: Send + Sync + fmt::Debug {
     }
 
     /// Get all models this worker can serve.
-    fn models(&self) -> &[ModelCard] {
-        self.metadata().spec.models.all()
+    fn models(&self) -> Vec<ModelCard> {
+        self.metadata().spec.models.all().to_vec()
     }
 
     /// Set models for this worker (for lazy discovery).
@@ -485,10 +486,10 @@ pub struct BasicWorker {
     /// Lazily initialized gRPC client for gRPC workers.
     /// Uses OnceCell for lock-free reads after initialization.
     pub grpc_client: Arc<OnceCell<Arc<GrpcClient>>>,
-    /// Runtime-mutable models override (for lazy discovery)
-    /// When set, overrides metadata.models for routing decisions.
-    /// Uses std::sync::RwLock for synchronous access in supports_model().
-    pub models_override: Arc<StdRwLock<Option<WorkerModels>>>,
+    /// Runtime-mutable models override (for lazy discovery).
+    /// When not `Wildcard`, overrides metadata.models for routing decisions.
+    /// Uses `ArcSwap` for lock-free reads on the hot path (`supports_model`).
+    pub models_override: Arc<ArcSwap<WorkerModels>>,
 }
 
 impl fmt::Debug for BasicWorker {
@@ -637,38 +638,36 @@ impl Worker for BasicWorker {
         &self.circuit_breaker
     }
 
+    fn models(&self) -> Vec<ModelCard> {
+        let overridden = self.models_override.load();
+        let source = if overridden.is_wildcard() {
+            self.metadata.spec.models.all()
+        } else {
+            overridden.all()
+        };
+        source.to_vec()
+    }
+
     fn supports_model(&self, model_id: &str) -> bool {
-        // Check models_override first (for lazy discovery)
-        if let Ok(guard) = self.models_override.read() {
-            if let Some(ref models) = *guard {
-                // Models were discovered - check if this model is supported
-                return models.supports(model_id);
-            }
+        let overridden = self.models_override.load();
+        if !overridden.is_wildcard() {
+            return overridden.supports(model_id);
         }
-        // Fall back to metadata.models
         self.metadata.supports_model(model_id)
     }
 
     fn set_models(&self, models: Vec<ModelCard>) {
-        if let Ok(mut guard) = self.models_override.write() {
-            tracing::debug!(
-                "Setting {} models for worker {} via lazy discovery",
-                models.len(),
-                self.metadata.spec.url
-            );
-            *guard = Some(WorkerModels::from(models));
-        }
+        tracing::debug!(
+            "Setting {} models for worker {} via lazy discovery",
+            models.len(),
+            self.metadata.spec.url
+        );
+        self.models_override
+            .store(Arc::new(WorkerModels::from(models)));
     }
 
     fn has_models_discovered(&self) -> bool {
-        // Check if models_override has been set
-        if let Ok(guard) = self.models_override.read() {
-            if guard.is_some() {
-                return true;
-            }
-        }
-        // Fall back to checking metadata.models
-        !self.metadata.spec.models.is_wildcard()
+        !self.models_override.load().is_wildcard() || !self.metadata.spec.models.is_wildcard()
     }
 
     async fn get_grpc_client(&self) -> WorkerResult<Option<Arc<GrpcClient>>> {
@@ -1767,5 +1766,29 @@ mod tests {
         drop(guard2);
         assert_eq!(worker.load(), 0);
         assert_eq!(worker.worker_routing_key_load().value(), 0);
+    }
+
+    #[test]
+    fn test_lazy_discovered_models_override_wildcard() {
+        let worker = BasicWorkerBuilder::new("http://test:8080").build();
+
+        // Wildcard worker starts with no models listed, but accepts any model
+        assert!(worker.models().is_empty());
+        assert!(!worker.has_models_discovered());
+        assert!(worker.supports_model("gpt-4o-mini")); // wildcard accepts anything
+
+        // Simulate lazy discovery via set_models
+        let discovered = vec![
+            ModelCard::new("gpt-4o-mini"),
+            ModelCard::new("text-embedding-3-small"),
+        ];
+        worker.set_models(discovered);
+
+        let ids: Vec<String> = worker.models().into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec!["gpt-4o-mini", "text-embedding-3-small"]);
+        assert!(worker.supports_model("gpt-4o-mini"));
+        assert!(worker.supports_model("text-embedding-3-small"));
+        assert!(!worker.supports_model("non-existent-model"));
+        assert!(worker.has_models_discovered());
     }
 }

@@ -29,6 +29,26 @@ env:
   GENAI_BENCH_IMAGE: ghcr.io/moirai-internal/genai-bench:0.0.3
 
 jobs:
+  pre-commit:
+    runs-on: k8s-runner-cpu
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Run pre-commit checks
+        env:
+          SKIP: rustfmt,clippy,no-commit-to-branch,branch-name-check,dco-check
+        run: pre-commit run --all-files --show-diff-on-failure
+
   python-lint:
     runs-on: k8s-runner-cpu
     permissions:
@@ -546,14 +566,15 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
+    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
     steps:
       - name: Check CI result
         run: |
-          if [[ "${{ needs.python-lint.result }}" == "failure" || \
+          if [[ "${{ needs.pre-commit.result }}" == "failure" || \
+                "${{ needs.python-lint.result }}" == "failure" || \
                 "${{ needs.grpc-proto-build-check.result }}" == "failure" || \
                 "${{ needs.build-wheel.result }}" == "failure" || \
                 "${{ needs.python-unit-tests.result }}" == "failure" || \
