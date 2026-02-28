@@ -15,6 +15,7 @@ pub use openai_protocol::UNKNOWN_MODEL_ID;
 pub mod circuit_breaker;
 pub mod error;
 pub mod job_queue;
+pub mod kv_event_monitor;
 pub mod metrics_aggregator;
 pub mod retry;
 pub mod steps;
@@ -29,6 +30,7 @@ pub mod worker_service;
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 pub use error::{WorkerError, WorkerResult};
 pub use job_queue::{Job, JobQueue, JobQueueConfig};
+pub use kv_event_monitor::KvEventMonitor;
 pub use openai_protocol::{
     model_card::ModelCard,
     model_type::{Endpoint, ModelType},
