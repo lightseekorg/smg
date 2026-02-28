@@ -5,7 +5,7 @@ use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 use thiserror::Error;
 
-use super::types::{ImageSize, Modality, PromptReplacement, TokenId};
+use super::types::{FieldLayout, ImageSize, Modality, PromptReplacement, TokenId};
 
 #[derive(Debug, Error)]
 pub enum ModelRegistryError {
@@ -62,6 +62,15 @@ pub trait ModelProcessorSpec: Send + Sync {
         metadata: &ModelMetadata,
         image_sizes: &[ImageSize],
     ) -> RegistryResult<Vec<PromptReplacement>>;
+
+    /// Declare how each tensor's first dimension maps to images.
+    ///
+    /// Keys not listed are treated as shared (replicated across all images).
+    /// The `"pixel_values"` key should be included when it differs from batched.
+    fn field_layouts(&self) -> HashMap<String, FieldLayout> {
+        // Default: pixel_values is batched (most models).
+        HashMap::from([("pixel_values".to_string(), FieldLayout::Batched)])
+    }
 }
 
 pub struct ModelRegistry {
@@ -263,6 +272,15 @@ impl ModelProcessorSpec for QwenVLVisionSpec {
             })
             .collect())
     }
+
+    fn field_layouts(&self) -> HashMap<String, FieldLayout> {
+        // Our Rust preprocessor stacks images → pixel_values is [num_images, C, H, W].
+        // image_grid_thw is [num_images, 3].
+        HashMap::from([
+            ("pixel_values".to_string(), FieldLayout::Batched),
+            ("image_grid_thw".to_string(), FieldLayout::Batched),
+        ])
+    }
 }
 
 struct Phi3VisionSpec;
@@ -417,6 +435,16 @@ impl ModelProcessorSpec for Llama4Spec {
                 PromptReplacement::repeated(Modality::Image, &token, token_id, count)
             })
             .collect())
+    }
+
+    fn field_layouts(&self) -> HashMap<String, FieldLayout> {
+        // pixel_values is [total_tiles, C, H, W] — variable tiles per image.
+        // aspect_ratios and patches_per_image are [num_images, ...].
+        HashMap::from([
+            ("pixel_values".to_string(), FieldLayout::flat("patches_per_image")),
+            ("aspect_ratios".to_string(), FieldLayout::Batched),
+            ("patches_per_image".to_string(), FieldLayout::Batched),
+        ])
     }
 }
 

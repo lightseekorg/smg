@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use dashmap::DashMap;
 use llm_multimodal::{
     AsyncMultiModalTracker, ChatContentPart, ImageDetail, ImageFrame, ImageProcessorRegistry,
-    ImageSize, MediaConnector, MediaConnectorConfig, Modality, ModelMetadata, ModelRegistry,
-    ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
+    ImageSize, MediaConnector, MediaConnectorConfig, Modality, ModelMetadata, ModelProcessorSpec,
+    ModelRegistry, ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
     PromptReplacement, TrackedMedia, TrackerOutput,
 };
 use llm_tokenizer::TokenizerTrait;
@@ -306,7 +306,7 @@ pub(crate) async fn process_multimodal(
 
     // Step 4: Build multimodal data (includes hash collection)
     let multimodal_data =
-        build_multimodal_data(&preprocessed, im_token_id, &mm_placeholders, &images);
+        build_multimodal_data(&preprocessed, im_token_id, &mm_placeholders, &images, spec);
 
     Ok(MultimodalOutput {
         expanded_token_ids,
@@ -366,6 +366,7 @@ fn build_multimodal_data(
     im_token_id: Option<u32>,
     placeholders: &[PlaceholderRange],
     images: &[Arc<ImageFrame>],
+    spec: &dyn ModelProcessorSpec,
 ) -> MultimodalData {
     // Serialize pixel values as raw little-endian f32 bytes
     let pixel_bytes: Vec<u8> = if let Some(pixel_slice) = preprocessed
@@ -409,14 +410,10 @@ fn build_multimodal_data(
         .map(|p| (p.offset as u32, p.length as u32))
         .collect();
 
-    // Determine which model-specific tensor keys are batched (first dim = num_images).
-    // "pixel_values" is implicit — always batched.
-    let num_images = images.len() as u32;
-    let batched_keys = model_specific_tensors
-        .iter()
-        .filter(|(_, t)| t.shape.first().copied() == Some(num_images))
-        .map(|(k, _)| k.clone())
-        .collect();
+    // Field layout classification comes from the model spec in the multimodal crate.
+    let layouts = spec.field_layouts();
+    let batched_keys = PreprocessedImages::batched_keys(&layouts);
+    let flat_keys = PreprocessedImages::flat_keys(&layouts);
 
     MultimodalData {
         image_data,
@@ -427,6 +424,7 @@ fn build_multimodal_data(
         mm_placeholders,
         mm_hashes,
         batched_keys,
+        flat_keys,
     }
 }
 

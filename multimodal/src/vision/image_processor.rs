@@ -8,6 +8,8 @@ use std::{borrow::Cow, collections::HashMap};
 use image::DynamicImage;
 use ndarray::{Array4, ArrayD};
 
+use crate::types::FieldLayout;
+
 use super::{preprocessor_config::PreProcessorConfig, transforms::TransformError};
 
 /// Helper to extract a dimension from pixel_values given an ndim-dependent axis index.
@@ -97,6 +99,16 @@ impl ModelSpecificValue {
         Self::IntTensor {
             data,
             shape: vec![rows, cols],
+        }
+    }
+
+    /// Get the first dimension of a tensor variant, if applicable.
+    pub fn first_dim(&self) -> Option<usize> {
+        match self {
+            Self::Tensor { shape, .. }
+            | Self::IntTensor { shape, .. }
+            | Self::UintTensor { shape, .. } => shape.first().copied(),
+            _ => None,
         }
     }
 }
@@ -231,6 +243,33 @@ impl PreprocessedImages {
     /// Get the shape of pixel values as a vector.
     pub fn pixel_values_shape(&self) -> Vec<usize> {
         self.pixel_values.shape().to_vec()
+    }
+
+    /// Number of images in this batch.
+    pub fn num_images(&self) -> usize {
+        self.image_sizes.len()
+    }
+
+    /// Extract batched tensor keys from explicit field layout declarations.
+    pub fn batched_keys(layouts: &HashMap<String, FieldLayout>) -> Vec<String> {
+        layouts
+            .iter()
+            .filter(|(_, l)| matches!(l, FieldLayout::Batched))
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// Extract flat-slicing tensor keys from explicit field layout declarations.
+    ///
+    /// Returns a map of tensor name → sizes tensor name.
+    pub fn flat_keys(layouts: &HashMap<String, FieldLayout>) -> HashMap<String, String> {
+        layouts
+            .iter()
+            .filter_map(|(k, l)| match l {
+                FieldLayout::Flat { sizes_key } => Some((k.clone(), sizes_key.clone())),
+                FieldLayout::Batched => None,
+            })
+            .collect()
     }
 }
 
