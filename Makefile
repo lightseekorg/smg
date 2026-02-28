@@ -152,6 +152,9 @@ generate-python-types: generate-openapi ## Generate Python types from OpenAPI sp
 		--collapse-root-models \
 		--use-standard-collections \
 		--use-union-operator
+	@echo "Post-processing: converting enums to str enums..."
+	@sed -i.bak 's/class \(.*\)(Enum):/class \1(str, Enum):/' clients/python/smg_client/types/_generated.py
+	@rm -f clients/python/smg_client/types/_generated.py.bak
 
 generate-java-types: generate-openapi ## Generate Java types from OpenAPI spec
 	@echo "Generating Java types..."
