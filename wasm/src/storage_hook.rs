@@ -283,6 +283,7 @@ mod tests {
             StorageOperation::DeleteConversation,
             StorageOperation::CreateItem,
             StorageOperation::LinkItem,
+            StorageOperation::LinkItems,
             StorageOperation::ListItems,
             StorageOperation::GetItem,
             StorageOperation::IsItemLinked,
