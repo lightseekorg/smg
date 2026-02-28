@@ -282,11 +282,9 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         )
         .await?;
 
-        let result = with_extra_columns(
-            extra.clone(),
-            self.inner.link_items(conversation_id, items),
-        )
-        .await?;
+        let result =
+            with_extra_columns(extra.clone(), self.inner.link_items(conversation_id, items))
+                .await?;
 
         run_after(
             &*self.hook,

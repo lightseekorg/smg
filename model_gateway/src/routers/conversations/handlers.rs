@@ -343,10 +343,7 @@ pub async fn create_conversation_items(
     }
 
     // Batch-link all items in a single operation
-    if let Err(e) = item_storage
-        .link_items(&conversation_id, &link_pairs)
-        .await
-    {
+    if let Err(e) = item_storage.link_items(&conversation_id, &link_pairs).await {
         warn!("Failed to batch-link items: {e}");
     }
 

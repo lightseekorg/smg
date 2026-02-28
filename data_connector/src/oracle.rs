@@ -822,10 +822,8 @@ impl ConversationItemStorage for OracleConversationItemStorage {
         let cid = conversation_id.0.clone();
         let schema = self.store.schema.clone();
         let hook_extra = current_extra_columns().unwrap_or_default();
-        let owned_items: Vec<(String, DateTime<Utc>)> = items
-            .iter()
-            .map(|(id, ts)| (id.0.clone(), *ts))
-            .collect();
+        let owned_items: Vec<(String, DateTime<Utc>)> =
+            items.iter().map(|(id, ts)| (id.0.clone(), *ts)).collect();
 
         self.store
             .execute(move |conn| {

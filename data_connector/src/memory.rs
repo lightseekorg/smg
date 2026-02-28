@@ -163,10 +163,7 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
                 .rev_index
                 .entry(conversation_id.clone())
                 .or_default()
-                .insert(
-                    item_id.0.clone(),
-                    (added_at.timestamp(), item_id.0.clone()),
-                );
+                .insert(item_id.0.clone(), (added_at.timestamp(), item_id.0.clone()));
         }
         Ok(())
     }
