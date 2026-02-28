@@ -679,6 +679,7 @@ class TestWebSearchStreamingEvents:
 
 
 @pytest.mark.e2e
+@pytest.mark.model("openai/gpt-oss-20b")
 class TestBuiltinToolRoutingGrpc:
     """Full integration tests for built-in tool routing on gRPC backend.
 
