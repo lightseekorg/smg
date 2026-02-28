@@ -267,6 +267,39 @@ impl ConversationItemStorage for HookedConversationItemStorage {
         Ok(result)
     }
 
+    async fn link_items(
+        &self,
+        conversation_id: &ConversationId,
+        items: &[(ConversationItemId, DateTime<Utc>)],
+    ) -> ConversationItemResult<()> {
+        let payload =
+            serde_json::json!({ "conversation_id": conversation_id, "items_count": items.len() });
+        let extra = run_before(
+            &*self.hook,
+            StorageOperation::LinkItem,
+            &payload,
+            ConversationItemStorageError::StorageError,
+        )
+        .await?;
+
+        let result = with_extra_columns(
+            extra.clone(),
+            self.inner.link_items(conversation_id, items),
+        )
+        .await?;
+
+        run_after(
+            &*self.hook,
+            StorageOperation::LinkItem,
+            &payload,
+            &serde_json::Value::Null,
+            &extra,
+        )
+        .await;
+
+        Ok(result)
+    }
+
     async fn list_items(
         &self,
         conversation_id: &ConversationId,

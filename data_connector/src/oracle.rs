@@ -810,6 +810,86 @@ impl ConversationItemStorage for OracleConversationItemStorage {
             .map_err(ConversationItemStorageError::StorageError)
     }
 
+    async fn link_items(
+        &self,
+        conversation_id: &ConversationId,
+        items: &[(ConversationItemId, DateTime<Utc>)],
+    ) -> Result<(), ConversationItemStorageError> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        let cid = conversation_id.0.clone();
+        let schema = self.store.schema.clone();
+        let hook_extra = current_extra_columns().unwrap_or_default();
+        let owned_items: Vec<(String, DateTime<Utc>)> = items
+            .iter()
+            .map(|(id, ts)| (id.0.clone(), *ts))
+            .collect();
+
+        self.store
+            .execute(move |conn| {
+                let sl = &schema.conversation_item_links;
+                let table = sl.qualified_table(schema.owner.as_deref());
+
+                let mut columns: Vec<&str> = vec![
+                    sl.col("conversation_id"),
+                    sl.col("item_id"),
+                    sl.col("added_at"),
+                ];
+
+                let extra_cols: Vec<(&str, Option<String>)> =
+                    resolve_extra_column_values(sl, &hook_extra);
+                for (name, _) in &extra_cols {
+                    columns.push(*name);
+                }
+
+                let col_list = columns.join(", ");
+
+                // Build INSERT ALL ... SELECT 1 FROM DUAL
+                let mut sql = String::from("INSERT ALL");
+                for (idx, _) in owned_items.iter().enumerate() {
+                    let mut placeholders = vec![
+                        ":cid".to_string(),
+                        format!(":iid{idx}"),
+                        format!(":ts{idx}"),
+                    ];
+                    for (ei, _) in extra_cols.iter().enumerate() {
+                        placeholders.push(format!(":ex{ei}"));
+                    }
+                    sql.push_str(&format!(
+                        " INTO {table} ({col_list}) VALUES ({})",
+                        placeholders.join(", ")
+                    ));
+                }
+                sql.push_str(" SELECT 1 FROM DUAL");
+
+                let mut params_vec: Vec<(&str, &dyn ToSql)> = vec![("cid", &cid)];
+
+                // We need stable references, so collect param names
+                let iid_names: Vec<String> =
+                    (0..owned_items.len()).map(|i| format!("iid{i}")).collect();
+                let ts_names: Vec<String> =
+                    (0..owned_items.len()).map(|i| format!("ts{i}")).collect();
+                let ex_names: Vec<String> =
+                    (0..extra_cols.len()).map(|i| format!("ex{i}")).collect();
+
+                for (idx, (iid, ts)) in owned_items.iter().enumerate() {
+                    params_vec.push((&iid_names[idx], iid));
+                    params_vec.push((&ts_names[idx], ts));
+                }
+                for (ei, (_, val)) in extra_cols.iter().enumerate() {
+                    params_vec.push((&ex_names[ei], val));
+                }
+
+                conn.execute_named(&sql, &params_vec)
+                    .map_err(map_oracle_error)?;
+                Ok(())
+            })
+            .await
+            .map_err(ConversationItemStorageError::StorageError)
+    }
+
     async fn list_items(
         &self,
         conversation_id: &ConversationId,
@@ -821,46 +901,9 @@ impl ConversationItemStorage for OracleConversationItemStorage {
         let after_id = params.after.clone();
         let schema = self.store.schema.clone();
 
-        // Resolve the added_at of the after cursor if provided
-        let after_key: Option<(DateTime<Utc>, String)> = if let Some(ref aid) = after_id {
-            let schema2 = schema.clone();
-            self.store
-                .execute({
-                    let cid = cid.clone();
-                    let aid = aid.clone();
-                    move |conn| {
-                        let sl = &schema2.conversation_item_links;
-                        let table = sl.qualified_table(schema2.owner.as_deref());
-                        let col_added = sl.col("added_at");
-                        let col_cid = sl.col("conversation_id");
-                        let col_iid = sl.col("item_id");
-
-                        let sql = format!(
-                            "SELECT {col_added} FROM {table} \
-                             WHERE {col_cid} = :1 AND {col_iid} = :2"
-                        );
-                        let mut stmt = conn.statement(&sql).build().map_err(map_oracle_error)?;
-                        let mut rows = stmt.query(&[&cid, &aid]).map_err(map_oracle_error)?;
-                        if let Some(row_res) = rows.next() {
-                            let row = row_res.map_err(map_oracle_error)?;
-                            let ts: DateTime<Utc> = row.get(col_added).map_err(map_oracle_error)?;
-                            Ok(Some((ts, aid)))
-                        } else {
-                            Ok(None)
-                        }
-                    }
-                })
-                .await
-                .map_err(ConversationItemStorageError::StorageError)?
-        } else {
-            None
-        };
-
-        // Build the main list query and construct items directly in the closure.
+        // Single query with optional LEFT JOIN to resolve cursor in one round trip
         self.store
             .execute({
-                let cid = cid.clone();
-                let schema = schema.clone();
                 move |conn| {
                     let si = &schema.conversation_items;
                     let sl = &schema.conversation_item_links;
@@ -888,21 +931,33 @@ impl ConversationItemStorage for OracleConversationItemStorage {
 
                     let mut sql = format!(
                         "SELECT {} FROM {sl_table} l \
-                         JOIN {si_table} i ON i.{si_col_id} = l.{sl_col_iid} \
-                         WHERE l.{sl_col_cid} = :cid",
+                         JOIN {si_table} i ON i.{si_col_id} = l.{sl_col_iid}",
                         select_cols.join(", "),
                     );
 
-                    if let Some((_ts, _iid)) = &after_key {
+                    if after_id.is_some() {
+                        // LEFT JOIN to the cursor row to resolve its added_at inline
+                        sql.push_str(&format!(
+                            " LEFT JOIN {sl_table} c \
+                             ON c.{sl_col_cid} = :cid AND c.{sl_col_iid} = :after_id"
+                        ));
+                    }
+
+                    sql.push_str(&format!(" WHERE l.{sl_col_cid} = :cid"));
+
+                    if after_id.is_some() {
+                        // c.item_id IS NULL handles "cursor not found" → returns all items
                         if order_desc {
                             sql.push_str(&format!(
-                                " AND (l.{sl_col_added} < :ats OR \
-                                 (l.{sl_col_added} = :ats AND l.{sl_col_iid} < :iid))"
+                                " AND (c.{sl_col_iid} IS NULL \
+                                 OR l.{sl_col_added} < c.{sl_col_added} \
+                                 OR (l.{sl_col_added} = c.{sl_col_added} AND l.{sl_col_iid} < c.{sl_col_iid}))"
                             ));
                         } else {
                             sql.push_str(&format!(
-                                " AND (l.{sl_col_added} > :ats OR \
-                                 (l.{sl_col_added} = :ats AND l.{sl_col_iid} > :iid))"
+                                " AND (c.{sl_col_iid} IS NULL \
+                                 OR l.{sl_col_added} > c.{sl_col_added} \
+                                 OR (l.{sl_col_added} = c.{sl_col_added} AND l.{sl_col_iid} > c.{sl_col_iid}))"
                             ));
                         }
                     }
@@ -919,9 +974,8 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                     sql.push_str(" FETCH NEXT :limit ROWS ONLY");
 
                     let mut params_vec: Vec<(&str, &dyn ToSql)> = vec![("cid", &cid)];
-                    if let Some((ts, iid)) = &after_key {
-                        params_vec.push(("ats", ts));
-                        params_vec.push(("iid", iid));
+                    if let Some(ref aid) = after_id {
+                        params_vec.push(("after_id", aid));
                     }
                     params_vec.push(("limit", &limit));
 

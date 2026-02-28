@@ -147,6 +147,30 @@ impl ConversationItemStorage for MemoryConversationItemStorage {
         Ok(())
     }
 
+    async fn link_items(
+        &self,
+        conversation_id: &ConversationId,
+        items: &[(ConversationItemId, DateTime<Utc>)],
+    ) -> ConversationItemResult<()> {
+        let mut store = self.inner.write();
+        for (item_id, added_at) in items {
+            store
+                .links
+                .entry(conversation_id.clone())
+                .or_default()
+                .insert((added_at.timestamp(), item_id.0.clone()), item_id.clone());
+            store
+                .rev_index
+                .entry(conversation_id.clone())
+                .or_default()
+                .insert(
+                    item_id.0.clone(),
+                    (added_at.timestamp(), item_id.0.clone()),
+                );
+        }
+        Ok(())
+    }
+
     async fn list_items(
         &self,
         conversation_id: &ConversationId,

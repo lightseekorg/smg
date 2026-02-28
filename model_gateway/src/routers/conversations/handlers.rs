@@ -222,12 +222,8 @@ pub async fn delete_conversation(
 ) -> Response {
     let conversation_id = ConversationId::from(conv_id);
 
-    if let Err(response) = ensure_conversation_exists(storage, &conversation_id).await {
-        return response;
-    }
-
     match storage.delete_conversation(&conversation_id).await {
-        Ok(_) => {
+        Ok(true) => {
             info!(conversation_id = %conversation_id.0, "Deleted conversation");
             (
                 StatusCode::OK,
@@ -239,6 +235,7 @@ pub async fn delete_conversation(
             )
                 .into_response()
         }
+        Ok(false) => not_found("Conversation not found"),
         Err(e) => internal_error(format!("Failed to delete conversation: {e}")),
     }
 }
@@ -329,11 +326,13 @@ pub async fn create_conversation_items(
 
     let mut created_items = Vec::new();
     let mut warnings = Vec::new();
+    let mut link_pairs = Vec::new();
     let added_at = Utc::now();
 
     for item_val in items_array {
         match process_item(item_storage, &conversation_id, item_val, added_at).await {
-            Ok((item_json, warning)) => {
+            Ok((item_json, item_id, warning)) => {
+                link_pairs.push((item_id, added_at));
                 created_items.push(item_json);
                 if let Some(w) = warning {
                     warnings.push(w);
@@ -341,6 +340,14 @@ pub async fn create_conversation_items(
             }
             Err(response) => return response,
         }
+    }
+
+    // Batch-link all items in a single operation
+    if let Err(e) = item_storage
+        .link_items(&conversation_id, &link_pairs)
+        .await
+    {
+        warn!("Failed to batch-link items: {e}");
     }
 
     let mut response = json!({
@@ -361,18 +368,20 @@ pub async fn create_conversation_items(
 }
 
 /// Process a single item for creation/linking
+/// Process a single item for creation. Returns (json, item_id, warning).
+/// Linking is deferred to the caller for batch operation.
 async fn process_item(
     item_storage: &Arc<dyn ConversationItemStorage>,
     conversation_id: &ConversationId,
     item_val: &Value,
     added_at: chrono::DateTime<Utc>,
-) -> Result<(Value, Option<String>), Response> {
+) -> Result<(Value, ConversationItemId, Option<String>), Response> {
     let item_type = item_val
         .get("type")
         .and_then(|v| v.as_str())
         .unwrap_or("message");
 
-    // Handle item_reference specially - just link existing item
+    // Handle item_reference specially - just resolve existing item
     if item_type == "item_reference" {
         return process_item_reference(item_storage, conversation_id, item_val, added_at).await;
     }
@@ -385,24 +394,18 @@ async fn process_item(
         process_new_item(item_storage, item_val).await?
     };
 
-    // Link item to conversation
-    if let Err(e) = item_storage
-        .link_item(conversation_id, &item.id, added_at)
-        .await
-    {
-        warn!("Failed to link item {}: {}", item.id.0, e);
-    }
-
-    Ok((item_to_json(&item), warning))
+    let item_id = item.id.clone();
+    Ok((item_to_json(&item), item_id, warning))
 }
 
-/// Process an item_reference - link an existing item to the conversation
+/// Process an item_reference - resolve an existing item for linking.
+/// Linking is deferred to the caller for batch operation.
 async fn process_item_reference(
     item_storage: &Arc<dyn ConversationItemStorage>,
-    conversation_id: &ConversationId,
+    _conversation_id: &ConversationId,
     item_val: &Value,
-    added_at: chrono::DateTime<Utc>,
-) -> Result<(Value, Option<String>), Response> {
+    _added_at: chrono::DateTime<Utc>,
+) -> Result<(Value, ConversationItemId, Option<String>), Response> {
     let ref_id = item_val
         .get("id")
         .and_then(|v| v.as_str())
@@ -420,14 +423,8 @@ async fn process_item_reference(
         }
     };
 
-    if let Err(e) = item_storage
-        .link_item(conversation_id, &existing_item.id, added_at)
-        .await
-    {
-        warn!("Failed to link item {}: {}", existing_item.id.0, e);
-    }
-
-    Ok((item_to_json(&existing_item), None))
+    let item_id = existing_item.id.clone();
+    Ok((item_to_json(&existing_item), item_id, None))
 }
 
 /// Process an item with a user-provided ID

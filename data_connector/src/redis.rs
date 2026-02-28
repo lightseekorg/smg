@@ -502,6 +502,37 @@ impl ConversationItemStorage for RedisConversationItemStorage {
         Ok(())
     }
 
+    async fn link_items(
+        &self,
+        conversation_id: &ConversationId,
+        items: &[(ConversationItemId, DateTime<Utc>)],
+    ) -> ConversationItemResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        let cid = conversation_id.0.as_str();
+        let key = self.conv_items_key(cid);
+
+        let mut conn = self
+            .store
+            .pool
+            .get()
+            .await
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
+
+        let mut pipe = redis::pipe();
+        for (item_id, added_at) in items {
+            let score = added_at.timestamp_millis() as f64;
+            pipe.zadd(&key, item_id.0.as_str(), score).ignore();
+        }
+        pipe.query_async::<()>(&mut *conn)
+            .await
+            .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
+
+        Ok(())
+    }
+
     async fn list_items(
         &self,
         conversation_id: &ConversationId,

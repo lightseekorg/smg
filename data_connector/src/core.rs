@@ -232,6 +232,20 @@ pub trait ConversationItemStorage: Send + Sync + 'static {
         added_at: DateTime<Utc>,
     ) -> ConversationItemResult<()>;
 
+    /// Batch-link multiple items to a conversation in a single operation.
+    /// Default implementation loops over `link_item`; backends may override
+    /// with a more efficient batched approach.
+    async fn link_items(
+        &self,
+        conversation_id: &ConversationId,
+        items: &[(ConversationItemId, DateTime<Utc>)],
+    ) -> ConversationItemResult<()> {
+        for (item_id, added_at) in items {
+            self.link_item(conversation_id, item_id, *added_at).await?;
+        }
+        Ok(())
+    }
+
     async fn list_items(
         &self,
         conversation_id: &ConversationId,
