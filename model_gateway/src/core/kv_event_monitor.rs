@@ -20,7 +20,7 @@ use smg_grpc_client::common_proto::{
 use tokio::{sync::Mutex, task::JoinHandle};
 use tracing::{debug, info, warn};
 
-use crate::core::Worker;
+use crate::core::{ConnectionMode, Worker};
 
 /// Default jump size for new `PositionalIndexer` instances.
 const DEFAULT_JUMP_SIZE: usize = 64;
@@ -84,6 +84,11 @@ impl KvEventMonitor {
         let url = worker.url().to_string();
         let model_id = worker.model_id().to_string();
 
+        if *worker.connection_mode() == ConnectionMode::Http {
+            debug!(worker_url = %url, "HTTP worker, skipping KV event subscription");
+            return;
+        }
+
         let mut handles = self.worker_handles.lock().await;
         if handles.contains_key(&url) {
             debug!(worker_url = %url, "KV event subscription already active, skipping");
@@ -119,9 +124,15 @@ impl KvEventMonitor {
 
     /// Stop the KV event subscription for a worker and remove it from the indexer.
     pub async fn on_worker_removed(&self, worker_url: &str) {
-        let subscription = {
+        // Single lock acquisition: remove subscription and check remaining atomically
+        // to avoid TOCTOU race with concurrent on_worker_added for the same model.
+        let (subscription, should_remove_indexer) = {
             let mut handles = self.worker_handles.lock().await;
-            handles.remove(worker_url)
+            let sub = handles.remove(worker_url);
+            let should_remove = sub
+                .as_ref()
+                .is_some_and(|s| !handles.values().any(|other| other.model_id == s.model_id));
+            (sub, should_remove)
         };
 
         let Some(sub) = subscription else {
@@ -137,10 +148,7 @@ impl KvEventMonitor {
             indexer.remove_worker(worker_url);
         }
 
-        // If no workers remain for this model, remove the indexer.
-        let handles = self.worker_handles.lock().await;
-        let any_remaining = handles.values().any(|s| s.model_id == sub.model_id);
-        if !any_remaining {
+        if should_remove_indexer {
             self.indexers.remove(&sub.model_id);
         }
     }
@@ -171,7 +179,7 @@ impl KvEventMonitor {
 
     /// Get the indexer for a model (used by `CacheAwarePolicy` for queries).
     pub fn get_indexer(&self, model_id: &str) -> Option<Arc<PositionalIndexer>> {
-        self.indexers.get(model_id).map(|r| r.clone())
+        self.indexers.get(model_id).map(|r| Arc::clone(&r))
     }
 
     /// Check if any subscription is running.
