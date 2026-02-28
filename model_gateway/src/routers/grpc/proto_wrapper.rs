@@ -137,41 +137,11 @@ impl MultimodalData {
 
     /// Convert to TensorRT-LLM proto MultimodalInput, consuming self to avoid clones.
     ///
-    /// Sends preprocessed tensors so TRT-LLM can bypass its HF input processor.
-    /// Raw image bytes are included as fallback.
+    /// Only sends raw image bytes — TRT-LLM's input processor handles hashing,
+    /// position tracking, and vision encoding server-side.
     pub fn into_trtllm_proto(self) -> trtllm::MultimodalInput {
-        let model_specific_tensors = self
-            .model_specific_tensors
-            .into_iter()
-            .map(|(k, v)| {
-                (
-                    k,
-                    trtllm::TensorData {
-                        data: v.data,
-                        shape: v.shape,
-                        dtype: v.dtype,
-                    },
-                )
-            })
-            .collect();
-
-        let mm_placeholders = self
-            .mm_placeholders
-            .into_iter()
-            .map(|(offset, length)| trtllm::PlaceholderRange { offset, length })
-            .collect();
-
         trtllm::MultimodalInput {
             image_data: self.image_data,
-            pixel_values: Some(trtllm::TensorData {
-                data: self.pixel_values,
-                shape: self.pixel_values_shape,
-                dtype: "float32".to_string(),
-            }),
-            model_specific_tensors,
-            mm_placeholders,
-            mm_hashes: self.mm_hashes,
-            batched_keys: self.batched_keys,
         }
     }
 }
