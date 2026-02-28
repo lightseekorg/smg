@@ -41,6 +41,9 @@ pub struct MultimodalData {
     pub mm_placeholders: Vec<(u32, u32)>, // (offset, length)
     /// Per-image blake3 hex hashes for encoder output caching (vLLM only)
     pub mm_hashes: Vec<String>,
+    /// Tensor keys whose first dim is per-image (batched).
+    /// "pixel_values" is implicit — always batched when present.
+    pub batched_keys: Vec<String>,
 }
 
 /// Raw tensor bytes with shape and dtype metadata.
@@ -128,6 +131,7 @@ impl MultimodalData {
             im_token_id: self.im_token_id,
             mm_placeholders,
             mm_hashes: self.mm_hashes,
+            batched_keys: self.batched_keys,
         }
     }
 

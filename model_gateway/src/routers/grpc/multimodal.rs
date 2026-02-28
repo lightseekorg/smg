@@ -409,6 +409,15 @@ fn build_multimodal_data(
         .map(|p| (p.offset as u32, p.length as u32))
         .collect();
 
+    // Determine which model-specific tensor keys are batched (first dim = num_images).
+    // "pixel_values" is implicit — always batched.
+    let num_images = images.len() as u32;
+    let batched_keys = model_specific_tensors
+        .iter()
+        .filter(|(_, t)| t.shape.first().copied() == Some(num_images))
+        .map(|(k, _)| k.clone())
+        .collect();
+
     MultimodalData {
         image_data,
         pixel_values: pixel_bytes,
@@ -417,6 +426,7 @@ fn build_multimodal_data(
         im_token_id,
         mm_placeholders,
         mm_hashes,
+        batched_keys,
     }
 }
 

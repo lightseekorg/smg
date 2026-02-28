@@ -123,6 +123,11 @@ message MultimodalInputs {
 
   // Per-image blake3 hex hashes for encoder output caching
   repeated string mm_hashes = 6;
+
+  // Tensor keys whose first dimension is per-image (batched).
+  // Keys not listed here are shared across all images.
+  // "pixel_values" is implicit — always batched when present.
+  repeated string batched_keys = 7;
 }
 
 // =====================
