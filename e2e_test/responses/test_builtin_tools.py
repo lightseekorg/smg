@@ -517,7 +517,8 @@ class TestMcpWebSearchStreamingEvents:
             assert mcp_call.name is not None
             assert mcp_call.output is not None
 
-        # SmgClient: responses streaming not supported, skipping comparison
+        # SmgClient streaming comparison — no smg fixture in this test,
+        # covered by test_tools_call.py MCP streaming tests
 
 
 class TestWebSearchStreamingEvents:

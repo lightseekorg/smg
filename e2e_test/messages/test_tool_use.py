@@ -159,16 +159,14 @@ class TestToolUseBasic:
             )
             assert smg_resp1.stop_reason == "tool_use"
             smg_tool = [b for b in smg_resp1.content if b.type == "tool_use"][0]
-            # SmgClient round-trip with tool result
-            # Build content list from smg_resp1.content as dicts
-            smg_assistant_content = [b.model_dump() for b in smg_resp1.content]
+            # SmgClient round-trip: pass content directly (auto-serialized)
             smg_resp2 = smg.messages.create(
                 model=model,
                 max_tokens=200,
                 tools=[GET_WEATHER_TOOL],
                 messages=[
                     {"role": "user", "content": "What is the weather in Tokyo?"},
-                    {"role": "assistant", "content": smg_assistant_content},
+                    {"role": "assistant", "content": smg_resp1.content},
                     {
                         "role": "user",
                         "content": [

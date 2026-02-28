@@ -104,4 +104,5 @@ class TestResponsesWithStorageHook:
             assert smg_resp.id is not None
             assert smg_resp.status == "completed"
             smg_items = smg.responses.input_items.list(response_id=smg_resp.id)
-            assert smg_items is not None
+            assert smg_items.data is not None
+            assert len(smg_items.data) > 0

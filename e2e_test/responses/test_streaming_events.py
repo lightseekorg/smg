@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,24 @@ class TestStreamingEventsLocal:
             "Number of output_item.added events should match output array length"
         )
 
-        # SmgClient: responses streaming not supported, skipping comparison
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="Count from 1 to 3",
+                stream=True,
+                max_output_tokens=50,
+            )
+            smg_events = list(smg_resp)
+            assert len(smg_events) > 0
+
+            smg_added = [e for e in smg_events if e.type == "response.output_item.added"]
+            assert len(smg_added) > 0
+            assert smg_added[0].output_index == 0
+
+            smg_completed = [e for e in smg_events if e.type == "response.completed"]
+            assert len(smg_completed) == 1
+            assert smg_completed[0].response.output is not None
 
 
 # =============================================================================
@@ -184,7 +202,24 @@ class TestStreamingEventsHarmony:
             "Number of output_item.added events should match output array length"
         )
 
-        # SmgClient: responses streaming not supported, skipping comparison
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="Count from 1 to 3",
+                stream=True,
+                max_output_tokens=50,
+            )
+            smg_events = list(smg_resp)
+            assert len(smg_events) > 0
+
+            smg_added = [e for e in smg_events if e.type == "response.output_item.added"]
+            assert len(smg_added) > 0
+            assert smg_added[0].output_index == 0
+
+            smg_completed = [e for e in smg_events if e.type == "response.completed"]
+            assert len(smg_completed) == 1
+            assert smg_completed[0].response.output is not None
 
     def test_reasoning_content(self, setup_backend, smg):
         """Test that reasoning content has correct zero-based output_index.
@@ -239,4 +274,23 @@ class TestStreamingEventsHarmony:
         reasoning_items_in_output = [item for item in output_array if item.type == "reasoning"]
         assert len(reasoning_items_in_output) > 0
 
-        # SmgClient: responses streaming not supported, skipping comparison
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What is the capital of France? Think step by step.",
+                stream=True,
+                max_output_tokens=200,
+            )
+            smg_events = list(smg_resp)
+            assert len(smg_events) > 0
+
+            smg_added = [e for e in smg_events if e.type == "response.output_item.added"]
+            assert len(smg_added) > 0
+
+            smg_reasoning = [e for e in smg_added if e.item.type == "reasoning"]
+            smg_messages = [e for e in smg_added if e.item.type == "message"]
+            if smg_reasoning:
+                assert smg_reasoning[0].output_index == 0
+            if smg_reasoning and smg_messages:
+                assert smg_messages[0].output_index == 1

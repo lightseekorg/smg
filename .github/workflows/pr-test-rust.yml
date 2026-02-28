@@ -117,6 +117,7 @@ jobs:
         if: steps.cache-wheel.outputs.cache-hit != 'true'
         run: |
           source "$HOME/.cargo/env"
+          mkdir -p clients/openapi
           cargo run -p openapi-gen -- clients/openapi/smg-openapi.yaml
           pip install 'datamodel-code-generator==0.54.0'
           datamodel-codegen \

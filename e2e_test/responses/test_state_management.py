@@ -59,7 +59,15 @@ class TestStateManagementCloud:
 
         assert any(e.type in ["response.completed", "response.in_progress"] for e in events)
 
-        # SmgClient: responses streaming not supported, skipping comparison
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model, input="Count to 5", stream=True, max_output_tokens=50
+            )
+            smg_events = list(smg_resp)
+            smg_created = [e for e in smg_events if e.type == "response.created"]
+            assert len(smg_created) > 0
+            assert any(e.type in ["response.completed", "response.in_progress"] for e in smg_events)
 
     def test_previous_response_id_chaining(self, setup_backend, smg):
         """Test chaining responses using previous_response_id."""
@@ -234,7 +242,15 @@ class TestStateManagementLocal:
 
         assert any(e.type in ["response.completed", "response.in_progress"] for e in events)
 
-        # SmgClient: responses streaming not supported, skipping comparison
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model, input="Count to 5", stream=True, max_output_tokens=50
+            )
+            smg_events = list(smg_resp)
+            smg_created = [e for e in smg_events if e.type == "response.created"]
+            assert len(smg_created) > 0
+            assert any(e.type in ["response.completed", "response.in_progress"] for e in smg_events)
 
     def test_previous_response_id_chaining(self, setup_backend, smg):
         """Test chaining responses using previous_response_id."""
@@ -354,7 +370,15 @@ class TestStateManagementHarmony:
 
         assert any(e.type in ["response.completed", "response.in_progress"] for e in events)
 
-        # SmgClient: responses streaming not supported, skipping comparison
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model, input="Count to 5", stream=True, max_output_tokens=50
+            )
+            smg_events = list(smg_resp)
+            smg_created = [e for e in smg_events if e.type == "response.created"]
+            assert len(smg_created) > 0
+            assert any(e.type in ["response.completed", "response.in_progress"] for e in smg_events)
 
     def test_previous_response_id_chaining(self, setup_backend, smg):
         """Test chaining responses using previous_response_id."""

@@ -140,6 +140,83 @@ def _parse_anthropic_event(event: Any) -> EventObject:
     return EventObject(data)
 
 
+class ResponsesSyncStream:
+    """Synchronous stream for Responses API events.
+
+    Matches the OpenAI SDK ``client.responses.create(stream=True)`` interface::
+
+        resp = client.responses.create(model="...", input="Hello", stream=True)
+        for event in resp:
+            if event.type == "response.output_item.added":
+                print(event.item)
+
+    Works as both an iterator and a context manager.
+    """
+
+    def __init__(self, response: httpx.Response) -> None:
+        self._response = response
+        self._iterator = iter_sse_sync(response)
+
+    def __iter__(self) -> Iterator[EventObject]:
+        return self
+
+    def __next__(self) -> EventObject:
+        event = next(self._iterator)
+        try:
+            data = event.json()
+        except ValueError as e:
+            raise SmgError(f"Failed to parse SSE event data as JSON: {e}") from e
+        if not isinstance(data, dict):
+            raise SmgError(f"Expected JSON object in SSE event, got {type(data).__name__}")
+        if event.event:
+            data["type"] = event.event
+        return EventObject(data)
+
+    def __enter__(self) -> ResponsesSyncStream:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._response.close()
+
+
+class ResponsesAsyncStream:
+    """Async stream for Responses API events.
+
+    Matches the OpenAI SDK async responses streaming interface.
+    """
+
+    def __init__(self, response: httpx.Response) -> None:
+        self._response = response
+        self._iterator = iter_sse_async(response)
+
+    def __aiter__(self) -> AsyncIterator[EventObject]:
+        return self
+
+    async def __anext__(self) -> EventObject:
+        event = await self._iterator.__anext__()
+        try:
+            data = event.json()
+        except ValueError as e:
+            raise SmgError(f"Failed to parse SSE event data as JSON: {e}") from e
+        if not isinstance(data, dict):
+            raise SmgError(f"Expected JSON object in SSE event, got {type(data).__name__}")
+        if event.event:
+            data["type"] = event.event
+        return EventObject(data)
+
+    async def __aenter__(self) -> ResponsesAsyncStream:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        await self._response.aclose()
+
+
 class AnthropicSyncStream:
     """Synchronous stream for Anthropic Messages API events.
 

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 from smg_client._helpers import prepare_body
+from smg_client._streaming import EventObject, ResponsesAsyncStream, ResponsesSyncStream
 from smg_client.types import ResponsesResponse
 
 if TYPE_CHECKING:
@@ -22,14 +23,20 @@ class SyncInputItems:
     def __init__(self, transport: SyncTransport) -> None:
         self._transport = transport
 
-    def list(self, *, response_id: str) -> Any:
+    def list(self, *, response_id: str) -> EventObject:
         """List input items for a response.
+
+        Returns an object with ``.data`` attribute (list of input items),
+        matching the OpenAI SDK interface::
+
+            items = client.responses.input_items.list(response_id=resp.id)
+            assert items.data is not None
 
         Args:
             response_id: The response ID to list input items for.
         """
         resp = self._transport.request("GET", f"/v1/responses/{response_id}/input_items")
-        return resp.json()
+        return EventObject(resp.json())
 
 
 class AsyncInputItems:
@@ -38,10 +45,10 @@ class AsyncInputItems:
     def __init__(self, transport: AsyncTransport) -> None:
         self._transport = transport
 
-    async def list(self, *, response_id: str) -> Any:
+    async def list(self, *, response_id: str) -> EventObject:
         """List input items for a response."""
         resp = await self._transport.request("GET", f"/v1/responses/{response_id}/input_items")
-        return resp.json()
+        return EventObject(resp.json())
 
 
 # ---------------------------------------------------------------------------
@@ -54,8 +61,14 @@ class SyncResponses:
 
     Matches the OpenAI SDK interface::
 
+        # Non-streaming
         resp = client.responses.create(model="...", input="Hello")
         print(resp.output_text)
+
+        # Streaming
+        resp = client.responses.create(model="...", input="Hello", stream=True)
+        for event in resp:
+            print(event.type)
 
         retrieved = client.responses.retrieve(response_id=resp.id)
         items = client.responses.input_items.list(response_id=resp.id)
@@ -65,8 +78,33 @@ class SyncResponses:
         self._transport = transport
         self.input_items = SyncInputItems(transport)
 
-    def create(self, **kwargs: Any) -> ResponsesResponse:
+    @overload
+    def create(self, *, stream: Literal[False] = ..., **kwargs: Any) -> ResponsesResponse: ...
+    @overload
+    def create(self, *, stream: Literal[True], **kwargs: Any) -> ResponsesSyncStream: ...
+
+    def create(self, **kwargs: Any) -> ResponsesResponse | ResponsesSyncStream:
+        """Create a response.
+
+        Args:
+            **kwargs: ResponsesRequest fields (model, input, etc.)
+                stream: If True, returns a stream of SSE events. Default False.
+                extra_body: Dict merged into the request body.
+                extra_headers: Dict merged into request headers.
+
+        Returns:
+            ResponsesResponse for non-streaming, ResponsesSyncStream for streaming.
+        """
+        is_stream = kwargs.pop("stream", False)
         body, extra_headers = prepare_body(kwargs)
+
+        if is_stream:
+            body["stream"] = True
+            resp = self._transport.request(
+                "POST", "/v1/responses", json=body, stream=True, headers=extra_headers
+            )
+            return ResponsesSyncStream(resp)
+
         resp = self._transport.request("POST", "/v1/responses", json=body, headers=extra_headers)
         return ResponsesResponse.model_validate_json(resp.content)
 
@@ -94,7 +132,7 @@ class SyncResponses:
         resp = self._transport.request("POST", f"/v1/responses/{response_id}/cancel", json={})
         return ResponsesResponse.model_validate_json(resp.content)
 
-    def list_input_items(self, response_id: str) -> Any:
+    def list_input_items(self, response_id: str) -> EventObject:
         """List input items (backward-compat alias).
 
         Prefer ``input_items.list(response_id=...)`` for OpenAI SDK compatibility.
@@ -109,8 +147,23 @@ class AsyncResponses:
         self._transport = transport
         self.input_items = AsyncInputItems(transport)
 
-    async def create(self, **kwargs: Any) -> ResponsesResponse:
+    @overload
+    async def create(self, *, stream: Literal[False] = ..., **kwargs: Any) -> ResponsesResponse: ...
+    @overload
+    async def create(self, *, stream: Literal[True], **kwargs: Any) -> ResponsesAsyncStream: ...
+
+    async def create(self, **kwargs: Any) -> ResponsesResponse | ResponsesAsyncStream:
+        """Create a response."""
+        is_stream = kwargs.pop("stream", False)
         body, extra_headers = prepare_body(kwargs)
+
+        if is_stream:
+            body["stream"] = True
+            resp = await self._transport.request(
+                "POST", "/v1/responses", json=body, stream=True, headers=extra_headers
+            )
+            return ResponsesAsyncStream(resp)
+
         resp = await self._transport.request(
             "POST", "/v1/responses", json=body, headers=extra_headers
         )
@@ -133,6 +186,6 @@ class AsyncResponses:
         resp = await self._transport.request("POST", f"/v1/responses/{response_id}/cancel", json={})
         return ResponsesResponse.model_validate_json(resp.content)
 
-    async def list_input_items(self, response_id: str) -> Any:
+    async def list_input_items(self, response_id: str) -> EventObject:
         """List input items (backward-compat alias)."""
         return await self.input_items.list(response_id=response_id)

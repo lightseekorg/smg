@@ -98,9 +98,10 @@ class TestResponseCRUD:
             smg_get = smg.responses.retrieve(response_id=smg_create.id)
             assert smg_get.id == smg_create.id
             assert smg_get.status == "completed"
-            # List input items
+            # List input items (same assertions as OpenAI SDK)
             smg_items = smg.responses.input_items.list(response_id=smg_create.id)
-            assert smg_items is not None
+            assert smg_items.data is not None
+            assert len(smg_items.data) > 0
 
     @pytest.mark.skip(reason="TODO: Add delete response feature")
     def test_delete_response(self, setup_backend, smg):
@@ -189,9 +190,10 @@ class TestResponseCRUDOracleStorage:
             smg_get = smg.responses.retrieve(response_id=smg_create.id)
             assert smg_get.id == smg_create.id
             assert smg_get.status == "completed"
-            # List input items
+            # List input items (same assertions as OpenAI SDK)
             smg_items = smg.responses.input_items.list(response_id=smg_create.id)
-            assert smg_items is not None
+            assert smg_items.data is not None
+            assert len(smg_items.data) > 0
 
     @pytest.mark.skip(reason="TODO: Add delete response feature")
     def test_delete_response(self, setup_backend, smg):
