@@ -35,16 +35,25 @@ _max_test_name: str = ""
 
 _needs_default_model: bool = False
 
+# Track model affinity for each test item (nodeid -> model_id or None for cloud tests)
+_item_model_affinity: dict[str, str | None] = {}
+
+# Backends that require local GPU workers.
+# Matches ConnectionMode values (infra/constants.py) plus their pd_ prefixed variants.
+_LOCAL_BACKENDS = frozenset({"grpc", "http", "pd_grpc", "pd_http"})
+
 
 def reset_collection_state() -> None:
     """Reset collection state (useful for testing)."""
     global _worker_counts, _first_seen_order
     global _max_test_gpu_requirement, _max_test_name, _needs_default_model
+    global _item_model_affinity
     _worker_counts = {}
     _first_seen_order = []
     _max_test_gpu_requirement = 0
     _max_test_name = ""
     _needs_default_model = False
+    _item_model_affinity = {}
 
 
 def get_worker_counts() -> dict:
@@ -84,7 +93,7 @@ def pytest_collection_modifyitems(
     tracking the max count needed for each (model, mode, worker_type) combination.
     """
     global _worker_counts, _first_seen_order, _needs_default_model
-    global _max_test_gpu_requirement, _max_test_name
+    global _max_test_gpu_requirement, _max_test_name, _item_model_affinity
 
     from infra import (
         DEFAULT_MODEL,
@@ -227,6 +236,17 @@ def pytest_collection_modifyitems(
             track_worker(model_id, ConnectionMode.HTTP, WorkerType.REGULAR, 1)
             test_gpus = calculate_test_gpus(model_id, 0, 0, 1)
 
+        # Track model affinity for reordering
+        # A test needs a local GPU worker if it either:
+        #   - is parametrized with at least one local backend, or
+        #   - is an e2e test with no explicit backends (defaults to local)
+        if model_id and (
+            (backends and any(b in _LOCAL_BACKENDS for b in backends)) or (is_e2e and not backends)
+        ):
+            _item_model_affinity[item.nodeid] = model_id
+        else:
+            _item_model_affinity[item.nodeid] = None
+
         if test_gpus > _max_test_gpu_requirement:
             _max_test_gpu_requirement = test_gpus
             _max_test_name = item.nodeid
@@ -249,6 +269,51 @@ def pytest_collection_modifyitems(
         )
     else:
         logger.info("Scanned worker requirements: (none)")
+
+    # Reorder tests to minimize GPU model swaps
+    _reorder_to_minimize_model_swaps(items)
+
+
+# ---------------------------------------------------------------------------
+# Test reordering
+# ---------------------------------------------------------------------------
+
+
+def _reorder_to_minimize_model_swaps(items: list[pytest.Item]) -> None:
+    """Reorder test items to minimize GPU model swaps.
+
+    Groups tests by their GPU model affinity:
+    1. Cloud tests (no GPU model) run first
+    2. Then each model group runs contiguously, in first-appearance order
+
+    Within each group, original collection order is preserved.
+    """
+    cloud_items: list[pytest.Item] = []
+    model_groups: dict[str, list[pytest.Item]] = {}
+    model_order: list[str] = []
+
+    for item in items:
+        affinity = _item_model_affinity.get(item.nodeid)
+        if affinity is None:
+            cloud_items.append(item)
+        else:
+            if affinity not in model_groups:
+                model_groups[affinity] = []
+                model_order.append(affinity)
+            model_groups[affinity].append(item)
+
+    # Rebuild items list in-place
+    items[:] = cloud_items
+    for model_id in model_order:
+        items.extend(model_groups[model_id])
+
+    # Log summary
+    parts = []
+    if cloud_items:
+        parts.append(f"cloud={len(cloud_items)}")
+    for model_id in model_order:
+        parts.append(f"{model_id}={len(model_groups[model_id])}")
+    logger.info("Reordered tests to minimize model swaps: %s", ", ".join(parts))
 
 
 # ---------------------------------------------------------------------------
