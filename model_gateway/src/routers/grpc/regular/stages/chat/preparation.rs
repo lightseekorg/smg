@@ -69,31 +69,58 @@ impl ChatPreparationStage {
             }
         };
 
-        let token_ids = encoding.token_ids().to_vec();
+        let mut token_ids = encoding.token_ids().to_vec();
 
-        // Step 3.5: Fetch multimodal images (Phase 1 — backend-agnostic)
-        // Pixel preprocessing and token expansion are deferred to Phase 2
-        // in ChatRequestBuildingStage, where the backend type is known.
-        let mut multimodal_images = None;
+        // Step 3.5: Full multimodal processing (fetch + preprocess + expand tokens + hash)
+        let mut multimodal_data = None;
         if multimodal::has_multimodal_content(&request.messages) {
             if let Some(mm_components) = ctx.components.multimodal.as_ref() {
-                match multimodal::fetch_images(&request.messages, mm_components).await {
-                    Ok(images) => {
+                let model_id = ctx.input.model_id.as_deref().unwrap_or(&request.model);
+                let tokenizer_source = ctx
+                    .components
+                    .tokenizer_registry
+                    .get_by_name(model_id)
+                    .or_else(|| ctx.components.tokenizer_registry.get_by_id(model_id))
+                    .map(|e| e.source)
+                    .unwrap_or_default();
+
+                if tokenizer_source.is_empty() {
+                    error!(
+                        function = "ChatPreparationStage::execute",
+                        model = %model_id,
+                        "Tokenizer source path not found for multimodal processing"
+                    );
+                    return Err(error::bad_request(
+                        "multimodal_config_missing",
+                        format!("Tokenizer source path not found for model: {model_id}"),
+                    ));
+                }
+
+                match multimodal::process_multimodal(
+                    &request.messages,
+                    model_id,
+                    &*tokenizer,
+                    token_ids,
+                    mm_components,
+                    &tokenizer_source,
+                )
+                .await
+                {
+                    Ok(output) => {
                         debug!(
                             function = "ChatPreparationStage::execute",
-                            image_count = images.len(),
-                            "Multimodal images fetched"
+                            expanded_tokens = output.expanded_token_ids.len(),
+                            "Multimodal processing complete"
                         );
-                        multimodal_images = Some(images);
+                        token_ids = output.expanded_token_ids;
+                        multimodal_data = Some(output.multimodal_data);
                     }
                     Err(e) => {
                         error!(
                             function = "ChatPreparationStage::execute",
                             error = %e,
-                            "Multimodal image fetching failed"
+                            "Multimodal processing failed"
                         );
-                        // TODO: Distinguish 4xx (invalid URL, unsupported format) from 5xx
-                        // (fetch timeout, backend failure) once error types are refined.
                         return Err(error::bad_request(
                             "multimodal_processing_failed",
                             format!("Multimodal processing failed: {e}"),
@@ -132,9 +159,8 @@ impl ChatPreparationStage {
             request.no_stop_trim,
         );
 
-        // Store fetched images on processed messages for Phase 2
         let mut processed_messages = processed_messages;
-        processed_messages.multimodal_images = multimodal_images;
+        processed_messages.multimodal_data = multimodal_data;
 
         // Store results in context
         ctx.state.preparation = Some(PreparationOutput {
