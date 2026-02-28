@@ -115,7 +115,8 @@ impl PipelineStage for ChatRequestBuildingStage {
 
             let (ids, data) = multimodal::process_for_backend(
                     images,
-                    builder_client.is_sglang(),
+                    builder_client.is_trtllm(),
+                    builder_client.is_vllm(),
                     model_id,
                     tokenizer,
                     prep.token_ids.clone(),

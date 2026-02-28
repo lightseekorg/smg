@@ -373,19 +373,23 @@ fn build_raw_multimodal_data(images: &[Arc<ImageFrame>]) -> MultimodalData {
 
 /// Phase 2: Backend-specific multimodal processing.
 ///
-/// For SGLang: preprocesses images, expands placeholder tokens, builds full MultimodalData.
-/// For vLLM/TRT-LLM: extracts raw image bytes only, returns original token IDs unchanged.
-/// Both vLLM and TRT-LLM handle image preprocessing and token expansion internally.
+/// For SGLang/vLLM: preprocesses images, expands placeholder tokens, builds full MultimodalData.
+///   vLLM additionally gets blake3 hashes for encoder output caching.
+/// For TRT-LLM: extracts raw image bytes only, returns original token IDs unchanged.
+///   TRT-LLM handles image preprocessing and token expansion internally.
 pub(crate) fn process_for_backend(
     images: &[Arc<ImageFrame>],
-    is_sglang: bool,
+    is_trtllm: bool,
+    is_vllm: bool,
     model_id: &str,
     tokenizer: &dyn TokenizerTrait,
     token_ids: Vec<u32>,
     components: &MultimodalComponents,
     tokenizer_source: &str,
 ) -> Result<(Vec<u32>, MultimodalData)> {
-    if is_sglang {
+    if is_trtllm {
+        Ok((token_ids, build_raw_multimodal_data(images)))
+    } else {
         let output = preprocess_for_sglang(
             images,
             model_id,
@@ -394,9 +398,15 @@ pub(crate) fn process_for_backend(
             components,
             tokenizer_source,
         )?;
-        Ok((output.expanded_token_ids, output.multimodal_data))
-    } else {
-        Ok((token_ids, build_raw_multimodal_data(images)))
+        let mut data = output.multimodal_data;
+        if is_vllm {
+            // Compute blake3 hashes for vLLM encoder output caching
+            let raw_bytes: Vec<&[u8]> = images.iter().map(|f| f.raw_bytes.as_ref()).collect();
+            data.mm_hashes = llm_multimodal::hasher::hash_images(&raw_bytes)
+                .remove("image")
+                .unwrap_or_default();
+        }
+        Ok((output.expanded_token_ids, data))
     }
 }
 
