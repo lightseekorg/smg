@@ -17,7 +17,7 @@
 
 use std::{fmt, sync::Arc};
 
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
 use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
@@ -110,11 +110,12 @@ pub fn compute_content_hash(token_ids: &[u32]) -> ContentHash {
 /// Partial trailing chunks (fewer tokens than `block_size`) are discarded because
 /// backends only cache full blocks.
 ///
-/// # Panics
-///
-/// Panics if `block_size` is 0.
+/// Returns an empty `Vec` if `block_size` is 0.
 pub fn compute_request_content_hashes(tokens: &[u32], block_size: usize) -> Vec<ContentHash> {
-    assert!(block_size > 0, "block_size must be greater than 0");
+    if block_size == 0 {
+        tracing::warn!("compute_request_content_hashes called with block_size=0, returning empty");
+        return Vec::new();
+    }
     tokens
         .chunks(block_size)
         .filter(|chunk| chunk.len() == block_size)
@@ -310,6 +311,13 @@ impl PositionalIndexer {
     /// Apply a "blocks removed" event for a worker.
     ///
     /// `seq_hashes`: position-aware block hashes to remove (from proto).
+    ///
+    /// **Note on orphaned entries**: Removing a block at position N does not cascade to
+    /// blocks at positions > N. Those entries become orphaned — they remain in the index
+    /// but won't match queries because the rolling prefix hash chain is broken at the gap.
+    /// This is harmless: orphaned entries waste a small amount of memory and are cleaned up
+    /// when the worker is cleared or removed. Backends typically evict from the tail (LRU),
+    /// so mid-sequence gaps are rare in practice.
     pub fn apply_removed(&self, worker: &str, seq_hashes: &[SequenceHash]) {
         let worker_id: WorkerId = Arc::from(worker);
 
@@ -330,10 +338,9 @@ impl PositionalIndexer {
                 continue;
             };
 
-            if let Some(mut entry) = self.index.get_mut(&(position, content_hash)) {
-                if entry.remove(prefix_hash, worker) {
-                    drop(entry);
-                    self.index.remove(&(position, content_hash));
+            if let Entry::Occupied(mut occupied) = self.index.entry((position, content_hash)) {
+                if occupied.get_mut().remove(prefix_hash, worker) {
+                    occupied.remove();
                 }
             }
         }
@@ -363,6 +370,12 @@ impl PositionalIndexer {
     /// Uses jump search: strides by `jump_size` positions, only scanning
     /// intermediate positions when workers drain (stop matching).
     /// Complexity: amortized O(D/J + W) where D=depth, J=jump_size, W=workers.
+    ///
+    /// **Assumption**: Block sequences are prefix-closed — if a worker has a block at
+    /// position N, it has blocks at all positions 0..N. This holds when backends evict
+    /// from the tail (LRU). If `apply_removed` creates a mid-sequence gap, the rolling
+    /// prefix hash detects it (the chain breaks at the gap), but the jump heuristic may
+    /// over-count if it lands past the gap. In practice, backends only evict tail blocks.
     pub fn find_matches(&self, content_hashes: &[ContentHash]) -> OverlapScores {
         self.jump_search_matches(content_hashes)
     }
@@ -378,10 +391,9 @@ impl PositionalIndexer {
         if let Some(level_index) = wb.remove(&worker_id) {
             let worker_map = level_index.read();
             for (_, &(position, content_hash, prefix_hash)) in worker_map.iter() {
-                if let Some(mut entry) = self.index.get_mut(&(position, content_hash)) {
-                    if entry.remove(prefix_hash, worker) {
-                        drop(entry);
-                        self.index.remove(&(position, content_hash));
+                if let Entry::Occupied(mut occupied) = self.index.entry((position, content_hash)) {
+                    if occupied.get_mut().remove(prefix_hash, worker) {
+                        occupied.remove();
                     }
                 }
             }
@@ -477,15 +489,12 @@ impl PositionalIndexer {
             }
             let pos = lo + offset;
 
-            let Some(entry) = self.index.get(&(pos, content_hash)) else {
-                for worker in active.drain() {
-                    scores.scores.insert(worker, pos as u32);
-                }
-                break;
-            };
+            let workers = self.index.get(&(pos, content_hash)).and_then(|entry| {
+                Self::ensure_seq_hash_computed(seq_hashes, pos, sequence);
+                entry.get(seq_hashes[pos]).cloned()
+            });
 
-            Self::ensure_seq_hash_computed(seq_hashes, pos, sequence);
-            let Some(workers) = entry.get(seq_hashes[pos]) else {
+            let Some(workers) = workers else {
                 for worker in active.drain() {
                     scores.scores.insert(worker, pos as u32);
                 }
@@ -1418,9 +1427,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "block_size must be greater than 0")]
-    fn test_request_hashes_zero_block_size_panics() {
-        compute_request_content_hashes(&[1, 2, 3], 0);
+    fn test_request_hashes_zero_block_size_returns_empty() {
+        let hashes = compute_request_content_hashes(&[1, 2, 3], 0);
+        assert!(hashes.is_empty());
     }
 
     #[test]
