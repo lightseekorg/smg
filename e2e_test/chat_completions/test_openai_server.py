@@ -583,12 +583,11 @@ class TestChatCompletionGptOss(TestChatCompletion):
         pass
 
     def test_stop_sequences(self, setup_backend):
-        """Test stop sequences with Harmony model.
+        """Override: Harmony channel markers consume extra tokens from max_tokens budget.
 
-        The Harmony protocol places output in reasoning_content (analysis
-        channel) when the model is still in its thinking phase.  The stop
-        sequence fires before the model transitions to the final channel,
-        so content is None and the text is in reasoning_content.
+        Use higher max_tokens to ensure the model generates a comma before
+        running out of tokens.  Content may appear in reasoning_content
+        (analysis channel) rather than content (final channel).
         """
         _, model, client, gateway = setup_backend
 
@@ -598,7 +597,7 @@ class TestChatCompletionGptOss(TestChatCompletion):
                 {"role": "user", "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"},
             ],
             temperature=0,
-            max_tokens=50,
+            max_tokens=200,
             stop=[","],
         )
 
@@ -608,7 +607,7 @@ class TestChatCompletionGptOss(TestChatCompletion):
         assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
 
     def test_stop_sequences_stream(self, setup_backend):
-        """Test streaming stop sequences with Harmony model."""
+        """Override: same as test_stop_sequences but streaming."""
         _, model, client, gateway = setup_backend
 
         chunks = list(
@@ -621,7 +620,7 @@ class TestChatCompletionGptOss(TestChatCompletion):
                     },
                 ],
                 temperature=0,
-                max_tokens=50,
+                max_tokens=200,
                 stop=[","],
                 stream=True,
             )
@@ -643,11 +642,11 @@ class TestChatCompletionGptOss(TestChatCompletion):
         assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
 
     def test_streaming_token_count_matches_chunks(self, setup_backend):
-        """Test streaming token count with Harmony model.
+        """Override: Harmony channel markers consume tokens not visible as content.
 
-        The Harmony protocol uses channel marker tokens (analysis/final
-        transitions) that count toward completion_tokens but don't appear
-        as content or reasoning_content chunks.
+        Allow higher tolerance than the parent (2) because Harmony protocol
+        uses channel transition tokens that count toward completion_tokens
+        but don't appear as content chunks.
         """
         _, model, client, gateway = setup_backend
 
@@ -682,8 +681,7 @@ class TestChatCompletionGptOss(TestChatCompletion):
             f"completion_tokens ({usage_completion_tokens}) should be >= "
             f"content chunk count ({content_chunk_count})"
         )
-        # Harmony channel markers consume tokens not visible as content.
-        # Allow up to 15 tokens overhead for channel transitions.
+        # Harmony channel markers consume ~5-15 tokens not visible as content
         assert usage_completion_tokens - content_chunk_count <= 15, (
             f"completion_tokens ({usage_completion_tokens}) differs too much from "
             f"content chunk count ({content_chunk_count})"
