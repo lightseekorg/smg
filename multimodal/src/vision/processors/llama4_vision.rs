@@ -444,7 +444,7 @@ impl ImagePreProcessor for Llama4VisionProcessor {
         let pixel_values = ndarray::concatenate(ndarray::Axis(0), &tile_views)
             .map_err(|e| TransformError::ShapeError(format!("Failed to concatenate tiles: {e}")))?;
 
-        // Store aspect ratios as model-specific data
+        // Store aspect ratios and patches_per_image as model-specific data
         let mut model_specific = std::collections::HashMap::new();
         let batch_size = images.len();
 
@@ -458,6 +458,15 @@ impl ImagePreProcessor for Llama4VisionProcessor {
                 data: aspect_ratios_flat,
                 shape: vec![batch_size, 2],
             },
+        );
+
+        // Per-image tile counts for flat slicing of pixel_values.
+        // Use i64 to match vLLM's native HF processor output (torch.int64)
+        // and avoid torch.uint32 pickle issues in multiproc workers.
+        let patches_per_image: Vec<i64> = all_outputs.iter().map(|o| o.shape()[0] as i64).collect();
+        model_specific.insert(
+            "patches_per_image".to_string(),
+            ModelSpecificValue::int_1d(patches_per_image),
         );
 
         Ok(PreprocessedImages {
