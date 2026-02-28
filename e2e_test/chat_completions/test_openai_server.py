@@ -581,3 +581,110 @@ class TestChatCompletionGptOss(TestChatCompletion):
     @pytest.mark.skip(reason="OSS models don't support continue_final_message")
     def test_response_prefill(self, setup_backend, smg):
         pass
+
+    def test_stop_sequences(self, setup_backend):
+        """Test stop sequences with Harmony model.
+
+        The Harmony protocol places output in reasoning_content (analysis
+        channel) when the model is still in its thinking phase.  The stop
+        sequence fires before the model transitions to the final channel,
+        so content is None and the text is in reasoning_content.
+        """
+        _, model, client, gateway = setup_backend
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"},
+            ],
+            temperature=0,
+            max_tokens=50,
+            stop=[","],
+        )
+
+        assert response.choices[0].finish_reason == "stop"
+        msg = response.choices[0].message
+        content = msg.content or getattr(msg, "reasoning_content", None) or ""
+        assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
+
+    def test_stop_sequences_stream(self, setup_backend):
+        """Test streaming stop sequences with Harmony model."""
+        _, model, client, gateway = setup_backend
+
+        chunks = list(
+            client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
+                    },
+                ],
+                temperature=0,
+                max_tokens=50,
+                stop=[","],
+                stream=True,
+            )
+        )
+
+        finish_reasons = [
+            c.choices[0].finish_reason for c in chunks if c.choices and c.choices[0].finish_reason
+        ]
+        assert "stop" in finish_reasons
+
+        # Collect all content (Harmony may use reasoning_content)
+        content = "".join(
+            c.choices[0].delta.content
+            or getattr(c.choices[0].delta, "reasoning_content", None)
+            or ""
+            for c in chunks
+            if c.choices
+        )
+        assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
+
+    def test_streaming_token_count_matches_chunks(self, setup_backend):
+        """Test streaming token count with Harmony model.
+
+        The Harmony protocol uses channel marker tokens (analysis/final
+        transitions) that count toward completion_tokens but don't appear
+        as content or reasoning_content chunks.
+        """
+        _, model, client, gateway = setup_backend
+
+        generator = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful AI assistant"},
+                {"role": "user", "content": "What is the capital of France?"},
+            ],
+            temperature=0,
+            max_tokens=50,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+
+        content_chunk_count = 0
+        usage_completion_tokens = None
+
+        for response in generator:
+            if response.usage is not None:
+                usage_completion_tokens = response.usage.completion_tokens
+                continue
+            if not response.choices:
+                continue
+            delta = response.choices[0].delta
+            if delta.content or getattr(delta, "reasoning_content", None):
+                content_chunk_count += 1
+
+        assert usage_completion_tokens is not None, "No usage chunk received"
+        assert content_chunk_count > 0, "No content chunks received"
+        assert usage_completion_tokens >= content_chunk_count, (
+            f"completion_tokens ({usage_completion_tokens}) should be >= "
+            f"content chunk count ({content_chunk_count})"
+        )
+        # Harmony channel markers consume tokens not visible as content.
+        # Allow up to 15 tokens overhead for channel transitions.
+        assert usage_completion_tokens - content_chunk_count <= 15, (
+            f"completion_tokens ({usage_completion_tokens}) differs too much from "
+            f"content chunk count ({content_chunk_count})"
+        )
