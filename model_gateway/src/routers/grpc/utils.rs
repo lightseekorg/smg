@@ -485,7 +485,7 @@ pub fn process_chat_messages(
             let Some(last_msg) = transformed_messages.pop() else {
                 return Ok(ProcessedMessages {
                     text: String::new(),
-                    multimodal_images: None,
+                    multimodal_data: None,
                     stop_sequences: request.stop.clone(),
                 });
             };
@@ -512,7 +512,7 @@ pub fn process_chat_messages(
 
     Ok(ProcessedMessages {
         text: formatted_text,
-        multimodal_images: None,
+        multimodal_data: None,
         stop_sequences: request.stop.clone(),
     })
 }

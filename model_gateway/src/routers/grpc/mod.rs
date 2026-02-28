@@ -1,8 +1,5 @@
 //! gRPC router implementations
 
-use std::sync::Arc;
-
-use llm_multimodal::ImageFrame;
 use openai_protocol::common::StringOrArray;
 
 pub mod client; // Used by core/
@@ -24,8 +21,8 @@ pub use proto_wrapper::{MultimodalData, TensorBytes};
 #[derive(Debug)]
 pub struct ProcessedMessages {
     pub text: String,
-    /// Raw fetched images (Phase 1). Backend-specific preprocessing
-    /// happens in Phase 2 at request building time.
-    pub multimodal_images: Option<Vec<Arc<ImageFrame>>>,
+    /// Preprocessed multimodal data (pixel values, placeholders, hashes).
+    /// Populated during preparation when multimodal content is detected.
+    pub multimodal_data: Option<MultimodalData>,
     pub stop_sequences: Option<StringOrArray>,
 }
