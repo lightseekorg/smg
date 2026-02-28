@@ -87,6 +87,8 @@ pub struct ImageFrame {
     pub raw_bytes: bytes::Bytes,
     pub detail: ImageDetail,
     pub source: ImageSource,
+    /// Blake3 hex-digest of raw_bytes, computed at decode time.
+    pub hash: String,
 }
 
 impl ImageFrame {
@@ -95,12 +97,14 @@ impl ImageFrame {
         raw_bytes: bytes::Bytes,
         detail: ImageDetail,
         source: ImageSource,
+        hash: String,
     ) -> Self {
         Self {
             image,
             raw_bytes,
             detail,
             source,
+            hash,
         }
     }
 
