@@ -68,10 +68,11 @@ impl KvEventMonitor {
     /// `jump_size` controls the `PositionalIndexer` jump search stride.
     /// Pass `None` for the default (64).
     pub fn new(jump_size: Option<usize>) -> Self {
+        let jump_size = jump_size.unwrap_or(DEFAULT_JUMP_SIZE).max(1);
         Self {
             indexers: DashMap::new(),
             worker_handles: Mutex::new(HashMap::new()),
-            jump_size: jump_size.unwrap_or(DEFAULT_JUMP_SIZE),
+            jump_size,
         }
     }
 
@@ -204,11 +205,17 @@ impl KvEventMonitor {
             let grpc_client = match worker.get_grpc_client().await {
                 Ok(Some(client)) => client,
                 Ok(None) => {
-                    info!(
+                    // HTTP workers are filtered in on_worker_added, so this should
+                    // be unreachable. Retry defensively rather than exiting and
+                    // leaving a stale entry in worker_handles.
+                    warn!(
                         worker_url = %worker_url,
-                        "Worker has no gRPC client, KV event subscription exiting"
+                        delay_ms = reconnect_delay_ms,
+                        "Worker has no gRPC client yet, retrying"
                     );
-                    return;
+                    tokio::time::sleep(Duration::from_millis(reconnect_delay_ms)).await;
+                    reconnect_delay_ms = (reconnect_delay_ms * 2).min(MAX_RECONNECT_DELAY_MS);
+                    continue;
                 }
                 Err(e) => {
                     warn!(
@@ -251,8 +258,13 @@ impl KvEventMonitor {
                     info!(
                         worker_url = %worker_url,
                         last_seq = last_seq,
+                        delay_ms = reconnect_delay_ms,
                         "KV event stream ended, reconnecting"
                     );
+                    // Backoff to avoid tight reconnect loop if server keeps
+                    // closing the stream cleanly (e.g., rolling connections).
+                    tokio::time::sleep(Duration::from_millis(reconnect_delay_ms)).await;
+                    reconnect_delay_ms = (reconnect_delay_ms * 2).min(MAX_RECONNECT_DELAY_MS);
                 }
                 StreamResult::Error(e) => {
                     warn!(
@@ -296,6 +308,17 @@ impl KvEventMonitor {
                 Ok(batch) => batch,
                 Err(e) => return StreamResult::Error(e.to_string()),
             };
+
+            // Skip stale/duplicate batches (can occur after reconnect replay).
+            if *last_seq > 0 && batch.sequence_number <= *last_seq {
+                debug!(
+                    worker_url = %worker_url,
+                    last_seq = *last_seq,
+                    received = batch.sequence_number,
+                    "Skipping stale KV event batch"
+                );
+                continue;
+            }
 
             // Gap detection.
             if *last_seq > 0 && batch.sequence_number > *last_seq + 1 {
@@ -677,6 +700,12 @@ mod tests {
     async fn test_monitor_new() {
         let monitor = KvEventMonitor::new(None);
         assert!(!monitor.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn test_monitor_new_clamps_zero_jump_size() {
+        let monitor = KvEventMonitor::new(Some(0));
+        assert_eq!(monitor.jump_size, 1);
     }
 
     #[tokio::test]
