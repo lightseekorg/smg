@@ -72,7 +72,7 @@ impl ChatPreparationStage {
         let mut token_ids = encoding.token_ids().to_vec();
 
         // Step 3.5: Full multimodal processing (fetch + preprocess + expand tokens + hash)
-        let mut multimodal_data = None;
+        let mut multimodal_intermediate = None;
         if multimodal::has_multimodal_content(&request.messages) {
             if let Some(mm_components) = ctx.components.multimodal.as_ref() {
                 let model_id = ctx.input.model_id.as_deref().unwrap_or(&request.model);
@@ -113,7 +113,7 @@ impl ChatPreparationStage {
                             "Multimodal processing complete"
                         );
                         token_ids = output.expanded_token_ids;
-                        multimodal_data = Some(output.multimodal_data);
+                        multimodal_intermediate = Some(output.intermediate);
                     }
                     Err(e) => {
                         error!(
@@ -160,7 +160,7 @@ impl ChatPreparationStage {
         );
 
         let mut processed_messages = processed_messages;
-        processed_messages.multimodal_data = multimodal_data;
+        processed_messages.multimodal_intermediate = multimodal_intermediate;
 
         // Store results in context
         ctx.state.preparation = Some(PreparationOutput {

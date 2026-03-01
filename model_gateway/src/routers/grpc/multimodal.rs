@@ -9,8 +9,8 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use llm_multimodal::{
-    AsyncMultiModalTracker, ChatContentPart, ImageDetail, ImageFrame, ImageProcessorRegistry,
-    MediaConnector, MediaConnectorConfig, Modality, ModelMetadata, ModelProcessorSpec,
+    AsyncMultiModalTracker, ChatContentPart, FieldLayout, ImageDetail, ImageFrame,
+    ImageProcessorRegistry, MediaConnector, MediaConnectorConfig, Modality, ModelMetadata,
     ModelRegistry, ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
     PromptReplacement, TrackedMedia, TrackerOutput,
 };
@@ -21,7 +21,11 @@ use openai_protocol::{
 };
 use tracing::{debug, warn};
 
-use crate::routers::grpc::{MultimodalData, TensorBytes};
+use crate::routers::grpc::{
+    client::GrpcClient,
+    proto_wrapper::{SglangMultimodalData, TensorBytes, TrtllmMultimodalData, VllmMultimodalData},
+    MultimodalData,
+};
 
 /// Cached model configuration files loaded from the tokenizer directory.
 #[derive(Debug, Clone)]
@@ -114,8 +118,30 @@ impl MultimodalComponents {
 pub(crate) struct MultimodalOutput {
     /// Token IDs with placeholder tokens expanded to the correct count per image.
     pub expanded_token_ids: Vec<u32>,
-    /// Backend-agnostic multimodal data.
-    pub multimodal_data: MultimodalData,
+    /// Lightweight intermediate holding preprocessing results.
+    /// Assembled into backend-specific `MultimodalData` in request_building.
+    pub intermediate: MultimodalIntermediate,
+}
+
+/// Lightweight intermediate from the preparation stage.
+///
+/// Holds all preprocessing results without serializing tensors to bytes.
+/// The assembly stage converts this into a backend-specific [`MultimodalData`]
+/// variant once the target backend is known (after worker selection).
+#[derive(Debug)]
+pub(crate) struct MultimodalIntermediate {
+    /// Preprocessed pixel values and model-specific tensors (not yet serialized).
+    pub preprocessed: PreprocessedImages,
+    /// Raw image frames (bytes + blake3 hashes).
+    pub images: Vec<Arc<ImageFrame>>,
+    /// Full structural placeholder ranges (offset, length).
+    pub placeholders: Vec<PlaceholderRange>,
+    /// Patch-only placeholder offsets for sglang.
+    pub patch_offsets: Option<Vec<(u32, u32)>>,
+    /// Image token ID from model config.
+    pub im_token_id: Option<u32>,
+    /// Per-tensor field layout classification from the model spec.
+    pub field_layouts: HashMap<String, FieldLayout>,
 }
 
 /// Check if any messages in the request contain multimodal content (images).
@@ -299,19 +325,19 @@ pub(crate) async fn process_multimodal(
         "Token expansion complete"
     );
 
-    // Step 4: Build multimodal data (includes hash collection)
-    let multimodal_data = build_multimodal_data(
-        &preprocessed,
+    // Step 4: Build lightweight intermediate (defers tensor serialization to assembly)
+    let intermediate = MultimodalIntermediate {
+        preprocessed,
+        images,
+        placeholders: expanded.placeholders,
+        patch_offsets: expanded.patch_offsets,
         im_token_id,
-        &expanded.placeholders,
-        expanded.patch_offsets,
-        &images,
-        spec,
-    );
+        field_layouts: spec.field_layouts(),
+    };
 
     Ok(MultimodalOutput {
         expanded_token_ids: expanded.token_ids,
-        multimodal_data,
+        intermediate,
     })
 }
 
@@ -406,16 +432,90 @@ fn expand_tokens(
     }
 }
 
-/// Build backend-agnostic `MultimodalData` from preprocessed images.
-fn build_multimodal_data(
-    preprocessed: &PreprocessedImages,
-    im_token_id: Option<u32>,
-    placeholders: &[PlaceholderRange],
-    sglang_patch_offsets: Option<Vec<(u32, u32)>>,
-    images: &[Arc<ImageFrame>],
-    spec: &dyn ModelProcessorSpec,
+// ---------------------------------------------------------------------------
+// Assembly: convert MultimodalIntermediate → backend-specific MultimodalData
+// ---------------------------------------------------------------------------
+
+/// Assemble backend-specific multimodal data from the intermediate.
+///
+/// Called in request_building after worker selection, when the backend is known.
+pub(crate) fn assemble_multimodal_data(
+    intermediate: MultimodalIntermediate,
+    client: &GrpcClient,
 ) -> MultimodalData {
-    // Serialize pixel values as raw little-endian f32 bytes
+    match client {
+        GrpcClient::Sglang(_) => MultimodalData::Sglang(assemble_sglang(intermediate)),
+        GrpcClient::Vllm(_) => MultimodalData::Vllm(assemble_vllm(intermediate)),
+        GrpcClient::Trtllm(_) => MultimodalData::Trtllm(assemble_trtllm(intermediate)),
+    }
+}
+
+fn assemble_sglang(intermediate: MultimodalIntermediate) -> SglangMultimodalData {
+    let (pixel_values, pixel_values_shape) = serialize_pixel_values(&intermediate.preprocessed);
+    let model_specific_tensors = serialize_model_specific(&intermediate.preprocessed);
+    let image_data = intermediate
+        .images
+        .iter()
+        .map(|f| f.raw_bytes.to_vec())
+        .collect();
+    // Use patch-only offsets when available; fall back to full structural ranges.
+    let mm_placeholders = intermediate.patch_offsets.unwrap_or_else(|| {
+        intermediate
+            .placeholders
+            .iter()
+            .map(|p| (p.offset as u32, p.length as u32))
+            .collect()
+    });
+
+    SglangMultimodalData {
+        image_data,
+        pixel_values,
+        pixel_values_shape,
+        model_specific_tensors,
+        im_token_id: intermediate.im_token_id,
+        mm_placeholders,
+    }
+}
+
+fn assemble_vllm(intermediate: MultimodalIntermediate) -> VllmMultimodalData {
+    let (pixel_values, pixel_values_shape) = serialize_pixel_values(&intermediate.preprocessed);
+    let model_specific_tensors = serialize_model_specific(&intermediate.preprocessed);
+    let mm_hashes = intermediate.images.iter().map(|f| f.hash.clone()).collect();
+    let mm_placeholders = intermediate
+        .placeholders
+        .iter()
+        .map(|p| (p.offset as u32, p.length as u32))
+        .collect();
+    let batched_keys = PreprocessedImages::batched_keys(&intermediate.field_layouts);
+    let flat_keys = PreprocessedImages::flat_keys(&intermediate.field_layouts);
+
+    VllmMultimodalData {
+        pixel_values,
+        pixel_values_shape,
+        model_specific_tensors,
+        im_token_id: intermediate.im_token_id,
+        mm_placeholders,
+        mm_hashes,
+        batched_keys,
+        flat_keys,
+    }
+}
+
+fn assemble_trtllm(intermediate: MultimodalIntermediate) -> TrtllmMultimodalData {
+    let image_data = intermediate
+        .images
+        .iter()
+        .map(|f| f.raw_bytes.to_vec())
+        .collect();
+    TrtllmMultimodalData { image_data }
+}
+
+// ---------------------------------------------------------------------------
+// Serialization helpers
+// ---------------------------------------------------------------------------
+
+/// Serialize pixel values ndarray to raw little-endian f32 bytes + shape.
+fn serialize_pixel_values(preprocessed: &PreprocessedImages) -> (Vec<u8>, Vec<u32>) {
     let pixel_bytes: Vec<u8> = if let Some(pixel_slice) = preprocessed
         .pixel_values
         .as_slice()
@@ -436,44 +536,18 @@ fn build_multimodal_data(
         .iter()
         .map(|&d| d as u32)
         .collect();
+    (pixel_bytes, pixel_shape)
+}
 
-    // Build model-specific tensors
-    let mut model_specific_tensors = HashMap::new();
+/// Serialize model-specific values to TensorBytes.
+fn serialize_model_specific(preprocessed: &PreprocessedImages) -> HashMap<String, TensorBytes> {
+    let mut tensors = HashMap::new();
     for (key, value) in &preprocessed.model_specific {
         if let Some(tensor) = model_specific_to_tensor_bytes(value) {
-            model_specific_tensors.insert(key.clone(), tensor);
+            tensors.insert(key.clone(), tensor);
         }
     }
-
-    // Collect raw image bytes and hashes in a single pass
-    let (image_data, mm_hashes): (Vec<Vec<u8>>, Vec<String>) = images
-        .iter()
-        .map(|frame| (frame.raw_bytes.to_vec(), frame.hash.clone()))
-        .unzip();
-
-    // Convert placeholder ranges
-    let mm_placeholders = placeholders
-        .iter()
-        .map(|p| (p.offset as u32, p.length as u32))
-        .collect();
-
-    // Field layout classification comes from the model spec in the multimodal crate.
-    let layouts = spec.field_layouts();
-    let batched_keys = PreprocessedImages::batched_keys(&layouts);
-    let flat_keys = PreprocessedImages::flat_keys(&layouts);
-
-    MultimodalData {
-        image_data,
-        pixel_values: pixel_bytes,
-        pixel_values_shape: pixel_shape,
-        model_specific_tensors,
-        im_token_id,
-        mm_placeholders,
-        sglang_patch_offsets,
-        mm_hashes,
-        batched_keys,
-        flat_keys,
-    }
+    tensors
 }
 
 /// Convert a model-specific value to backend-agnostic TensorBytes.

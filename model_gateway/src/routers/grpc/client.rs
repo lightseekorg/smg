@@ -267,6 +267,10 @@ impl GrpcClient {
         }
     }
 
+    #[expect(
+        clippy::unreachable,
+        reason = "assembly stage guarantees matching MultimodalData variant for each backend"
+    )]
     pub fn build_chat_request(
         &self,
         request_id: String,
@@ -278,7 +282,10 @@ impl GrpcClient {
     ) -> Result<ProtoGenerateRequest, String> {
         match self {
             Self::Sglang(client) => {
-                let sglang_mm = multimodal_inputs.map(|mm| mm.into_sglang_proto());
+                let sglang_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Sglang(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
@@ -290,7 +297,10 @@ impl GrpcClient {
                 Ok(ProtoGenerateRequest::Sglang(Box::new(req)))
             }
             Self::Vllm(client) => {
-                let vllm_mm = multimodal_inputs.map(|mm| mm.into_vllm_proto());
+                let vllm_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Vllm(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
@@ -302,7 +312,10 @@ impl GrpcClient {
                 Ok(ProtoGenerateRequest::Vllm(Box::new(req)))
             }
             Self::Trtllm(client) => {
-                let trtllm_mm = multimodal_inputs.map(|mm| mm.into_trtllm_proto());
+                let trtllm_mm = multimodal_inputs.map(|mm| match mm {
+                    MultimodalData::Trtllm(data) => data.into_proto(),
+                    _ => unreachable!("caller guarantees matching variant"),
+                });
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,

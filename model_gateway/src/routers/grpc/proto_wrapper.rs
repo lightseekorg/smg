@@ -19,38 +19,49 @@ use smg_grpc_client::{
 // Multimodal Data
 // =====================
 
-/// Backend-agnostic multimodal data produced by the processing pipeline.
+/// Backend-specific multimodal data produced by the assembly stage.
 ///
-/// Each backend client converts this into its own proto format:
-/// - SGLang: full pixel_values + model_specific_tensors + placeholders
-/// - vLLM: full pixel_values + model_specific_tensors + placeholders + mm_hashes
-/// - TRT-LLM: raw image bytes only (TRT-LLM handles preprocessing internally)
-#[derive(Debug, Clone)]
-pub struct MultimodalData {
-    /// Raw image bytes (JPEG/PNG) for each image (TRT-LLM only)
+/// Each variant carries only the fields its backend needs:
+/// - SGLang: pixel_values + model_specific_tensors + patch-only placeholders
+/// - vLLM: pixel_values + model_specific_tensors + structural placeholders + hashes + field keys
+/// - TRT-LLM: raw image bytes only (preprocessing handled server-side)
+#[derive(Debug)]
+pub enum MultimodalData {
+    Sglang(SglangMultimodalData),
+    Vllm(VllmMultimodalData),
+    Trtllm(TrtllmMultimodalData),
+}
+
+/// SGLang multimodal data: preprocessed tensors with patch-only placeholders.
+#[derive(Debug)]
+pub struct SglangMultimodalData {
     pub image_data: Vec<Vec<u8>>,
-    /// Preprocessed pixel values as raw little-endian f32 bytes
     pub pixel_values: Vec<u8>,
-    /// Shape of the pixel_values tensor
     pub pixel_values_shape: Vec<u32>,
-    /// Model-specific tensors (aspect_ratios, image_grid_thw, etc.)
     pub model_specific_tensors: HashMap<String, TensorBytes>,
-    /// Image token ID for downstream pad_input_ids_func
     pub im_token_id: Option<u32>,
-    /// Placeholder offsets: where each image's tokens are in input_ids (full structural range).
-    pub mm_placeholders: Vec<(u32, u32)>, // (offset, length)
-    /// Patch-only placeholder offsets for sglang: contiguous runs of im_token_id
-    /// within each expansion, computed during token expansion at zero extra cost.
-    /// sglang's embedding merge expects offsets aligned 1:1 with vision encoder output.
-    pub sglang_patch_offsets: Option<Vec<(u32, u32)>>, // (offset, length)
-    /// Per-image blake3 hex hashes for encoder output caching (vLLM only)
+    /// Patch-only placeholder offsets aligned 1:1 with vision encoder output.
+    pub mm_placeholders: Vec<(u32, u32)>,
+}
+
+/// vLLM multimodal data: preprocessed tensors with hashing and field layout metadata.
+#[derive(Debug)]
+pub struct VllmMultimodalData {
+    pub pixel_values: Vec<u8>,
+    pub pixel_values_shape: Vec<u32>,
+    pub model_specific_tensors: HashMap<String, TensorBytes>,
+    pub im_token_id: Option<u32>,
+    /// Full structural placeholder offsets (vLLM filters via is_embed mask).
+    pub mm_placeholders: Vec<(u32, u32)>,
     pub mm_hashes: Vec<String>,
-    /// Tensor keys whose first dim is per-image (batched).
     pub batched_keys: Vec<String>,
-    /// Tensor keys that need flat slicing: maps tensor name → sizes tensor name.
-    /// e.g. {"pixel_values": "patches_per_image"} means pixel_values should be
-    /// split using per-item sizes from the patches_per_image tensor.
     pub flat_keys: HashMap<String, String>,
+}
+
+/// TRT-LLM multimodal data: raw image bytes only.
+#[derive(Debug)]
+pub struct TrtllmMultimodalData {
+    pub image_data: Vec<Vec<u8>>,
 }
 
 /// Raw tensor bytes with shape and dtype metadata.
@@ -61,14 +72,9 @@ pub struct TensorBytes {
     pub dtype: String,
 }
 
-impl MultimodalData {
-    /// Convert to SGLang proto MultimodalInputs, consuming self to avoid clones.
-    ///
-    /// Uses precomputed `sglang_patch_offsets` (contiguous runs of im_token_id)
-    /// when available, falling back to `mm_placeholders` for models without
-    /// structural tokens. Patch-only offsets are computed at zero extra cost
-    /// during token expansion in `expand_tokens()`.
-    pub fn into_sglang_proto(self) -> sglang::MultimodalInputs {
+impl SglangMultimodalData {
+    /// Convert to SGLang proto MultimodalInputs.
+    pub fn into_proto(self) -> sglang::MultimodalInputs {
         let model_specific_tensors = self
             .model_specific_tensors
             .into_iter()
@@ -85,8 +91,7 @@ impl MultimodalData {
             .collect();
 
         let mm_placeholders = self
-            .sglang_patch_offsets
-            .unwrap_or(self.mm_placeholders)
+            .mm_placeholders
             .into_iter()
             .map(|(offset, length)| sglang::PlaceholderRange { offset, length })
             .collect();
@@ -109,9 +114,11 @@ impl MultimodalData {
             mm_placeholders,
         }
     }
+}
 
-    /// Convert to vLLM proto MultimodalInputs, consuming self to avoid clones.
-    pub fn into_vllm_proto(self) -> vllm::MultimodalInputs {
+impl VllmMultimodalData {
+    /// Convert to vLLM proto MultimodalInputs.
+    pub fn into_proto(self) -> vllm::MultimodalInputs {
         let model_specific_tensors = self
             .model_specific_tensors
             .into_iter()
@@ -147,12 +154,11 @@ impl MultimodalData {
             flat_keys: self.flat_keys,
         }
     }
+}
 
-    /// Convert to TensorRT-LLM proto MultimodalInput, consuming self to avoid clones.
-    ///
-    /// Only sends raw image bytes — TRT-LLM's input processor handles hashing,
-    /// position tracking, and vision encoding server-side.
-    pub fn into_trtllm_proto(self) -> trtllm::MultimodalInput {
+impl TrtllmMultimodalData {
+    /// Convert to TRT-LLM proto MultimodalInput.
+    pub fn into_proto(self) -> trtllm::MultimodalInput {
         trtllm::MultimodalInput {
             image_data: self.image_data,
         }
