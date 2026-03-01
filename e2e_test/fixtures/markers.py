@@ -27,7 +27,7 @@ def resolve_class_marker(
             if hasattr(cls, "pytestmark"):
                 markers = cls.pytestmark if isinstance(cls.pytestmark, list) else [cls.pytestmark]
                 for marker in markers:
-                    if marker.name == marker_name and marker.args:
+                    if marker.name == marker_name:
                         return marker
     return item.get_closest_marker(marker_name)
 

@@ -750,6 +750,7 @@ class TestBuiltinToolRoutingGrpc:
 
 
 @pytest.mark.e2e
+@pytest.mark.model("openai/gpt-oss-20b")
 class TestWebSearchStreamingEventsGrpc:
     """Test web_search_call SSE streaming events with builtin routing on gRPC.
 

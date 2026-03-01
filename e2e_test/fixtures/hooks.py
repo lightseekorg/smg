@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from .markers import resolve_class_marker
+
 if TYPE_CHECKING:
     from infra import ConnectionMode, WorkerIdentity, WorkerType
 
@@ -142,8 +144,6 @@ def pytest_collection_modifyitems(
     for item in items_to_scan:
         # Extract model from marker or use default
         # Use MRO-aware resolution so child class markers override parent
-        from .markers import resolve_class_marker
-
         model_marker = resolve_class_marker(item, PARAM_MODEL)
         model_id = model_marker.args[0] if model_marker and model_marker.args else None
 
