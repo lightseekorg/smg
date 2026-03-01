@@ -515,9 +515,9 @@ impl Llama4Spec {
         if let Some(ModelSpecificValue::IntTensor { data, shape }) =
             preprocessed.model_specific.get("aspect_ratios")
         {
-            if shape.len() == 2 && shape[1] == 2 && data.len() >= 2 {
+            if shape.len() == 2 && shape[1] == 2 && data.len() == shape[0] * 2 {
                 return data
-                    .chunks(2)
+                    .chunks_exact(2)
                     .map(|chunk| (chunk[0] as usize, chunk[1] as usize))
                     .collect();
             }
