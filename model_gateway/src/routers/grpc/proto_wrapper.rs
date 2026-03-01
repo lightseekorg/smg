@@ -37,8 +37,12 @@ pub struct MultimodalData {
     pub model_specific_tensors: HashMap<String, TensorBytes>,
     /// Image token ID for downstream pad_input_ids_func
     pub im_token_id: Option<u32>,
-    /// Placeholder offsets: where each image's tokens are in input_ids
+    /// Placeholder offsets: where each image's tokens are in input_ids (full structural range).
     pub mm_placeholders: Vec<(u32, u32)>, // (offset, length)
+    /// Patch-only placeholder offsets for sglang: contiguous runs of im_token_id
+    /// within each expansion, computed during token expansion at zero extra cost.
+    /// sglang's embedding merge expects offsets aligned 1:1 with vision encoder output.
+    pub sglang_patch_offsets: Option<Vec<(u32, u32)>>, // (offset, length)
     /// Per-image blake3 hex hashes for encoder output caching (vLLM only)
     pub mm_hashes: Vec<String>,
     /// Tensor keys whose first dim is per-image (batched).
@@ -60,13 +64,11 @@ pub struct TensorBytes {
 impl MultimodalData {
     /// Convert to SGLang proto MultimodalInputs, consuming self to avoid clones.
     ///
-    /// `token_ids` is the expanded token sequence. When `im_token_id` is set,
-    /// we scan `token_ids` for contiguous runs of that ID and emit patch-only
-    /// placeholder offsets. This is necessary because `mm_placeholders` covers
-    /// the full structural expansion (image_start, tile separators, etc.) but
-    /// sglang's embedding merge expects offsets aligned 1:1 with vision encoder
-    /// output (patch tokens only).
-    pub fn into_sglang_proto(self, token_ids: &[u32]) -> sglang::MultimodalInputs {
+    /// Uses precomputed `sglang_patch_offsets` (contiguous runs of im_token_id)
+    /// when available, falling back to `mm_placeholders` for models without
+    /// structural tokens. Patch-only offsets are computed at zero extra cost
+    /// during token expansion in `expand_tokens()`.
+    pub fn into_sglang_proto(self) -> sglang::MultimodalInputs {
         let model_specific_tensors = self
             .model_specific_tensors
             .into_iter()
@@ -82,44 +84,12 @@ impl MultimodalData {
             })
             .collect();
 
-        // For sglang, compute patch-only offsets by scanning only within the
-        // known mm_placeholder ranges for contiguous runs of im_token_id.
-        // Falls back to mm_placeholders as-is when im_token_id is not set.
-        let mm_placeholders = match self.im_token_id {
-            Some(im_id) => {
-                let mut offsets = Vec::new();
-                for (ph_offset, ph_length) in &self.mm_placeholders {
-                    let start = *ph_offset as usize;
-                    let end = start + *ph_length as usize;
-                    let mut run_start: Option<u32> = None;
-                    for i in start..end {
-                        if token_ids[i] == im_id {
-                            if run_start.is_none() {
-                                run_start = Some(i as u32);
-                            }
-                        } else if let Some(s) = run_start {
-                            offsets.push(sglang::PlaceholderRange {
-                                offset: s,
-                                length: i as u32 - s,
-                            });
-                            run_start = None;
-                        }
-                    }
-                    if let Some(s) = run_start {
-                        offsets.push(sglang::PlaceholderRange {
-                            offset: s,
-                            length: end as u32 - s,
-                        });
-                    }
-                }
-                offsets
-            }
-            None => self
-                .mm_placeholders
-                .into_iter()
-                .map(|(offset, length)| sglang::PlaceholderRange { offset, length })
-                .collect(),
-        };
+        let mm_placeholders = self
+            .sglang_patch_offsets
+            .unwrap_or(self.mm_placeholders)
+            .into_iter()
+            .map(|(offset, length)| sglang::PlaceholderRange { offset, length })
+            .collect();
 
         sglang::MultimodalInputs {
             image_urls: vec![],

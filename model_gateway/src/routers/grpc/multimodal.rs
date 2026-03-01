@@ -283,51 +283,102 @@ pub(crate) async fn process_multimodal(
         .map(|id| id as u32)
         .or(search_token_id);
 
-    let (expanded_token_ids, mm_placeholders) =
-        expand_tokens(&token_ids, search_token_id, &prompt_replacements);
+    let expanded = expand_tokens(
+        &token_ids,
+        search_token_id,
+        im_token_id,
+        &prompt_replacements,
+    );
 
     debug!(
         original_len = token_ids.len(),
-        expanded_len = expanded_token_ids.len(),
-        placeholder_count = mm_placeholders.len(),
+        expanded_len = expanded.token_ids.len(),
+        placeholder_count = expanded.placeholders.len(),
         ?search_token_id,
         ?im_token_id,
         "Token expansion complete"
     );
 
     // Step 4: Build multimodal data (includes hash collection)
-    let multimodal_data =
-        build_multimodal_data(&preprocessed, im_token_id, &mm_placeholders, &images, spec);
+    let multimodal_data = build_multimodal_data(
+        &preprocessed,
+        im_token_id,
+        &expanded.placeholders,
+        expanded.patch_offsets,
+        &images,
+        spec,
+    );
 
     Ok(MultimodalOutput {
-        expanded_token_ids,
+        expanded_token_ids: expanded.token_ids,
         multimodal_data,
     })
+}
+
+/// Output of token expansion, containing both full structural and patch-only ranges.
+struct ExpandedTokens {
+    /// The expanded token ID sequence.
+    token_ids: Vec<u32>,
+    /// Full structural placeholder ranges (offset, length) covering the entire
+    /// replacement including structural tokens. Used by vLLM (which filters via is_embed).
+    placeholders: Vec<PlaceholderRange>,
+    /// Patch-only placeholder ranges: contiguous runs of `im_token_id` within each
+    /// expansion. Used by sglang (which expects offsets aligned 1:1 with vision
+    /// encoder output). `None` when `im_token_id` is not set.
+    patch_offsets: Option<Vec<(u32, u32)>>,
 }
 
 /// Expand placeholder tokens in the token ID sequence.
 ///
 /// For each placeholder token found, replace it with the expanded token sequence
-/// from the corresponding `PromptReplacement`. Also track placeholder ranges.
+/// from the corresponding `PromptReplacement`. Also track both the full structural
+/// placeholder ranges and patch-only offsets (contiguous runs of `im_token_id`)
+/// in a single pass — no extra iteration needed.
 fn expand_tokens(
     token_ids: &[u32],
     placeholder_token_id: Option<u32>,
+    im_token_id: Option<u32>,
     replacements: &[PromptReplacement],
-) -> (Vec<u32>, Vec<PlaceholderRange>) {
+) -> ExpandedTokens {
     let Some(placeholder_id) = placeholder_token_id else {
         // If we can't resolve the placeholder token, return unchanged
         warn!("Could not resolve placeholder token ID; skipping token expansion");
-        return (token_ids.to_vec(), vec![]);
+        return ExpandedTokens {
+            token_ids: token_ids.to_vec(),
+            placeholders: vec![],
+            patch_offsets: None,
+        };
     };
 
     let mut expanded = Vec::with_capacity(token_ids.len());
     let mut placeholders = Vec::new();
+    let mut patch_offsets: Option<Vec<(u32, u32)>> = im_token_id.map(|_| Vec::new());
     let mut replacement_idx = 0;
 
     for &token in token_ids {
         if token == placeholder_id && replacement_idx < replacements.len() {
             let repl = &replacements[replacement_idx];
             let offset = expanded.len();
+
+            // Track patch-only runs while extending
+            if let (Some(im_id), Some(ref mut offsets)) = (im_token_id, &mut patch_offsets) {
+                let mut run_start: Option<u32> = None;
+                for (i, &t) in repl.tokens.iter().enumerate() {
+                    let pos = (offset + i) as u32;
+                    if t as u32 == im_id {
+                        if run_start.is_none() {
+                            run_start = Some(pos);
+                        }
+                    } else if let Some(s) = run_start {
+                        offsets.push((s, pos - s));
+                        run_start = None;
+                    }
+                }
+                if let Some(s) = run_start {
+                    offsets.push((s, (offset + repl.tokens.len()) as u32 - s));
+                }
+            }
+
             // PromptReplacement uses TokenId = i32, convert to u32
             expanded.extend(repl.tokens.iter().map(|&t| t as u32));
             placeholders.push(PlaceholderRange {
@@ -348,7 +399,11 @@ fn expand_tokens(
         );
     }
 
-    (expanded, placeholders)
+    ExpandedTokens {
+        token_ids: expanded,
+        placeholders,
+        patch_offsets,
+    }
 }
 
 /// Build backend-agnostic `MultimodalData` from preprocessed images.
@@ -356,6 +411,7 @@ fn build_multimodal_data(
     preprocessed: &PreprocessedImages,
     im_token_id: Option<u32>,
     placeholders: &[PlaceholderRange],
+    sglang_patch_offsets: Option<Vec<(u32, u32)>>,
     images: &[Arc<ImageFrame>],
     spec: &dyn ModelProcessorSpec,
 ) -> MultimodalData {
@@ -413,6 +469,7 @@ fn build_multimodal_data(
         model_specific_tensors,
         im_token_id,
         mm_placeholders,
+        sglang_patch_offsets,
         mm_hashes,
         batched_keys,
         flat_keys,
@@ -554,21 +611,23 @@ mod tests {
             tokens: vec![50, 50, 50, 50], // Expand to 4 tokens
         }];
 
-        let (expanded, placeholders) = expand_tokens(&token_ids, Some(100), &replacements);
+        let result = expand_tokens(&token_ids, Some(100), None, &replacements);
 
-        assert_eq!(expanded, vec![1, 2, 50, 50, 50, 50, 3, 4]);
-        assert_eq!(placeholders.len(), 1);
-        assert_eq!(placeholders[0].offset, 2);
-        assert_eq!(placeholders[0].length, 4);
+        assert_eq!(result.token_ids, vec![1, 2, 50, 50, 50, 50, 3, 4]);
+        assert_eq!(result.placeholders.len(), 1);
+        assert_eq!(result.placeholders[0].offset, 2);
+        assert_eq!(result.placeholders[0].length, 4);
+        assert!(result.patch_offsets.is_none());
     }
 
     #[test]
     fn test_expand_tokens_no_placeholder() {
         let token_ids = vec![1, 2, 3];
-        let (expanded, placeholders) = expand_tokens(&token_ids, None, &[]);
+        let result = expand_tokens(&token_ids, None, None, &[]);
 
-        assert_eq!(expanded, vec![1, 2, 3]);
-        assert!(placeholders.is_empty());
+        assert_eq!(result.token_ids, vec![1, 2, 3]);
+        assert!(result.placeholders.is_empty());
+        assert!(result.patch_offsets.is_none());
     }
 
     #[test]
@@ -587,14 +646,39 @@ mod tests {
             },
         ];
 
-        let (expanded, placeholders) = expand_tokens(&token_ids, Some(100), &replacements);
+        let result = expand_tokens(&token_ids, Some(100), None, &replacements);
 
-        assert_eq!(expanded, vec![1, 50, 50, 2, 60, 60, 60, 3]);
-        assert_eq!(placeholders.len(), 2);
-        assert_eq!(placeholders[0].offset, 1);
-        assert_eq!(placeholders[0].length, 2);
-        assert_eq!(placeholders[1].offset, 4);
-        assert_eq!(placeholders[1].length, 3);
+        assert_eq!(result.token_ids, vec![1, 50, 50, 2, 60, 60, 60, 3]);
+        assert_eq!(result.placeholders.len(), 2);
+        assert_eq!(result.placeholders[0].offset, 1);
+        assert_eq!(result.placeholders[0].length, 2);
+        assert_eq!(result.placeholders[1].offset, 4);
+        assert_eq!(result.placeholders[1].length, 3);
+    }
+
+    #[test]
+    fn test_expand_tokens_patch_offsets_with_structural() {
+        // Simulates Llama-4: placeholder expands to structural + patch tokens
+        // 88=image_start, 92=patch(im_token_id), 93=separator, 89=image_end
+        let token_ids = vec![1, 100, 2]; // 100 is the placeholder
+        let replacements = vec![PromptReplacement {
+            modality: Modality::Image,
+            placeholder_token: "<image>".to_string(),
+            tokens: vec![88, 92, 92, 92, 93, 92, 92, 92, 89], // start + patches + sep + patches + end
+        }];
+
+        let result = expand_tokens(&token_ids, Some(100), Some(92), &replacements);
+
+        // Full structural range
+        assert_eq!(result.placeholders.len(), 1);
+        assert_eq!(result.placeholders[0].offset, 1);
+        assert_eq!(result.placeholders[0].length, 9);
+
+        // Patch-only offsets: two runs of token 92
+        let patch = result.patch_offsets.unwrap();
+        assert_eq!(patch.len(), 2);
+        assert_eq!(patch[0], (2, 3)); // offset=2, length=3
+        assert_eq!(patch[1], (6, 3)); // offset=6, length=3
     }
 
     #[test]

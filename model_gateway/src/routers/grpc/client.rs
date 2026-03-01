@@ -278,7 +278,7 @@ impl GrpcClient {
     ) -> Result<ProtoGenerateRequest, String> {
         match self {
             Self::Sglang(client) => {
-                let sglang_mm = multimodal_inputs.map(|mm| mm.into_sglang_proto(&token_ids));
+                let sglang_mm = multimodal_inputs.map(|mm| mm.into_sglang_proto());
                 let req = client.build_generate_request_from_chat(
                     request_id,
                     body,
