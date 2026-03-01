@@ -106,8 +106,9 @@ message PlaceholderRange {
 
 // Multimodal inputs for vision/audio models
 message MultimodalInputs {
-  // Raw image bytes (JPEG/PNG) — kept for fallback / TRT-LLM compatibility
-  repeated bytes image_data = 1;
+  // Reserved: field 1 was image_data (raw bytes), removed in favor of
+  // preprocessed pixel_values.
+  reserved 1;
 
   // Preprocessed pixel values tensor
   TensorData pixel_values = 2;

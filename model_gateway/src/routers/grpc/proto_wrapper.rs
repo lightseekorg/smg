@@ -27,7 +27,7 @@ use smg_grpc_client::{
 /// - TRT-LLM: raw image bytes only (TRT-LLM handles preprocessing internally)
 #[derive(Debug, Clone)]
 pub struct MultimodalData {
-    /// Raw image bytes (JPEG/PNG) for each image
+    /// Raw image bytes (JPEG/PNG) for each image (TRT-LLM only)
     pub image_data: Vec<Vec<u8>>,
     /// Preprocessed pixel values as raw little-endian f32 bytes
     pub pixel_values: Vec<u8>,
@@ -124,7 +124,6 @@ impl MultimodalData {
             .collect();
 
         vllm::MultimodalInputs {
-            image_data: self.image_data,
             pixel_values: Some(vllm::TensorData {
                 data: self.pixel_values,
                 shape: self.pixel_values_shape,
