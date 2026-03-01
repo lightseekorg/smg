@@ -10,7 +10,7 @@
 //! - `on_worker_removed` — aborts task, removes worker from indexer
 //! - `stop` — aborts all tasks, clears state
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use dashmap::DashMap;
 use kv_index::{compute_content_hash, ApplyError, PositionalIndexer, SequenceHash, StoredBlock};
@@ -405,6 +405,15 @@ impl Drop for KvEventMonitor {
                 sub.handle.abort();
             }
         }
+    }
+}
+
+impl fmt::Debug for KvEventMonitor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KvEventMonitor")
+            .field("models", &self.indexers.len())
+            .field("jump_size", &self.jump_size)
+            .finish()
     }
 }
 

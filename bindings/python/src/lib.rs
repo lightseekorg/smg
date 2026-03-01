@@ -477,6 +477,7 @@ impl Router {
                     balance_rel_threshold: self.balance_rel_threshold,
                     eviction_interval_secs: self.eviction_interval_secs,
                     max_tree_size: self.max_tree_size,
+                    block_size: 16,
                 },
                 PolicyType::PowerOfTwo => ConfigPolicyConfig::PowerOfTwo {
                     load_check_interval_secs: 5,

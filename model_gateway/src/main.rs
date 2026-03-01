@@ -754,6 +754,7 @@ impl CliArgs {
                 balance_rel_threshold: self.balance_rel_threshold,
                 eviction_interval_secs: self.eviction_interval,
                 max_tree_size: self.max_tree_size,
+                block_size: 16,
             },
             "power_of_two" => PolicyConfig::PowerOfTwo {
                 load_check_interval_secs: 5,

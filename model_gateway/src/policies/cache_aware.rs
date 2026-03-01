@@ -62,7 +62,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use kv_index::{TokenTree, Tree};
+use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tree};
 use rand::Rng;
 use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeOperation};
 use tracing::{debug, warn};
@@ -71,7 +71,7 @@ use super::{
     get_healthy_worker_indices, normalize_model_key, utils::PeriodicTask, CacheAwareConfig,
     LoadBalancingPolicy, SelectWorkerInfo,
 };
-use crate::core::{Worker, UNKNOWN_MODEL_ID};
+use crate::core::{KvEventMonitor, Worker, UNKNOWN_MODEL_ID};
 
 /// Cache-aware routing policy
 ///
@@ -93,6 +93,10 @@ pub struct CacheAwarePolicy {
     token_trees: Arc<DashMap<String, Arc<TokenTree>>>,
     mesh_sync: OptionalMeshSyncManager,
     _eviction_task: Option<PeriodicTask>,
+    /// Event-driven KV cache monitor for overlap scoring (gRPC workers only).
+    /// Set via `set_kv_event_monitor`. When present and the indexer has data for
+    /// a model, event-driven routing takes priority over approximate trees.
+    kv_monitor: Option<Arc<KvEventMonitor>>,
 }
 
 impl CacheAwarePolicy {
@@ -148,6 +152,7 @@ impl CacheAwarePolicy {
             token_trees,
             mesh_sync: None,
             _eviction_task: eviction_task,
+            kv_monitor: None,
         }
     }
 
@@ -157,6 +162,11 @@ impl CacheAwarePolicy {
         if mesh_sync.is_some() {
             self.restore_tree_state_from_mesh();
         }
+    }
+
+    /// Set event-driven KV cache monitor (can be called after construction)
+    pub fn set_kv_event_monitor(&mut self, monitor: Option<Arc<KvEventMonitor>>) {
+        self.kv_monitor = monitor;
     }
 
     /// Initialize the trees with worker URLs (used only during initial setup)
@@ -451,13 +461,17 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
             return self.select_worker_min_load(workers, info, &healthy_indices, model_id);
         }
 
-        // Use cache-aware routing when balanced
-        // gRPC requests use token tree, HTTP requests use string tree
+        // Use cache-aware routing when balanced (three tiers)
         if let Some(tokens) = request_tokens {
-            // gRPC path: use token-based tree
+            // gRPC path: try event-driven first, then approximate token tree
+            if let Some(idx) =
+                self.try_event_driven_routing(workers, tokens, &healthy_indices, model_id)
+            {
+                return Some(idx);
+            }
             self.select_worker_with_tokens(workers, tokens, &healthy_indices, model_id)
         } else {
-            // HTTP path: use string-based tree
+            // HTTP path: approximate string tree (unchanged)
             let text = request_text.unwrap_or("");
             self.select_worker_with_text(workers, text, &healthy_indices, model_id)
         }
@@ -490,6 +504,78 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
 
 // Private helper methods for select_worker
 impl CacheAwarePolicy {
+    /// Try event-driven routing via KvEventMonitor overlap scoring.
+    ///
+    /// Returns `Some(idx)` if the monitor has an indexer with data for this model
+    /// and a worker was selected. Returns `None` to fall back to approximate trees.
+    fn try_event_driven_routing(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        tokens: &[u32],
+        healthy_indices: &[usize],
+        model_id: &str,
+    ) -> Option<usize> {
+        let monitor = self.kv_monitor.as_ref()?;
+        let indexer = monitor.get_indexer(model_id)?;
+        if indexer.current_size() == 0 {
+            return None;
+        }
+        self.select_worker_with_events(workers, tokens, healthy_indices, &indexer)
+    }
+
+    /// Select worker using event-driven overlap scoring (gRPC path, Tier 1).
+    ///
+    /// Computes content hashes from request tokens, queries the PositionalIndexer
+    /// for overlap scores, and selects the worker with the best match. Tie-breaks
+    /// by load (lower wins) then tree size (smaller wins).
+    ///
+    /// Returns `None` if the request is too short for any full block or no workers
+    /// have cached data matching the request — caller should fall back to approximate trees.
+    fn select_worker_with_events(
+        &self,
+        workers: &[Arc<dyn Worker>],
+        tokens: &[u32],
+        healthy_indices: &[usize],
+        indexer: &PositionalIndexer,
+    ) -> Option<usize> {
+        let content_hashes = compute_request_content_hashes(tokens, self.config.block_size);
+        if content_hashes.is_empty() {
+            return None;
+        }
+
+        let overlap = indexer.find_matches(&content_hashes);
+        if overlap.scores.is_empty() {
+            return None;
+        }
+
+        let best_idx = healthy_indices
+            .iter()
+            .max_by(|&&a, &&b| {
+                let score_a = overlap.scores.get(workers[a].url()).copied().unwrap_or(0);
+                let score_b = overlap.scores.get(workers[b].url()).copied().unwrap_or(0);
+                score_a
+                    .cmp(&score_b)
+                    .then_with(|| workers[b].load().cmp(&workers[a].load()))
+                    .then_with(|| {
+                        let size_a = overlap
+                            .tree_sizes
+                            .get(workers[a].url())
+                            .copied()
+                            .unwrap_or(0);
+                        let size_b = overlap
+                            .tree_sizes
+                            .get(workers[b].url())
+                            .copied()
+                            .unwrap_or(0);
+                        size_b.cmp(&size_a)
+                    })
+            })
+            .copied()?;
+
+        workers[best_idx].increment_processed();
+        Some(best_idx)
+    }
+
     /// Select worker using token-based tree (gRPC path)
     fn select_worker_with_tokens(
         &self,
@@ -620,6 +706,8 @@ impl Default for CacheAwarePolicy {
 
 #[cfg(test)]
 mod tests {
+    use kv_index::{compute_content_hash, SequenceHash, StoredBlock};
+
     use super::*;
     use crate::core::{BasicWorkerBuilder, WorkerType};
 
@@ -693,6 +781,7 @@ mod tests {
             balance_rel_threshold: 2.0,
             eviction_interval_secs: 0, // Disable eviction thread
             max_tree_size: 10000,
+            block_size: 16,
         });
 
         let worker1 = BasicWorkerBuilder::new("http://w1:8000")
@@ -972,5 +1061,334 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Event-driven routing tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a PositionalIndexer and store blocks for a worker.
+    /// `token_chunks` is a list of token-id slices — each becomes one block.
+    fn setup_indexer_with_blocks(
+        worker_url: &str,
+        token_chunks: &[&[u32]],
+        jump_size: usize,
+    ) -> Arc<PositionalIndexer> {
+        let indexer = Arc::new(PositionalIndexer::new(jump_size));
+        let blocks: Vec<StoredBlock> = token_chunks
+            .iter()
+            .enumerate()
+            .map(|(i, tokens)| StoredBlock {
+                seq_hash: SequenceHash(i as u64 + 1),
+                content_hash: compute_content_hash(tokens),
+            })
+            .collect();
+        indexer.apply_stored(worker_url, &blocks, None).unwrap();
+        indexer
+    }
+
+    fn test_config() -> CacheAwareConfig {
+        CacheAwareConfig {
+            eviction_interval_secs: 0,
+            block_size: 4, // small block size for easy test setup
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_event_driven_selects_best_overlap() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        // Store 4 blocks for w1: tokens [1..16] in blocks of 4
+        let indexer = setup_indexer_with_blocks(
+            "http://w1:8000",
+            &[
+                &[1, 2, 3, 4],
+                &[5, 6, 7, 8],
+                &[9, 10, 11, 12],
+                &[13, 14, 15, 16],
+            ],
+            4,
+        );
+
+        // Query with matching tokens — should select w1
+        let result = policy.select_worker_with_events(
+            &workers,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            &[0, 1],
+            &indexer,
+        );
+        assert_eq!(result, Some(0)); // w1
+    }
+
+    #[test]
+    fn test_event_driven_no_overlap_returns_none() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
+            BasicWorkerBuilder::new("http://w1:8000")
+                .worker_type(WorkerType::Regular)
+                .build(),
+        )];
+        policy.init_workers(&workers);
+
+        // Store blocks for tokens [1..8]
+        let indexer =
+            setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4], &[5, 6, 7, 8]], 4);
+
+        // Query with completely different tokens — no overlap
+        let result = policy.select_worker_with_events(
+            &workers,
+            &[100, 200, 300, 400, 500, 600, 700, 800],
+            &[0],
+            &indexer,
+        );
+        assert_eq!(result, None); // no match → falls back
+    }
+
+    #[test]
+    fn test_event_driven_load_tiebreak() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+
+        let w1 = BasicWorkerBuilder::new("http://w1:8000")
+            .worker_type(WorkerType::Regular)
+            .build();
+        let w2 = BasicWorkerBuilder::new("http://w2:8000")
+            .worker_type(WorkerType::Regular)
+            .build();
+
+        // Give w1 higher load
+        for _ in 0..10 {
+            w1.increment_load();
+        }
+
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(w1), Arc::new(w2)];
+        policy.init_workers(&workers);
+
+        // Store same blocks for both workers (equal overlap)
+        let indexer = Arc::new(PositionalIndexer::new(4));
+        let blocks = vec![StoredBlock {
+            seq_hash: SequenceHash(1),
+            content_hash: compute_content_hash(&[1, 2, 3, 4]),
+        }];
+        indexer
+            .apply_stored("http://w1:8000", &blocks, None)
+            .unwrap();
+        let blocks2 = vec![StoredBlock {
+            seq_hash: SequenceHash(1),
+            content_hash: compute_content_hash(&[1, 2, 3, 4]),
+        }];
+        indexer
+            .apply_stored("http://w2:8000", &blocks2, None)
+            .unwrap();
+
+        // Equal overlap → tie-break by load → w2 wins (lower load)
+        let result = policy.select_worker_with_events(&workers, &[1, 2, 3, 4], &[0, 1], &indexer);
+        assert_eq!(result, Some(1)); // w2 (lower load)
+    }
+
+    #[test]
+    fn test_event_driven_tree_size_tiebreak() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        let indexer = Arc::new(PositionalIndexer::new(4));
+
+        // Both workers have block [1,2,3,4] (equal overlap, equal load)
+        let block = vec![StoredBlock {
+            seq_hash: SequenceHash(1),
+            content_hash: compute_content_hash(&[1, 2, 3, 4]),
+        }];
+        indexer
+            .apply_stored("http://w1:8000", &block, None)
+            .unwrap();
+
+        // w2 has the same block plus extra blocks → larger tree
+        let block2 = vec![StoredBlock {
+            seq_hash: SequenceHash(1),
+            content_hash: compute_content_hash(&[1, 2, 3, 4]),
+        }];
+        indexer
+            .apply_stored("http://w2:8000", &block2, None)
+            .unwrap();
+        let extra = vec![StoredBlock {
+            seq_hash: SequenceHash(2),
+            content_hash: compute_content_hash(&[5, 6, 7, 8]),
+        }];
+        indexer
+            .apply_stored("http://w2:8000", &extra, Some(SequenceHash(1)))
+            .unwrap();
+
+        // Equal overlap, equal load → tie-break by tree size → w1 wins (smaller)
+        let result = policy.select_worker_with_events(&workers, &[1, 2, 3, 4], &[0, 1], &indexer);
+        assert_eq!(result, Some(0)); // w1 (smaller tree)
+    }
+
+    #[test]
+    fn test_event_driven_short_request_returns_none() {
+        let policy = CacheAwarePolicy::with_config(test_config()); // block_size=4
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
+            BasicWorkerBuilder::new("http://w1:8000")
+                .worker_type(WorkerType::Regular)
+                .build(),
+        )];
+
+        let indexer = setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4]], 4);
+
+        // Request shorter than block_size → no full blocks → None
+        let result = policy.select_worker_with_events(&workers, &[1, 2, 3], &[0], &indexer);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_three_tier_dispatch_prefers_events() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        // Event indexer: only w1 has cached blocks
+        let indexer =
+            setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4], &[5, 6, 7, 8]], 4);
+
+        // Event-driven path selects w1 (it has the cached blocks)
+        let result = policy.select_worker_with_events(
+            &workers,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            &[0, 1],
+            &indexer,
+        );
+        assert_eq!(result, Some(0)); // w1 via event-driven
+
+        // Without event data (no overlap), returns None → would fall back
+        let result =
+            policy.select_worker_with_events(&workers, &[100, 200, 300, 400], &[0, 1], &indexer);
+        assert_eq!(result, None); // no match → caller falls back to approximate tree
+    }
+
+    #[test]
+    fn test_three_tier_empty_indexer_falls_back() {
+        let policy = CacheAwarePolicy::with_config(test_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        // Empty indexer — no data
+        let indexer = Arc::new(PositionalIndexer::new(4));
+
+        // Should return None → caller falls back to approximate tree
+        let result = policy.select_worker_with_events(
+            &workers,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            &[0, 1],
+            &indexer,
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_set_kv_event_monitor() {
+        let mut policy = CacheAwarePolicy::with_config(test_config());
+
+        // Initially no monitor
+        assert!(policy.kv_monitor.is_none());
+
+        // Set monitor
+        let monitor = Arc::new(KvEventMonitor::new(Some(4)));
+        policy.set_kv_event_monitor(Some(Arc::clone(&monitor)));
+        assert!(policy.kv_monitor.is_some());
+
+        // get_indexer returns None for unknown model
+        assert!(monitor.get_indexer("nonexistent").is_none());
+
+        // Clear monitor
+        policy.set_kv_event_monitor(None);
+        assert!(policy.kv_monitor.is_none());
+    }
+
+    #[test]
+    fn test_event_driven_imbalanced_skips_events() {
+        let mut policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+            balance_abs_threshold: 5,
+            balance_rel_threshold: 2.0,
+            eviction_interval_secs: 0,
+            block_size: 4,
+            ..Default::default()
+        });
+
+        let w1 = BasicWorkerBuilder::new("http://w1:8000")
+            .worker_type(WorkerType::Regular)
+            .build();
+        let w2 = BasicWorkerBuilder::new("http://w2:8000")
+            .worker_type(WorkerType::Regular)
+            .build();
+
+        // Create heavy imbalance: w1 has 20 load, w2 has 0
+        for _ in 0..20 {
+            w1.increment_load();
+        }
+
+        let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(w1), Arc::new(w2)];
+        policy.init_workers(&workers);
+
+        // Even though we set up event monitor, imbalance check fires first
+        let monitor = Arc::new(KvEventMonitor::new(Some(4)));
+        policy.set_kv_event_monitor(Some(monitor));
+
+        // With imbalance, select_worker should pick min-load (w2), not event-driven
+        let idx = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&[1, 2, 3, 4]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(idx, 1); // w2 (min load), regardless of event data
     }
 }

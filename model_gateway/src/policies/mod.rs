@@ -97,6 +97,10 @@ pub struct CacheAwareConfig {
     pub balance_rel_threshold: f32,
     pub eviction_interval_secs: u64,
     pub max_tree_size: usize,
+    /// Backend KV cache block size (tokens per block) for event-driven routing.
+    /// Used by `compute_request_content_hashes` to chunk request tokens into blocks.
+    /// Must match the backend's block size. Default: 16 (SGLang page size).
+    pub block_size: usize,
 }
 
 impl Default for CacheAwareConfig {
@@ -107,6 +111,7 @@ impl Default for CacheAwareConfig {
             balance_rel_threshold: 1.1,
             eviction_interval_secs: 30,
             max_tree_size: 10000,
+            block_size: 16,
         }
     }
 }
