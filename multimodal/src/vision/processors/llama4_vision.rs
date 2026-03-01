@@ -461,8 +461,6 @@ impl ImagePreProcessor for Llama4VisionProcessor {
         );
 
         // Per-image tile counts for flat slicing of pixel_values.
-        // Use i64 to match vLLM's native HF processor output (torch.int64)
-        // and avoid torch.uint32 pickle issues in multiproc workers.
         let patches_per_image: Vec<i64> = all_outputs.iter().map(|o| o.shape()[0] as i64).collect();
         model_specific.insert(
             "patches_per_image".to_string(),
