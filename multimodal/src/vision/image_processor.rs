@@ -8,9 +8,8 @@ use std::{borrow::Cow, collections::HashMap};
 use image::DynamicImage;
 use ndarray::{Array4, ArrayD};
 
-use crate::types::FieldLayout;
-
 use super::{preprocessor_config::PreProcessorConfig, transforms::TransformError};
+use crate::types::FieldLayout;
 
 /// Helper to extract a dimension from pixel_values given an ndim-dependent axis index.
 /// Returns `Err` if the ndim is not 4 or 5.
