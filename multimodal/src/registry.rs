@@ -361,12 +361,9 @@ impl ModelProcessorSpec for QwenVLVisionSpec {
     }
 
     fn placeholder_token_id(&self, metadata: &ModelMetadata) -> RegistryResult<TokenId> {
-        metadata
-            .config_u32(&["image_token_id"])
-            .map(|v| v as TokenId)
-            .ok_or_else(|| ModelRegistryError::MissingConfigField {
-                field: "image_token_id".to_string(),
-            })
+        // Must match pad_token_id (vision_token_id) — this is the repeated token
+        // in the expanded sequence. image_token_id is a distinct token in Qwen2-VL.
+        Self::pad_token_id(metadata)
     }
 
     fn modality_limits(
@@ -708,8 +705,11 @@ mod tests {
             self.vocab.get(token).copied()
         }
 
-        fn id_to_token(&self, _id: u32) -> Option<String> {
-            None
+        fn id_to_token(&self, id: u32) -> Option<String> {
+            self.vocab
+                .iter()
+                .find(|(_, &v)| v == id)
+                .map(|(k, _)| k.clone())
         }
 
         fn as_any(&self) -> &dyn std::any::Any {
@@ -805,7 +805,7 @@ mod tests {
 
     #[test]
     fn qwen3_vl_includes_end_token() {
-        let tokenizer = TestTokenizer::new(&[("<image>", 999)]);
+        let tokenizer = TestTokenizer::new(&[("<image>", 999), ("<|image_pad|>", 151655)]);
         let config = json!({
             "model_type": "qwen3_vl",
             "vision_start_token_id": 151652,
