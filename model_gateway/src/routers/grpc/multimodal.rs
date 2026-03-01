@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use dashmap::DashMap;
 use llm_multimodal::{
     AsyncMultiModalTracker, ChatContentPart, ImageDetail, ImageFrame, ImageProcessorRegistry,
-    ImageSize, MediaConnector, MediaConnectorConfig, Modality, ModelMetadata, ModelProcessorSpec,
+    MediaConnector, MediaConnectorConfig, Modality, ModelMetadata, ModelProcessorSpec,
     ModelRegistry, ModelSpecificValue, PlaceholderRange, PreProcessorConfig, PreprocessedImages,
     PromptReplacement, TrackedMedia, TrackerOutput,
 };
@@ -265,18 +265,9 @@ pub(crate) async fn process_multimodal(
         "Image preprocessing complete"
     );
 
-    // Step 3: Compute prompt replacements and expand tokens
-    let image_sizes: Vec<ImageSize> = preprocessed
-        .image_sizes
-        .iter()
-        .map(|&(w, h)| ImageSize {
-            width: w,
-            height: h,
-        })
-        .collect();
-
+    // Step 3: Compute prompt replacements and expand tokens.
     let prompt_replacements = spec
-        .prompt_replacements(&metadata, &image_sizes)
+        .prompt_replacements(&metadata, &preprocessed)
         .map_err(|e| anyhow::anyhow!("Failed to compute prompt replacements: {e}"))?;
 
     // Two token IDs may differ for the same placeholder:

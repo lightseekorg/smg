@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use thiserror::Error;
 
 use super::types::{FieldLayout, ImageSize, Modality, PromptReplacement, TokenId};
+use crate::vision::image_processor::{ModelSpecificValue, PreprocessedImages};
 
 #[derive(Debug, Error)]
 pub enum ModelRegistryError {
@@ -57,10 +58,15 @@ pub trait ModelProcessorSpec: Send + Sync {
     fn modality_limits(&self, metadata: &ModelMetadata)
         -> RegistryResult<HashMap<Modality, usize>>;
     fn processor_kwargs(&self, metadata: &ModelMetadata) -> RegistryResult<Value>;
+    /// Compute per-image prompt replacement token sequences.
+    ///
+    /// Receives the full preprocessed output so each model can extract whatever
+    /// metadata it needs (e.g. aspect_ratios for tile-based models).  This
+    /// mirrors vLLM's `_get_prompt_updates(out_mm_kwargs)` pattern.
     fn prompt_replacements(
         &self,
         metadata: &ModelMetadata,
-        image_sizes: &[ImageSize],
+        preprocessed: &PreprocessedImages,
     ) -> RegistryResult<Vec<PromptReplacement>>;
 
     /// Declare how each tensor's first dimension maps to images.
@@ -124,6 +130,18 @@ impl LazySpec {
     }
 }
 
+/// Convert preprocessor `(height, width)` tuples to `ImageSize` values.
+fn image_sizes_hw(preprocessed: &PreprocessedImages) -> Vec<ImageSize> {
+    preprocessed
+        .image_sizes
+        .iter()
+        .map(|&(h, w)| ImageSize {
+            width: w,
+            height: h,
+        })
+        .collect()
+}
+
 struct LlavaSpec;
 
 impl LlavaSpec {
@@ -175,10 +193,11 @@ impl ModelProcessorSpec for LlavaSpec {
     fn prompt_replacements(
         &self,
         metadata: &ModelMetadata,
-        image_sizes: &[ImageSize],
+        preprocessed: &PreprocessedImages,
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let token_id = self.placeholder_token_id(metadata)?;
         let token = self.placeholder_token(metadata)?;
+        let image_sizes = image_sizes_hw(preprocessed);
         Ok(image_sizes
             .iter()
             .map(|size| {
@@ -267,12 +286,13 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
     fn prompt_replacements(
         &self,
         metadata: &ModelMetadata,
-        image_sizes: &[ImageSize],
+        preprocessed: &PreprocessedImages,
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let start_token_id = Self::start_token_id(metadata)?;
         let pad_token_id = Self::pad_token_id(metadata)?;
         let end_token_id = Self::end_token_id(metadata)?;
         let placeholder_token = self.placeholder_token(metadata)?;
+        let image_sizes = image_sizes_hw(preprocessed);
         Ok(image_sizes
             .iter()
             .map(|size| {
@@ -363,11 +383,12 @@ impl ModelProcessorSpec for QwenVLVisionSpec {
     fn prompt_replacements(
         &self,
         metadata: &ModelMetadata,
-        image_sizes: &[ImageSize],
+        preprocessed: &PreprocessedImages,
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let start_token_id = Self::start_token_id(metadata)?;
         let pad_token_id = Self::pad_token_id(metadata)?;
         let placeholder_token = self.placeholder_token(metadata)?;
+        let image_sizes = image_sizes_hw(preprocessed);
         Ok(image_sizes
             .iter()
             .map(|size| {
@@ -433,12 +454,13 @@ impl ModelProcessorSpec for Phi3VisionSpec {
     fn prompt_replacements(
         &self,
         metadata: &ModelMetadata,
-        image_sizes: &[ImageSize],
+        preprocessed: &PreprocessedImages,
     ) -> RegistryResult<Vec<PromptReplacement>> {
         let token_id = self.placeholder_token_id(metadata)?;
         let token = self.placeholder_token(metadata)?;
         let count = Self::tokens_per_image(metadata);
-        Ok(image_sizes
+        Ok(preprocessed
+            .image_sizes
             .iter()
             .map(|_| PromptReplacement::repeated(Modality::Image, &token, token_id, count))
             .collect())
@@ -482,6 +504,35 @@ impl Llama4Spec {
         let downsample = (1.0 / (ratio * ratio)).round().max(1.0) as usize;
         patches / downsample
     }
+
+    /// Extract per-image `(h_tiles, w_tiles)` from the preprocessor's
+    /// `aspect_ratios` tensor.  Falls back to deriving tile counts from
+    /// the original image sizes when aspect_ratios are unavailable.
+    fn extract_aspect_ratios(
+        preprocessed: &PreprocessedImages,
+        tile_size: usize,
+    ) -> Vec<(usize, usize)> {
+        if let Some(ModelSpecificValue::IntTensor { data, shape }) =
+            preprocessed.model_specific.get("aspect_ratios")
+        {
+            if shape.len() == 2 && shape[1] == 2 && data.len() >= 2 {
+                return data
+                    .chunks(2)
+                    .map(|chunk| (chunk[0] as usize, chunk[1] as usize))
+                    .collect();
+            }
+        }
+        // Fallback: derive from original image sizes (height, width).
+        preprocessed
+            .image_sizes
+            .iter()
+            .map(|&(h, w)| {
+                let h_tiles = (h as usize).div_ceil(tile_size);
+                let w_tiles = (w as usize).div_ceil(tile_size);
+                (h_tiles, w_tiles)
+            })
+            .collect()
+    }
 }
 
 impl ModelProcessorSpec for Llama4Spec {
@@ -520,27 +571,56 @@ impl ModelProcessorSpec for Llama4Spec {
     fn prompt_replacements(
         &self,
         metadata: &ModelMetadata,
-        image_sizes: &[ImageSize],
+        preprocessed: &PreprocessedImages,
     ) -> RegistryResult<Vec<PromptReplacement>> {
-        let token_id = self.placeholder_token_id(metadata)?;
-        let token = self.placeholder_token(metadata)?;
+        let patch_token_id = self.placeholder_token_id(metadata)?;
+        let placeholder = self.placeholder_token(metadata)?;
         let tokens_per_tile = Self::tokens_per_tile(metadata);
         let tile_size = Self::tile_size(metadata) as usize;
 
-        Ok(image_sizes
+        // Structural token IDs matching HF _prompt_split_image format.
+        let image_start_id = metadata.token_id("<|image_start|>")?;
+        let image_end_id = metadata.token_id("<|image_end|>")?;
+        let image_id = metadata.token_id("<|image|>")?;
+        let tile_x_sep_id = metadata.token_id("<|tile_x_separator|>")?;
+        let tile_y_sep_id = metadata.token_id("<|tile_y_separator|>")?;
+
+        // Extract aspect_ratios from preprocessor output (computed by
+        // get_best_fit, respecting max_patches cap).  This is the Llama 4
+        // analog of vLLM's out_mm_kwargs["image"][i]["aspect_ratios"].data.
+        let aspect_ratios = Self::extract_aspect_ratios(preprocessed, tile_size);
+
+        Ok(aspect_ratios
             .iter()
-            .map(|size| {
-                let h_tiles = size.height.div_ceil(tile_size as u32) as usize;
-                let w_tiles = size.width.div_ceil(tile_size as u32) as usize;
+            .map(|&(h_tiles, w_tiles)| {
                 let num_tiles = h_tiles * w_tiles;
-                // Global tile added when multiple tiles
-                let total_tiles = if num_tiles > 1 {
-                    num_tiles + 1
-                } else {
-                    num_tiles
-                };
-                let count = total_tiles * tokens_per_tile;
-                PromptReplacement::repeated(Modality::Image, &token, token_id, count)
+
+                let mut tokens = Vec::new();
+
+                // <|image_start|>
+                tokens.push(image_start_id);
+
+                // Grid tiles with separators (only for multi-tile images)
+                if num_tiles > 1 {
+                    for _row in 0..h_tiles {
+                        for col in 0..w_tiles {
+                            tokens.extend(std::iter::repeat_n(patch_token_id, tokens_per_tile));
+                            if col < w_tiles - 1 {
+                                tokens.push(tile_x_sep_id);
+                            }
+                        }
+                        tokens.push(tile_y_sep_id);
+                    }
+                }
+
+                // Global/cover tile: <|image|> + <|patch|> * tokens_per_tile
+                tokens.push(image_id);
+                tokens.extend(std::iter::repeat_n(patch_token_id, tokens_per_tile));
+
+                // <|image_end|>
+                tokens.push(image_end_id);
+
+                PromptReplacement::sequence(Modality::Image, &placeholder, tokens)
             })
             .collect())
     }
@@ -549,7 +629,10 @@ impl ModelProcessorSpec for Llama4Spec {
         // pixel_values is [total_tiles, C, H, W] — variable tiles per image.
         // aspect_ratios and patches_per_image are [num_images, ...].
         HashMap::from([
-            ("pixel_values".to_string(), FieldLayout::flat("patches_per_image")),
+            (
+                "pixel_values".to_string(),
+                FieldLayout::flat("patches_per_image"),
+            ),
             ("aspect_ratios".to_string(), FieldLayout::Batched),
             ("patches_per_image".to_string(), FieldLayout::Batched),
         ])
@@ -634,6 +717,45 @@ mod tests {
         }
     }
 
+    /// Build a minimal `PreprocessedImages` for testing prompt_replacements.
+    fn test_preprocessed(image_sizes: &[ImageSize]) -> PreprocessedImages {
+        let sizes: Vec<(u32, u32)> = image_sizes.iter().map(|s| (s.height, s.width)).collect();
+        PreprocessedImages {
+            pixel_values: ndarray::ArrayD::zeros(vec![1, 3, 336, 336]),
+            num_img_tokens: vec![0; sizes.len()],
+            image_sizes: sizes,
+            model_specific: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Build `PreprocessedImages` with explicit aspect_ratios (for Llama4 tests).
+    fn test_preprocessed_with_aspects(
+        image_sizes: &[ImageSize],
+        aspect_ratios: &[(i64, i64)],
+    ) -> PreprocessedImages {
+        use crate::vision::image_processor::ModelSpecificValue;
+        let sizes: Vec<(u32, u32)> = image_sizes.iter().map(|s| (s.height, s.width)).collect();
+        let flat: Vec<i64> = aspect_ratios
+            .iter()
+            .flat_map(|&(h, w)| vec![h, w])
+            .collect();
+        let batch = aspect_ratios.len();
+        let mut model_specific = std::collections::HashMap::new();
+        model_specific.insert(
+            "aspect_ratios".to_string(),
+            ModelSpecificValue::IntTensor {
+                data: flat,
+                shape: vec![batch, 2],
+            },
+        );
+        PreprocessedImages {
+            pixel_values: ndarray::ArrayD::zeros(vec![1, 3, 336, 336]),
+            num_img_tokens: vec![0; sizes.len()],
+            image_sizes: sizes,
+            model_specific,
+        }
+    }
+
     #[test]
     fn llava_prompt_replacement_uses_config_ids() {
         let tokenizer = TestTokenizer::new(&[("<image>", 32000)]);
@@ -650,7 +772,7 @@ mod tests {
         let registry = ModelRegistry::new();
         let spec = registry.lookup(&metadata).expect("llava spec");
         let replacements = spec
-            .prompt_replacements(&metadata, &[ImageSize::new(336, 336)])
+            .prompt_replacements(&metadata, &test_preprocessed(&[ImageSize::new(336, 336)]))
             .unwrap();
         assert_eq!(replacements[0].tokens.len(), 576);
     }
@@ -673,7 +795,7 @@ mod tests {
         let registry = ModelRegistry::new();
         let spec = registry.lookup(&metadata).expect("qwen spec");
         let replacements = spec
-            .prompt_replacements(&metadata, &[ImageSize::new(448, 448)])
+            .prompt_replacements(&metadata, &test_preprocessed(&[ImageSize::new(448, 448)]))
             .unwrap();
         // 448/14 = 32 patches => 1024 pad tokens + 1 start token
         assert_eq!(replacements[0].tokens.len(), 1025);
@@ -700,7 +822,7 @@ mod tests {
         let spec = registry.lookup(&metadata).expect("qwen3 spec");
         assert_eq!(spec.name(), "qwen3_vl");
         let replacements = spec
-            .prompt_replacements(&metadata, &[ImageSize::new(448, 448)])
+            .prompt_replacements(&metadata, &test_preprocessed(&[ImageSize::new(448, 448)]))
             .unwrap();
         // 448/16 = 28 patches => 784 pad tokens + 1 start + 1 end = 786
         assert_eq!(replacements[0].tokens.len(), 786);
@@ -745,7 +867,7 @@ mod tests {
         let registry = ModelRegistry::new();
         let spec = registry.lookup(&metadata).expect("phi3 spec");
         let replacements = spec
-            .prompt_replacements(&metadata, &[ImageSize::new(336, 336)])
+            .prompt_replacements(&metadata, &test_preprocessed(&[ImageSize::new(336, 336)]))
             .unwrap();
         assert_eq!(replacements[0].tokens.len(), 144);
         assert_eq!(replacements[0].tokens[0], 555);
@@ -753,7 +875,14 @@ mod tests {
 
     #[test]
     fn llama4_single_tile_token_count() {
-        let tokenizer = TestTokenizer::new(&[("<|image|>", 200092)]);
+        let tokenizer = TestTokenizer::new(&[
+            ("<|image|>", 200090),
+            ("<|image_start|>", 200088),
+            ("<|image_end|>", 200089),
+            ("<|patch|>", 200092),
+            ("<|tile_x_separator|>", 200093),
+            ("<|tile_y_separator|>", 200094),
+        ]);
         let config = json!({
             "model_type": "llama4",
             "image_token_index": 200092,
@@ -768,18 +897,28 @@ mod tests {
         let spec = registry.lookup(&metadata).expect("llama4 spec");
         assert_eq!(spec.name(), "llama4");
 
-        // Single tile (336x336): 1 tile * (336/14)^2 / pixel_shuffle_downsample
-        // patches = (336/14)^2 = 576, ratio=0.5 → downsample=4, tokens = 576/4 = 144
-        let replacements = spec
-            .prompt_replacements(&metadata, &[ImageSize::new(336, 336)])
-            .unwrap();
-        assert_eq!(replacements[0].tokens.len(), 144);
-        assert_eq!(replacements[0].tokens[0], 200092);
+        // Single tile (336x336): <|image_start|> <|image|> <|patch|>*144 <|image_end|>
+        // = 1 + 1 + 144 + 1 = 147 tokens
+        let pp = test_preprocessed_with_aspects(&[ImageSize::new(336, 336)], &[(1, 1)]);
+        let replacements = spec.prompt_replacements(&metadata, &pp).unwrap();
+        assert_eq!(replacements[0].tokens.len(), 147);
+        assert_eq!(replacements[0].tokens[0], 200088); // <|image_start|>
+        assert_eq!(replacements[0].tokens[1], 200090); // <|image|>
+        assert_eq!(replacements[0].tokens[2], 200092); // <|patch|> (first)
+        assert_eq!(replacements[0].tokens[145], 200092); // <|patch|> (last)
+        assert_eq!(replacements[0].tokens[146], 200089); // <|image_end|>
     }
 
     #[test]
     fn llama4_multi_tile_adds_global() {
-        let tokenizer = TestTokenizer::new(&[("<|image|>", 200092)]);
+        let tokenizer = TestTokenizer::new(&[
+            ("<|image|>", 200090),
+            ("<|image_start|>", 200088),
+            ("<|image_end|>", 200089),
+            ("<|patch|>", 200092),
+            ("<|tile_x_separator|>", 200093),
+            ("<|tile_y_separator|>", 200094),
+        ]);
         let config = json!({
             "model_type": "llama4",
             "image_token_index": 200092,
@@ -793,10 +932,21 @@ mod tests {
         let registry = ModelRegistry::new();
         let spec = registry.lookup(&metadata).expect("llama4 spec");
 
-        // 672x672 = 2x2 tiles = 4 tiles + 1 global = 5 * 144 = 720 tokens
-        let replacements = spec
-            .prompt_replacements(&metadata, &[ImageSize::new(672, 672)])
-            .unwrap();
-        assert_eq!(replacements[0].tokens.len(), 720);
+        // 672x672 = 2x2 tiles + 1 global:
+        //   <|image_start|>                                  = 1
+        //   row0: <|patch|>*144 <|tile_x_sep|> <|patch|>*144 <|tile_y_sep|>  = 290
+        //   row1: <|patch|>*144 <|tile_x_sep|> <|patch|>*144 <|tile_y_sep|>  = 290
+        //   <|image|> <|patch|>*144                          = 145
+        //   <|image_end|>                                    = 1
+        //   Total = 1 + 290 + 290 + 145 + 1 = 727
+        let pp = test_preprocessed_with_aspects(&[ImageSize::new(672, 672)], &[(2, 2)]);
+        let replacements = spec.prompt_replacements(&metadata, &pp).unwrap();
+        assert_eq!(replacements[0].tokens.len(), 727);
+        // Verify structure: starts with image_start, ends with image_end
+        assert_eq!(replacements[0].tokens[0], 200088); // <|image_start|>
+        assert_eq!(*replacements[0].tokens.last().unwrap(), 200089); // <|image_end|>
+                                                                     // The token before the last patch block is <|image|> (global tile marker)
+                                                                     // Position: 1 + 290 + 290 = 581
+        assert_eq!(replacements[0].tokens[581], 200090); // <|image|>
     }
 }
