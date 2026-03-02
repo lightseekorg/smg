@@ -559,20 +559,21 @@ impl AppContextBuilder {
 
     /// Create KV event monitor for event-driven cache-aware routing.
     ///
-    /// The monitor is created when the default policy is cache_aware and
-    /// connection mode is gRPC. It stays dormant until workers are added
-    /// via `on_worker_added` in the UpdatePoliciesStep.
+    /// The monitor is created when the default policy is cache_aware, regardless
+    /// of connection mode. The monitor itself is cheap (empty DashMaps) and stays
+    /// dormant until workers are added. The UpdatePoliciesStep gates subscriptions
+    /// on `cache_aware && gRPC`, so HTTP workers are never subscribed.
     fn with_kv_event_monitor(mut self, config: &RouterConfig) -> Self {
         use crate::config::types::PolicyConfig;
 
         let is_cache_aware = matches!(config.policy, PolicyConfig::CacheAware { .. });
-        let is_grpc = matches!(config.connection_mode, crate::core::ConnectionMode::Grpc);
 
-        if is_cache_aware && is_grpc {
+        if is_cache_aware {
             let monitor = Arc::new(KvEventMonitor::new(None));
             debug!("Created KV event monitor for event-driven cache-aware routing");
 
-            // Inject monitor into PolicyRegistry so new CacheAwarePolicy instances get it
+            // Inject monitor into PolicyRegistry — propagates to default_policy
+            // and any other existing cache-aware policies.
             if let Some(ref registry) = self.policy_registry {
                 registry.set_kv_event_monitor(Some(Arc::clone(&monitor)));
             }

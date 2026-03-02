@@ -20,7 +20,7 @@ use smg_grpc_client::common_proto::{
 use tokio::{sync::Mutex, task::JoinHandle};
 use tracing::{debug, info, warn};
 
-use crate::core::{ConnectionMode, Worker};
+use crate::core::{ConnectionMode, Worker, UNKNOWN_MODEL_ID};
 
 /// Default jump size for new `PositionalIndexer` instances.
 const DEFAULT_JUMP_SIZE: usize = 64;
@@ -87,7 +87,8 @@ impl KvEventMonitor {
     /// Duplicate calls for the same worker URL are no-ops.
     pub async fn on_worker_added(&self, worker: &Arc<dyn Worker>) {
         let url = worker.url().to_string();
-        let model_id = worker.model_id().to_string();
+        // Normalize model_id to match routing's normalize_model_key — empty → "unknown".
+        let model_id = Self::normalize_model_id(worker.model_id());
 
         if *worker.connection_mode() == ConnectionMode::Http {
             debug!(worker_url = %url, "HTTP worker, skipping KV event subscription");
@@ -106,9 +107,13 @@ impl KvEventMonitor {
             .or_insert_with(|| Arc::new(PositionalIndexer::new(self.jump_size)))
             .clone();
 
-        // Seed block_size from WorkerSpec if set and not already known.
+        // Seed block_size from WorkerSpec if set, valid, and not already known.
         if let Some(bs) = worker.metadata().spec.kv_block_size {
-            self.block_sizes.entry(model_id.clone()).or_insert(bs);
+            if bs > 0 {
+                self.block_sizes.entry(model_id.clone()).or_insert(bs);
+            } else {
+                warn!(worker_url = %url, "Worker reports kv_block_size=0, ignoring");
+            }
         }
 
         let worker = Arc::clone(worker);
@@ -134,15 +139,10 @@ impl KvEventMonitor {
 
     /// Stop the KV event subscription for a worker and remove it from the indexer.
     pub async fn on_worker_removed(&self, worker_url: &str) {
-        // Single lock acquisition: remove subscription and check remaining atomically
-        // to avoid TOCTOU race with concurrent on_worker_added for the same model.
-        let (subscription, should_remove_indexer) = {
+        // Remove subscription from handles under lock.
+        let subscription = {
             let mut handles = self.worker_handles.lock().await;
-            let sub = handles.remove(worker_url);
-            let should_remove = sub
-                .as_ref()
-                .is_some_and(|s| !handles.values().any(|other| other.model_id == s.model_id));
-            (sub, should_remove)
+            handles.remove(worker_url)
         };
 
         let Some(sub) = subscription else {
@@ -157,6 +157,15 @@ impl KvEventMonitor {
         if let Some(indexer) = self.indexers.get(&sub.model_id) {
             indexer.remove_worker(worker_url);
         }
+
+        // Re-check under lock whether this was the last worker for the model.
+        // Must re-acquire lock after abort to avoid TOCTOU with concurrent
+        // on_worker_added that may have added a new worker for the same model
+        // between our first lock release and this point.
+        let should_remove_indexer = {
+            let handles = self.worker_handles.lock().await;
+            !handles.values().any(|other| other.model_id == sub.model_id)
+        };
 
         if should_remove_indexer {
             self.indexers.remove(&sub.model_id);
@@ -208,6 +217,16 @@ impl KvEventMonitor {
     /// Check if any subscription is running.
     pub async fn is_running(&self) -> bool {
         !self.worker_handles.lock().await.is_empty()
+    }
+
+    /// Normalize model_id to match routing's `normalize_model_key`.
+    /// Empty model IDs map to UNKNOWN_MODEL_ID for consistent keying.
+    fn normalize_model_id(model_id: &str) -> String {
+        if model_id.is_empty() {
+            UNKNOWN_MODEL_ID.to_string()
+        } else {
+            model_id.to_string()
+        }
     }
 
     // -----------------------------------------------------------------------

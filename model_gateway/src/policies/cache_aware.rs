@@ -45,6 +45,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use kv_index::{compute_request_content_hashes, PositionalIndexer, TokenTree, Tree};
+use parking_lot::RwLock;
 use rand::Rng;
 use smg_mesh::{OptionalMeshSyncManager, TreeInsertOp, TreeOperation};
 use tracing::{debug, warn};
@@ -78,7 +79,9 @@ pub struct CacheAwarePolicy {
     /// Event-driven KV cache monitor for overlap scoring (gRPC workers only).
     /// Set via `set_kv_event_monitor`. When present and the indexer has data for
     /// a model, event-driven routing takes priority over approximate trees.
-    kv_monitor: Option<Arc<KvEventMonitor>>,
+    /// Uses `RwLock` for interior mutability so the monitor can be injected into
+    /// policies already behind `Arc<dyn LoadBalancingPolicy>`.
+    kv_monitor: RwLock<Option<Arc<KvEventMonitor>>>,
 }
 
 impl CacheAwarePolicy {
@@ -134,7 +137,7 @@ impl CacheAwarePolicy {
             token_trees,
             mesh_sync: None,
             _eviction_task: eviction_task,
-            kv_monitor: None,
+            kv_monitor: RwLock::new(None),
         }
     }
 
@@ -146,9 +149,10 @@ impl CacheAwarePolicy {
         }
     }
 
-    /// Set event-driven KV cache monitor (can be called after construction)
-    pub fn set_kv_event_monitor(&mut self, monitor: Option<Arc<KvEventMonitor>>) {
-        self.kv_monitor = monitor;
+    /// Set event-driven KV cache monitor (thread-safe, can be called after construction).
+    /// Uses interior mutability so this works on policies behind `Arc<dyn LoadBalancingPolicy>`.
+    pub fn set_kv_event_monitor(&self, monitor: Option<Arc<KvEventMonitor>>) {
+        *self.kv_monitor.write() = monitor;
     }
 
     /// Initialize the trees with worker URLs (used only during initial setup)
@@ -486,13 +490,16 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
 
 // Private helper methods for select_worker
 impl CacheAwarePolicy {
-    /// Check if an event-driven indexer exists for this model.
-    /// Used to choose between event-driven and approximate tree routing.
+    /// Check if an event-driven indexer exists with data for this model.
+    /// Returns false when the indexer is empty (startup, reconnect) so
+    /// routing falls through to the approximate token tree instead of
+    /// taking the event-driven path with no data and landing on min-load.
     fn has_event_indexer(&self, model_id: &str) -> bool {
-        self.kv_monitor
+        let guard = self.kv_monitor.read();
+        guard
             .as_ref()
             .and_then(|m| m.get_indexer(model_id))
-            .is_some()
+            .is_some_and(|indexer| indexer.current_size() > 0)
     }
 
     /// Event-driven routing: PositionalIndexer overlap scoring (Type 1).
@@ -507,7 +514,8 @@ impl CacheAwarePolicy {
         healthy_indices: &[usize],
         model_id: &str,
     ) -> Option<usize> {
-        let monitor = self.kv_monitor.as_ref()?;
+        let guard = self.kv_monitor.read();
+        let monitor = guard.as_ref()?;
         let indexer = monitor.get_indexer(model_id)?;
 
         // Per-model block_size: learned from events > config default
@@ -1339,7 +1347,7 @@ mod tests {
 
     #[test]
     fn test_event_driven_overlap_selects_cached_worker() {
-        let mut policy = CacheAwarePolicy::with_config(test_config());
+        let policy = CacheAwarePolicy::with_config(test_config());
         let workers: Vec<Arc<dyn Worker>> = vec![
             Arc::new(
                 BasicWorkerBuilder::new("http://w1:8000")
@@ -1376,7 +1384,7 @@ mod tests {
 
     #[test]
     fn test_event_driven_no_overlap_uses_min_load() {
-        let mut policy = CacheAwarePolicy::with_config(test_config());
+        let policy = CacheAwarePolicy::with_config(test_config());
 
         let w1 = BasicWorkerBuilder::new("http://w1:8000")
             .worker_type(WorkerType::Regular)
@@ -1413,7 +1421,7 @@ mod tests {
 
     #[test]
     fn test_event_driven_short_request_uses_min_load() {
-        let mut policy = CacheAwarePolicy::with_config(test_config()); // block_size=4
+        let policy = CacheAwarePolicy::with_config(test_config()); // block_size=4
 
         let w1 = BasicWorkerBuilder::new("http://w1:8000")
             .worker_type(WorkerType::Regular)
@@ -1481,29 +1489,29 @@ mod tests {
 
     #[test]
     fn test_set_kv_event_monitor() {
-        let mut policy = CacheAwarePolicy::with_config(test_config());
+        let policy = CacheAwarePolicy::with_config(test_config());
 
         // Initially no monitor
-        assert!(policy.kv_monitor.is_none());
+        assert!(policy.kv_monitor.read().is_none());
 
-        // Set monitor
+        // Set monitor (works via &self thanks to interior mutability)
         let monitor = Arc::new(KvEventMonitor::new(Some(4)));
         policy.set_kv_event_monitor(Some(Arc::clone(&monitor)));
-        assert!(policy.kv_monitor.is_some());
+        assert!(policy.kv_monitor.read().is_some());
 
         // get_indexer returns None for unknown model
         assert!(monitor.get_indexer("nonexistent").is_none());
 
         // Clear monitor
         policy.set_kv_event_monitor(None);
-        assert!(policy.kv_monitor.is_none());
+        assert!(policy.kv_monitor.read().is_none());
     }
 
     #[test]
     fn test_event_driven_uses_monitor_block_size() {
         // Test that event-driven routing uses monitor's learned block_size
         // instead of config default when available.
-        let mut policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+        let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
             block_size: 4, // config default
             eviction_interval_secs: 0,
             ..Default::default()
@@ -1559,7 +1567,7 @@ mod tests {
 
     #[test]
     fn test_imbalanced_skips_event_driven() {
-        let mut policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+        let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
             balance_abs_threshold: 5,
             balance_rel_threshold: 2.0,
             eviction_interval_secs: 0,
@@ -1597,5 +1605,61 @@ mod tests {
             )
             .unwrap();
         assert_eq!(idx, 1); // w2 (min load), regardless of event data
+    }
+
+    #[test]
+    fn test_empty_indexer_falls_through_to_token_tree() {
+        // When the monitor has an indexer for a model but the indexer is empty
+        // (startup, reconnect), routing should fall through to the token tree
+        // instead of taking the event-driven path and landing on min-load.
+        let policy = CacheAwarePolicy::with_config(test_config());
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        // Set up monitor with an empty indexer
+        let monitor = Arc::new(KvEventMonitor::new(Some(4)));
+        let empty_indexer = Arc::new(PositionalIndexer::new(4));
+        monitor
+            .indexers
+            .insert("unknown".to_string(), empty_indexer);
+        policy.set_kv_event_monitor(Some(monitor));
+
+        // Empty indexer → has_event_indexer returns false → falls through to token tree
+        assert!(!policy.has_event_indexer("unknown"));
+
+        // Route a request — should use token tree, not event-driven min-load
+        let idx = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&[1, 2, 3, 4]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(idx < 2); // valid worker via token tree
+
+        // Route the same tokens again — token tree should route to same worker (cache hit)
+        let idx2 = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&[1, 2, 3, 4]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(idx, idx2); // token tree cache affinity preserved
     }
 }
