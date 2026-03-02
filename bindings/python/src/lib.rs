@@ -390,6 +390,7 @@ struct Router {
     prefill_selector: HashMap<String, String>,
     decode_selector: HashMap<String, String>,
     bootstrap_port_annotation: String,
+    model_id_from: Option<String>,
     prometheus_port: Option<u16>,
     prometheus_host: Option<String>,
     prometheus_duration_buckets: Option<Vec<f64>>,
@@ -557,7 +558,7 @@ impl Router {
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),
                 router_selector: HashMap::new(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
-                model_id_source: None,
+                model_id_source: self.model_id_from.clone(),
             })
         } else {
             None
@@ -715,6 +716,7 @@ impl Router {
         prefill_selector = HashMap::new(),
         decode_selector = HashMap::new(),
         bootstrap_port_annotation = String::from("sglang.ai/bootstrap-port"),
+        model_id_from = None,
         prometheus_port = None,
         prometheus_host = None,
         prometheus_duration_buckets = None,
@@ -808,6 +810,7 @@ impl Router {
         prefill_selector: HashMap<String, String>,
         decode_selector: HashMap<String, String>,
         bootstrap_port_annotation: String,
+        model_id_from: Option<String>,
         prometheus_port: Option<u16>,
         prometheus_host: Option<String>,
         prometheus_duration_buckets: Option<Vec<f64>>,
@@ -910,6 +913,7 @@ impl Router {
             prefill_selector,
             decode_selector,
             bootstrap_port_annotation,
+            model_id_from,
             prometheus_port,
             prometheus_host,
             prometheus_duration_buckets,
@@ -984,6 +988,18 @@ impl Router {
             pyo3::exceptions::PyValueError::new_err(format!("Configuration validation failed: {e}"))
         })?;
 
+        let model_id_source = self
+            .model_id_from
+            .as_deref()
+            .map(|s| {
+                service_discovery::ModelIdSource::parse(s).map_err(|e| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "Invalid --model-id-from value '{s}': {e}"
+                    ))
+                })
+            })
+            .transpose()?;
+
         let service_discovery_config = if self.service_discovery {
             Some(service_discovery::ServiceDiscoveryConfig {
                 enabled: true,
@@ -997,7 +1013,7 @@ impl Router {
                 bootstrap_port_annotation: self.bootstrap_port_annotation.clone(),
                 router_selector: HashMap::new(),
                 router_mesh_port_annotation: "sglang.ai/mesh-port".to_string(),
-                model_id_source: None,
+                model_id_source,
             })
         } else {
             None

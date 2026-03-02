@@ -55,6 +55,7 @@ class RouterArgs:
     prefill_selector: dict[str, str] = dataclasses.field(default_factory=dict)
     decode_selector: dict[str, str] = dataclasses.field(default_factory=dict)
     bootstrap_port_annotation: str = "sglang.ai/bootstrap-port"
+    model_id_from: str | None = None
     # Prometheus configuration
     prometheus_port: int | None = None
     prometheus_host: str | None = None
@@ -477,6 +478,16 @@ class RouterArgs:
             default={},
             help=(
                 "Label selector for decode server pods in PD mode (format: key1=value1 key2=value2)"
+            ),
+        )
+        k8s_group.add_argument(
+            f"--{prefix}model-id-from",
+            type=str,
+            default=None,
+            help=(
+                "Override each worker's model ID from pod metadata."
+                " Accepted values: 'namespace', 'label:<key>', 'annotation:<key>'."
+                " The backend-discovered model name becomes an alias."
             ),
         )
         # Prometheus configuration

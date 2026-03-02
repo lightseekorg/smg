@@ -494,12 +494,6 @@ pub struct WorkerSpec {
     /// Falls back to the global `load_monitor_interval_secs` from router config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_monitor_interval_secs: Option<u64>,
-
-    /// Per-worker model_id override from pod metadata (e.g., namespace).
-    /// When set during service discovery, this becomes the primary model ID
-    /// and the backend-discovered name becomes an alias.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_id_override: Option<String>,
 }
 
 impl WorkerSpec {
@@ -526,7 +520,6 @@ impl WorkerSpec {
             health: HealthCheckUpdate::default(),
             max_connection_attempts: default_max_connection_attempts(),
             load_monitor_interval_secs: None,
-            model_id_override: None,
         }
     }
 }

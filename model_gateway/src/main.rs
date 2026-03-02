@@ -1096,7 +1096,7 @@ impl CliArgs {
         builder.build()
     }
 
-    fn to_server_config(&self, router_config: RouterConfig) -> ServerConfig {
+    fn to_server_config(&self, router_config: RouterConfig) -> ConfigResult<ServerConfig> {
         let service_discovery_config = if self.service_discovery {
             // Get router discovery config from router_config.discovery if available
             let (router_selector, router_mesh_port_annotation) = router_config
@@ -1119,7 +1119,14 @@ impl CliArgs {
                         .as_ref()
                         .and_then(|d| d.model_id_source.as_deref())
                 })
-                .and_then(|s| ModelIdSource::parse(s).ok());
+                .map(|s| {
+                    ModelIdSource::parse(s).map_err(|e| ConfigError::InvalidValue {
+                        field: "model_id_source".to_string(),
+                        value: s.to_string(),
+                        reason: e,
+                    })
+                })
+                .transpose()?;
 
             Some(ServiceDiscoveryConfig {
                 enabled: true,
@@ -1192,7 +1199,7 @@ impl CliArgs {
             None
         };
 
-        ServerConfig {
+        Ok(ServerConfig {
             host: self.host.clone(),
             port: self.port,
             router_config,
@@ -1211,7 +1218,7 @@ impl CliArgs {
             shutdown_grace_period_secs: self.shutdown_grace_period_secs,
             control_plane_auth,
             mesh_server_config,
-        }
+        })
     }
 }
 
@@ -1296,7 +1303,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router_config = cli_args.to_router_config(prefill_urls)?;
     router_config.validate()?;
 
-    let server_config = cli_args.to_server_config(router_config);
+    let server_config = cli_args.to_server_config(router_config)?;
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move { server::startup(server_config).await })?;
     if is_otel_enabled() {

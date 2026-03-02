@@ -64,19 +64,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for CreateLocalWorkerStep {
             .or_else(|| labels.get("model_path").cloned())
             .unwrap_or_else(|| UNKNOWN_MODEL_ID.to_string());
 
-        let mut model_card = build_model_card(&model_id, config, &labels);
-
-        // Per-worker override from pod metadata (--model-id-from).
-        // Replaces the primary model ID; the backend-discovered name becomes an alias.
-        if let Some(ref override_id) = config.model_id_override {
-            if !override_id.is_empty() && *override_id != model_id {
-                if model_id != UNKNOWN_MODEL_ID {
-                    model_card.aliases.push(model_id.clone());
-                    model_card.aliases.retain(|a| a != override_id);
-                }
-                model_card.id.clone_from(override_id);
-            }
-        }
+        let model_card = build_model_card(&model_id, config, &labels);
 
         let runtime_type = match context.data.detected_runtime_type.as_deref() {
             Some(s) => s.parse::<RuntimeType>().unwrap_or(config.runtime_type),

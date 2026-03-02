@@ -525,8 +525,13 @@ async fn handle_pod_event(
             let mut spec = WorkerSpec::new(worker_url.clone());
             spec.worker_type = worker_type;
             spec.bootstrap_port = bootstrap_port;
-            spec.model_id_override
-                .clone_from(&pod_info.model_id_override);
+            // Inject pod-metadata model_id as a label so the existing
+            // resolution chain in create_worker.rs picks it up at
+            // priority #2 (served_model_name).
+            if let Some(ref override_id) = pod_info.model_id_override {
+                spec.labels
+                    .insert("served_model_name".to_string(), override_id.clone());
+            }
             spec.api_key.clone_from(&app_context.router_config.api_key);
             // Health config is resolved at worker build time from router
             // defaults + per-worker overrides (spec.health).
