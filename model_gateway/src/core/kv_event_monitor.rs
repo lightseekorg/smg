@@ -38,7 +38,7 @@ const MAX_RECONNECT_DELAY_MS: u64 = 30_000;
 /// (one per `model_id`). Workers serving the same model share the same indexer.
 pub struct KvEventMonitor {
     /// Per-model positional indexers: model_id → shared indexer.
-    indexers: DashMap<String, Arc<PositionalIndexer>>,
+    pub(crate) indexers: DashMap<String, Arc<PositionalIndexer>>,
     /// Per-worker subscription handles: worker_url → subscription info.
     /// Mutex matches LoadMonitor pattern for atomic abort + remove.
     worker_handles: Mutex<HashMap<String, WorkerSubscription>>,
