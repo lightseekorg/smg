@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
 use crate::{
+    builders::RealtimeResponseBuilder,
     common::ResponsePrompt,
     realtime_conversation::{ConversationItemRole, RealtimeContentPart, RealtimeConversationItem},
     realtime_session::{
@@ -269,4 +270,11 @@ fn validate_conversation_item(item: &RealtimeConversationItem) -> Result<(), Val
     }
 
     Ok(())
+}
+
+impl RealtimeResponse {
+    /// Create a builder for constructing a `RealtimeResponse`.
+    pub fn builder(id: impl Into<String>) -> RealtimeResponseBuilder {
+        RealtimeResponseBuilder::new(id)
+    }
 }
