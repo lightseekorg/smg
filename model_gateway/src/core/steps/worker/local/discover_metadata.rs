@@ -286,7 +286,7 @@ impl StepExecutor<WorkerWorkflowData> for DiscoverMetadataStep {
         &self,
         context: &mut WorkflowContext<WorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
-        if context.data.worker_kind == Some(WorkerKind::External) {
+        if context.data.worker_kind != Some(WorkerKind::Local) {
             return Ok(StepResult::Skip);
         }
 

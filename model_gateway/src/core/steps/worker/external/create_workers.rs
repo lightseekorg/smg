@@ -31,7 +31,7 @@ impl StepExecutor<WorkerWorkflowData> for CreateExternalWorkersStep {
         &self,
         context: &mut WorkflowContext<WorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
-        if context.data.worker_kind == Some(WorkerKind::Local) {
+        if context.data.worker_kind != Some(WorkerKind::External) {
             return Ok(StepResult::Skip);
         }
 
