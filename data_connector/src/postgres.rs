@@ -16,8 +16,8 @@ use tokio_postgres::{NoTls, Row};
 
 use crate::{
     common::{
-        build_response_select_base, extra_column_defs, parse_json_value, parse_metadata,
-        parse_raw_response, parse_tool_calls, resolve_extra_column_values,
+        build_response_select_base, extra_column_defs, parse_json_value, parse_raw_response,
+        resolve_extra_column_values,
     },
     config::PostgresConfig,
     context::current_extra_columns,
@@ -871,14 +871,10 @@ impl PostgresResponseStorage {
 
         // Build DDL column definitions, filtering out skip_columns and appending extras
         let mut col_defs = vec![format!("{} VARCHAR(64) PRIMARY KEY", s.col("id"))];
-        let core_cols: [(&str, &str); 11] = [
+        let core_cols: [(&str, &str); 7] = [
             ("conversation_id", "VARCHAR(64)"),
             ("previous_response_id", "VARCHAR(64)"),
             ("input", "JSON"),
-            ("instructions", "TEXT"),
-            ("output", "JSON"),
-            ("tool_calls", "JSON"),
-            ("metadata", "JSON"),
             ("created_at", "TIMESTAMPTZ"),
             ("safety_identifier", "VARCHAR(128)"),
             ("model", "VARCHAR(128)"),
@@ -945,26 +941,6 @@ impl PostgresResponseStorage {
         } else {
             row.get(s.col("input"))
         };
-        let instructions: Option<String> = if s.is_skipped("instructions") {
-            None
-        } else {
-            row.get(s.col("instructions"))
-        };
-        let output_json: Option<String> = if s.is_skipped("output") {
-            None
-        } else {
-            row.get(s.col("output"))
-        };
-        let tool_calls_json: Option<String> = if s.is_skipped("tool_calls") {
-            None
-        } else {
-            row.get(s.col("tool_calls"))
-        };
-        let metadata_json: Option<String> = if s.is_skipped("metadata") {
-            None
-        } else {
-            row.get(s.col("metadata"))
-        };
         let created_at: DateTime<Utc> = if s.is_skipped("created_at") {
             Utc::now()
         } else {
@@ -987,20 +963,13 @@ impl PostgresResponseStorage {
         };
 
         let previous_response_id = previous.map(ResponseId);
-        let tool_calls = parse_tool_calls(tool_calls_json)?;
-        let metadata = parse_metadata(metadata_json)?;
         let raw_response = parse_raw_response(raw_response_json)?;
         let input = parse_json_value(input_json)?;
-        let output = parse_json_value(output_json)?;
 
         Ok(StoredResponse {
             id: ResponseId(id),
             previous_response_id,
             input,
-            instructions,
-            output,
-            tool_calls,
-            metadata,
             created_at,
             safety_identifier,
             model,
@@ -1020,10 +989,6 @@ impl ResponseStorage for PostgresResponseStorage {
             id: response_id,
             previous_response_id,
             input,
-            instructions,
-            output,
-            tool_calls,
-            metadata,
             created_at,
             safety_identifier,
             model,
@@ -1031,8 +996,6 @@ impl ResponseStorage for PostgresResponseStorage {
             raw_response,
         } = response;
         let previous_id = previous_response_id.map(|r| r.0);
-        let tool_calls_value = serde_json::to_value(&tool_calls)?;
-        let metadata_value = serde_json::to_value(&metadata)?;
 
         let s = &self.store.schema.responses;
         let table = s.qualified_table(self.store.schema.owner.as_deref());
@@ -1052,22 +1015,6 @@ impl ResponseStorage for PostgresResponseStorage {
         if !s.is_skipped("input") {
             col_names.push(s.col("input"));
             params.push(&input);
-        }
-        if !s.is_skipped("instructions") {
-            col_names.push(s.col("instructions"));
-            params.push(&instructions);
-        }
-        if !s.is_skipped("output") {
-            col_names.push(s.col("output"));
-            params.push(&output);
-        }
-        if !s.is_skipped("tool_calls") {
-            col_names.push(s.col("tool_calls"));
-            params.push(&tool_calls_value);
-        }
-        if !s.is_skipped("metadata") {
-            col_names.push(s.col("metadata"));
-            params.push(&metadata_value);
         }
         if !s.is_skipped("created_at") {
             col_names.push(s.col("created_at"));

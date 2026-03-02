@@ -336,7 +336,12 @@ impl OpenAIRouter {
                         .flat_map(|stored| {
                             Self::deserialize_items_from_array(&stored.input)
                                 .into_iter()
-                                .chain(Self::deserialize_items_from_array(&stored.output))
+                                .chain(Self::deserialize_items_from_array(
+                                    stored
+                                        .raw_response
+                                        .get("output")
+                                        .unwrap_or(&Value::Array(vec![])),
+                                ))
                         })
                         .collect();
                     chain_items = Some(items);

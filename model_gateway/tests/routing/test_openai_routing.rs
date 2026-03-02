@@ -266,9 +266,10 @@ async fn test_openai_router_responses_with_mock() {
     assert_eq!(input_items[0]["role"], "user");
     assert_eq!(input_items[0]["content"][0]["text"], "Say hi");
 
-    // Output is now stored as a JSON array of items
-    assert!(stored1.output.is_array());
-    let output_items = stored1.output.as_array().unwrap();
+    // Output is now stored in raw_response["output"] as a JSON array of items
+    let output_val = &stored1.raw_response["output"];
+    assert!(output_val.is_array());
+    let output_items = output_val.as_array().unwrap();
     assert_eq!(output_items.len(), 1);
     assert_eq!(output_items[0]["content"][0]["text"], "mock_output_1");
 
@@ -281,9 +282,10 @@ async fn test_openai_router_responses_with_mock() {
         .expect("second response missing");
     assert_eq!(stored2.previous_response_id.unwrap().0, resp1_id);
 
-    // Output is now stored as a JSON array
-    assert!(stored2.output.is_array());
-    let output_items2 = stored2.output.as_array().unwrap();
+    // Output is now stored in raw_response["output"] as a JSON array
+    let output_val2 = &stored2.raw_response["output"];
+    assert!(output_val2.is_array());
+    let output_items2 = output_val2.as_array().unwrap();
     assert_eq!(output_items2.len(), 1);
     assert_eq!(output_items2[0]["content"][0]["text"], "mock_output_2");
 
@@ -485,7 +487,7 @@ async fn test_openai_router_responses_streaming_with_mock() {
     let mut previous = StoredResponse::new(None);
     previous.id = ResponseId::from("resp_prev_chain");
     previous.input = serde_json::json!("Earlier bedtime question");
-    previous.output = serde_json::json!("Earlier answer");
+    previous.raw_response = serde_json::json!({"output": "Earlier answer"});
     storage.store_response(previous).await.unwrap();
 
     let mut metadata = HashMap::new();
@@ -541,9 +543,10 @@ async fn test_openai_router_responses_streaming_with_mock() {
         "Tell me a bedtime story."
     );
 
-    // Output is now stored as a JSON array of items
-    assert!(stored.output.is_array());
-    let output_items = stored.output.as_array().unwrap();
+    // Output is now stored in raw_response["output"] as a JSON array of items
+    let output_val = &stored.raw_response["output"];
+    assert!(output_val.is_array());
+    let output_items = output_val.as_array().unwrap();
     assert_eq!(output_items.len(), 1);
     assert_eq!(
         output_items[0]["content"][0]["text"],
@@ -557,8 +560,11 @@ async fn test_openai_router_responses_streaming_with_mock() {
             .0,
         "resp_prev_chain"
     );
-    assert_eq!(stored.metadata.get("topic"), Some(&json!("unicorns")));
-    assert_eq!(stored.instructions.as_deref(), Some("Be kind"));
+    assert_eq!(stored.raw_response["metadata"]["topic"], json!("unicorns"));
+    assert_eq!(
+        stored.raw_response["instructions"].as_str(),
+        Some("Be kind")
+    );
     assert_eq!(stored.model.as_deref(), Some("gpt-5-nano"));
     assert_eq!(stored.safety_identifier, None);
     assert_eq!(stored.raw_response["store"], json!(true));

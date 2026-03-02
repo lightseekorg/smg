@@ -15,10 +15,7 @@ use redis::AsyncCommands;
 use serde_json::Value;
 
 use crate::{
-    common::{
-        parse_json_value, parse_metadata, parse_raw_response, parse_tool_calls,
-        resolve_extra_column_values,
-    },
+    common::{parse_json_value, parse_raw_response, resolve_extra_column_values},
     config::RedisConfig,
     context::current_extra_columns,
     core::{
@@ -749,29 +746,6 @@ impl RedisResponseStorage {
             parse_json_value(map.get(s.col("input")).cloned())
                 .map_err(ResponseStorageError::StorageError)?
         };
-        let instructions = if s.is_skipped("instructions") {
-            None
-        } else {
-            map.get(s.col("instructions")).cloned()
-        };
-        let output = if s.is_skipped("output") {
-            Value::Array(vec![])
-        } else {
-            parse_json_value(map.get(s.col("output")).cloned())
-                .map_err(ResponseStorageError::StorageError)?
-        };
-        let tool_calls = if s.is_skipped("tool_calls") {
-            Vec::new()
-        } else {
-            parse_tool_calls(map.get(s.col("tool_calls")).cloned())
-                .map_err(ResponseStorageError::StorageError)?
-        };
-        let metadata = if s.is_skipped("metadata") {
-            HashMap::new()
-        } else {
-            parse_metadata(map.get(s.col("metadata")).cloned())
-                .map_err(ResponseStorageError::StorageError)?
-        };
 
         let created_at = if s.is_skipped("created_at") {
             Utc::now()
@@ -812,10 +786,6 @@ impl RedisResponseStorage {
             id,
             previous_response_id,
             input,
-            instructions,
-            output,
-            tool_calls,
-            metadata,
             created_at,
             safety_identifier,
             model,
@@ -837,9 +807,6 @@ impl ResponseStorage for RedisResponseStorage {
         let key = self.response_key(response_id_str);
 
         let json_input = serde_json::to_string(&response.input)?;
-        let json_output = serde_json::to_string(&response.output)?;
-        let json_tool_calls = serde_json::to_string(&response.tool_calls)?;
-        let json_metadata = serde_json::to_string(&response.metadata)?;
         let json_raw_response = serde_json::to_string(&response.raw_response)?;
 
         let mut conn = self
@@ -864,20 +831,6 @@ impl ResponseStorage for RedisResponseStorage {
         }
         if !sr.is_skipped("input") {
             pipe.hset(&key, sr.col("input"), &json_input);
-        }
-        if !sr.is_skipped("instructions") {
-            if let Some(inst) = &response.instructions {
-                pipe.hset(&key, sr.col("instructions"), inst);
-            }
-        }
-        if !sr.is_skipped("output") {
-            pipe.hset(&key, sr.col("output"), &json_output);
-        }
-        if !sr.is_skipped("tool_calls") {
-            pipe.hset(&key, sr.col("tool_calls"), &json_tool_calls);
-        }
-        if !sr.is_skipped("metadata") {
-            pipe.hset(&key, sr.col("metadata"), &json_metadata);
         }
         if !sr.is_skipped("created_at") {
             pipe.hset(&key, sr.col("created_at"), response.created_at.to_rfc3339());

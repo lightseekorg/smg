@@ -1252,7 +1252,7 @@ mod tests {
 
         let mut resp = StoredResponse::new(None);
         resp.input = json!("round-trip-input");
-        resp.output = json!(["round-trip-output"]);
+        resp.raw_response = json!({"output": ["round-trip-output"]});
         resp.safety_identifier = Some("user-rt".to_string());
 
         let id = hooked.store_response(resp).await.unwrap();
@@ -1263,7 +1263,7 @@ mod tests {
         assert!(fetched.is_some(), "stored response should be retrievable");
         let fetched = fetched.unwrap();
         assert_eq!(fetched.input, json!("round-trip-input"));
-        assert_eq!(fetched.output, json!(["round-trip-output"]));
+        assert_eq!(fetched.raw_response["output"], json!(["round-trip-output"]));
         assert_eq!(fetched.safety_identifier.as_deref(), Some("user-rt"));
 
         // get_response also triggers before/after hooks

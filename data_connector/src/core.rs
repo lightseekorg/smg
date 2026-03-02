@@ -347,18 +347,6 @@ pub struct StoredResponse {
     /// Input items as JSON array
     pub input: Value,
 
-    /// System instructions used
-    pub instructions: Option<String>,
-
-    /// Output items as JSON array
-    pub output: Value,
-
-    /// Tool calls made by the model (if any)
-    pub tool_calls: Vec<Value>,
-
-    /// Custom metadata
-    pub metadata: HashMap<String, Value>,
-
     /// When this response was created
     pub created_at: DateTime<Utc>,
 
@@ -383,10 +371,6 @@ impl StoredResponse {
             id: ResponseId::new(),
             previous_response_id,
             input: Value::Array(vec![]),
-            instructions: None,
-            output: Value::Array(vec![]),
-            tool_calls: Vec::new(),
-            metadata: HashMap::new(),
             created_at: Utc::now(),
             safety_identifier: None,
             model: None,
@@ -441,7 +425,14 @@ impl ResponseChain {
 
         responses
             .iter()
-            .map(|r| (r.input.clone(), r.output.clone()))
+            .map(|r| {
+                let output = r
+                    .raw_response
+                    .get("output")
+                    .cloned()
+                    .unwrap_or(Value::Array(vec![]));
+                (r.input.clone(), output)
+            })
             .collect()
     }
 }
@@ -865,9 +856,9 @@ mod tests {
             "default input should be empty array"
         );
         assert_eq!(
-            resp.output,
-            Value::Array(vec![]),
-            "default output should be empty array"
+            resp.raw_response,
+            Value::Null,
+            "default raw_response should be Null"
         );
     }
 
@@ -934,15 +925,17 @@ mod tests {
 
     #[test]
     fn response_chain_build_context_returns_input_output_pairs() {
+        use serde_json::json;
+
         let mut chain = ResponseChain::new();
 
         let mut r1 = StoredResponse::new(None);
         r1.input = Value::String("input1".to_string());
-        r1.output = Value::String("output1".to_string());
+        r1.raw_response = json!({"output": "output1"});
 
         let mut r2 = StoredResponse::new(None);
         r2.input = Value::String("input2".to_string());
-        r2.output = Value::String("output2".to_string());
+        r2.raw_response = json!({"output": "output2"});
 
         chain.add_response(r1);
         chain.add_response(r2);
@@ -957,12 +950,14 @@ mod tests {
 
     #[test]
     fn response_chain_build_context_with_max_responses_limits_output() {
+        use serde_json::json;
+
         let mut chain = ResponseChain::new();
 
         for i in 0..5 {
             let mut resp = StoredResponse::new(None);
             resp.input = Value::String(format!("input{i}"));
-            resp.output = Value::String(format!("output{i}"));
+            resp.raw_response = json!({"output": format!("output{i}")});
             chain.add_response(resp);
         }
 

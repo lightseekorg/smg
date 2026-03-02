@@ -7,7 +7,7 @@
 use crate::{schema::SchemaConfig, versioning::Migration};
 
 /// Postgres migration list. Append new migrations here.
-pub(crate) static POSTGRES_MIGRATIONS: [Migration; 2] = [
+pub(crate) static POSTGRES_MIGRATIONS: [Migration; 3] = [
     Migration {
         version: 1,
         description: "Add safety_identifier column to responses",
@@ -17,6 +17,12 @@ pub(crate) static POSTGRES_MIGRATIONS: [Migration; 2] = [
         version: 2,
         description: "Remove legacy user_id column from responses",
         up: pg_v2_up,
+    },
+    Migration {
+        version: 3,
+        description:
+            "Drop redundant output, metadata, instructions, tool_calls columns from responses",
+        up: pg_v3_up,
     },
 ];
 
@@ -47,6 +53,26 @@ fn pg_v2_up(schema: &SchemaConfig) -> Vec<String> {
     }
     let table = s.qualified_table(schema.owner.as_deref());
     vec![format!("ALTER TABLE {table} DROP COLUMN IF EXISTS user_id")]
+}
+
+/// Drop the four redundant columns (output, metadata, instructions, tool_calls)
+/// that are now fully covered by `raw_response`.
+fn pg_v3_up(schema: &SchemaConfig) -> Vec<String> {
+    let s = &schema.responses;
+    let table = s.qualified_table(schema.owner.as_deref());
+
+    // Columns to drop. Skip if the column name is used by a column mapping
+    // or defined as an extra column (same guard pattern as pg_v2_up).
+    let redundant = ["output", "metadata", "instructions", "tool_calls"];
+
+    redundant
+        .iter()
+        .filter(|&&col| {
+            !s.columns.values().any(|v| v.eq_ignore_ascii_case(col))
+                && !s.extra_columns.keys().any(|k| k.eq_ignore_ascii_case(col))
+        })
+        .map(|col| format!("ALTER TABLE {table} DROP COLUMN IF EXISTS {col}"))
+        .collect()
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -117,6 +143,52 @@ mod tests {
         assert!(
             stmts.is_empty(),
             "should skip drop when user_id is an extra column"
+        );
+    }
+
+    #[test]
+    fn pg_v3_up_generates_four_drop_statements() {
+        let schema = SchemaConfig::default();
+        let stmts = pg_v3_up(&schema);
+        assert_eq!(stmts.len(), 4);
+        for stmt in &stmts {
+            assert!(stmt.contains("DROP COLUMN IF EXISTS"), "got: {stmt}");
+        }
+        assert!(stmts[0].contains("output"), "got: {}", stmts[0]);
+        assert!(stmts[1].contains("metadata"), "got: {}", stmts[1]);
+        assert!(stmts[2].contains("instructions"), "got: {}", stmts[2]);
+        assert!(stmts[3].contains("tool_calls"), "got: {}", stmts[3]);
+    }
+
+    #[test]
+    fn pg_v3_up_skips_column_mapped_to_output() {
+        let mut schema = SchemaConfig::default();
+        schema
+            .responses
+            .columns
+            .insert("safety_identifier".to_string(), "output".to_string());
+        let stmts = pg_v3_up(&schema);
+        // "output" is used as a physical column name, so it should be skipped
+        assert!(
+            stmts.iter().all(|s| !s.contains(" output")),
+            "should skip output when mapped: {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn pg_v3_up_skips_extra_column_named_metadata() {
+        let mut schema = SchemaConfig::default();
+        schema.responses.extra_columns.insert(
+            "metadata".to_string(),
+            crate::schema::ColumnDef {
+                sql_type: "JSON".to_string(),
+                default_value: None,
+            },
+        );
+        let stmts = pg_v3_up(&schema);
+        assert!(
+            stmts.iter().all(|s| !s.contains(" metadata")),
+            "should skip metadata when it's an extra column: {stmts:?}"
         );
     }
 }

@@ -26,8 +26,8 @@ use super::core::{
 };
 use crate::{
     common::{
-        build_response_select_base, extra_column_defs, parse_json_value, parse_metadata,
-        parse_raw_response, parse_tool_calls, resolve_extra_column_values,
+        build_response_select_base, extra_column_defs, parse_json_value, parse_raw_response,
+        resolve_extra_column_values,
     },
     config::OracleConfig,
     context::current_extra_columns,
@@ -1216,14 +1216,10 @@ impl OracleResponseStorage {
 
         if exists == 0 {
             let mut col_defs = vec![format!("{} VARCHAR2(64) PRIMARY KEY", s.col("id"))];
-            let core_cols: [(&str, &str); 11] = [
+            let core_cols: [(&str, &str); 7] = [
                 ("conversation_id", "VARCHAR2(64)"),
                 ("previous_response_id", "VARCHAR2(64)"),
                 ("input", "CLOB"),
-                ("instructions", "CLOB"),
-                ("output", "CLOB"),
-                ("tool_calls", "CLOB"),
-                ("metadata", "CLOB"),
                 ("created_at", "TIMESTAMP WITH TIME ZONE"),
                 ("safety_identifier", "VARCHAR2(128)"),
                 ("model", "VARCHAR2(128)"),
@@ -1291,26 +1287,6 @@ impl OracleResponseStorage {
         } else {
             row.get(s.col("input")).map_err(map_oracle_error)?
         };
-        let instructions: Option<String> = if s.is_skipped("instructions") {
-            None
-        } else {
-            row.get(s.col("instructions")).map_err(map_oracle_error)?
-        };
-        let output_json: Option<String> = if s.is_skipped("output") {
-            None
-        } else {
-            row.get(s.col("output")).map_err(map_oracle_error)?
-        };
-        let tool_calls_json: Option<String> = if s.is_skipped("tool_calls") {
-            None
-        } else {
-            row.get(s.col("tool_calls")).map_err(map_oracle_error)?
-        };
-        let metadata_json: Option<String> = if s.is_skipped("metadata") {
-            None
-        } else {
-            row.get(s.col("metadata")).map_err(map_oracle_error)?
-        };
         let safety_identifier: Option<String> = if s.is_skipped("safety_identifier") {
             None
         } else {
@@ -1335,20 +1311,13 @@ impl OracleResponseStorage {
         };
 
         let previous_response_id = previous.map(ResponseId);
-        let tool_calls = parse_tool_calls(tool_calls_json)?;
-        let metadata = parse_metadata(metadata_json)?;
         let raw_response = parse_raw_response(raw_response_json)?;
         let input = parse_json_value(input_json)?;
-        let output = parse_json_value(output_json)?;
 
         Ok(StoredResponse {
             id: ResponseId(id),
             previous_response_id,
             input,
-            instructions,
-            output,
-            tool_calls,
-            metadata,
             created_at,
             safety_identifier,
             model,
@@ -1368,10 +1337,6 @@ impl ResponseStorage for OracleResponseStorage {
             id,
             previous_response_id,
             input,
-            instructions,
-            output,
-            tool_calls,
-            metadata,
             created_at,
             safety_identifier,
             model,
@@ -1384,9 +1349,6 @@ impl ResponseStorage for OracleResponseStorage {
         let response_id_str = id.0;
         let previous_id = previous_response_id.map(|r| r.0);
         let json_input = serde_json::to_string(&input)?;
-        let json_output = serde_json::to_string(&output)?;
-        let json_tool_calls = serde_json::to_string(&tool_calls)?;
-        let json_metadata = serde_json::to_string(&metadata)?;
         let json_raw_response = serde_json::to_string(&raw_response)?;
         let schema = self.store.schema.clone();
         // Capture extra columns before spawn_blocking (task-locals don't propagate)
@@ -1402,10 +1364,6 @@ impl ResponseStorage for OracleResponseStorage {
                     ("id", &response_id_str),
                     ("previous_response_id", &previous_id),
                     ("input", &json_input),
-                    ("instructions", &instructions),
-                    ("output", &json_output),
-                    ("tool_calls", &json_tool_calls),
-                    ("metadata", &json_metadata),
                     ("created_at", &created_at),
                     ("safety_identifier", &safety_identifier),
                     ("model", &model),

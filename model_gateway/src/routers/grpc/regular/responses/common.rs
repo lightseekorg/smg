@@ -187,8 +187,10 @@ pub(super) async fn load_conversation_history(
                         }
                     }
 
-                    // Convert output items from stored output (which is now a JSON array)
-                    if let Some(output_arr) = stored.output.as_array() {
+                    // Convert output items from stored raw_response["output"] (which is a JSON array)
+                    if let Some(output_arr) =
+                        stored.raw_response.get("output").and_then(|v| v.as_array())
+                    {
                         for item in output_arr {
                             match serde_json::from_value::<ResponseInputOutputItem>(item.clone()) {
                                 Ok(output_item) => {

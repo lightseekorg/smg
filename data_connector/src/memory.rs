@@ -600,14 +600,14 @@ mod tests {
         let mut response = StoredResponse::new(None);
         response.id = ResponseId::from("resp_custom");
         response.input = json!("Input");
-        response.output = json!("Output");
+        response.raw_response = json!({"output": "Output"});
         store.store_response(response.clone()).await.unwrap();
         let retrieved = store
             .get_response(&ResponseId::from("resp_custom"))
             .await
             .unwrap();
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().output, json!("Output"));
+        assert_eq!(retrieved.unwrap().raw_response["output"], json!("Output"));
     }
 
     #[tokio::test]
@@ -617,7 +617,7 @@ mod tests {
         // Store a response
         let mut response = StoredResponse::new(None);
         response.input = json!("Hello");
-        response.output = json!("Hi there!");
+        response.raw_response = json!({"output": "Hi there!"});
         let response_id = store.store_response(response).await.unwrap();
 
         // Retrieve it
@@ -638,17 +638,17 @@ mod tests {
         // Create a chain of responses
         let mut response1 = StoredResponse::new(None);
         response1.input = json!("First");
-        response1.output = json!("First response");
+        response1.raw_response = json!({"output": "First response"});
         let id1 = store.store_response(response1).await.unwrap();
 
         let mut response2 = StoredResponse::new(Some(id1.clone()));
         response2.input = json!("Second");
-        response2.output = json!("Second response");
+        response2.raw_response = json!({"output": "Second response"});
         let id2 = store.store_response(response2).await.unwrap();
 
         let mut response3 = StoredResponse::new(Some(id2.clone()));
         response3.input = json!("Third");
-        response3.output = json!("Third response");
+        response3.raw_response = json!({"output": "Third response"});
         let id3 = store.store_response(response3).await.unwrap();
 
         // Get the chain
@@ -671,19 +671,16 @@ mod tests {
         // Store responses for different users
         let mut response1 = StoredResponse::new(None);
         response1.input = json!("User1 message");
-        response1.output = json!("Response to user1");
         response1.safety_identifier = Some("user1".to_string());
         store.store_response(response1).await.unwrap();
 
         let mut response2 = StoredResponse::new(None);
         response2.input = json!("Another user1 message");
-        response2.output = json!("Another response to user1");
         response2.safety_identifier = Some("user1".to_string());
         store.store_response(response2).await.unwrap();
 
         let mut response3 = StoredResponse::new(None);
         response3.input = json!("User2 message");
-        response3.output = json!("Response to user2");
         response3.safety_identifier = Some("user2".to_string());
         store.store_response(response3).await.unwrap();
 
@@ -725,13 +722,11 @@ mod tests {
 
         let mut response1 = StoredResponse::new(None);
         response1.input = json!("Test1");
-        response1.output = json!("Reply1");
         response1.safety_identifier = Some("user1".to_string());
         store.store_response(response1).await.unwrap();
 
         let mut response2 = StoredResponse::new(None);
         response2.input = json!("Test2");
-        response2.output = json!("Reply2");
         response2.safety_identifier = Some("user2".to_string());
         store.store_response(response2).await.unwrap();
 

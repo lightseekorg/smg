@@ -136,12 +136,8 @@ pub fn build_stored_response(
 ) -> StoredResponse {
     let mut stored = StoredResponse::new(None);
 
-    // Initialize empty arrays - will be populated by persist_conversation_items
+    // Initialize empty array - will be populated by persist_conversation_items
     stored.input = Value::Array(vec![]);
-    stored.output = Value::Array(vec![]);
-
-    stored.instructions =
-        get_string(response_json, "instructions").or_else(|| original_body.instructions.clone());
 
     stored.model = get_string(response_json, "model").or_else(|| Some(original_body.model.clone()));
 
@@ -149,12 +145,6 @@ pub fn build_stored_response(
     stored
         .conversation_id
         .clone_from(&original_body.conversation);
-
-    stored.metadata = response_json
-        .get("metadata")
-        .and_then(|v| v.as_object())
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .unwrap_or_else(|| original_body.metadata.clone().unwrap_or_default());
 
     stored.previous_response_id = get_string(response_json, "previous_response_id")
         .map(|s| ResponseId::from(s.as_str()))
@@ -353,7 +343,6 @@ pub async fn persist_conversation_items(
     let mut stored_response = build_stored_response(response_json, original_body);
     stored_response.id = response_id.clone();
     stored_response.input = Value::Array(input_items.clone());
-    stored_response.output = Value::Array(output_items.clone());
 
     response_storage
         .store_response(stored_response)

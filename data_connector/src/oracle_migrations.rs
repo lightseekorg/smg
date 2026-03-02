@@ -7,7 +7,7 @@
 use crate::{schema::SchemaConfig, versioning::Migration};
 
 /// Oracle migration list. Append new migrations here.
-pub(crate) static ORACLE_MIGRATIONS: [Migration; 2] = [
+pub(crate) static ORACLE_MIGRATIONS: [Migration; 3] = [
     Migration {
         version: 1,
         description: "Add safety_identifier column to responses",
@@ -17,6 +17,12 @@ pub(crate) static ORACLE_MIGRATIONS: [Migration; 2] = [
         version: 2,
         description: "Remove legacy user_id column from responses",
         up: oracle_v2_up,
+    },
+    Migration {
+        version: 3,
+        description:
+            "Drop redundant output, metadata, instructions, tool_calls columns from responses",
+        up: oracle_v3_up,
     },
 ];
 
@@ -52,6 +58,37 @@ fn oracle_v2_up(schema: &SchemaConfig) -> Vec<String> {
     vec![format!(
         "BEGIN EXECUTE IMMEDIATE 'ALTER TABLE {table} DROP (USER_ID)'; \
          EXCEPTION WHEN OTHERS THEN IF SQLCODE != -904 THEN RAISE; END IF; END;"
+    )]
+}
+
+/// Drop the four redundant columns (output, metadata, instructions, tool_calls)
+/// that are now fully covered by `raw_response`.
+fn oracle_v3_up(schema: &SchemaConfig) -> Vec<String> {
+    let s = &schema.responses;
+    let table = s.qualified_table(schema.owner.as_deref());
+
+    // Columns to drop. Skip if the column name is used by a column mapping
+    // or defined as an extra column (same guard pattern as oracle_v2_up).
+    let redundant = ["OUTPUT", "METADATA", "INSTRUCTIONS", "TOOL_CALLS"];
+
+    let cols_to_drop: Vec<&str> = redundant
+        .iter()
+        .filter(|&&col| {
+            !s.columns.values().any(|v| v.eq_ignore_ascii_case(col))
+                && !s.extra_columns.keys().any(|k| k.eq_ignore_ascii_case(col))
+        })
+        .copied()
+        .collect();
+
+    if cols_to_drop.is_empty() {
+        return vec![];
+    }
+
+    // PL/SQL block: ORA-00904 = "invalid identifier" (column doesn't exist)
+    vec![format!(
+        "BEGIN EXECUTE IMMEDIATE 'ALTER TABLE {table} DROP ({})'; \
+         EXCEPTION WHEN OTHERS THEN IF SQLCODE != -904 THEN RAISE; END IF; END;",
+        cols_to_drop.join(", ")
     )]
 }
 
@@ -126,5 +163,35 @@ mod tests {
             stmts.is_empty(),
             "should skip drop when USER_ID is an extra column"
         );
+    }
+
+    #[test]
+    fn oracle_v3_up_generates_plsql_drop_columns() {
+        let schema = SchemaConfig::default();
+        let stmts = oracle_v3_up(&schema);
+        assert_eq!(stmts.len(), 1);
+        assert!(stmts[0].contains("DROP"), "got: {}", stmts[0]);
+        assert!(stmts[0].contains("OUTPUT"), "got: {}", stmts[0]);
+        assert!(stmts[0].contains("METADATA"), "got: {}", stmts[0]);
+        assert!(stmts[0].contains("INSTRUCTIONS"), "got: {}", stmts[0]);
+        assert!(stmts[0].contains("TOOL_CALLS"), "got: {}", stmts[0]);
+        assert!(stmts[0].contains("SQLCODE"), "got: {}", stmts[0]);
+    }
+
+    #[test]
+    fn oracle_v3_up_skips_column_mapped_to_output() {
+        let mut schema = SchemaConfig::default();
+        schema
+            .responses
+            .columns
+            .insert("safety_identifier".to_string(), "OUTPUT".to_string());
+        let stmts = oracle_v3_up(&schema);
+        if !stmts.is_empty() {
+            assert!(
+                !stmts[0].contains("OUTPUT"),
+                "should skip OUTPUT when mapped: {}",
+                stmts[0]
+            );
+        }
     }
 }

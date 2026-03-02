@@ -887,9 +887,11 @@ mod responses_endpoint_tests {
             {"id": "item_1", "content": "hello", "role": "user"},
             {"id": "item_2", "content": "hi there", "role": "assistant"}
         ]);
-        stored_response.output = json!([
-            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "test response"}]}
-        ]);
+        stored_response.raw_response = json!({
+            "output": [
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "test response"}]}
+            ]
+        });
 
         ctx.app_context
             .response_storage

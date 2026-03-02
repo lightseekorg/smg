@@ -230,7 +230,13 @@ pub(super) async fn load_previous_messages(
 
     for stored in &chain.responses {
         history_items.extend(deserialize_items(&stored.input, "input"));
-        history_items.extend(deserialize_items(&stored.output, "output"));
+        history_items.extend(deserialize_items(
+            stored
+                .raw_response
+                .get("output")
+                .unwrap_or(&Value::Array(vec![])),
+            "output",
+        ));
     }
 
     debug!(
