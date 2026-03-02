@@ -16,7 +16,10 @@ use tracing::debug;
 
 use crate::{
     config::RouterConfig,
-    core::{steps::WorkflowEngines, JobQueue, LoadMonitor, WorkerRegistry, WorkerService},
+    core::{
+        steps::WorkflowEngines, JobQueue, KvEventMonitor, LoadMonitor, WorkerRegistry,
+        WorkerService,
+    },
     middleware::TokenBucket,
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
@@ -59,6 +62,7 @@ pub struct AppContext {
     pub wasm_manager: Option<Arc<WasmModuleManager>>,
     pub worker_service: Arc<WorkerService>,
     pub inflight_tracker: Arc<InFlightRequestTracker>,
+    pub kv_event_monitor: Option<Arc<KvEventMonitor>>,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -87,6 +91,7 @@ pub struct AppContextBuilder {
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
     mcp_orchestrator: Option<Arc<OnceLock<Arc<McpOrchestrator>>>>,
     wasm_manager: Option<Arc<WasmModuleManager>>,
+    kv_event_monitor: Option<Arc<KvEventMonitor>>,
 }
 
 impl AppContext {
@@ -132,6 +137,7 @@ impl AppContextBuilder {
             workflow_engines: None,
             mcp_orchestrator: None,
             wasm_manager: None,
+            kv_event_monitor: None,
         }
     }
 
@@ -232,6 +238,11 @@ impl AppContextBuilder {
         self
     }
 
+    pub fn kv_event_monitor(mut self, kv_event_monitor: Option<Arc<KvEventMonitor>>) -> Self {
+        self.kv_event_monitor = kv_event_monitor;
+        self
+    }
+
     pub fn build(self) -> Result<AppContext, AppContextBuildError> {
         let router_config = self
             .router_config
@@ -289,6 +300,7 @@ impl AppContextBuilder {
             wasm_manager: self.wasm_manager,
             worker_service,
             inflight_tracker: InFlightRequestTracker::new(),
+            kv_event_monitor: self.kv_event_monitor,
         })
     }
 
@@ -314,6 +326,7 @@ impl AppContextBuilder {
             .with_mcp_orchestrator(&router_config)
             .await?
             .with_wasm_manager(&router_config)
+            .with_kv_event_monitor(&router_config)
             .router_config(router_config))
     }
 
@@ -542,6 +555,32 @@ impl AppContextBuilder {
 
         self.mcp_orchestrator = Some(mcp_orchestrator_lock);
         Ok(self)
+    }
+
+    /// Create KV event monitor for event-driven cache-aware routing.
+    ///
+    /// The monitor is created when the default policy is cache_aware and
+    /// connection mode is gRPC. It stays dormant until workers are added
+    /// via `on_worker_added` in the UpdatePoliciesStep.
+    fn with_kv_event_monitor(mut self, config: &RouterConfig) -> Self {
+        use crate::config::types::PolicyConfig;
+
+        let is_cache_aware = matches!(config.policy, PolicyConfig::CacheAware { .. });
+        let is_grpc = matches!(config.connection_mode, crate::core::ConnectionMode::Grpc);
+
+        if is_cache_aware && is_grpc {
+            let monitor = Arc::new(KvEventMonitor::new(None));
+            debug!("Created KV event monitor for event-driven cache-aware routing");
+
+            // Inject monitor into PolicyRegistry so new CacheAwarePolicy instances get it
+            if let Some(ref registry) = self.policy_registry {
+                registry.set_kv_event_monitor(Some(Arc::clone(&monitor)));
+            }
+
+            self.kv_event_monitor = Some(monitor);
+        }
+
+        self
     }
 
     /// Create wasm manager if enabled in config

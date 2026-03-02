@@ -8,7 +8,7 @@ use wfaas::{
     StepExecutor, StepResult, WorkflowContext, WorkflowData, WorkflowError, WorkflowResult,
 };
 
-use crate::core::{steps::workflow_data::WorkerRegistrationData, Worker};
+use crate::core::{steps::workflow_data::WorkerRegistrationData, ConnectionMode, Worker};
 
 /// Unified step to update policy registry for registered workers.
 ///
@@ -124,6 +124,17 @@ impl<D: WorkerRegistrationData + WorkflowData> StepExecutor<D> for UpdatePolicie
                     app_context
                         .policy_registry
                         .init_cache_aware_policy(&model_id, &all_workers);
+                }
+            }
+
+            // Start KV event subscription for gRPC workers with cache_aware policy
+            if let Some(ref monitor) = app_context.kv_event_monitor {
+                if let Some(policy) = app_context.policy_registry.get_policy(&model_id) {
+                    if policy.name() == "cache_aware"
+                        && *worker.connection_mode() == ConnectionMode::Grpc
+                    {
+                        monitor.on_worker_added(worker).await;
+                    }
                 }
             }
 

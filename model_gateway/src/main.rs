@@ -169,6 +169,10 @@ struct CliArgs {
     #[arg(long, default_value_t = 67108864, help_heading = "Routing Policy")]
     max_tree_size: usize,
 
+    /// KV cache block size for event-driven cache-aware routing
+    #[arg(long, default_value_t = 16, help_heading = "Routing Policy")]
+    block_size: usize,
+
     /// Maximum idle time in seconds before eviction (for manual policy)
     #[arg(long, default_value_t = 14400, help_heading = "Routing Policy")]
     max_idle_secs: u64,
@@ -754,7 +758,7 @@ impl CliArgs {
                 balance_rel_threshold: self.balance_rel_threshold,
                 eviction_interval_secs: self.eviction_interval,
                 max_tree_size: self.max_tree_size,
-                block_size: 16,
+                block_size: self.block_size,
             },
             "power_of_two" => PolicyConfig::PowerOfTwo {
                 load_check_interval_secs: 5,

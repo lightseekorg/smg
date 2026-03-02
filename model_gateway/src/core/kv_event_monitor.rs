@@ -171,18 +171,16 @@ impl KvEventMonitor {
             std::mem::take(&mut *handles)
         };
 
-        if subscriptions.is_empty() {
-            return;
-        }
-
-        info!(
-            count = subscriptions.len(),
-            "Stopping all KV event subscriptions"
-        );
-        for (url, sub) in subscriptions {
-            debug!(worker_url = %url, "Aborting KV event subscription");
-            sub.handle.abort();
-            let _ = sub.handle.await;
+        if !subscriptions.is_empty() {
+            info!(
+                count = subscriptions.len(),
+                "Stopping all KV event subscriptions"
+            );
+            for (url, sub) in subscriptions {
+                debug!(worker_url = %url, "Aborting KV event subscription");
+                sub.handle.abort();
+                let _ = sub.handle.await;
+            }
         }
 
         self.indexers.clear();

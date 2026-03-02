@@ -858,6 +858,7 @@ mod tests {
                 router_config,
             )),
             inflight_tracker: InFlightRequestTracker::new(),
+            kv_event_monitor: None,
         })
     }
 

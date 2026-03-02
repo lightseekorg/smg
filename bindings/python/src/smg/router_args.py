@@ -36,6 +36,7 @@ class RouterArgs:
     balance_rel_threshold: float = 1.5
     eviction_interval_secs: int = 60
     max_tree_size: int = 2**26
+    block_size: int = 16
     max_idle_secs: int = 4 * 3600
     assignment_mode: str = "random"  # Mode for manual policy new routing key assignment
     max_payload_size: int = 512 * 1024 * 1024  # 512MB default for large batches
@@ -331,6 +332,12 @@ class RouterArgs:
             type=int,
             default=RouterArgs.max_tree_size,
             help="Maximum size of the approximation tree for cache-aware routing",
+        )
+        routing_group.add_argument(
+            f"--{prefix}block-size",
+            type=int,
+            default=RouterArgs.block_size,
+            help="KV cache block size for event-driven cache-aware routing (default: 16)",
         )
         routing_group.add_argument(
             f"--{prefix}max-idle-secs",
