@@ -481,6 +481,12 @@ pub struct WorkerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_role: Option<String>,
 
+    /// KV cache block size (tokens per block) for event-driven routing.
+    /// When set, overrides the router-level default for this worker's model.
+    /// Typically matches the backend engine's page size (e.g. 16 for SGLang).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_block_size: Option<usize>,
+
     /// Per-worker health check overrides (partial — only `Some` fields override router defaults).
     #[serde(default, skip_serializing_if = "HealthCheckUpdate::is_empty")]
     pub health: HealthCheckUpdate,
@@ -517,6 +523,7 @@ impl WorkerSpec {
             dp_size: None,
             kv_connector: None,
             kv_role: None,
+            kv_block_size: None,
             health: HealthCheckUpdate::default(),
             max_connection_attempts: default_max_connection_attempts(),
             load_monitor_interval_secs: None,

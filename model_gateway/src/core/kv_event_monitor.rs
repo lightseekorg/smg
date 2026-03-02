@@ -39,6 +39,9 @@ const MAX_RECONNECT_DELAY_MS: u64 = 30_000;
 pub struct KvEventMonitor {
     /// Per-model positional indexers: model_id → shared indexer.
     pub(crate) indexers: DashMap<String, Arc<PositionalIndexer>>,
+    /// Per-model block sizes learned from KV events or set via WorkerSpec.
+    /// Used by CacheAwarePolicy to chunk request tokens at query time.
+    block_sizes: DashMap<String, usize>,
     /// Per-worker subscription handles: worker_url → subscription info.
     /// Mutex matches LoadMonitor pattern for atomic abort + remove.
     worker_handles: Mutex<HashMap<String, WorkerSubscription>>,
@@ -71,6 +74,7 @@ impl KvEventMonitor {
         let jump_size = jump_size.unwrap_or(DEFAULT_JUMP_SIZE).max(1);
         Self {
             indexers: DashMap::new(),
+            block_sizes: DashMap::new(),
             worker_handles: Mutex::new(HashMap::new()),
             jump_size,
         }
@@ -101,6 +105,11 @@ impl KvEventMonitor {
             .entry(model_id.clone())
             .or_insert_with(|| Arc::new(PositionalIndexer::new(self.jump_size)))
             .clone();
+
+        // Seed block_size from WorkerSpec if set and not already known.
+        if let Some(bs) = worker.metadata().spec.kv_block_size {
+            self.block_sizes.entry(model_id.clone()).or_insert(bs);
+        }
 
         let worker = Arc::clone(worker);
         let worker_url = url.clone();
@@ -151,6 +160,7 @@ impl KvEventMonitor {
 
         if should_remove_indexer {
             self.indexers.remove(&sub.model_id);
+            self.block_sizes.remove(&sub.model_id);
         }
     }
 
@@ -176,11 +186,25 @@ impl KvEventMonitor {
         }
 
         self.indexers.clear();
+        self.block_sizes.clear();
     }
 
     /// Get the indexer for a model (used by `CacheAwarePolicy` for queries).
     pub fn get_indexer(&self, model_id: &str) -> Option<Arc<PositionalIndexer>> {
         self.indexers.get(model_id).map(|r| Arc::clone(&r))
+    }
+
+    /// Get the block size for a model (learned from events or set via `set_block_size`).
+    pub fn block_size(&self, model_id: &str) -> Option<usize> {
+        self.block_sizes.get(model_id).map(|v| *v)
+    }
+
+    /// Set the block size for a model (e.g. from WorkerSpec during registration).
+    /// Does not overwrite a value already learned from events.
+    pub fn set_block_size(&self, model_id: &str, block_size: usize) {
+        self.block_sizes
+            .entry(model_id.to_string())
+            .or_insert(block_size);
     }
 
     /// Check if any subscription is running.
@@ -412,6 +436,7 @@ impl fmt::Debug for KvEventMonitor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KvEventMonitor")
             .field("models", &self.indexers.len())
+            .field("block_sizes", &self.block_sizes.len())
             .field("jump_size", &self.jump_size)
             .finish()
     }
@@ -733,5 +758,35 @@ mod tests {
     async fn test_on_worker_removed_nonexistent() {
         let monitor = KvEventMonitor::new(None);
         monitor.on_worker_removed("http://nonexistent:8000").await;
+    }
+
+    // -----------------------------------------------------------------------
+    // block_size learning
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_set_block_size() {
+        let monitor = KvEventMonitor::new(None);
+
+        // Initially no block_size
+        assert!(monitor.block_size("llama").is_none());
+
+        // Set it
+        monitor.set_block_size("llama", 32);
+        assert_eq!(monitor.block_size("llama"), Some(32));
+
+        // set_block_size doesn't overwrite existing value
+        monitor.set_block_size("llama", 64);
+        assert_eq!(monitor.block_size("llama"), Some(32));
+    }
+
+    #[tokio::test]
+    async fn test_stop_clears_block_sizes() {
+        let monitor = KvEventMonitor::new(None);
+        monitor.set_block_size("llama", 16);
+        assert_eq!(monitor.block_size("llama"), Some(16));
+
+        monitor.stop().await;
+        assert!(monitor.block_size("llama").is_none());
     }
 }

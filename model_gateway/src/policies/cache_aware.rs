@@ -507,9 +507,17 @@ impl CacheAwarePolicy {
         healthy_indices: &[usize],
         model_id: &str,
     ) -> Option<usize> {
-        let indexer = self.kv_monitor.as_ref()?.get_indexer(model_id)?;
+        let monitor = self.kv_monitor.as_ref()?;
+        let indexer = monitor.get_indexer(model_id)?;
 
-        if let Some(idx) = self.score_overlap(workers, tokens, healthy_indices, &indexer) {
+        // Per-model block_size: learned from events > config default
+        let block_size = monitor
+            .block_size(model_id)
+            .unwrap_or(self.config.block_size);
+
+        if let Some(idx) =
+            Self::score_overlap(workers, tokens, healthy_indices, &indexer, block_size)
+        {
             return Some(idx);
         }
 
@@ -532,13 +540,13 @@ impl CacheAwarePolicy {
     /// request. Returns `None` if the request is too short for a full block or
     /// no workers have matching data.
     fn score_overlap(
-        &self,
         workers: &[Arc<dyn Worker>],
         tokens: &[u32],
         healthy_indices: &[usize],
         indexer: &PositionalIndexer,
+        block_size: usize,
     ) -> Option<usize> {
-        let content_hashes = compute_request_content_hashes(tokens, self.config.block_size);
+        let content_hashes = compute_request_content_hashes(tokens, block_size);
         if content_hashes.is_empty() {
             return None;
         }
@@ -1137,11 +1145,12 @@ mod tests {
         );
 
         // Query with matching tokens — should select w1
-        let result = policy.score_overlap(
+        let result = CacheAwarePolicy::score_overlap(
             &workers,
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             &[0, 1],
             &indexer,
+            4,
         );
         assert_eq!(result, Some(0)); // w1
     }
@@ -1160,11 +1169,12 @@ mod tests {
             setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4], &[5, 6, 7, 8]], 4);
 
         // Completely different tokens — no overlap → None
-        let result = policy.score_overlap(
+        let result = CacheAwarePolicy::score_overlap(
             &workers,
             &[100, 200, 300, 400, 500, 600, 700, 800],
             &[0],
             &indexer,
+            4,
         );
         assert_eq!(result, None);
     }
@@ -1206,7 +1216,7 @@ mod tests {
             .unwrap();
 
         // Equal overlap → tie-break by load → w2 wins (lower load)
-        let result = policy.score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer);
+        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer, 4);
         assert_eq!(result, Some(1)); // w2 (lower load)
     }
 
@@ -1255,13 +1265,12 @@ mod tests {
             .unwrap();
 
         // Equal overlap, equal load → tie-break by tree size → w1 wins (smaller)
-        let result = policy.score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer);
+        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3, 4], &[0, 1], &indexer, 4);
         assert_eq!(result, Some(0)); // w1 (smaller tree)
     }
 
     #[test]
     fn test_score_overlap_short_request_returns_none() {
-        let policy = CacheAwarePolicy::with_config(test_config()); // block_size=4
         let workers: Vec<Arc<dyn Worker>> = vec![Arc::new(
             BasicWorkerBuilder::new("http://w1:8000")
                 .worker_type(WorkerType::Regular)
@@ -1271,7 +1280,7 @@ mod tests {
         let indexer = setup_indexer_with_blocks("http://w1:8000", &[&[1, 2, 3, 4]], 4);
 
         // Request shorter than block_size → no full blocks → None
-        let result = policy.score_overlap(&workers, &[1, 2, 3], &[0], &indexer);
+        let result = CacheAwarePolicy::score_overlap(&workers, &[1, 2, 3], &[0], &indexer, 4);
         assert_eq!(result, None);
     }
 
@@ -1327,11 +1336,12 @@ mod tests {
             .unwrap();
 
         // Query with all 4 blocks worth of tokens → w1 wins (higher overlap: 4 vs 2)
-        let result = policy.score_overlap(
+        let result = CacheAwarePolicy::score_overlap(
             &workers,
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             &[0, 1],
             &indexer,
+            4,
         );
         assert_eq!(result, Some(0)); // w1 (higher overlap)
     }
@@ -1498,6 +1508,64 @@ mod tests {
         // Clear monitor
         policy.set_kv_event_monitor(None);
         assert!(policy.kv_monitor.is_none());
+    }
+
+    #[test]
+    fn test_event_driven_uses_monitor_block_size() {
+        // Test that event-driven routing uses monitor's learned block_size
+        // instead of config default when available.
+        let mut policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+            block_size: 4, // config default
+            eviction_interval_secs: 0,
+            ..Default::default()
+        });
+
+        let workers: Vec<Arc<dyn Worker>> = vec![
+            Arc::new(
+                BasicWorkerBuilder::new("http://w1:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+            Arc::new(
+                BasicWorkerBuilder::new("http://w2:8000")
+                    .worker_type(WorkerType::Regular)
+                    .build(),
+            ),
+        ];
+        policy.init_workers(&workers);
+
+        let monitor = Arc::new(KvEventMonitor::new(Some(4)));
+
+        // Store blocks using block_size=8 (tokens chunked in groups of 8)
+        let indexer = Arc::new(PositionalIndexer::new(4));
+        let block = vec![StoredBlock {
+            seq_hash: SequenceHash(1),
+            content_hash: compute_content_hash(&[1, 2, 3, 4, 5, 6, 7, 8]),
+        }];
+        indexer
+            .apply_stored("http://w1:8000", &block, None)
+            .unwrap();
+        monitor
+            .indexers
+            .insert("unknown".to_string(), indexer.clone());
+
+        // Set block_size=8 in monitor (simulating learned from events)
+        monitor.set_block_size("unknown", 8);
+
+        policy.set_kv_event_monitor(Some(monitor));
+
+        // Query with 8 tokens — with block_size=8, this is one full block
+        // With config block_size=4, this would be two blocks and wouldn't match
+        let idx = policy
+            .select_worker(
+                &workers,
+                &SelectWorkerInfo {
+                    tokens: Some(&[1, 2, 3, 4, 5, 6, 7, 8]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(idx, 0); // w1 has the cached block
     }
 
     #[test]
