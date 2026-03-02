@@ -13,12 +13,19 @@ use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, Wo
 
 use super::strip_protocol;
 use crate::{
-    core::{steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode},
+    core::{
+        steps::workflow_data::{WorkerKind, WorkerWorkflowData},
+        ConnectionMode,
+    },
     routers::grpc::client::GrpcClient,
 };
 
 /// Try HTTP health check.
-async fn try_http_reachable(url: &str, timeout_secs: u64, client: &Client) -> Result<(), String> {
+pub(crate) async fn try_http_reachable(
+    url: &str,
+    timeout_secs: u64,
+    client: &Client,
+) -> Result<(), String> {
     let is_https = url.starts_with("https://");
     let protocol = if is_https { "https" } else { "http" };
     let clean_url = strip_protocol(url);
@@ -62,7 +69,7 @@ pub(super) async fn do_grpc_health_check(
 ///
 /// We don't care which runtime it is here — that's detect_backend's job.
 /// We just need to know: does this endpoint speak gRPC at all?
-async fn try_grpc_reachable(url: &str, timeout_secs: u64) -> Result<(), String> {
+pub(crate) async fn try_grpc_reachable(url: &str, timeout_secs: u64) -> Result<(), String> {
     let grpc_url = if url.starts_with("grpc://") {
         url.to_string()
     } else {
@@ -90,11 +97,15 @@ async fn try_grpc_reachable(url: &str, timeout_secs: u64) -> Result<(), String> 
 pub struct DetectConnectionModeStep;
 
 #[async_trait]
-impl StepExecutor<LocalWorkerWorkflowData> for DetectConnectionModeStep {
+impl StepExecutor<WorkerWorkflowData> for DetectConnectionModeStep {
     async fn execute(
         &self,
-        context: &mut WorkflowContext<LocalWorkerWorkflowData>,
+        context: &mut WorkflowContext<WorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
+        if context.data.worker_kind == Some(WorkerKind::External) {
+            return Ok(StepResult::Skip);
+        }
+
         let config = &context.data.config;
         let app_context = context
             .data

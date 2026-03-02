@@ -21,12 +21,11 @@ use crate::{
     app_context::AppContext,
     config::{RouterConfig, RoutingMode},
     core::steps::{
-        create_external_worker_workflow_data, create_local_worker_workflow_data,
         create_mcp_workflow_data, create_tokenizer_workflow_data,
         create_wasm_registration_workflow_data, create_wasm_removal_workflow_data,
         create_worker_removal_workflow_data, create_worker_update_workflow_data,
-        McpServerConfigRequest, TokenizerConfigRequest, TokenizerRemovalRequest,
-        WasmModuleConfigRequest, WasmModuleRemovalRequest,
+        create_worker_workflow_data, McpServerConfigRequest, TokenizerConfigRequest,
+        TokenizerRemovalRequest, WasmModuleConfigRequest, WasmModuleRemovalRequest,
     },
 };
 
@@ -315,63 +314,23 @@ impl JobQueue {
                 let timeout_duration =
                     Duration::from_secs(context.router_config.worker_startup_timeout_secs + 30);
 
-                // Select workflow based on runtime type
-                match config.runtime_type {
-                    RuntimeType::External => {
-                        let workflow_data = create_external_worker_workflow_data(
-                            (**config).clone(),
-                            Arc::clone(context),
-                        );
-                        let instance_id = engines
-                            .external_worker
-                            .start_workflow(
-                                WorkflowId::new("external_worker_registration"),
-                                workflow_data,
-                            )
-                            .await
-                            .map_err(|e| {
-                                format!(
-                                    "Failed to start external worker registration workflow: {e:?}"
-                                )
-                            })?;
+                let workflow_data =
+                    create_worker_workflow_data((**config).clone(), Arc::clone(context));
+                let instance_id = engines
+                    .worker_registration
+                    .start_workflow(WorkflowId::new("worker_registration"), workflow_data)
+                    .await
+                    .map_err(|e| format!("Failed to start worker registration workflow: {e:?}"))?;
 
-                        debug!(
-                            "Started external worker registration workflow for {} (instance: {})",
-                            config.url, instance_id
-                        );
+                debug!(
+                    "Started worker registration workflow for {} (instance: {})",
+                    config.url, instance_id
+                );
 
-                        engines
-                            .external_worker
-                            .wait_for_completion(instance_id, &config.url, timeout_duration)
-                            .await
-                    }
-                    _ => {
-                        let workflow_data = create_local_worker_workflow_data(
-                            (**config).clone(),
-                            Arc::clone(context),
-                        );
-                        let instance_id = engines
-                            .local_worker
-                            .start_workflow(
-                                WorkflowId::new("local_worker_registration"),
-                                workflow_data,
-                            )
-                            .await
-                            .map_err(|e| {
-                                format!("Failed to start local worker registration workflow: {e:?}")
-                            })?;
-
-                        debug!(
-                            "Started local worker registration workflow for {} (instance: {})",
-                            config.url, instance_id
-                        );
-
-                        engines
-                            .local_worker
-                            .wait_for_completion(instance_id, &config.url, timeout_duration)
-                            .await
-                    }
-                }
+                engines
+                    .worker_registration
+                    .wait_for_completion(instance_id, &config.url, timeout_duration)
+                    .await
             }
             Job::UpdateWorker { url, update } => {
                 let engines = context

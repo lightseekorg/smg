@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tracing::{debug, info};
 use wfaas::{StepExecutor, StepId, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use crate::core::steps::workflow_data::ExternalWorkerWorkflowData;
+use crate::core::steps::workflow_data::{WorkerKind, WorkerWorkflowData};
 
 // HTTP client for API calls
 #[expect(
@@ -228,11 +228,15 @@ async fn fetch_models(url: &str, api_key: Option<&str>) -> Result<Vec<ModelCard>
 pub struct DiscoverModelsStep;
 
 #[async_trait]
-impl StepExecutor<ExternalWorkerWorkflowData> for DiscoverModelsStep {
+impl StepExecutor<WorkerWorkflowData> for DiscoverModelsStep {
     async fn execute(
         &self,
-        context: &mut WorkflowContext<ExternalWorkerWorkflowData>,
+        context: &mut WorkflowContext<WorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
+        if context.data.worker_kind == Some(WorkerKind::Local) {
+            return Ok(StepResult::Skip);
+        }
+
         let config = &context.data.config;
 
         // If no API key is provided, skip model discovery and use wildcard mode.

@@ -11,7 +11,10 @@ use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowRe
 
 use super::{grpc_base_url, http_base_url};
 use crate::{
-    core::{steps::workflow_data::LocalWorkerWorkflowData, ConnectionMode},
+    core::{
+        steps::workflow_data::{WorkerKind, WorkerWorkflowData},
+        ConnectionMode,
+    },
     routers::grpc::client::{flat_labels, GrpcClient},
 };
 
@@ -278,11 +281,15 @@ fn normalize_grpc_keys(labels: &mut HashMap<String, String>) {
 pub struct DiscoverMetadataStep;
 
 #[async_trait]
-impl StepExecutor<LocalWorkerWorkflowData> for DiscoverMetadataStep {
+impl StepExecutor<WorkerWorkflowData> for DiscoverMetadataStep {
     async fn execute(
         &self,
-        context: &mut WorkflowContext<LocalWorkerWorkflowData>,
+        context: &mut WorkflowContext<WorkerWorkflowData>,
     ) -> WorkflowResult<StepResult> {
+        if context.data.worker_kind == Some(WorkerKind::External) {
+            return Ok(StepResult::Skip);
+        }
+
         let config = &context.data.config;
         let connection_mode =
             context.data.connection_mode.as_ref().ok_or_else(|| {
