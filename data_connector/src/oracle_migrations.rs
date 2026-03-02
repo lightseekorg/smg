@@ -76,12 +76,13 @@ fn oracle_v3_up(schema: &SchemaConfig) -> Vec<String> {
         .iter()
         .filter_map(|&field| {
             let col = s.col(field).to_uppercase();
-            let mapped_by_other_field = s
-                .columns
-                .iter()
-                .any(|(k, v)| !k.eq_ignore_ascii_case(field) && v.eq_ignore_ascii_case(&col));
+            let mapped_by_non_redundant_field = s.columns.iter().any(|(k, v)| {
+                !k.eq_ignore_ascii_case(field)
+                    && !redundant.iter().any(|r| k.eq_ignore_ascii_case(r))
+                    && v.eq_ignore_ascii_case(&col)
+            });
             let used_as_extra = s.extra_columns.keys().any(|k| k.eq_ignore_ascii_case(&col));
-            if mapped_by_other_field || used_as_extra {
+            if mapped_by_non_redundant_field || used_as_extra {
                 None
             } else {
                 // PL/SQL block: ORA-00904 = "invalid identifier" (column doesn't exist)

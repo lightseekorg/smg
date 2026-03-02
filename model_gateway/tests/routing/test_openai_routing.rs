@@ -487,7 +487,7 @@ async fn test_openai_router_responses_streaming_with_mock() {
     let mut previous = StoredResponse::new(None);
     previous.id = ResponseId::from("resp_prev_chain");
     previous.input = serde_json::json!("Earlier bedtime question");
-    previous.raw_response = serde_json::json!({"output": "Earlier answer"});
+    previous.raw_response = serde_json::json!({"output": [{"type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "Earlier answer", "annotations": []}]}]});
     storage.store_response(previous).await.unwrap();
 
     let mut metadata = HashMap::new();
