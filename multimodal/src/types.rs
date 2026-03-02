@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt,
     path::PathBuf,
-    sync::{Arc, LazyLock},
+    sync::Arc,
 };
 
 use image::DynamicImage;
@@ -29,16 +29,6 @@ impl fmt::Display for Modality {
         }
     }
 }
-
-/// Simple helper used for default placeholder tokens per modality.
-pub static DEFAULT_PLACEHOLDERS: LazyLock<HashMap<Modality, &'static str>> = LazyLock::new(|| {
-    HashMap::from([
-        (Modality::Image, "<image>"),
-        (Modality::ImageEmbeds, "<image_embeds>"),
-        (Modality::Audio, "<audio>"),
-        (Modality::Video, "<video>"),
-    ])
-});
 
 /// Detail level passed by OpenAI style APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -80,36 +70,6 @@ pub enum ChatContentPart {
     },
 }
 
-/// Represents one segment in the conversation after placeholders are inserted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConversationSegment {
-    Text(String),
-    Placeholder { token: String },
-}
-
-impl ConversationSegment {
-    pub fn text<S: Into<String>>(text: S) -> Self {
-        ConversationSegment::Text(text.into())
-    }
-
-    pub fn placeholder<S: Into<String>>(token: S) -> Self {
-        ConversationSegment::Placeholder {
-            token: token.into(),
-        }
-    }
-}
-
-/// Metadata describing where placeholder tokens were inserted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlaceholderHandle {
-    pub modality: Modality,
-    pub item_index: usize,
-    pub text_position: usize,
-}
-
-pub type PlaceholderMap = HashMap<String, Vec<PlaceholderHandle>>;
-
 /// Image source metadata (useful for hashing & tracing).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -127,6 +87,8 @@ pub struct ImageFrame {
     pub raw_bytes: bytes::Bytes,
     pub detail: ImageDetail,
     pub source: ImageSource,
+    /// Blake3 hex-digest of raw_bytes, computed at decode time.
+    pub hash: String,
 }
 
 impl ImageFrame {
@@ -135,12 +97,14 @@ impl ImageFrame {
         raw_bytes: bytes::Bytes,
         detail: ImageDetail,
         source: ImageSource,
+        hash: String,
     ) -> Self {
         Self {
             image,
             raw_bytes,
             detail,
             source,
+            hash,
         }
     }
 
@@ -175,6 +139,28 @@ pub type MultiModalData = HashMap<Modality, Vec<TrackedMedia>>;
 pub type MultiModalUUIDs = HashMap<Modality, Vec<Option<String>>>;
 
 pub type TokenId = i32;
+
+/// Declares how a multimodal tensor's first dimension maps to items (images).
+///
+/// Used by [`ModelProcessorSpec::field_layouts`] to tell the backend how to
+/// split tensors for per-item scheduling (vLLM `MultiModalFieldConfig`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldLayout {
+    /// First dimension equals num_images (one slice per image).
+    Batched,
+    /// Variable-length slices per image.  The sizes are stored in the
+    /// tensor named by `sizes_key` (e.g. `"patches_per_image"`).
+    Flat { sizes_key: String },
+}
+
+impl FieldLayout {
+    /// Convenience constructor for `Flat`.
+    pub fn flat(sizes_key: impl Into<String>) -> Self {
+        Self::Flat {
+            sizes_key: sizes_key.into(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageSize {

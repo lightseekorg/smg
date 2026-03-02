@@ -75,6 +75,10 @@ impl MinimaxM2Parser {
     }
 
     /// Create a new MiniMax M2 parser
+    #[expect(
+        clippy::expect_used,
+        reason = "regex patterns are compile-time string literals"
+    )]
     pub fn new() -> Self {
         // Use (?s) flag for DOTALL mode to handle newlines
         let tool_call_pattern = r"(?s)<minimax:tool_call>.*?</minimax:tool_call>";
@@ -106,7 +110,7 @@ impl MinimaxM2Parser {
     }
 
     /// Parse parameters from parameter tags
-    fn parse_parameters(&self, params_text: &str) -> ParserResult<serde_json::Map<String, Value>> {
+    fn parse_parameters(&self, params_text: &str) -> serde_json::Map<String, Value> {
         let mut parameters = serde_json::Map::new();
 
         for capture in self.param_extractor.captures_iter(params_text) {
@@ -114,7 +118,7 @@ impl MinimaxM2Parser {
             let value_str = capture.get(2).map_or("", |m| m.as_str());
 
             // Decode XML entities and parse value
-            let decoded_value = self.decode_xml_entities(value_str);
+            let decoded_value = Self::decode_xml_entities(value_str);
 
             // Note: We keep JSON-like strings as strings (not parsed JSON)
             // This matches the behavior of other parsers like GLM4 MOE
@@ -123,11 +127,11 @@ impl MinimaxM2Parser {
             parameters.insert(key.to_string(), value);
         }
 
-        Ok(parameters)
+        parameters
     }
 
     /// Decode common XML entities
-    fn decode_xml_entities(&self, text: &str) -> String {
+    fn decode_xml_entities(text: &str) -> String {
         text.replace("&lt;", "<")
             .replace("&gt;", ">")
             .replace("&amp;", "&")
@@ -145,7 +149,7 @@ impl MinimaxM2Parser {
             let params_text = captures.get(2).map_or("", |m| m.as_str());
 
             // Parse parameters
-            let parameters = self.parse_parameters(params_text)?;
+            let parameters = self.parse_parameters(params_text);
 
             let arguments_str = serde_json::to_string(&parameters)
                 .map_err(|e| ParserError::ParsingFailed(e.to_string()))?;
@@ -162,10 +166,7 @@ impl MinimaxM2Parser {
     }
 
     /// Parse all tool calls from text and return first valid position
-    fn parse_tool_calls_from_text(
-        &self,
-        text: &str,
-    ) -> ParserResult<(Vec<ToolCall>, Option<usize>)> {
+    fn parse_tool_calls_from_text(&self, text: &str) -> (Vec<ToolCall>, Option<usize>) {
         let mut tools = Vec::new();
         let mut first_valid_pos = None;
 
@@ -185,7 +186,7 @@ impl MinimaxM2Parser {
             }
         }
 
-        Ok((tools, first_valid_pos))
+        (tools, first_valid_pos)
     }
 
     /// Parse and stream parameters incrementally
@@ -199,7 +200,7 @@ impl MinimaxM2Parser {
             .map(|cap| {
                 let name = cap.get(1).map_or("", |m| m.as_str()).trim().to_string();
                 let value_str = cap.get(2).map_or("", |m| m.as_str());
-                let decoded = self.decode_xml_entities(value_str);
+                let decoded = Self::decode_xml_entities(value_str);
 
                 // Try parsing as JSON first (for nested objects/arrays)
                 let value = if decoded.starts_with('{') || decoded.starts_with('[') {
@@ -242,13 +243,10 @@ impl MinimaxM2Parser {
                     if !first {
                         json_fragment.push_str(", ");
                     }
-                    write!(
-                        &mut json_fragment,
-                        "{}: {}",
-                        serde_json::to_string(key).unwrap(),
-                        serde_json::to_string(value).unwrap()
-                    )
-                    .unwrap();
+                    // serde_json::to_string for String/Value is infallible; write! to String is infallible
+                    let key_json = serde_json::to_string(key).unwrap_or_default();
+                    let value_json = serde_json::to_string(value).unwrap_or_default();
+                    let _ = write!(&mut json_fragment, "{key_json}: {value_json}");
                     first = false;
                 }
 
@@ -271,13 +269,10 @@ impl MinimaxM2Parser {
 
                     for key in new_keys {
                         let value = &new_params[key];
-                        write!(
-                            &mut json_fragment,
-                            ", {}: {}",
-                            serde_json::to_string(key).unwrap(),
-                            serde_json::to_string(value).unwrap()
-                        )
-                        .unwrap();
+                        // serde_json::to_string for String/Value is infallible; write! to String is infallible
+                        let key_json = serde_json::to_string(key).unwrap_or_default();
+                        let value_json = serde_json::to_string(value).unwrap_or_default();
+                        let _ = write!(&mut json_fragment, ", {key_json}: {value_json}");
                     }
 
                     calls.push(ToolCallItem {
@@ -322,7 +317,7 @@ impl ToolParser for MinimaxM2Parser {
         }
 
         // Parse all tool calls and get first valid position
-        let (tools, first_valid_tool_pos) = self.parse_tool_calls_from_text(text)?;
+        let (tools, first_valid_tool_pos) = self.parse_tool_calls_from_text(text);
 
         // If no tools were successfully parsed, return entire text as fallback
         if tools.is_empty() {
@@ -385,7 +380,7 @@ impl ToolParser for MinimaxM2Parser {
                     self.buffer = self.buffer[end..].to_string();
                 } else {
                     // No partial token, return all as normal text
-                    normal_text = self.buffer.clone();
+                    normal_text.clone_from(&self.buffer);
                     self.buffer.clear();
                 }
                 break;
@@ -423,7 +418,7 @@ impl ToolParser for MinimaxM2Parser {
 
                     // Validate function name
                     if tool_indices.contains_key(&function_name) {
-                        self.current_function_name = function_name.clone();
+                        self.current_function_name.clone_from(&function_name);
                         self.function_name_sent = true;
 
                         // Initialize tool call tracking

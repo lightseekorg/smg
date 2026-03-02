@@ -53,7 +53,7 @@ impl ResponseProcessor {
     }
 
     /// Process a single choice from GenerateComplete response
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn process_single_choice(
         &self,
         complete: &ProtoGenerateComplete,
@@ -69,7 +69,7 @@ impl ResponseProcessor {
         // Decode tokens
         let outputs = stop_decoder
             .process_tokens(complete.output_ids())
-            .map_err(|e| format!("Failed to process tokens: {}", e))?;
+            .map_err(|e| format!("Failed to process tokens: {e}"))?;
 
         // Accumulate text with early breaks
         let mut final_text = String::new();
@@ -110,7 +110,7 @@ impl ResponseProcessor {
                     processed_text = result.normal_text;
                 }
                 Err(e) => {
-                    return Err(format!("Reasoning parsing error: {}", e));
+                    return Err(format!("Reasoning parsing error: {e}"));
                 }
             }
         }
@@ -134,7 +134,7 @@ impl ResponseProcessor {
             if used_json_schema {
                 (tool_calls, processed_text) = utils::parse_json_schema_response(
                     &processed_text,
-                    &original_request.tool_choice,
+                    original_request.tool_choice.as_ref(),
                     &original_request.model,
                     history_tool_calls_count,
                 );
@@ -162,17 +162,9 @@ impl ResponseProcessor {
         let matched_stop = complete.matched_stop_json();
 
         // Step 4: Convert output logprobs if present
-        let logprobs = if let Some(ref proto_logprobs) = complete.output_logprobs() {
-            match utils::convert_proto_to_openai_logprobs(proto_logprobs, tokenizer) {
-                Ok(logprobs) => Some(logprobs),
-                Err(e) => {
-                    error!("Failed to convert logprobs: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let logprobs = complete.output_logprobs().map(|ref proto_logprobs| {
+            utils::convert_proto_to_openai_logprobs(proto_logprobs, tokenizer)
+        });
 
         // Step 5: Build ChatCompletionMessage (proper response message type)
         let chat_message = ChatCompletionMessage {
@@ -269,7 +261,7 @@ impl ResponseProcessor {
                 Err(e) => {
                     return Err(error::internal_error(
                         "process_choice_failed",
-                        format!("Failed to process choice {}: {}", index, e),
+                        format!("Failed to process choice {index}: {e}"),
                     ));
                 }
             }
@@ -371,7 +363,7 @@ impl ResponseProcessor {
                 Err(e) => {
                     return Err(error::internal_error(
                         "process_tokens_failed",
-                        format!("Failed to process tokens: {}", e),
+                        format!("Failed to process tokens: {e}"),
                     ))
                 }
             };

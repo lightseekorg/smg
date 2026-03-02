@@ -17,8 +17,10 @@ use crate::routers::grpc::proto_wrapper::{ProtoGenerateComplete, ProtoGenerateSt
 pub(crate) fn build_usage(responses: &[ProtoGenerateComplete]) -> Usage {
     let total_prompt_tokens: u32 = responses.iter().map(|r| r.prompt_tokens()).sum();
     let total_completion_tokens: u32 = responses.iter().map(|r| r.completion_tokens()).sum();
+    let total_cached_tokens: u32 = responses.iter().map(|r| r.cached_tokens()).sum();
 
     Usage::from_counts(total_prompt_tokens, total_completion_tokens)
+        .with_cached_tokens(total_cached_tokens)
 }
 
 /// Tracks per-index completion token counts across streaming chunks.

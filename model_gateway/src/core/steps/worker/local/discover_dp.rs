@@ -22,12 +22,12 @@ pub async fn get_dp_info(url: &str, api_key: Option<&str>) -> Result<DpInfo, Str
 
     let dp_size = info
         .dp_size
-        .ok_or_else(|| format!("No dp_size in response from {}", url))?;
+        .ok_or_else(|| format!("No dp_size in response from {url}"))?;
 
     let model_id = info
         .model_id
         .filter(|s| !s.is_empty())
-        .or(info.served_model_name.filter(|s| !s.is_empty()))
+        .or_else(|| info.served_model_name.filter(|s| !s.is_empty()))
         .or_else(|| {
             info.model_path
                 .and_then(|path| path.split('/').next_back().map(|s| s.to_string()))
@@ -81,7 +81,7 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverDPInfoStep {
             .await
             .map_err(|e| WorkflowError::StepFailed {
                 step_id: StepId::new("discover_dp_info"),
-                message: format!("Failed to get DP info: {}", e),
+                message: format!("Failed to get DP info: {e}"),
             })?;
 
         debug!(

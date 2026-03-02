@@ -1,0 +1,728 @@
+//! Per-worker KV cache event subscription manager.
+//!
+//! `KvEventMonitor` spawns a background tokio task per gRPC worker that subscribes
+//! to KV cache events and feeds them into a shared `PositionalIndexer` (one per model).
+//! This enables event-driven cache-aware routing as an alternative to the approximate
+//! radix tree approach.
+//!
+//! Lifecycle:
+//! - `on_worker_added` — spawns streaming task, creates indexer if needed
+//! - `on_worker_removed` — aborts task, removes worker from indexer
+//! - `stop` — aborts all tasks, clears state
+
+use std::{collections::HashMap, sync::Arc, time::Duration};
+
+use dashmap::DashMap;
+use kv_index::{compute_content_hash, ApplyError, PositionalIndexer, SequenceHash, StoredBlock};
+use smg_grpc_client::common_proto::{
+    kv_cache_event, KvBlock, KvBlocksRemoved, KvBlocksStored, KvCacheEvent, KvEventBatch,
+};
+use tokio::{sync::Mutex, task::JoinHandle};
+use tracing::{debug, info, warn};
+
+use crate::core::{ConnectionMode, Worker};
+
+/// Default jump size for new `PositionalIndexer` instances.
+const DEFAULT_JUMP_SIZE: usize = 64;
+
+/// Initial reconnection delay after stream failure.
+const INITIAL_RECONNECT_DELAY_MS: u64 = 100;
+
+/// Maximum reconnection delay (caps exponential backoff).
+const MAX_RECONNECT_DELAY_MS: u64 = 30_000;
+
+/// Manages per-worker KV cache event subscriptions.
+///
+/// Each gRPC worker gets a dedicated tokio task that subscribes to the backend's
+/// KV cache event stream and feeds events into a shared `PositionalIndexer`
+/// (one per `model_id`). Workers serving the same model share the same indexer.
+pub struct KvEventMonitor {
+    /// Per-model positional indexers: model_id → shared indexer.
+    indexers: DashMap<String, Arc<PositionalIndexer>>,
+    /// Per-worker subscription handles: worker_url → subscription info.
+    /// Mutex matches LoadMonitor pattern for atomic abort + remove.
+    worker_handles: Mutex<HashMap<String, WorkerSubscription>>,
+    /// Jump size for new PositionalIndexer instances.
+    jump_size: usize,
+}
+
+/// Tracks a single worker's subscription state.
+struct WorkerSubscription {
+    handle: JoinHandle<()>,
+    model_id: String,
+}
+
+/// Result of processing a stream connection to completion.
+enum StreamResult {
+    /// Stream closed normally (server-side).
+    Ended,
+    /// Stream produced an error.
+    Error(String),
+    /// Detected a gap in sequence numbers.
+    GapDetected { expected: u64, received: u64 },
+}
+
+impl KvEventMonitor {
+    /// Create a new `KvEventMonitor`.
+    ///
+    /// `jump_size` controls the `PositionalIndexer` jump search stride.
+    /// Pass `None` for the default (64).
+    pub fn new(jump_size: Option<usize>) -> Self {
+        let jump_size = jump_size.unwrap_or(DEFAULT_JUMP_SIZE).max(1);
+        Self {
+            indexers: DashMap::new(),
+            worker_handles: Mutex::new(HashMap::new()),
+            jump_size,
+        }
+    }
+
+    /// Start a KV event subscription for a worker.
+    ///
+    /// Spawns a background tokio task that subscribes to KV cache events via
+    /// server-streaming gRPC and applies them to the model's `PositionalIndexer`.
+    /// Duplicate calls for the same worker URL are no-ops.
+    pub async fn on_worker_added(&self, worker: &Arc<dyn Worker>) {
+        let url = worker.url().to_string();
+        let model_id = worker.model_id().to_string();
+
+        if *worker.connection_mode() == ConnectionMode::Http {
+            debug!(worker_url = %url, "HTTP worker, skipping KV event subscription");
+            return;
+        }
+
+        let mut handles = self.worker_handles.lock().await;
+        if handles.contains_key(&url) {
+            debug!(worker_url = %url, "KV event subscription already active, skipping");
+            return;
+        }
+
+        let indexer = self
+            .indexers
+            .entry(model_id.clone())
+            .or_insert_with(|| Arc::new(PositionalIndexer::new(self.jump_size)))
+            .clone();
+
+        let worker = Arc::clone(worker);
+        let worker_url = url.clone();
+
+        info!(
+            worker_url = %url,
+            model_id = %model_id,
+            "Starting KV event subscription"
+        );
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "KV event monitor: runs for the lifetime of the worker, \
+                      handle is stored and abort() is called on removal"
+        )]
+        let handle = tokio::spawn(async move {
+            Self::subscription_loop(worker, worker_url, indexer).await;
+        });
+
+        handles.insert(url, WorkerSubscription { handle, model_id });
+    }
+
+    /// Stop the KV event subscription for a worker and remove it from the indexer.
+    pub async fn on_worker_removed(&self, worker_url: &str) {
+        // Single lock acquisition: remove subscription and check remaining atomically
+        // to avoid TOCTOU race with concurrent on_worker_added for the same model.
+        let (subscription, should_remove_indexer) = {
+            let mut handles = self.worker_handles.lock().await;
+            let sub = handles.remove(worker_url);
+            let should_remove = sub
+                .as_ref()
+                .is_some_and(|s| !handles.values().any(|other| other.model_id == s.model_id));
+            (sub, should_remove)
+        };
+
+        let Some(sub) = subscription else {
+            return;
+        };
+
+        info!(worker_url = %worker_url, "Stopping KV event subscription");
+        sub.handle.abort();
+        let _ = sub.handle.await;
+
+        // Remove this worker's blocks from the indexer.
+        if let Some(indexer) = self.indexers.get(&sub.model_id) {
+            indexer.remove_worker(worker_url);
+        }
+
+        if should_remove_indexer {
+            self.indexers.remove(&sub.model_id);
+        }
+    }
+
+    /// Stop all subscriptions and clean up.
+    pub async fn stop(&self) {
+        let subscriptions: HashMap<String, WorkerSubscription> = {
+            let mut handles = self.worker_handles.lock().await;
+            std::mem::take(&mut *handles)
+        };
+
+        if subscriptions.is_empty() {
+            return;
+        }
+
+        info!(
+            count = subscriptions.len(),
+            "Stopping all KV event subscriptions"
+        );
+        for (url, sub) in subscriptions {
+            debug!(worker_url = %url, "Aborting KV event subscription");
+            sub.handle.abort();
+            let _ = sub.handle.await;
+        }
+
+        self.indexers.clear();
+    }
+
+    /// Get the indexer for a model (used by `CacheAwarePolicy` for queries).
+    pub fn get_indexer(&self, model_id: &str) -> Option<Arc<PositionalIndexer>> {
+        self.indexers.get(model_id).map(|r| Arc::clone(&r))
+    }
+
+    /// Check if any subscription is running.
+    pub async fn is_running(&self) -> bool {
+        !self.worker_handles.lock().await.is_empty()
+    }
+
+    // -----------------------------------------------------------------------
+    // Subscription loop
+    // -----------------------------------------------------------------------
+
+    /// Main subscription loop for a single worker. Runs until cancelled.
+    async fn subscription_loop(
+        worker: Arc<dyn Worker>,
+        worker_url: String,
+        indexer: Arc<PositionalIndexer>,
+    ) {
+        let mut last_seq: u64 = 0;
+        let mut reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
+
+        loop {
+            let grpc_client = match worker.get_grpc_client().await {
+                Ok(Some(client)) => client,
+                Ok(None) => {
+                    // HTTP workers are filtered in on_worker_added, so this should
+                    // be unreachable. Retry defensively rather than exiting and
+                    // leaving a stale entry in worker_handles.
+                    warn!(
+                        worker_url = %worker_url,
+                        delay_ms = reconnect_delay_ms,
+                        "Worker has no gRPC client yet, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(reconnect_delay_ms)).await;
+                    reconnect_delay_ms = (reconnect_delay_ms * 2).min(MAX_RECONNECT_DELAY_MS);
+                    continue;
+                }
+                Err(e) => {
+                    warn!(
+                        worker_url = %worker_url,
+                        error = %e,
+                        delay_ms = reconnect_delay_ms,
+                        "Failed to get gRPC client, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(reconnect_delay_ms)).await;
+                    reconnect_delay_ms = (reconnect_delay_ms * 2).min(MAX_RECONNECT_DELAY_MS);
+                    continue;
+                }
+            };
+
+            let stream = match grpc_client.subscribe_kv_events(last_seq).await {
+                Ok(stream) => {
+                    info!(
+                        worker_url = %worker_url,
+                        start_seq = last_seq,
+                        "KV event stream connected"
+                    );
+                    reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
+                    stream
+                }
+                Err(e) => {
+                    warn!(
+                        worker_url = %worker_url,
+                        error = %e,
+                        delay_ms = reconnect_delay_ms,
+                        "Failed to subscribe to KV events, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(reconnect_delay_ms)).await;
+                    reconnect_delay_ms = (reconnect_delay_ms * 2).min(MAX_RECONNECT_DELAY_MS);
+                    continue;
+                }
+            };
+
+            match Self::process_stream(stream, &worker_url, &indexer, &mut last_seq).await {
+                StreamResult::Ended => {
+                    info!(
+                        worker_url = %worker_url,
+                        last_seq = last_seq,
+                        delay_ms = reconnect_delay_ms,
+                        "KV event stream ended, reconnecting"
+                    );
+                    // Backoff to avoid tight reconnect loop if server keeps
+                    // closing the stream cleanly (e.g., rolling connections).
+                    tokio::time::sleep(Duration::from_millis(reconnect_delay_ms)).await;
+                    reconnect_delay_ms = (reconnect_delay_ms * 2).min(MAX_RECONNECT_DELAY_MS);
+                }
+                StreamResult::Error(e) => {
+                    warn!(
+                        worker_url = %worker_url,
+                        error = %e,
+                        last_seq = last_seq,
+                        delay_ms = reconnect_delay_ms,
+                        "KV event stream error, reconnecting"
+                    );
+                    tokio::time::sleep(Duration::from_millis(reconnect_delay_ms)).await;
+                    reconnect_delay_ms = (reconnect_delay_ms * 2).min(MAX_RECONNECT_DELAY_MS);
+                }
+                StreamResult::GapDetected { expected, received } => {
+                    warn!(
+                        worker_url = %worker_url,
+                        expected = expected,
+                        received = received,
+                        "Sequence gap detected, reconnecting for replay from seq {last_seq}"
+                    );
+                    // No backoff — gap replay is a normal recovery path.
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Stream processing + proto conversion
+    // -----------------------------------------------------------------------
+
+    /// Process batches from a single stream connection.
+    async fn process_stream(
+        mut stream: tonic::Streaming<KvEventBatch>,
+        worker_url: &str,
+        indexer: &PositionalIndexer,
+        last_seq: &mut u64,
+    ) -> StreamResult {
+        use tokio_stream::StreamExt;
+
+        while let Some(result) = stream.next().await {
+            let batch = match result {
+                Ok(batch) => batch,
+                Err(e) => return StreamResult::Error(e.to_string()),
+            };
+
+            // Skip stale/duplicate batches (can occur after reconnect replay).
+            if *last_seq > 0 && batch.sequence_number <= *last_seq {
+                debug!(
+                    worker_url = %worker_url,
+                    last_seq = *last_seq,
+                    received = batch.sequence_number,
+                    "Skipping stale KV event batch"
+                );
+                continue;
+            }
+
+            // Gap detection.
+            if *last_seq > 0 && batch.sequence_number > *last_seq + 1 {
+                return StreamResult::GapDetected {
+                    expected: *last_seq + 1,
+                    received: batch.sequence_number,
+                };
+            }
+
+            for event in &batch.events {
+                Self::apply_event(event, worker_url, indexer);
+            }
+
+            *last_seq = batch.sequence_number;
+        }
+
+        StreamResult::Ended
+    }
+
+    /// Apply a single KV cache event to the indexer.
+    fn apply_event(event: &KvCacheEvent, worker_url: &str, indexer: &PositionalIndexer) {
+        let Some(ref data) = event.data else {
+            return;
+        };
+
+        match data {
+            kv_cache_event::Data::Stored(stored) => {
+                Self::apply_stored(stored, worker_url, indexer);
+            }
+            kv_cache_event::Data::Removed(removed) => {
+                Self::apply_removed(removed, worker_url, indexer);
+            }
+            kv_cache_event::Data::Cleared(_) => {
+                indexer.apply_cleared(worker_url);
+            }
+        }
+    }
+
+    /// Convert proto `KvBlocksStored` and apply to the indexer.
+    fn apply_stored(stored: &KvBlocksStored, worker_url: &str, indexer: &PositionalIndexer) {
+        let blocks: Vec<StoredBlock> = stored.blocks.iter().map(convert_kv_block).collect();
+
+        let parent_seq_hash = stored.parent_block_hash.map(SequenceHash::from);
+
+        match indexer.apply_stored(worker_url, &blocks, parent_seq_hash) {
+            Ok(()) => {}
+            Err(ApplyError::WorkerNotTracked | ApplyError::ParentBlockNotFound) => {
+                // Cold start or parent evicted — retry without parent to start a new chain.
+                if let Err(e) = indexer.apply_stored(worker_url, &blocks, None) {
+                    warn!(
+                        worker_url = %worker_url,
+                        error = %e,
+                        "Failed to apply stored event after fallback"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Convert proto `KvBlocksRemoved` and apply to the indexer.
+    fn apply_removed(removed: &KvBlocksRemoved, worker_url: &str, indexer: &PositionalIndexer) {
+        let seq_hashes: Vec<SequenceHash> = removed
+            .block_hashes
+            .iter()
+            .map(|&h| SequenceHash::from(h))
+            .collect();
+
+        indexer.apply_removed(worker_url, &seq_hashes);
+    }
+}
+
+/// Convert a proto `KvBlock` to a kv-index `StoredBlock`.
+fn convert_kv_block(block: &KvBlock) -> StoredBlock {
+    StoredBlock {
+        seq_hash: SequenceHash::from(block.block_hash),
+        content_hash: compute_content_hash(&block.token_ids),
+    }
+}
+
+impl Drop for KvEventMonitor {
+    fn drop(&mut self) {
+        if let Ok(mut handles) = self.worker_handles.try_lock() {
+            for (_, sub) in handles.drain() {
+                sub.handle.abort();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Proto → kv-index conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_convert_kv_block() {
+        let block = KvBlock {
+            block_hash: 42,
+            token_ids: vec![1, 2, 3, 4],
+            block_size: 4,
+            lora_id: None,
+            cache_level: None,
+        };
+        let stored = convert_kv_block(&block);
+        assert_eq!(stored.seq_hash, SequenceHash::from(42i64));
+        assert_eq!(stored.content_hash, compute_content_hash(&[1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn test_convert_kv_block_negative_hash() {
+        let block = KvBlock {
+            block_hash: -1,
+            token_ids: vec![10, 20],
+            block_size: 2,
+            lora_id: None,
+            cache_level: None,
+        };
+        let stored = convert_kv_block(&block);
+        assert_eq!(stored.seq_hash, SequenceHash(u64::MAX));
+    }
+
+    #[test]
+    fn test_convert_kv_block_empty_tokens() {
+        let block = KvBlock {
+            block_hash: 100,
+            token_ids: vec![],
+            block_size: 0,
+            lora_id: None,
+            cache_level: None,
+        };
+        let stored = convert_kv_block(&block);
+        assert_eq!(stored.seq_hash, SequenceHash::from(100i64));
+        assert_eq!(stored.content_hash, compute_content_hash(&[]));
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_event integration with PositionalIndexer
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_stored_no_parent() {
+        let indexer = PositionalIndexer::new(64);
+        let stored = KvBlocksStored {
+            blocks: vec![
+                KvBlock {
+                    block_hash: 1,
+                    token_ids: vec![10, 20, 30, 40],
+                    block_size: 4,
+                    lora_id: None,
+                    cache_level: None,
+                },
+                KvBlock {
+                    block_hash: 2,
+                    token_ids: vec![50, 60, 70, 80],
+                    block_size: 4,
+                    lora_id: None,
+                    cache_level: None,
+                },
+            ],
+            parent_block_hash: None,
+        };
+
+        KvEventMonitor::apply_stored(&stored, "http://w1:8000", &indexer);
+        assert_eq!(indexer.current_size(), 2);
+    }
+
+    #[test]
+    fn test_apply_stored_with_parent() {
+        let indexer = PositionalIndexer::new(64);
+
+        let stored1 = KvBlocksStored {
+            blocks: vec![KvBlock {
+                block_hash: 1,
+                token_ids: vec![10, 20, 30, 40],
+                block_size: 4,
+                lora_id: None,
+                cache_level: None,
+            }],
+            parent_block_hash: None,
+        };
+        KvEventMonitor::apply_stored(&stored1, "http://w1:8000", &indexer);
+
+        let stored2 = KvBlocksStored {
+            blocks: vec![KvBlock {
+                block_hash: 2,
+                token_ids: vec![50, 60, 70, 80],
+                block_size: 4,
+                lora_id: None,
+                cache_level: None,
+            }],
+            parent_block_hash: Some(1),
+        };
+        KvEventMonitor::apply_stored(&stored2, "http://w1:8000", &indexer);
+        assert_eq!(indexer.current_size(), 2);
+    }
+
+    #[test]
+    fn test_apply_stored_fallback_on_worker_not_tracked() {
+        let indexer = PositionalIndexer::new(64);
+
+        // Pass parent_block_hash for an untracked worker — should fallback to no parent.
+        let stored = KvBlocksStored {
+            blocks: vec![KvBlock {
+                block_hash: 1,
+                token_ids: vec![10, 20, 30, 40],
+                block_size: 4,
+                lora_id: None,
+                cache_level: None,
+            }],
+            parent_block_hash: Some(999),
+        };
+        KvEventMonitor::apply_stored(&stored, "http://new-worker:8000", &indexer);
+        assert_eq!(indexer.current_size(), 1);
+    }
+
+    #[test]
+    fn test_apply_removed() {
+        let indexer = PositionalIndexer::new(64);
+
+        let stored = KvBlocksStored {
+            blocks: vec![
+                KvBlock {
+                    block_hash: 1,
+                    token_ids: vec![10, 20, 30, 40],
+                    block_size: 4,
+                    lora_id: None,
+                    cache_level: None,
+                },
+                KvBlock {
+                    block_hash: 2,
+                    token_ids: vec![50, 60, 70, 80],
+                    block_size: 4,
+                    lora_id: None,
+                    cache_level: None,
+                },
+            ],
+            parent_block_hash: None,
+        };
+        KvEventMonitor::apply_stored(&stored, "http://w1:8000", &indexer);
+
+        let removed = KvBlocksRemoved {
+            block_hashes: vec![2],
+            cache_level: None,
+        };
+        KvEventMonitor::apply_removed(&removed, "http://w1:8000", &indexer);
+        assert_eq!(indexer.current_size(), 1);
+    }
+
+    #[test]
+    fn test_apply_cleared_event() {
+        let indexer = PositionalIndexer::new(64);
+
+        let stored = KvBlocksStored {
+            blocks: vec![KvBlock {
+                block_hash: 1,
+                token_ids: vec![10, 20, 30, 40],
+                block_size: 4,
+                lora_id: None,
+                cache_level: None,
+            }],
+            parent_block_hash: None,
+        };
+        KvEventMonitor::apply_stored(&stored, "http://w1:8000", &indexer);
+        assert_eq!(indexer.current_size(), 1);
+
+        indexer.apply_cleared("http://w1:8000");
+        assert_eq!(indexer.current_size(), 0);
+    }
+
+    #[test]
+    fn test_apply_event_dispatch_stored() {
+        let indexer = PositionalIndexer::new(64);
+        let event = KvCacheEvent {
+            event_id: 1,
+            data: Some(kv_cache_event::Data::Stored(KvBlocksStored {
+                blocks: vec![KvBlock {
+                    block_hash: 42,
+                    token_ids: vec![1, 2, 3, 4],
+                    block_size: 4,
+                    lora_id: None,
+                    cache_level: None,
+                }],
+                parent_block_hash: None,
+            })),
+        };
+
+        KvEventMonitor::apply_event(&event, "http://w1:8000", &indexer);
+        assert_eq!(indexer.current_size(), 1);
+    }
+
+    #[test]
+    fn test_apply_event_dispatch_removed() {
+        let indexer = PositionalIndexer::new(64);
+
+        // Store first
+        let stored_event = KvCacheEvent {
+            event_id: 1,
+            data: Some(kv_cache_event::Data::Stored(KvBlocksStored {
+                blocks: vec![KvBlock {
+                    block_hash: 1,
+                    token_ids: vec![1, 2, 3, 4],
+                    block_size: 4,
+                    lora_id: None,
+                    cache_level: None,
+                }],
+                parent_block_hash: None,
+            })),
+        };
+        KvEventMonitor::apply_event(&stored_event, "http://w1:8000", &indexer);
+
+        // Remove
+        let removed_event = KvCacheEvent {
+            event_id: 2,
+            data: Some(kv_cache_event::Data::Removed(KvBlocksRemoved {
+                block_hashes: vec![1],
+                cache_level: None,
+            })),
+        };
+        KvEventMonitor::apply_event(&removed_event, "http://w1:8000", &indexer);
+        assert_eq!(indexer.current_size(), 0);
+    }
+
+    #[test]
+    fn test_apply_event_dispatch_cleared() {
+        let indexer = PositionalIndexer::new(64);
+
+        // Store first
+        KvEventMonitor::apply_event(
+            &KvCacheEvent {
+                event_id: 1,
+                data: Some(kv_cache_event::Data::Stored(KvBlocksStored {
+                    blocks: vec![KvBlock {
+                        block_hash: 1,
+                        token_ids: vec![1, 2, 3, 4],
+                        block_size: 4,
+                        lora_id: None,
+                        cache_level: None,
+                    }],
+                    parent_block_hash: None,
+                })),
+            },
+            "http://w1:8000",
+            &indexer,
+        );
+
+        // Clear
+        KvEventMonitor::apply_event(
+            &KvCacheEvent {
+                event_id: 2,
+                data: Some(kv_cache_event::Data::Cleared(
+                    smg_grpc_client::common_proto::KvCacheCleared {},
+                )),
+            },
+            "http://w1:8000",
+            &indexer,
+        );
+        assert_eq!(indexer.current_size(), 0);
+    }
+
+    #[test]
+    fn test_apply_event_no_data() {
+        let indexer = PositionalIndexer::new(64);
+        let event = KvCacheEvent {
+            event_id: 1,
+            data: None,
+        };
+        KvEventMonitor::apply_event(&event, "http://w1:8000", &indexer);
+        assert_eq!(indexer.current_size(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Lifecycle
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_monitor_new() {
+        let monitor = KvEventMonitor::new(None);
+        assert!(!monitor.is_running().await);
+    }
+
+    #[tokio::test]
+    async fn test_monitor_new_clamps_zero_jump_size() {
+        let monitor = KvEventMonitor::new(Some(0));
+        assert_eq!(monitor.jump_size, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_indexer_nonexistent() {
+        let monitor = KvEventMonitor::new(None);
+        assert!(monitor.get_indexer("nonexistent").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stop_empty_monitor() {
+        let monitor = KvEventMonitor::new(None);
+        monitor.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_on_worker_removed_nonexistent() {
+        let monitor = KvEventMonitor::new(None);
+        monitor.on_worker_removed("http://nonexistent:8000").await;
+    }
+}

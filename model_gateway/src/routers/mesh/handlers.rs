@@ -274,7 +274,7 @@ pub async fn get_app_config(
     match handler.read_data(key.clone()) {
         Some(value) => {
             // Return value as hex encoded string for JSON compatibility
-            let hex_value: String = value.iter().map(|b| format!("{:02x}", b)).collect();
+            let hex_value: String = value.iter().map(|b| format!("{b:02x}")).collect();
             (
                 StatusCode::OK,
                 Json(json!({"key": key, "value": hex_value, "format": "hex"})),
@@ -434,6 +434,10 @@ pub async fn trigger_graceful_shutdown(State(app_state): State<Arc<AppState>>) -
         }
     };
     info!("Graceful shutdown triggered via API");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "graceful shutdown must run independently of the request that triggered it"
+    )]
     tokio::spawn(async move {
         if let Err(e) = handler.graceful_shutdown().await {
             warn!("Error during graceful shutdown: {}", e);

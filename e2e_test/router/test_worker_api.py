@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from conftest import smg_compare
 from infra import ConnectionMode, Gateway, ModelPool
 
 logger = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ pytestmark = pytest.mark.skip_for_runtime("vllm", reason="vLLM does not support 
 class TestWorkerAPI:
     """Tests for worker management APIs using setup_backend fixture."""
 
-    def test_list_workers(self, setup_backend):
+    def test_list_workers(self, setup_backend, smg):
         """Test listing workers via /workers endpoint."""
         backend, model, client, gateway = setup_backend
 
@@ -47,7 +48,13 @@ class TestWorkerAPI:
             )
             assert worker.url, "Worker should have a URL"
 
-    def test_list_models(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_workers = smg.workers.list()
+            assert smg_workers["total"] >= 1, "SmgClient: expected at least one worker"
+            assert len(smg_workers["workers"]) >= 1
+
+    def test_list_models(self, setup_backend, smg):
         """Test listing models via /v1/models endpoint."""
         backend, model, client, gateway = setup_backend
 
@@ -59,7 +66,12 @@ class TestWorkerAPI:
             logger.info("Model: %s", m.get("id", "unknown"))
             assert "id" in m, "Model should have an id"
 
-    def test_health_endpoint(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_models = smg.models.list()
+            assert len(smg_models.data) >= 1, "SmgClient: expected at least one model"
+
+    def test_health_endpoint(self, setup_backend, smg):
         """Test health check endpoint."""
         backend, model, client, gateway = setup_backend
 

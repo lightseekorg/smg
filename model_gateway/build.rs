@@ -10,7 +10,7 @@ macro_rules! set_env {
     };
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
     // Rebuild trigger
     println!("cargo:rerun-if-changed=Cargo.toml");
 
@@ -54,8 +54,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "CARGO_VERSION",
         cargo_version().unwrap_or_else(|| "unknown".into())
     );
-
-    Ok(())
 }
 
 fn read_cargo_version() -> Result<String, Box<dyn std::error::Error>> {

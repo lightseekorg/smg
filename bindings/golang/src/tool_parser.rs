@@ -66,7 +66,7 @@ pub unsafe extern "C" fn sgl_tool_parser_create(
     } else if let Some(parser_box) = PARSER_FACTORY.registry().create_parser(type_str) {
         parser_box
     } else {
-        set_error_message(error_out, &format!("Unknown parser type: {}", type_str));
+        set_error_message(error_out, &format!("Unknown parser type: {type_str}"));
         return ptr::null_mut();
     };
 
@@ -155,7 +155,7 @@ pub unsafe extern "C" fn sgl_tool_parser_parse_complete(
             let result_str = match serde_json::to_string(&result_json) {
                 Ok(s) => s,
                 Err(e) => {
-                    set_error_message(error_out, &format!("Failed to serialize JSON: {}", e));
+                    set_error_message(error_out, &format!("Failed to serialize JSON: {e}"));
                     return SglErrorCode::ParsingError;
                 }
             };
@@ -163,7 +163,7 @@ pub unsafe extern "C" fn sgl_tool_parser_parse_complete(
             let result_cstr = match CString::new(result_str) {
                 Ok(s) => s,
                 Err(e) => {
-                    set_error_message(error_out, &format!("Failed to create result string: {}", e));
+                    set_error_message(error_out, &format!("Failed to create result string: {e}"));
                     return SglErrorCode::MemoryError;
                 }
             };
@@ -173,7 +173,7 @@ pub unsafe extern "C" fn sgl_tool_parser_parse_complete(
             SglErrorCode::Success
         }
         Err(e) => {
-            set_error_message(error_out, &format!("Parse error: {}", e));
+            set_error_message(error_out, &format!("Parse error: {e}"));
             SglErrorCode::ParsingError
         }
     }
@@ -220,7 +220,9 @@ pub unsafe extern "C" fn sgl_tool_parser_parse_incremental(
     };
 
     // Parse tools JSON if provided
-    let tools: Vec<Tool> = if !tools_json.is_null() {
+    let tools: Vec<Tool> = if tools_json.is_null() {
+        vec![]
+    } else {
         let tools_str = match CStr::from_ptr(tools_json).to_str() {
             Ok(s) => s,
             Err(_) => {
@@ -229,8 +231,6 @@ pub unsafe extern "C" fn sgl_tool_parser_parse_incremental(
             }
         };
         serde_json::from_str::<Vec<Tool>>(tools_str).unwrap_or_default()
-    } else {
-        vec![]
     };
 
     let handle_ref = &*handle;
@@ -291,7 +291,7 @@ pub unsafe extern "C" fn sgl_tool_parser_parse_incremental(
             let result_str = match serde_json::to_string(&result_json) {
                 Ok(s) => s,
                 Err(e) => {
-                    set_error_message(error_out, &format!("Failed to serialize JSON: {}", e));
+                    set_error_message(error_out, &format!("Failed to serialize JSON: {e}"));
                     return SglErrorCode::ParsingError;
                 }
             };
@@ -299,7 +299,7 @@ pub unsafe extern "C" fn sgl_tool_parser_parse_incremental(
             let result_cstr = match CString::new(result_str) {
                 Ok(s) => s,
                 Err(e) => {
-                    set_error_message(error_out, &format!("Failed to create result string: {}", e));
+                    set_error_message(error_out, &format!("Failed to create result string: {e}"));
                     return SglErrorCode::MemoryError;
                 }
             };
@@ -309,7 +309,7 @@ pub unsafe extern "C" fn sgl_tool_parser_parse_incremental(
             SglErrorCode::Success
         }
         Err(e) => {
-            set_error_message(error_out, &format!("Parse incremental error: {}", e));
+            set_error_message(error_out, &format!("Parse incremental error: {e}"));
             SglErrorCode::ParsingError
         }
     }

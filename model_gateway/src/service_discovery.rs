@@ -1,5 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
+    // std::sync::Mutex is intentional: all critical sections are tiny
+    // (HashSet insert/remove/contains) and never cross .await boundaries.
+    // See: https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html#which-kind-of-mutex-should-you-use
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -15,7 +18,7 @@ use kube::{
     Client,
 };
 use openai_protocol::worker::{WorkerSpec, WorkerType};
-use rustls;
+use rustls::crypto::ring;
 use smg_mesh::{
     gossip::{NodeState, NodeStatus},
     ClusterState,
@@ -217,7 +220,7 @@ pub async fn start_service_discovery(
         ));
     }
 
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = ring::default_provider().install_default();
 
     let client = Client::try_default().await?;
 
@@ -226,14 +229,14 @@ pub async fn start_service_discovery(
         let prefill_selector = config
             .prefill_selector
             .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
+            .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join(",");
 
         let decode_selector = config
             .decode_selector
             .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
+            .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join(",");
 
@@ -245,7 +248,7 @@ pub async fn start_service_discovery(
         let label_selector = config
             .selector
             .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
+            .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join(",");
 
@@ -260,7 +263,7 @@ pub async fn start_service_discovery(
         let router_selector = config
             .router_selector
             .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
+            .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join(",");
         info!(
@@ -269,6 +272,10 @@ pub async fn start_service_discovery(
         );
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "service discovery runs for the lifetime of the server; shutdown is handled by dropping the handle"
+    )]
     let handle = task::spawn(async move {
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
 
@@ -291,6 +298,10 @@ pub async fn start_service_discovery(
             {
                 let router_config = config_arc.clone();
                 let router_pods = pods.clone();
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "router discovery runs for the lifetime of the server alongside worker discovery"
+                )]
                 tokio::spawn(async move {
                     start_router_discovery(router_config, router_pods, cluster_state, mesh_port)
                         .await;
@@ -369,7 +380,7 @@ pub async fn start_service_discovery(
                 })
                 .await
             {
-                Ok(_) => {
+                Ok(()) => {
                     retry_delay = Duration::from_secs(1);
                 }
                 Err(err) => {
@@ -451,7 +462,7 @@ async fn handle_pod_event(
             let mut spec = WorkerSpec::new(worker_url.clone());
             spec.worker_type = worker_type;
             spec.bootstrap_port = bootstrap_port;
-            spec.api_key = app_context.router_config.api_key.clone();
+            spec.api_key.clone_from(&app_context.router_config.api_key);
             // Health config is resolved at worker build time from router
             // defaults + per-worker overrides (spec.health).
             spec.max_connection_attempts = app_context
@@ -469,7 +480,7 @@ async fn handle_pod_event(
 
             if let Some(job_queue) = app_context.worker_job_queue.get() {
                 match job_queue.submit(job).await {
-                    Ok(_) => {
+                    Ok(()) => {
                         debug!("Worker addition job submitted for: {}", worker_url);
 
                         // Layer 4: Record successful registration from K8s discovery
@@ -693,7 +704,7 @@ async fn start_router_discovery(
             })
             .await
         {
-            Ok(_) => {
+            Ok(()) => {
                 retry_delay = Duration::from_secs(1);
             }
             Err(err) => {
@@ -802,7 +813,7 @@ mod tests {
         }
     }
 
-    async fn create_test_app_context() -> Arc<AppContext> {
+    fn create_test_app_context() -> Arc<AppContext> {
         use crate::{
             config::RouterConfig, core::WorkerService, middleware::TokenBucket,
             observability::inflight_tracker::InFlightRequestTracker,
@@ -917,9 +928,9 @@ mod tests {
         let decode = PodType::Decode;
         let regular = PodType::Regular;
 
-        assert_eq!(format!("{:?}", prefill), "Prefill");
-        assert_eq!(format!("{:?}", decode), "Decode");
-        assert_eq!(format!("{:?}", regular), "Regular");
+        assert_eq!(format!("{prefill:?}"), "Prefill");
+        assert_eq!(format!("{decode:?}"), "Decode");
+        assert_eq!(format!("{regular:?}"), "Regular");
     }
 
     #[test]
@@ -1143,7 +1154,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_pod_event_add_unhealthy_pod() {
-        let app_context = create_test_app_context().await;
+        let app_context = create_test_app_context();
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "pod1".into(),
@@ -1171,7 +1182,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_pod_deletion_non_existing_pod() {
-        let app_context = create_test_app_context().await;
+        let app_context = create_test_app_context();
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "pod1".into(),
@@ -1198,7 +1209,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_pd_pod_event_prefill_pod() {
-        let app_context = create_test_app_context().await;
+        let app_context = create_test_app_context();
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "prefill-pod".into(),
@@ -1231,7 +1242,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_pd_pod_event_decode_pod() {
-        let app_context = create_test_app_context().await;
+        let app_context = create_test_app_context();
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "decode-pod".into(),
@@ -1264,7 +1275,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_pd_pod_deletion_tracked_pod() {
-        let app_context = create_test_app_context().await;
+        let app_context = create_test_app_context();
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "test-pod".into(),
@@ -1299,7 +1310,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_pd_pod_deletion_untracked_pod() {
-        let app_context = create_test_app_context().await;
+        let app_context = create_test_app_context();
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "untracked-pod".into(),
@@ -1329,7 +1340,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unified_handler_regular_mode() {
-        let app_context = create_test_app_context().await;
+        let app_context = create_test_app_context();
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "regular-pod".into(),
@@ -1363,7 +1374,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unified_handler_pd_mode_with_prefill() {
-        let app_context = create_test_app_context().await;
+        let app_context = create_test_app_context();
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "prefill-pod".into(),
@@ -1396,7 +1407,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unified_handler_deletion_with_pd_mode() {
-        let app_context = create_test_app_context().await;
+        let app_context = create_test_app_context();
         let tracked_pods = Arc::new(Mutex::new(HashSet::new()));
         let pod_info = PodInfo {
             name: "decode-pod".into(),

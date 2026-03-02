@@ -195,7 +195,8 @@ impl MediaConnector {
         detail: ImageDetail,
         source: ImageSource,
     ) -> Result<Arc<ImageFrame>, MediaConnectorError> {
-        // Use bytes directly for decoding
+        let hash = crate::hasher::hash_image(&bytes);
+
         let cursor = std::io::Cursor::new(bytes.clone());
         let reader = image::ImageReader::new(cursor).with_guessed_format()?;
 
@@ -203,6 +204,8 @@ impl MediaConnector {
             .await
             .map_err(MediaConnectorError::Blocking)??;
 
-        Ok(Arc::new(ImageFrame::new(image, bytes, detail, source)))
+        Ok(Arc::new(ImageFrame::new(
+            image, bytes, detail, source, hash,
+        )))
     }
 }

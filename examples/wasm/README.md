@@ -40,6 +40,29 @@ Rate limiting middleware with configurable limits.
 
 **Use case:** Protect against request flooding and abuse.
 
+### [wasm-guest-storage-hook](./wasm-guest-storage-hook/)
+
+Storage hook demonstrating multi-tenancy and audit trail via extra columns.
+
+**Features:**
+- Extracts `tenant_id` from request context and writes it as an extra column
+- Adds `CREATED_BY` / `STORED_BY` audit columns from `user_id` context
+- Rejects `StoreResponse` when `tenant_id` is missing (validation example)
+- Read/delete operations pass through unchanged
+
+**Use case:** Multi-tenant storage isolation and audit logging without forking backend code.
+
+### [wasm-guest-storage-hook-passthrough](./wasm-guest-storage-hook-passthrough/)
+
+Minimal storage hook that never rejects. Used as an E2E test fixture.
+
+**Features:**
+- Always continues without rejection
+- Adds `HOOK_ACTIVE=true` marker on write operations
+- Passes through extra columns unchanged in `after` hook
+
+**Use case:** Verifying the storage hook pipeline is active in integration/E2E tests.
+
 ## Quick Start
 
 Each example includes its own README with detailed build and deployment instructions. See individual example directories for:
@@ -58,11 +81,13 @@ All examples require:
 - `wasm-tools`: `cargo install wasm-tools`
 - SMG running with WASM enabled (`--enable-wasm`)
 
+**Storage hook examples** additionally require the storage hook WIT interface at `wasm/src/interface/storage/`.
+
 ## Building All Examples
 
 ```bash
 cd examples/wasm
-for example in wasm-guest-auth wasm-guest-logging wasm-guest-ratelimit; do
+for example in wasm-guest-auth wasm-guest-logging wasm-guest-ratelimit wasm-guest-storage-hook wasm-guest-storage-hook-passthrough; do
   echo "Building $example..."
   cd $example && ./build.sh && cd ..
 done

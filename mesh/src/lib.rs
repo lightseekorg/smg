@@ -8,7 +8,7 @@
 
 mod consistent_hash;
 mod controller;
-mod crdt;
+mod crdt_kv;
 mod flow_control;
 mod incremental;
 mod metrics;
@@ -28,7 +28,7 @@ mod tree_ops;
 mod tests;
 
 // Re-export commonly used types
-pub use crdt::SKey;
+pub use crdt_kv::{CrdtOrMap, OperationLog};
 pub use metrics::init_mesh_metrics;
 pub use mtls::{MTLSConfig, MTLSManager, OptionalMTLSManager};
 pub use partition::PartitionDetector;

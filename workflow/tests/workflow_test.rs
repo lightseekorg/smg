@@ -53,7 +53,7 @@ impl StepExecutor<TestWorkflowData> for CountingStep {
         } else {
             Err(WorkflowError::StepFailed {
                 step_id: StepId::new("counting_step"),
-                message: format!("Not ready yet, attempt {}", count),
+                message: format!("Not ready yet, attempt {count}"),
             })
         }
     }
@@ -473,15 +473,13 @@ async fn test_parallel_execution_no_dependencies() {
     let start_spread = last_start.duration_since(*first_start);
     assert!(
         start_spread < Duration::from_millis(100),
-        "Steps did not start in parallel, spread: {:?}",
-        start_spread
+        "Steps did not start in parallel, spread: {start_spread:?}",
     );
 
     // Total duration should be less than sequential (300ms) - use generous threshold
     assert!(
         overall_duration < Duration::from_millis(500),
-        "Parallel execution took too long: {:?}",
-        overall_duration
+        "Parallel execution took too long: {overall_duration:?}",
     );
 }
 
@@ -755,8 +753,7 @@ async fn test_step_delay() {
     // Note: wait_for_completion cleans up state, so we verify via timing
     assert!(
         duration >= Duration::from_millis(100),
-        "Step delay not applied, duration: {:?}",
-        duration
+        "Step delay not applied, duration: {duration:?}",
     );
 }
 
@@ -799,8 +796,7 @@ async fn test_step_scheduled_at() {
     // Note: wait_for_completion cleans up state, so we verify via timing
     assert!(
         duration >= Duration::from_millis(100),
-        "Scheduled time not respected, duration: {:?}",
-        duration
+        "Scheduled time not respected, duration: {duration:?}",
     );
 }
 

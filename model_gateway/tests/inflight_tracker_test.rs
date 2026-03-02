@@ -15,6 +15,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 #[tokio::test]
+#[expect(clippy::disallowed_methods)]
 async fn test_multiple_concurrent_requests_tracking() {
     let ctx = AppTestContext::new(vec![MockWorkerConfig {
         port: 19002,
@@ -29,10 +30,10 @@ async fn test_multiple_concurrent_requests_tracking() {
 
     let mut handles = vec![];
     for i in 0..5 {
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
         handles.push(tokio::spawn(async move {
             let payload = json!({
-                "text": format!("Request {}", i),
+                "text": format!("Request {i}"),
                 "stream": false
             });
 
@@ -58,6 +59,7 @@ async fn test_multiple_concurrent_requests_tracking() {
 }
 
 #[tokio::test]
+#[expect(clippy::disallowed_methods)]
 async fn test_inflight_request_appears_in_bucket() {
     let ctx = AppTestContext::new(vec![MockWorkerConfig {
         port: 19004,
@@ -71,7 +73,7 @@ async fn test_inflight_request_appears_in_bucket() {
     let tracker = &ctx.app_context.inflight_tracker;
     assert!(tracker.is_empty(), "Tracker should start empty");
 
-    let app = ctx.create_app().await;
+    let app = ctx.create_app();
     let payload = json!({
         "text": "Long running request",
         "stream": false
@@ -92,8 +94,7 @@ async fn test_inflight_request_appears_in_bucket() {
     let inflight_count = tracker_clone.len();
     assert!(
         inflight_count > 0,
-        "Should have at least one in-flight request, got {}",
-        inflight_count
+        "Should have at least one in-flight request, got {inflight_count}"
     );
 
     let buckets = tracker_clone.compute_bucket_counts();
@@ -125,7 +126,7 @@ async fn test_failed_request_still_deregisters() {
     let tracker = &ctx.app_context.inflight_tracker;
     assert!(tracker.is_empty());
 
-    let app = ctx.create_app().await;
+    let app = ctx.create_app();
 
     let payload = json!({
         "text": "This should fail",

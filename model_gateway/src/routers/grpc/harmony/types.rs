@@ -15,7 +15,7 @@ pub(crate) struct HarmonyMessage {
 }
 
 /// Some methods are kept for API completeness even if currently unused.
-#[allow(dead_code)]
+#[expect(dead_code)]
 impl HarmonyMessage {
     pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
@@ -121,7 +121,7 @@ pub(crate) struct HarmonyChannelDelta {
     pub final_delta: Option<String>,
 
     /// Whether this is the final delta
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub is_final: bool,
 }
 

@@ -12,6 +12,7 @@ import logging
 
 import openai
 import pytest
+from conftest import smg_compare
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 class TestStateManagementCloud:
     """State management tests against cloud APIs."""
 
-    def test_basic_response_creation(self, setup_backend):
+    def test_basic_response_creation(self, setup_backend, smg):
         """Test basic response creation without state."""
         _, model, client, gateway = setup_backend
 
@@ -37,7 +38,14 @@ class TestStateManagementCloud:
         assert len(resp.output_text) > 0
         assert resp.usage is not None
 
-    def test_streaming_response(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(model=model, input="What is 2+2?")
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
+
+    def test_streaming_response(self, setup_backend, smg):
         """Test streaming response."""
         _, model, client, gateway = setup_backend
 
@@ -51,7 +59,17 @@ class TestStateManagementCloud:
 
         assert any(e.type in ["response.completed", "response.in_progress"] for e in events)
 
-    def test_previous_response_id_chaining(self, setup_backend):
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model, input="Count to 5", stream=True, max_output_tokens=50
+            )
+            smg_events = list(smg_resp)
+            smg_created = [e for e in smg_events if e.type == "response.created"]
+            assert len(smg_created) > 0
+            assert any(e.type in ["response.completed", "response.in_progress"] for e in smg_events)
+
+    def test_previous_response_id_chaining(self, setup_backend, smg):
         """Test chaining responses using previous_response_id."""
         _, model, client, gateway = setup_backend
 
@@ -80,7 +98,23 @@ class TestStateManagementCloud:
         assert resp3.status == "completed"
         assert "Bob" in resp3.output_text
 
-    def test_conversation_with_multiple_turns(self, setup_backend):
+        # SmgClient comparison — validate previous_response_id chaining
+        with smg_compare():
+            smg_resp1 = smg.responses.create(
+                model=model, input="My name is Alice and my friend is Bob. Remember it."
+            )
+            assert smg_resp1.error is None
+            assert smg_resp1.id is not None
+            assert smg_resp1.status == "completed"
+
+            smg_resp2 = smg.responses.create(
+                model=model, input="What is my name", previous_response_id=smg_resp1.id
+            )
+            assert smg_resp2.error is None
+            assert smg_resp2.status == "completed"
+            assert "Alice" in smg_resp2.output_text
+
+    def test_conversation_with_multiple_turns(self, setup_backend, smg):
         """Test state management using conversation ID."""
         _, model, client, gateway = setup_backend
 
@@ -121,8 +155,10 @@ class TestStateManagementCloud:
         assert items.data is not None
         assert len(items.data) >= 6  # 3 inputs + 3 outputs
 
+        # SmgClient: conversations API not supported, skipping comparison
+
     @pytest.mark.skip(reason="TODO: Add the invalid previous_response_id check")
-    def test_previous_response_id_invalid(self, setup_backend):
+    def test_previous_response_id_invalid(self, setup_backend, smg):
         """Test using invalid previous_response_id."""
         _, model, client, gateway = setup_backend
         with pytest.raises(openai.BadRequestError):
@@ -133,7 +169,7 @@ class TestStateManagementCloud:
                 max_output_tokens=50,
             )
 
-    def test_mutually_exclusive_parameters(self, setup_backend):
+    def test_mutually_exclusive_parameters(self, setup_backend, smg):
         """Test that previous_response_id and conversation are mutually exclusive."""
         _, model, client, gateway = setup_backend
 
@@ -162,7 +198,7 @@ class TestStateManagementLocal:
     """State management tests against local gRPC backend."""
 
     @pytest.mark.skip(reason="TODO: Add the invalid previous_response_id check")
-    def test_previous_response_id_invalid(self, setup_backend):
+    def test_previous_response_id_invalid(self, setup_backend, smg):
         """Test using invalid previous_response_id."""
         _, model, client, gateway = setup_backend
         with pytest.raises(openai.BadRequestError):
@@ -173,7 +209,7 @@ class TestStateManagementLocal:
                 max_output_tokens=50,
             )
 
-    def test_basic_response_creation(self, setup_backend):
+    def test_basic_response_creation(self, setup_backend, smg):
         """Test basic response creation without state."""
         _, model, client, gateway = setup_backend
 
@@ -185,7 +221,14 @@ class TestStateManagementLocal:
         assert len(resp.output_text) > 0
         assert resp.usage is not None
 
-    def test_streaming_response(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(model=model, input="What is 2+2?")
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
+
+    def test_streaming_response(self, setup_backend, smg):
         """Test streaming response."""
         _, model, client, gateway = setup_backend
 
@@ -199,7 +242,17 @@ class TestStateManagementLocal:
 
         assert any(e.type in ["response.completed", "response.in_progress"] for e in events)
 
-    def test_previous_response_id_chaining(self, setup_backend):
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model, input="Count to 5", stream=True, max_output_tokens=50
+            )
+            smg_events = list(smg_resp)
+            smg_created = [e for e in smg_events if e.type == "response.created"]
+            assert len(smg_created) > 0
+            assert any(e.type in ["response.completed", "response.in_progress"] for e in smg_events)
+
+    def test_previous_response_id_chaining(self, setup_backend, smg):
         """Test chaining responses using previous_response_id."""
         _, model, client, gateway = setup_backend
 
@@ -228,7 +281,23 @@ class TestStateManagementLocal:
         assert resp3.status == "completed"
         assert "Bob" in resp3.output_text
 
-    def test_mutually_exclusive_parameters(self, setup_backend):
+        # SmgClient comparison — validate previous_response_id chaining
+        with smg_compare():
+            smg_resp1 = smg.responses.create(
+                model=model, input="My name is Alice and my friend is Bob. Remember it."
+            )
+            assert smg_resp1.error is None
+            assert smg_resp1.id is not None
+            assert smg_resp1.status == "completed"
+
+            smg_resp2 = smg.responses.create(
+                model=model, input="What is my name", previous_response_id=smg_resp1.id
+            )
+            assert smg_resp2.error is None
+            assert smg_resp2.status == "completed"
+            assert "Alice" in smg_resp2.output_text
+
+    def test_mutually_exclusive_parameters(self, setup_backend, smg):
         """Test that previous_response_id and conversation are mutually exclusive."""
         _, model, client, gateway = setup_backend
 
@@ -257,7 +326,7 @@ class TestStateManagementHarmony:
     """State management tests against local gRPC backend with Harmony model."""
 
     @pytest.mark.skip(reason="TODO: Add the invalid previous_response_id check")
-    def test_previous_response_id_invalid(self, setup_backend):
+    def test_previous_response_id_invalid(self, setup_backend, smg):
         """Test using invalid previous_response_id."""
         _, model, client, gateway = setup_backend
         with pytest.raises(openai.BadRequestError):
@@ -268,7 +337,7 @@ class TestStateManagementHarmony:
                 max_output_tokens=50,
             )
 
-    def test_basic_response_creation(self, setup_backend):
+    def test_basic_response_creation(self, setup_backend, smg):
         """Test basic response creation without state."""
         _, model, client, gateway = setup_backend
 
@@ -280,7 +349,14 @@ class TestStateManagementHarmony:
         assert len(resp.output_text) > 0
         assert resp.usage is not None
 
-    def test_streaming_response(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(model=model, input="What is 2+2?")
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status == "completed"
+
+    def test_streaming_response(self, setup_backend, smg):
         """Test streaming response."""
         _, model, client, gateway = setup_backend
 
@@ -294,7 +370,17 @@ class TestStateManagementHarmony:
 
         assert any(e.type in ["response.completed", "response.in_progress"] for e in events)
 
-    def test_previous_response_id_chaining(self, setup_backend):
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model, input="Count to 5", stream=True, max_output_tokens=50
+            )
+            smg_events = list(smg_resp)
+            smg_created = [e for e in smg_events if e.type == "response.created"]
+            assert len(smg_created) > 0
+            assert any(e.type in ["response.completed", "response.in_progress"] for e in smg_events)
+
+    def test_previous_response_id_chaining(self, setup_backend, smg):
         """Test chaining responses using previous_response_id."""
         _, model, client, gateway = setup_backend
 
@@ -323,7 +409,23 @@ class TestStateManagementHarmony:
         assert resp3.status == "completed"
         assert "Bob" in resp3.output_text
 
-    def test_mutually_exclusive_parameters(self, setup_backend):
+        # SmgClient comparison — validate previous_response_id chaining
+        with smg_compare():
+            smg_resp1 = smg.responses.create(
+                model=model, input="My name is Alice and my friend is Bob. Remember it."
+            )
+            assert smg_resp1.error is None
+            assert smg_resp1.id is not None
+            assert smg_resp1.status == "completed"
+
+            smg_resp2 = smg.responses.create(
+                model=model, input="What is my name", previous_response_id=smg_resp1.id
+            )
+            assert smg_resp2.error is None
+            assert smg_resp2.status == "completed"
+            assert "Alice" in smg_resp2.output_text
+
+    def test_mutually_exclusive_parameters(self, setup_backend, smg):
         """Test that previous_response_id and conversation are mutually exclusive."""
         _, model, client, gateway = setup_backend
 

@@ -329,6 +329,14 @@ impl ConfigValidator {
             });
         }
 
+        if config.load_monitor_interval_secs == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "load_monitor_interval_secs".to_string(),
+                value: config.load_monitor_interval_secs.to_string(),
+                reason: "Must be > 0".to_string(),
+            });
+        }
+
         Ok(())
     }
 
@@ -547,7 +555,7 @@ impl ConfigValidator {
         for (idx, ca_cert) in config.ca_certificates.iter().enumerate() {
             if ca_cert.is_empty() {
                 return Err(ConfigError::ValidationFailed {
-                    reason: format!("CA certificate at index {} cannot be empty", idx),
+                    reason: format!("CA certificate at index {idx} cannot be empty"),
                 });
             }
         }
@@ -646,7 +654,7 @@ impl ConfigValidator {
                     return Err(ConfigError::InvalidValue {
                         field: "worker_url".to_string(),
                         value: url.clone(),
-                        reason: format!("Invalid URL format: {}", e),
+                        reason: format!("Invalid URL format: {e}"),
                     });
                 }
             }

@@ -9,18 +9,18 @@ use axum::response::Response;
 use openai_protocol::{
     common::{ToolCall, Usage},
     responses::{
-        OutputTokensDetails, ResponseContentPart, ResponseOutputItem, ResponseReasoningContent,
-        ResponseStatus, ResponseUsage, ResponsesRequest, ResponsesResponse, ResponsesUsage,
+        InputTokensDetails, OutputTokensDetails, ResponseContentPart, ResponseOutputItem,
+        ResponseReasoningContent, ResponseStatus, ResponseUsage, ResponsesRequest,
+        ResponsesResponse, ResponsesUsage,
     },
 };
 use serde_json::{json, to_string};
-use smg_mcp::McpToolSession;
+use smg_mcp::{McpServerBinding, McpToolSession};
 use tracing::{debug, error, warn};
 
 use super::{
     common::{
-        build_mcp_tool_names_set, build_next_request_with_tools, inject_mcp_metadata,
-        load_previous_messages, McpCallTracking,
+        build_next_request_with_tools, inject_mcp_metadata, load_previous_messages, McpCallTracking,
     },
     execution::{convert_mcp_tools_to_response_tools, execute_mcp_tools, ToolResult},
 };
@@ -88,7 +88,7 @@ pub(crate) async fn serve_harmony_responses(
 async fn execute_with_mcp_loop(
     ctx: &ResponsesContext,
     mut current_request: ResponsesRequest,
-    mcp_servers: Vec<(String, String)>,
+    mcp_servers: Vec<McpServerBinding>,
 ) -> Result<ResponsesResponse, Response> {
     let mut iteration_count = 0;
 
@@ -102,7 +102,8 @@ async fn execute_with_mcp_loop(
     let original_tools = current_request.tools.clone();
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
-    let session_request_id = format!("resp_{}", uuid::Uuid::new_v4());
+    let session_request_id = format!("resp_{}", uuid::Uuid::now_v7());
+
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &session_request_id);
 
     // Add filtered MCP tools (static + requested dynamic) to the request
@@ -137,10 +138,7 @@ async fn execute_with_mcp_loop(
             );
             return Err(error::internal_error(
                 "tool_iterations_exceeded",
-                format!(
-                    "Maximum tool iterations ({}) exceeded",
-                    DEFAULT_MAX_ITERATIONS
-                ),
+                format!("Maximum tool iterations ({DEFAULT_MAX_ITERATIONS}) exceeded"),
             ));
         }
 
@@ -170,12 +168,12 @@ async fn execute_with_mcp_loop(
                     "Tool calls found - separating MCP and function tools"
                 );
 
-                // Separate MCP and function tool calls based on tool type
-                let request_tools = current_request.tools.as_deref().unwrap_or(&[]);
-                let mcp_tool_names = build_mcp_tool_names_set(request_tools);
+                // Separate MCP and function tool calls based on session exposure.
+                // MCP tools are exposed to the model as function tools, so the only reliable
+                // discriminator is whether the name belongs to the MCP session.
                 let (mcp_tool_calls, function_tool_calls): (Vec<_>, Vec<_>) = tool_calls
                     .into_iter()
-                    .partition(|tc| mcp_tool_names.contains(tc.function.name.as_str()));
+                    .partition(|tc| session.has_exposed_tool(&tc.function.name));
 
                 debug!(
                     mcp_calls = mcp_tool_calls.len(),
@@ -210,7 +208,7 @@ async fn execute_with_mcp_loop(
                     // Build response with incomplete status - no tools executed due to limit
                     // Use original_tools for response (hide internal MCP tools)
                     let mut response_request = current_request.clone();
-                    response_request.tools = original_tools.clone();
+                    response_request.tools.clone_from(&original_tools);
                     let mut response = build_tool_response(
                         vec![],         // No MCP tools executed
                         vec![],         // No MCP results
@@ -235,7 +233,9 @@ async fn execute_with_mcp_loop(
                 }
 
                 // Execute MCP tools (if any)
-                let mcp_results = if !mcp_tool_calls.is_empty() {
+                let mcp_results = if mcp_tool_calls.is_empty() {
+                    Vec::new()
+                } else {
                     execute_mcp_tools(
                         &session,
                         &mcp_tool_calls,
@@ -243,8 +243,6 @@ async fn execute_with_mcp_loop(
                         &current_request.model,
                     )
                     .await?
-                } else {
-                    Vec::new()
                 };
 
                 // If there are function tools, exit MCP loop and return response
@@ -259,7 +257,7 @@ async fn execute_with_mcp_loop(
                     // 3. Function tools as completed (without output) - need caller execution
                     // Use original_tools for response (hide internal MCP tools)
                     let mut response_request = current_request.clone();
-                    response_request.tools = original_tools.clone();
+                    response_request.tools.clone_from(&original_tools);
                     let mut response = build_tool_response(
                         mcp_tool_calls,
                         mcp_results,
@@ -289,8 +287,7 @@ async fn execute_with_mcp_loop(
                     mcp_results,
                     analysis,
                     partial_text,
-                )
-                .map_err(|e| *e)?;
+                );
 
                 // Continue loop - next iteration will select workers and execute
             }
@@ -373,7 +370,7 @@ async fn execute_without_mcp_loop(
 }
 
 /// Build ResponsesResponse with tool calls (MCP and/or function tools)
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn build_tool_response(
     mcp_tool_calls: Vec<ToolCall>,
     mcp_results: Vec<ToolResult>,
@@ -389,7 +386,7 @@ fn build_tool_response(
     // Add reasoning output item if analysis exists
     if let Some(analysis_text) = analysis {
         output.push(ResponseOutputItem::Reasoning {
-            id: format!("reasoning_{}", request_id),
+            id: format!("reasoning_{request_id}"),
             summary: vec![],
             content: vec![ResponseReasoningContent::ReasoningText {
                 text: analysis_text,
@@ -401,7 +398,7 @@ fn build_tool_response(
     // Add message output item if partial text exists
     if !partial_text.is_empty() {
         output.push(ResponseOutputItem::Message {
-            id: format!("msg_{}", request_id),
+            id: format!("msg_{request_id}"),
             role: "assistant".to_string(),
             content: vec![ResponseContentPart::OutputText {
                 text: partial_text,
@@ -414,9 +411,8 @@ fn build_tool_response(
 
     // Add MCP tool calls WITH output (these were executed)
     for (tool_call, result) in mcp_tool_calls.iter().zip(mcp_results.iter()) {
-        let output_str = to_string(&result.output).unwrap_or_else(|e| {
-            format!("{{\"error\": \"Failed to serialize tool output: {}\"}}", e)
-        });
+        let output_str = to_string(&result.output)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize tool output: {e}\"}}"));
 
         output.push(ResponseOutputItem::FunctionToolCall {
             id: tool_call.id.clone(),
@@ -448,7 +444,7 @@ fn build_tool_response(
     // Build ResponsesResponse with Completed status
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs() as i64;
 
     ResponsesResponse::builder(&request_id, &responses_request.model)
@@ -460,7 +456,10 @@ fn build_tool_response(
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
-            input_tokens_details: None,
+            input_tokens_details: usage
+                .prompt_tokens_details
+                .as_ref()
+                .map(InputTokensDetails::from),
             output_tokens_details: usage.completion_tokens_details.as_ref().and_then(|d| {
                 d.reasoning_tokens.map(|tokens| OutputTokensDetails {
                     reasoning_tokens: tokens,

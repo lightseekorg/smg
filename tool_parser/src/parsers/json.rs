@@ -63,7 +63,7 @@ impl JsonParser {
 
     /// Try to extract a first valid JSON object or array from text that may contain other content
     /// Returns (json_string, normal_text) where normal_text is text before and after the JSON
-    fn extract_json_from_text(&self, text: &str) -> Option<(String, String)> {
+    fn extract_json_from_text(text: &str) -> Option<(String, String)> {
         let mut in_string = false;
         let mut escape = false;
         let mut stack: Vec<char> = Vec::with_capacity(8);
@@ -101,7 +101,10 @@ impl JsonParser {
                     }
 
                     if stack.is_empty() {
-                        let s = start.unwrap();
+                        // Safe: start is always set when stack was pushed to (opening bracket sets it)
+                        let Some(s) = start else {
+                            continue;
+                        };
                         let e = i + ch.len_utf8();
                         let potential_json = &text[s..e];
 
@@ -124,7 +127,7 @@ impl JsonParser {
     }
 
     /// Parse a single JSON object into a ToolCall
-    fn parse_single_object(&self, obj: &Value) -> ParserResult<Option<ToolCall>> {
+    fn parse_single_object(obj: &Value) -> ParserResult<Option<ToolCall>> {
         // Check if this looks like a tool call
         let name = obj
             .get("name")
@@ -155,21 +158,21 @@ impl JsonParser {
     }
 
     /// Parse JSON value(s) into tool calls
-    fn parse_json_value(&self, value: &Value) -> ParserResult<Vec<ToolCall>> {
+    fn parse_json_value(value: &Value) -> ParserResult<Vec<ToolCall>> {
         let mut tools = Vec::new();
 
         match value {
             Value::Array(arr) => {
                 // Parse each element in the array
                 for item in arr {
-                    if let Some(tool) = self.parse_single_object(item)? {
+                    if let Some(tool) = Self::parse_single_object(item)? {
                         tools.push(tool);
                     }
                 }
             }
             Value::Object(_) => {
                 // Single tool call
-                if let Some(tool) = self.parse_single_object(value)? {
+                if let Some(tool) = Self::parse_single_object(value)? {
                     tools.push(tool);
                 }
             }
@@ -193,10 +196,10 @@ impl Default for JsonParser {
 impl ToolParser for JsonParser {
     async fn parse_complete(&self, text: &str) -> ParserResult<(String, Vec<ToolCall>)> {
         // Always use extract_json_from_text to handle both pure JSON and mixed content
-        if let Some((extracted_json, normal_text)) = self.extract_json_from_text(text) {
+        if let Some((extracted_json, normal_text)) = Self::extract_json_from_text(text) {
             let parsed = serde_json::from_str::<Value>(&extracted_json)
                 .map_err(|e| ParserError::ParsingFailed(e.to_string()))
-                .and_then(|v| self.parse_json_value(&v));
+                .and_then(|v| Self::parse_json_value(&v));
 
             match parsed {
                 Ok(tools) => return Ok((normal_text, tools)),
@@ -238,7 +241,9 @@ impl ToolParser for JsonParser {
                 && self.current_tool_id > 0
                 && normal_text.starts_with("]")
             {
-                normal_text = normal_text.strip_prefix("]").unwrap().to_string();
+                if let Some(stripped) = normal_text.strip_prefix(']') {
+                    normal_text = stripped.to_string();
+                }
                 self.array_closed = true;
             }
 

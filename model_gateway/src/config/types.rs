@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 // Re-export storage config types from data_connector
 pub use smg_data_connector::{HistoryBackend, OracleConfig, PostgresConfig, RedisConfig};
 
-use super::ConfigResult;
+use super::{validation::ConfigValidator, ConfigResult};
 use crate::core::ConnectionMode;
 
 /// Main router configuration
@@ -21,6 +21,8 @@ pub struct RouterConfig {
     pub request_timeout_secs: u64,
     pub worker_startup_timeout_secs: u64,
     pub worker_startup_check_interval_secs: u64,
+    #[serde(default = "default_load_monitor_interval_secs")]
+    pub load_monitor_interval_secs: u64,
     pub dp_aware: bool,
     pub api_key: Option<String>,
     pub discovery: Option<DiscoveryConfig>,
@@ -87,6 +89,10 @@ pub struct RouterConfig {
     /// Enable WASM support
     #[serde(default)]
     pub enable_wasm: bool,
+    /// Path to a WASM component implementing storage hooks.
+    /// When set, wraps all storage backends with hook-based interceptors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_hook_wasm_path: Option<String>,
 }
 
 /// Tokenizer cache configuration
@@ -102,6 +108,10 @@ pub struct TokenizerCacheConfig {
     pub enable_l1: bool,
     #[serde(default = "default_l1_max_memory")]
     pub l1_max_memory: usize,
+}
+
+fn default_load_monitor_interval_secs() -> u64 {
+    10
 }
 
 fn default_enable_l0() -> bool {
@@ -501,6 +511,7 @@ impl Default for RouterConfig {
             request_timeout_secs: 1800,        // 30 minutes
             worker_startup_timeout_secs: 1800, // 30 minutes for large model loading
             worker_startup_check_interval_secs: 30,
+            load_monitor_interval_secs: 10,
             dp_aware: false,
             api_key: None,
             discovery: None,
@@ -535,6 +546,7 @@ impl Default for RouterConfig {
             ca_certificates: vec![],
             mcp_config: None,
             enable_wasm: false,
+            storage_hook_wasm_path: None,
             server_cert: None,
             server_key: None,
         }
@@ -553,7 +565,7 @@ impl RouterConfig {
 
     /// Validate the configuration
     pub fn validate(&self) -> ConfigResult<()> {
-        crate::config::validation::ConfigValidator::validate(self)
+        ConfigValidator::validate(self)
     }
 
     /// Get the routing mode type as a string
@@ -626,6 +638,7 @@ mod tests {
         assert_eq!(config.request_timeout_secs, 1800);
         assert_eq!(config.worker_startup_timeout_secs, 1800);
         assert_eq!(config.worker_startup_check_interval_secs, 30);
+        assert_eq!(config.load_monitor_interval_secs, 10);
         assert!(config.discovery.is_none());
         assert!(config.metrics.is_none());
         assert!(config.trace_config.is_none());
@@ -1008,7 +1021,7 @@ mod tests {
 
     #[test]
     fn test_large_worker_lists() {
-        let large_urls: Vec<String> = (0..1000).map(|i| format!("http://worker{}", i)).collect();
+        let large_urls: Vec<String> = (0..1000).map(|i| format!("http://worker{i}")).collect();
 
         let config = RouterConfig::builder()
             .regular_mode(large_urls.clone())
@@ -1060,8 +1073,8 @@ mod tests {
             .build_unchecked();
 
         assert_eq!(config.host, "");
-        assert_eq!(config.log_dir, Some("".to_string()));
-        assert_eq!(config.log_level, Some("".to_string()));
+        assert_eq!(config.log_dir, Some(String::new()));
+        assert_eq!(config.log_level, Some(String::new()));
     }
 
     #[test]

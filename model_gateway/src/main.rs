@@ -74,7 +74,7 @@ impl std::fmt::Display for Backend {
             Backend::Openai => "openai",
             Backend::Anthropic => "anthropic",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -217,6 +217,10 @@ struct CliArgs {
     /// Interval in seconds between worker startup checks
     #[arg(long, default_value_t = 30, help_heading = "PD Disaggregation")]
     worker_startup_check_interval: u64,
+
+    /// Interval in seconds between load monitor checks for PowerOfTwo routing
+    #[arg(long, default_value_t = 10, help_heading = "Load Monitoring")]
+    load_monitor_interval: u64,
 
     // ==================== Service Discovery (Kubernetes) ====================
     /// Enable Kubernetes service discovery
@@ -388,7 +392,7 @@ struct CliArgs {
 
     // ==================== Tokenizer ====================
     /// Model path for loading tokenizer (HuggingFace ID or local path)
-    #[arg(long, help_heading = "Tokenizer")]
+    #[arg(long, alias = "model", help_heading = "Tokenizer")]
     model_path: Option<String>,
 
     /// Explicit tokenizer path (overrides model_path)
@@ -440,6 +444,10 @@ struct CliArgs {
     /// Enable WebAssembly support
     #[arg(long, default_value_t = false, help_heading = "Backend")]
     enable_wasm: bool,
+
+    /// Path to a WASM component implementing storage hooks
+    #[arg(long, help_heading = "Backend")]
+    storage_hook_wasm_path: Option<String>,
 
     // ==================== Oracle Database ====================
     /// Path to Oracle ATP wallet directory
@@ -607,12 +615,15 @@ enum OracleConnectSource {
 }
 
 /// Parse role mapping from CLI format "idp_role=gateway_role"
+#[expect(
+    clippy::print_stderr,
+    reason = "pre-logger CLI argument parsing warnings"
+)]
 fn parse_role_mapping(mapping: &str) -> Option<(String, Role)> {
     let parts: Vec<&str> = mapping.splitn(2, '=').collect();
     if parts.len() != 2 {
         eprintln!(
-            "WARNING: Invalid role mapping format '{}'. Expected 'idp_role=gateway_role'",
-            mapping
+            "WARNING: Invalid role mapping format '{mapping}'. Expected 'idp_role=gateway_role'"
         );
         return None;
     }
@@ -622,8 +633,7 @@ fn parse_role_mapping(mapping: &str) -> Option<(String, Role)> {
         "user" => Role::User,
         other => {
             eprintln!(
-                "WARNING: Invalid gateway role '{}' in mapping. Valid roles: admin, user",
-                other
+                "WARNING: Invalid gateway role '{other}' in mapping. Valid roles: admin, user"
             );
             return None;
         }
@@ -632,12 +642,15 @@ fn parse_role_mapping(mapping: &str) -> Option<(String, Role)> {
 }
 
 /// Parse control plane API key from CLI format "id:name:role:key"
+#[expect(
+    clippy::print_stderr,
+    reason = "pre-logger CLI argument parsing warnings"
+)]
 fn parse_control_plane_api_key(key_str: &str) -> Option<ApiKeyEntry> {
     let parts: Vec<&str> = key_str.splitn(4, ':').collect();
     if parts.len() != 4 {
         eprintln!(
-            "WARNING: Invalid control-plane-api-key format '{}'. Expected 'id:name:role:key'",
-            key_str
+            "WARNING: Invalid control-plane-api-key format '{key_str}'. Expected 'id:name:role:key'"
         );
         return None;
     }
@@ -651,8 +664,7 @@ fn parse_control_plane_api_key(key_str: &str) -> Option<ApiKeyEntry> {
         "user" => Role::User,
         other => {
             eprintln!(
-                "WARNING: Invalid role '{}' in control-plane-api-key. Valid roles: admin, user",
-                other
+                "WARNING: Invalid role '{other}' in control-plane-api-key. Valid roles: admin, user"
             );
             return None;
         }
@@ -663,6 +675,7 @@ fn parse_control_plane_api_key(key_str: &str) -> Option<ApiKeyEntry> {
 
 impl CliArgs {
     /// Build control plane authentication configuration from CLI args.
+    #[expect(clippy::print_stderr, reason = "pre-logger CLI configuration warnings")]
     fn build_control_plane_auth_config(&self) -> ControlPlaneAuthConfig {
         // Build JWT config if issuer and audience are provided
         let jwt = match (&self.jwt_issuer, &self.jwt_audience) {
@@ -674,7 +687,7 @@ impl CliArgs {
                     .collect();
 
                 let mut jwt_config = JwtConfig::new(issuer.clone(), audience.clone());
-                jwt_config.role_claim = self.jwt_role_claim.clone();
+                jwt_config.role_claim.clone_from(&self.jwt_role_claim);
                 jwt_config.role_mapping = role_mapping;
                 if let Some(jwks_uri) = &self.jwt_jwks_uri {
                     jwt_config.jwks_uri = Some(jwks_uri.clone());
@@ -727,6 +740,10 @@ impl CliArgs {
         map
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "unreachable: clap value_parser restricts valid assignment modes"
+    )]
     fn parse_policy(&self, policy_str: &str) -> PolicyConfig {
         match policy_str {
             "random" => PolicyConfig::Random,
@@ -752,7 +769,7 @@ impl CliArgs {
                     "random" => ManualAssignmentMode::Random,
                     "min_load" => ManualAssignmentMode::MinLoad,
                     "min_group" => ManualAssignmentMode::MinGroup,
-                    other => panic!("Unknown assignment mode: {}", other),
+                    other => panic!("Unknown assignment mode: {other}"),
                 },
             },
             _ => PolicyConfig::RoundRobin,
@@ -764,19 +781,19 @@ impl CliArgs {
             return Ok(OracleConnectSource::Dsn { descriptor: dsn });
         }
 
-        let wallet_path = self
-            .oracle_wallet_path
-            .clone()
-            .ok_or(ConfigError::MissingRequired {
-                field: "oracle_wallet_path or ATP_WALLET_PATH".to_string(),
-            })?;
+        let wallet_path =
+            self.oracle_wallet_path
+                .clone()
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    field: "oracle_wallet_path or ATP_WALLET_PATH".to_string(),
+                })?;
 
-        let tns_alias = self
-            .oracle_tns_alias
-            .clone()
-            .ok_or(ConfigError::MissingRequired {
-                field: "oracle_tns_alias or ATP_TNS_ALIAS".to_string(),
-            })?;
+        let tns_alias =
+            self.oracle_tns_alias
+                .clone()
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    field: "oracle_tns_alias or ATP_TNS_ALIAS".to_string(),
+                })?;
 
         Ok(OracleConnectSource::Wallet {
             path: wallet_path,
@@ -798,12 +815,12 @@ impl CliArgs {
             (
                 self.oracle_user
                     .clone()
-                    .ok_or(ConfigError::MissingRequired {
+                    .ok_or_else(|| ConfigError::MissingRequired {
                         field: "oracle_user or ATP_USER".to_string(),
                     })?,
                 self.oracle_password
                     .clone()
-                    .ok_or(ConfigError::MissingRequired {
+                    .ok_or_else(|| ConfigError::MissingRequired {
                         field: "oracle_password or ATP_PASSWORD".to_string(),
                     })?,
             )
@@ -845,6 +862,7 @@ impl CliArgs {
             pool_min,
             pool_max,
             pool_timeout_secs,
+            schema: None,
         })
     }
 
@@ -853,7 +871,11 @@ impl CliArgs {
         let pool_max = self
             .postgres_pool_max_size
             .unwrap_or_else(PostgresConfig::default_pool_max);
-        let pcf = PostgresConfig { db_url, pool_max };
+        let pcf = PostgresConfig {
+            db_url,
+            pool_max,
+            schema: None,
+        };
         pcf.validate().map_err(|e| ConfigError::ValidationFailed {
             reason: e.to_string(),
         })?;
@@ -874,6 +896,7 @@ impl CliArgs {
             url,
             pool_max,
             retention_days,
+            schema: None,
         };
         rcf.validate().map_err(|e| ConfigError::ValidationFailed {
             reason: e.to_string(),
@@ -998,6 +1021,7 @@ impl CliArgs {
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
+            .load_monitor_interval_secs(self.load_monitor_interval)
             .max_concurrent_requests(self.max_concurrent_requests)
             .queue_size(self.queue_size)
             .queue_timeout_secs(self.queue_timeout_secs)
@@ -1053,6 +1077,7 @@ impl CliArgs {
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
             .enable_wasm(self.enable_wasm)
+            .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
             .igw(self.enable_igw)
             .maybe_server_cert_and_key(self.tls_cert_path.as_ref(), self.tls_key_path.as_ref());
 
@@ -1119,7 +1144,7 @@ impl CliArgs {
                 let mut rng = rand::rng();
                 let random_string: String =
                     (0..4).map(|_| rng.sample(Alphanumeric) as char).collect();
-                format!("Mesh_{}", random_string)
+                format!("Mesh_{random_string}")
             };
 
             let peer = self
@@ -1166,6 +1191,10 @@ impl CliArgs {
     }
 }
 
+#[expect(
+    clippy::print_stdout,
+    reason = "pre-logger startup output and version display"
+)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check for version flags before parsing other args to avoid errors
     let args: Vec<String> = std::env::args().collect();
@@ -1224,7 +1253,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if cli_args.pd_disaggregation {
         "PD Disaggregated".to_string()
     } else if let Some(backend) = &cli_args.backend {
-        format!("Regular ({})", backend)
+        format!("Regular ({backend})")
     } else {
         "Regular".to_string()
     };
@@ -1235,13 +1264,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Policy: {}", cli_args.policy);
 
         if cli_args.pd_disaggregation && !prefill_urls.is_empty() {
-            println!("Prefill nodes: {:?}", prefill_urls);
+            println!("Prefill nodes: {prefill_urls:?}");
             println!("Decode nodes: {:?}", cli_args.decode);
         }
     }
 
     let router_config = cli_args.to_router_config(prefill_urls)?;
     router_config.validate()?;
+
     let server_config = cli_args.to_server_config(router_config);
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move { server::startup(server_config).await })?;

@@ -4,7 +4,7 @@ Tests for built-in tool routing (web_search_preview, code_interpreter, file_sear
 that are routed through MCP servers with response format transformation.
 
 Prerequisites:
-- Brave MCP Server running on port 8001 (set up in CI via pr-test-rust.yml)
+- Brave MCP Server running on port 8080 (set up in CI via pr-test-rust.yml)
 - OPENAI_API_KEY environment variable set for cloud backend tests
 """
 
@@ -19,11 +19,10 @@ import time
 import openai
 import pytest
 import yaml
+from conftest import smg_compare
+from infra import BRAVE_MCP_HOST, BRAVE_MCP_PORT, BRAVE_MCP_URL
 
 logger = logging.getLogger(__name__)
-
-BRAVE_MCP_PORT = 8001
-BRAVE_MCP_URL = f"http://localhost:{BRAVE_MCP_PORT}/sse"
 
 WEB_SEARCH_PREVIEW_TOOL = {"type": "web_search_preview"}
 
@@ -32,18 +31,19 @@ BRAVE_MCP_TOOL = {
     "server_label": "brave",
     "server_url": BRAVE_MCP_URL,
     "require_approval": "never",
+    "allowed_tools": ["brave_web_search"],
 }
 
 WEB_SEARCH_PROMPT = (
-    "Search the web for information about the Rust programming language. "
-    "Use your web search tool and provide a brief summary."
+    "Search the web for the Rust programming language. "
+    "Set count to 1 to get only one result, and give a one sentence summary."
 )
 
 
 def is_brave_server_available() -> bool:
     """Check if Brave MCP server is running on expected port."""
     try:
-        with socket.create_connection(("localhost", BRAVE_MCP_PORT), timeout=1):
+        with socket.create_connection((BRAVE_MCP_HOST, BRAVE_MCP_PORT), timeout=1):
             return True
     except (TimeoutError, OSError):
         return False
@@ -55,7 +55,7 @@ def create_mcp_config() -> dict:
         "servers": [
             {
                 "name": "brave-builtin",
-                "protocol": "sse",
+                "protocol": "streamable",
                 "url": BRAVE_MCP_URL,
                 "builtin_type": "web_search_preview",
                 "builtin_tool_name": "brave_web_search",
@@ -86,12 +86,11 @@ def mcp_config_file():
 
 @pytest.fixture(scope="module")
 def require_brave_server():
-    """Skip tests if Brave MCP server is not available."""
+    """Fail if Brave MCP server is not available."""
     if not is_brave_server_available():
-        pytest.skip(
+        pytest.fail(
             f"Brave MCP server not available on port {BRAVE_MCP_PORT}. "
-            "Run: docker run -d -p 8001:8080 -e BRAVE_API_KEY=<key> "
-            "shoofio/brave-search-mcp-sse:1.0.10"
+            "Ensure the brave-search service is running."
         )
 
 
@@ -173,7 +172,7 @@ class TestBuiltinVsMcpComparison:
     These tests verify baseline MCP behavior without requiring builtin routing config.
     """
 
-    def test_mcp_tool_produces_mcp_call(self, setup_backend):
+    def test_mcp_tool_produces_mcp_call(self, setup_backend, smg):
         """Verify that direct MCP tool produces mcp_call output."""
         _, model, client, gateway = setup_backend
 
@@ -181,7 +180,10 @@ class TestBuiltinVsMcpComparison:
 
         resp = client.responses.create(
             model=model,
-            input="Search the web for Python programming language.",
+            input=(
+                "Search the web for Python programming language. "
+                "Set count to 1 to get only one result and give a one sentence summary."
+            ),
             tools=[BRAVE_MCP_TOOL],
             stream=False,
         )
@@ -197,6 +199,17 @@ class TestBuiltinVsMcpComparison:
             f"Direct MCP tool should produce mcp_call, got: {output_types}"
         )
 
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="Search the web for Python programming language.",
+                tools=[BRAVE_MCP_TOOL],
+            )
+            assert smg_resp.error is None, f"SmgClient error: {smg_resp.error}"
+            assert smg_resp.id is not None
+            assert smg_resp.status in ("completed", "incomplete")
+
 
 @pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestBuiltinToolsCloudBackend:
@@ -206,7 +219,7 @@ class TestBuiltinToolsCloudBackend:
     Full routing tests require MCP config with builtin_type configured.
     """
 
-    def test_web_search_preview_accepted(self, setup_backend):
+    def test_web_search_preview_accepted(self, setup_backend, smg):
         """Test that web_search_preview tool type is accepted."""
         _, model, client, gateway = setup_backend
 
@@ -222,7 +235,18 @@ class TestBuiltinToolsCloudBackend:
         assert resp.id is not None
         assert resp.status in ("completed", "incomplete")
 
-    def test_mixed_builtin_and_function_tools(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=WEB_SEARCH_PROMPT,
+                tools=[WEB_SEARCH_PREVIEW_TOOL],
+            )
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status in ("completed", "incomplete")
+
+    def test_mixed_builtin_and_function_tools(self, setup_backend, smg):
         """Test mixing web_search_preview with function tools."""
         _, model, client, gateway = setup_backend
 
@@ -249,6 +273,16 @@ class TestBuiltinToolsCloudBackend:
         assert resp.error is None
         assert resp.id is not None
 
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What's the weather in Seattle?",
+                tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
+            )
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+
 
 @pytest.mark.e2e
 @pytest.mark.model("openai/gpt-oss-20b")
@@ -260,7 +294,7 @@ class TestBuiltinToolsLocalBackend:
     These tests verify built-in tool handling with local models.
     """
 
-    def test_web_search_preview_accepted(self, setup_backend):
+    def test_web_search_preview_accepted(self, setup_backend, smg):
         """Test that web_search_preview tool type is accepted by local backend."""
         _, model, client, gateway = setup_backend
 
@@ -275,7 +309,18 @@ class TestBuiltinToolsLocalBackend:
 
         assert resp.id is not None
 
-    def test_mixed_builtin_and_function_tools(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input=WEB_SEARCH_PROMPT,
+                tools=[WEB_SEARCH_PREVIEW_TOOL],
+            )
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+            assert smg_resp.status in ("completed", "incomplete")
+
+    def test_mixed_builtin_and_function_tools(self, setup_backend, smg):
         """Test mixing web_search_preview with function tools on local backend."""
         _, model, client, gateway = setup_backend
 
@@ -301,16 +346,26 @@ class TestBuiltinToolsLocalBackend:
 
         assert resp.id is not None
 
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.responses.create(
+                model=model,
+                input="What's the weather in Seattle?",
+                tools=[WEB_SEARCH_PREVIEW_TOOL, get_weather_function],
+            )
+            assert smg_resp.error is None
+            assert smg_resp.id is not None
+
 
 # =============================================================================
 # Full Integration Tests (require Brave MCP server + proper gateway config)
 # =============================================================================
 # These tests run in CI where:
-# 1. Brave MCP server runs on port 8001
+# 1. Brave MCP server runs on port 8080
 # 2. Gateway is configured with builtin_type: web_search_preview via fixture
 #
 # To run locally:
-# 1. Start Brave MCP: docker run -d -p 8001:8080 -e BRAVE_API_KEY=<key> shoofio/brave-search-mcp-sse:1.0.10
+# 1. Start Brave MCP: docker run -d -p 8080:8080 -e BRAVE_API_KEY=<key> shoofio/brave-search-mcp-sse:1.0.10
 # 2. Set OPENAI_API_KEY environment variable
 # 3. Run: pytest e2e_test/responses/test_builtin_tools.py::TestBuiltinToolRouting -v
 
@@ -324,7 +379,7 @@ class TestBuiltinToolRouting:
     3. Response contains web_search_call (not mcp_call)
 
     Requires:
-    - Brave MCP server on port 8001
+    - Brave MCP server on port 8080
     - OPENAI_API_KEY environment variable
     """
 
@@ -360,6 +415,11 @@ class TestBuiltinToolRouting:
         )
         assert "mcp_call" not in output_types, (
             f"Built-in tool should NOT produce mcp_call, got: {output_types}"
+        )
+
+        # Built-in tool should NOT produce mcp_list_tools output
+        assert "mcp_list_tools" not in output_types, (
+            f"Built-in tool should NOT produce mcp_list_tools, got: {output_types}"
         )
 
     def test_response_tools_shows_original_type(self, gateway_with_mcp_config):
@@ -412,7 +472,10 @@ class TestMcpWebSearchStreamingEvents:
 
         resp = client.responses.create(
             model=model,
-            input="Search the web for Python programming language.",
+            input=(
+                "Search the web for Python programming language. "
+                "Set count to 1 to get only one result and give a one sentence summary."
+            ),
             tools=[BRAVE_MCP_TOOL],
             stream=True,
         )
@@ -460,6 +523,9 @@ class TestMcpWebSearchStreamingEvents:
             assert mcp_call.server_label == "brave"
             assert mcp_call.name is not None
             assert mcp_call.output is not None
+
+        # SmgClient streaming comparison — no smg fixture in this test,
+        # covered by test_tools_call.py MCP streaming tests
 
 
 class TestWebSearchStreamingEvents:
@@ -520,6 +586,14 @@ class TestWebSearchStreamingEvents:
             "Built-in tool should NOT produce mcp_call events"
         )
 
+        # Verify no mcp_list_tools events (builtin servers should be hidden)
+        assert "response.mcp_list_tools.in_progress" not in event_types, (
+            "Built-in tool should NOT produce mcp_list_tools events"
+        )
+        assert "response.mcp_list_tools.completed" not in event_types, (
+            "Built-in tool should NOT produce mcp_list_tools events"
+        )
+
         # Verify final response
         completed_events = [e for e in events if e.type == "response.completed"]
         final_response = completed_events[0].response
@@ -532,6 +606,11 @@ class TestWebSearchStreamingEvents:
         )
         assert "mcp_call" not in final_output_types, (
             "Built-in tool should NOT produce mcp_call output"
+        )
+
+        # Verify no mcp_list_tools in final output
+        assert "mcp_list_tools" not in final_output_types, (
+            "Built-in tool should NOT produce mcp_list_tools output"
         )
 
         # Verify web_search_call item structure
@@ -609,7 +688,7 @@ class TestBuiltinToolRoutingGrpc:
     3. Response contains web_search_call (not mcp_call)
 
     Requires:
-    - Brave MCP server on port 8001
+    - Brave MCP server on port 8080
     - gRPC worker available in model_pool
     """
 
@@ -638,6 +717,11 @@ class TestBuiltinToolRoutingGrpc:
         )
         assert "mcp_call" not in output_types, (
             f"Built-in tool should NOT produce mcp_call, got: {output_types}"
+        )
+
+        # Built-in tool should NOT produce mcp_list_tools output
+        assert "mcp_list_tools" not in output_types, (
+            f"Built-in tool should NOT produce mcp_list_tools, got: {output_types}"
         )
 
     def test_response_tools_shows_original_type(self, gateway_with_mcp_config_grpc):
@@ -716,6 +800,14 @@ class TestWebSearchStreamingEventsGrpc:
             "Built-in tool should NOT produce mcp_call events"
         )
 
+        # Verify no mcp_list_tools events (builtin servers should be hidden)
+        assert "response.mcp_list_tools.in_progress" not in event_types, (
+            "Built-in tool should NOT produce mcp_list_tools events"
+        )
+        assert "response.mcp_list_tools.completed" not in event_types, (
+            "Built-in tool should NOT produce mcp_list_tools events"
+        )
+
         # Verify final response
         completed_events = [e for e in events if e.type == "response.completed"]
         final_response = completed_events[0].response
@@ -728,6 +820,11 @@ class TestWebSearchStreamingEventsGrpc:
         )
         assert "mcp_call" not in final_output_types, (
             "Built-in tool should NOT produce mcp_call output"
+        )
+
+        # Verify no mcp_list_tools in final output
+        assert "mcp_list_tools" not in final_output_types, (
+            "Built-in tool should NOT produce mcp_list_tools output"
         )
 
         # Verify web_search_call item structure

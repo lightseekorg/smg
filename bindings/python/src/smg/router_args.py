@@ -30,6 +30,7 @@ class RouterArgs:
     decode_policy: str | None = None  # Specific policy for decode nodes in PD mode
     worker_startup_timeout_secs: int = 1800
     worker_startup_check_interval: int = 30
+    load_monitor_interval: int = 10
     cache_threshold: float = 0.3
     balance_abs_threshold: int = 64
     balance_rel_threshold: float = 1.5
@@ -108,6 +109,8 @@ class RouterArgs:
     mcp_config_path: str | None = None
     # Backend selection
     backend: str = "sglang"
+    # Storage hooks (WASM)
+    storage_hook_wasm_path: str | None = None
     # History backend configuration
     history_backend: str = "memory"
     oracle_wallet_path: str | None = None
@@ -399,6 +402,14 @@ class RouterArgs:
             help="Interval in seconds between checks for worker startup",
         )
 
+        # Load monitoring
+        parser.add_argument(
+            f"--{prefix}load-monitor-interval",
+            type=int,
+            default=RouterArgs.load_monitor_interval,
+            help="Interval in seconds between load monitor checks for PowerOfTwo routing (default: 10)",
+        )
+
         # Logging configuration
         logging_group.add_argument(
             f"--{prefix}log-dir",
@@ -666,6 +677,7 @@ class RouterArgs:
         # Tokenizer configuration
         tokenizer_group.add_argument(
             f"--{prefix}model-path",
+            f"--{prefix}model",
             type=str,
             default=None,
             help="Model path for loading tokenizer (HuggingFace model ID or local path)",
@@ -736,6 +748,12 @@ class RouterArgs:
             default=RouterArgs.backend,
             choices=["sglang", "openai", "anthropic"],
             help="Backend runtime to use (default: sglang)",
+        )
+        backend_group.add_argument(
+            f"--{prefix}storage-hook-wasm-path",
+            type=str,
+            default=None,
+            help="Path to a WASM component implementing storage hooks",
         )
         backend_group.add_argument(
             f"--{prefix}history-backend",
@@ -967,9 +985,14 @@ class RouterArgs:
         args_dict = {}
 
         for attr in dataclasses.fields(cls):
-            # Auto strip prefix from args
-            if f"{prefix}{attr.name}" in cli_args_dict:
-                args_dict[attr.name] = cli_args_dict[f"{prefix}{attr.name}"]
+            # Auto strip prefix from args.
+            # Prefer the prefixed version (e.g. --router-model-path) when
+            # explicitly set, but fall back to the unprefixed version
+            # (e.g. --model-path from the backend) when the prefixed key
+            # exists but is None (argparse default).
+            prefixed_key = f"{prefix}{attr.name}"
+            if prefixed_key in cli_args_dict and cli_args_dict[prefixed_key] is not None:
+                args_dict[attr.name] = cli_args_dict[prefixed_key]
             elif attr.name in cli_args_dict:
                 args_dict[attr.name] = cli_args_dict[attr.name]
 

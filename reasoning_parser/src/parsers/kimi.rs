@@ -50,7 +50,7 @@ impl ReasoningParser for KimiParser {
     }
 
     fn reset(&mut self) {
-        self.base.reset()
+        self.base.reset();
     }
 
     fn model_type(&self) -> &str {

@@ -17,11 +17,11 @@ use openai_protocol::{
     common::{ChatLogProbs, ContentPart, Tool},
     responses::{
         ReasoningEffort as ResponsesReasoningEffort, ResponseContentPart, ResponseInput,
-        ResponseInputOutputItem, ResponseReasoningContent, ResponseTool, ResponseToolType,
-        ResponsesRequest, StringOrContentParts,
+        ResponseInputOutputItem, ResponseReasoningContent, ResponseTool, ResponsesRequest,
+        StringOrContentParts,
     },
 };
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use super::types::HarmonyBuildOutput;
 use crate::routers::grpc::{proto_wrapper::ProtoOutputLogProbs, utils};
@@ -32,6 +32,10 @@ static HARMONY_ENCODING: OnceLock<HarmonyEncoding> = OnceLock::new();
 /// Get or initialize the Harmony encoding
 ///
 /// Uses HarmonyGptOss encoding which supports the gpt-oss model family.
+#[expect(
+    clippy::expect_used,
+    reason = "Harmony encoding is a required static resource; failure is unrecoverable"
+)]
 pub(crate) fn get_harmony_encoding() -> &'static HarmonyEncoding {
     HARMONY_ENCODING.get_or_init(|| {
         tokio::task::block_in_place(|| {
@@ -45,16 +49,14 @@ pub(crate) fn get_harmony_encoding() -> &'static HarmonyEncoding {
 ///
 /// Delegates to the shared `convert_proto_logprobs` with Harmony's built-in tokenizer
 /// for token ID decoding.
-pub(crate) fn convert_harmony_logprobs(
-    proto_logprobs: &ProtoOutputLogProbs,
-) -> Result<ChatLogProbs, String> {
+pub(crate) fn convert_harmony_logprobs(proto_logprobs: &ProtoOutputLogProbs) -> ChatLogProbs {
     let encoding = get_harmony_encoding();
     let tokenizer = encoding.tokenizer();
-    Ok(utils::convert_proto_logprobs(proto_logprobs, |token_id| {
+    utils::convert_proto_logprobs(proto_logprobs, |token_id| {
         tokenizer
             .decode_utf8([token_id])
-            .unwrap_or_else(|_| format!("<token_{}>", token_id))
-    }))
+            .unwrap_or_else(|_| format!("<token_{token_id}>"))
+    })
 }
 
 /// Built-in tools that are added to the system message
@@ -63,7 +65,7 @@ const BUILTIN_TOOLS: &[&str] = &["web_search_preview", "code_interpreter", "cont
 /// Trait for tool-like objects that can be converted to Harmony ToolDescription
 trait ToolLike {
     /// Check if this is a built-in tool (should be skipped in developer message)
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     fn is_builtin(&self) -> bool;
 
     /// Check if this is a custom tool (function or MCP)
@@ -83,7 +85,7 @@ impl ToolLike for Tool {
     }
 
     fn is_custom(&self) -> bool {
-        matches!(self.tool_type.as_str(), "mcp" | "function")
+        matches!(self.tool_type.as_str(), "function")
     }
 
     fn to_tool_description(&self) -> Option<ToolDescription> {
@@ -99,26 +101,24 @@ impl ToolLike for Tool {
 impl ToolLike for ResponseTool {
     fn is_builtin(&self) -> bool {
         matches!(
-            self.r#type,
-            ResponseToolType::WebSearchPreview | ResponseToolType::CodeInterpreter
+            self,
+            ResponseTool::WebSearchPreview(_) | ResponseTool::CodeInterpreter(_)
         )
     }
 
     fn is_custom(&self) -> bool {
-        matches!(
-            self.r#type,
-            ResponseToolType::Mcp | ResponseToolType::Function
-        )
+        matches!(self, ResponseTool::Function(_))
     }
 
     fn to_tool_description(&self) -> Option<ToolDescription> {
-        self.function.as_ref().map(|func| {
-            ToolDescription::new(
-                func.name.clone(),
-                func.description.clone().unwrap_or_default(),
-                Some(func.parameters.clone()),
-            )
-        })
+        match self {
+            ResponseTool::Function(ft) => Some(ToolDescription::new(
+                ft.function.name.clone(),
+                ft.function.description.clone().unwrap_or_default(),
+                Some(ft.function.parameters.clone()),
+            )),
+            _ => None,
+        }
     }
 }
 
@@ -163,14 +163,14 @@ impl HarmonyBuilder {
         let dev_msg = self.build_developer_message_from_chat(request.tools.as_ref());
         all_messages.push(dev_msg);
 
-        let mut user_messages = self.convert_chat_messages(&request.messages)?;
+        let mut user_messages = self.convert_chat_messages(&request.messages);
         all_messages.append(&mut user_messages);
 
         let conversation = Conversation::from_messages(all_messages.clone());
         let token_ids = self
             .encoding
             .render_conversation_for_completion(&conversation, Role::Assistant, None)
-            .map_err(|e| format!("Failed to encode Harmony conversation: {}", e))?;
+            .map_err(|e| format!("Failed to encode Harmony conversation: {e}"))?;
 
         let selection_text = self.extract_selection_text(&all_messages);
 
@@ -212,7 +212,7 @@ impl HarmonyBuilder {
         let token_ids = self
             .encoding
             .render_conversation_for_completion(&conversation, Role::Assistant, None)
-            .map_err(|e| format!("Failed to encode Harmony conversation: {}", e))?;
+            .map_err(|e| format!("Failed to encode Harmony conversation: {e}"))?;
 
         let selection_text = self.extract_selection_text(&all_messages);
 
@@ -254,6 +254,10 @@ impl HarmonyBuilder {
     /// # Arguments
     /// * `reasoning_effort` - Optional reasoning effort level
     /// * `has_tools` - Whether custom tools are present
+    #[expect(
+        clippy::unused_self,
+        reason = "method on HarmonyBuilder for logical grouping"
+    )]
     fn build_system_message(
         &self,
         reasoning_effort: Option<ReasoningEffort>,
@@ -335,6 +339,10 @@ impl HarmonyBuilder {
     /// # Arguments
     /// * `tools` - Optional list of tools
     /// * `instructions` - Optional instructions (Responses API only)
+    #[expect(
+        clippy::unused_self,
+        reason = "method on HarmonyBuilder for logical grouping"
+    )]
     fn build_developer_message<T: ToolLike>(
         &self,
         tools: Option<&Vec<T>>,
@@ -413,11 +421,11 @@ impl HarmonyBuilder {
                 .map(|tools| {
                     tools
                         .iter()
-                        .map(|tool| match tool.r#type {
-                            ResponseToolType::Function => "function",
-                            ResponseToolType::WebSearchPreview => "web_search_preview",
-                            ResponseToolType::CodeInterpreter => "code_interpreter",
-                            ResponseToolType::Mcp => "mcp",
+                        .map(|tool| match tool {
+                            ResponseTool::Function(_) => "function",
+                            ResponseTool::WebSearchPreview(_) => "web_search_preview",
+                            ResponseTool::CodeInterpreter(_) => "code_interpreter",
+                            ResponseTool::Mcp(_) => "mcp",
                         })
                         .collect()
                 })
@@ -492,6 +500,10 @@ impl HarmonyBuilder {
     /// # Arguments
     /// * `item` - The ResponseInputOutputItem to parse
     /// * `prev_outputs` - Previous items for looking up function call names (for function_call_output)
+    #[expect(
+        clippy::unused_self,
+        reason = "method on HarmonyBuilder for logical grouping"
+    )]
     fn parse_response_item_to_harmony_message(
         &self,
         item: &ResponseInputOutputItem,
@@ -569,7 +581,7 @@ impl HarmonyBuilder {
                     // Tool result - use Tool role with "functions.{name}" as author name
                     // IMPORTANT: Must include recipient="assistant" for parser to recognize it.
                     // We keep channel=None to minimize what the model might copy.
-                    let author_name = format!("functions.{}", name);
+                    let author_name = format!("functions.{name}");
                     debug!(
                         tool_name = %name,
                         author_name = %author_name,
@@ -591,7 +603,7 @@ impl HarmonyBuilder {
                 } else {
                     // Tool call - assistant message in commentary channel with recipient
                     // msg.with_channel("commentary").with_recipient(f"functions.{name}")
-                    let recipient = format!("functions.{}", name);
+                    let recipient = format!("functions.{name}");
                     debug!(
                         tool_name = %name,
                         recipient = %recipient,
@@ -628,7 +640,7 @@ impl HarmonyBuilder {
                         } if item_call_id == call_id => Some(name.clone()),
                         _ => None,
                     })
-                    .ok_or_else(|| format!("No function call found for call_id: {}", call_id))?;
+                    .ok_or_else(|| format!("No function call found for call_id: {call_id}"))?;
 
                 // Create Tool message with "functions.{name}" prefix
                 // IMPORTANT: Must include recipient="assistant" for parser to recognize it.
@@ -636,7 +648,7 @@ impl HarmonyBuilder {
                 Ok(HarmonyMessage {
                     author: Author {
                         role: Role::Tool,
-                        name: Some(format!("functions.{}", call)),
+                        name: Some(format!("functions.{call}")),
                     },
                     recipient: Some("assistant".to_string()),
                     content: vec![Content::Text(TextContent {
@@ -683,6 +695,15 @@ impl HarmonyBuilder {
                     content_type: None,
                 })
             }
+
+            ResponseInputOutputItem::McpApprovalResponse { .. }
+            | ResponseInputOutputItem::McpApprovalRequest { .. } => {
+                warn!(
+                    function = "parse_response_item_to_harmony_message",
+                    "Approval item reached Harmony conversion"
+                );
+                Err("Unsupported input item type".to_string())
+            }
         }
     }
 
@@ -691,10 +712,11 @@ impl HarmonyBuilder {
     /// - Assistant messages with tool_calls create multiple messages (one per tool call)
     /// - Tool role messages use Role::Tool with proper author
     /// - Tool-related messages use channel="commentary"
-    fn convert_chat_messages(
-        &self,
-        messages: &[ChatMessage],
-    ) -> Result<Vec<HarmonyMessage>, String> {
+    #[expect(
+        clippy::unused_self,
+        reason = "method on HarmonyBuilder for logical grouping"
+    )]
+    fn convert_chat_messages(&self, messages: &[ChatMessage]) -> Vec<HarmonyMessage> {
         let mut harmony_messages = Vec::new();
 
         // Build a map of tool_call_id -> function_name for tool responses
@@ -800,7 +822,7 @@ impl HarmonyBuilder {
                                     role: Role::Assistant,
                                     name: name.clone(),
                                 },
-                                recipient: Some(format!("functions.{}", function_name)),
+                                recipient: Some(format!("functions.{function_name}")),
                                 content: vec![Content::Text(TextContent { text: arguments })],
                                 channel: Some("commentary".to_string()),
                                 content_type: Some("json".to_string()),
@@ -851,7 +873,7 @@ impl HarmonyBuilder {
                     let harmony_msg = HarmonyMessage {
                         author: Author {
                             role: Role::Tool,
-                            name: Some(format!("functions.{}", function_name)),
+                            name: Some(format!("functions.{function_name}")),
                         },
                         recipient: Some("assistant".to_string()),
                         content: vec![Content::Text(TextContent {
@@ -870,7 +892,7 @@ impl HarmonyBuilder {
                     let harmony_msg = HarmonyMessage {
                         author: Author {
                             role: Role::Tool,
-                            name: Some(format!("functions.{}", name)),
+                            name: Some(format!("functions.{name}")),
                         },
                         recipient: Some("assistant".to_string()),
                         content: vec![Content::Text(TextContent {
@@ -884,12 +906,16 @@ impl HarmonyBuilder {
             }
         }
 
-        Ok(harmony_messages)
+        harmony_messages
     }
 
     /// Extract selection text for worker routing
     ///
     /// Uses the last user message for load balancing
+    #[expect(
+        clippy::unused_self,
+        reason = "method on HarmonyBuilder for logical grouping"
+    )]
     fn extract_selection_text(&self, messages: &[HarmonyMessage]) -> String {
         // Find the last user message
         if let Some(last_user_msg) = messages.iter().rev().find(|m| m.author.role == Role::User) {

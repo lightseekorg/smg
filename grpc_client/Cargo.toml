@@ -1,6 +1,6 @@
 [package]
 name = "smg-grpc-client"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "gRPC clients for SGLang and vLLM backends"
 license = "Apache-2.0"
@@ -31,6 +31,11 @@ prost-types.workspace = true
 
 # Async/concurrency
 futures.workspace = true
+
+# Archive validation
+sha2 = "0.10"
+zip = "8.1"
+tempfile = "3.8"
 
 [build-dependencies]
 tonic-prost-build = "0.14.2"

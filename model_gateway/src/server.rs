@@ -32,7 +32,7 @@ use rustls::crypto::ring;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use smg_mesh::{MeshServerBuilder, MeshServerConfig, MeshServerHandler};
-use tokio::{signal, spawn};
+use tokio::{signal, spawn, sync::mpsc};
 use tracing::{debug, error, info, warn, Level};
 use wfaas::LoggingSubscriber;
 
@@ -70,7 +70,7 @@ use crate::{
 pub struct AppState {
     pub router: Arc<dyn RouterTrait>,
     pub context: Arc<AppContext>,
-    pub concurrency_queue_tx: Option<tokio::sync::mpsc::Sender<QueuedRequest>>,
+    pub concurrency_queue_tx: Option<mpsc::Sender<QueuedRequest>>,
     pub router_manager: Option<Arc<RouterManager>>,
     pub mesh_handler: Option<Arc<MeshServerHandler>>,
 }
@@ -720,7 +720,9 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         )?;
     }
 
-    let _log_guard = if !LOGGING_INITIALIZED.swap(true, Ordering::SeqCst) {
+    let _log_guard = if LOGGING_INITIALIZED.swap(true, Ordering::SeqCst) {
+        None
+    } else {
         Some(logging::init_logging(
             LoggingConfig {
                 level: config
@@ -742,8 +744,6 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
             },
             config.router_config.trace_config.clone(),
         ))
-    } else {
-        None
     };
 
     if let Some(prometheus_config) = &config.prometheus_config {
@@ -758,6 +758,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         // Start rate limit window reset task (managed by handler)
         handler.start_rate_limit_task(1); // Reset every 1 second
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "mesh server runs for the lifetime of the process; shutdown is handled by the mesh handler"
+        )]
         spawn(async move {
             if let Err(e) = mesh_server.start().await {
                 tracing::error!("Mesh server failed: {}", e);
@@ -788,6 +792,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
     let weak_context = Arc::downgrade(&app_context);
     let worker_job_queue = JobQueue::new(JobQueueConfig::default(), weak_context);
+    #[expect(
+        clippy::expect_used,
+        reason = "OnceLock initialization during startup; double-init is a fatal bug"
+    )]
     app_context
         .worker_job_queue
         .set(worker_job_queue)
@@ -799,6 +807,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     // Subscribe logging to all workflow engines
     engines.subscribe_all(Arc::new(LoggingSubscriber)).await;
 
+    #[expect(
+        clippy::expect_used,
+        reason = "OnceLock initialization during startup; double-init is a fatal bug"
+    )]
     app_context
         .workflow_engines
         .set(engines)
@@ -818,6 +830,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     {
         info!("Loading startup tokenizer from: {}", tokenizer_source);
 
+        #[expect(
+            clippy::expect_used,
+            reason = "JobQueue was just initialized above; absence is unreachable"
+        )]
         let job_queue = app_context
             .worker_job_queue
             .get()
@@ -839,7 +855,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         job_queue
             .submit(job)
             .await
-            .map_err(|e| format!("Failed to submit startup tokenizer job: {}", e))?;
+            .map_err(|e| format!("Failed to submit startup tokenizer job: {e}"))?;
 
         info!("Startup tokenizer job submitted (will complete in background)");
     }
@@ -850,6 +866,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     );
 
     // Submit worker initialization job to queue
+    #[expect(
+        clippy::expect_used,
+        reason = "JobQueue was initialized above; absence is unreachable"
+    )]
     let job_queue = app_context
         .worker_job_queue
         .get()
@@ -860,7 +880,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     job_queue
         .submit(job)
         .await
-        .map_err(|e| format!("Failed to submit worker initialization job: {}", e))?;
+        .map_err(|e| format!("Failed to submit worker initialization job: {e}"))?;
 
     info!("Worker initialization job submitted (will complete in background)");
 
@@ -872,7 +892,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         job_queue
             .submit(mcp_job)
             .await
-            .map_err(|e| format!("Failed to submit MCP initialization job: {}", e))?;
+            .map_err(|e| format!("Failed to submit MCP initialization job: {e}"))?;
     } else {
         info!("No MCP config provided, skipping MCP server initialization");
     }
@@ -889,21 +909,27 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     let router_manager = RouterManager::from_config(&config, &app_context).await?;
     let router: Arc<dyn RouterTrait> = router_manager.clone();
 
-    if !config.router_config.health_check.disable_health_check {
-        let _health_checker = app_context
+    // Health checker handle must outlive the server to keep the background task alive.
+    // HealthChecker aborts its task on Drop, so binding it here keeps it alive until
+    // the server shuts down.
+    let _health_checker = if config.router_config.health_check.disable_health_check {
+        info!("Global health checks disabled via CLI/config; skipping health checker");
+        None
+    } else {
+        let hc = app_context
             .worker_registry
             .start_health_checker(config.router_config.health_check.check_interval_secs);
         debug!(
             "Started health checker for workers with {}s interval",
             config.router_config.health_check.check_interval_secs
         );
-    } else {
-        info!("Global health checks disabled via CLI/config; skipping health checker");
-    }
+        Some(hc)
+    };
 
-    if let Some(ref load_monitor) = app_context.load_monitor {
-        load_monitor.start().await;
-        debug!("Started LoadMonitor for PowerOfTwo policies");
+    // LoadMonitor groups are started dynamically when workers are registered.
+    // No explicit start() needed — see RegisterWorkersStep.
+    if app_context.load_monitor.is_some() {
+        debug!("LoadMonitor initialized (groups start on worker registration)");
     }
 
     let (limiter, processor) = middleware::ConcurrencyLimiter::new(
@@ -918,6 +944,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
     match processor {
         Some(proc) => {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "request queue processor runs for the lifetime of the server"
+            )]
             spawn(proc.run());
             debug!(
                 "Started request queue (size: {}, timeout: {}s)",
@@ -976,6 +1006,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
             {
                 Ok(handle) => {
                     info!("Service discovery started");
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "service discovery runs for the lifetime of the server"
+                    )]
                     spawn(async move {
                         if let Err(e) = handle.await {
                             error!("Service discovery task failed: {:?}", e);
@@ -1004,9 +1038,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
         ]
     });
 
-    let auth_config = AuthConfig {
-        api_key: config.router_config.api_key.clone(),
-    };
+    let auth_config = AuthConfig::new(config.router_config.api_key.clone());
 
     // Initialize control plane authentication if configured
     let control_plane_auth_state =
@@ -1028,11 +1060,15 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     // Parse address and set up graceful shutdown (common to both TLS and non-TLS)
     let addr: std::net::SocketAddr = bind_addr
         .parse()
-        .map_err(|e| format!("Invalid address: {}", e))?;
+        .map_err(|e| format!("Invalid address: {e}"))?;
 
     let handle = axum_server::Handle::new();
     let handle_clone = handle.clone();
     let grace_period = Duration::from_secs(config.shutdown_grace_period_secs);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "shutdown signal handler must outlive the server to trigger graceful shutdown"
+    )]
     spawn(async move {
         shutdown_signal().await;
         handle_clone.graceful_shutdown(Some(grace_period));
@@ -1049,7 +1085,7 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
 
         let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem(cert.clone(), key.clone())
             .await
-            .map_err(|e| format!("Failed to create TLS config: {}", e))?;
+            .map_err(|e| format!("Failed to create TLS config: {e}"))?;
 
         axum_server::bind_rustls(addr, tls_config)
             .handle(handle)
@@ -1077,6 +1113,10 @@ pub async fn startup(config: ServerConfig) -> Result<(), Box<dyn std::error::Err
     server_result.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "signal handler installation is infallible on supported platforms; failure is fatal"
+)]
 async fn shutdown_signal() {
     let ctrl_c = async {
         signal::ctrl_c()
@@ -1096,10 +1136,10 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {
+        () = ctrl_c => {
             info!("Received Ctrl+C, starting graceful shutdown");
         },
-        _ = terminate => {
+        () = terminate => {
             info!("Received terminate signal, starting graceful shutdown");
         },
     }

@@ -10,7 +10,7 @@ use crate::routers::{
     grpc::{
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, RequestContext},
-        proto_wrapper::ProtoGenerateRequest,
+        proto_wrapper::{ProtoGenerateRequest, ProtoRequest},
         utils,
     },
 };
@@ -31,7 +31,8 @@ impl ChatRequestBuildingStage {
 #[async_trait]
 impl PipelineStage for ChatRequestBuildingStage {
     async fn execute(&self, ctx: &mut RequestContext) -> Result<Option<Response>, Response> {
-        let prep = ctx.state.preparation.as_ref().ok_or_else(|| {
+        // Take preparation state (last consumer — worker_selection already ran)
+        let prep = ctx.state.preparation.take().ok_or_else(|| {
             error!(
                 function = "ChatRequestBuildingStage::execute",
                 "Preparation not completed"
@@ -59,23 +60,33 @@ impl PipelineStage for ChatRequestBuildingStage {
         };
 
         // Build chat request
-        let request_id = format!("chatcmpl-{}", Uuid::new_v4());
+        let request_id = format!("chatcmpl-{}", Uuid::now_v7());
         let body_ref = prep.filtered_request.as_ref().unwrap_or(&chat_request);
 
-        // Build proto request using centralized dispatch
-        let processed_messages = prep.processed_messages.as_ref().unwrap();
+        // Build proto request — take ownership of preparation fields (no clones needed)
+        let processed_messages = prep.processed_messages.ok_or_else(|| {
+            error!(
+                function = "ChatRequestBuildingStage::execute",
+                "processed_messages not set in preparation state"
+            );
+            error::internal_error(
+                "processed_messages_missing",
+                "processed_messages not set - this is a bug in the pipeline",
+            )
+        })?;
+
         let mut proto_request = builder_client
             .build_chat_request(
                 request_id,
                 body_ref,
-                processed_messages.text.clone(),
-                prep.token_ids.clone(),
-                processed_messages.multimodal_inputs.clone(),
-                prep.tool_constraints.clone(),
+                processed_messages.text,
+                prep.token_ids,
+                processed_messages.multimodal_data,
+                prep.tool_constraints,
             )
             .map_err(|e| {
                 error!(function = "ChatRequestBuildingStage::execute", error = %e, "Failed to build generate request");
-                error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {}", e))
+                error::bad_request("invalid_request_parameters", format!("Invalid request parameters: {e}"))
             })?;
 
         // Inject tokenized stop sequences for TRT-LLM requests
@@ -93,9 +104,7 @@ impl PipelineStage for ChatRequestBuildingStage {
             }
         }
 
-        ctx.state.proto_request = Some(
-            crate::routers::grpc::proto_wrapper::ProtoRequest::Generate(proto_request),
-        );
+        ctx.state.proto_request = Some(ProtoRequest::Generate(proto_request));
         Ok(None)
     }
 

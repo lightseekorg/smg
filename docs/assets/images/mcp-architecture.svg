@@ -95,7 +95,7 @@
     <text x="72" y="150" text-anchor="middle" class="mcp-feature">Tool Call:</text>
     <text x="72" y="165" text-anchor="middle" class="mcp-code" fill="#a78bfa">web_search</text>
     <text x="72" y="180" text-anchor="middle" class="mcp-code" fill="#94a3b8">{"query": "..."}</text>
-    <text x="72" y="200" text-anchor="middle" class="mcp-feature" fill="#64748b">vLLM / SGLang</text>
+    <text x="72" y="200" text-anchor="middle" class="mcp-feature" fill="#64748b">SGLang / vLLM</text>
   </g>
 
   <!-- SMG Gateway Container -->

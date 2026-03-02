@@ -70,7 +70,7 @@ mod tests {
         for event in &events {
             if event != "[DONE]" {
                 let parsed: Result<serde_json::Value, _> = serde_json::from_str(event);
-                assert!(parsed.is_ok(), "Invalid JSON in SSE event: {}", event);
+                assert!(parsed.is_ok(), "Invalid JSON in SSE event: {event}");
 
                 let json = parsed.unwrap();
                 assert_eq!(

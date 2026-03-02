@@ -49,8 +49,8 @@ pub enum AuthMethod {
 impl std::fmt::Display for AuthMethod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AuthMethod::Jwt { issuer } => write!(f, "jwt:{}", issuer),
-            AuthMethod::ApiKey { key_id } => write!(f, "api_key:{}", key_id),
+            AuthMethod::Jwt { issuer } => write!(f, "jwt:{issuer}"),
+            AuthMethod::ApiKey { key_id } => write!(f, "api_key:{key_id}"),
         }
     }
 }
@@ -293,13 +293,13 @@ pub async fn control_plane_auth_middleware(
                     auth_state.audit_logger.log_auth_failure(
                         &method,
                         &path,
-                        &format!("Invalid JWT: {}", e),
+                        &format!("Invalid JWT: {e}"),
                         request_id.as_deref(),
                     );
                     return (
                         StatusCode::UNAUTHORIZED,
                         [("WWW-Authenticate", "Bearer realm=\"control-plane\"")],
-                        format!("Invalid JWT: {}", e),
+                        format!("Invalid JWT: {e}"),
                     )
                         .into_response();
                 }

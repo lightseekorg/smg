@@ -32,9 +32,9 @@ impl StepExecutor<WorkerUpdateWorkflowData> for FindWorkerToUpdateStep {
 
         if workers_to_update.is_empty() {
             let error_msg = if dp_aware {
-                format!("No workers found with prefix {}@", worker_url)
+                format!("No workers found with prefix {worker_url}@")
             } else {
-                format!("Worker {} not found", worker_url)
+                format!("Worker {worker_url} not found")
             };
             return Err(WorkflowError::StepFailed {
                 step_id: StepId::new("find_worker_to_update"),

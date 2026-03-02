@@ -230,20 +230,36 @@ impl L1Cache {
             self.evict_lru(total_size_needed);
         }
 
-        // Insert all entries
+        // Insert all entries, accounting for replaced entries in memory tracking
         let current_timestamp = self.access_counter.load(Ordering::Relaxed);
         for (hash_bytes, prefix_tokens, size_bytes) in entries_to_insert {
             let shard_idx = hash_bytes[0] as usize % NUM_SHARDS;
 
             let cached = CachedPrefix {
-                tokens: prefix_tokens, // Already Arc<[TokenIdType]>
+                tokens: prefix_tokens,
                 last_accessed: Arc::new(AtomicU64::new(current_timestamp)),
                 size_bytes,
             };
 
-            self.shards[shard_idx].insert(hash_bytes, cached);
-            self.current_memory
-                .fetch_add(size_bytes as u64, Ordering::Relaxed);
+            if let Some(old) = self.shards[shard_idx].insert(hash_bytes, cached) {
+                // Replaced an existing entry — adjust delta only.
+                // Note: the counter update is not atomic with the shard insert, so
+                // concurrent replacements of the same key can briefly skew the
+                // counter. This is benign — eviction is best-effort and the drift
+                // is bounded to a single entry's size per race.
+                let old_size = old.size_bytes as u64;
+                let new_size = size_bytes as u64;
+                if new_size >= old_size {
+                    self.current_memory
+                        .fetch_add(new_size - old_size, Ordering::Relaxed);
+                } else {
+                    self.current_memory
+                        .fetch_sub(old_size - new_size, Ordering::Relaxed);
+                }
+            } else {
+                self.current_memory
+                    .fetch_add(size_bytes as u64, Ordering::Relaxed);
+            }
         }
 
         Ok(())
@@ -519,5 +535,83 @@ mod tests {
         // The most recently accessed entries should still be present
         let result = cache.longest_prefix_match(input3, special_tokens);
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_concurrent_access() {
+        use std::{sync::Arc, thread};
+
+        let cache = Arc::new(L1Cache::new(1024 * 1024));
+        let special_tokens_owned: Vec<String> =
+            vec!["<|im_start|>".to_string(), "<|im_end|>".to_string()];
+        let special_tokens_arc = Arc::new(special_tokens_owned);
+
+        let mut handles = vec![];
+
+        // Spawn 10 threads that each insert different special-token-bounded strings
+        // and query for prefix matches concurrently.
+        for i in 0..10 {
+            let cache_clone = cache.clone();
+            let st_clone = special_tokens_arc.clone();
+            handles.push(thread::spawn(move || {
+                let tokenizer = MockTokenizer::new();
+                let special_tokens: Vec<&str> = st_clone.iter().map(|s| s.as_str()).collect();
+
+                // Each thread uses a unique user message to avoid hash collisions
+                let input = format!(
+                    "<|im_start|>system\nYou are assistant number {i}.<|im_end|>\
+                     <|im_start|>user\nThread {i} says hello world test token.<|im_end|>"
+                );
+
+                // Insert prefix entries at boundaries
+                cache_clone
+                    .insert_at_boundaries(&input, &tokenizer, &special_tokens, false)
+                    .unwrap();
+
+                // Query for the same input - should find a prefix match
+                let result = cache_clone.longest_prefix_match(&input, &special_tokens);
+                assert!(
+                    result.is_some(),
+                    "Thread {i} expected a prefix match after insertion"
+                );
+
+                let (tokens, offset) = result.unwrap();
+                assert!(
+                    !tokens.is_empty(),
+                    "Thread {i} expected non-empty cached tokens"
+                );
+                assert!(offset > 0, "Thread {i} expected positive byte offset");
+                assert!(
+                    offset <= input.len(),
+                    "Thread {i}: offset {offset} exceeds input length {}",
+                    input.len()
+                );
+            }));
+        }
+
+        // Wait for all threads to complete (no panics)
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Cache should contain entries from the concurrent inserts
+        assert!(!cache.is_empty());
+
+        // Memory tracking should be consistent (non-zero after inserts)
+        let stats = cache.stats();
+        assert!(
+            stats.memory_bytes > 0,
+            "Expected non-zero memory tracking after concurrent inserts"
+        );
+        assert!(
+            stats.entries > 0,
+            "Expected non-zero cache entries after concurrent inserts"
+        );
+        // Total hits should be at least 10 (one per thread)
+        assert!(
+            stats.hits >= 10,
+            "Expected at least 10 cache hits, got {}",
+            stats.hits
+        );
     }
 }

@@ -37,7 +37,7 @@ mod retry_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // Request should succeed via retry to healthy worker
         let payload = json!({
@@ -85,7 +85,7 @@ mod retry_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // With retries disabled, request should fail immediately
         let payload = json!({
@@ -127,7 +127,7 @@ mod retry_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // All retries will fail, should return error after exhausting retries
         let payload = json!({
@@ -187,7 +187,7 @@ mod retry_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         // With round robin and retries, should eventually hit the healthy worker
         let payload = json!({

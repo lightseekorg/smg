@@ -77,7 +77,6 @@ pub fn init_mesh_metrics() {
     );
 }
 
-#[allow(dead_code)]
 /// Record convergence latency
 pub fn record_convergence_latency(duration: Duration) {
     histogram!("router_mesh_convergence_ms",
@@ -100,7 +99,7 @@ pub fn record_batch_sent(peer: &str, batch_size: usize) {
     .increment(batch_size as u64);
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 /// Record batch reception
 pub fn record_batch_received(peer: &str, batch_size: usize) {
     counter!("router_mesh_batches_total",
@@ -175,7 +174,7 @@ pub fn record_nack(peer: &str) {
     .increment(1);
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 /// Update store cardinality
 pub fn update_store_cardinality(store: &str, count: usize) {
     gauge!("router_mesh_store_cardinality",
@@ -184,7 +183,7 @@ pub fn update_store_cardinality(store: &str, count: usize) {
     .set(count as f64);
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 /// Update store hash (for integrity checking)
 pub fn update_store_hash(store: &str, hash: u64) {
     gauge!("router_mesh_store_hash",
@@ -193,7 +192,7 @@ pub fn update_store_hash(store: &str, hash: u64) {
     .set(hash as f64);
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 /// Update rate-limit drift ratio
 pub fn update_rl_drift_ratio(key: &str, ratio: f64) {
     gauge!("router_rl_drift_ratio",
@@ -202,7 +201,7 @@ pub fn update_rl_drift_ratio(key: &str, ratio: f64) {
     .set(ratio);
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 /// Update load balance drift ratio
 pub fn update_lb_drift_ratio(model: &str, ratio: f64) {
     gauge!("router_lb_drift_ratio",
@@ -211,7 +210,6 @@ pub fn update_lb_drift_ratio(model: &str, ratio: f64) {
     .set(ratio);
 }
 
-#[allow(dead_code)]
 /// Helper struct for tracking convergence time
 pub struct ConvergenceTracker {
     start_time: Instant,
@@ -224,7 +222,7 @@ impl ConvergenceTracker {
         }
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn record_convergence(&self) {
         let duration = self.start_time.elapsed();
         record_convergence_latency(duration);

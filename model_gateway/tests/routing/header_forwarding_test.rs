@@ -32,7 +32,7 @@ mod header_forwarding_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let custom_request_id = "test-request-id-12345";
         let payload = json!({
@@ -95,7 +95,7 @@ mod header_forwarding_tests {
         )
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let custom_trace_id = "my-custom-trace-123";
         let payload = json!({
@@ -138,7 +138,7 @@ mod header_forwarding_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let correlation_id = "correlation-abc-789";
         let payload = json!({
@@ -181,7 +181,7 @@ mod header_forwarding_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "text": "Test auto-generated ID",
@@ -210,8 +210,7 @@ mod header_forwarding_tests {
         // For generate endpoint, ID should have 'gnt-' prefix
         assert!(
             id_value.starts_with("gnt-"),
-            "Generate endpoint should have gnt- prefix, got: {}",
-            id_value
+            "Generate endpoint should have gnt- prefix, got: {id_value}"
         );
 
         ctx.shutdown().await;
@@ -229,7 +228,7 @@ mod header_forwarding_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let payload = json!({
             "model": "test-model",
@@ -254,8 +253,7 @@ mod header_forwarding_tests {
         let id_value = response_id.unwrap().to_str().unwrap();
         assert!(
             id_value.starts_with("chatcmpl-"),
-            "Chat completions should have chatcmpl- prefix, got: {}",
-            id_value
+            "Chat completions should have chatcmpl- prefix, got: {id_value}"
         );
 
         ctx.shutdown().await;
@@ -273,7 +271,7 @@ mod header_forwarding_tests {
         }])
         .await;
 
-        let app = ctx.create_app().await;
+        let app = ctx.create_app();
 
         let primary_id = "primary-request-id";
         let fallback_id = "fallback-correlation-id";

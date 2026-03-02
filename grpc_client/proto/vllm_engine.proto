@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package vllm.grpc.engine;
 
+import "common.proto";
+
 // Service definition for vLLM engine communication
 // This protocol is designed for efficient binary communication between
 // the Rust router and vLLM Python engine (AsyncLLM).
@@ -23,6 +25,13 @@ service VllmEngine {
 
   // Get server information
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+
+  // Get tokenizer artifacts for remote construction
+  rpc GetTokenizer(smg.grpc.common.GetTokenizerRequest) returns (stream smg.grpc.common.GetTokenizerChunk);
+
+  // Subscribe to KV cache events (server-streaming)
+  rpc SubscribeKvEvents(smg.grpc.common.SubscribeKvEventsRequest)
+      returns (stream smg.grpc.common.KvEventBatch);
 }
 
 // =====================
@@ -83,6 +92,49 @@ message TokenizedInput {
   repeated uint32 input_ids = 2;  // Actual token IDs to process
 }
 
+// A typed tensor: raw little-endian bytes + shape + dtype.
+message TensorData {
+  bytes data = 1;              // Raw little-endian bytes (f32/i64/u32)
+  repeated uint32 shape = 2;   // Dimension sizes
+  string dtype = 3;            // "float32", "int64", "uint32"
+}
+
+message PlaceholderRange {
+  uint32 offset = 1;
+  uint32 length = 2;
+}
+
+// Multimodal inputs for vision/audio models
+message MultimodalInputs {
+  // Reserved: field 1 was image_data (raw bytes), removed in favor of
+  // preprocessed pixel_values.
+  reserved 1;
+
+  // Preprocessed pixel values tensor
+  TensorData pixel_values = 2;
+
+  // Model-specific tensors (image_grid_thw, aspect_ratios, etc.)
+  map<string, TensorData> model_specific_tensors = 3;
+
+  // Image token ID used for placeholder expansion
+  optional uint32 im_token_id = 4;
+
+  // Placeholder offsets: where each image's tokens are in input_ids
+  repeated PlaceholderRange mm_placeholders = 5;
+
+  // Per-image blake3 hex hashes for encoder output caching
+  repeated string mm_hashes = 6;
+
+  // Tensor keys whose first dimension is per-image (batched).
+  // Keys not listed here are shared across all images.
+  repeated string batched_keys = 7;
+
+  // Tensor keys that need flat slicing: maps tensor name → sizes tensor name.
+  // e.g. {"pixel_values": "patches_per_image"} means pixel_values should be
+  // split per-item using sizes from the patches_per_image tensor.
+  map<string, string> flat_keys = 8;
+}
+
 // =====================
 // Generate Request
 // =====================
@@ -105,6 +157,9 @@ message GenerateRequest {
   // KV transfer parameters for PD disaggregation (Mooncake)
   // Decode worker uses this to fetch KV cache from prefill worker
   KvTransferParams kv_transfer_params = 6;
+
+  // Optional multimodal data (images for vision models)
+  MultimodalInputs mm_inputs = 7;
 }
 
 // KV cache transfer parameters for Mooncake PD disaggregation

@@ -15,14 +15,14 @@ mod tests {
         let template_path = temp_dir.path().join("template.jinja");
 
         // Write a test template
-        let template_content = r#"
+        let template_content = r"
 {%- for message in messages %}
     {{- '<|' + message['role'] + '|>' + message['content'] }}
 {%- endfor %}
 {%- if add_generation_prompt %}
     {{- '<|assistant|>' }}
 {%- endif %}
-"#;
+";
         fs::write(&template_path, template_content).unwrap();
 
         // Create a mock tokenizer config
@@ -132,7 +132,7 @@ mod tests {
         // Create custom template that should override
         let custom_template_path = temp_dir.path().join("custom.jinja");
         let custom_template =
-            r#"CUSTOM: {% for msg in messages %}[{{ msg.role }}]: {{ msg.content }}{% endfor %}"#;
+            r"CUSTOM: {% for msg in messages %}[{{ msg.role }}]: {{ msg.content }}{% endfor %}";
         fs::write(&custom_template_path, custom_template).unwrap();
 
         // Load with custom template - should override the built-in one
@@ -198,7 +198,9 @@ mod tests {
         // Set a template after creation (mimics Python's behavior)
         let new_template =
             "NEW: {% for msg in messages %}{{ msg.role }}: {{ msg.content }}; {% endfor %}";
-        tokenizer.set_chat_template(new_template.to_string());
+        tokenizer
+            .set_chat_template(new_template.to_string())
+            .unwrap();
 
         let messages = [
             ChatMessage::User {

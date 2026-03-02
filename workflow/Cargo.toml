@@ -1,6 +1,6 @@
 [package]
 name = "wfaas"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "Workflow-as-a-Service engine for managing multi-step operations"
 license = "Apache-2.0"
@@ -24,7 +24,7 @@ serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros", "time"] }
 tracing.workspace = true
-uuid = { workspace = true, features = ["v4", "serde"] }
+uuid = { workspace = true, features = ["serde"] }
 # Only used by workflow
 backoff = "0.4"
 

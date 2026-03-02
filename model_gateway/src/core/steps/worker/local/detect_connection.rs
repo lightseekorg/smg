@@ -22,7 +22,7 @@ async fn try_http_reachable(url: &str, timeout_secs: u64, client: &Client) -> Re
     let is_https = url.starts_with("https://");
     let protocol = if is_https { "https" } else { "http" };
     let clean_url = strip_protocol(url);
-    let health_url = format!("{}://{}/health", protocol, clean_url);
+    let health_url = format!("{protocol}://{clean_url}/health");
 
     client
         .get(&health_url)
@@ -30,7 +30,7 @@ async fn try_http_reachable(url: &str, timeout_secs: u64, client: &Client) -> Re
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| format!("Health check failed: {}", e))?;
+        .map_err(|e| format!("Health check failed: {e}"))?;
 
     Ok(())
 }
@@ -47,13 +47,13 @@ pub(super) async fn do_grpc_health_check(
     let client = tokio::time::timeout(Duration::from_secs(timeout_secs), connect_future)
         .await
         .map_err(|_| "gRPC connection timeout".to_string())?
-        .map_err(|e| format!("gRPC connection failed: {}", e))?;
+        .map_err(|e| format!("gRPC connection failed: {e}"))?;
 
     let health_future = client.health_check();
     tokio::time::timeout(Duration::from_secs(timeout_secs), health_future)
         .await
         .map_err(|_| "gRPC health check timeout".to_string())?
-        .map_err(|e| format!("gRPC health check failed: {}", e))?;
+        .map_err(|e| format!("gRPC health check failed: {e}"))?;
 
     Ok(())
 }
@@ -76,10 +76,9 @@ async fn try_grpc_reachable(url: &str, timeout_secs: u64) -> Result<(), String> 
     );
 
     match (sglang, vllm, trtllm) {
-        (Ok(_), _, _) | (_, Ok(_), _) | (_, _, Ok(_)) => Ok(()),
+        (Ok(()), _, _) | (_, Ok(()), _) | (_, _, Ok(())) => Ok(()),
         (Err(e1), Err(e2), Err(e3)) => Err(format!(
-            "gRPC not reachable (tried sglang, vllm, trtllm): sglang={}, vllm={}, trtllm={}",
-            e1, e2, e3,
+            "gRPC not reachable (tried sglang, vllm, trtllm): sglang={e1}, vllm={e2}, trtllm={e3}",
         )),
     }
 }
@@ -121,11 +120,11 @@ impl StepExecutor<LocalWorkerWorkflowData> for DetectConnectionModeStep {
         );
 
         let connection_mode = match (http_result, grpc_result) {
-            (Ok(_), _) => {
+            (Ok(()), _) => {
                 debug!("{} detected as HTTP", config.url);
                 ConnectionMode::Http
             }
-            (_, Ok(_)) => {
+            (_, Ok(())) => {
                 debug!("{} detected as gRPC", config.url);
                 ConnectionMode::Grpc
             }

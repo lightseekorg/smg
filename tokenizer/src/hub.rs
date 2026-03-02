@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use hf_hub::api::tokio::ApiBuilder;
+use hf_hub::api::tokio::{Api, ApiBuilder};
 
 /// Environment variable for HuggingFace token
 /// Note: The hf-hub crate's from_env() doesn't read HF_TOKEN directly,
@@ -9,7 +9,7 @@ use hf_hub::api::tokio::ApiBuilder;
 const HF_TOKEN_ENV: &str = "HF_TOKEN";
 
 /// Build an ApiBuilder with token from HF_TOKEN environment variable if set
-fn build_api() -> anyhow::Result<hf_hub::api::tokio::Api> {
+fn build_api() -> anyhow::Result<Api> {
     let mut builder = ApiBuilder::from_env().with_progress(true);
 
     // Only override token if HF_TOKEN env var is set and non-empty
@@ -76,17 +76,14 @@ pub async fn download_tokenizer_from_hf(model_id: impl AsRef<Path>) -> anyhow::R
         Ok(info) => info,
         Err(e) => {
             return Err(anyhow::anyhow!(
-                "Failed to fetch model '{}' from HuggingFace: {}. Is this a valid HuggingFace ID?",
-                model_name,
-                e
+                "Failed to fetch model '{model_name}' from HuggingFace: {e}. Is this a valid HuggingFace ID?"
             ));
         }
     };
 
     if info.siblings.is_empty() {
         return Err(anyhow::anyhow!(
-            "Model '{}' exists but contains no downloadable files.",
-            model_name
+            "Model '{model_name}' exists but contains no downloadable files."
         ));
     }
 
@@ -107,8 +104,7 @@ pub async fn download_tokenizer_from_hf(model_id: impl AsRef<Path>) -> anyhow::R
 
     if tokenizer_files.is_empty() {
         return Err(anyhow::anyhow!(
-            "No tokenizer files found for model '{}'.",
-            model_name
+            "No tokenizer files found for model '{model_name}'."
         ));
     }
 
@@ -134,8 +130,7 @@ pub async fn download_tokenizer_from_hf(model_id: impl AsRef<Path>) -> anyhow::R
 
     if !tokenizer_files_found {
         return Err(anyhow::anyhow!(
-            "No tokenizer files could be downloaded for model '{}'.",
-            model_name
+            "No tokenizer files could be downloaded for model '{model_name}'."
         ));
     }
 
@@ -148,8 +143,7 @@ pub async fn download_tokenizer_from_hf(model_id: impl AsRef<Path>) -> anyhow::R
             Ok(final_dir)
         }
         None => Err(anyhow::anyhow!(
-            "Invalid HF cache path for model '{}'",
-            model_name
+            "Invalid HF cache path for model '{model_name}'"
         )),
     }
 }
@@ -168,17 +162,14 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
         Ok(info) => info,
         Err(e) => {
             return Err(anyhow::anyhow!(
-                "Failed to fetch model '{}' from HuggingFace: {}. Is this a valid HuggingFace ID?",
-                model_name,
-                e
+                "Failed to fetch model '{model_name}' from HuggingFace: {e}. Is this a valid HuggingFace ID?"
             ));
         }
     };
 
     if info.siblings.is_empty() {
         return Err(anyhow::anyhow!(
-            "Model '{}' exists but contains no downloadable files.",
-            model_name
+            "Model '{model_name}' exists but contains no downloadable files."
         ));
     }
 
@@ -218,9 +209,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
             "valid"
         };
         return Err(anyhow::anyhow!(
-            "No {} files found for model '{}'.",
-            file_type,
-            model_name
+            "No {file_type} files found for model '{model_name}'."
         ));
     }
 

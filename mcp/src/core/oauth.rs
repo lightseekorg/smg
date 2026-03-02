@@ -10,7 +10,7 @@ use axum::{
     routing::get,
     Router,
 };
-use rmcp::transport::auth::OAuthState;
+use rmcp::transport::auth::{AuthClient, AuthorizationManager, OAuthState};
 use serde::Deserialize;
 use tokio::sync::{oneshot, Mutex};
 
@@ -20,7 +20,7 @@ use crate::error::{McpError, McpResult};
 #[derive(Debug, Deserialize)]
 struct CallbackParams {
     code: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     state: Option<String>,
 }
 
@@ -86,25 +86,22 @@ impl OAuthHelper {
     }
 
     /// Perform OAuth authentication flow
-    pub async fn authenticate(
-        &self,
-        scopes: &[&str],
-    ) -> McpResult<rmcp::transport::auth::AuthorizationManager> {
+    pub async fn authenticate(&self, scopes: &[&str]) -> McpResult<AuthorizationManager> {
         // Initialize OAuth state machine
         let mut oauth_state = OAuthState::new(&self.server_url, None)
             .await
-            .map_err(|e| McpError::Auth(format!("Failed to initialize OAuth: {}", e)))?;
+            .map_err(|e| McpError::Auth(format!("Failed to initialize OAuth: {e}")))?;
 
         oauth_state
             .start_authorization(scopes, &self.redirect_uri, None)
             .await
-            .map_err(|e| McpError::Auth(format!("Failed to start authorization: {}", e)))?;
+            .map_err(|e| McpError::Auth(format!("Failed to start authorization: {e}")))?;
 
         // Get authorization URL
         let auth_url = oauth_state
             .get_authorization_url()
             .await
-            .map_err(|e| McpError::Auth(format!("Failed to get authorization URL: {}", e)))?;
+            .map_err(|e| McpError::Auth(format!("Failed to get authorization URL: {e}")))?;
 
         tracing::info!("OAuth authorization URL: {}", auth_url);
 
@@ -115,7 +112,7 @@ impl OAuthHelper {
         oauth_state
             .handle_callback(&auth_code, "")
             .await
-            .map_err(|e| McpError::Auth(format!("Failed to handle OAuth callback: {}", e)))?;
+            .map_err(|e| McpError::Auth(format!("Failed to handle OAuth callback: {e}")))?;
 
         // Get authorization manager
         oauth_state
@@ -146,6 +143,10 @@ impl OAuthHelper {
             ))
         })?;
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "fire-and-forget OAuth callback server; runs until listener drops when auth flow completes"
+        )]
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
@@ -184,11 +185,11 @@ pub async fn create_oauth_client(
     redirect_uri: String,
     callback_port: u16,
     scopes: &[&str],
-) -> McpResult<rmcp::transport::auth::AuthClient<reqwest::Client>> {
+) -> McpResult<AuthClient<reqwest::Client>> {
     let helper = OAuthHelper::new(server_url, redirect_uri, callback_port);
     let auth_manager = helper.authenticate(scopes).await?;
 
-    let client = rmcp::transport::auth::AuthClient::new(reqwest::Client::default(), auth_manager);
+    let client = AuthClient::new(reqwest::Client::default(), auth_manager);
 
     Ok(client)
 }

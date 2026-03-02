@@ -216,7 +216,7 @@ The cache-aware policy optimizes for KV cache reuse:
 4. Otherwise, route to worker with most cache capacity
 5. Falls back to least-loaded when system is imbalanced
 
-This integrates with vLLM, SGLang, and TensorRT-LLM's native KV cache management.
+This integrates with SGLang, vLLM, and TensorRT-LLM's native KV cache management.
 
 ---
 

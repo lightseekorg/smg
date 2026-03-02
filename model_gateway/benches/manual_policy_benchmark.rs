@@ -1,3 +1,4 @@
+#![expect(clippy::unwrap_used, clippy::uninlined_format_args)]
 use std::{hint::black_box, sync::Arc, thread};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};

@@ -5,8 +5,7 @@ use openai_protocol::{
     common::{ToolCall, ToolChoice, ToolChoiceValue},
     responses::{
         ResponseContentPart, ResponseInput, ResponseInputOutputItem, ResponseOutputItem,
-        ResponseReasoningContent, ResponseTool, ResponseToolType, ResponsesRequest,
-        ResponsesResponse, StringOrContentParts,
+        ResponseReasoningContent, ResponsesRequest, ResponsesResponse, StringOrContentParts,
     },
 };
 use serde_json::{from_value, to_string, Value};
@@ -54,20 +53,6 @@ impl McpCallTracking {
     }
 }
 
-/// Build a HashSet of MCP tool names for O(1) lookup
-///
-/// Creates a HashSet containing the names of all MCP tools in the request,
-/// allowing for efficient O(1) lookups when partitioning tool calls.
-pub(super) fn build_mcp_tool_names_set(
-    request_tools: &[ResponseTool],
-) -> std::collections::HashSet<&str> {
-    request_tools
-        .iter()
-        .filter(|t| t.r#type == ResponseToolType::Mcp)
-        .filter_map(|t| t.function.as_ref().map(|f| f.name.as_str()))
-        .collect()
-}
-
 /// Build next request with tool results appended to history
 ///
 /// Constructs a new ResponsesRequest with:
@@ -80,7 +65,7 @@ pub(super) fn build_next_request_with_tools(
     tool_results: Vec<ToolResult>,
     analysis: Option<String>, // Analysis channel content (becomes reasoning content)
     partial_text: String,     // Final channel content (becomes message content)
-) -> Result<ResponsesRequest, Box<Response>> {
+) -> ResponsesRequest {
     // Get current input items (or empty vec if Text variant)
     let mut items = match request.input {
         ResponseInput::Items(items) => items,
@@ -96,12 +81,12 @@ pub(super) fn build_next_request_with_tools(
 
     // Build assistant response item with reasoning + content + tool calls
     // This represents what the model generated in this iteration
-    let assistant_id = format!("msg_{}", Uuid::new_v4());
+    let assistant_id = format!("msg_{}", Uuid::now_v7());
 
     // Add reasoning if present (from analysis channel)
     if let Some(analysis_text) = analysis {
         items.push(ResponseInputOutputItem::Reasoning {
-            id: format!("reasoning_{}", assistant_id),
+            id: format!("reasoning_{assistant_id}"),
             summary: vec![],
             content: vec![ResponseReasoningContent::ReasoningText {
                 text: analysis_text,
@@ -142,9 +127,8 @@ pub(super) fn build_next_request_with_tools(
     // Add tool results
     for tool_result in tool_results {
         // Serialize tool output to string
-        let output_str = to_string(&tool_result.output).unwrap_or_else(|e| {
-            format!("{{\"error\": \"Failed to serialize tool output: {}\"}}", e)
-        });
+        let output_str = to_string(&tool_result.output)
+            .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize tool output: {e}\"}}"));
 
         // Update the corresponding tool call with output and completed status
         // Find and update the matching FunctionToolCall
@@ -173,7 +157,7 @@ pub(super) fn build_next_request_with_tools(
     // After receiving tool results, the model should be free to decide whether to call more tools or finish
     request.tool_choice = Some(ToolChoice::Value(ToolChoiceValue::Auto));
 
-    Ok(request)
+    request
 }
 
 pub(super) fn inject_mcp_metadata(
@@ -219,10 +203,7 @@ pub(super) async fn load_previous_messages(
             );
             error::internal_error(
                 "load_previous_response_chain_failed",
-                format!(
-                    "Failed to load previous response chain for {}: {}",
-                    prev_id_str, e
-                ),
+                format!("Failed to load previous response chain for {prev_id_str}: {e}"),
             )
         })?;
 
@@ -247,7 +228,7 @@ pub(super) async fn load_previous_messages(
             .collect()
     };
 
-    for stored in chain.responses.iter() {
+    for stored in &chain.responses {
         history_items.extend(deserialize_items(&stored.input, "input"));
         history_items.extend(deserialize_items(&stored.output, "output"));
     }

@@ -3,12 +3,7 @@
 //! Provides SSE frame parsing, event formatting, stream wrappers,
 //! and the core stream consumption logic used by the streaming processor.
 
-use std::{
-    io,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use std::io;
 
 use axum::{
     body::Body,
@@ -16,18 +11,21 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use openai_protocol::messages::{ContentBlock, MessageDeltaUsage, StopReason, ToolUseBlock};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
 use super::mcp::{IterationResult, McpToolCall};
-use crate::core::Worker;
+use crate::routers::error::internal_error;
 
 // ============================================================================
 // Constants
 // ============================================================================
+
+/// Sentinel error string returned when the downstream SSE client disconnects.
+pub(crate) const CLIENT_DISCONNECTED_ERROR: &str = "Client disconnected";
 
 /// Maximum SSE buffer size (1 MB) to prevent DoS from upstream workers
 /// that send data without frame delimiters.
@@ -67,7 +65,7 @@ pub(crate) fn build_sse_response(
         .header(header::CACHE_CONTROL, "no-cache")
         .header(header::CONNECTION, "keep-alive");
 
-    for (key, value) in upstream_headers.iter() {
+    for (key, value) in &upstream_headers {
         let key_str = key.as_str();
         if !matches!(
             key_str,
@@ -83,97 +81,8 @@ pub(crate) fn build_sse_response(
 
     builder.body(body).unwrap_or_else(|e| {
         error!("Failed to build streaming response: {}", e);
-        crate::routers::error::internal_error("response_build_failed", "Failed to build response")
+        internal_error("response_build_failed", "Failed to build response")
     })
-}
-
-// ============================================================================
-// Load Tracking Stream Wrapper
-// ============================================================================
-
-/// Stream wrapper that tracks worker load and circuit breaker outcome.
-///
-/// Decrements worker load when the stream completes or is dropped, and records
-/// circuit breaker outcome based on whether the stream completed successfully.
-pub(crate) struct LoadTrackingStream<S> {
-    inner: Pin<Box<S>>,
-    /// Worker is wrapped in `Option` so `Drop` can `.take()` it exactly once.
-    /// It is always `Some` during the stream's lifetime.
-    worker: Option<Arc<dyn Worker>>,
-    completed_successfully: bool,
-    encountered_error: bool,
-    /// If true, always record failure regardless of stream completion
-    force_failure: bool,
-}
-
-impl<S> LoadTrackingStream<S> {
-    pub(crate) fn new(inner: S, worker: Arc<dyn Worker>) -> Self {
-        Self {
-            inner: Box::pin(inner),
-            worker: Some(worker),
-            completed_successfully: false,
-            encountered_error: false,
-            force_failure: false,
-        }
-    }
-
-    pub(crate) fn new_force_failure(inner: S, worker: Arc<dyn Worker>) -> Self {
-        Self {
-            inner: Box::pin(inner),
-            worker: Some(worker),
-            completed_successfully: false,
-            encountered_error: false,
-            force_failure: true,
-        }
-    }
-}
-
-impl<S> Stream for LoadTrackingStream<S>
-where
-    S: Stream<Item = Result<Bytes, reqwest::Error>>,
-{
-    type Item = Result<Bytes, io::Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.inner.as_mut().poll_next(cx) {
-            Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(bytes))),
-            Poll::Ready(Some(Err(e))) => {
-                self.encountered_error = true;
-                Poll::Ready(Some(Err(io::Error::other(e.to_string()))))
-            }
-            Poll::Ready(None) => {
-                self.completed_successfully = true;
-                Poll::Ready(None)
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl<S> Drop for LoadTrackingStream<S> {
-    fn drop(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            worker.decrement_load();
-
-            if self.force_failure {
-                worker.record_outcome(false);
-                debug!(
-                    completed = %self.completed_successfully,
-                    "LoadTrackingStream (force_failure) completed, recorded failure"
-                );
-            } else if self.completed_successfully && !self.encountered_error {
-                worker.record_outcome(true);
-                debug!("LoadTrackingStream completed successfully, recorded success");
-            } else {
-                worker.record_outcome(false);
-                debug!(
-                    completed = %self.completed_successfully,
-                    error = %self.encountered_error,
-                    "LoadTrackingStream interrupted or errored, recorded failure"
-                );
-            }
-        }
-    }
 }
 
 // ============================================================================
@@ -195,7 +104,7 @@ pub(crate) async fn send_event(
 /// Format a `MessageStreamEvent` as SSE bytes: `event: <type>\ndata: <json>\n\n`
 fn format_sse_event(event_type: &str, data: &Value) -> Bytes {
     let json = serde_json::to_string(data).unwrap_or_else(|_| "{}".to_string());
-    Bytes::from(format!("event: {}\ndata: {}\n\n", event_type, json))
+    Bytes::from(format!("event: {event_type}\ndata: {json}\n\n"))
 }
 
 /// Send an SSE error event.
@@ -307,38 +216,47 @@ where
     F: Fn(&str) -> String,
 {
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer = Vec::<u8>::new();
     let mut processor =
         EventProcessor::new(tx, global_index, is_first_iteration, resolve_server_name);
 
     while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
-        let text = String::from_utf8_lossy(&chunk);
-        buffer.push_str(&text);
+        let chunk = chunk_result.map_err(|e| format!("Stream read error: {e}"))?;
 
-        // Guard against unbounded buffer growth (DoS protection)
-        if buffer.len() > MAX_SSE_BUFFER_SIZE {
+        // Guard against unbounded buffer growth (DoS protection).
+        // Check *before* extending so a single oversized chunk never
+        // causes an allocation beyond the cap.
+        if buffer.len() + chunk.len() > MAX_SSE_BUFFER_SIZE {
             return Err(format!(
-                "SSE buffer exceeded maximum size ({} bytes) — possible malformed upstream stream",
-                MAX_SSE_BUFFER_SIZE
+                "SSE buffer exceeded maximum size ({MAX_SSE_BUFFER_SIZE} bytes) — possible malformed upstream stream"
             ));
         }
 
-        // Process complete SSE frames (delimited by double newline)
-        while let Some(frame_end) = buffer.find("\n\n") {
-            let frame: String = buffer.drain(..frame_end + 2).collect();
-            let frame = &frame[..frame.len() - 2]; // strip trailing \n\n
+        buffer.extend_from_slice(&chunk);
 
+        // Process complete SSE frames (delimited by double newline).
+        // UTF-8 validation is deferred to complete frames so that multi-byte
+        // characters split across network chunks don't cause spurious errors.
+        while let Some(pos) = find_double_newline(&buffer) {
+            let frame_bytes = &buffer[..pos];
+            let frame = std::str::from_utf8(frame_bytes)
+                .map_err(|e| format!("Invalid UTF-8 in SSE frame: {e}"))?;
             if let Some((event_type, data)) = parse_sse_frame(frame) {
                 processor.process(&event_type, &data).await?;
             }
+            buffer.drain(..pos + 2);
         }
     }
 
     // Process any remaining data in buffer
-    if !buffer.trim().is_empty() {
-        if let Some((event_type, data)) = parse_sse_frame(&buffer) {
-            processor.process(&event_type, &data).await?;
+    if !buffer.is_empty() {
+        let remaining = std::str::from_utf8(&buffer)
+            .map_err(|e| format!("Invalid UTF-8 in final SSE data: {e}"))?;
+        let trimmed = remaining.trim();
+        if !trimmed.is_empty() {
+            if let Some((event_type, data)) = parse_sse_frame(trimmed) {
+                processor.process(&event_type, &data).await?;
+            }
         }
     }
 
@@ -363,18 +281,29 @@ enum BlockAccumulator {
         thinking: String,
         signature: String,
     },
+    /// Passthrough for block types that don't need delta accumulation
+    /// (e.g. server_tool_use, tool_search_tool_result, tool_reference).
+    /// Stores the raw `content_block` JSON from content_block_start.
+    Passthrough {
+        content_block: Value,
+    },
 }
 
 impl BlockAccumulator {
-    /// Create a new accumulator for the given content block type.
-    fn for_type(block_type: &str) -> Self {
+    /// Create a new accumulator for the given content block type and
+    /// optional raw `content_block` JSON from `content_block_start`.
+    fn for_type(block_type: &str, content_block: Option<Value>) -> Self {
         match block_type {
             "thinking" => Self::Thinking {
                 thinking: String::new(),
                 signature: String::new(),
             },
-            _ => Self::Text {
+            "text" => Self::Text {
                 text: String::new(),
+            },
+            // Block types that are forwarded as-is without delta accumulation
+            _ => Self::Passthrough {
+                content_block: content_block.unwrap_or(Value::Null),
             },
         }
     }
@@ -467,6 +396,26 @@ impl BlockAccumulator {
                 },
                 None,
             ),
+            Self::Passthrough { content_block } => {
+                // Deserialize the raw content_block JSON into a ContentBlock.
+                // Falls back to empty text if deserialization fails.
+                match serde_json::from_value::<ContentBlock>(content_block.clone()) {
+                    Ok(block) => (block, None),
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "Failed to deserialize passthrough content block, using empty text"
+                        );
+                        (
+                            ContentBlock::Text {
+                                text: String::new(),
+                                citations: None,
+                            },
+                            None,
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -526,31 +475,40 @@ where
         }
     }
 
+    /// Send an SSE event to the client, returning `Err` on disconnect.
+    async fn send(&self, event_type: &str, data: &Value) -> Result<(), String> {
+        if !send_event(self.tx, event_type, data).await {
+            return Err(CLIENT_DISCONNECTED_ERROR.into());
+        }
+        Ok(())
+    }
+
     /// Process a single SSE event from the upstream worker.
     async fn process(&mut self, event_type: &str, data: &str) -> Result<(), String> {
         let mut parsed: Value =
-            serde_json::from_str(data).map_err(|e| format!("Failed to parse SSE data: {}", e))?;
+            serde_json::from_str(data).map_err(|e| format!("Failed to parse SSE data: {e}"))?;
 
         match event_type {
             "message_start" => {
                 if self.is_first_iteration {
-                    send_event(self.tx, "message_start", &parsed).await;
+                    self.send("message_start", &parsed).await?;
                 }
             }
             "content_block_start" => self.handle_block_start(&mut parsed).await?,
-            "content_block_delta" => self.handle_block_delta(&mut parsed).await,
-            "content_block_stop" => self.handle_block_stop(&parsed).await,
+            "content_block_delta" => self.handle_block_delta(&mut parsed).await?,
+            "content_block_stop" => self.handle_block_stop(&parsed).await?,
             "message_delta" => self.handle_message_delta(&parsed),
             "message_stop" => { /* Don't forward — we emit our own at the end */ }
             "ping" => {
-                send_event(self.tx, "ping", &serde_json::json!({"type": "ping"})).await;
+                self.send("ping", &serde_json::json!({"type": "ping"}))
+                    .await?;
             }
             "error" => {
-                send_event(self.tx, "error", &parsed).await;
+                self.send("error", &parsed).await?;
             }
             _ => {
                 debug!(event_type = %event_type, "Forwarding unknown SSE event type");
-                send_event(self.tx, event_type, &parsed).await;
+                self.send(event_type, &parsed).await?;
             }
         }
 
@@ -564,8 +522,7 @@ where
 
         if upstream_index > MAX_UPSTREAM_BLOCK_INDEX {
             return Err(format!(
-                "Upstream content block index {} exceeds maximum ({})",
-                upstream_index, MAX_UPSTREAM_BLOCK_INDEX
+                "Upstream content block index {upstream_index} exceeds maximum ({MAX_UPSTREAM_BLOCK_INDEX})"
             ));
         }
 
@@ -585,12 +542,14 @@ where
         if block_type == "tool_use" {
             let content_block = parsed.get("content_block").cloned().unwrap_or(Value::Null);
             self.emit_mcp_tool_use_start(&content_block, upstream_index, client_index)
-                .await;
+                .await?;
         } else {
             // Initialize accumulator before mutating parsed (block_type borrows parsed)
-            self.upstream_blocks[upstream_index as usize] = BlockAccumulator::for_type(block_type);
+            let raw_block = parsed.get("content_block").cloned();
+            self.upstream_blocks[upstream_index as usize] =
+                BlockAccumulator::for_type(block_type, raw_block);
             parsed["index"] = Value::from(client_index);
-            send_event(self.tx, "content_block_start", parsed).await;
+            self.send("content_block_start", parsed).await?;
         }
 
         Ok(())
@@ -602,7 +561,7 @@ where
         content_block: &Value,
         upstream_index: u32,
         client_index: u32,
-    ) {
+    ) -> Result<(), String> {
         let id = content_block
             .get("id")
             .and_then(|v| v.as_str())
@@ -627,18 +586,19 @@ where
                 "input": {}
             }
         });
-        send_event(self.tx, "content_block_start", &event).await;
+        self.send("content_block_start", &event).await?;
 
         self.upstream_blocks[upstream_index as usize] = BlockAccumulator::ToolUse {
             id,
             name,
             input_json: String::new(),
         };
+        Ok(())
     }
 
     /// Handle a `content_block_delta` event: accumulate content and forward
     /// with remapped index.
-    async fn handle_block_delta(&mut self, parsed: &mut Value) {
+    async fn handle_block_delta(&mut self, parsed: &mut Value) -> Result<(), String> {
         let upstream_index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let client_index = self.index_base + upstream_index;
 
@@ -650,12 +610,12 @@ where
         }
 
         parsed["index"] = Value::from(client_index);
-        send_event(self.tx, "content_block_delta", parsed).await;
+        self.send("content_block_delta", parsed).await
     }
 
     /// Handle a `content_block_stop` event: finalize the accumulated block
     /// and update the global index.
-    async fn handle_block_stop(&mut self, parsed: &Value) {
+    async fn handle_block_stop(&mut self, parsed: &Value) -> Result<(), String> {
         let upstream_index = parsed.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let client_index = self.index_base + upstream_index;
 
@@ -663,7 +623,7 @@ where
             "type": "content_block_stop",
             "index": client_index
         });
-        send_event(self.tx, "content_block_stop", &event).await;
+        self.send("content_block_stop", &event).await?;
 
         if let Some(block) = self.upstream_blocks.get(upstream_index as usize) {
             let (content_block, tool_use) = block.finalize();
@@ -674,6 +634,7 @@ where
         }
 
         *self.global_index = (*self.global_index).max(client_index + 1);
+        Ok(())
     }
 
     /// Handle a `message_delta` event: capture stop_reason and usage
@@ -694,6 +655,11 @@ where
 // ============================================================================
 // SSE frame parsing
 // ============================================================================
+
+/// Find the position of `\n\n` in a byte buffer.
+fn find_double_newline(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\n\n")
+}
 
 /// Parse a raw SSE frame into `(event_type, data)`.
 ///

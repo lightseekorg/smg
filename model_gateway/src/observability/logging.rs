@@ -43,7 +43,6 @@ impl Default for LoggingConfig {
 }
 
 /// Guard that keeps the file appender thread alive.
-#[allow(dead_code)]
 pub struct LogGuard {
     _file_guard: Option<WorkerGuard>,
 }
@@ -123,7 +122,11 @@ pub fn init_logging(config: LoggingConfig, otel_layer_config: Option<TraceConfig
 
         if !log_dir.exists() {
             if let Err(e) = std::fs::create_dir_all(&log_dir) {
-                eprintln!("Failed to create log directory: {}", e);
+                // Logger is not yet initialized; stderr is the only output channel
+                #[expect(clippy::print_stderr)]
+                {
+                    eprintln!("Failed to create log directory: {e}");
+                }
                 return LogGuard { _file_guard: None };
             }
         }
@@ -157,7 +160,11 @@ pub fn init_logging(config: LoggingConfig, otel_layer_config: Option<TraceConfig
                     layers.push(otel_layer);
                 }
                 Err(e) => {
-                    eprintln!("Failed to initialize OpenTelemetry: {}", e);
+                    // Logger may not be fully initialized yet; use stderr as fallback
+                    #[expect(clippy::print_stderr)]
+                    {
+                        eprintln!("Failed to initialize OpenTelemetry: {e}");
+                    }
                 }
             }
         }

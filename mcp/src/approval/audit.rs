@@ -62,7 +62,7 @@ impl AuditEntry {
         source: DecisionSource,
     ) -> Self {
         Self {
-            id: Arc::from(uuid::Uuid::new_v4().to_string()),
+            id: Arc::from(uuid::Uuid::now_v7().to_string()),
             timestamp: Utc::now(),
             tenant_id,
             request_id,
@@ -196,9 +196,9 @@ mod tests {
 
         for i in 0..10 {
             log.record_decision(
-                &QualifiedToolName::new("server", format!("tool-{}", i)),
+                &QualifiedToolName::new("server", format!("tool-{i}")),
                 &tenant,
-                &format!("req-{}", i),
+                &format!("req-{i}"),
                 DecisionResult::Approved,
                 DecisionSource::PolicyEngine,
             );

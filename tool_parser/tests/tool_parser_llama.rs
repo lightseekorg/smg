@@ -253,11 +253,11 @@ async fn test_llama_streaming_partial() {
 
     // Stream in chunks
     let chunks = vec![
-        r#"<|python"#,
+        r"<|python",
         r#"_tag|>{"name": "#,
         r#""calculate", "#,
         r#""parameters": {"x": 10}"#,
-        r#"}"#,
+        r"}",
     ];
 
     let mut got_complete = false;
@@ -312,8 +312,8 @@ async fn test_llama_streaming_with_text_before() {
     let mut parser = LlamaParser::new();
 
     let chunks = vec![
-        r#"Let me help you. "#,
-        r#"<|python_tag|>"#,
+        r"Let me help you. ",
+        r"<|python_tag|>",
         r#"{"name": "get_time","#,
         r#" "parameters": {"#,
         r#""timezone": "UTC"}}"#,

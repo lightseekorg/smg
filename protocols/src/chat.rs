@@ -23,7 +23,7 @@ use crate::{
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "role")]
 pub enum ChatMessage {
     #[serde(rename = "system")]
@@ -59,7 +59,7 @@ pub enum ChatMessage {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum MessageContent {
     Text(String),
@@ -98,11 +98,11 @@ impl MessageContent {
     pub fn append_text_to(&self, buffer: &mut String) -> bool {
         match self {
             MessageContent::Text(text) => {
-                if !text.is_empty() {
+                if text.is_empty() {
+                    false
+                } else {
                     buffer.push_str(text);
                     true
-                } else {
-                    false
                 }
             }
             MessageContent::Parts(parts) => {
@@ -140,7 +140,7 @@ impl MessageContent {
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize, Default, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, Validate, schemars::JsonSchema)]
 #[validate(schema(function = "validate_chat_cross_parameters"))]
 pub struct ChatCompletionRequest {
     /// A list of messages comprising the conversation so far
@@ -329,7 +329,7 @@ fn validate_messages(messages: &[ChatMessage]) -> Result<(), validator::Validati
         return Err(validator::ValidationError::new("messages cannot be empty"));
     }
 
-    for msg in messages.iter() {
+    for msg in messages {
         if let ChatMessage::User { content, .. } = msg {
             match content {
                 MessageContent::Text(text) if text.is_empty() => {
@@ -434,9 +434,7 @@ fn validate_chat_cross_parameters(
         }
 
         // Additional validation when tools are present
-        if has_tools {
-            let tools = req.tools.as_ref().unwrap();
-
+        if let Some(tools) = req.tools.as_ref().filter(|t| !t.is_empty()) {
             match tool_choice {
                 ToolChoice::Function { function, .. } => {
                     // Validate that the specified function name exists in tools
@@ -466,8 +464,7 @@ fn validate_chat_cross_parameters(
                     if mode != "auto" && mode != "required" {
                         let mut e = validator::ValidationError::new("tool_choice_invalid_mode");
                         e.message = Some(format!(
-                            "Invalid value for 'tool_choice.mode': must be 'auto' or 'required', got '{}'.",
-                            mode
+                            "Invalid value for 'tool_choice.mode': must be 'auto' or 'required', got '{mode}'."
                         ).into());
                         return Err(e);
                     }
@@ -487,8 +484,7 @@ fn validate_chat_cross_parameters(
                                     );
                                     e.message = Some(
                                         format!(
-                                            "Invalid value for 'tool_choice.tools': tool '{}' not found in 'tools'.",
-                                            name
+                                            "Invalid value for 'tool_choice.tools': tool '{name}' not found in 'tools'."
                                         )
                                         .into(),
                                     );
@@ -512,7 +508,7 @@ fn validate_chat_cross_parameters(
                         }
                     }
                 }
-                _ => {}
+                ToolChoice::Value(_) => {}
             }
         }
     }
@@ -531,14 +527,14 @@ impl Normalizable for ChatCompletionRequest {
     /// 3. Apply OpenAI defaults for tool_choice
     fn normalize(&mut self) {
         // Migrate deprecated max_tokens → max_completion_tokens
-        #[allow(deprecated)]
+        #[expect(deprecated)]
         if self.max_completion_tokens.is_none() && self.max_tokens.is_some() {
             self.max_completion_tokens = self.max_tokens;
             self.max_tokens = None; // Clear deprecated field
         }
 
         // Migrate deprecated functions → tools
-        #[allow(deprecated)]
+        #[expect(deprecated)]
         if self.tools.is_none() && self.functions.is_some() {
             tracing::warn!("functions is deprecated, use tools instead");
             self.tools = self.functions.as_ref().map(|functions| {
@@ -554,7 +550,7 @@ impl Normalizable for ChatCompletionRequest {
         }
 
         // Migrate deprecated function_call → tool_choice
-        #[allow(deprecated)]
+        #[expect(deprecated)]
         if self.tool_choice.is_none() && self.function_call.is_some() {
             tracing::warn!("function_call is deprecated, use tool_choice instead");
             self.tool_choice = self.function_call.as_ref().map(|fc| match fc {
@@ -571,10 +567,10 @@ impl Normalizable for ChatCompletionRequest {
         // Apply tool_choice defaults
         if self.tool_choice.is_none() {
             if let Some(tools) = &self.tools {
-                let choice_value = if !tools.is_empty() {
-                    ToolChoiceValue::Auto
-                } else {
+                let choice_value = if tools.is_empty() {
                     ToolChoiceValue::None
+                } else {
+                    ToolChoiceValue::Auto
                 };
                 self.tool_choice = Some(ToolChoice::Value(choice_value));
             }
@@ -661,7 +657,7 @@ impl GenerationRequest for ChatCompletionRequest {
 // ============================================================================
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatCompletionResponse {
     pub id: String,
     pub object: String, // "chat.completion"
@@ -683,7 +679,7 @@ impl ChatCompletionResponse {
 }
 
 /// Response message structure for ChatCompletionResponse (different from request ChatMessage)
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatCompletionMessage {
     pub role: String, // Always "assistant" for responses
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -695,7 +691,7 @@ pub struct ChatCompletionMessage {
     // Note: refusal, annotations, audio are not added yet
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatChoice {
     pub index: u32,
     pub message: ChatCompletionMessage,
@@ -711,7 +707,7 @@ pub struct ChatChoice {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatCompletionStreamResponse {
     pub id: String,
     pub object: String, // "chat.completion.chunk"
@@ -733,7 +729,7 @@ impl ChatCompletionStreamResponse {
 }
 
 /// Delta structure for streaming chat completion responses
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatMessageDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
@@ -744,7 +740,7 @@ pub struct ChatMessageDelta {
     pub reasoning_content: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChatStreamChoice {
     pub index: u32,
     pub delta: ChatMessageDelta,

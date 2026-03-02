@@ -11,6 +11,7 @@ import json
 import logging
 
 import pytest
+from conftest import smg_compare
 from infra import is_trtllm
 
 logger = logging.getLogger(__name__)
@@ -29,27 +30,67 @@ class TestChatCompletion:
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
-    def test_chat_completion(self, setup_backend, logprobs, parallel_sample_num):
+    def test_chat_completion(self, setup_backend, smg, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
         if is_trtllm() and parallel_sample_num > 1:
             pytest.skip("TRT-LLM does not support n>1 with greedy decoding")
         _, model, client, gateway = setup_backend
         self._run_chat_completion(client, model, logprobs, parallel_sample_num)
 
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {
+                        "role": "user",
+                        "content": "What is the capital of France? Answer in a few words.",
+                    },
+                ],
+                temperature=0,
+                logprobs=logprobs is not None and logprobs > 0,
+                top_logprobs=logprobs,
+                n=parallel_sample_num,
+            )
+            assert len(smg_resp.choices) == parallel_sample_num
+            assert smg_resp.choices[0].message.role == "assistant"
+            assert isinstance(smg_resp.choices[0].message.content, str)
+
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
-    def test_chat_completion_stream(self, setup_backend, logprobs, parallel_sample_num):
+    def test_chat_completion_stream(self, setup_backend, smg, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
         if is_trtllm() and parallel_sample_num > 1:
             pytest.skip("TRT-LLM does not support n>1 with greedy decoding")
         _, model, client, gateway = setup_backend
         self._run_chat_completion_stream(client, model, logprobs, parallel_sample_num)
 
+        # SmgClient streaming comparison
+        with smg_compare():
+            content_pieces = []
+            with smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {"role": "user", "content": "What is the capital of France?"},
+                ],
+                temperature=0,
+                logprobs=logprobs is not None and logprobs > 0,
+                top_logprobs=logprobs,
+                n=parallel_sample_num,
+                stream=True,
+            ) as stream:
+                for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        content_pieces.append(chunk.choices[0].delta.content)
+            assert len(content_pieces) > 0, "SmgClient stream should produce content"
+
     @pytest.mark.skip_for_runtime(
         "trtllm",
         reason="TRT-LLM gRPC bug: uses 'guided_decoding_params' instead of 'guided_decoding'",
     )
-    def test_regex(self, setup_backend):
+    def test_regex(self, setup_backend, smg):
         """Test structured output with regex constraint."""
         _, model, client, gateway = setup_backend
 
@@ -76,7 +117,24 @@ class TestChatCompletion:
         assert isinstance(js_obj["name"], str)
         assert isinstance(js_obj["population"], int)
 
-    def test_penalty(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {"role": "user", "content": "Introduce the capital of France."},
+                ],
+                temperature=0,
+                max_tokens=128,
+                extra_body={"regex": regex},
+            )
+            smg_text = smg_resp.choices[0].message.content
+            smg_obj = json.loads(smg_text)
+            assert isinstance(smg_obj["name"], str)
+            assert isinstance(smg_obj["population"], int)
+
+    def test_penalty(self, setup_backend, smg):
         """Test frequency penalty parameter."""
         _, model, client, gateway = setup_backend
 
@@ -93,7 +151,21 @@ class TestChatCompletion:
         text = response.choices[0].message.content
         assert isinstance(text, str)
 
-    def test_response_prefill(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {"role": "user", "content": "Introduce the capital of France."},
+                ],
+                temperature=0,
+                max_tokens=32,
+                frequency_penalty=1.0,
+            )
+            assert isinstance(smg_resp.choices[0].message.content, str)
+
+    def test_response_prefill(self, setup_backend, smg):
         """Test assistant message prefill with continue_final_message."""
         _, model, client, gateway = setup_backend
 
@@ -125,7 +197,38 @@ convenient hands-free control to your smart devices.
 
         assert response.choices[0].message.content.strip().startswith('"name": "SmartHome Mini",')
 
-    def test_streaming_token_count_matches_chunks(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {
+                        "role": "user",
+                        "content": """
+Extract the name, size, price, and color from this product description as a JSON object:
+
+<description>
+The SmartHome Mini is a compact smart home assistant available in black or white for only $49.99.
+At just 5 inches wide, it lets you control lights, thermostats, and other connected devices via
+voice or app—no matter where you place it in your home. This affordable little hub brings
+convenient hands-free control to your smart devices.
+</description>
+""",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "{\n",
+                    },
+                ],
+                temperature=0,
+                extra_body={"continue_final_message": True},
+            )
+            assert (
+                smg_resp.choices[0].message.content.strip().startswith('"name": "SmartHome Mini",')
+            )
+
+    def test_streaming_token_count_matches_chunks(self, setup_backend, smg):
         """Test that streaming completion_tokens matches the number of content chunks.
 
         This verifies that the usage.completion_tokens reported at the end of a
@@ -180,15 +283,44 @@ convenient hands-free control to your smart devices.
             f"content chunk count ({content_chunk_count})"
         )
 
-    def test_model_list(self, setup_backend):
+        # SmgClient streaming comparison
+        with smg_compare():
+            smg_content_count = 0
+            smg_usage_tokens = None
+            with smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant"},
+                    {"role": "user", "content": "What is the capital of France?"},
+                ],
+                temperature=0,
+                max_tokens=50,
+                stream=True,
+                stream_options={"include_usage": True},
+            ) as stream:
+                for chunk in stream:
+                    if chunk.usage is not None:
+                        smg_usage_tokens = chunk.usage.completion_tokens
+                        continue
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        smg_content_count += 1
+            assert smg_usage_tokens is not None, "SmgClient: no usage chunk received"
+            assert smg_content_count > 0, "SmgClient: no content chunks"
+
+    def test_model_list(self, setup_backend, smg):
         """Test listing available models."""
         _, model, client, gateway = setup_backend
 
         models = list(client.models.list().data)
         assert len(models) == 1
 
+        # SmgClient comparison
+        with smg_compare():
+            smg_models = smg.models.list()
+            assert len(smg_models.data) == 1
+
     @pytest.mark.skip(reason="Skipping retrieve model test as it is not supported by the router")
-    def test_retrieve_model(self, setup_backend):
+    def test_retrieve_model(self, setup_backend, smg):
         """Test retrieving a specific model."""
         import openai
 
@@ -201,7 +333,7 @@ convenient hands-free control to your smart devices.
         with pytest.raises(openai.NotFoundError):
             client.models.retrieve("non-existent-model")
 
-    def test_stop_sequences(self, setup_backend):
+    def test_stop_sequences(self, setup_backend, smg):
         """Test that stop sequences cause the model to stop generating."""
         _, model, client, gateway = setup_backend
 
@@ -219,7 +351,27 @@ convenient hands-free control to your smart devices.
         content = response.choices[0].message.content
         assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
 
-    def test_stop_sequences_stream(self, setup_backend):
+        # SmgClient comparison
+        with smg_compare():
+            smg_resp = smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
+                    },
+                ],
+                temperature=0,
+                max_tokens=50,
+                stop=[","],
+            )
+            assert smg_resp.choices[0].finish_reason == "stop"
+            smg_content = smg_resp.choices[0].message.content
+            assert "," not in smg_content, (
+                f"SmgClient: stop sequence ',' should not appear: {smg_content}"
+            )
+
+    def test_stop_sequences_stream(self, setup_backend, smg):
         """Test that stop sequences work in streaming mode."""
         _, model, client, gateway = setup_backend
 
@@ -250,6 +402,35 @@ convenient hands-free control to your smart devices.
             c.choices[0].delta.content for c in chunks if c.choices and c.choices[0].delta.content
         )
         assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
+
+        # SmgClient streaming comparison
+        with smg_compare():
+            with smg.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10",
+                    },
+                ],
+                temperature=0,
+                max_tokens=50,
+                stop=[","],
+                stream=True,
+            ) as stream:
+                smg_chunks = list(stream)
+            smg_finish = [
+                c.choices[0].finish_reason
+                for c in smg_chunks
+                if c.choices and c.choices[0].finish_reason
+            ]
+            assert "stop" in smg_finish
+            smg_text = "".join(
+                c.choices[0].delta.content
+                for c in smg_chunks
+                if c.choices and c.choices[0].delta.content
+            )
+            assert "," not in smg_text
 
     # -------------------------------------------------------------------------
     # Helper methods
@@ -379,24 +560,24 @@ class TestChatCompletionGptOss(TestChatCompletion):
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
-    def test_chat_completion(self, setup_backend, logprobs, parallel_sample_num):
+    def test_chat_completion(self, setup_backend, smg, logprobs, parallel_sample_num):
         """Test non-streaming chat completion with logprobs and parallel sampling."""
-        super().test_chat_completion(setup_backend, logprobs, parallel_sample_num)
+        super().test_chat_completion(setup_backend, smg, logprobs, parallel_sample_num)
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
-    def test_chat_completion_stream(self, setup_backend, logprobs, parallel_sample_num):
+    def test_chat_completion_stream(self, setup_backend, smg, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
-        super().test_chat_completion_stream(setup_backend, logprobs, parallel_sample_num)
+        super().test_chat_completion_stream(setup_backend, smg, logprobs, parallel_sample_num)
 
     @pytest.mark.skip(reason="OSS models don't support regex constraints")
-    def test_regex(self, setup_backend):
+    def test_regex(self, setup_backend, smg):
         pass
 
     @pytest.mark.skip(reason="OSS models don't support frequency_penalty")
-    def test_penalty(self, setup_backend):
+    def test_penalty(self, setup_backend, smg):
         pass
 
     @pytest.mark.skip(reason="OSS models don't support continue_final_message")
-    def test_response_prefill(self, setup_backend):
+    def test_response_prefill(self, setup_backend, smg):
         pass

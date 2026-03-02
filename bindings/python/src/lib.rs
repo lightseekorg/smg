@@ -6,7 +6,7 @@ use smg::*;
 use smg_auth as auth;
 
 // Define the enums with PyO3 bindings
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug)]
 pub enum PolicyType {
     Random,
@@ -19,7 +19,7 @@ pub enum PolicyType {
     PrefixHash,
 }
 
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug)]
 pub enum BackendType {
     Sglang,
@@ -27,7 +27,7 @@ pub enum BackendType {
     Anthropic,
 }
 
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug)]
 pub enum HistoryBackendType {
     Memory,
@@ -37,7 +37,7 @@ pub enum HistoryBackendType {
     Redis,
 }
 
-#[pyclass(eq)]
+#[pyclass(eq, from_py_object)]
 #[derive(Clone, PartialEq, Debug, Default)]
 pub enum PyRole {
     Admin,
@@ -54,7 +54,7 @@ impl PyRole {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyApiKeyEntry {
     #[pyo3(get, set)]
@@ -87,7 +87,7 @@ impl PyApiKeyEntry {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyJwtConfig {
     #[pyo3(get, set)]
@@ -146,7 +146,7 @@ impl PyJwtConfig {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PyControlPlaneAuthConfig {
     #[pyo3(get, set)]
@@ -188,7 +188,7 @@ impl PyControlPlaneAuthConfig {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, PartialEq)]
 pub struct PyOracleConfig {
     #[pyo3(get, set)]
@@ -226,7 +226,7 @@ impl std::fmt::Debug for PyOracleConfig {
 
 #[pymethods]
 impl PyOracleConfig {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[new]
     #[pyo3(signature = (
         password = None,
@@ -283,11 +283,12 @@ impl PyOracleConfig {
             pool_min: self.pool_min,
             pool_max: self.pool_max,
             pool_timeout_secs: self.pool_timeout_secs,
+            schema: None,
         }
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PyRedisConfig {
     #[pyo3(get, set)]
@@ -302,6 +303,10 @@ pub struct PyRedisConfig {
 impl PyRedisConfig {
     #[new]
     #[pyo3(signature = (url, pool_max = 16, retention_days = Some(30)))]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "PyO3 #[new] method signature requires PyResult"
+    )]
     fn new(url: String, pool_max: usize, retention_days: Option<u64>) -> PyResult<Self> {
         Ok(PyRedisConfig {
             url,
@@ -317,11 +322,12 @@ impl PyRedisConfig {
             url: self.url.clone(),
             pool_max: self.pool_max,
             retention_days: self.retention_days,
+            schema: None,
         }
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PyPostgresConfig {
     #[pyo3(get, set)]
@@ -335,6 +341,10 @@ pub struct PyPostgresConfig {
 impl PyPostgresConfig {
     #[new]
     #[pyo3(signature = (db_url = None,pool_max = 16,))]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "PyO3 #[new] method signature requires PyResult"
+    )]
     fn new(db_url: Option<String>, pool_max: usize) -> PyResult<Self> {
         Ok(PyPostgresConfig { db_url, pool_max })
     }
@@ -345,11 +355,12 @@ impl PyPostgresConfig {
         config::PostgresConfig {
             db_url: self.db_url.clone().unwrap_or_default(),
             pool_max: self.pool_max,
+            schema: None,
         }
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone, PartialEq)]
 struct Router {
     host: String,
@@ -358,6 +369,7 @@ struct Router {
     policy: PolicyType,
     worker_startup_timeout_secs: u64,
     worker_startup_check_interval: u64,
+    load_monitor_interval: u64,
     cache_threshold: f32,
     balance_abs_threshold: usize,
     balance_rel_threshold: f32,
@@ -424,6 +436,7 @@ struct Router {
     reasoning_parser: Option<String>,
     tool_call_parser: Option<String>,
     mcp_config_path: Option<String>,
+    storage_hook_wasm_path: Option<String>,
     backend: BackendType,
     history_backend: HistoryBackendType,
     oracle_config: Option<PyOracleConfig>,
@@ -602,6 +615,7 @@ impl Router {
             .request_timeout_secs(self.request_timeout_secs)
             .worker_startup_timeout_secs(self.worker_startup_timeout_secs)
             .worker_startup_check_interval_secs(self.worker_startup_check_interval)
+            .load_monitor_interval_secs(self.load_monitor_interval)
             .max_concurrent_requests(self.max_concurrent_requests)
             .queue_size(self.queue_size)
             .queue_timeout_secs(self.queue_timeout_secs)
@@ -651,6 +665,7 @@ impl Router {
             .maybe_reasoning_parser(self.reasoning_parser.as_ref())
             .maybe_tool_call_parser(self.tool_call_parser.as_ref())
             .maybe_mcp_config_path(self.mcp_config_path.as_ref())
+            .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
             .dp_aware(self.dp_aware)
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
@@ -678,6 +693,7 @@ impl Router {
         port = 3001,
         worker_startup_timeout_secs = 600,
         worker_startup_check_interval = 30,
+        load_monitor_interval = 10,
         cache_threshold = 0.3,
         balance_abs_threshold = 64,
         balance_rel_threshold = 1.5,
@@ -743,6 +759,7 @@ impl Router {
         reasoning_parser = None,
         tool_call_parser = None,
         mcp_config_path = None,
+        storage_hook_wasm_path = None,
         backend = BackendType::Sglang,
         history_backend = HistoryBackendType::Memory,
         oracle_config = None,
@@ -757,7 +774,11 @@ impl Router {
         otlp_traces_endpoint = String::from("localhost:4317"),
         control_plane_auth = None,
     ))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "PyO3 #[new] method signature requires PyResult"
+    )]
     fn new(
         worker_urls: Vec<String>,
         policy: PolicyType,
@@ -765,6 +786,7 @@ impl Router {
         port: u16,
         worker_startup_timeout_secs: u64,
         worker_startup_check_interval: u64,
+        load_monitor_interval: u64,
         cache_threshold: f32,
         balance_abs_threshold: usize,
         balance_rel_threshold: f32,
@@ -830,6 +852,7 @@ impl Router {
         reasoning_parser: Option<String>,
         tool_call_parser: Option<String>,
         mcp_config_path: Option<String>,
+        storage_hook_wasm_path: Option<String>,
         backend: BackendType,
         history_backend: HistoryBackendType,
         oracle_config: Option<PyOracleConfig>,
@@ -865,6 +888,7 @@ impl Router {
             policy,
             worker_startup_timeout_secs,
             worker_startup_check_interval,
+            load_monitor_interval,
             cache_threshold,
             balance_abs_threshold,
             balance_rel_threshold,
@@ -931,6 +955,7 @@ impl Router {
             reasoning_parser,
             tool_call_parser,
             mcp_config_path,
+            storage_hook_wasm_path,
             backend,
             history_backend,
             oracle_config,
@@ -951,14 +976,11 @@ impl Router {
         use observability::metrics::PrometheusConfig;
 
         let router_config = self.to_router_config().map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Configuration error: {}", e))
+            pyo3::exceptions::PyValueError::new_err(format!("Configuration error: {e}"))
         })?;
 
         router_config.validate().map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "Configuration validation failed: {}",
-                e
-            ))
+            pyo3::exceptions::PyValueError::new_err(format!("Configuration validation failed: {e}"))
         })?;
 
         let service_discovery_config = if self.service_discovery {

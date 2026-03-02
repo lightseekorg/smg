@@ -14,7 +14,7 @@ fn test_chat_message_tagged_by_role_system() {
             assert_eq!(
                 content,
                 MessageContent::Text("You are a helpful assistant".to_string())
-            )
+            );
         }
         _ => panic!("Expected System variant"),
     }
@@ -31,7 +31,7 @@ fn test_chat_message_tagged_by_role_user() {
     match msg {
         ChatMessage::User { content, .. } => match content {
             MessageContent::Text(text) => assert_eq!(text, "Hello"),
-            _ => panic!("Expected text content"),
+            MessageContent::Parts(_) => panic!("Expected text content"),
         },
         _ => panic!("Expected User variant"),
     }
@@ -71,7 +71,7 @@ fn test_chat_message_tagged_by_role_tool() {
                 MessageContent::Text(text) => {
                     assert_eq!(text, "Tool result");
                 }
-                _ => panic!("Expected content to be a string"),
+                MessageContent::Parts(_) => panic!("Expected content to be a string"),
             }
             assert_eq!(tool_call_id, "call_123");
         }
