@@ -65,14 +65,20 @@ fn pg_v3_up(schema: &SchemaConfig) -> Vec<String> {
     // or defined as an extra column (same guard pattern as pg_v2_up).
     let redundant = ["output", "metadata", "instructions", "tool_calls"];
 
-    redundant
+    let cols_to_drop: Vec<_> = redundant
         .iter()
         .filter(|&&col| {
             !s.columns.values().any(|v| v.eq_ignore_ascii_case(col))
                 && !s.extra_columns.keys().any(|k| k.eq_ignore_ascii_case(col))
         })
-        .map(|col| format!("ALTER TABLE {table} DROP COLUMN IF EXISTS {col}"))
-        .collect()
+        .map(|col| format!("DROP COLUMN IF EXISTS {col}"))
+        .collect();
+
+    if cols_to_drop.is_empty() {
+        return vec![];
+    }
+
+    vec![format!("ALTER TABLE {table} {}", cols_to_drop.join(", "))]
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -147,17 +153,15 @@ mod tests {
     }
 
     #[test]
-    fn pg_v3_up_generates_four_drop_statements() {
+    fn pg_v3_up_generates_one_drop_statement() {
         let schema = SchemaConfig::default();
         let stmts = pg_v3_up(&schema);
-        assert_eq!(stmts.len(), 4);
-        for stmt in &stmts {
-            assert!(stmt.contains("DROP COLUMN IF EXISTS"), "got: {stmt}");
-        }
-        assert!(stmts[0].contains("output"), "got: {}", stmts[0]);
-        assert!(stmts[1].contains("metadata"), "got: {}", stmts[1]);
-        assert!(stmts[2].contains("instructions"), "got: {}", stmts[2]);
-        assert!(stmts[3].contains("tool_calls"), "got: {}", stmts[3]);
+        assert_eq!(stmts.len(), 1);
+        let stmt = &stmts[0];
+        assert!(stmt.contains("DROP COLUMN IF EXISTS output"));
+        assert!(stmt.contains("DROP COLUMN IF EXISTS metadata"));
+        assert!(stmt.contains("DROP COLUMN IF EXISTS instructions"));
+        assert!(stmt.contains("DROP COLUMN IF EXISTS tool_calls"));
     }
 
     #[test]
@@ -168,11 +172,13 @@ mod tests {
             .columns
             .insert("safety_identifier".to_string(), "output".to_string());
         let stmts = pg_v3_up(&schema);
+        assert_eq!(stmts.len(), 1);
         // "output" is used as a physical column name, so it should be skipped
         assert!(
-            stmts.iter().all(|s| !s.contains(" output")),
+            !stmts[0].contains("EXISTS output"),
             "should skip output when mapped: {stmts:?}"
         );
+        assert!(stmts[0].contains("metadata"));
     }
 
     #[test]
@@ -186,9 +192,11 @@ mod tests {
             },
         );
         let stmts = pg_v3_up(&schema);
+        assert_eq!(stmts.len(), 1);
         assert!(
-            stmts.iter().all(|s| !s.contains(" metadata")),
+            !stmts[0].contains("metadata"),
             "should skip metadata when it's an extra column: {stmts:?}"
         );
+        assert!(stmts[0].contains("output"));
     }
 }
