@@ -14,36 +14,9 @@ mod update_worker_properties;
 
 use std::{sync::Arc, time::Duration};
 
-/// Strip protocol prefix (http://, https://, grpc://) from URL.
-pub(crate) fn strip_protocol(url: &str) -> String {
-    url.trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .trim_start_matches("grpc://")
-        .to_string()
-}
-
-/// Ensure URL has an HTTP(S) scheme — handles bare `host:port` and `grpc://` inputs.
-pub(super) fn http_base_url(url: &str) -> String {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        url.trim_end_matches('/').to_string()
-    } else {
-        format!("http://{}", strip_protocol(url).trim_end_matches('/'))
-    }
-}
-
-/// Ensure URL has a gRPC scheme — handles bare `host:port` and `http://` inputs.
-pub(super) fn grpc_base_url(url: &str) -> String {
-    if url.starts_with("grpc://") {
-        url.trim_end_matches('/').to_string()
-    } else {
-        format!("grpc://{}", strip_protocol(url).trim_end_matches('/'))
-    }
-}
-
 pub use create_worker::CreateLocalWorkerStep;
 pub use detect_backend::DetectBackendStep;
 pub use detect_connection::DetectConnectionModeStep;
-pub(crate) use detect_connection::{try_grpc_reachable, try_http_reachable};
 pub use discover_dp::{get_dp_info, DiscoverDPInfoStep, DpInfo};
 pub use discover_metadata::DiscoverMetadataStep;
 pub use find_worker_to_update::FindWorkerToUpdateStep;

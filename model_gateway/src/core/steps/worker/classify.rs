@@ -7,27 +7,24 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
 use tracing::debug;
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use super::local::{http_base_url, try_grpc_reachable, try_http_reachable};
+use super::util::{http_base_url, try_grpc_reachable, try_http_reachable};
 use crate::core::{
     steps::workflow_data::{WorkerKind, WorkerWorkflowData},
     worker::RuntimeType,
 };
 
-/// Quick-probe timeout (seconds) for the classification step.
-///
-/// Deliberately short — this step only needs to distinguish Local from External.
-/// The full connection timeout is applied later by `DetectConnectionModeStep`.
+/// Quick-probe timeout for classification. Deliberately short — the full
+/// connection timeout is applied later by `DetectConnectionModeStep`.
 const CLASSIFY_PROBE_TIMEOUT_SECS: u64 = 2;
 
-/// Check if `/v1/models` responds with a status that indicates a cloud API.
+/// Check if `/v1/models` responds with a non-5xx status.
 ///
-/// Returns `true` for 2xx, 401, or 403 — these prove the endpoint is a real API.
-/// Returns `false` on connection errors AND on 5xx/404 — a 503 from a starting
-/// local backend should NOT be classified as External.
+/// Any non-server-error response (2xx, 401, 403, 429, etc.) proves the endpoint
+/// is a real API. 5xx is excluded — a starting local backend may return 503.
 async fn is_models_endpoint_reachable(
     url: &str,
     timeout_secs: u64,
@@ -43,14 +40,7 @@ async fn is_models_endpoint_reachable(
         req = req.bearer_auth(key);
     }
     match req.send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            // 2xx, 401, 403 clearly indicate a cloud API endpoint.
-            // 5xx or 404 could be a local backend that's still starting.
-            status.is_success()
-                || status == StatusCode::UNAUTHORIZED
-                || status == StatusCode::FORBIDDEN
-        }
+        Ok(resp) => !resp.status().is_server_error(),
         Err(_) => false,
     }
 }
@@ -63,7 +53,7 @@ async fn is_models_endpoint_reachable(
 /// 3. Auto-detect (default `Sglang` = "auto"):
 ///    a. `/health` responds → Local (only local backends expose `/health`)
 ///    b. gRPC health responds → Local (external APIs never use gRPC)
-///    c. `/v1/models` returns 2xx/401/403 → External (5xx ignored — could be starting local)
+///    c. `/v1/models` returns non-5xx → External (5xx ignored — could be starting local)
 ///    d. Nothing reachable → default Local (backend may still be starting)
 pub struct ClassifyWorkerTypeStep;
 
@@ -119,8 +109,8 @@ impl StepExecutor<WorkerWorkflowData> for ClassifyWorkerTypeStep {
         }
 
         // /health and gRPC both failed.
-        // Try /v1/models — any HTTP response (including 401/403) proves the
-        // endpoint is a cloud API. Connection error means unreachable.
+        // Try /v1/models — any non-5xx response proves the endpoint is a cloud
+        // API. 5xx is excluded (starting local backend may return 503).
         if is_models_endpoint_reachable(&config.url, timeout, client, config.api_key.as_deref())
             .await
         {

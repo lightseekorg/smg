@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use super::{grpc_base_url, http_base_url};
 use crate::{
     core::{
-        steps::workflow_data::{WorkerKind, WorkerWorkflowData},
+        steps::{
+            worker::util::{grpc_base_url, http_base_url},
+            workflow_data::{WorkerKind, WorkerWorkflowData},
+        },
         ConnectionMode,
     },
     routers::grpc::client::{flat_labels, GrpcClient},

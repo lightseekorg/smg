@@ -11,12 +11,12 @@ use reqwest::Client;
 use tracing::debug;
 use wfaas::{StepExecutor, StepResult, WorkflowContext, WorkflowError, WorkflowResult};
 
-use super::{
-    detect_connection::do_grpc_health_check, discover_metadata::ModelsResponse, grpc_base_url,
-    http_base_url,
-};
+use super::discover_metadata::ModelsResponse;
 use crate::core::{
-    steps::workflow_data::{WorkerKind, WorkerWorkflowData},
+    steps::{
+        worker::util::{do_grpc_health_check, grpc_base_url, http_base_url},
+        workflow_data::{WorkerKind, WorkerWorkflowData},
+    },
     worker::RuntimeType,
     ConnectionMode,
 };

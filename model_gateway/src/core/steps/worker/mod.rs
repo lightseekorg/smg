@@ -2,6 +2,7 @@ pub mod classify;
 pub mod external;
 pub mod local;
 pub mod shared;
+pub(crate) mod util;
 
 use std::{sync::Arc, time::Duration};
 
