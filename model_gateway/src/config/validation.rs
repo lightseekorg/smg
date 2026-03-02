@@ -173,8 +173,16 @@ impl ConfigValidator {
                 balance_rel_threshold,
                 eviction_interval_secs,
                 max_tree_size,
-                ..
+                block_size,
             } => {
+                if *block_size == 0 {
+                    return Err(ConfigError::InvalidValue {
+                        field: "block_size".to_string(),
+                        value: block_size.to_string(),
+                        reason: "Must be > 0".to_string(),
+                    });
+                }
+
                 if !(0.0..=1.0).contains(cache_threshold) {
                     return Err(ConfigError::InvalidValue {
                         field: "cache_threshold".to_string(),

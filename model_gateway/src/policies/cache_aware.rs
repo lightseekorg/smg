@@ -556,30 +556,19 @@ impl CacheAwarePolicy {
             return None;
         }
 
-        // Select worker with best overlap; tie-break by load (lower) then tree size (smaller)
+        // Select worker with best overlap among those that actually match.
+        // Tie-break: lower load, then smaller tree size.
         let best_idx = healthy_indices
             .iter()
-            .max_by(|&&a, &&b| {
-                let score_a = overlap.scores.get(workers[a].url()).copied().unwrap_or(0);
-                let score_b = overlap.scores.get(workers[b].url()).copied().unwrap_or(0);
-                score_a
-                    .cmp(&score_b)
-                    .then_with(|| workers[b].load().cmp(&workers[a].load()))
-                    .then_with(|| {
-                        let size_a = overlap
-                            .tree_sizes
-                            .get(workers[a].url())
-                            .copied()
-                            .unwrap_or(0);
-                        let size_b = overlap
-                            .tree_sizes
-                            .get(workers[b].url())
-                            .copied()
-                            .unwrap_or(0);
-                        size_b.cmp(&size_a)
-                    })
-            })
-            .copied()?;
+            .copied()
+            .filter(|&idx| overlap.scores.get(workers[idx].url()).copied().unwrap_or(0) > 0)
+            .max_by_key(|&idx| {
+                let url = workers[idx].url();
+                let score = overlap.scores.get(url).copied().unwrap_or(0);
+                let load = workers[idx].load();
+                let tree_size = overlap.tree_sizes.get(url).copied().unwrap_or(0);
+                (score, std::cmp::Reverse(load), std::cmp::Reverse(tree_size))
+            })?;
 
         debug!(
             worker = workers[best_idx].url(),
