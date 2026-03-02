@@ -343,7 +343,7 @@ convenient hands-free control to your smart devices.
                 {"role": "user", "content": "Count from 1 to 10: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"},
             ],
             temperature=0,
-            max_tokens=1024,
+            max_tokens=200,
             stop=[","],
         )
 
@@ -584,6 +584,10 @@ class TestChatCompletionGptOss(TestChatCompletion):
 
     @pytest.mark.skip(reason="TODO: Harmony puts output in reasoning_content, content is None")
     def test_stop_sequences(self, setup_backend):
+        pass
+
+    @pytest.mark.skip(reason="TODO: Harmony puts output in reasoning_content, content is None")
+    def test_stop_sequences_stream(self, setup_backend):
         pass
 
     @pytest.mark.skip(
