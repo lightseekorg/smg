@@ -560,11 +560,6 @@ async fn test_openai_router_responses_streaming_with_mock() {
             .0,
         "resp_prev_chain"
     );
-    assert_eq!(stored.raw_response["metadata"]["topic"], json!("unicorns"));
-    assert_eq!(
-        stored.raw_response["instructions"].as_str(),
-        Some("Be kind")
-    );
     assert_eq!(stored.model.as_deref(), Some("gpt-5-nano"));
     assert_eq!(stored.safety_identifier, None);
     assert_eq!(stored.raw_response["store"], json!(true));

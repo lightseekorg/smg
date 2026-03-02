@@ -61,17 +61,25 @@ fn pg_v3_up(schema: &SchemaConfig) -> Vec<String> {
     let s = &schema.responses;
     let table = s.qualified_table(schema.owner.as_deref());
 
-    // Columns to drop. Skip if the column name is used by a column mapping
-    // or defined as an extra column (same guard pattern as pg_v2_up).
+    // Resolve each redundant field to its physical column name, then drop it.
+    // Skip if another field maps to the same physical name or it's an extra column.
     let redundant = ["output", "metadata", "instructions", "tool_calls"];
 
     let cols_to_drop: Vec<_> = redundant
         .iter()
-        .filter(|&&col| {
-            !s.columns.values().any(|v| v.eq_ignore_ascii_case(col))
-                && !s.extra_columns.keys().any(|k| k.eq_ignore_ascii_case(col))
+        .filter_map(|&field| {
+            let col = s.col(field);
+            let mapped_by_other_field = s
+                .columns
+                .iter()
+                .any(|(k, v)| !k.eq_ignore_ascii_case(field) && v.eq_ignore_ascii_case(col));
+            let used_as_extra = s.extra_columns.keys().any(|k| k.eq_ignore_ascii_case(col));
+            if mapped_by_other_field || used_as_extra {
+                None
+            } else {
+                Some(format!("DROP COLUMN IF EXISTS {col}"))
+            }
         })
-        .map(|col| format!("DROP COLUMN IF EXISTS {col}"))
         .collect();
 
     if cols_to_drop.is_empty() {
@@ -165,18 +173,18 @@ mod tests {
     }
 
     #[test]
-    fn pg_v3_up_skips_column_mapped_to_output() {
+    fn pg_v3_up_skips_when_output_is_used_by_another_field() {
         let mut schema = SchemaConfig::default();
+        // Another field maps to physical column "output"
         schema
             .responses
             .columns
             .insert("safety_identifier".to_string(), "output".to_string());
         let stmts = pg_v3_up(&schema);
         assert_eq!(stmts.len(), 1);
-        // "output" is used as a physical column name, so it should be skipped
         assert!(
             !stmts[0].contains("EXISTS output"),
-            "should skip output when mapped: {stmts:?}"
+            "should skip output when another field maps to it: {stmts:?}"
         );
         assert!(stmts[0].contains("metadata"));
     }
@@ -198,5 +206,24 @@ mod tests {
             "should skip metadata when it's an extra column: {stmts:?}"
         );
         assert!(stmts[0].contains("output"));
+    }
+
+    #[test]
+    fn pg_v3_up_drops_mapped_physical_column_name() {
+        let mut schema = SchemaConfig::default();
+        schema
+            .responses
+            .columns
+            .insert("output".to_string(), "resp_output".to_string());
+        let stmts = pg_v3_up(&schema);
+        assert_eq!(stmts.len(), 1);
+        assert!(
+            stmts[0].contains("resp_output"),
+            "should drop mapped physical column: {stmts:?}"
+        );
+        assert!(
+            !stmts[0].contains("EXISTS output"),
+            "should not use logical name: {stmts:?}"
+        );
     }
 }

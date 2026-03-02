@@ -67,29 +67,31 @@ fn oracle_v3_up(schema: &SchemaConfig) -> Vec<String> {
     let s = &schema.responses;
     let table = s.qualified_table(schema.owner.as_deref());
 
-    // Columns to drop. Skip if the column name is used by a column mapping
-    // or defined as an extra column (same guard pattern as oracle_v2_up).
-    let redundant = ["OUTPUT", "METADATA", "INSTRUCTIONS", "TOOL_CALLS"];
+    // Resolve each redundant field to its physical column name (uppercased for Oracle).
+    // Skip if another field maps to the same physical name or it's an extra column.
+    // Drop one column per statement so a missing column doesn't block dropping others.
+    let redundant = ["output", "metadata", "instructions", "tool_calls"];
 
-    let cols_to_drop: Vec<&str> = redundant
+    redundant
         .iter()
-        .filter(|&&col| {
-            !s.columns.values().any(|v| v.eq_ignore_ascii_case(col))
-                && !s.extra_columns.keys().any(|k| k.eq_ignore_ascii_case(col))
+        .filter_map(|&field| {
+            let col = s.col(field).to_uppercase();
+            let mapped_by_other_field = s
+                .columns
+                .iter()
+                .any(|(k, v)| !k.eq_ignore_ascii_case(field) && v.eq_ignore_ascii_case(&col));
+            let used_as_extra = s.extra_columns.keys().any(|k| k.eq_ignore_ascii_case(&col));
+            if mapped_by_other_field || used_as_extra {
+                None
+            } else {
+                // PL/SQL block: ORA-00904 = "invalid identifier" (column doesn't exist)
+                Some(format!(
+                    "BEGIN EXECUTE IMMEDIATE 'ALTER TABLE {table} DROP ({col})'; \
+                     EXCEPTION WHEN OTHERS THEN IF SQLCODE != -904 THEN RAISE; END IF; END;"
+                ))
+            }
         })
-        .copied()
-        .collect();
-
-    if cols_to_drop.is_empty() {
-        return vec![];
-    }
-
-    // PL/SQL block: ORA-00904 = "invalid identifier" (column doesn't exist)
-    vec![format!(
-        "BEGIN EXECUTE IMMEDIATE 'ALTER TABLE {table} DROP ({})'; \
-         EXCEPTION WHEN OTHERS THEN IF SQLCODE != -904 THEN RAISE; END IF; END;",
-        cols_to_drop.join(", ")
-    )]
+        .collect()
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -166,31 +168,32 @@ mod tests {
     }
 
     #[test]
-    fn oracle_v3_up_generates_plsql_drop_columns() {
+    fn oracle_v3_up_generates_per_column_plsql_drops() {
         let schema = SchemaConfig::default();
         let stmts = oracle_v3_up(&schema);
-        assert_eq!(stmts.len(), 1);
-        assert!(stmts[0].contains("DROP"), "got: {}", stmts[0]);
+        assert_eq!(stmts.len(), 4);
         assert!(stmts[0].contains("OUTPUT"), "got: {}", stmts[0]);
-        assert!(stmts[0].contains("METADATA"), "got: {}", stmts[0]);
-        assert!(stmts[0].contains("INSTRUCTIONS"), "got: {}", stmts[0]);
-        assert!(stmts[0].contains("TOOL_CALLS"), "got: {}", stmts[0]);
-        assert!(stmts[0].contains("SQLCODE"), "got: {}", stmts[0]);
+        assert!(stmts[1].contains("METADATA"), "got: {}", stmts[1]);
+        assert!(stmts[2].contains("INSTRUCTIONS"), "got: {}", stmts[2]);
+        assert!(stmts[3].contains("TOOL_CALLS"), "got: {}", stmts[3]);
+        for stmt in &stmts {
+            assert!(stmt.contains("SQLCODE"), "got: {stmt}");
+        }
     }
 
     #[test]
-    fn oracle_v3_up_skips_column_mapped_to_output() {
+    fn oracle_v3_up_skips_when_output_is_used_by_another_field() {
         let mut schema = SchemaConfig::default();
         schema
             .responses
             .columns
             .insert("safety_identifier".to_string(), "OUTPUT".to_string());
         let stmts = oracle_v3_up(&schema);
-        if !stmts.is_empty() {
+        assert_eq!(stmts.len(), 3, "expected 3 statements (OUTPUT skipped)");
+        for stmt in &stmts {
             assert!(
-                !stmts[0].contains("OUTPUT"),
-                "should skip OUTPUT when mapped: {}",
-                stmts[0]
+                !stmt.contains("DROP (OUTPUT)"),
+                "should skip OUTPUT when mapped: {stmt}"
             );
         }
     }
