@@ -60,13 +60,25 @@ pub fn create_worker_registration_workflow(
 ) -> WorkflowDefinition<WorkerWorkflowData> {
     let detect_timeout = Duration::from_secs(router_config.worker_startup_timeout_secs);
 
-    // Calculate max_attempts for detect_connection_mode based on timeout
+    // Reserve 10% of the startup timeout for workflow overhead (step transitions, etc.).
+    // The remaining budget is split into retry attempts: a base number of attempts for
+    // the first ATTEMPTS_THRESHOLD seconds, plus one extra attempt per SECS_PER_EXTRA
+    // seconds beyond that.
+    const EFFECTIVE_TIMEOUT_FACTOR: f64 = 0.9;
+    const ATTEMPTS_THRESHOLD_SECS: f64 = 10.0;
+    const BASE_ATTEMPTS: u32 = 5;
+    const SECS_PER_EXTRA_ATTEMPT: f64 = 5.0;
+    const MIN_ATTEMPTS: u32 = 3;
+
     let timeout_secs = detect_timeout.as_secs() as f64;
-    let effective_timeout = timeout_secs * 0.9;
-    let max_attempts = if effective_timeout > 10.0 {
-        (5 + ((effective_timeout - 10.0) / 5.0).ceil() as u32).max(3)
+    let effective_timeout = timeout_secs * EFFECTIVE_TIMEOUT_FACTOR;
+    let max_attempts = if effective_timeout > ATTEMPTS_THRESHOLD_SECS {
+        (BASE_ATTEMPTS
+            + ((effective_timeout - ATTEMPTS_THRESHOLD_SECS) / SECS_PER_EXTRA_ATTEMPT).ceil()
+                as u32)
+            .max(MIN_ATTEMPTS)
     } else {
-        3
+        MIN_ATTEMPTS
     };
 
     WorkflowDefinition::new("worker_registration", "Worker Registration")
