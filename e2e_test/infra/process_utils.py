@@ -104,22 +104,23 @@ def wait_for_workers_ready(
     start = time.perf_counter()
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
-    while time.perf_counter() - start < timeout:
-        try:
-            resp = requests.get(f"{router_url}/workers", headers=headers, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                total = data.get("total", len(data.get("workers", [])))
-                if total >= expected_workers:
-                    logger.info(
-                        "All %d workers connected after %.1fs",
-                        expected_workers,
-                        time.perf_counter() - start,
-                    )
-                    return
-        except requests.RequestException:
-            pass
-        time.sleep(2)
+    with requests.Session() as session:
+        while time.perf_counter() - start < timeout:
+            try:
+                resp = session.get(f"{router_url}/workers", headers=headers, timeout=5)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    total = data.get("total", len(data.get("workers", [])))
+                    if total >= expected_workers:
+                        logger.info(
+                            "All %d workers connected after %.1fs",
+                            expected_workers,
+                            time.perf_counter() - start,
+                        )
+                        return
+            except requests.RequestException:
+                pass
+            time.sleep(2)
 
     raise TimeoutError(
         f"Router at {router_url} did not get {expected_workers} workers within {timeout}s"

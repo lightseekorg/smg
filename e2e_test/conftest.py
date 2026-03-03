@@ -213,8 +213,6 @@ from fixtures import (
 from smg_client import SmgClient
 from smg_client._errors import SmgError
 
-logger = logging.getLogger(__name__)
-
 
 @pytest.fixture
 def smg(setup_backend):

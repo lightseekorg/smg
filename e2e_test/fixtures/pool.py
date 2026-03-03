@@ -170,6 +170,36 @@ def model_pool(request: pytest.FixtureRequest) -> ModelPool:
         return _model_pool
 
 
+def _get_model_instance(
+    request: pytest.FixtureRequest, model_pool: ModelPool, fixture_name: str
+) -> ModelInstance:
+    """Extract model from marker and acquire instance from pool.
+
+    Args:
+        request: Pytest fixture request.
+        model_pool: The model pool.
+        fixture_name: Name of the calling fixture (for error messages).
+
+    Returns:
+        Acquired ModelInstance.
+    """
+    from infra import PARAM_MODEL
+
+    marker = request.node.get_closest_marker(PARAM_MODEL)
+    if marker is None:
+        pytest.fail(
+            f"Test must be marked with @pytest.mark.{PARAM_MODEL}('model-id') "
+            f"to use {fixture_name} fixture"
+        )
+
+    model_id = marker.args[0]
+
+    try:
+        return model_pool.get(model_id)
+    except KeyError:
+        pytest.skip(f"Model {model_id} not available in model pool")
+
+
 @pytest.fixture
 def model_client(
     request: pytest.FixtureRequest, model_pool: ModelPool
@@ -182,22 +212,8 @@ def model_client(
             response = model_client.chat.completions.create(...)
     """
     import openai
-    from infra import PARAM_MODEL
 
-    marker = request.node.get_closest_marker(PARAM_MODEL)
-    if marker is None:
-        pytest.fail(
-            f"Test must be marked with @pytest.mark.{PARAM_MODEL}('model-id') "
-            "to use model_client fixture"
-        )
-
-    model_id = marker.args[0]
-
-    try:
-        # get() auto-acquires the returned instance
-        instance = model_pool.get(model_id)
-    except KeyError:
-        pytest.skip(f"Model {model_id} not available in model pool")
+    instance = _get_model_instance(request, model_pool, "model_client")
 
     client = openai.OpenAI(
         base_url=f"{instance.base_url}/v1",
@@ -206,7 +222,6 @@ def model_client(
 
     yield client
 
-    # Release reference to allow eviction
     instance.release()
 
 
@@ -221,24 +236,8 @@ def model_base_url(
         def test_direct_http(model_base_url):
             response = httpx.get(f"{model_base_url}/health")
     """
-    from infra import PARAM_MODEL
-
-    marker = request.node.get_closest_marker(PARAM_MODEL)
-    if marker is None:
-        pytest.fail(
-            f"Test must be marked with @pytest.mark.{PARAM_MODEL}('model-id') "
-            "to use model_base_url fixture"
-        )
-
-    model_id = marker.args[0]
-
-    try:
-        # get() auto-acquires the returned instance
-        instance = model_pool.get(model_id)
-    except KeyError:
-        pytest.skip(f"Model {model_id} not available in model pool")
+    instance = _get_model_instance(request, model_pool, "model_base_url")
 
     yield instance.base_url
 
-    # Release reference to allow eviction
     instance.release()

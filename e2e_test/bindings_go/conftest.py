@@ -9,10 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
-import signal
-import socket
 import subprocess
-import time
 from collections.abc import Generator
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,31 +19,15 @@ import pytest
 if TYPE_CHECKING:
     from infra import ModelInstance, ModelPool
 
+from infra import get_open_port, terminate_process
+from infra.process_utils import wait_for_health
+
 logger = logging.getLogger(__name__)
 
 # Paths
 _ROOT = Path(__file__).resolve().parents[2]  # smg/
 _GO_BINDINGS = _ROOT / "bindings" / "golang"
 _GO_OAI_SERVER = _GO_BINDINGS / "examples" / "oai_server"
-
-
-def _find_free_port() -> int:
-    """Find an available port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
-
-
-def _wait_for_server(host: str, port: int, timeout: float = 30.0) -> bool:
-    """Wait for server to become available."""
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            with socket.create_connection((host, port), timeout=1.0):
-                return True
-        except (TimeoutError, ConnectionRefusedError, OSError):
-            time.sleep(0.5)
-    return False
 
 
 @pytest.fixture(scope="session")
@@ -241,7 +222,7 @@ def go_oai_server(
     grpc_endpoint = f"grpc://localhost:{grpc_worker.port}"
 
     # Find a free port for the Go OAI server
-    oai_port = _find_free_port()
+    oai_port = get_open_port()
 
     # Set up environment - the Go OAI server uses env vars for config
     env = os.environ.copy()
@@ -270,7 +251,9 @@ def go_oai_server(
 
     try:
         # Wait for server to start
-        if not _wait_for_server("localhost", oai_port, timeout=30.0):
+        try:
+            wait_for_health(f"http://localhost:{oai_port}", timeout=30.0, check_interval=0.5)
+        except TimeoutError:
             stdout, stderr = process.communicate(timeout=5)
             pytest.fail(
                 f"Go OAI server failed to start.\n"
@@ -283,14 +266,8 @@ def go_oai_server(
         yield ("localhost", oai_port, grpc_worker.model_path)
 
     finally:
-        # Shutdown the server
         logger.info("Shutting down Go OAI server...")
-        process.send_signal(signal.SIGTERM)
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+        terminate_process(process, timeout=10)
 
 
 @pytest.fixture(scope="class")
@@ -318,7 +295,7 @@ def go_oai_server_multi(
     grpc_endpoints = ",".join(f"grpc://localhost:{w.port}" for w in grpc_workers)
 
     # Find a free port for the Go OAI server
-    oai_port = _find_free_port()
+    oai_port = get_open_port()
 
     # Set up environment
     env = os.environ.copy()
@@ -359,7 +336,9 @@ def go_oai_server_multi(
 
     try:
         # Wait for server to start
-        if not _wait_for_server("localhost", oai_port, timeout=60.0):
+        try:
+            wait_for_health(f"http://localhost:{oai_port}", timeout=60.0, check_interval=0.5)
+        except TimeoutError:
             stdout, stderr = process.communicate(timeout=5)
             pytest.fail(
                 f"Go OAI server failed to start.\n"
@@ -376,12 +355,7 @@ def go_oai_server_multi(
 
     finally:
         logger.info("Shutting down Go OAI server...")
-        process.send_signal(signal.SIGTERM)
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+        terminate_process(process, timeout=10)
 
 
 @pytest.fixture(scope="class")

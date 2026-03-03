@@ -6,9 +6,6 @@ This package contains modular pytest fixtures split by responsibility:
 - setup_backend.py: Backend setup fixtures (class/function-scoped)
 - markers.py: Helper utilities for marker extraction
 
-Legacy modules (to be removed during e2e_response_api migration):
-- ports.py: Use infra.get_open_port() instead
-- router_manager.py: Use infra.Gateway instead
 """
 
 # Pytest hooks (imported by conftest.py via pytest_plugins)

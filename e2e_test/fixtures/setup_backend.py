@@ -59,6 +59,15 @@ _thread_cache: dict[int, _CachedBackend] = {}
 _cache_lock = threading.Lock()
 
 
+def _release_workers(workers: list) -> None:
+    """Release a list of workers, logging warnings on failure."""
+    for w in workers:
+        try:
+            w.release()
+        except Exception as e:
+            logger.warning("Failed to release worker during cleanup: %s", e)
+
+
 def _create_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
     """Extract configuration from request and return the appropriate backend generator.
 
@@ -96,10 +105,10 @@ def _create_backend(request: pytest.FixtureRequest, model_pool: ModelPool):
 
     # PD disaggregation backends - explicit connection modes
     if backend_name == "pd_http":
-        return _setup_pd_http_backend(request, model_pool, model_id, workers_config, gateway_config)
+        return _setup_pd_http_backend(model_pool, model_id, workers_config, gateway_config)
 
     if backend_name == "pd_grpc":
-        return _setup_pd_grpc_backend(request, model_pool, model_id, workers_config, gateway_config)
+        return _setup_pd_grpc_backend(model_pool, model_id, workers_config, gateway_config)
 
     # Check if this is a local backend (grpc, http)
     try:
@@ -256,7 +265,6 @@ def cleanup_all_cached_backends() -> None:
 
 
 def _setup_pd_http_backend(
-    request: pytest.FixtureRequest,
     model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
@@ -274,7 +282,6 @@ def _setup_pd_http_backend(
 
 
 def _setup_pd_grpc_backend(
-    request: pytest.FixtureRequest,
     model_pool: ModelPool,
     model_id: str,
     workers_config: dict,
@@ -413,12 +420,7 @@ def _setup_pd_backend_common(
                 f"{len(decodes)} decode (need {num_prefill} prefill, {num_decode} decode)"
             )
     except Exception:
-        # Release all acquired workers on any failure
-        for w in acquired_workers:
-            try:
-                w.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(acquired_workers)
         raise
 
     model_path = prefills[0].model_path
@@ -435,12 +437,7 @@ def _setup_pd_backend_common(
             log_dir=gateway_config.get("log_dir"),
         )
     except Exception:
-        # Release workers if gateway fails to start
-        for w in acquired_workers:
-            try:
-                w.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(acquired_workers)
         raise
 
     client = openai.OpenAI(
@@ -463,11 +460,7 @@ def _setup_pd_backend_common(
     finally:
         logger.info("Tearing down %s PD gateway", runtime_label)
         gateway.shutdown()
-        for worker in acquired_workers:
-            try:
-                worker.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(acquired_workers)
 
 
 def _setup_grpc_backend(
@@ -554,11 +547,7 @@ def _setup_grpc_backend(
             worker_urls = [instance.worker_url]
             model_path = instance.model_path
     except Exception as e:
-        for inst in instances:
-            try:
-                inst.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(instances)
         if isinstance(e, RuntimeError):
             pytest.fail(str(e))
         raise
@@ -575,11 +564,7 @@ def _setup_grpc_backend(
             log_dir=gateway_config.get("log_dir"),
         )
     except Exception:
-        for inst in instances:
-            try:
-                inst.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(instances)
         raise
 
     client = openai.OpenAI(
@@ -601,11 +586,7 @@ def _setup_grpc_backend(
     finally:
         logger.info("Tearing down %s gRPC gateway", runtime_label)
         gateway.shutdown()
-        for inst in instances:
-            try:
-                inst.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(instances)
 
 
 def _setup_local_backend(
@@ -665,12 +646,7 @@ def _setup_local_backend(
             worker_urls = [instance.worker_url]
             model_path = instance.model_path
     except Exception as e:
-        # Release any acquired instances on failure
-        for inst in instances:
-            try:
-                inst.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(instances)
         if isinstance(e, RuntimeError):
             pytest.fail(str(e))
         raise
@@ -688,12 +664,7 @@ def _setup_local_backend(
             log_dir=gateway_config.get("log_dir"),
         )
     except Exception:
-        # Release workers if gateway fails to start
-        for inst in instances:
-            try:
-                inst.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(instances)
         raise
 
     client = openai.OpenAI(
@@ -715,12 +686,7 @@ def _setup_local_backend(
     finally:
         logger.info("Tearing down gateway for %s backend", backend_name)
         gateway.shutdown()
-        # Release references to allow eviction
-        for inst in instances:
-            try:
-                inst.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+        _release_workers(instances)
 
 
 def _setup_cloud_backend(
@@ -808,21 +774,13 @@ def backend_router(request: pytest.FixtureRequest, model_pool: ModelPool):
             model_path=instance.model_path,
         )
     except Exception:
-        # Release worker if gateway fails to start
         if instance is not None:
-            try:
-                instance.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+            _release_workers([instance])
         raise
 
     try:
         yield gateway
     finally:
         gateway.shutdown()
-        # Release reference to allow eviction
         if instance is not None:
-            try:
-                instance.release()
-            except Exception as release_err:
-                logger.warning("Failed to release worker during cleanup: %s", release_err)
+            _release_workers([instance])
