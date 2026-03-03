@@ -401,13 +401,10 @@ convenient hands-free control to your smart devices.
         assert "stop" in finish_reasons
 
         # Collect all content (fall back to reasoning_content for models like Harmony)
-        def _delta_text(delta):
-            return delta.content or getattr(delta, "reasoning_content", "") or ""
-
         content = "".join(
-            _delta_text(c.choices[0].delta)
+            self._delta_text(c.choices[0].delta)
             for c in chunks
-            if c.choices and _delta_text(c.choices[0].delta)
+            if c.choices and self._delta_text(c.choices[0].delta)
         )
         assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
 
@@ -434,15 +431,20 @@ convenient hands-free control to your smart devices.
             ]
             assert "stop" in smg_finish
             smg_text = "".join(
-                _delta_text(c.choices[0].delta)
+                self._delta_text(c.choices[0].delta)
                 for c in smg_chunks
-                if c.choices and _delta_text(c.choices[0].delta)
+                if c.choices and self._delta_text(c.choices[0].delta)
             )
             assert "," not in smg_text
 
     # -------------------------------------------------------------------------
     # Helper methods
     # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _delta_text(delta):
+        """Extract text from delta, falling back to reasoning_content for Harmony."""
+        return delta.content or getattr(delta, "reasoning_content", "") or ""
 
     def _run_chat_completion(self, client, model, logprobs, parallel_sample_num):
         """Run a non-streaming chat completion and verify response."""

@@ -113,35 +113,33 @@ impl HarmonyParserAdapter {
             return;
         }
 
+        let strip_suffix = |text: &mut String| {
+            if text.ends_with(stop_str) {
+                text.truncate(text.len() - stop_str.len());
+            }
+        };
+
         // Determine which channel was active last
         let active_channel = parser.current_channel();
         match active_channel.as_deref() {
             Some("analysis") => {
                 if let Some(ref mut text) = analysis {
-                    if text.ends_with(stop_str) {
-                        let new_len = text.len() - stop_str.len();
-                        text.truncate(new_len);
-                    }
+                    strip_suffix(text);
                 }
             }
             Some("final") | None => {
-                if final_text.ends_with(stop_str) {
-                    let new_len = final_text.len() - stop_str.len();
-                    final_text.truncate(new_len);
-                }
+                strip_suffix(final_text);
             }
             _ => {
                 // Unknown channel: try stripping from both as a fallback
+                tracing::trace!(
+                    channel = ?active_channel,
+                    "Unknown channel during stop-sequence stripping, checking both buffers"
+                );
                 if let Some(ref mut text) = analysis {
-                    if text.ends_with(stop_str) {
-                        let new_len = text.len() - stop_str.len();
-                        text.truncate(new_len);
-                    }
+                    strip_suffix(text);
                 }
-                if final_text.ends_with(stop_str) {
-                    let new_len = final_text.len() - stop_str.len();
-                    final_text.truncate(new_len);
-                }
+                strip_suffix(final_text);
             }
         }
     }
