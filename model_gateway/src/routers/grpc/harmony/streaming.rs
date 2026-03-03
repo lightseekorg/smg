@@ -202,7 +202,6 @@ impl HarmonyStreamingProcessor {
         // Per-index state management (for n>1 support)
         let mut parsers: HashMap<u32, HarmonyParserAdapter> = HashMap::new();
         let mut is_firsts: HashMap<u32, bool> = HashMap::new();
-        let mut finish_reasons: HashMap<u32, Option<String>> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
         let mut completion_tokens = CompletionTokenTracker::new();
 
@@ -272,8 +271,6 @@ impl HarmonyStreamingProcessor {
                     let index = complete_wrapper.index();
 
                     // Store final metadata
-                    finish_reasons
-                        .insert(index, Some(complete_wrapper.finish_reason().to_string()));
                     matched_stops.insert(index, complete_wrapper.matched_stop_json());
                     prompt_tokens
                         .entry(index)
