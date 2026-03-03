@@ -12,12 +12,12 @@ use llm_tokenizer::{
     StopSequenceDecoder,
 };
 use openai_protocol::{
-    chat::{ChatCompletionRequest, ChatMessage},
+    chat::{ChatCompletionRequest, ChatMessage, MessageContent},
     common::{
-        ChatLogProbs, ChatLogProbsContent, FunctionCallResponse, StringOrArray, Tool, ToolCall,
-        ToolChoice, ToolChoiceValue, TopLogProb,
+        ChatLogProbs, ChatLogProbsContent, ContentPart, FunctionCallResponse, StringOrArray, Tool,
+        ToolCall, ToolChoice, ToolChoiceValue, TopLogProb,
     },
-    generate::GenerateFinishReason,
+    generate::{GenerateFinishReason, GenerateRequest},
 };
 use reasoning_parser::{
     ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser, ReasoningParser,
@@ -412,6 +412,202 @@ pub(crate) fn filter_chat_request_by_tool_choice(
 
     // No filtering needed - return original request
     std::borrow::Cow::Borrowed(body)
+}
+
+/// Extract multimodal inputs (images, videos, audio) from chat messages.
+///
+/// Scans all messages for multimodal content parts and collects them into
+/// a `MultimodalInputs` struct for the EPD (Encode-Prefill-Decode) pipeline.
+///
+/// Supports:
+/// - image_url: URLs or base64 data URIs
+/// - video_url: URLs or base64 data URIs
+///
+/// Returns `None` if no multimodal content is found.
+fn extract_multimodal_from_messages(
+    messages: &[ChatMessage],
+    keep_data_uri_as_url: bool,
+) -> Option<smg_grpc_client::sglang_proto::MultimodalInputs> {
+    let mut image_urls: Vec<String> = Vec::new();
+    let mut video_urls: Vec<String> = Vec::new();
+    let mut image_data: Vec<Vec<u8>> = Vec::new();
+    let mut video_data: Vec<Vec<u8>> = Vec::new();
+    let mut modalities: Vec<String> = Vec::new();
+
+    for message in messages {
+        let content = match message {
+            ChatMessage::User { content, .. } => Some(content),
+            ChatMessage::System { content, .. } => Some(content),
+            ChatMessage::Assistant { content, .. } => content.as_ref(),
+            ChatMessage::Tool { content, .. } => Some(content),
+            ChatMessage::Function { .. } => None,
+            ChatMessage::Developer { content, .. } => Some(content),
+        };
+
+        let Some(content) = content else { continue };
+
+        // Only Parts can contain multimodal content
+        let MessageContent::Parts(parts) = content else {
+            continue;
+        };
+        for part in parts {
+            match part {
+                ContentPart::ImageUrl { image_url } => {
+                    let url = &image_url.url;
+                    if keep_data_uri_as_url {
+                        image_urls.push(url.clone());
+                    } else if let Some(base64_data) = parse_data_uri(url) {
+                        image_data.push(base64_data);
+                    } else {
+                        image_urls.push(url.clone());
+                    }
+                }
+                ContentPart::VideoUrl { video_url } => {
+                    let url = &video_url.url;
+                    if keep_data_uri_as_url {
+                        video_urls.push(url.clone());
+                    } else if let Some(base64_data) = parse_data_uri(url) {
+                        video_data.push(base64_data);
+                    } else {
+                        video_urls.push(url.clone());
+                    }
+                }
+                ContentPart::Text { .. } => {}
+            }
+        }
+    }
+
+    if image_urls.is_empty()
+        && video_urls.is_empty()
+        && image_data.is_empty()
+        && video_data.is_empty()
+    {
+        return None;
+    }
+
+    let image_count = image_urls.len() + image_data.len();
+    let video_count = video_urls.len() + video_data.len();
+    if video_count > 0 {
+        modalities.push("video".to_string());
+    } else if image_count > 1 {
+        modalities.push("multi-images".to_string());
+    } else if image_count == 1 {
+        modalities.push("image".to_string());
+    }
+
+    Some(smg_grpc_client::sglang_proto::MultimodalInputs {
+        image_urls,
+        video_urls,
+        audio_urls: Vec::new(),
+        image_data,
+        video_data,
+        audio_data: Vec::new(),
+        modalities,
+        pixel_values: None,
+        model_specific_tensors: HashMap::new(),
+        im_token_id: None,
+        mm_placeholders: Vec::new(),
+    })
+}
+
+fn extract_urls_from_value(value: &Value, urls: &mut Vec<String>) {
+    match value {
+        Value::String(url) => urls.push(url.clone()),
+        Value::Array(items) => {
+            for item in items {
+                extract_urls_from_value(item, urls);
+            }
+        }
+        Value::Object(map) => {
+            if let Some(Value::String(url)) = map.get("url") {
+                urls.push(url.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn build_multimodal_inputs_from_generate(
+    request: &GenerateRequest,
+) -> Option<smg_grpc_client::sglang_proto::MultimodalInputs> {
+    let mut image_urls = Vec::new();
+    let mut video_urls = Vec::new();
+
+    if let Some(image_data) = request.image_data.as_ref() {
+        extract_urls_from_value(image_data, &mut image_urls);
+    }
+    if let Some(video_data) = request.video_data.as_ref() {
+        extract_urls_from_value(video_data, &mut video_urls);
+    }
+
+    if image_urls.is_empty() && video_urls.is_empty() {
+        return None;
+    }
+
+    let mut modalities = Vec::new();
+    modalities.extend(std::iter::repeat_n("image".to_string(), image_urls.len()));
+    modalities.extend(std::iter::repeat_n("video".to_string(), video_urls.len()));
+
+    Some(smg_grpc_client::sglang_proto::MultimodalInputs {
+        image_urls,
+        video_urls,
+        audio_urls: Vec::new(),
+        image_data: Vec::new(),
+        video_data: Vec::new(),
+        audio_data: Vec::new(),
+        modalities,
+        pixel_values: None,
+        model_specific_tensors: HashMap::new(),
+        im_token_id: None,
+        mm_placeholders: Vec::new(),
+    })
+}
+
+pub(crate) fn build_multimodal_inputs_from_messages(
+    messages: &[ChatMessage],
+) -> Option<smg_grpc_client::sglang_proto::MultimodalInputs> {
+    // For EPD mode, SGLang's gRPC server currently dispatches encoder requests from
+    // `mm_inputs.image_urls`; keep data URIs as URLs instead of decoding into bytes.
+    extract_multimodal_from_messages(messages, true)
+}
+
+const MAX_DATA_URI_DECODED_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
+const MAX_DATA_URI_ENCODED_SIZE: usize = MAX_DATA_URI_DECODED_SIZE / 3 * 4 + 4;
+
+fn parse_data_uri(url: &str) -> Option<Vec<u8>> {
+    if !url.starts_with("data:") {
+        return None;
+    }
+
+    let base64_marker = ";base64,";
+    let base64_start = url.find(base64_marker)?;
+    let data_start = base64_start + base64_marker.len();
+    let encoded = &url[data_start..];
+
+    if encoded.len() > MAX_DATA_URI_ENCODED_SIZE {
+        warn!(
+            function = "parse_data_uri",
+            encoded_len = encoded.len(),
+            limit = MAX_DATA_URI_ENCODED_SIZE,
+            "Data URI encoded payload exceeds allowed size"
+        );
+        return None;
+    }
+
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    let decoded = STANDARD.decode(encoded).ok()?;
+
+    if decoded.len() > MAX_DATA_URI_DECODED_SIZE {
+        warn!(
+            function = "parse_data_uri",
+            decoded_len = decoded.len(),
+            limit = MAX_DATA_URI_DECODED_SIZE,
+            "Data URI payload exceeds allowed size after decoding"
+        );
+        return None;
+    }
+
+    Some(decoded)
 }
 
 /// Process chat messages and apply template (shared by both routers)
@@ -1252,5 +1448,45 @@ mod tests {
         assert_eq!(content_array.len(), 2);
         assert_eq!(content_array[0]["type"], "text");
         assert_eq!(content_array[1], json!({"type": "image"}));
+    }
+
+    #[test]
+    fn test_build_multimodal_inputs_from_messages_keeps_data_uri_for_epd() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,aGVsbG8=".to_string(),
+                    detail: None,
+                },
+            }]),
+            name: None,
+        }];
+
+        let mm_inputs = build_multimodal_inputs_from_messages(&messages)
+            .expect("multimodal inputs should be built");
+
+        assert_eq!(mm_inputs.image_urls.len(), 1);
+        assert_eq!(mm_inputs.image_urls[0], "data:image/png;base64,aGVsbG8=");
+        assert!(mm_inputs.image_data.is_empty());
+    }
+
+    #[test]
+    fn test_extract_multimodal_decodes_data_uri_when_requested() {
+        let messages = vec![ChatMessage::User {
+            content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,aGVsbG8=".to_string(),
+                    detail: None,
+                },
+            }]),
+            name: None,
+        }];
+
+        let mm_inputs = extract_multimodal_from_messages(&messages, false)
+            .expect("multimodal inputs should be built");
+
+        assert!(mm_inputs.image_urls.is_empty());
+        assert_eq!(mm_inputs.image_data.len(), 1);
+        assert_eq!(mm_inputs.image_data[0], b"hello");
     }
 }

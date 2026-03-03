@@ -20,7 +20,17 @@ use crate::routers::{
 ///
 /// Extracts chat-specific preparation logic from the old unified PreparationStage.
 /// This is a direct extraction without architectural changes.
-pub(crate) struct ChatPreparationStage;
+pub(crate) struct ChatPreparationStage {
+    enable_multimodal_fetch: bool,
+}
+
+impl ChatPreparationStage {
+    pub fn new(enable_multimodal_fetch: bool) -> Self {
+        Self {
+            enable_multimodal_fetch,
+        }
+    }
+}
 
 #[async_trait]
 impl PipelineStage for ChatPreparationStage {
@@ -74,7 +84,12 @@ impl ChatPreparationStage {
         // Step 3.5: Full multimodal processing (fetch + preprocess + expand tokens + hash)
         let mut multimodal_data = None;
         if multimodal::has_multimodal_content(&request.messages) {
-            if let Some(mm_components) = ctx.components.multimodal.as_ref() {
+            if !self.enable_multimodal_fetch {
+                debug!(
+                    function = "ChatPreparationStage::execute",
+                    "Multimodal fetch disabled; skipping multimodal processing"
+                );
+            } else if let Some(mm_components) = ctx.components.multimodal.as_ref() {
                 let model_id = ctx.input.model_id.as_deref().unwrap_or(&request.model);
                 let tokenizer_source = ctx
                     .components

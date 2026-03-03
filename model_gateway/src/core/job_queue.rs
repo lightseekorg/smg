@@ -483,6 +483,28 @@ impl JobQueue {
 
                         prefill_workers.chain(decode_workers).collect()
                     }
+                    RoutingMode::EncodePrefillDecode {
+                        encode_urls,
+                        prefill_urls,
+                        decode_urls,
+                        ..
+                    } => {
+                        let encode_workers = encode_urls
+                            .iter()
+                            .map(|(url, port)| (url.clone(), "encode", *port));
+
+                        let prefill_workers = prefill_urls
+                            .iter()
+                            .map(|(url, port)| (url.clone(), "prefill", *port));
+
+                        let decode_workers =
+                            decode_urls.iter().map(|url| (url.clone(), "decode", None));
+
+                        encode_workers
+                            .chain(prefill_workers)
+                            .chain(decode_workers)
+                            .collect()
+                    }
                     RoutingMode::OpenAI { worker_urls } => {
                         // OpenAI mode: submit AddWorker jobs with runtime: "external"
                         // The external_worker_registration workflow handles model discovery
@@ -567,6 +589,7 @@ impl JobQueue {
                     let proto_worker_type = match worker_type {
                         "prefill" => WorkerType::Prefill,
                         "decode" => WorkerType::Decode,
+                        "encode" => WorkerType::Encode,
                         _ => WorkerType::Regular,
                     };
                     let mut spec = WorkerSpec::new(url);

@@ -24,10 +24,10 @@ pub(crate) struct RequestBuildingStage {
 }
 
 impl RequestBuildingStage {
-    pub fn new(inject_pd_metadata: bool) -> Self {
+    pub fn new(inject_pd_metadata: bool, epd_mode: bool) -> Self {
         Self {
-            chat_stage: ChatRequestBuildingStage::new(inject_pd_metadata),
-            generate_stage: GenerateRequestBuildingStage::new(inject_pd_metadata),
+            chat_stage: ChatRequestBuildingStage::new(inject_pd_metadata, epd_mode),
+            generate_stage: GenerateRequestBuildingStage::new(inject_pd_metadata, epd_mode),
             embedding_stage: EmbeddingRequestBuildingStage::new(),
         }
     }

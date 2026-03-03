@@ -447,6 +447,17 @@ impl WorkerRegistry {
             .collect()
     }
 
+    /// Get all encode workers
+    pub fn get_encode_workers(&self) -> Vec<Arc<dyn Worker>> {
+        self.workers
+            .iter()
+            .filter_map(|entry| {
+                let worker = entry.value();
+                matches!(worker.worker_type(), WorkerType::Encode).then_some(worker.clone())
+            })
+            .collect()
+    }
+
     /// Get all decode workers
     pub fn get_decode_workers(&self) -> Vec<Arc<dyn Worker>> {
         self.get_by_type(WorkerType::Decode)
@@ -587,6 +598,7 @@ impl WorkerRegistry {
         let mut healthy_count = 0;
         let mut total_load = 0;
         let mut regular_count = 0;
+        let mut encode_count = 0;
         let mut prefill_count = 0;
         let mut decode_count = 0;
         let mut http_count = 0;
@@ -606,6 +618,7 @@ impl WorkerRegistry {
                 WorkerType::Regular => regular_count += 1,
                 WorkerType::Prefill => prefill_count += 1,
                 WorkerType::Decode => decode_count += 1,
+                WorkerType::Encode => encode_count += 1,
             }
 
             match worker.connection_mode() {
@@ -627,6 +640,7 @@ impl WorkerRegistry {
             unhealthy_workers: total_workers.saturating_sub(healthy_count),
             total_load,
             regular_workers: regular_count,
+            encode_workers: encode_count,
             prefill_workers: prefill_count,
             decode_workers: decode_count,
             http_workers: http_count,
@@ -771,6 +785,8 @@ pub struct WorkerRegistryStats {
     pub total_load: usize,
     /// Number of regular (non-PD) workers
     pub regular_workers: usize,
+    /// Number of encode workers (EPD mode)
+    pub encode_workers: usize,
     /// Number of prefill workers (PD mode)
     pub prefill_workers: usize,
     /// Number of decode workers (PD mode)

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::{
     anthropic::AnthropicRouter,
-    grpc::{pd_router::GrpcPDRouter, router::GrpcRouter},
+    grpc::{epd_router::GrpcEPDRouter, pd_router::GrpcPDRouter, router::GrpcRouter},
     http::{pd_router::PDRouter, router::Router},
     openai::OpenAIRouter,
     RouterTrait,
@@ -39,6 +39,7 @@ pub mod router_ids {
     pub const HTTP_ANTHROPIC: RouterId = RouterId::new("http-anthropic");
     pub const GRPC_REGULAR: RouterId = RouterId::new("grpc-regular");
     pub const GRPC_PD: RouterId = RouterId::new("grpc-pd");
+    pub const GRPC_EPD: RouterId = RouterId::new("grpc-epd");
 }
 
 /// Factory for creating router instances based on configuration
@@ -55,6 +56,16 @@ impl RouterFactory {
                     decode_policy,
                     ..
                 } => Self::create_grpc_pd_router(
+                    prefill_policy.as_ref(),
+                    decode_policy.as_ref(),
+                    &ctx.router_config.policy,
+                    ctx,
+                ),
+                RoutingMode::EncodePrefillDecode {
+                    prefill_policy,
+                    decode_policy,
+                    ..
+                } => Self::create_grpc_epd_router(
                     prefill_policy.as_ref(),
                     decode_policy.as_ref(),
                     &ctx.router_config.policy,
@@ -82,6 +93,11 @@ impl RouterFactory {
                     )
                     .await
                 }
+                RoutingMode::EncodePrefillDecode { .. } => Err(
+                    "EPD (Encode-Prefill-Decode) mode requires gRPC connection_mode. \
+                         Use --connection-mode grpc or configure connection_mode: grpc in config."
+                        .to_string(),
+                ),
                 RoutingMode::OpenAI { .. } => Self::create_openai_router(ctx).await,
                 RoutingMode::Anthropic { .. } => Self::create_anthropic_router(ctx).await,
             },
@@ -143,6 +159,26 @@ impl RouterFactory {
         Ok(Box::new(router))
     }
 
+    /// Create a gRPC EPD router with prefill and decode policies
+    pub fn create_grpc_epd_router(
+        prefill_policy_config: Option<&PolicyConfig>,
+        decode_policy_config: Option<&PolicyConfig>,
+        main_policy_config: &PolicyConfig,
+        ctx: &Arc<AppContext>,
+    ) -> Result<Box<dyn RouterTrait>, String> {
+        let prefill_policy =
+            PolicyFactory::create_from_config(prefill_policy_config.unwrap_or(main_policy_config));
+        let decode_policy =
+            PolicyFactory::create_from_config(decode_policy_config.unwrap_or(main_policy_config));
+
+        ctx.policy_registry.set_prefill_policy(prefill_policy);
+        ctx.policy_registry.set_decode_policy(decode_policy);
+
+        let router = GrpcEPDRouter::new(ctx)?;
+
+        Ok(Box::new(router))
+    }
+
     /// Create an OpenAI router
     ///
     /// Workers should be registered via the external worker registration workflow
@@ -198,6 +234,11 @@ impl RouterFactory {
                 router_ids::GRPC_PD,
                 "gRPC PD",
                 Self::create_grpc_pd_router(None, None, policy, ctx),
+            ),
+            (
+                router_ids::GRPC_EPD,
+                "gRPC EPD",
+                Self::create_grpc_epd_router(None, None, policy, ctx),
             ),
             (
                 router_ids::HTTP_OPENAI,

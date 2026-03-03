@@ -219,6 +219,7 @@ impl WorkerSelectionStage {
                             WorkerType::Prefill => acc.0.push(w),
                             WorkerType::Decode => acc.1.push(w),
                             WorkerType::Regular => {}
+                            WorkerType::Encode => {}
                         }
                     }
                     acc

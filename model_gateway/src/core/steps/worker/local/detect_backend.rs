@@ -18,7 +18,7 @@ use crate::core::{
         workflow_data::{WorkerKind, WorkerWorkflowData},
     },
     worker::RuntimeType,
-    ConnectionMode,
+    ConnectionMode, WorkerType,
 };
 
 // ─── gRPC backend detection ────────────────────────────────────────────────
@@ -253,6 +253,15 @@ impl StepExecutor<WorkerWorkflowData> for DetectBackendStep {
             .health
             .timeout_secs
             .unwrap_or(app_context.router_config.health_check.timeout_secs);
+
+        if config.worker_type == WorkerType::Encode {
+            debug!(
+                "Encode worker detected for {} - using sglang runtime",
+                config.url
+            );
+            context.data.detected_runtime_type = Some(RuntimeType::Sglang.to_string());
+            return Ok(StepResult::Success);
+        }
 
         // If runtime_type is explicitly configured (non-default), use it and skip detection
         let config_runtime = config.runtime_type;
