@@ -63,10 +63,11 @@ impl ToolLoopState {
         _success: bool,
     ) {
         // Add function_tool_call item with both arguments and output
+        let id = call_id.clone();
         self.conversation_history
             .push(ResponseInputOutputItem::FunctionToolCall {
-                id: call_id.clone(),
-                call_id: call_id.clone(),
+                id,
+                call_id,
                 name: tool_name,
                 arguments: args_json_str,
                 output: Some(output_str),

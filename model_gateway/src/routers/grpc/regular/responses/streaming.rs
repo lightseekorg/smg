@@ -504,12 +504,12 @@ async fn execute_tool_loop_streaming_internal(
     let session = McpToolSession::new(&ctx.mcp_orchestrator, mcp_servers, &response_id);
 
     // Create response event emitter
-    let model = current_request.model.clone();
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let mut emitter = ResponseStreamEventEmitter::new(response_id, model.clone(), created_at);
+    let mut emitter =
+        ResponseStreamEventEmitter::new(response_id, current_request.model.clone(), created_at);
     emitter.set_original_request(original_request.clone());
 
     // Emit initial response.created and response.in_progress events
@@ -532,7 +532,7 @@ async fn execute_tool_loop_streaming_internal(
         state.iteration += 1;
 
         // Record tool loop iteration metric
-        Metrics::record_mcp_tool_iteration(&model);
+        Metrics::record_mcp_tool_iteration(&current_request.model);
 
         if state.iteration > DEFAULT_MAX_ITERATIONS {
             return Err(format!(
@@ -771,12 +771,12 @@ async fn execute_tool_loop_streaming_internal(
 
                 // Record MCP tool metrics
                 Metrics::record_mcp_tool_duration(
-                    &model,
+                    &current_request.model,
                     &tool_output.tool_name,
                     tool_output.duration,
                 );
                 Metrics::record_mcp_tool_call(
-                    &model,
+                    &current_request.model,
                     &tool_output.tool_name,
                     if success {
                         metrics_labels::RESULT_SUCCESS

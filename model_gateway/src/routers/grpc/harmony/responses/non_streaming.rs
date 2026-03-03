@@ -414,9 +414,10 @@ fn build_tool_response(
         let output_str = to_string(&result.output)
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize tool output: {e}\"}}"));
 
+        let id = tool_call.id.clone();
         output.push(ResponseOutputItem::FunctionToolCall {
-            id: tool_call.id.clone(),
-            call_id: tool_call.id.clone(),
+            call_id: id.clone(),
+            id,
             name: tool_call.function.name.clone(),
             arguments: tool_call.function.arguments.clone().unwrap_or_default(),
             output: Some(output_str),
@@ -431,11 +432,13 @@ fn build_tool_response(
 
     // Add function tool calls WITHOUT output (need caller execution)
     for tool_call in function_tool_calls {
+        let call_id = tool_call.id.clone();
+        let arguments = tool_call.function.arguments.unwrap_or_default();
         output.push(ResponseOutputItem::FunctionToolCall {
-            id: tool_call.id.clone(),
-            call_id: tool_call.id.clone(),
-            name: tool_call.function.name.clone(),
-            arguments: tool_call.function.arguments.clone().unwrap_or_default(),
+            id: tool_call.id,
+            call_id,
+            name: tool_call.function.name,
+            arguments,
             output: None, // No output = needs execution
             status: "completed".to_string(),
         });

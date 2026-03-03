@@ -264,10 +264,10 @@ impl ResponseStreamEventEmitter {
         // Build output array from tracked items
         let output: Vec<serde_json::Value> = self
             .output_items
-            .iter()
+            .iter_mut()
             .filter_map(|item| {
                 if item.status == ItemStatus::Completed {
-                    item.item_data.clone()
+                    item.item_data.take()
                 } else {
                     None
                 }
@@ -277,12 +277,12 @@ impl ResponseStreamEventEmitter {
         // If no items were tracked (legacy path), fall back to generic message
         let output = if output.is_empty() {
             vec![json!({
-                "id": self.message_id.clone(),
+                "id": std::mem::take(&mut self.message_id),
                 "type": "message",
                 "role": "assistant",
                 "content": [{
                     "type": "output_text",
-                    "text": self.accumulated_text.clone()
+                    "text": std::mem::take(&mut self.accumulated_text)
                 }]
             })]
         } else {
@@ -663,15 +663,15 @@ impl ResponseStreamEventEmitter {
     ///
     /// This constructs the final ResponsesResponse from all accumulated output items
     /// for persistence. Should be called after streaming is complete.
-    pub fn finalize(&self, usage: Option<Usage>) -> ResponsesResponse {
-        // Build output array from tracked items
+    pub fn finalize(&mut self, usage: Option<Usage>) -> ResponsesResponse {
+        // Build output array from tracked items, taking ownership to avoid cloning
         let output: Vec<ResponseOutputItem> = self
             .output_items
-            .iter()
+            .iter_mut()
             .filter_map(|item| {
                 item.item_data
-                    .as_ref()
-                    .and_then(|data| serde_json::from_value(data.clone()).ok())
+                    .take()
+                    .and_then(|data| serde_json::from_value(data).ok())
             })
             .collect();
 
@@ -819,7 +819,7 @@ impl ResponseStreamEventEmitter {
                                 "role": "assistant",
                                 "content": [{
                                     "type": "output_text",
-                                    "text": self.accumulated_text.clone()
+                                    "text": std::mem::take(&mut self.accumulated_text)
                                 }]
                             });
                             let event = self.emit_output_item_done(output_index, &item);
