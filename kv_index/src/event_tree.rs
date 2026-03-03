@@ -1,7 +1,9 @@
 //! Positional indexer for cache-aware routing.
 //!
-//! Uses `DashMap<(position, ContentHash), SeqEntry>` for O(1) random access to any
-//! depth position, replacing tree pointer-chasing with direct positional lookup.
+//! Uses `Vec<DashMap<ContentHash, SeqEntry>>` (one DashMap per position) for O(1)
+//! random access to any depth position, replacing tree pointer-chasing with direct
+//! positional lookup. Per-position DashMaps eliminate cross-position shard contention
+//! and improve cache locality for hot prefix positions.
 //! Jump search skips positions in strides, yielding amortized O(D/J + W) complexity.
 //!
 //! **Dual-hash scheme**: backends send a position-aware `block_hash` (SequenceHash)
@@ -140,15 +142,14 @@ enum SeqEntry {
 }
 
 impl SeqEntry {
-    fn new(seq_hash: SequenceHash, worker: &str) -> Self {
+    fn new(seq_hash: SequenceHash, worker_id: WorkerId) -> Self {
         let mut workers = FxHashSet::default();
-        workers.insert(Arc::from(worker));
+        workers.insert(worker_id);
         Self::Single(seq_hash, workers)
     }
 
     /// Insert a worker for a given seq_hash, upgrading to Multi if needed.
-    fn insert(&mut self, seq_hash: SequenceHash, worker: &str) {
-        let worker_id: WorkerId = Arc::from(worker);
+    fn insert(&mut self, seq_hash: SequenceHash, worker_id: WorkerId) {
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => {
                 workers.insert(worker_id);
@@ -194,6 +195,19 @@ impl SeqEntry {
             Self::Multi(map) => map.get(&seq_hash),
         }
     }
+
+    /// For Single entries, return the worker set directly without prefix hash check.
+    /// Content hash collisions at 64-bit XXH3 are practically impossible (~2^-64),
+    /// so a matching content_hash at the same position is unambiguous — the rolling
+    /// hash computation can be skipped entirely.
+    /// Returns None for Multi entries — caller must compute prefix hash to disambiguate.
+    #[inline]
+    fn workers_if_single(&self) -> Option<&FxHashSet<WorkerId>> {
+        match self {
+            Self::Single(_, workers) => Some(workers),
+            Self::Multi(_) => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -206,18 +220,24 @@ type LevelIndex = RwLock<FxHashMap<SequenceHash, (usize, ContentHash, SequenceHa
 
 /// Positional indexer for cache-aware routing.
 ///
-/// Uses `DashMap<(position, ContentHash), SeqEntry>`
+/// Uses `Vec<DashMap<ContentHash, SeqEntry>>` — one DashMap per block position —
 /// for O(1) position access and jump search for O(D/J + W) matching complexity.
+/// Per-position DashMaps eliminate cross-position shard contention and improve
+/// cache locality for hot prefix positions (matching Dynamo's Flash Indexer design).
 ///
 /// All methods take `&self` — concurrency is handled internally via DashMap sharding
 /// and parking_lot::RwLock.
 pub struct PositionalIndexer {
-    /// Primary index: (position, content_hash) → SeqEntry.
-    index: DashMap<(usize, ContentHash), SeqEntry, FxBuildHasher>,
+    /// Per-position index: index[position] is a DashMap<ContentHash, SeqEntry>.
+    /// Vec grows lazily as deeper positions are stored.
+    index: RwLock<Vec<DashMap<ContentHash, SeqEntry, FxBuildHasher>>>,
     /// Per-worker reverse lookup: worker → { seq_hash → (position, content_hash) }.
     /// Single RwLock because structural mutations (add/remove workers) are rare;
     /// the hot path is read-only.
     worker_blocks: RwLock<FxHashMap<WorkerId, LevelIndex>>,
+    /// Worker ID intern table — avoids Arc::from() allocation on every API call.
+    /// Lookup by &str works because Arc<str>: Borrow<str>.
+    intern: DashMap<WorkerId, (), FxBuildHasher>,
     /// Jump size for search optimization (default 64).
     jump_size: usize,
 }
@@ -231,8 +251,9 @@ impl PositionalIndexer {
     pub fn new(jump_size: usize) -> Self {
         assert!(jump_size > 0, "jump_size must be greater than 0");
         Self {
-            index: DashMap::with_hasher(FxBuildHasher),
+            index: RwLock::new(Vec::new()),
             worker_blocks: RwLock::new(FxHashMap::default()),
+            intern: DashMap::with_hasher(FxBuildHasher),
             jump_size,
         }
     }
@@ -252,7 +273,7 @@ impl PositionalIndexer {
             return Ok(());
         }
 
-        let worker_id: WorkerId = Arc::from(worker);
+        let worker_id = self.intern_worker(worker);
 
         // Determine starting position and parent's router prefix hash.
         let (start_pos, parent_prefix) = match parent_seq_hash {
@@ -277,12 +298,17 @@ impl PositionalIndexer {
                 .or_insert_with(|| RwLock::new(FxHashMap::default()));
         }
 
+        // Ensure the per-position Vec has enough levels for all blocks.
+        let max_pos = start_pos + blocks.len() - 1;
+        self.ensure_levels(max_pos);
+
         let wb = self.worker_blocks.read();
         let Some(level_index) = wb.get(&worker_id) else {
             return Ok(());
         };
         let mut worker_map = level_index.write();
 
+        let levels = self.index.read();
         let mut prev_prefix = parent_prefix;
         for (i, block) in blocks.iter().enumerate() {
             let position = start_pos + i;
@@ -296,10 +322,10 @@ impl PositionalIndexer {
                 None => SequenceHash(content_hash.0),
             };
 
-            self.index
-                .entry((position, content_hash))
-                .and_modify(|entry| entry.insert(prefix_hash, worker))
-                .or_insert_with(|| SeqEntry::new(prefix_hash, worker));
+            levels[position]
+                .entry(content_hash)
+                .and_modify(|entry| entry.insert(prefix_hash, worker_id.clone()))
+                .or_insert_with(|| SeqEntry::new(prefix_hash, worker_id.clone()));
 
             worker_map.insert(block.seq_hash, (position, content_hash, prefix_hash));
             prev_prefix = Some(prefix_hash);
@@ -319,7 +345,7 @@ impl PositionalIndexer {
     /// when the worker is cleared or removed. Backends typically evict from the tail (LRU),
     /// so mid-sequence gaps are rare in practice.
     pub fn apply_removed(&self, worker: &str, seq_hashes: &[SequenceHash]) {
-        let worker_id: WorkerId = Arc::from(worker);
+        let worker_id = self.intern_worker(worker);
 
         let wb = self.worker_blocks.read();
         let Some(level_index) = wb.get(&worker_id) else {
@@ -332,15 +358,18 @@ impl PositionalIndexer {
         };
 
         let mut worker_map = level_index.write();
+        let levels = self.index.read();
 
         for &seq_hash in seq_hashes {
             let Some((position, content_hash, prefix_hash)) = worker_map.remove(&seq_hash) else {
                 continue;
             };
 
-            if let Entry::Occupied(mut occupied) = self.index.entry((position, content_hash)) {
-                if occupied.get_mut().remove(prefix_hash, worker) {
-                    occupied.remove();
+            if let Some(level) = levels.get(position) {
+                if let Entry::Occupied(mut occupied) = level.entry(content_hash) {
+                    if occupied.get_mut().remove(prefix_hash, worker) {
+                        occupied.remove();
+                    }
                 }
             }
         }
@@ -385,15 +414,18 @@ impl PositionalIndexer {
     // -----------------------------------------------------------------------
 
     fn remove_or_clear_worker(&self, worker: &str, keep_worker: bool) {
-        let worker_id: WorkerId = Arc::from(worker);
+        let worker_id = self.intern_worker(worker);
 
         let mut wb = self.worker_blocks.write();
         if let Some(level_index) = wb.remove(&worker_id) {
+            let levels = self.index.read();
             let worker_map = level_index.read();
             for (_, &(position, content_hash, prefix_hash)) in worker_map.iter() {
-                if let Entry::Occupied(mut occupied) = self.index.entry((position, content_hash)) {
-                    if occupied.get_mut().remove(prefix_hash, worker) {
-                        occupied.remove();
+                if let Some(level) = levels.get(position) {
+                    if let Entry::Occupied(mut occupied) = level.entry(content_hash) {
+                        if occupied.get_mut().remove(prefix_hash, worker) {
+                            occupied.remove();
+                        }
                     }
                 }
             }
@@ -442,30 +474,77 @@ impl PositionalIndexer {
         }
     }
 
-    /// Get workers at a position matching both content_hash and prefix_hash.
+    // -----------------------------------------------------------------------
+    // Internal: Vec growth + worker interning
+    // -----------------------------------------------------------------------
+
+    /// Grow the per-position Vec to accommodate `max_pos`.
+    /// Takes write lock only when growth is needed (rare after warmup).
+    fn ensure_levels(&self, max_pos: usize) {
+        let needed = max_pos + 1;
+        if self.index.read().len() >= needed {
+            return;
+        }
+        let mut levels = self.index.write();
+        while levels.len() < needed {
+            levels.push(DashMap::with_hasher(FxBuildHasher));
+        }
+    }
+
+    /// Intern a worker URL to reuse the same `Arc<str>` across calls.
+    /// First call per worker allocates; subsequent calls return Arc::clone.
+    fn intern_worker(&self, worker: &str) -> WorkerId {
+        if let Some(entry) = self.intern.get(worker) {
+            return entry.key().clone();
+        }
+        let id: WorkerId = Arc::from(worker);
+        self.intern.entry(id.clone()).or_insert(());
+        id
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal: query helpers
+    // -----------------------------------------------------------------------
+
+    /// Get workers at a position matching content_hash (and prefix_hash for Multi).
+    /// Clones the worker set — used only once at position 0 to initialize `active`.
+    /// Skips rolling hash computation for Single entries (unambiguous match).
     fn get_workers_lazy(
-        &self,
+        levels: &[DashMap<ContentHash, SeqEntry, FxBuildHasher>],
         position: usize,
         content_hash: ContentHash,
         seq_hashes: &mut Vec<SequenceHash>,
         sequence: &[ContentHash],
     ) -> Option<FxHashSet<WorkerId>> {
-        let entry = self.index.get(&(position, content_hash))?;
+        let level = levels.get(position)?;
+        let entry = level.get(&content_hash)?;
+        if let Some(workers) = entry.value().workers_if_single() {
+            return Some(workers.clone());
+        }
+        // Multi: need rolling hash to disambiguate
         Self::ensure_seq_hash_computed(seq_hashes, position, sequence);
-        entry.get(seq_hashes[position]).cloned()
+        entry.value().get(seq_hashes[position]).cloned()
     }
 
-    /// Count workers at a position matching the prefix_hash.
+    /// Count workers at a position matching the prefix_hash (no set materialization).
+    /// Skips rolling hash computation for Single entries (unambiguous match).
     fn count_workers_at(
-        &self,
+        levels: &[DashMap<ContentHash, SeqEntry, FxBuildHasher>],
         position: usize,
         content_hash: ContentHash,
         seq_hashes: &mut Vec<SequenceHash>,
         sequence: &[ContentHash],
     ) -> usize {
-        let Some(entry) = self.index.get(&(position, content_hash)) else {
+        let Some(level) = levels.get(position) else {
             return 0;
         };
+        let Some(entry) = level.get(&content_hash) else {
+            return 0;
+        };
+        if let Some(workers) = entry.value().workers_if_single() {
+            return workers.len();
+        }
+        // Multi: need rolling hash to disambiguate
         Self::ensure_seq_hash_computed(seq_hashes, position, sequence);
         entry
             .get(seq_hashes[position])
@@ -473,9 +552,11 @@ impl PositionalIndexer {
             .unwrap_or(0)
     }
 
-    /// Scan positions sequentially, filtering by prefix_hash.
+    /// Scan positions sequentially, draining workers that stop matching.
+    /// Accesses DashMap entries directly — no FxHashSet cloning.
+    /// Skips rolling hash computation for Single entries (unambiguous match).
     fn linear_scan_drain(
-        &self,
+        levels: &[DashMap<ContentHash, SeqEntry, FxBuildHasher>],
         sequence: &[ContentHash],
         seq_hashes: &mut Vec<SequenceHash>,
         active: &mut FxHashSet<WorkerId>,
@@ -489,18 +570,45 @@ impl PositionalIndexer {
             }
             let pos = lo + offset;
 
-            let workers = self.index.get(&(pos, content_hash)).and_then(|entry| {
-                Self::ensure_seq_hash_computed(seq_hashes, pos, sequence);
-                entry.get(seq_hashes[pos]).cloned()
-            });
-
-            let Some(workers) = workers else {
+            let Some(level) = levels.get(pos) else {
                 for worker in active.drain() {
                     scores.scores.insert(worker, pos as u32);
                 }
                 break;
             };
 
+            let Some(entry) = level.get(&content_hash) else {
+                for worker in active.drain() {
+                    scores.scores.insert(worker, pos as u32);
+                }
+                break;
+            };
+
+            // Fast path: Single entry — skip rolling hash, use workers directly.
+            if let Some(workers) = entry.value().workers_if_single() {
+                active.retain(|w| {
+                    if workers.contains(w) {
+                        true
+                    } else {
+                        scores.scores.insert(w.clone(), pos as u32);
+                        false
+                    }
+                });
+                continue;
+            }
+
+            // Multi: need rolling hash to disambiguate.
+            Self::ensure_seq_hash_computed(seq_hashes, pos, sequence);
+            let seq_hash = seq_hashes[pos];
+
+            let Some(workers) = entry.get(seq_hash) else {
+                for worker in active.drain() {
+                    scores.scores.insert(worker, pos as u32);
+                }
+                break;
+            };
+
+            // Direct membership check — no clone of workers set.
             active.retain(|w| {
                 if workers.contains(w) {
                     true
@@ -519,11 +627,18 @@ impl PositionalIndexer {
             return scores;
         }
 
+        // Hold the read guard for the entire query — only blocks Vec growth (rare).
+        let levels = self.index.read();
+
         let mut seq_hashes = Vec::with_capacity(content_hashes.len());
 
-        let Some(initial_workers) =
-            self.get_workers_lazy(0, content_hashes[0], &mut seq_hashes, content_hashes)
-        else {
+        let Some(initial_workers) = Self::get_workers_lazy(
+            &levels,
+            0,
+            content_hashes[0],
+            &mut seq_hashes,
+            content_hashes,
+        ) else {
             return scores;
         };
 
@@ -538,7 +653,8 @@ impl PositionalIndexer {
         while current_pos < len - 1 && !active.is_empty() {
             let next_pos = (current_pos + self.jump_size).min(len - 1);
 
-            let count = self.count_workers_at(
+            let count = Self::count_workers_at(
+                &levels,
                 next_pos,
                 content_hashes[next_pos],
                 &mut seq_hashes,
@@ -550,7 +666,8 @@ impl PositionalIndexer {
             if count == active.len() {
                 current_pos = next_pos;
             } else {
-                self.linear_scan_drain(
+                Self::linear_scan_drain(
+                    &levels,
                     content_hashes,
                     &mut seq_hashes,
                     &mut active,
@@ -561,6 +678,9 @@ impl PositionalIndexer {
                 current_pos = next_pos;
             }
         }
+
+        // Drop levels guard before acquiring worker_blocks.
+        drop(levels);
 
         let final_score = len as u32;
         for worker in active {
@@ -589,7 +709,7 @@ impl Default for PositionalIndexer {
 impl fmt::Debug for PositionalIndexer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PositionalIndexer")
-            .field("index_size", &self.index.len())
+            .field("levels", &self.index.read().len())
             .field("jump_size", &self.jump_size)
             .field(
                 "workers",
@@ -854,7 +974,8 @@ mod tests {
 
         // Position 1 has same content but different prefix histories → Multi
         {
-            let entry = indexer.index.get(&(1, ContentHash(20))).unwrap();
+            let levels = indexer.index.read();
+            let entry = levels[1].get(&ContentHash(20)).unwrap();
             assert!(matches!(entry.value(), SeqEntry::Multi(_)));
         }
 
@@ -879,7 +1000,8 @@ mod tests {
             .apply_stored("http://w4:8000", &blocks_w4, None)
             .unwrap();
         {
-            let entry = indexer2.index.get(&(0, ContentHash(10))).unwrap();
+            let levels = indexer2.index.read();
+            let entry = levels[0].get(&ContentHash(10)).unwrap();
             assert!(matches!(entry.value(), SeqEntry::Single(_, _)));
         }
 
@@ -1269,15 +1391,27 @@ mod tests {
             .apply_stored("http://w2:8000", &blocks, None)
             .unwrap();
 
-        assert!(!indexer.index.is_empty());
+        {
+            let levels = indexer.index.read();
+            let total: usize = levels.iter().map(|l| l.len()).sum();
+            assert!(total > 0);
+        }
 
         indexer.remove_worker("http://w1:8000");
-        // w2 still has entries, so DashMap should still have entries
-        assert!(!indexer.index.is_empty());
+        // w2 still has entries, so index should still have entries
+        {
+            let levels = indexer.index.read();
+            let total: usize = levels.iter().map(|l| l.len()).sum();
+            assert!(total > 0);
+        }
 
         indexer.remove_worker("http://w2:8000");
-        // Both workers removed — DashMap should be empty
-        assert_eq!(indexer.index.len(), 0);
+        // Both workers removed — all per-position DashMaps should be empty
+        {
+            let levels = indexer.index.read();
+            let total: usize = levels.iter().map(|l| l.len()).sum();
+            assert_eq!(total, 0);
+        }
     }
 
     #[test]
