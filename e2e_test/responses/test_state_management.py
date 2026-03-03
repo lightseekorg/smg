@@ -186,6 +186,22 @@ class TestStateManagementCloud:
 
 
 # =============================================================================
+# Cloud Backend Tests with Flyway-managed Oracle schema (oracle-custom)
+# =============================================================================
+
+
+@pytest.mark.storage("oracle-custom")
+@pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
+class TestStateManagementOracleCustom(TestStateManagementCloud):
+    """State management tests against Oracle with Flyway-managed schema (schema-config).
+
+    Inherits all test methods from TestStateManagementCloud. The storage("oracle-custom")
+    marker causes the gateway to launch with --schema-config pointing to the Flyway schema,
+    using ATP_FLYWAY_* env vars for Oracle credentials.
+    """
+
+
+# =============================================================================
 # Local Backend Tests (gRPC with Qwen model)
 # =============================================================================
 

@@ -129,6 +129,7 @@ class RouterArgs:
     redis_url: str | None = None
     redis_pool_max: int = 16
     redis_retention_days: int = 30
+    schema_config: str | None = None
     # mTLS configuration for worker communication
     client_cert_path: str | None = None
     client_key_path: str | None = None
@@ -869,6 +870,14 @@ class RouterArgs:
             type=int,
             default=int(os.getenv("REDIS_RETENTION_DAYS", RouterArgs.redis_retention_days)),
             help="Redis data retention in days (-1 for persistent, default: 30, env: REDIS_RETENTION_DAYS)",
+        )
+
+        # Schema configuration
+        backend_group.add_argument(
+            f"--{prefix}schema-config",
+            type=str,
+            default=None,
+            help="Path to a YAML schema config file for storage table/column remapping",
         )
 
         # TLS/mTLS configuration

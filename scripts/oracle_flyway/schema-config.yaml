@@ -1,0 +1,19 @@
+# SMG SchemaConfig for genai-data-plane Oracle tables (Flyway-managed)
+version: 3
+auto_migrate: false
+
+conversations:
+  table: CONVERSATIONS_V2
+
+responses:
+  table: RESPONSES
+  columns:
+    id: RESPONSE_ID
+    input: INPUT_ITEMS
+    raw_response: RESPONSE_OBJECT
+
+conversation_items:
+  table: CONVERSATION_ITEMS
+
+conversation_item_links:
+  table: CONVERSATION_ITEM_LINKS

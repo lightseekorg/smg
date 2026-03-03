@@ -463,7 +463,7 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         "storage(backend): mark test to use a specific history storage backend "
-        "(memory, oracle). Default is memory.",
+        "(memory, oracle, oracle-custom). Default is memory.",
     )
     config.addinivalue_line(
         "markers",

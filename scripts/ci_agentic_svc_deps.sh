@@ -5,6 +5,8 @@
 #   bash ci_agentic_svc_deps.sh setup-oracle-client
 #   bash ci_agentic_svc_deps.sh create-oracle-user <host>
 #   bash ci_agentic_svc_deps.sh cleanup-oracle-user <host>
+#   bash ci_agentic_svc_deps.sh create-oracle-flyway-user <host>
+#   bash ci_agentic_svc_deps.sh cleanup-oracle-flyway-user <host>
 
 set -uo pipefail
 
@@ -143,10 +145,111 @@ except Exception as e:
 PYEOF
 }
 
+cmd_create_oracle_flyway_user() {
+    set -e
+    local oracle_host="${1:-oracle-db}"
+    local oracle_dsn="${oracle_host}:1521/FREEPDB1"
+
+    pip install oracledb
+
+    # Use last two segments of pod name (same logic as create-oracle-user)
+    RAW_NAME=$(echo "$HOSTNAME" | rev | cut -d'-' -f1,2 | rev | tr '[:lower:]-' '[:upper:]_')
+    FLYWAY_USER="FLYWAY_${RAW_NAME}"
+    # Prefix with 'P' so the password always starts with a letter (Oracle requirement)
+    FLYWAY_PASS="P$(openssl rand -hex 8)"
+    echo "Creating Oracle Flyway test user: $FLYWAY_USER"
+
+    export ORA_FLYWAY_USER="$FLYWAY_USER"
+    export ORA_FLYWAY_PASS="$FLYWAY_PASS"
+    export ORA_DSN="$oracle_dsn"
+
+    # Locate Flyway SQL files relative to the repo root
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+    export FLYWAY_SQL_DIR="$REPO_ROOT/scripts/oracle_flyway/sql"
+
+    python3 << 'PYEOF'
+import os, glob, oracledb
+
+user = os.environ["ORA_FLYWAY_USER"]
+pwd = os.environ["ORA_FLYWAY_PASS"]
+dsn = os.environ["ORA_DSN"]
+sql_dir = os.environ["FLYWAY_SQL_DIR"]
+
+# Create user with extra privileges needed for V2 sweep procedures/scheduler jobs
+conn = oracledb.connect(user="system", password="oracle", dsn=dsn)
+cur = conn.cursor()
+cur.execute(f'CREATE USER {user} IDENTIFIED BY "{pwd}" QUOTA UNLIMITED ON USERS')
+cur.execute(f"GRANT CONNECT, RESOURCE TO {user}")
+conn.commit()
+conn.close()
+print(f"Oracle Flyway user {user} created successfully")
+
+# Run Flyway SQL files against the new user
+flyway_conn = oracledb.connect(user=user, password=pwd, dsn=dsn)
+flyway_cur = flyway_conn.cursor()
+
+sql_files = sorted(glob.glob(os.path.join(sql_dir, "V*.sql")))
+for sql_file in sql_files:
+    print(f"Executing {os.path.basename(sql_file)}...")
+    with open(sql_file) as f:
+        content = f.read()
+
+    # Split on semicolons and execute each statement
+    for stmt in content.split(";"):
+        # Strip comments and whitespace
+        lines = [l for l in stmt.split("\n") if not l.strip().startswith("--")]
+        cleaned = "\n".join(lines).strip()
+        if cleaned:
+            flyway_cur.execute(cleaned)
+
+flyway_conn.commit()
+flyway_conn.close()
+print("Flyway SQL files executed successfully")
+PYEOF
+
+    echo "ATP_FLYWAY_USER=$FLYWAY_USER" >> "$GITHUB_ENV"
+    echo "ATP_FLYWAY_PASSWORD=$FLYWAY_PASS" >> "$GITHUB_ENV"
+    echo "ATP_FLYWAY_DSN=$oracle_dsn" >> "$GITHUB_ENV"
+}
+
+cmd_cleanup_oracle_flyway_user() {
+    local oracle_host="${1:-oracle-db}"
+    local oracle_dsn="${oracle_host}:1521/FREEPDB1"
+
+    if [ -z "${ATP_FLYWAY_USER:-}" ] || [ "$ATP_FLYWAY_USER" = "system" ]; then
+        echo "No Flyway test user to clean up"
+        return 0
+    fi
+
+    echo "Dropping Oracle Flyway test user: $ATP_FLYWAY_USER"
+    pip install oracledb 2>/dev/null || true
+
+    export ORA_DROP_USER="$ATP_FLYWAY_USER"
+    export ORA_DSN="$oracle_dsn"
+
+    python3 << 'PYEOF' || echo "Warning: cleanup script failed"
+import os, oracledb
+try:
+    user = os.environ["ORA_DROP_USER"]
+    dsn = os.environ["ORA_DSN"]
+    conn = oracledb.connect(user="system", password="oracle", dsn=dsn)
+    cur = conn.cursor()
+    cur.execute(f"DROP USER {user} CASCADE")
+    conn.commit()
+    conn.close()
+    print("Oracle Flyway test user dropped successfully")
+except Exception as e:
+    print(f"Warning: failed to drop Flyway test user: {e}")
+PYEOF
+}
+
 case "$COMMAND" in
     check)                cmd_check "$@" ;;
     setup-oracle-client)  cmd_setup_oracle_client ;;
     create-oracle-user)   cmd_create_oracle_user "$@" ;;
     cleanup-oracle-user)  cmd_cleanup_oracle_user "$@" ;;
+    create-oracle-flyway-user)   cmd_create_oracle_flyway_user "$@" ;;
+    cleanup-oracle-flyway-user)  cmd_cleanup_oracle_flyway_user "$@" ;;
     *)                    echo "Unknown command: $COMMAND"; exit 1 ;;
 esac

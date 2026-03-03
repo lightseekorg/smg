@@ -155,7 +155,7 @@ class Gateway:
             decode_workers: List of decode ModelInstance objects for PD mode.
             igw_mode: Start in IGW mode (no workers, add via API).
             cloud_backend: Cloud backend type ("openai", "xai", or "anthropic").
-            history_backend: History backend for cloud mode ("memory" or "oracle").
+            history_backend: History backend for cloud mode ("memory", "oracle", or "oracle-custom").
             policy: Routing policy (round_robin, random, etc.)
             timeout: Startup timeout in seconds.
             show_output: Show subprocess output (env var override).
@@ -277,14 +277,40 @@ class Gateway:
                 raise ValueError(f"Unsupported cloud backend: {cloud_backend}")
 
             backend_type = cloud_backend_type.get(cloud_backend, "openai")
+
+            # oracle-custom: use Flyway-managed schema with schema-config
+            actual_history_backend = history_backend
+            if history_backend == "oracle-custom":
+                actual_history_backend = "oracle"
+                # Override Oracle env vars to use Flyway user credentials
+                flyway_user = os.environ.get("ATP_FLYWAY_USER", "")
+                flyway_password = os.environ.get("ATP_FLYWAY_PASSWORD", "")
+                flyway_dsn = os.environ.get("ATP_FLYWAY_DSN", "")
+                if not all([flyway_user, flyway_password, flyway_dsn]):
+                    raise ValueError(
+                        "ATP_FLYWAY_USER, ATP_FLYWAY_PASSWORD, and ATP_FLYWAY_DSN "
+                        "environment variables required for oracle-custom backend"
+                    )
+                self._env["ATP_USER"] = flyway_user
+                self._env["ATP_PASSWORD"] = flyway_password
+                self._env["ATP_DSN"] = flyway_dsn
+
             mode_args = [
                 "--backend",
                 backend_type,
                 "--worker-urls",
                 worker_url,
                 "--history-backend",
-                history_backend,
+                actual_history_backend,
             ]
+
+            if history_backend == "oracle-custom":
+                mode_args.extend(
+                    [
+                        "--schema-config",
+                        "scripts/oracle_flyway/schema-config.yaml",
+                    ]
+                )
 
             self._launch(
                 mode_args=mode_args,
@@ -621,7 +647,7 @@ def launch_cloud_gateway(
 
     Args:
         runtime: Cloud runtime ("openai" or "xai")
-        history_backend: History storage backend ("memory" or "oracle")
+        history_backend: History storage backend ("memory", "oracle", or "oracle-custom")
         extra_args: Additional router arguments
         timeout: Startup timeout in seconds
         show_output: Show subprocess output

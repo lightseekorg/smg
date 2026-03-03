@@ -419,6 +419,7 @@ jobs:
         run: |
           bash scripts/ci_agentic_svc_deps.sh setup-oracle-client
           bash scripts/ci_agentic_svc_deps.sh create-oracle-user oracle-db
+          bash scripts/ci_agentic_svc_deps.sh create-oracle-flyway-user oracle-db
 
       - name: Run E2E tests
         env:
@@ -431,9 +432,11 @@ jobs:
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
 
-      - name: Cleanup Oracle test user
+      - name: Cleanup Oracle test users
         if: always() && matrix.setup_agentic_deps
-        run: bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-user oracle-db
+        run: |
+          bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-flyway-user oracle-db
+          bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-user oracle-db
 
       - name: Upload benchmark results
         if: matrix.upload_benchmarks && success()
