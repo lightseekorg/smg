@@ -218,7 +218,7 @@ jobs:
           python-version: "3.13"
 
       - name: Download wheel artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: smg-wheel
           path: dist/
@@ -386,20 +386,20 @@ jobs:
         uses: ./.github/actions/setup-sglang
 
       - name: Download wheel artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: smg-wheel
           path: wheel/
 
       - name: Download WASM test fixtures
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: wasm-test-fixtures
           path: wasm/tests/fixtures/
         continue-on-error: true
 
       - name: Download Python client types
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: python-client-types
           path: clients/python/smg_client/types/
@@ -469,7 +469,7 @@ jobs:
           sudo apt-get install -y build-essential
 
       - name: Download Go FFI library
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: go-ffi-library
           path: bindings/golang/target/release/
@@ -508,7 +508,7 @@ jobs:
           cache-dependency-path: bindings/golang/go.sum
 
       - name: Download Go FFI library
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: go-ffi-library
           path: bindings/golang/target/release/
@@ -517,13 +517,13 @@ jobs:
         run: ls -la bindings/golang/target/release/libsmg_go.*
 
       - name: Download wheel artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: smg-wheel
           path: wheel/
 
       - name: Download Python client types
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: python-client-types
           path: clients/python/smg_client/types/
@@ -567,7 +567,7 @@ jobs:
           cache-dependency-path: bindings/golang/go.sum
 
       - name: Download Go FFI library
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: go-ffi-library
           path: bindings/golang/target/release/
@@ -576,7 +576,7 @@ jobs:
         run: ls -la bindings/golang/target/release/libsmg_go.*
 
       - name: Download wheel artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: smg-wheel
           path: wheel/
@@ -647,7 +647,7 @@ jobs:
         python-version: "3.13"
 
     - name: Download gateway benchmark results
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@v8
       with:
         name: genai-bench-results-all-policies
 

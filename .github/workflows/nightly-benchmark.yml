@@ -129,7 +129,7 @@ jobs:
 
       - name: Download wheel artifact
         if: steps.filter.outputs.skip != 'true'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: smg-wheel
           path: wheel/
@@ -236,7 +236,7 @@ jobs:
 
       - name: Download wheel artifact
         if: steps.filter.outputs.skip != 'true'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: smg-wheel
           path: wheel/
@@ -347,7 +347,7 @@ jobs:
 
       - name: Download wheel artifact
         if: steps.filter.outputs.skip != 'true'
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: smg-wheel
           path: wheel/
@@ -433,7 +433,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download all benchmark results
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: nightly-*
           merge-multiple: true
