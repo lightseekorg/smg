@@ -592,13 +592,13 @@ impl Router {
         let schema = if let Some(ref path) = self.schema_config {
             let content = std::fs::read_to_string(path).map_err(|e| {
                 config::ConfigError::ValidationFailed {
-                    reason: format!("Failed to read schema config file '{}': {}", path, e),
+                    reason: format!("Failed to read schema config file '{path}': {e}"),
                 }
             })?;
             let schema: config::SchemaConfig =
                 serde_yaml::from_str(&content).map_err(|e| {
                     config::ConfigError::ValidationFailed {
-                        reason: format!("Failed to parse schema config file '{}': {}", path, e),
+                        reason: format!("Failed to parse schema config file '{path}': {e}"),
                     }
                 })?;
             Some(schema)
@@ -609,7 +609,7 @@ impl Router {
         let oracle = if matches!(self.history_backend, HistoryBackendType::Oracle) {
             self.oracle_config.as_ref().map(|cfg| {
                 let mut c = cfg.to_config_oracle();
-                c.schema = schema.clone();
+                c.schema.clone_from(&schema);
                 c
             })
         } else {
@@ -619,7 +619,7 @@ impl Router {
         let postgres_config = if matches!(self.history_backend, HistoryBackendType::Postgres) {
             self.postgres_config.as_ref().map(|cfg| {
                 let mut c = cfg.to_config_postgres();
-                c.schema = schema.clone();
+                c.schema.clone_from(&schema);
                 c
             })
         } else {
