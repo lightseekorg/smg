@@ -458,7 +458,7 @@ impl HarmonyStreamingProcessor {
 
                         let final_output = parser.finalize(
                             complete_wrapper.finish_reason().to_string(),
-                            matched_stop.clone(),
+                            matched_stop,
                             no_stop_trim,
                         );
 
@@ -1189,8 +1189,7 @@ impl HarmonyStreamingProcessor {
                 let analysis_content = if has_analysis {
                     // Get analysis from finalized parser output by calling finalize again
                     // This is safe because finalize can be called multiple times
-                    let output =
-                        parser.finalize(finish_reason.clone(), matched_stop.clone(), false);
+                    let output = parser.finalize(finish_reason, matched_stop, false);
                     output.analysis
                 } else {
                     None
