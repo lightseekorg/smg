@@ -665,18 +665,16 @@ impl ResponseStreamEventEmitter {
     ///
     /// This constructs the final ResponsesResponse from all accumulated output items
     /// for persistence. Should be called after streaming is complete.
-    ///
-    /// INVARIANT: this method is terminal — it drains internal state via `take()`
-    /// and must only be called once per emitter lifetime.
-    pub fn finalize(&mut self, usage: Option<Usage>) -> ResponsesResponse {
-        // Build output array from tracked items, taking ownership to avoid cloning
+    /// Reads non-destructively so `emit_completed()` can still drain state afterwards.
+    pub fn finalize(&self, usage: Option<Usage>) -> ResponsesResponse {
+        // Build output array from tracked items (clone — emit_completed drains later)
         let output: Vec<ResponseOutputItem> = self
             .output_items
-            .iter_mut()
+            .iter()
             .filter_map(|item| {
                 item.item_data
-                    .take()
-                    .and_then(|data| serde_json::from_value(data).ok())
+                    .as_ref()
+                    .and_then(|data| serde_json::from_value(data.clone()).ok())
             })
             .collect();
 
