@@ -20,7 +20,7 @@ axum = ["dep:axum"]
 [dependencies]
 axum = { workspace = true, optional = true }
 bitflags.workspace = true
-chrono.workspace = true
+chrono = { workspace = true, features = ["serde"] }
 rand.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }

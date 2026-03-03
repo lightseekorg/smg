@@ -31,6 +31,9 @@ pub trait Tokenizer: Encoder + Decoder {
     /// Enable downcasting to concrete types
     fn as_any(&self) -> &dyn std::any::Any;
 
+    /// Get the backend type of the tokenizer
+    fn backend(&self) -> TokenizerBackend;
+
     /// Apply chat template to messages. Default returns an error for tokenizers without template support.
     fn apply_chat_template(
         &self,
@@ -55,6 +58,19 @@ pub trait Tokenizer: Encoder + Decoder {
         Err(anyhow::anyhow!(
             "set_chat_template is not supported by this tokenizer"
         ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenizerBackend {
+    HuggingFace,
+    Tiktoken,
+    Mock,
+}
+
+impl std::fmt::Display for TokenizerBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 

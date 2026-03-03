@@ -478,6 +478,10 @@ impl TokenizerTrait for TiktokenTokenizer {
         self
     }
 
+    fn backend(&self) -> crate::traits::TokenizerBackend {
+        crate::traits::TokenizerBackend::Tiktoken
+    }
+
     fn apply_chat_template(
         &self,
         messages: &[serde_json::Value],

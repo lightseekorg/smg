@@ -18,13 +18,14 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::traits::Tokenizer;
+use crate::traits::{Tokenizer, TokenizerBackend};
 
 /// Outcome of a tokenizer load operation
 #[derive(Debug, Clone)]
@@ -75,6 +76,32 @@ pub struct TokenizerEntry {
     pub source: String,
     /// The tokenizer instance
     pub tokenizer: Arc<dyn Tokenizer>,
+    // Metadata fields
+    pub vocab_size: usize,
+    pub chat_template_path: Option<String>,
+    pub backend: TokenizerBackend,
+    pub created_at: DateTime<Utc>,
+}
+
+impl TokenizerEntry {
+    pub fn new(
+        id: &str,
+        name: &str,
+        source: &str,
+        chat_template_path: Option<&str>,
+        tokenizer: Arc<dyn Tokenizer>,
+    ) -> Self {
+        Self {
+            id: id.to_string(),
+            name: name.to_string(),
+            source: source.to_string(),
+            vocab_size: tokenizer.vocab_size(),
+            chat_template_path: chat_template_path.map(|s| s.to_string()),
+            backend: tokenizer.backend(),
+            created_at: Utc::now(),
+            tokenizer,
+        }
+    }
 }
 
 /// Registry for managing tokenizers keyed by UUID
@@ -140,6 +167,7 @@ impl TokenizerRegistry {
         id: &str,
         name: &str,
         source: &str,
+        chat_template_path: Option<&str>,
         loader: F,
     ) -> Result<LoadOutcome, LoadError>
     where
@@ -191,13 +219,8 @@ impl TokenizerRegistry {
 
         let tokenizer = result.map_err(LoadError::LoadFailed)?;
 
-        // Create entry with provided ID
-        let entry = TokenizerEntry {
-            id: id.to_string(),
-            name: name.to_string(),
-            source: source.to_string(),
-            tokenizer,
-        };
+        // Create entry using constructor
+        let entry = TokenizerEntry::new(id, name, source, chat_template_path, tokenizer);
 
         // Store in registry
         self.tokenizers.insert(id.to_string(), entry);
@@ -227,6 +250,7 @@ impl TokenizerRegistry {
         id: &str,
         name: &str,
         source: &str,
+        chat_template_path: Option<&str>,
         tokenizer: Arc<dyn Tokenizer>,
     ) -> Option<String> {
         use dashmap::mapref::entry::Entry;
@@ -241,12 +265,8 @@ impl TokenizerRegistry {
                 None
             }
             Entry::Vacant(name_entry) => {
-                let entry = TokenizerEntry {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    source: source.to_string(),
-                    tokenizer,
-                };
+                // Create entry using constructor
+                let entry = TokenizerEntry::new(id, name, source, chat_template_path, tokenizer);
 
                 info!("Registering tokenizer '{}' with id: {}", name, id);
                 self.tokenizers.insert(id.to_string(), entry);
@@ -370,7 +390,7 @@ mod tests {
         // Load and register a tokenizer
         let id = TokenizerRegistry::generate_id();
         let outcome = registry
-            .load(&id, "model1", "path/to/model", || async {
+            .load(&id, "model1", "path/to/model", None, || async {
                 Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
             })
             .await
@@ -406,7 +426,7 @@ mod tests {
 
         // First load should return Loaded
         let outcome1 = registry
-            .load(&id1, "model1", "source1", || async {
+            .load(&id1, "model1", "source1", None, || async {
                 Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
             })
             .await
@@ -416,7 +436,7 @@ mod tests {
 
         // Second load with same name should return AlreadyExists with ORIGINAL id
         let outcome2 = registry
-            .load(&id2, "model1", "source2", || async {
+            .load(&id2, "model1", "source2", None, || async {
                 panic!("Loader should not be called for duplicate name");
             })
             .await
@@ -439,7 +459,7 @@ mod tests {
 
         // Empty name should fail
         let result = registry
-            .load(&id, "", "source", || async {
+            .load(&id, "", "source", None, || async {
                 panic!("Loader should not be called for invalid input");
             })
             .await;
@@ -447,7 +467,7 @@ mod tests {
 
         // Empty source should fail
         let result = registry
-            .load(&id, "model", "", || async {
+            .load(&id, "model", "", None, || async {
                 panic!("Loader should not be called for invalid input");
             })
             .await;
@@ -470,7 +490,7 @@ mod tests {
             let id = format!("id-{i}");
             let handle = tokio::spawn(async move {
                 registry
-                    .load(&id, "model1", "source", || async {
+                    .load(&id, "model1", "source", None, || async {
                         // Simulate slow loading
                         sleep(Duration::from_millis(10)).await;
                         load_count.fetch_add(1, Ordering::SeqCst);
@@ -504,7 +524,7 @@ mod tests {
             let model_name = format!("model{i}");
             let id = TokenizerRegistry::generate_id();
             registry
-                .load(&id, &model_name, "source", || async {
+                .load(&id, &model_name, "source", None, || async {
                     Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
                 })
                 .await
@@ -533,7 +553,7 @@ mod tests {
 
         // Try to load with a failing loader
         let result = registry
-            .load(&id, "failing_model", "source", || async {
+            .load(&id, "failing_model", "source", None, || async {
                 Err("Load failed".to_string())
             })
             .await;
@@ -549,7 +569,7 @@ mod tests {
         let id = TokenizerRegistry::generate_id();
 
         registry
-            .load(&id, "my-model", "hf/model", || async {
+            .load(&id, "my-model", "hf/model", None, || async {
                 Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
             })
             .await
@@ -579,12 +599,12 @@ mod tests {
         let tokenizer2 = Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>;
 
         // First registration should succeed
-        let result1 = registry.register(&id1, "model1", "source1", tokenizer1.clone());
+        let result1 = registry.register(&id1, "model1", "source1", None, tokenizer1.clone());
         assert!(result1.is_some());
         assert_eq!(registry.len(), 1);
 
         // Second registration with same name should fail
-        let result2 = registry.register(&id2, "model1", "source2", tokenizer2.clone());
+        let result2 = registry.register(&id2, "model1", "source2", None, tokenizer2.clone());
         assert!(result2.is_none());
         assert_eq!(registry.len(), 1);
 
@@ -595,7 +615,7 @@ mod tests {
 
         // Registration with different name should succeed
         let id3 = TokenizerRegistry::generate_id();
-        let result3 = registry.register(&id3, "model2", "source2", tokenizer2);
+        let result3 = registry.register(&id3, "model2", "source2", None, tokenizer2);
         assert!(result3.is_some());
         assert_eq!(registry.len(), 2);
     }
@@ -612,6 +632,7 @@ mod tests {
                     &TokenizerRegistry::generate_id(),
                     "panic-model",
                     "source",
+                    None,
                     || async {
                         panic!("Simulated panic during tokenizer loading");
                     },
@@ -628,7 +649,7 @@ mod tests {
         // not deadlock or fail due to stale lock.
         let id = TokenizerRegistry::generate_id();
         let outcome = registry
-            .load(&id, "panic-model", "source", || async {
+            .load(&id, "panic-model", "source", None, || async {
                 Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
             })
             .await;
@@ -647,7 +668,7 @@ mod tests {
         // Load a tokenizer
         let id1 = TokenizerRegistry::generate_id();
         registry
-            .load(&id1, "model1", "source1", || async {
+            .load(&id1, "model1", "source1", None, || async {
                 Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
             })
             .await
@@ -661,7 +682,7 @@ mod tests {
         // by checking that we can load a different model without issues
         let id2 = TokenizerRegistry::generate_id();
         let outcome = registry
-            .load(&id2, "model2", "source2", || async {
+            .load(&id2, "model2", "source2", None, || async {
                 Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
             })
             .await
@@ -674,7 +695,7 @@ mod tests {
         // and the lock should be cleaned up (not leak)
         let id3 = TokenizerRegistry::generate_id();
         let outcome = registry
-            .load(&id3, "model1", "source1", || async {
+            .load(&id3, "model1", "source1", None, || async {
                 panic!("Loader should not be called for existing model");
             })
             .await
@@ -682,5 +703,61 @@ mod tests {
 
         assert!(!outcome.is_newly_loaded());
         assert_eq!(outcome.id(), id1); // Returns original ID
+    }
+
+    #[tokio::test]
+    async fn test_metadata_population() {
+        let registry = TokenizerRegistry::new();
+        let id = TokenizerRegistry::generate_id();
+        let chat_template = Some("templates/chat.json");
+
+        registry
+            .load(&id, "meta-model", "source", chat_template, || async {
+                Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
+            })
+            .await
+            .unwrap();
+
+        let entry = registry.get_by_name("meta-model").unwrap();
+
+        // Verify metadata
+        assert_eq!(entry.vocab_size, 14); // MockTokenizer default populated with 14 tokens
+        assert_eq!(entry.chat_template_path.as_deref(), chat_template);
+        assert!(matches!(
+            entry.backend,
+            crate::traits::TokenizerBackend::Mock
+        ));
+        assert!(entry.created_at.timestamp() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_load_ignores_updates() {
+        let registry = TokenizerRegistry::new();
+        let id = TokenizerRegistry::generate_id();
+
+        // Load initially with chat template A
+        registry
+            .load(&id, "fixed-model", "source", Some("A"), || async {
+                Ok(Arc::new(MockTokenizer::default()) as Arc<dyn Tokenizer>)
+            })
+            .await
+            .unwrap();
+
+        // Try to load again (same name) with chat template B
+        let id2 = TokenizerRegistry::generate_id();
+        let outcome = registry
+            .load(&id2, "fixed-model", "source", Some("B"), || async {
+                panic!("Should not load")
+            })
+            .await
+            .unwrap();
+
+        // Should return existing ID
+        assert_eq!(outcome.id(), id);
+
+        // Verify the original chat template is preserved
+        let entry = registry.get_by_name("fixed-model").unwrap();
+        assert_eq!(entry.chat_template_path.as_deref(), Some("A"));
+        assert_ne!(entry.chat_template_path.as_deref(), Some("B"));
     }
 }
