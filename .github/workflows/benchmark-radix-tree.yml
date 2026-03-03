@@ -51,7 +51,7 @@ jobs:
         timeout-minutes: 40
         run: |
           source "$HOME/.cargo/env"
-          cargo bench --bench radix_tree_benchmark -- benchmark_summary --exact 2>&1 | tee benchmark_output.txt
+          cargo bench --bench radix_tree_benchmark -- benchmark_summary 2>&1 | tee benchmark_output.txt
 
       - name: Upload benchmark results
         if: always()
