@@ -1035,20 +1035,11 @@ impl CliArgs {
 
         let schema = self.load_schema_config()?;
 
-        let oracle = if history_backend == HistoryBackend::Oracle {
-            Some(self.build_oracle_config(schema.clone())?)
-        } else {
-            None
-        };
-        let postgres = if history_backend == HistoryBackend::Postgres {
-            Some(self.build_postgres_config(schema.clone())?)
-        } else {
-            None
-        };
-        let redis = if history_backend == HistoryBackend::Redis {
-            Some(self.build_redis_config(schema)?)
-        } else {
-            None
+        let (oracle, postgres, redis) = match history_backend {
+            HistoryBackend::Oracle => (Some(self.build_oracle_config(schema)?), None, None),
+            HistoryBackend::Postgres => (None, Some(self.build_postgres_config(schema)?), None),
+            HistoryBackend::Redis => (None, None, Some(self.build_redis_config(schema)?)),
+            _ => (None, None, None),
         };
 
         let builder = RouterConfig::builder()
