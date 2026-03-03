@@ -548,8 +548,12 @@ fn serialize_model_specific(
 ) -> HashMap<String, TensorBytes> {
     model_specific
         .into_iter()
-        .filter_map(|(key, value)| {
-            model_specific_to_tensor_bytes(&value).map(|tensor| (key, tensor))
+        .filter_map(|(key, value)| match model_specific_to_tensor_bytes(&value) {
+            Some(tensor) => Some((key, tensor)),
+            None => {
+                warn!(tensor_key = %key, "Dropping unsupported model_specific value during multimodal serialization");
+                None
+            }
         })
         .collect()
 }
@@ -587,7 +591,6 @@ fn model_specific_to_tensor_bytes(value: &ModelSpecificValue) -> Option<TensorBy
             shape: vec![v.len() as u32],
             dtype: "float32".to_string(),
         }),
-        // Scalar/tuple/bool types not used by any current processor; skip.
         _ => None,
     }
 }
