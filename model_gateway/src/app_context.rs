@@ -16,7 +16,10 @@ use tracing::debug;
 
 use crate::{
     config::RouterConfig,
-    core::{steps::WorkflowEngines, JobQueue, LoadMonitor, WorkerRegistry, WorkerService},
+    core::{
+        lora::LoraMiddleware, steps::WorkflowEngines, JobQueue, LoadMonitor, WorkerRegistry,
+        WorkerService,
+    },
     middleware::TokenBucket,
     observability::inflight_tracker::InFlightRequestTracker,
     policies::PolicyRegistry,
@@ -59,6 +62,7 @@ pub struct AppContext {
     pub wasm_manager: Option<Arc<WasmModuleManager>>,
     pub worker_service: Arc<WorkerService>,
     pub inflight_tracker: Arc<InFlightRequestTracker>,
+    pub lora_middleware: Option<Arc<LoraMiddleware>>,
 }
 
 impl std::fmt::Debug for AppContext {
@@ -87,6 +91,7 @@ pub struct AppContextBuilder {
     workflow_engines: Option<Arc<OnceLock<WorkflowEngines>>>,
     mcp_orchestrator: Option<Arc<OnceLock<Arc<McpOrchestrator>>>>,
     wasm_manager: Option<Arc<WasmModuleManager>>,
+    lora_middleware: Option<Arc<LoraMiddleware>>,
 }
 
 impl AppContext {
@@ -132,6 +137,7 @@ impl AppContextBuilder {
             workflow_engines: None,
             mcp_orchestrator: None,
             wasm_manager: None,
+            lora_middleware: None,
         }
     }
 
@@ -232,6 +238,15 @@ impl AppContextBuilder {
         self
     }
 
+    /// Build the LoRA middleware when `router_config.lora` is set.
+    /// Must be called *after* `with_client` so that `self.client` is available.
+    fn with_lora_middleware(mut self, router_config: &RouterConfig) -> Self {
+        if let (Some(lora_cfg), Some(client)) = (&router_config.lora, &self.client) {
+            self.lora_middleware = Some(Arc::new(LoraMiddleware::new(lora_cfg, client.clone())));
+        }
+        self
+    }
+
     pub fn build(self) -> Result<AppContext, AppContextBuildError> {
         let router_config = self
             .router_config
@@ -289,6 +304,7 @@ impl AppContextBuilder {
             wasm_manager: self.wasm_manager,
             worker_service,
             inflight_tracker: InFlightRequestTracker::new(),
+            lora_middleware: self.lora_middleware,
         })
     }
 
@@ -300,6 +316,7 @@ impl AppContextBuilder {
     ) -> Result<Self, String> {
         Ok(Self::new()
             .with_client(&router_config, request_timeout_secs)?
+            .with_lora_middleware(&router_config)
             .maybe_rate_limiter(&router_config)
             .with_tokenizer_registry()
             .with_reasoning_parser_factory()

@@ -27,8 +27,10 @@ use crate::{
     app_context::AppContext,
     config::types::RetryConfig,
     core::{
-        is_retryable_status, AttachedBody, ConnectionMode, RetryExecutor, Worker, WorkerLoadGuard,
-        WorkerRegistry, WorkerType, UNKNOWN_MODEL_ID,
+        is_retryable_status,
+        lora::LoraMiddleware,
+        AttachedBody, ConnectionMode, RetryExecutor, Worker, WorkerLoadGuard, WorkerRegistry,
+        WorkerType, UNKNOWN_MODEL_ID,
     },
     observability::{
         events::{self, Event},
@@ -50,6 +52,7 @@ pub struct Router {
     client: Client,
     enable_igw: bool,
     retry_config: RetryConfig,
+    lora: Option<Arc<LoraMiddleware>>,
 }
 
 impl std::fmt::Debug for Router {
@@ -60,6 +63,7 @@ impl std::fmt::Debug for Router {
             .field("client", &self.client)
             .field("enable_igw", &self.enable_igw)
             .field("retry_config", &self.retry_config)
+            .field("lora", &self.lora.is_some())
             .finish()
     }
 }
@@ -77,6 +81,7 @@ impl Router {
             client: ctx.client.clone(),
             enable_igw: ctx.router_config.enable_igw,
             retry_config: ctx.router_config.effective_retry_config(),
+            lora: ctx.lora_middleware.clone(),
         })
     }
 
@@ -462,7 +467,7 @@ impl Router {
         let api_key = worker.api_key().cloned();
         let endpoint_url = worker.endpoint_url(route);
 
-        let json_val = match serde_json::to_value(typed_req) {
+        let mut json_val = match serde_json::to_value(typed_req) {
             Ok(j) => j,
             Err(e) => {
                 return error::bad_request(
@@ -471,6 +476,24 @@ impl Router {
                 );
             }
         };
+
+        // LoRA: resolve local adapter path → engine-side adapter name, then rewrite JSON.
+        if let Some(lora) = &self.lora {
+            if let Err(e) = lora.resolve(&mut json_val, worker.url()).await {
+                use crate::core::lora::LoraError;
+                // UnsupportedUri is a client error (bad input), not a server fault.
+                return match e {
+                    LoraError::UnsupportedUri(_) => error::bad_request(
+                        "lora_unsupported_uri",
+                        format!("LoRA adapter URI not supported: {e}"),
+                    ),
+                    LoraError::Engine(_) => error::internal_error(
+                        "lora_load_failed",
+                        format!("Failed to load LoRA adapter: {e}"),
+                    ),
+                };
+            }
+        }
 
         let json_val = match worker.prepare_request(json_val).await {
             Ok(prepared) => prepared,
@@ -810,6 +833,7 @@ mod tests {
             client: Client::new(),
             retry_config: RetryConfig::default(),
             enable_igw: false,
+            lora: None,
         }
     }
 

@@ -666,6 +666,7 @@ impl Router {
             .maybe_tool_call_parser(self.tool_call_parser.as_ref())
             .maybe_mcp_config_path(self.mcp_config_path.as_ref())
             .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
+            .maybe_lora(None) // LoRA config is not exposed via Python bindings yet
             .dp_aware(self.dp_aware)
             .retries(!self.disable_retries)
             .circuit_breaker(!self.disable_circuit_breaker)
