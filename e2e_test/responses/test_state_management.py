@@ -18,13 +18,13 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Cloud Backend Tests (OpenAI, xAI)
+# Cloud Backend Tests (base class — OpenAI only)
 # =============================================================================
 
 
-@pytest.mark.parametrize("setup_backend", ["openai", "xai"], indirect=True)
+@pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestStateManagementCloud:
-    """State management tests against cloud APIs."""
+    """State management tests against cloud APIs (OpenAI)."""
 
     def test_basic_response_creation(self, setup_backend, smg):
         """Test basic response creation without state."""
@@ -186,18 +186,27 @@ class TestStateManagementCloud:
 
 
 # =============================================================================
+# Cloud Backend Tests (xAI)
+# =============================================================================
+
+
+@pytest.mark.parametrize("setup_backend", ["xai"], indirect=True)
+class TestStateManagementCloudXai(TestStateManagementCloud):
+    """State management tests against xAI cloud API."""
+
+
+# =============================================================================
 # Cloud Backend Tests with Flyway-managed Oracle schema (oracle-custom)
 # =============================================================================
 
 
 @pytest.mark.storage("oracle-custom")
-@pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
 class TestStateManagementOracleCustom(TestStateManagementCloud):
     """State management tests against Oracle with Flyway-managed schema (schema-config).
 
-    Inherits all test methods from TestStateManagementCloud. The storage("oracle-custom")
-    marker causes the gateway to launch with --schema-config pointing to the Flyway schema,
-    using ATP_FLYWAY_* env vars for Oracle credentials.
+    Inherits all test methods and OpenAI parametrize from TestStateManagementCloud.
+    The storage("oracle-custom") marker causes the gateway to launch with
+    --schema-config pointing to the Flyway schema, using ATP_FLYWAY_* env vars.
     """
 
 
