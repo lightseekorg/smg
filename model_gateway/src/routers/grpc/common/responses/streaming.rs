@@ -260,6 +260,8 @@ impl ResponseStreamEventEmitter {
         })
     }
 
+    // INVARIANT: this method is terminal — it drains internal state via `take()`
+    // and must only be called once per emitter lifetime.
     pub fn emit_completed(&mut self, usage: Option<&serde_json::Value>) -> serde_json::Value {
         // Build output array from tracked items
         let output: Vec<serde_json::Value> = self
@@ -663,6 +665,9 @@ impl ResponseStreamEventEmitter {
     ///
     /// This constructs the final ResponsesResponse from all accumulated output items
     /// for persistence. Should be called after streaming is complete.
+    ///
+    /// INVARIANT: this method is terminal — it drains internal state via `take()`
+    /// and must only be called once per emitter lifetime.
     pub fn finalize(&mut self, usage: Option<Usage>) -> ResponsesResponse {
         // Build output array from tracked items, taking ownership to avoid cloning
         let output: Vec<ResponseOutputItem> = self

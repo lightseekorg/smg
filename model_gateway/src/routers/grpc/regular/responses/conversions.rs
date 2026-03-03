@@ -323,10 +323,9 @@ pub(crate) fn chat_to_responses(
     // Convert tool calls if present
     if let Some(tool_calls) = &choice.message.tool_calls {
         for tool_call in tool_calls {
-            let id = tool_call.id.clone();
             output.push(ResponseOutputItem::FunctionToolCall {
-                call_id: id.clone(),
-                id,
+                id: tool_call.id.clone(),
+                call_id: tool_call.id.clone(),
                 name: tool_call.function.name.clone(),
                 arguments: tool_call.function.arguments.clone().unwrap_or_default(),
                 output: None, // Tool hasn't been executed yet
