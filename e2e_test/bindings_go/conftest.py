@@ -19,7 +19,7 @@ import pytest
 if TYPE_CHECKING:
     from infra import ModelInstance, ModelPool
 
-from infra import get_open_port, terminate_process
+from infra import get_open_port, release_port, terminate_process
 from infra.process_utils import wait_for_health
 
 logger = logging.getLogger(__name__)
@@ -268,6 +268,7 @@ def go_oai_server(
     finally:
         logger.info("Shutting down Go OAI server...")
         terminate_process(process, timeout=10)
+        release_port(oai_port)
 
 
 @pytest.fixture(scope="class")
@@ -356,6 +357,7 @@ def go_oai_server_multi(
     finally:
         logger.info("Shutting down Go OAI server...")
         terminate_process(process, timeout=10)
+        release_port(oai_port)
 
 
 @pytest.fixture(scope="class")

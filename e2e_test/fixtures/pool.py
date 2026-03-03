@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 if TYPE_CHECKING:
-    from infra import ModelPool
+    from infra import ModelInstance, ModelPool
 
 from .hooks import get_pool_requirements
 
@@ -183,10 +183,10 @@ def _get_model_instance(
     Returns:
         Acquired ModelInstance.
     """
-    from infra import PARAM_MODEL
+    from infra import PARAM_MODEL, ConnectionMode
 
     marker = request.node.get_closest_marker(PARAM_MODEL)
-    if marker is None:
+    if marker is None or not marker.args:
         pytest.fail(
             f"Test must be marked with @pytest.mark.{PARAM_MODEL}('model-id') "
             f"to use {fixture_name} fixture"
@@ -195,7 +195,7 @@ def _get_model_instance(
     model_id = marker.args[0]
 
     try:
-        return model_pool.get(model_id)
+        return model_pool.get(model_id, ConnectionMode.HTTP)
     except KeyError:
         pytest.skip(f"Model {model_id} not available in model pool")
 
