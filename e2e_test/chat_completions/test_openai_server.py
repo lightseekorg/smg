@@ -278,7 +278,8 @@ convenient hands-free control to your smart devices.
             f"content chunk count ({content_chunk_count})"
         )
         # But they should be close - allow small difference for special tokens
-        assert usage_completion_tokens - content_chunk_count <= 2, (
+        token_tolerance = getattr(self, "STREAMING_TOKEN_TOLERANCE", 2)
+        assert usage_completion_tokens - content_chunk_count <= token_tolerance, (
             f"completion_tokens ({usage_completion_tokens}) differs too much from "
             f"content chunk count ({content_chunk_count})"
         )
@@ -348,7 +349,8 @@ convenient hands-free control to your smart devices.
         )
 
         assert response.choices[0].finish_reason == "stop"
-        content = response.choices[0].message.content
+        msg = response.choices[0].message
+        content = msg.content or getattr(msg, "reasoning_content", "") or ""
         assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
 
         # SmgClient comparison
@@ -366,7 +368,8 @@ convenient hands-free control to your smart devices.
                 stop=[","],
             )
             assert smg_resp.choices[0].finish_reason == "stop"
-            smg_content = smg_resp.choices[0].message.content
+            smg_msg = smg_resp.choices[0].message
+            smg_content = smg_msg.content or getattr(smg_msg, "reasoning_content", "") or ""
             assert "," not in smg_content, (
                 f"SmgClient: stop sequence ',' should not appear: {smg_content}"
             )
@@ -397,9 +400,14 @@ convenient hands-free control to your smart devices.
         ]
         assert "stop" in finish_reasons
 
-        # Collect all content
+        # Collect all content (fall back to reasoning_content for models like Harmony)
+        def _delta_text(delta):
+            return delta.content or getattr(delta, "reasoning_content", "") or ""
+
         content = "".join(
-            c.choices[0].delta.content for c in chunks if c.choices and c.choices[0].delta.content
+            _delta_text(c.choices[0].delta)
+            for c in chunks
+            if c.choices and _delta_text(c.choices[0].delta)
         )
         assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
 
@@ -426,9 +434,9 @@ convenient hands-free control to your smart devices.
             ]
             assert "stop" in smg_finish
             smg_text = "".join(
-                c.choices[0].delta.content
+                _delta_text(c.choices[0].delta)
                 for c in smg_chunks
-                if c.choices and c.choices[0].delta.content
+                if c.choices and _delta_text(c.choices[0].delta)
             )
             assert "," not in smg_text
 
@@ -558,6 +566,9 @@ class TestChatCompletionGptOss(TestChatCompletion):
     with OSS models. Logprobs are supported via Harmony's built-in tokenizer.
     """
 
+    # Harmony channel markers add ~10 special tokens
+    STREAMING_TOKEN_TOLERANCE = 10
+
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion(self, setup_backend, smg, logprobs, parallel_sample_num):
@@ -580,18 +591,4 @@ class TestChatCompletionGptOss(TestChatCompletion):
 
     @pytest.mark.skip(reason="OSS models don't support continue_final_message")
     def test_response_prefill(self, setup_backend, smg):
-        pass
-
-    @pytest.mark.skip(reason="TODO: Harmony puts output in reasoning_content, content is None")
-    def test_stop_sequences(self, setup_backend):
-        pass
-
-    @pytest.mark.skip(reason="TODO: Harmony puts output in reasoning_content, content is None")
-    def test_stop_sequences_stream(self, setup_backend):
-        pass
-
-    @pytest.mark.skip(
-        reason="TODO: Harmony channel markers add ~10 tokens exceeding parent tolerance of 2"
-    )
-    def test_streaming_token_count_matches_chunks(self, setup_backend):
         pass
