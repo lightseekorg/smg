@@ -49,6 +49,7 @@ uuid = { version = "1.10", features = ["v7", "serde"] }
 wasmtime = { version = "41.0", features = ["component-model", "async"] }
 wasmtime-wasi = "41.0"
 tokio-util = { version = "0.7", features = ["rt"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 scopeguard = "1.2"
 bitflags = "2.10.0"
 schemars = "0.8"
