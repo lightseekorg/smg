@@ -29,6 +29,7 @@ tokio.workspace = true
 tracing.workspace = true
 schemars.workspace = true
 # Only used by protocols
+url = "2.5"
 validator = { version = "0.20.0", features = ["derive"] }
 
 [lints]

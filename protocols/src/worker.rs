@@ -197,16 +197,18 @@ impl ProviderType {
         }
     }
 
-    /// Detect provider from URL domain patterns.
-    /// Returns `None` for URLs that don't match known providers.
+    /// Detect provider from URL host.
+    /// Returns `None` for URLs that don't match known providers or can't be parsed.
     pub fn from_url(url: &str) -> Option<Self> {
-        if url.contains("openai.com") {
+        let host = url::Url::parse(url).ok()?.host_str()?.to_lowercase();
+
+        if host.ends_with("openai.com") {
             Some(Self::OpenAI)
-        } else if url.contains("x.ai") {
+        } else if host.ends_with("x.ai") {
             Some(Self::XAI)
-        } else if url.contains("anthropic") {
+        } else if host.ends_with("anthropic.com") {
             Some(Self::Anthropic)
-        } else if url.contains("googleapis.com") {
+        } else if host.ends_with("googleapis.com") {
             Some(Self::Gemini)
         } else {
             None

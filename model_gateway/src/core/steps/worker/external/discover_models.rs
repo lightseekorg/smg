@@ -183,16 +183,16 @@ fn infer_provider_from_id(id: &str) -> Option<ProviderType> {
 /// Resolve the API key to use for model discovery.
 ///
 /// Priority: per-provider env var > config.api_key > None (wildcard).
-fn resolve_discovery_api_key(url: &str, config_api_key: Option<&str>) -> Option<String> {
+fn resolve_discovery_api_key(
+    provider: Option<&ProviderType>,
+    url: &str,
+    config_api_key: Option<&str>,
+) -> Option<String> {
     // 1. Try per-provider admin key from env var
-    if let Some(provider) = ProviderType::from_url(url) {
-        if let Some(env_name) = provider.admin_key_env_var() {
-            if let Ok(key) = std::env::var(env_name) {
-                if !key.is_empty() {
-                    debug!("Using {} for model discovery on {}", env_name, url);
-                    return Some(key);
-                }
-            }
+    if let Some(env_name) = provider.and_then(|p| p.admin_key_env_var()) {
+        if let Some(key) = std::env::var(env_name).ok().filter(|k| !k.is_empty()) {
+            debug!("Using {} for model discovery on {}", env_name, url);
+            return Some(key);
         }
     }
 
@@ -274,7 +274,8 @@ impl StepExecutor<WorkerWorkflowData> for DiscoverModelsStep {
         let provider = ProviderType::from_url(&config.url);
 
         // Resolve discovery API key: env var admin key > config.api_key > None (wildcard)
-        let discovery_key = resolve_discovery_api_key(&config.url, config.api_key.as_deref());
+        let discovery_key =
+            resolve_discovery_api_key(provider.as_ref(), &config.url, config.api_key.as_deref());
 
         if discovery_key.is_none() {
             info!(
