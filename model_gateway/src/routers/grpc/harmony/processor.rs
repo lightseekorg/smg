@@ -74,20 +74,9 @@ impl HarmonyResponseProcessor {
                 )
             })?;
 
-            let stop_sequences: Vec<String> = chat_request
-                .stop
-                .as_ref()
-                .map(|s| s.to_vec())
-                .unwrap_or_default();
-
             // Parse Harmony channels
             let parsed = parser
-                .parse_complete(
-                    complete.output_ids(),
-                    complete.finish_reason().to_string(),
-                    &stop_sequences,
-                    chat_request.no_stop_trim,
-                )
+                .parse_complete(complete.output_ids(), complete.finish_reason().to_string())
                 .map_err(|e| {
                     error!(
                         function = "process_non_streaming_chat_response",
@@ -227,12 +216,7 @@ impl HarmonyResponseProcessor {
         })?;
 
         let parsed = parser
-            .parse_complete(
-                complete.output_ids(),
-                complete.finish_reason().to_string(),
-                &[],   // Responses API: no user-specified stop sequences
-                false, // Responses API: always trim stop sequences
-            )
+            .parse_complete(complete.output_ids(), complete.finish_reason().to_string())
             .map_err(|e| {
                 error!(
                     function = "process_responses_iteration",

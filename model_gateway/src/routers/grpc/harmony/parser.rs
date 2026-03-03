@@ -93,58 +93,6 @@ impl HarmonyParserAdapter {
         }
     }
 
-    /// Strip the matched stop sequence from parsed analysis / final_text (static helper)
-    ///
-    /// Used by `parse_complete` and `finalize` (non-streaming path) where no
-    /// jail buffering is needed – we simply remove the stop string from the end
-    /// of whichever channel was active when the model stopped.
-    ///
-    /// Self-detects which stop sequence matched by checking buffer suffixes,
-    /// so we don't rely on the backend's `matched_stop` field.
-    fn strip_stop_sequence(
-        parser: &StreamableParser,
-        stop_sequences: &[String],
-        analysis: &mut Option<String>,
-        final_text: &mut String,
-    ) {
-        if stop_sequences.is_empty() {
-            return;
-        }
-
-        let strip_suffix = |text: &mut String| {
-            for seq in stop_sequences {
-                if text.ends_with(seq.as_str()) {
-                    text.truncate(text.len() - seq.len());
-                    return;
-                }
-            }
-        };
-
-        // Determine which channel was active last
-        let active_channel = parser.current_channel();
-        match active_channel.as_deref() {
-            Some("analysis") => {
-                if let Some(ref mut text) = analysis {
-                    strip_suffix(text);
-                }
-            }
-            Some("final") | None => {
-                strip_suffix(final_text);
-            }
-            _ => {
-                // Unknown channel: try stripping from both as a fallback
-                tracing::trace!(
-                    channel = ?active_channel,
-                    "Unknown channel during stop-sequence stripping, checking both buffers"
-                );
-                if let Some(ref mut text) = analysis {
-                    strip_suffix(text);
-                }
-                strip_suffix(final_text);
-            }
-        }
-    }
-
     /// Parse messages into channel outputs (private helper)
     ///
     /// Extracts analysis, commentary (tool calls), and final text from Harmony messages.
@@ -278,22 +226,10 @@ impl HarmonyParserAdapter {
     ///
     /// Parses all output token IDs and returns the complete channel output
     /// containing analysis, commentary (tool calls), and final text.
-    ///
-    /// # Arguments
-    ///
-    /// * `output_ids` - The complete output token IDs from the model
-    /// * `finish_reason` - The finish reason from GenerateComplete ("stop", "length", etc.)
-    /// * `stop_sequences` - Stop sequences from the request (for self-detecting suffix to strip)
-    ///
-    /// # Returns
-    ///
-    /// Complete HarmonyChannelOutput with all three channels parsed
     pub fn parse_complete(
         &mut self,
         output_ids: &[u32],
         finish_reason: String,
-        stop_sequences: &[String],
-        no_stop_trim: bool,
     ) -> Result<HarmonyChannelOutput, String> {
         let mut reasoning_token_count = 0u32;
 
@@ -319,11 +255,6 @@ impl HarmonyParserAdapter {
 
         // Check for incomplete content in parser state
         Self::handle_incomplete_content(&self.parser, &mut analysis, &mut final_text);
-
-        // Strip stop sequence from the active channel (unless no_stop_trim)
-        if !no_stop_trim {
-            Self::strip_stop_sequence(&self.parser, stop_sequences, &mut analysis, &mut final_text);
-        }
 
         // Determine finish reason: override to "tool_calls" if commentary has tool calls
         let final_finish_reason = if commentary.is_some() {
@@ -544,12 +475,7 @@ impl HarmonyParserAdapter {
     /// # Returns
     ///
     /// Final HarmonyChannelOutput with complete parsed content
-    pub fn finalize(
-        &mut self,
-        finish_reason: String,
-        stop_sequences: &[String],
-        no_stop_trim: bool,
-    ) -> HarmonyChannelOutput {
+    pub fn finalize(&mut self, finish_reason: String) -> HarmonyChannelOutput {
         // Extract all completed messages
         let messages = self.parser.messages();
 
@@ -558,11 +484,6 @@ impl HarmonyParserAdapter {
 
         // Check for remaining incomplete content
         Self::handle_incomplete_content(&self.parser, &mut analysis, &mut final_text);
-
-        // Strip stop sequence from the active channel (unless no_stop_trim)
-        if !no_stop_trim {
-            Self::strip_stop_sequence(&self.parser, stop_sequences, &mut analysis, &mut final_text);
-        }
 
         // Determine finish reason: override to "tool_calls" if commentary has tool calls
         let final_finish_reason = if commentary.is_some() {
