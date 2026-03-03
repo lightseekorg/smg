@@ -541,13 +541,13 @@ fn serialize_pixel_values(preprocessed: &PreprocessedImages) -> (Vec<u8>, Vec<u3
 
 /// Serialize model-specific values to TensorBytes.
 fn serialize_model_specific(preprocessed: &PreprocessedImages) -> HashMap<String, TensorBytes> {
-    let mut tensors = HashMap::new();
-    for (key, value) in &preprocessed.model_specific {
-        if let Some(tensor) = model_specific_to_tensor_bytes(value) {
-            tensors.insert(key.clone(), tensor);
-        }
-    }
-    tensors
+    preprocessed
+        .model_specific
+        .iter()
+        .filter_map(|(key, value)| {
+            model_specific_to_tensor_bytes(value).map(|tensor| (key.clone(), tensor))
+        })
+        .collect()
 }
 
 /// Convert a model-specific value to backend-agnostic TensorBytes.
