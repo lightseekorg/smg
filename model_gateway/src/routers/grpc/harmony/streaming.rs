@@ -44,6 +44,106 @@ use crate::{
     },
 };
 
+/// Streaming stop-sequence buffer
+///
+/// Buffers analysis and final channel text so that stop sequences spanning
+/// chunk boundaries are never emitted to the client.  When the stream
+/// completes, `flush()` releases the remaining buffered text with the
+/// matched stop sequence stripped.
+struct StopSequenceBuffer {
+    stop_sequences: Vec<String>,
+    max_stop_len: usize,
+    analysis_buffer: String,
+    final_buffer: String,
+}
+
+impl StopSequenceBuffer {
+    fn new(stop_sequences: Vec<String>) -> Self {
+        let max_stop_len = stop_sequences.iter().map(|s| s.len()).max().unwrap_or(0);
+        Self {
+            stop_sequences,
+            max_stop_len,
+            analysis_buffer: String::new(),
+            final_buffer: String::new(),
+        }
+    }
+
+    /// Buffer analysis-channel text, returning the safe-to-emit prefix.
+    fn buffer_analysis(&mut self, new_text: &str) -> Option<String> {
+        Self::buffer(&mut self.analysis_buffer, new_text, &self.stop_sequences, self.max_stop_len)
+    }
+
+    /// Buffer final-channel text, returning the safe-to-emit prefix.
+    fn buffer_final(&mut self, new_text: &str) -> Option<String> {
+        Self::buffer(&mut self.final_buffer, new_text, &self.stop_sequences, self.max_stop_len)
+    }
+
+    /// Flush both buffers at stream end, stripping the matched stop sequence.
+    ///
+    /// Returns `(remaining_analysis, remaining_final)`.
+    fn flush(&mut self, matched_stop: Option<&str>) -> (Option<String>, Option<String>) {
+        let analysis = Self::flush_one(&mut self.analysis_buffer, matched_stop);
+        let final_text = Self::flush_one(&mut self.final_buffer, matched_stop);
+        (analysis, final_text)
+    }
+
+    // -- private helpers --
+
+    fn buffer(
+        buf: &mut String,
+        new_text: &str,
+        stop_sequences: &[String],
+        max_stop_len: usize,
+    ) -> Option<String> {
+        if stop_sequences.is_empty() {
+            return Some(new_text.to_string());
+        }
+
+        buf.push_str(new_text);
+
+        // Check whether the buffer already contains a complete stop sequence
+        for seq in stop_sequences {
+            if let Some(pos) = buf.find(seq.as_str()) {
+                let safe = buf[..pos].to_string();
+                buf.clear();
+                return if safe.is_empty() { None } else { Some(safe) };
+            }
+        }
+
+        // No complete stop sequence yet: retain the tail that could still form
+        // one and release the safe prefix.
+        if buf.len() > max_stop_len.saturating_sub(1) {
+            let keep_from = buf.len() - max_stop_len.saturating_sub(1);
+            let keep_from = (keep_from..=buf.len())
+                .find(|&i| buf.is_char_boundary(i))
+                .unwrap_or(buf.len());
+            let safe = buf[..keep_from].to_string();
+            buf.drain(..keep_from);
+            if !safe.is_empty() {
+                return Some(safe);
+            }
+        }
+
+        None
+    }
+
+    fn flush_one(buf: &mut String, matched_stop: Option<&str>) -> Option<String> {
+        if buf.is_empty() {
+            return None;
+        }
+        if let Some(stop) = matched_stop {
+            if buf.ends_with(stop) {
+                buf.truncate(buf.len() - stop.len());
+            }
+        }
+        if buf.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(buf))
+        }
+    }
+}
+
 /// Processor for streaming Harmony responses
 ///
 /// Returns an SSE stream that parses Harmony tokens incrementally and
@@ -134,7 +234,7 @@ impl HarmonyStreamingProcessor {
         let start_time = Instant::now();
         let mut first_token_time: Option<Instant> = None;
 
-        // Extract stop sequences from the original request for jail-based stripping
+        // Stop-sequence buffering (per-index)
         let stop_sequences: Vec<String> = original_request
             .stop
             .as_ref()
@@ -143,6 +243,7 @@ impl HarmonyStreamingProcessor {
 
         // Per-index state management (for n>1 support)
         let mut parsers: HashMap<u32, HarmonyParserAdapter> = HashMap::new();
+        let mut stop_buffers: HashMap<u32, StopSequenceBuffer> = HashMap::new();
         let mut is_firsts: HashMap<u32, bool> = HashMap::new();
         let mut finish_reasons: HashMap<u32, Option<String>> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
@@ -165,12 +266,13 @@ impl HarmonyStreamingProcessor {
                         first_token_time = Some(Instant::now());
                     }
 
-                    // Initialize parser for this index if needed
+                    // Initialize parser and stop buffer for this index if needed
                     if let Vacant(e) = parsers.entry(index) {
                         e.insert(
-                            HarmonyParserAdapter::new_with_stop_sequences(stop_sequences.clone())
+                            HarmonyParserAdapter::new()
                                 .map_err(|e| format!("Failed to create parser: {e}"))?,
                         );
+                        stop_buffers.insert(index, StopSequenceBuffer::new(stop_sequences.clone()));
                         is_firsts.insert(index, true);
                     }
 
@@ -194,8 +296,28 @@ impl HarmonyStreamingProcessor {
                         .parse_chunk(chunk_wrapper.token_ids())
                         .map_err(|e| format!("Parse error: {e}"))?;
 
+                    // Filter analysis/final deltas through the stop-sequence buffer
+                    let delta = delta_result.and_then(|mut d| {
+                        if let Some(buf) = stop_buffers.get_mut(&index) {
+                            d.analysis_delta = d
+                                .analysis_delta
+                                .and_then(|t| buf.buffer_analysis(&t));
+                            d.final_delta = d
+                                .final_delta
+                                .and_then(|t| buf.buffer_final(&t));
+                        }
+                        if d.analysis_delta.is_some()
+                            || d.commentary_delta.is_some()
+                            || d.final_delta.is_some()
+                        {
+                            Some(d)
+                        } else {
+                            None
+                        }
+                    });
+
                     // Emit SSE event if there's a delta
-                    if let Some(delta) = delta_result {
+                    if let Some(delta) = delta {
                         let is_first = is_firsts.get(&index).copied().unwrap_or(false);
                         Self::emit_chunk_delta(
                             &delta,
@@ -227,33 +349,36 @@ impl HarmonyStreamingProcessor {
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
 
-                        // Flush any remaining jailed text (strip the stop sequence suffix)
+                        // Flush any remaining buffered text (strip the stop sequence suffix)
                         let matched_stop_str = matched_stop
                             .as_ref()
                             .and_then(|v| v.as_str());
-                        let (remaining_analysis, remaining_final) =
-                            parser.flush_stop_buffer(matched_stop_str);
 
-                        // Emit remaining buffered text as content deltas before the finish chunk
-                        if remaining_analysis.is_some() || remaining_final.is_some() {
-                            let remaining_delta = HarmonyChannelDelta {
-                                analysis_delta: remaining_analysis,
-                                commentary_delta: None,
-                                final_delta: remaining_final,
-                                is_final: false,
-                            };
-                            let is_first = is_firsts.get(&index).copied().unwrap_or(false);
-                            Self::emit_chunk_delta(
-                                &remaining_delta,
-                                index,
-                                is_first,
-                                &dispatch,
-                                &original_request,
-                                tx,
-                                None,
-                            )?;
-                            if is_first {
-                                is_firsts.insert(index, false);
+                        if let Some(buf) = stop_buffers.get_mut(&index) {
+                            let (remaining_analysis, remaining_final) =
+                                buf.flush(matched_stop_str);
+
+                            // Emit remaining buffered text as content deltas before the finish chunk
+                            if remaining_analysis.is_some() || remaining_final.is_some() {
+                                let remaining_delta = HarmonyChannelDelta {
+                                    analysis_delta: remaining_analysis,
+                                    commentary_delta: None,
+                                    final_delta: remaining_final,
+                                    is_final: false,
+                                };
+                                let is_first = is_firsts.get(&index).copied().unwrap_or(false);
+                                Self::emit_chunk_delta(
+                                    &remaining_delta,
+                                    index,
+                                    is_first,
+                                    &dispatch,
+                                    &original_request,
+                                    tx,
+                                    None,
+                                )?;
+                                if is_first {
+                                    is_firsts.insert(index, false);
+                                }
                             }
                         }
 
@@ -339,7 +464,7 @@ impl HarmonyStreamingProcessor {
             }
         }
 
-        // Extract stop sequences from the original request for jail-based stripping
+        // Stop-sequence buffering (per-index)
         let stop_sequences: Vec<String> = original_request
             .stop
             .as_ref()
@@ -348,6 +473,7 @@ impl HarmonyStreamingProcessor {
 
         // Phase 2: Process decode stream (same as single stream)
         let mut parsers: HashMap<u32, HarmonyParserAdapter> = HashMap::new();
+        let mut stop_buffers: HashMap<u32, StopSequenceBuffer> = HashMap::new();
         let mut is_firsts: HashMap<u32, bool> = HashMap::new();
         let mut finish_reasons: HashMap<u32, Option<String>> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
@@ -367,12 +493,13 @@ impl HarmonyStreamingProcessor {
                         first_token_time = Some(Instant::now());
                     }
 
-                    // Initialize parser for this index if needed
+                    // Initialize parser and stop buffer for this index if needed
                     if let Vacant(e) = parsers.entry(index) {
                         e.insert(
-                            HarmonyParserAdapter::new_with_stop_sequences(stop_sequences.clone())
+                            HarmonyParserAdapter::new()
                                 .map_err(|e| format!("Failed to create parser: {e}"))?,
                         );
+                        stop_buffers.insert(index, StopSequenceBuffer::new(stop_sequences.clone()));
                         is_firsts.insert(index, true);
                     }
 
@@ -395,7 +522,27 @@ impl HarmonyStreamingProcessor {
                         .parse_chunk(chunk_wrapper.token_ids())
                         .map_err(|e| format!("Parse error: {e}"))?;
 
-                    if let Some(delta) = delta_result {
+                    // Filter analysis/final deltas through the stop-sequence buffer
+                    let delta = delta_result.and_then(|mut d| {
+                        if let Some(buf) = stop_buffers.get_mut(&index) {
+                            d.analysis_delta = d
+                                .analysis_delta
+                                .and_then(|t| buf.buffer_analysis(&t));
+                            d.final_delta = d
+                                .final_delta
+                                .and_then(|t| buf.buffer_final(&t));
+                        }
+                        if d.analysis_delta.is_some()
+                            || d.commentary_delta.is_some()
+                            || d.final_delta.is_some()
+                        {
+                            Some(d)
+                        } else {
+                            None
+                        }
+                    });
+
+                    if let Some(delta) = delta {
                         let is_first = is_firsts.get(&index).copied().unwrap_or(false);
                         Self::emit_chunk_delta(
                             &delta,
@@ -423,33 +570,36 @@ impl HarmonyStreamingProcessor {
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
 
-                        // Flush any remaining jailed text (strip the stop sequence suffix)
+                        // Flush any remaining buffered text (strip the stop sequence suffix)
                         let matched_stop_str = matched_stop
                             .as_ref()
                             .and_then(|v| v.as_str());
-                        let (remaining_analysis, remaining_final) =
-                            parser.flush_stop_buffer(matched_stop_str);
 
-                        // Emit remaining buffered text as content deltas before the finish chunk
-                        if remaining_analysis.is_some() || remaining_final.is_some() {
-                            let remaining_delta = HarmonyChannelDelta {
-                                analysis_delta: remaining_analysis,
-                                commentary_delta: None,
-                                final_delta: remaining_final,
-                                is_final: false,
-                            };
-                            let is_first = is_firsts.get(&index).copied().unwrap_or(false);
-                            Self::emit_chunk_delta(
-                                &remaining_delta,
-                                index,
-                                is_first,
-                                &dispatch,
-                                &original_request,
-                                tx,
-                                None,
-                            )?;
-                            if is_first {
-                                is_firsts.insert(index, false);
+                        if let Some(buf) = stop_buffers.get_mut(&index) {
+                            let (remaining_analysis, remaining_final) =
+                                buf.flush(matched_stop_str);
+
+                            // Emit remaining buffered text as content deltas before the finish chunk
+                            if remaining_analysis.is_some() || remaining_final.is_some() {
+                                let remaining_delta = HarmonyChannelDelta {
+                                    analysis_delta: remaining_analysis,
+                                    commentary_delta: None,
+                                    final_delta: remaining_final,
+                                    is_final: false,
+                                };
+                                let is_first = is_firsts.get(&index).copied().unwrap_or(false);
+                                Self::emit_chunk_delta(
+                                    &remaining_delta,
+                                    index,
+                                    is_first,
+                                    &dispatch,
+                                    &original_request,
+                                    tx,
+                                    None,
+                                )?;
+                                if is_first {
+                                    is_firsts.insert(index, false);
+                                }
                             }
                         }
 
