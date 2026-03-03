@@ -89,7 +89,7 @@ pub(super) fn prepare_chat_tools_and_choice(
     iteration: usize,
 ) {
     // Merge function tools from request with MCP tools
-    let mut all_tools = chat_request.tools.clone().unwrap_or_default();
+    let mut all_tools = chat_request.tools.take().unwrap_or_default();
     all_tools.extend(mcp_chat_tools.iter().cloned());
     chat_request.tools = Some(all_tools);
 

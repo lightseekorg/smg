@@ -83,7 +83,7 @@ pub(super) async fn convert_chat_stream_to_responses_stream(
     let chat_response = ctx
         .pipeline
         .execute_chat(
-            chat_request.clone(),
+            chat_request,
             params.headers,
             params.model_id,
             ctx.components.clone(),

@@ -99,7 +99,7 @@ async fn execute_with_mcp_loop(
 
     // Preserve original tools for response (before merging MCP tools)
     // The response should show the user's original request tools, not internal MCP tools
-    let original_tools = current_request.tools.clone();
+    let mut original_tools = current_request.tools.clone();
 
     // Create session once — bundles orchestrator, request_ctx, server_keys, mcp_tools
     let session_request_id = format!("resp_{}", uuid::Uuid::now_v7());
@@ -111,7 +111,7 @@ async fn execute_with_mcp_loop(
     if !mcp_tools.is_empty() {
         let mcp_response_tools = convert_mcp_tools_to_response_tools(&session);
 
-        let mut all_tools = current_request.tools.clone().unwrap_or_default();
+        let mut all_tools = current_request.tools.take().unwrap_or_default();
         all_tools.extend(mcp_response_tools);
         current_request.tools = Some(all_tools);
 
@@ -306,7 +306,7 @@ async fn execute_with_mcp_loop(
                 inject_mcp_metadata(&mut response, &mcp_tracking, &session);
 
                 // Restore original tools (hide internal MCP tools from response)
-                response.tools = original_tools.clone().unwrap_or_default();
+                response.tools = original_tools.take().unwrap_or_default();
 
                 debug!(
                     mcp_calls = mcp_tracking.total_calls(),
