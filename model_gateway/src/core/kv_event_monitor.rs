@@ -282,6 +282,18 @@ impl KvEventMonitor {
                     stream
                 }
                 Err(e) => {
+                    // If the backend doesn't implement SubscribeKvEvents (e.g. vLLM),
+                    // stop retrying — this RPC will never succeed.
+                    if let Some(status) = e.downcast_ref::<tonic::Status>() {
+                        if status.code() == tonic::Code::Unimplemented {
+                            warn!(
+                                worker_url = %worker_url,
+                                "Backend does not implement SubscribeKvEvents, \
+                                 disabling KV event subscription for this worker"
+                            );
+                            return;
+                        }
+                    }
                     warn!(
                         worker_url = %worker_url,
                         error = %e,
