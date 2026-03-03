@@ -1089,7 +1089,7 @@ mod tests {
         token_chunks: &[&[u32]],
         jump_size: usize,
     ) -> Arc<PositionalIndexer> {
-        let indexer = Arc::new(PositionalIndexer::new(jump_size));
+        let indexer = Arc::new(PositionalIndexer::new(jump_size, 2048));
         let blocks: Vec<StoredBlock> = token_chunks
             .iter()
             .enumerate()
@@ -1196,7 +1196,7 @@ mod tests {
         policy.init_workers(&workers);
 
         // Store same blocks for both workers (equal overlap)
-        let indexer = Arc::new(PositionalIndexer::new(4));
+        let indexer = Arc::new(PositionalIndexer::new(4, 2048));
         let blocks = vec![StoredBlock {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4]),
@@ -1234,7 +1234,7 @@ mod tests {
         ];
         policy.init_workers(&workers);
 
-        let indexer = Arc::new(PositionalIndexer::new(4));
+        let indexer = Arc::new(PositionalIndexer::new(4, 2048));
 
         // Both workers have block [1,2,3,4] (equal overlap, equal load)
         let block = vec![StoredBlock {
@@ -1298,7 +1298,7 @@ mod tests {
         ];
         policy.init_workers(&workers);
 
-        let indexer = Arc::new(PositionalIndexer::new(4));
+        let indexer = Arc::new(PositionalIndexer::new(4, 2048));
 
         // w1 has 4 blocks cached
         let blocks_w1: Vec<StoredBlock> = (0..4)
@@ -1534,7 +1534,7 @@ mod tests {
         let monitor = Arc::new(KvEventMonitor::new(Some(4)));
 
         // Store blocks using block_size=8 (tokens chunked in groups of 8)
-        let indexer = Arc::new(PositionalIndexer::new(4));
+        let indexer = Arc::new(PositionalIndexer::new(4, 2048));
         let block = vec![StoredBlock {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4, 5, 6, 7, 8]),
@@ -1629,7 +1629,7 @@ mod tests {
 
         // Set up monitor with an empty indexer
         let monitor = Arc::new(KvEventMonitor::new(Some(4)));
-        let empty_indexer = Arc::new(PositionalIndexer::new(4));
+        let empty_indexer = Arc::new(PositionalIndexer::new(4, 2048));
         monitor
             .indexers
             .insert("unknown".to_string(), empty_indexer);

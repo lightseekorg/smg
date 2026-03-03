@@ -1,9 +1,7 @@
 //! Positional indexer for cache-aware routing.
 //!
-//! Uses `Vec<DashMap<ContentHash, SeqEntry>>` (one DashMap per position) for O(1)
-//! random access to any depth position, replacing tree pointer-chasing with direct
-//! positional lookup. Per-position DashMaps eliminate cross-position shard contention
-//! and improve cache locality for hot prefix positions.
+//! Uses `Box<[DashMap<ContentHash, SeqEntry>]>` (one DashMap per position, pre-allocated)
+//! for O(1) random access to any depth position with zero lock overhead.
 //! Jump search skips positions in strides, yielding amortized O(D/J + W) complexity.
 //!
 //! **Dual-hash scheme**: backends send a position-aware `block_hash` (SequenceHash)
@@ -13,9 +11,12 @@
 //! precise disambiguation at query time. The backend's SequenceHash is stored in
 //! worker_blocks only, used for `apply_removed` reverse lookup.
 //!
-//! Thread safety: all methods are `&self` and internally synchronized via DashMap +
-//! parking_lot::RwLock. Reads (find_matches) and writes (apply_stored/removed/cleared)
-//! can proceed concurrently.
+//! **Performance**: Internal u32 worker IDs eliminate Arc<str> hashing and atomic
+//! refcount bouncing in the hot query loop. Pre-allocated index eliminates RwLock
+//! cache-line contention. DashMap worker_blocks eliminates single-lock serialization.
+//!
+//! Thread safety: all methods are `&self` and internally synchronized via DashMap
+//! sharding and parking_lot::RwLock (per-worker reverse lookup only).
 
 use std::{fmt, sync::Arc};
 
@@ -136,20 +137,20 @@ pub fn compute_request_content_hashes(tokens: &[u32], block_size: usize) -> Vec<
 #[derive(Debug, Clone)]
 enum SeqEntry {
     /// Single seq_hash → workers mapping (common case, no HashMap allocation).
-    Single(SequenceHash, FxHashSet<WorkerId>),
+    Single(SequenceHash, FxHashSet<u32>),
     /// Multiple seq_hash → workers mappings (rare: different prefixes with same content).
-    Multi(FxHashMap<SequenceHash, FxHashSet<WorkerId>>),
+    Multi(FxHashMap<SequenceHash, FxHashSet<u32>>),
 }
 
 impl SeqEntry {
-    fn new(seq_hash: SequenceHash, worker_id: WorkerId) -> Self {
+    fn new(seq_hash: SequenceHash, worker_id: u32) -> Self {
         let mut workers = FxHashSet::default();
         workers.insert(worker_id);
         Self::Single(seq_hash, workers)
     }
 
     /// Insert a worker for a given seq_hash, upgrading to Multi if needed.
-    fn insert(&mut self, seq_hash: SequenceHash, worker_id: WorkerId) {
+    fn insert(&mut self, seq_hash: SequenceHash, worker_id: u32) {
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => {
                 workers.insert(worker_id);
@@ -168,16 +169,16 @@ impl SeqEntry {
 
     /// Remove a worker from a given seq_hash.
     /// Returns true if the entry is now completely empty and should be removed.
-    fn remove(&mut self, seq_hash: SequenceHash, worker: &str) -> bool {
+    fn remove(&mut self, seq_hash: SequenceHash, worker_id: u32) -> bool {
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => {
-                workers.remove(worker);
+                workers.remove(&worker_id);
                 workers.is_empty()
             }
             Self::Single(_, _) => false,
             Self::Multi(map) => {
                 if let Some(workers) = map.get_mut(&seq_hash) {
-                    workers.remove(worker);
+                    workers.remove(&worker_id);
                     if workers.is_empty() {
                         map.remove(&seq_hash);
                     }
@@ -188,7 +189,7 @@ impl SeqEntry {
     }
 
     /// Get workers for a specific prefix hash (used in query path and event processing).
-    fn get(&self, seq_hash: SequenceHash) -> Option<&FxHashSet<WorkerId>> {
+    fn get(&self, seq_hash: SequenceHash) -> Option<&FxHashSet<u32>> {
         match self {
             Self::Single(existing_hash, workers) if *existing_hash == seq_hash => Some(workers),
             Self::Single(_, _) => None,
@@ -202,7 +203,7 @@ impl SeqEntry {
     /// hash computation can be skipped entirely.
     /// Returns None for Multi entries — caller must compute prefix hash to disambiguate.
     #[inline]
-    fn workers_if_single(&self) -> Option<&FxHashSet<WorkerId>> {
+    fn workers_if_single(&self) -> Option<&FxHashSet<u32>> {
         match self {
             Self::Single(_, workers) => Some(workers),
             Self::Multi(_) => None,
@@ -220,40 +221,47 @@ type LevelIndex = RwLock<FxHashMap<SequenceHash, (usize, ContentHash, SequenceHa
 
 /// Positional indexer for cache-aware routing.
 ///
-/// Uses `Vec<DashMap<ContentHash, SeqEntry>>` — one DashMap per block position —
-/// for O(1) position access and jump search for O(D/J + W) matching complexity.
-/// Per-position DashMaps eliminate cross-position shard contention and improve
-/// cache locality for hot prefix positions (matching Dynamo's Flash Indexer design).
+/// Uses `Box<[DashMap<ContentHash, SeqEntry>]>` — one DashMap per block position —
+/// pre-allocated at construction for O(1) position access with zero lock overhead.
+/// Jump search gives amortized O(D/J + W) matching complexity.
 ///
 /// All methods take `&self` — concurrency is handled internally via DashMap sharding
-/// and parking_lot::RwLock.
+/// and parking_lot::RwLock (for per-worker reverse lookup only).
 pub struct PositionalIndexer {
-    /// Per-position index: index[position] is a DashMap<ContentHash, SeqEntry>.
-    /// Vec grows lazily as deeper positions are stored.
-    index: RwLock<Vec<DashMap<ContentHash, SeqEntry, FxBuildHasher>>>,
-    /// Per-worker reverse lookup: worker → { seq_hash → (position, content_hash) }.
-    /// Single RwLock because structural mutations (add/remove workers) are rare;
-    /// the hot path is read-only.
-    worker_blocks: RwLock<FxHashMap<WorkerId, LevelIndex>>,
-    /// Worker ID intern table — avoids Arc::from() allocation on every API call.
-    /// Lookup by &str works because Arc<str>: Borrow<str>.
-    intern: DashMap<WorkerId, (), FxBuildHasher>,
+    /// Pre-allocated per-position index: index[position] is a DashMap<ContentHash, SeqEntry>.
+    /// Fixed size — no RwLock needed (eliminates cache-line bouncing on 128+ CPU cores).
+    index: Box<[DashMap<ContentHash, SeqEntry, FxBuildHasher>]>,
+    /// Per-worker reverse lookup: worker_id → { seq_hash → (position, content_hash, prefix_hash) }.
+    /// DashMap shards by worker — ops on different workers never contend.
+    worker_blocks: DashMap<u32, LevelIndex, FxBuildHasher>,
+    /// Worker URL → internal u32 ID (fast path: DashMap shard read).
+    worker_to_id: DashMap<Arc<str>, u32, FxBuildHasher>,
+    /// Internal u32 ID → Worker URL (write lock only on new worker registration).
+    id_to_worker: RwLock<Vec<Arc<str>>>,
     /// Jump size for search optimization (default 64).
     jump_size: usize,
 }
 
 impl PositionalIndexer {
-    /// Create a new PositionalIndexer with the given jump size.
+    /// Create a new PositionalIndexer with the given jump size and max block capacity.
     ///
     /// `jump_size` controls how many positions the search algorithm skips at a time.
     /// Larger values reduce lookups on long matching prefixes but increase scan range
     /// when workers drain. Default: 64.
-    pub fn new(jump_size: usize) -> Self {
+    ///
+    /// `max_num_blocks` pre-allocates per-position DashMaps. Blocks beyond this limit
+    /// are silently truncated with a warning. Default: 2048.
+    pub fn new(jump_size: usize, max_num_blocks: usize) -> Self {
         assert!(jump_size > 0, "jump_size must be greater than 0");
+        assert!(max_num_blocks > 0, "max_num_blocks must be greater than 0");
+        let index: Vec<_> = (0..max_num_blocks)
+            .map(|_| DashMap::with_hasher(FxBuildHasher))
+            .collect();
         Self {
-            index: RwLock::new(Vec::new()),
-            worker_blocks: RwLock::new(FxHashMap::default()),
-            intern: DashMap::with_hasher(FxBuildHasher),
+            index: index.into_boxed_slice(),
+            worker_blocks: DashMap::with_hasher(FxBuildHasher),
+            worker_to_id: DashMap::with_hasher(FxBuildHasher),
+            id_to_worker: RwLock::new(Vec::new()),
             jump_size,
         }
     }
@@ -278,11 +286,10 @@ impl PositionalIndexer {
         // Determine starting position and parent's router prefix hash.
         let (start_pos, parent_prefix) = match parent_seq_hash {
             Some(parent_hash) => {
-                let wb = self.worker_blocks.read();
-                let Some(level_index) = wb.get(&worker_id) else {
+                let Some(wb_ref) = self.worker_blocks.get(&worker_id) else {
                     return Err(ApplyError::WorkerNotTracked);
                 };
-                let worker_map = level_index.read();
+                let worker_map = wb_ref.value().read();
                 let Some(&(parent_pos, _, parent_pfx)) = worker_map.get(&parent_hash) else {
                     return Err(ApplyError::ParentBlockNotFound);
                 };
@@ -291,26 +298,33 @@ impl PositionalIndexer {
             None => (0, None),
         };
 
-        if !self.worker_blocks.read().contains_key(&worker_id) {
-            self.worker_blocks
-                .write()
-                .entry(worker_id.clone())
-                .or_insert_with(|| RwLock::new(FxHashMap::default()));
-        }
+        // Ensure worker entry exists (DashMap entry API, no separate read check).
+        self.worker_blocks
+            .entry(worker_id)
+            .or_insert_with(|| RwLock::new(FxHashMap::default()));
 
-        // Ensure the per-position Vec has enough levels for all blocks.
+        // Truncate blocks that exceed pre-allocated capacity.
         let max_pos = start_pos + blocks.len() - 1;
-        self.ensure_levels(max_pos);
+        let effective_blocks = if max_pos >= self.index.len() {
+            tracing::warn!(
+                worker = %worker,
+                max_pos = max_pos,
+                capacity = self.index.len(),
+                "blocks exceed index capacity, truncating"
+            );
+            let usable = self.index.len().saturating_sub(start_pos);
+            &blocks[..usable]
+        } else {
+            blocks
+        };
 
-        let wb = self.worker_blocks.read();
-        let Some(level_index) = wb.get(&worker_id) else {
+        let Some(wb_ref) = self.worker_blocks.get(&worker_id) else {
             return Ok(());
         };
-        let mut worker_map = level_index.write();
+        let mut worker_map = wb_ref.value().write();
 
-        let levels = self.index.read();
         let mut prev_prefix = parent_prefix;
-        for (i, block) in blocks.iter().enumerate() {
+        for (i, block) in effective_blocks.iter().enumerate() {
             let position = start_pos + i;
             let content_hash = block.content_hash;
 
@@ -322,10 +336,10 @@ impl PositionalIndexer {
                 None => SequenceHash(content_hash.0),
             };
 
-            levels[position]
+            self.index[position]
                 .entry(content_hash)
-                .and_modify(|entry| entry.insert(prefix_hash, worker_id.clone()))
-                .or_insert_with(|| SeqEntry::new(prefix_hash, worker_id.clone()));
+                .and_modify(|entry| entry.insert(prefix_hash, worker_id))
+                .or_insert_with(|| SeqEntry::new(prefix_hash, worker_id));
 
             worker_map.insert(block.seq_hash, (position, content_hash, prefix_hash));
             prev_prefix = Some(prefix_hash);
@@ -347,8 +361,7 @@ impl PositionalIndexer {
     pub fn apply_removed(&self, worker: &str, seq_hashes: &[SequenceHash]) {
         let worker_id = self.intern_worker(worker);
 
-        let wb = self.worker_blocks.read();
-        let Some(level_index) = wb.get(&worker_id) else {
+        let Some(wb_ref) = self.worker_blocks.get(&worker_id) else {
             tracing::debug!(
                 worker = %worker,
                 num_hashes = seq_hashes.len(),
@@ -357,17 +370,16 @@ impl PositionalIndexer {
             return;
         };
 
-        let mut worker_map = level_index.write();
-        let levels = self.index.read();
+        let mut worker_map = wb_ref.value().write();
 
         for &seq_hash in seq_hashes {
             let Some((position, content_hash, prefix_hash)) = worker_map.remove(&seq_hash) else {
                 continue;
             };
 
-            if let Some(level) = levels.get(position) {
+            if let Some(level) = self.index.get(position) {
                 if let Entry::Occupied(mut occupied) = level.entry(content_hash) {
-                    if occupied.get_mut().remove(prefix_hash, worker) {
+                    if occupied.get_mut().remove(prefix_hash, worker_id) {
                         occupied.remove();
                     }
                 }
@@ -388,9 +400,8 @@ impl PositionalIndexer {
     /// Get total number of blocks across all workers.
     pub fn current_size(&self) -> usize {
         self.worker_blocks
-            .read()
-            .values()
-            .map(|level_index| level_index.read().len())
+            .iter()
+            .map(|entry| entry.value().read().len())
             .sum()
     }
 
@@ -416,14 +427,13 @@ impl PositionalIndexer {
     fn remove_or_clear_worker(&self, worker: &str, keep_worker: bool) {
         let worker_id = self.intern_worker(worker);
 
-        let mut wb = self.worker_blocks.write();
-        if let Some(level_index) = wb.remove(&worker_id) {
-            let levels = self.index.read();
+        if let Some((_, level_index)) = self.worker_blocks.remove(&worker_id) {
+            // level_index is owned — iterate without holding any DashMap shard lock.
             let worker_map = level_index.read();
             for (_, &(position, content_hash, prefix_hash)) in worker_map.iter() {
-                if let Some(level) = levels.get(position) {
+                if let Some(level) = self.index.get(position) {
                     if let Entry::Occupied(mut occupied) = level.entry(content_hash) {
-                        if occupied.get_mut().remove(prefix_hash, worker) {
+                        if occupied.get_mut().remove(prefix_hash, worker_id) {
                             occupied.remove();
                         }
                     }
@@ -432,7 +442,8 @@ impl PositionalIndexer {
         }
 
         if keep_worker {
-            wb.insert(worker_id, RwLock::new(FxHashMap::default()));
+            self.worker_blocks
+                .insert(worker_id, RwLock::new(FxHashMap::default()));
         }
     }
 
@@ -475,30 +486,26 @@ impl PositionalIndexer {
     }
 
     // -----------------------------------------------------------------------
-    // Internal: Vec growth + worker interning
+    // Internal: worker interning (u32 IDs)
     // -----------------------------------------------------------------------
 
-    /// Grow the per-position Vec to accommodate `max_pos`.
-    /// Takes write lock only when growth is needed (rare after warmup).
-    fn ensure_levels(&self, max_pos: usize) {
-        let needed = max_pos + 1;
-        if self.index.read().len() >= needed {
-            return;
+    /// Intern a worker URL to an internal u32 ID.
+    /// Fast path: DashMap shard read (no lock). Slow path: assign new ID (once per worker).
+    fn intern_worker(&self, worker: &str) -> u32 {
+        // Fast path: already interned
+        if let Some(entry) = self.worker_to_id.get(worker) {
+            return *entry.value();
         }
-        let mut levels = self.index.write();
-        while levels.len() < needed {
-            levels.push(DashMap::with_hasher(FxBuildHasher));
+        // Slow path: assign new ID (once per worker lifetime)
+        let mut reverse = self.id_to_worker.write();
+        // Double-check after acquiring write lock
+        if let Some(entry) = self.worker_to_id.get(worker) {
+            return *entry.value();
         }
-    }
-
-    /// Intern a worker URL to reuse the same `Arc<str>` across calls.
-    /// First call per worker allocates; subsequent calls return Arc::clone.
-    fn intern_worker(&self, worker: &str) -> WorkerId {
-        if let Some(entry) = self.intern.get(worker) {
-            return entry.key().clone();
-        }
-        let id: WorkerId = Arc::from(worker);
-        self.intern.entry(id.clone()).or_insert(());
+        let id = reverse.len() as u32;
+        let key: Arc<str> = Arc::from(worker);
+        reverse.push(key.clone());
+        self.worker_to_id.insert(key, id);
         id
     }
 
@@ -515,7 +522,7 @@ impl PositionalIndexer {
         content_hash: ContentHash,
         seq_hashes: &mut Vec<SequenceHash>,
         sequence: &[ContentHash],
-    ) -> Option<FxHashSet<WorkerId>> {
+    ) -> Option<FxHashSet<u32>> {
         let level = levels.get(position)?;
         let entry = level.get(&content_hash)?;
         if let Some(workers) = entry.value().workers_if_single() {
@@ -559,8 +566,8 @@ impl PositionalIndexer {
         levels: &[DashMap<ContentHash, SeqEntry, FxBuildHasher>],
         sequence: &[ContentHash],
         seq_hashes: &mut Vec<SequenceHash>,
-        active: &mut FxHashSet<WorkerId>,
-        scores: &mut OverlapScores,
+        active: &mut FxHashSet<u32>,
+        internal_scores: &mut FxHashMap<u32, u32>,
         lo: usize,
         hi: usize,
     ) {
@@ -571,26 +578,26 @@ impl PositionalIndexer {
             let pos = lo + offset;
 
             let Some(level) = levels.get(pos) else {
-                for worker in active.drain() {
-                    scores.scores.insert(worker, pos as u32);
+                for w in active.drain() {
+                    internal_scores.insert(w, pos as u32);
                 }
                 break;
             };
 
             let Some(entry) = level.get(&content_hash) else {
-                for worker in active.drain() {
-                    scores.scores.insert(worker, pos as u32);
+                for w in active.drain() {
+                    internal_scores.insert(w, pos as u32);
                 }
                 break;
             };
 
             // Fast path: Single entry — skip rolling hash, use workers directly.
             if let Some(workers) = entry.value().workers_if_single() {
-                active.retain(|w| {
-                    if workers.contains(w) {
+                active.retain(|&w| {
+                    if workers.contains(&w) {
                         true
                     } else {
-                        scores.scores.insert(w.clone(), pos as u32);
+                        internal_scores.insert(w, pos as u32);
                         false
                     }
                 });
@@ -602,18 +609,18 @@ impl PositionalIndexer {
             let seq_hash = seq_hashes[pos];
 
             let Some(workers) = entry.get(seq_hash) else {
-                for worker in active.drain() {
-                    scores.scores.insert(worker, pos as u32);
+                for w in active.drain() {
+                    internal_scores.insert(w, pos as u32);
                 }
                 break;
             };
 
             // Direct membership check — no clone of workers set.
-            active.retain(|w| {
-                if workers.contains(w) {
+            active.retain(|&w| {
+                if workers.contains(&w) {
                     true
                 } else {
-                    scores.scores.insert(w.clone(), pos as u32);
+                    internal_scores.insert(w, pos as u32);
                     false
                 }
             });
@@ -627,13 +634,10 @@ impl PositionalIndexer {
             return scores;
         }
 
-        // Hold the read guard for the entire query — only blocks Vec growth (rare).
-        let levels = self.index.read();
-
         let mut seq_hashes = Vec::with_capacity(content_hashes.len());
 
         let Some(initial_workers) = Self::get_workers_lazy(
-            &levels,
+            &self.index,
             0,
             content_hashes[0],
             &mut seq_hashes,
@@ -649,12 +653,14 @@ impl PositionalIndexer {
 
         let len = content_hashes.len();
         let mut current_pos = 0;
+        // Internal scores use u32 worker IDs — converted to Arc<str> at the end.
+        let mut internal_scores: FxHashMap<u32, u32> = FxHashMap::default();
 
         while current_pos < len - 1 && !active.is_empty() {
             let next_pos = (current_pos + self.jump_size).min(len - 1);
 
             let count = Self::count_workers_at(
-                &levels,
+                &self.index,
                 next_pos,
                 content_hashes[next_pos],
                 &mut seq_hashes,
@@ -667,11 +673,11 @@ impl PositionalIndexer {
                 current_pos = next_pos;
             } else {
                 Self::linear_scan_drain(
-                    &levels,
+                    &self.index,
                     content_hashes,
                     &mut seq_hashes,
                     &mut active,
-                    &mut scores,
+                    &mut internal_scores,
                     current_pos + 1,
                     next_pos + 1,
                 );
@@ -679,20 +685,25 @@ impl PositionalIndexer {
             }
         }
 
-        // Drop levels guard before acquiring worker_blocks.
-        drop(levels);
-
         let final_score = len as u32;
-        for worker in active {
-            scores.scores.insert(worker, final_score);
+        for w in active {
+            internal_scores.insert(w, final_score);
         }
 
-        let wb = self.worker_blocks.read();
-        for worker in scores.scores.keys() {
-            if let Some(level_index) = wb.get(worker) {
-                scores
-                    .tree_sizes
-                    .insert(Arc::clone(worker), level_index.read().len());
+        // Convert u32 worker IDs → Arc<str> URLs for return value (O(W), negligible).
+        let reverse = self.id_to_worker.read();
+        for (&int_id, &score) in &internal_scores {
+            if let Some(url) = reverse.get(int_id as usize) {
+                scores.scores.insert(url.clone(), score);
+            }
+        }
+
+        // Populate tree_sizes from worker_blocks.
+        for &int_id in internal_scores.keys() {
+            if let Some(wb_ref) = self.worker_blocks.get(&int_id) {
+                let size = wb_ref.value().read().len();
+                let url = reverse[int_id as usize].clone();
+                scores.tree_sizes.insert(url, size);
             }
         }
 
@@ -702,19 +713,16 @@ impl PositionalIndexer {
 
 impl Default for PositionalIndexer {
     fn default() -> Self {
-        Self::new(64)
+        Self::new(64, 2048)
     }
 }
 
 impl fmt::Debug for PositionalIndexer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PositionalIndexer")
-            .field("levels", &self.index.read().len())
+            .field("max_blocks", &self.index.len())
             .field("jump_size", &self.jump_size)
-            .field(
-                "workers",
-                &self.worker_blocks.read().keys().collect::<Vec<_>>(),
-            )
+            .field("workers", &self.worker_blocks.len())
             .finish()
     }
 }
@@ -758,7 +766,7 @@ mod tests {
 
     #[test]
     fn test_store_and_find_single_worker() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let blocks = make_blocks(&[10, 20, 30]);
         indexer
             .apply_stored("http://w1:8000", &blocks, None)
@@ -771,7 +779,7 @@ mod tests {
 
     #[test]
     fn test_store_partial_prefix_match() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let blocks = make_blocks(&[10, 20, 30]);
         indexer
             .apply_stored("http://w1:8000", &blocks, None)
@@ -784,7 +792,7 @@ mod tests {
 
     #[test]
     fn test_store_no_match() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let blocks = make_blocks(&[10, 20, 30]);
         indexer
             .apply_stored("http://w1:8000", &blocks, None)
@@ -796,7 +804,7 @@ mod tests {
 
     #[test]
     fn test_two_workers_different_depths() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let blocks_w1 = make_blocks(&[10, 20, 30]);
         let blocks_w2 = make_blocks(&[10, 20]);
         indexer
@@ -813,7 +821,7 @@ mod tests {
 
     #[test]
     fn test_remove_blocks() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let blocks = make_blocks(&[10, 20, 30]);
         let seq_hash_of_30 = blocks[2].seq_hash;
         indexer
@@ -829,7 +837,7 @@ mod tests {
 
     #[test]
     fn test_clear_worker() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let blocks_w1 = make_blocks(&[10, 20, 30]);
         let blocks_w2 = make_blocks(&[10, 20]);
         indexer
@@ -848,7 +856,7 @@ mod tests {
 
     #[test]
     fn test_tree_sizes() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let blocks_w1 = make_blocks(&[10, 20, 30]);
         let blocks_w2 = make_blocks(&[10, 20]);
         indexer
@@ -865,7 +873,7 @@ mod tests {
 
     #[test]
     fn test_store_with_parent_hash() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         // First store: blocks at positions 0, 1
         let blocks1 = make_blocks(&[10, 20]);
         let parent_seq_hash = blocks1[1].seq_hash;
@@ -899,7 +907,7 @@ mod tests {
 
     #[test]
     fn test_remove_nonexistent_worker() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let blocks = make_blocks(&[10, 20]);
         indexer
             .apply_stored("http://w1:8000", &blocks, None)
@@ -915,7 +923,7 @@ mod tests {
     #[test]
     fn test_jump_search_skips_positions() {
         // Use a small jump_size to test the jump behavior
-        let indexer = PositionalIndexer::new(4);
+        let indexer = PositionalIndexer::new(4, 2048);
 
         // Worker 1: 10 blocks
         let content: Vec<u64> = (100..110).collect();
@@ -937,7 +945,7 @@ mod tests {
 
     #[test]
     fn test_seq_entry_single_to_multi_upgrade() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
 
         // Two workers with DIFFERENT content at position 0 but SAME content at position 1.
         // This creates different router prefix hashes at position 1, triggering Multi upgrade.
@@ -974,14 +982,13 @@ mod tests {
 
         // Position 1 has same content but different prefix histories → Multi
         {
-            let levels = indexer.index.read();
-            let entry = levels[1].get(&ContentHash(20)).unwrap();
+            let entry = indexer.index[1].get(&ContentHash(20)).unwrap();
             assert!(matches!(entry.value(), SeqEntry::Multi(_)));
         }
 
         // Same content at same position → Single (both share prefix hash)
         // Workers with identical content get identical router prefix hashes.
-        let indexer2 = PositionalIndexer::new(64);
+        let indexer2 = PositionalIndexer::new(64, 2048);
         let blocks_w3 = make_blocks(&[10, 20]);
         let blocks_w4 = vec![
             StoredBlock {
@@ -1000,8 +1007,7 @@ mod tests {
             .apply_stored("http://w4:8000", &blocks_w4, None)
             .unwrap();
         {
-            let levels = indexer2.index.read();
-            let entry = levels[0].get(&ContentHash(10)).unwrap();
+            let entry = indexer2.index[0].get(&ContentHash(10)).unwrap();
             assert!(matches!(entry.value(), SeqEntry::Single(_, _)));
         }
 
@@ -1018,7 +1024,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_find_matches() {
-        let indexer = Arc::new(PositionalIndexer::new(64));
+        let indexer = Arc::new(PositionalIndexer::new(64, 2048));
         let blocks = make_blocks(&[10, 20, 30]);
         indexer
             .apply_stored("http://w1:8000", &blocks, None)
@@ -1047,7 +1053,7 @@ mod tests {
 
     #[test]
     fn test_remove_worker_entirely() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let blocks = make_blocks(&[10, 20, 30]);
         indexer
             .apply_stored("http://w1:8000", &blocks, None)
@@ -1218,7 +1224,7 @@ mod tests {
     #[test]
     fn test_jump_search_with_jump_size_1() {
         // jump_size=1 means linear scan every step (degenerate case)
-        let indexer = PositionalIndexer::new(1);
+        let indexer = PositionalIndexer::new(1, 2048);
         let content: Vec<u64> = (100..120).collect();
         let blocks_w1 = make_blocks(&content);
         let blocks_w2 = make_blocks(&content[..10]);
@@ -1237,7 +1243,7 @@ mod tests {
     #[test]
     fn test_jump_search_workers_drain_at_different_positions() {
         // 3 workers with different depths, small jump_size to exercise linear_scan_drain
-        let indexer = PositionalIndexer::new(3);
+        let indexer = PositionalIndexer::new(3, 2048);
         let content: Vec<u64> = (1..=15).collect();
 
         let blocks_w1 = make_blocks(&content); // 15 blocks
@@ -1263,7 +1269,7 @@ mod tests {
     #[test]
     fn test_jump_search_large_sequence() {
         // Sequence larger than default jump_size to verify multiple jumps
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let content: Vec<u64> = (1..=200).collect();
 
         let blocks_full = make_blocks(&content);
@@ -1336,7 +1342,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_read_write() {
-        let indexer = Arc::new(PositionalIndexer::new(4));
+        let indexer = Arc::new(PositionalIndexer::new(4, 2048));
         let content: Vec<u64> = (1..=20).collect();
         let blocks = make_blocks(&content);
         indexer
@@ -1392,24 +1398,21 @@ mod tests {
             .unwrap();
 
         {
-            let levels = indexer.index.read();
-            let total: usize = levels.iter().map(|l| l.len()).sum();
+            let total: usize = indexer.index.iter().map(|l| l.len()).sum();
             assert!(total > 0);
         }
 
         indexer.remove_worker("http://w1:8000");
         // w2 still has entries, so index should still have entries
         {
-            let levels = indexer.index.read();
-            let total: usize = levels.iter().map(|l| l.len()).sum();
+            let total: usize = indexer.index.iter().map(|l| l.len()).sum();
             assert!(total > 0);
         }
 
         indexer.remove_worker("http://w2:8000");
         // Both workers removed — all per-position DashMaps should be empty
         {
-            let levels = indexer.index.read();
-            let total: usize = levels.iter().map(|l| l.len()).sum();
+            let total: usize = indexer.index.iter().map(|l| l.len()).sum();
             assert_eq!(total, 0);
         }
     }
@@ -1487,7 +1490,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "jump_size must be greater than 0")]
     fn test_zero_jump_size_panics() {
-        let _ = PositionalIndexer::new(0);
+        let _ = PositionalIndexer::new(0, 2048);
     }
 
     #[test]
@@ -1645,7 +1648,7 @@ mod tests {
     #[test]
     fn test_end_to_end_different_backends_same_content() {
         // Two workers with different seq_hashes but same content (different backends)
-        let indexer = PositionalIndexer::new(4);
+        let indexer = PositionalIndexer::new(4, 2048);
         let block_size = 4;
         let tokens: Vec<u32> = (1..=8).collect();
         let content_hashes: Vec<ContentHash> = tokens
@@ -1714,7 +1717,7 @@ mod tests {
     fn test_divergence_at_jump_boundaries() {
         // 128-block sequence, workers diverge at specific boundary positions.
         // With jump_size=32, boundaries are at 32, 64, 96.
-        let indexer = PositionalIndexer::new(32);
+        let indexer = PositionalIndexer::new(32, 2048);
         let full: Vec<u64> = (1..=128).collect();
         let full_blocks = make_blocks(&full);
         indexer
@@ -1752,7 +1755,7 @@ mod tests {
     #[test]
     fn test_exact_jump_size_sequences() {
         // Sequences that are exact multiples of jump_size (32, 64, 96).
-        let indexer = PositionalIndexer::new(32);
+        let indexer = PositionalIndexer::new(32, 2048);
 
         for &len in &[32, 64, 96] {
             let content: Vec<u64> = (1..=len as u64).collect();
@@ -1772,7 +1775,7 @@ mod tests {
     #[test]
     fn test_off_by_one_jump_boundaries() {
         // Sequences at jump_size +/- 1 to catch off-by-one errors.
-        let indexer = PositionalIndexer::new(32);
+        let indexer = PositionalIndexer::new(32, 2048);
         let full: Vec<u64> = (1..=128).collect();
 
         for &len in &[31, 33, 63, 65, 95, 97] {
@@ -1794,7 +1797,7 @@ mod tests {
     fn test_staggered_workers_across_jump_boundaries() {
         // 5 workers at depths 10, 20, 35, 64, 100 with jump_size=32.
         // Tests drain tracking across multiple jump boundaries.
-        let indexer = PositionalIndexer::new(32);
+        let indexer = PositionalIndexer::new(32, 2048);
         let full: Vec<u64> = (1..=100).collect();
 
         let depths = [10, 20, 35, 64, 100];
@@ -1818,7 +1821,7 @@ mod tests {
     #[test]
     fn test_shared_prefix_diverge_at_jump_boundary() {
         // 3 workers share 40-block prefix, then diverge with different suffixes.
-        let indexer = PositionalIndexer::new(32);
+        let indexer = PositionalIndexer::new(32, 2048);
         let shared: Vec<u64> = (1..=40).collect();
 
         // Worker 1: shared + [1001..1060] = 100 blocks total
@@ -1853,7 +1856,7 @@ mod tests {
     #[test]
     fn test_very_long_sequence() {
         // 1000-block sequence: full match, prefix match, mid-divergence.
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let content: Vec<u64> = (1..=1000).collect();
         let blocks = make_blocks(&content);
         indexer
@@ -1882,7 +1885,7 @@ mod tests {
     #[test]
     fn test_deep_continuation_chain() {
         // Build 200-block sequence via 20 continuations of 10 blocks each.
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let content: Vec<u64> = (1..=200).collect();
         store_via_continuations(&indexer, "http://w1:8000", &content, 10);
 
@@ -1901,7 +1904,7 @@ mod tests {
     fn test_continuation_chain_with_multiple_workers() {
         // Two workers: w1 builds 100 blocks via 10 continuations,
         // w2 builds 50 blocks via 5 continuations (same content prefix).
-        let indexer = PositionalIndexer::new(32);
+        let indexer = PositionalIndexer::new(32, 2048);
         let content: Vec<u64> = (1..=100).collect();
 
         store_via_continuations(&indexer, "http://w1:8000", &content, 10);
@@ -1915,7 +1918,7 @@ mod tests {
     #[test]
     fn test_multiple_disjoint_sequences_per_worker() {
         // Same worker stores two completely disjoint sequences (no shared prefix).
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
 
         // Sequence 1: content [10, 20, 30] at positions 0-2
         let blocks1 = make_blocks(&[10, 20, 30]);
@@ -1947,7 +1950,7 @@ mod tests {
     fn test_long_sequence_partial_removal() {
         // Store 100 blocks, remove the last 20 (blocks 80-99).
         // Verify remaining 80 blocks still match.
-        let indexer = PositionalIndexer::new(32);
+        let indexer = PositionalIndexer::new(32, 2048);
         let content: Vec<u64> = (1..=100).collect();
         let blocks = make_blocks(&content);
         indexer
@@ -1977,7 +1980,7 @@ mod tests {
         // With jump_size > sequence length, the jump skips directly from position 0
         // to the last position, bypassing the removed middle block entirely.
         // Use jump_size=1 to force linear scan and detect the gap.
-        let indexer = PositionalIndexer::new(1);
+        let indexer = PositionalIndexer::new(1, 2048);
         let blocks = make_blocks(&[10, 20, 30, 40, 50]);
         indexer
             .apply_stored("http://w1:8000", &blocks, None)
@@ -2000,7 +2003,7 @@ mod tests {
     fn test_long_sequence_clear_and_rebuild() {
         // Clear a 100-block sequence, rebuild with 100 different blocks.
         // Verify old data is completely gone.
-        let indexer = PositionalIndexer::new(32);
+        let indexer = PositionalIndexer::new(32, 2048);
 
         // Store original
         let original: Vec<u64> = (1..=100).collect();
@@ -2032,7 +2035,7 @@ mod tests {
     #[test]
     fn test_interleaved_long_sequences() {
         // 4 workers with shared prefix, staggered at 25/50/75/100 blocks.
-        let indexer = PositionalIndexer::new(32);
+        let indexer = PositionalIndexer::new(32, 2048);
         let content: Vec<u64> = (1..=100).collect();
 
         let depths = [25, 50, 75, 100];

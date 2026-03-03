@@ -104,7 +104,7 @@ impl KvEventMonitor {
         let indexer = self
             .indexers
             .entry(model_id.clone())
-            .or_insert_with(|| Arc::new(PositionalIndexer::new(self.jump_size)))
+            .or_insert_with(|| Arc::new(PositionalIndexer::new(self.jump_size, 2048)))
             .clone();
 
         // Seed block_size from WorkerSpec if set, valid, and not already known.
@@ -526,7 +526,7 @@ mod tests {
 
     #[test]
     fn test_apply_stored_no_parent() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let stored = KvBlocksStored {
             blocks: vec![
                 KvBlock {
@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn test_apply_stored_with_parent() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
 
         let stored1 = KvBlocksStored {
             blocks: vec![KvBlock {
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn test_apply_stored_fallback_on_worker_not_tracked() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
 
         // Pass parent_block_hash for an untracked worker — should fallback to no parent.
         let stored = KvBlocksStored {
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn test_apply_removed() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
 
         let stored = KvBlocksStored {
             blocks: vec![
@@ -635,7 +635,7 @@ mod tests {
 
     #[test]
     fn test_apply_cleared_event() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
 
         let stored = KvBlocksStored {
             blocks: vec![KvBlock {
@@ -656,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_apply_event_dispatch_stored() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let event = KvCacheEvent {
             event_id: 1,
             data: Some(kv_cache_event::Data::Stored(KvBlocksStored {
@@ -677,7 +677,7 @@ mod tests {
 
     #[test]
     fn test_apply_event_dispatch_removed() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
 
         // Store first
         let stored_event = KvCacheEvent {
@@ -709,7 +709,7 @@ mod tests {
 
     #[test]
     fn test_apply_event_dispatch_cleared() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
 
         // Store first
         KvEventMonitor::apply_event(
@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn test_apply_event_no_data() {
-        let indexer = PositionalIndexer::new(64);
+        let indexer = PositionalIndexer::new(64, 2048);
         let event = KvCacheEvent {
             event_id: 1,
             data: None,
