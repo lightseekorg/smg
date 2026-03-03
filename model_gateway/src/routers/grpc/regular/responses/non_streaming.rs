@@ -383,7 +383,7 @@ pub(super) async fn execute_tool_loop(
             }
 
             // Build resume request with conversation history
-            current_request = build_next_request(&state, &current_request);
+            current_request = build_next_request(&state, current_request);
 
             // Continue to next iteration
         }
