@@ -24,43 +24,19 @@ pub(crate) struct HarmonyParserAdapter {
     parser: StreamableParser,
     prev_recipient: Option<String>,
     reasoning_token_count: u32,
-    /// User-specified stop sequences for streaming jail buffering
-    stop_sequences: Vec<String>,
-    /// Maximum byte length of any stop sequence (used for jail trimming)
-    max_stop_len: usize,
-    /// Buffer for analysis channel text; holds the trailing portion that might contain a stop sequence
-    analysis_jail: String,
-    /// Buffer for final channel text; holds the trailing portion that might contain a stop sequence
-    final_jail: String,
 }
 
 impl HarmonyParserAdapter {
-    /// Create a new Harmony parser with no stop sequences
+    /// Create a new Harmony parser
     pub fn new() -> Result<Self, String> {
-        Self::new_with_stop_sequences(vec![])
-    }
-
-    /// Create a new Harmony parser with user-specified stop sequences
-    ///
-    /// When `stop_sequences` is non-empty, streaming deltas for the analysis and
-    /// final channels are buffered through a "jail" to prevent emitting stop
-    /// sequence text as content deltas.  The jail is flushed (with the stop
-    /// sequence stripped) when the stream completes.
-    pub fn new_with_stop_sequences(stop_sequences: Vec<String>) -> Result<Self, String> {
         let encoding = get_harmony_encoding();
         let parser = StreamableParser::new(encoding.clone(), Some(Role::Assistant))
             .map_err(|e| format!("Failed to create StreamableParser: {e}"))?;
-
-        let max_stop_len = stop_sequences.iter().map(|s| s.len()).max().unwrap_or(0);
 
         Ok(Self {
             parser,
             prev_recipient: None,
             reasoning_token_count: 0,
-            stop_sequences,
-            max_stop_len,
-            analysis_jail: String::new(),
-            final_jail: String::new(),
         })
     }
 
@@ -117,104 +93,6 @@ impl HarmonyParserAdapter {
         }
     }
 
-    /// Route new text through a stop-sequence jail buffer (static helper)
-    ///
-    /// Appends `new_text` to `jail` and returns the portion of the jail that is
-    /// safe to emit (i.e. cannot be part of an upcoming stop sequence).
-    ///
-    /// Rules:
-    /// - If `stop_sequences` is empty, the text is returned immediately without
-    ///   touching the jail (zero-overhead fast path).
-    /// - If a complete stop sequence is found anywhere in the jail the text
-    ///   preceding it is returned and the jail is cleared.
-    /// - Otherwise the last `max_stop_len - 1` bytes (UTF-8 safe) are retained
-    ///   in the jail and the rest is returned.
-    ///
-    /// Returns `None` while all accumulated text is still held in the jail.
-    fn buffer_through_jail(
-        jail: &mut String,
-        new_text: &str,
-        stop_sequences: &[String],
-        max_stop_len: usize,
-    ) -> Option<String> {
-        // Fast path: no stop sequences configured
-        if stop_sequences.is_empty() {
-            return Some(new_text.to_string());
-        }
-
-        jail.push_str(new_text);
-
-        // Check whether the jail already contains a complete stop sequence
-        for seq in stop_sequences {
-            if let Some(pos) = jail.find(seq.as_str()) {
-                // Return text before the stop sequence and clear the jail.
-                // If the stop sequence is at position 0, safe is empty - return None to avoid
-                // emitting a spurious empty delta.
-                let safe = jail[..pos].to_string();
-                jail.clear();
-                return if safe.is_empty() { None } else { Some(safe) };
-            }
-        }
-
-        // No complete stop sequence yet: retain the tail that could still form one
-        // and release the safe prefix.
-        //
-        // We keep at most `max_stop_len - 1` bytes at the end of the jail so that
-        // any stop sequence spanning a chunk boundary is never accidentally emitted.
-        if jail.len() > max_stop_len.saturating_sub(1) {
-            let keep_from = jail.len() - max_stop_len.saturating_sub(1);
-            // Walk back to a valid UTF-8 char boundary
-            let keep_from = (keep_from..=jail.len())
-                .find(|&i| jail.is_char_boundary(i))
-                .unwrap_or(jail.len());
-            let safe = jail[..keep_from].to_string();
-            jail.drain(..keep_from);
-            if !safe.is_empty() {
-                return Some(safe);
-            }
-        }
-
-        None
-    }
-
-    /// Flush a single jail buffer at stream end (static helper)
-    ///
-    /// Strips the matched stop sequence suffix from the jail content (if any)
-    /// and returns the remaining text, or `None` if the jail is empty after
-    /// stripping.
-    fn flush_single_jail(jail: &mut String, matched_stop: Option<&str>) -> Option<String> {
-        if jail.is_empty() {
-            return None;
-        }
-
-        if let Some(stop) = matched_stop {
-            if jail.ends_with(stop) {
-                let new_len = jail.len() - stop.len();
-                jail.truncate(new_len);
-            }
-        }
-
-        if jail.is_empty() {
-            None
-        } else {
-            Some(std::mem::take(jail))
-        }
-    }
-
-    /// Flush both channel jails at stream end
-    ///
-    /// Should be called once after the backend signals completion.  Strips the
-    /// matched stop string (if any) from whichever jail is non-empty and
-    /// returns `(remaining_analysis, remaining_final)`.
-    pub fn flush_stop_buffer(
-        &mut self,
-        matched_stop: Option<&str>,
-    ) -> (Option<String>, Option<String>) {
-        let remaining_analysis = Self::flush_single_jail(&mut self.analysis_jail, matched_stop);
-        let remaining_final = Self::flush_single_jail(&mut self.final_jail, matched_stop);
-        (remaining_analysis, remaining_final)
-    }
-
     /// Strip the matched stop sequence from parsed analysis / final_text (static helper)
     ///
     /// Used by `parse_complete` and `finalize` (non-streaming path) where no
@@ -222,7 +100,7 @@ impl HarmonyParserAdapter {
     /// of whichever channel was active when the model stopped.
     fn strip_matched_stop(
         parser: &StreamableParser,
-        matched_stop: &Option<serde_json::Value>,
+        matched_stop: Option<&serde_json::Value>,
         analysis: &mut Option<String>,
         final_text: &mut String,
     ) {
@@ -443,7 +321,7 @@ impl HarmonyParserAdapter {
         Self::handle_incomplete_content(&self.parser, &mut analysis, &mut final_text);
 
         // Strip matched stop sequence from the active channel
-        Self::strip_matched_stop(&self.parser, &matched_stop, &mut analysis, &mut final_text);
+        Self::strip_matched_stop(&self.parser, matched_stop.as_ref(), &mut analysis, &mut final_text);
 
         // Determine finish reason: override to "tool_calls" if commentary has tool calls
         let final_finish_reason = if commentary.is_some() {
@@ -563,32 +441,16 @@ impl HarmonyParserAdapter {
                 let channel = self.parser.current_channel();
                 match channel.as_deref() {
                     Some("analysis") => {
-                        let released = Self::buffer_through_jail(
-                            &mut self.analysis_jail,
-                            &delta_text,
-                            &self.stop_sequences,
-                            self.max_stop_len,
-                        );
-                        if let Some(text) = released {
-                            analysis_delta = Some(match analysis_delta {
-                                Some(existing) => existing + &text,
-                                None => text,
-                            });
-                        }
+                        analysis_delta = Some(match analysis_delta {
+                            Some(existing) => existing + &delta_text,
+                            None => delta_text,
+                        });
                     }
                     Some("final") | None => {
-                        let released = Self::buffer_through_jail(
-                            &mut self.final_jail,
-                            &delta_text,
-                            &self.stop_sequences,
-                            self.max_stop_len,
-                        );
-                        if let Some(text) = released {
-                            final_delta = Some(match final_delta {
-                                Some(existing) => existing + &text,
-                                None => text,
-                            });
-                        }
+                        final_delta = Some(match final_delta {
+                            Some(existing) => existing + &delta_text,
+                            None => delta_text,
+                        });
                     }
                     Some("commentary") => {
                         // Accumulate delta for commentary (tool calls are never stop-stripped)
@@ -698,7 +560,7 @@ impl HarmonyParserAdapter {
         Self::handle_incomplete_content(&self.parser, &mut analysis, &mut final_text);
 
         // Strip matched stop sequence from the active channel
-        Self::strip_matched_stop(&self.parser, &matched_stop, &mut analysis, &mut final_text);
+        Self::strip_matched_stop(&self.parser, matched_stop.as_ref(), &mut analysis, &mut final_text);
 
         // Determine finish reason: override to "tool_calls" if commentary has tool calls
         let final_finish_reason = if commentary.is_some() {
@@ -728,8 +590,6 @@ impl HarmonyParserAdapter {
             .map_err(|e| format!("Failed to reset parser: {e}"))?;
         self.prev_recipient = None;
         self.reasoning_token_count = 0;
-        self.analysis_jail.clear();
-        self.final_jail.clear();
         Ok(())
     }
 }
