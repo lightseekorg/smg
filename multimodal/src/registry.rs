@@ -237,15 +237,6 @@ impl Qwen3VLVisionSpec {
                 field: "vision_end_token_id".to_string(),
             })
     }
-
-    fn patch_grid(metadata: &ModelMetadata, size: ImageSize) -> (usize, usize) {
-        let patch = metadata
-            .config_u32(&["vision_config", "patch_size"])
-            .unwrap_or(16);
-        let cols = size.width.div_ceil(patch) as usize;
-        let rows = size.height.div_ceil(patch) as usize;
-        (rows, cols)
-    }
 }
 
 impl ModelProcessorSpec for Qwen3VLVisionSpec {
@@ -292,15 +283,13 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
         let pad_token_id = Self::pad_token_id(metadata)?;
         let end_token_id = Self::end_token_id(metadata)?;
         let placeholder_token = self.placeholder_token(metadata)?;
-        let image_sizes = image_sizes_hw(preprocessed);
-        Ok(image_sizes
+        Ok(preprocessed
+            .num_img_tokens
             .iter()
-            .map(|size| {
-                let (rows, cols) = Self::patch_grid(metadata, *size);
-                let pad_len = rows * cols;
-                let mut tokens = Vec::with_capacity(pad_len + 2);
+            .map(|&num_tokens| {
+                let mut tokens = Vec::with_capacity(num_tokens + 2);
                 tokens.push(start_token_id);
-                tokens.extend(std::iter::repeat_n(pad_token_id, pad_len));
+                tokens.extend(std::iter::repeat_n(pad_token_id, num_tokens));
                 tokens.push(end_token_id);
                 PromptReplacement::sequence(Modality::Image, &placeholder_token, tokens)
             })
@@ -341,15 +330,6 @@ impl QwenVLVisionSpec {
             .ok_or_else(|| ModelRegistryError::MissingConfigField {
                 field: "vision_start_token_id".to_string(),
             })
-    }
-
-    fn patch_grid(metadata: &ModelMetadata, size: ImageSize) -> (usize, usize) {
-        let patch = metadata
-            .config_u32(&["vision_config", "patch_size"])
-            .unwrap_or(14);
-        let cols = size.width.div_ceil(patch) as usize;
-        let rows = size.height.div_ceil(patch) as usize;
-        (rows, cols)
     }
 }
 
@@ -392,15 +372,13 @@ impl ModelProcessorSpec for QwenVLVisionSpec {
         let start_token_id = Self::start_token_id(metadata)?;
         let pad_token_id = Self::pad_token_id(metadata)?;
         let placeholder_token = self.placeholder_token(metadata)?;
-        let image_sizes = image_sizes_hw(preprocessed);
-        Ok(image_sizes
+        Ok(preprocessed
+            .num_img_tokens
             .iter()
-            .map(|size| {
-                let (rows, cols) = Self::patch_grid(metadata, *size);
-                let pad_len = rows * cols;
-                let mut tokens = Vec::with_capacity(pad_len + 1);
+            .map(|&num_tokens| {
+                let mut tokens = Vec::with_capacity(num_tokens + 1);
                 tokens.push(start_token_id);
-                tokens.extend(std::iter::repeat_n(pad_token_id, pad_len));
+                tokens.extend(std::iter::repeat_n(pad_token_id, num_tokens));
                 PromptReplacement::sequence(Modality::Image, &placeholder_token, tokens)
             })
             .collect())
@@ -731,10 +709,17 @@ mod tests {
 
     /// Build a minimal `PreprocessedImages` for testing prompt_replacements.
     fn test_preprocessed(image_sizes: &[ImageSize]) -> PreprocessedImages {
+        test_preprocessed_with_tokens(image_sizes, &vec![0; image_sizes.len()])
+    }
+
+    fn test_preprocessed_with_tokens(
+        image_sizes: &[ImageSize],
+        num_img_tokens: &[usize],
+    ) -> PreprocessedImages {
         let sizes: Vec<(u32, u32)> = image_sizes.iter().map(|s| (s.height, s.width)).collect();
         PreprocessedImages {
             pixel_values: ndarray::ArrayD::zeros(vec![1, 3, 336, 336]),
-            num_img_tokens: vec![0; sizes.len()],
+            num_img_tokens: num_img_tokens.to_vec(),
             image_sizes: sizes,
             model_specific: std::collections::HashMap::new(),
         }
@@ -806,11 +791,15 @@ mod tests {
         };
         let registry = ModelRegistry::new();
         let spec = registry.lookup(&metadata).expect("qwen spec");
+        // 448/14 = 32 grid, merge_size=2 => (32*32)/4 = 256 tokens
         let replacements = spec
-            .prompt_replacements(&metadata, &test_preprocessed(&[ImageSize::new(448, 448)]))
+            .prompt_replacements(
+                &metadata,
+                &test_preprocessed_with_tokens(&[ImageSize::new(448, 448)], &[256]),
+            )
             .unwrap();
-        // 448/14 = 32 patches => 1024 pad tokens + 1 start token
-        assert_eq!(replacements[0].tokens.len(), 1025);
+        // 256 pad tokens + 1 start token = 257
+        assert_eq!(replacements[0].tokens.len(), 257);
         assert_eq!(replacements[0].tokens[0], 151652);
         assert_eq!(replacements[0].tokens[1], 151654);
     }
@@ -833,11 +822,15 @@ mod tests {
         let registry = ModelRegistry::new();
         let spec = registry.lookup(&metadata).expect("qwen3 spec");
         assert_eq!(spec.name(), "qwen3_vl");
+        // 448/16 = 28 grid, merge_size=2 => (28*28)/4 = 196 tokens
         let replacements = spec
-            .prompt_replacements(&metadata, &test_preprocessed(&[ImageSize::new(448, 448)]))
+            .prompt_replacements(
+                &metadata,
+                &test_preprocessed_with_tokens(&[ImageSize::new(448, 448)], &[196]),
+            )
             .unwrap();
-        // 448/16 = 28 patches => 784 pad tokens + 1 start + 1 end = 786
-        assert_eq!(replacements[0].tokens.len(), 786);
+        // 196 pad tokens + 1 start + 1 end = 198
+        assert_eq!(replacements[0].tokens.len(), 198);
         assert_eq!(replacements[0].tokens[0], 151652); // start
         assert_eq!(replacements[0].tokens[1], 151655); // pad (image_token_id)
         assert_eq!(*replacements[0].tokens.last().unwrap(), 151653); // end
