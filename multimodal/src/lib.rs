@@ -12,8 +12,7 @@ pub use registry::{ModelMetadata, ModelProcessorSpec, ModelRegistry};
 pub use tracker::{AsyncMultiModalTracker, TrackerOutput};
 pub use types::{
     ChatContentPart, FieldLayout, ImageDetail, ImageFrame, ImageSize, ImageSource, Modality,
-    MultiModalData, MultiModalInputs, MultiModalTensor, MultiModalUUIDs, MultiModalValue,
-    PlaceholderRange, PromptReplacement, TokenId, TrackedMedia,
+    MultiModalData, MultiModalUUIDs, PlaceholderRange, PromptReplacement, TokenId, TrackedMedia,
 };
 // Re-export vision processing components
 pub use vision::{

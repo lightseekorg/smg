@@ -1,9 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    fmt,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc};
 
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
@@ -180,42 +175,6 @@ pub struct PlaceholderRange {
     pub length: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MultiModalTensor {
-    pub shape: Vec<usize>,
-    pub dtype: String,
-    pub data: bytes::Bytes,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum MultiModalValue {
-    Tensor(MultiModalTensor),
-    Json(Value),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct MultiModalInputs {
-    pub prompt_token_ids: Vec<u32>,
-    #[serde(default)]
-    pub mm_kwargs: BTreeMap<String, Vec<MultiModalValue>>,
-    #[serde(default)]
-    pub mm_hashes: BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    pub mm_placeholders: BTreeMap<String, Vec<PlaceholderRange>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_salt: Option<String>,
-}
-
-impl MultiModalInputs {
-    pub fn new(prompt_token_ids: Vec<u32>) -> Self {
-        Self {
-            prompt_token_ids,
-            ..Default::default()
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct PromptReplacement {
     pub modality: Modality,
@@ -249,13 +208,6 @@ impl PromptReplacement {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn multimodal_inputs_defaults() {
-        let inputs = MultiModalInputs::new(vec![1, 2, 3]);
-        assert_eq!(inputs.prompt_token_ids, vec![1, 2, 3]);
-        assert!(inputs.mm_kwargs.is_empty());
-    }
 
     #[test]
     fn placeholder_range_serializes() {

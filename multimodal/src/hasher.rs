@@ -7,7 +7,7 @@ pub fn hash_image(raw_bytes: &[u8]) -> String {
 
 /// Compute per-image hashes keyed by modality.
 ///
-/// Returns a `BTreeMap` compatible with `MultiModalInputs.mm_hashes`,
+/// Returns a `BTreeMap` of per-modality hash lists,
 /// e.g. `{"image": ["abc123...", "def456..."]}`.
 pub fn hash_images(raw_bytes: &[impl AsRef<[u8]>]) -> BTreeMap<String, Vec<String>> {
     let hashes: Vec<String> = raw_bytes.iter().map(|b| hash_image(b.as_ref())).collect();
