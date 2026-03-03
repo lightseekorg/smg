@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 class TestChatCompletion:
     """Tests for OpenAI-compatible chat completions API."""
 
+    # Whether the backend trims stop sequences from output.
+    # Harmony (gpt-oss) does not trim because its detokenization is not channel-aware.
+    STOP_SEQUENCE_TRIMMED = True
+
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
     def test_chat_completion(self, setup_backend, smg, logprobs, parallel_sample_num):
@@ -351,7 +355,12 @@ convenient hands-free control to your smart devices.
         assert response.choices[0].finish_reason == "stop"
         msg = response.choices[0].message
         content = msg.content or getattr(msg, "reasoning_content", "") or ""
-        assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
+        if self.STOP_SEQUENCE_TRIMMED:
+            assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
+        else:
+            assert content.endswith(","), (
+                f"Stop sequence ',' should be the suffix of output: {content}"
+            )
 
         # SmgClient comparison
         with smg_compare():
@@ -370,9 +379,14 @@ convenient hands-free control to your smart devices.
             assert smg_resp.choices[0].finish_reason == "stop"
             smg_msg = smg_resp.choices[0].message
             smg_content = smg_msg.content or getattr(smg_msg, "reasoning_content", "") or ""
-            assert "," not in smg_content, (
-                f"SmgClient: stop sequence ',' should not appear: {smg_content}"
-            )
+            if self.STOP_SEQUENCE_TRIMMED:
+                assert "," not in smg_content, (
+                    f"SmgClient: stop sequence ',' should not appear: {smg_content}"
+                )
+            else:
+                assert smg_content.endswith(","), (
+                    f"SmgClient: stop sequence ',' should be the suffix: {smg_content}"
+                )
 
     def test_stop_sequences_stream(self, setup_backend, smg):
         """Test that stop sequences work in streaming mode."""
@@ -406,7 +420,12 @@ convenient hands-free control to your smart devices.
             for c in chunks
             if c.choices and self._delta_text(c.choices[0].delta)
         )
-        assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
+        if self.STOP_SEQUENCE_TRIMMED:
+            assert "," not in content, f"Stop sequence ',' should not appear in output: {content}"
+        else:
+            assert content.endswith(","), (
+                f"Stop sequence ',' should be the suffix of output: {content}"
+            )
 
         # SmgClient streaming comparison
         with smg_compare():
@@ -435,7 +454,10 @@ convenient hands-free control to your smart devices.
                 for c in smg_chunks
                 if c.choices and self._delta_text(c.choices[0].delta)
             )
-            assert "," not in smg_text
+            if self.STOP_SEQUENCE_TRIMMED:
+                assert "," not in smg_text
+            else:
+                assert smg_text.endswith(",")
 
     # -------------------------------------------------------------------------
     # Helper methods
@@ -570,6 +592,9 @@ class TestChatCompletionGptOss(TestChatCompletion):
 
     # Harmony channel markers add ~10 special tokens
     STREAMING_TOKEN_TOLERANCE = 10
+
+    # Harmony doesn't trim stop sequences (detokenization is not channel-aware)
+    STOP_SEQUENCE_TRIMMED = False
 
     @pytest.mark.parametrize("logprobs", [None, 5])
     @pytest.mark.parametrize("parallel_sample_num", [1, 2])
