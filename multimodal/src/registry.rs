@@ -308,9 +308,16 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
     }
 
     fn field_layouts(&self) -> HashMap<String, FieldLayout> {
+        // pixel_values is patchified: [total_patches, patch_features].
+        // patches_per_image tells how many patches belong to each image.
+        // image_grid_thw is [num_images, 3].
         HashMap::from([
-            ("pixel_values".to_string(), FieldLayout::Batched),
+            (
+                "pixel_values".to_string(),
+                FieldLayout::flat("patches_per_image"),
+            ),
             ("image_grid_thw".to_string(), FieldLayout::Batched),
+            ("patches_per_image".to_string(), FieldLayout::Batched),
         ])
     }
 }
@@ -400,11 +407,16 @@ impl ModelProcessorSpec for QwenVLVisionSpec {
     }
 
     fn field_layouts(&self) -> HashMap<String, FieldLayout> {
-        // Our Rust preprocessor stacks images → pixel_values is [num_images, C, H, W].
+        // pixel_values is patchified: [total_patches, patch_features].
+        // patches_per_image tells how many patches belong to each image.
         // image_grid_thw is [num_images, 3].
         HashMap::from([
-            ("pixel_values".to_string(), FieldLayout::Batched),
+            (
+                "pixel_values".to_string(),
+                FieldLayout::flat("patches_per_image"),
+            ),
             ("image_grid_thw".to_string(), FieldLayout::Batched),
+            ("patches_per_image".to_string(), FieldLayout::Batched),
         ])
     }
 }

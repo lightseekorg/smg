@@ -351,7 +351,9 @@ mod tests {
         let image = create_test_image(640, 480, Rgb([128, 128, 128]));
         let result = processor.preprocess(&[image], &config).unwrap();
 
-        assert_eq!(result.batch_size(), 1);
+        // pixel_values is patchified: [total_patches, patch_features]
+        assert_eq!(result.pixel_values.ndim(), 2);
+        assert!(result.pixel_values.shape()[0] > 0); // total_patches > 0
 
         // Check pixel values are normalized
         let flat = result.pixel_values_flat();
@@ -360,8 +362,9 @@ mod tests {
         // Values should be in [-1, 1] range
         assert!(flat.iter().all(|&v| (-1.5..=1.5).contains(&v)));
 
-        // Check image_grid_thw is present
+        // Check image_grid_thw and patches_per_image are present
         assert!(result.model_specific.contains_key("image_grid_thw"));
+        assert!(result.model_specific.contains_key("patches_per_image"));
 
         // Verify token count is reasonable
         assert!(result.num_img_tokens[0] > 0);
@@ -387,6 +390,9 @@ mod tests {
         assert_eq!(result.image_sizes.len(), 2);
         assert_eq!(result.num_img_tokens.len(), 2);
 
+        // pixel_values is 2D [total_patches, patch_features]
+        assert_eq!(result.pixel_values.ndim(), 2);
+
         // Check grid_thw shape
         if let Some(ModelSpecificValue::IntTensor { data, shape }) =
             result.model_specific.get("image_grid_thw")
@@ -395,6 +401,19 @@ mod tests {
             assert_eq!(data.len(), 6);
         } else {
             panic!("Expected image_grid_thw to be IntTensor");
+        }
+
+        // Check patches_per_image
+        if let Some(ModelSpecificValue::IntTensor { data, shape }) =
+            result.model_specific.get("patches_per_image")
+        {
+            assert_eq!(shape, &[2]); // 2 images
+            assert_eq!(data.len(), 2);
+            // Total patches should match pixel_values first dim
+            let total: i64 = data.iter().sum();
+            assert_eq!(total as usize, result.pixel_values.shape()[0]);
+        } else {
+            panic!("Expected patches_per_image to be IntTensor");
         }
     }
 

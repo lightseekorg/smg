@@ -18,10 +18,6 @@
     clippy::expect_used,
     reason = "integration test helpers: panic on failure is intentional"
 )]
-#![expect(
-    clippy::unwrap_used,
-    reason = "integration test helpers: panic on failure is intentional"
-)]
 #![expect(clippy::print_stdout, reason = "integration tests: diagnostic output")]
 #![expect(
     clippy::print_stderr,
@@ -383,42 +379,17 @@ fn run_qwen2_vl_golden_test(image_name: &str) {
         "num_tokens mismatch for {image_name}"
     );
 
-    // Compare pixel values by reshaping our output to patch format
-    let grid_t = rust_grid_thw[0] as usize;
-    let grid_h = rust_grid_thw[1] as usize;
-    let grid_w = rust_grid_thw[2] as usize;
-
-    // Get the tensor for the first image (batch index 0)
-    let pixel_values = &result.pixel_values;
-    let tensor_3d_dyn = pixel_values.index_axis(ndarray::Axis(0), 0).to_owned();
-    let tensor_3d = tensor_3d_dyn
-        .into_dimensionality::<ndarray::Ix3>()
-        .expect("Expected 3D tensor for Qwen2-VL");
-
-    // Reshape to patches format
-    let rust_patches = processor
-        .reshape_to_patches(&tensor_3d, grid_t, grid_h, grid_w)
-        .unwrap();
-
-    // Verify shapes match
-    let expected_num_patches = grid_t * grid_h * grid_w;
-    let patch_size = config.get_patch_size(14);
-    let temporal_patch_size = config.temporal_patch_size.unwrap_or(2);
-    let expected_patch_features = 3 * temporal_patch_size * patch_size * patch_size;
+    // pixel_values is now already patchified: [total_patches, patch_features]
+    let rust_patches = result.pixel_values_flat();
+    let rust_shape = (
+        result.pixel_values.shape()[0],
+        result.pixel_values.shape()[1],
+    );
 
     println!(
-        "qwen2_vl - {image_name} image - Patch shape: golden={golden_shape:?}, rust=({expected_num_patches}, {expected_patch_features})"
+        "qwen2_vl - {image_name} image - Patch shape: golden={golden_shape:?}, rust={rust_shape:?}"
     );
-    assert_eq!(
-        golden_shape,
-        (expected_num_patches, expected_patch_features),
-        "Patch shape mismatch"
-    );
-    assert_eq!(
-        rust_patches.len(),
-        expected_num_patches * expected_patch_features,
-        "Rust patches size mismatch"
-    );
+    assert_eq!(golden_shape, rust_shape, "Patch shape mismatch");
 
     // Compare pixel values
     let max_diff = rust_patches
@@ -557,42 +528,17 @@ fn run_qwen3_vl_golden_test(image_name: &str) {
         "num_tokens mismatch for {image_name}"
     );
 
-    // Compare pixel values by reshaping our output to patch format
-    let grid_t = rust_grid_thw[0] as usize;
-    let grid_h = rust_grid_thw[1] as usize;
-    let grid_w = rust_grid_thw[2] as usize;
-
-    // Get the tensor for the first image (batch index 0)
-    let pixel_values = &result.pixel_values;
-    let tensor_3d_dyn = pixel_values.index_axis(ndarray::Axis(0), 0).to_owned();
-    let tensor_3d = tensor_3d_dyn
-        .into_dimensionality::<ndarray::Ix3>()
-        .expect("Expected 3D tensor for Qwen3-VL");
-
-    // Reshape to patches format
-    let rust_patches = processor
-        .reshape_to_patches(&tensor_3d, grid_t, grid_h, grid_w)
-        .unwrap();
-
-    // Verify shapes match (Qwen3-VL has patch_size=16)
-    let expected_num_patches = grid_t * grid_h * grid_w;
-    let patch_size = config.get_patch_size(16);
-    let temporal_patch_size = config.temporal_patch_size.unwrap_or(2);
-    let expected_patch_features = 3 * temporal_patch_size * patch_size * patch_size;
+    // pixel_values is now already patchified: [total_patches, patch_features]
+    let rust_patches = result.pixel_values_flat();
+    let rust_shape = (
+        result.pixel_values.shape()[0],
+        result.pixel_values.shape()[1],
+    );
 
     println!(
-        "qwen3_vl - {image_name} image - Patch shape: golden={golden_shape:?}, rust=({expected_num_patches}, {expected_patch_features})"
+        "qwen3_vl - {image_name} image - Patch shape: golden={golden_shape:?}, rust={rust_shape:?}"
     );
-    assert_eq!(
-        golden_shape,
-        (expected_num_patches, expected_patch_features),
-        "Patch shape mismatch"
-    );
-    assert_eq!(
-        rust_patches.len(),
-        expected_num_patches * expected_patch_features,
-        "Rust patches size mismatch"
-    );
+    assert_eq!(golden_shape, rust_shape, "Patch shape mismatch");
 
     // Compare pixel values
     let max_diff = rust_patches
