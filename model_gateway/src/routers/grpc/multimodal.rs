@@ -452,7 +452,7 @@ pub(crate) fn assemble_multimodal_data(
 
 fn assemble_sglang(intermediate: MultimodalIntermediate) -> SglangMultimodalData {
     let (pixel_values, pixel_values_shape) = serialize_pixel_values(&intermediate.preprocessed);
-    let model_specific_tensors = serialize_model_specific(&intermediate.preprocessed);
+    let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
     let image_data = intermediate
         .images
         .iter()
@@ -482,7 +482,7 @@ fn assemble_sglang(intermediate: MultimodalIntermediate) -> SglangMultimodalData
 
 fn assemble_vllm(intermediate: MultimodalIntermediate) -> VllmMultimodalData {
     let (pixel_values, pixel_values_shape) = serialize_pixel_values(&intermediate.preprocessed);
-    let model_specific_tensors = serialize_model_specific(&intermediate.preprocessed);
+    let model_specific_tensors = serialize_model_specific(intermediate.preprocessed.model_specific);
     let mm_hashes = intermediate.images.iter().map(|f| f.hash.clone()).collect();
     let mm_placeholders = intermediate
         .placeholders
@@ -542,13 +542,14 @@ fn serialize_pixel_values(preprocessed: &PreprocessedImages) -> (Vec<u8>, Vec<u3
     (pixel_bytes, pixel_shape)
 }
 
-/// Serialize model-specific values to TensorBytes.
-fn serialize_model_specific(preprocessed: &PreprocessedImages) -> HashMap<String, TensorBytes> {
-    preprocessed
-        .model_specific
-        .iter()
+/// Serialize model-specific values to TensorBytes, consuming the map to avoid key clones.
+fn serialize_model_specific(
+    model_specific: HashMap<String, ModelSpecificValue>,
+) -> HashMap<String, TensorBytes> {
+    model_specific
+        .into_iter()
         .filter_map(|(key, value)| {
-            model_specific_to_tensor_bytes(value).map(|tensor| (key.clone(), tensor))
+            model_specific_to_tensor_bytes(&value).map(|tensor| (key, tensor))
         })
         .collect()
 }
