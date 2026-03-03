@@ -437,7 +437,7 @@ fn build_populated_indexer(
     shared_prefix_blocks: usize,
     jump_size: usize,
 ) -> (Arc<PositionalIndexer>, Vec<Vec<Vec<TokenId>>>) {
-    let indexer = Arc::new(PositionalIndexer::new(jump_size, 2048));
+    let indexer = Arc::new(PositionalIndexer::new(jump_size));
 
     let shared_chunks = generate_token_chunks(shared_prefix_blocks, block_size);
     let shared_blocks = chunks_to_stored_blocks(&shared_chunks);
@@ -494,7 +494,7 @@ macro_rules! bench_indexer_store {
             b.iter_custom(|iters| {
                 let start = Instant::now();
                 for _ in 0..iters {
-                    let indexer = PositionalIndexer::new(64, 2048);
+                    let indexer = PositionalIndexer::new(64);
                     for worker in &workers {
                         let chunks = generate_token_chunks($blocks_per_worker, $block_size);
                         let blocks = chunks_to_stored_blocks(&chunks);
