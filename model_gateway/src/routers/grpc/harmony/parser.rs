@@ -283,7 +283,6 @@ impl HarmonyParserAdapter {
     ///
     /// * `output_ids` - The complete output token IDs from the model
     /// * `finish_reason` - The finish reason from GenerateComplete ("stop", "length", etc.)
-    /// * `matched_stop` - Optional matched stop token information from GenerateComplete
     /// * `stop_sequences` - Stop sequences from the request (for self-detecting suffix to strip)
     ///
     /// # Returns
@@ -293,7 +292,6 @@ impl HarmonyParserAdapter {
         &mut self,
         output_ids: &[u32],
         finish_reason: String,
-        matched_stop: Option<serde_json::Value>,
         stop_sequences: &[String],
         no_stop_trim: bool,
     ) -> Result<HarmonyChannelOutput, String> {
@@ -339,7 +337,6 @@ impl HarmonyParserAdapter {
             commentary,
             final_text,
             finish_reason: final_finish_reason,
-            matched_stop,
             reasoning_token_count,
         })
     }
@@ -544,15 +541,12 @@ impl HarmonyParserAdapter {
     /// # Arguments
     ///
     /// * `finish_reason` - The finish reason from GenerateComplete ("stop", "length", etc.)
-    /// * `matched_stop` - Optional matched stop token information from GenerateComplete
-    ///
     /// # Returns
     ///
     /// Final HarmonyChannelOutput with complete parsed content
     pub fn finalize(
         &mut self,
         finish_reason: String,
-        matched_stop: Option<serde_json::Value>,
         stop_sequences: &[String],
         no_stop_trim: bool,
     ) -> HarmonyChannelOutput {
@@ -582,7 +576,6 @@ impl HarmonyParserAdapter {
             commentary,
             final_text,
             finish_reason: final_finish_reason,
-            matched_stop,
             reasoning_token_count: self.reasoning_token_count,
         }
     }

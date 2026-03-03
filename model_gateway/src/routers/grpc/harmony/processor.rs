@@ -80,12 +80,11 @@ impl HarmonyResponseProcessor {
                 .map(|s| s.to_vec())
                 .unwrap_or_default();
 
-            // Parse Harmony channels with finish_reason and matched_stop
+            // Parse Harmony channels
             let parsed = parser
                 .parse_complete(
                     complete.output_ids(),
                     complete.finish_reason().to_string(),
-                    matched_stop.clone(),
                     &stop_sequences,
                     chat_request.no_stop_trim,
                 )
@@ -227,13 +226,10 @@ impl HarmonyResponseProcessor {
             )
         })?;
 
-        let matched_stop = complete.matched_stop_json();
-
         let parsed = parser
             .parse_complete(
                 complete.output_ids(),
                 complete.finish_reason().to_string(),
-                matched_stop,
                 &[],   // Responses API: no user-specified stop sequences
                 false, // Responses API: always trim stop sequences
             )
