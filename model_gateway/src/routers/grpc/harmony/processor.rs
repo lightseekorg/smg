@@ -74,7 +74,7 @@ impl HarmonyResponseProcessor {
                 )
             })?;
 
-            // Parse Harmony channels
+            // Parse Harmony channels with finish_reason
             let parsed = parser
                 .parse_complete(complete.output_ids(), complete.finish_reason().to_string())
                 .map_err(|e| {

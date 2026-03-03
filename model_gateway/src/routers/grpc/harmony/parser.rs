@@ -373,19 +373,17 @@ impl HarmonyParserAdapter {
                 let channel = self.parser.current_channel();
                 match channel.as_deref() {
                     Some("analysis") => {
-                        analysis_delta = Some(match analysis_delta {
-                            Some(existing) => existing + &delta_text,
-                            None => delta_text,
-                        });
+                        analysis_delta
+                            .get_or_insert_with(String::new)
+                            .push_str(&delta_text);
                     }
                     Some("final") | None => {
-                        final_delta = Some(match final_delta {
-                            Some(existing) => existing + &delta_text,
-                            None => delta_text,
-                        });
+                        final_delta
+                            .get_or_insert_with(String::new)
+                            .push_str(&delta_text);
                     }
                     Some("commentary") => {
-                        // Accumulate delta for commentary (tool calls are never stop-stripped)
+                        // Accumulate delta for commentary
                         accumulated_delta.push_str(&delta_text);
                     }
                     _ => {}
