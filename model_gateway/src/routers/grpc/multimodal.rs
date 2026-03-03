@@ -142,6 +142,8 @@ pub(crate) struct MultimodalIntermediate {
     pub im_token_id: Option<u32>,
     /// Per-tensor field layout classification from the model spec.
     pub field_layouts: HashMap<String, FieldLayout>,
+    /// Tensor keys that should remain on CPU (vLLM `keep_on_cpu` hint).
+    pub keep_on_cpu_keys: Vec<String>,
 }
 
 /// Check if any messages in the request contain multimodal content (images).
@@ -333,6 +335,7 @@ pub(crate) async fn process_multimodal(
         patch_offsets: expanded.patch_offsets,
         im_token_id,
         field_layouts: spec.field_layouts(),
+        keep_on_cpu_keys: spec.keep_on_cpu_keys(),
     };
 
     Ok(MultimodalOutput {
@@ -501,6 +504,7 @@ fn assemble_vllm(intermediate: MultimodalIntermediate) -> VllmMultimodalData {
         mm_hashes,
         batched_keys,
         flat_keys,
+        keep_on_cpu_keys: intermediate.keep_on_cpu_keys,
     }
 }
 

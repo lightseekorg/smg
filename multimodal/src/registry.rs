@@ -77,6 +77,16 @@ pub trait ModelProcessorSpec: Send + Sync {
         // Default: pixel_values is batched (most models).
         HashMap::from([("pixel_values".to_string(), FieldLayout::Batched)])
     }
+
+    /// Tensor keys that should remain on CPU (not transferred to GPU).
+    ///
+    /// In vLLM, certain model-specific tensors are marked `keep_on_cpu=True`
+    /// in their `MultiModalFieldConfig`.  This method mirrors that per-model
+    /// knowledge so the router can send the hint via gRPC, avoiding the need
+    /// for the backend to instantiate a Python processor just to query it.
+    fn keep_on_cpu_keys(&self) -> Vec<String> {
+        vec![]
+    }
 }
 
 pub struct ModelRegistry {
@@ -309,6 +319,10 @@ impl ModelProcessorSpec for Qwen3VLVisionSpec {
             ("patches_per_image".to_string(), FieldLayout::Batched),
         ])
     }
+
+    fn keep_on_cpu_keys(&self) -> Vec<String> {
+        vec!["image_grid_thw".to_string()]
+    }
 }
 
 struct QwenVLVisionSpec;
@@ -396,6 +410,10 @@ impl ModelProcessorSpec for QwenVLVisionSpec {
             ("image_grid_thw".to_string(), FieldLayout::Batched),
             ("patches_per_image".to_string(), FieldLayout::Batched),
         ])
+    }
+
+    fn keep_on_cpu_keys(&self) -> Vec<String> {
+        vec!["image_grid_thw".to_string()]
     }
 }
 

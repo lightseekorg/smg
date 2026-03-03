@@ -133,6 +133,10 @@ message MultimodalInputs {
   // e.g. {"pixel_values": "patches_per_image"} means pixel_values should be
   // split per-item using sizes from the patches_per_image tensor.
   map<string, string> flat_keys = 8;
+
+  // Tensor keys that should remain on CPU (not transferred to GPU).
+  // Maps to vLLM's MultiModalFieldConfig keep_on_cpu flag.
+  repeated string keep_on_cpu_keys = 9;
 }
 
 // =====================

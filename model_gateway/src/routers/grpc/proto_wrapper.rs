@@ -56,6 +56,8 @@ pub struct VllmMultimodalData {
     pub mm_hashes: Vec<String>,
     pub batched_keys: Vec<String>,
     pub flat_keys: HashMap<String, String>,
+    /// Tensor keys that should remain on CPU (`keep_on_cpu=True` in vLLM).
+    pub keep_on_cpu_keys: Vec<String>,
 }
 
 /// TRT-LLM multimodal data: raw image bytes only.
@@ -152,6 +154,7 @@ impl VllmMultimodalData {
             mm_hashes: self.mm_hashes,
             batched_keys: self.batched_keys,
             flat_keys: self.flat_keys,
+            keep_on_cpu_keys: self.keep_on_cpu_keys,
         }
     }
 }
