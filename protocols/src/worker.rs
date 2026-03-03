@@ -197,6 +197,39 @@ impl ProviderType {
         }
     }
 
+    /// Detect provider from URL domain patterns.
+    /// Returns `None` for URLs that don't match known providers.
+    pub fn from_url(url: &str) -> Option<Self> {
+        if url.contains("openai.com") {
+            Some(Self::OpenAI)
+        } else if url.contains("x.ai") {
+            Some(Self::XAI)
+        } else if url.contains("anthropic") {
+            Some(Self::Anthropic)
+        } else if url.contains("googleapis.com") {
+            Some(Self::Gemini)
+        } else {
+            None
+        }
+    }
+
+    /// Environment variable name for per-provider admin API key (model discovery).
+    /// Returns `None` for `Custom` providers since there's no known env var.
+    pub fn admin_key_env_var(&self) -> Option<&'static str> {
+        match self {
+            Self::OpenAI => Some("OPENAI_ADMIN_KEY"),
+            Self::XAI => Some("XAI_ADMIN_KEY"),
+            Self::Anthropic => Some("ANTHROPIC_ADMIN_KEY"),
+            Self::Gemini => Some("GEMINI_ADMIN_KEY"),
+            Self::Custom(_) => None,
+        }
+    }
+
+    /// Whether this provider uses `x-api-key` header instead of `Authorization: Bearer`.
+    pub fn uses_x_api_key(&self) -> bool {
+        matches!(self, Self::Anthropic)
+    }
+
     /// Detect provider from model name (heuristic fallback).
     /// Returns `None` for models that don't match known external providers.
     pub fn from_model_name(model: &str) -> Option<Self> {
