@@ -88,12 +88,12 @@ impl StopSequenceBuffer {
         )
     }
 
-    /// Flush both buffers at stream end, stripping the matched stop sequence.
+    /// Flush both buffers at stream end, stripping any trailing stop sequence.
     ///
     /// Returns `(remaining_analysis, remaining_final)`.
-    fn flush(&mut self, matched_stop: Option<&str>) -> (Option<String>, Option<String>) {
-        let analysis = Self::flush_one(&mut self.analysis_buffer, matched_stop);
-        let final_text = Self::flush_one(&mut self.final_buffer, matched_stop);
+    fn flush(&mut self) -> (Option<String>, Option<String>) {
+        let analysis = Self::flush_one(&mut self.analysis_buffer, &self.stop_sequences);
+        let final_text = Self::flush_one(&mut self.final_buffer, &self.stop_sequences);
         (analysis, final_text)
     }
 
@@ -137,13 +137,14 @@ impl StopSequenceBuffer {
         None
     }
 
-    fn flush_one(buf: &mut String, matched_stop: Option<&str>) -> Option<String> {
+    fn flush_one(buf: &mut String, stop_sequences: &[String]) -> Option<String> {
         if buf.is_empty() {
             return None;
         }
-        if let Some(stop) = matched_stop {
-            if buf.ends_with(stop) {
-                buf.truncate(buf.len() - stop.len());
+        for seq in stop_sequences {
+            if buf.ends_with(seq.as_str()) {
+                buf.truncate(buf.len() - seq.len());
+                break;
             }
         }
         if buf.is_empty() {
@@ -426,11 +427,9 @@ impl HarmonyStreamingProcessor {
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
 
-                        // Flush any remaining buffered text (strip the stop sequence suffix)
-                        let matched_stop_str = matched_stop.as_ref().and_then(|v| v.as_str());
-
+                        // Flush any remaining buffered text (strip trailing stop sequence)
                         if let Some(buf) = stop_buffers.get_mut(&index) {
-                            let (remaining_analysis, remaining_final) = buf.flush(matched_stop_str);
+                            let (remaining_analysis, remaining_final) = buf.flush();
 
                             // Emit remaining buffered text as content deltas before the finish chunk
                             if remaining_analysis.is_some() || remaining_final.is_some() {
@@ -459,6 +458,7 @@ impl HarmonyStreamingProcessor {
                         let final_output = parser.finalize(
                             complete_wrapper.finish_reason().to_string(),
                             matched_stop,
+                            &stop_sequences,
                             no_stop_trim,
                         );
 
@@ -969,9 +969,9 @@ impl HarmonyStreamingProcessor {
                     }
 
                     // Finalize parser and get complete output
-                    // Responses API: always trim stop sequences
+                    // Responses API: no user-specified stop sequences
                     let final_output =
-                        parser.finalize(finish_reason.clone(), matched_stop.clone(), false);
+                        parser.finalize(finish_reason.clone(), matched_stop.clone(), &[], false);
 
                     // Store finalized tool calls and reasoning token count
                     accumulated_tool_calls.clone_from(&final_output.commentary);
@@ -1189,7 +1189,7 @@ impl HarmonyStreamingProcessor {
                 let analysis_content = if has_analysis {
                     // Get analysis from finalized parser output by calling finalize again
                     // This is safe because finalize can be called multiple times
-                    let output = parser.finalize(finish_reason, matched_stop, false);
+                    let output = parser.finalize(finish_reason, matched_stop, &[], false);
                     output.analysis
                 } else {
                     None

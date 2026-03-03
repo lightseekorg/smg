@@ -98,24 +98,25 @@ impl HarmonyParserAdapter {
     /// Used by `parse_complete` and `finalize` (non-streaming path) where no
     /// jail buffering is needed – we simply remove the stop string from the end
     /// of whichever channel was active when the model stopped.
-    fn strip_matched_stop(
+    ///
+    /// Self-detects which stop sequence matched by checking buffer suffixes,
+    /// so we don't rely on the backend's `matched_stop` field.
+    fn strip_stop_sequence(
         parser: &StreamableParser,
-        matched_stop: Option<&serde_json::Value>,
+        stop_sequences: &[String],
         analysis: &mut Option<String>,
         final_text: &mut String,
     ) {
-        let stop_str = match matched_stop {
-            Some(serde_json::Value::String(s)) => s.as_str(),
-            _ => return,
-        };
-
-        if stop_str.is_empty() {
+        if stop_sequences.is_empty() {
             return;
         }
 
         let strip_suffix = |text: &mut String| {
-            if text.ends_with(stop_str) {
-                text.truncate(text.len() - stop_str.len());
+            for seq in stop_sequences {
+                if text.ends_with(seq.as_str()) {
+                    text.truncate(text.len() - seq.len());
+                    return;
+                }
             }
         };
 
@@ -283,6 +284,7 @@ impl HarmonyParserAdapter {
     /// * `output_ids` - The complete output token IDs from the model
     /// * `finish_reason` - The finish reason from GenerateComplete ("stop", "length", etc.)
     /// * `matched_stop` - Optional matched stop token information from GenerateComplete
+    /// * `stop_sequences` - Stop sequences from the request (for self-detecting suffix to strip)
     ///
     /// # Returns
     ///
@@ -292,6 +294,7 @@ impl HarmonyParserAdapter {
         output_ids: &[u32],
         finish_reason: String,
         matched_stop: Option<serde_json::Value>,
+        stop_sequences: &[String],
         no_stop_trim: bool,
     ) -> Result<HarmonyChannelOutput, String> {
         let mut reasoning_token_count = 0u32;
@@ -319,14 +322,9 @@ impl HarmonyParserAdapter {
         // Check for incomplete content in parser state
         Self::handle_incomplete_content(&self.parser, &mut analysis, &mut final_text);
 
-        // Strip matched stop sequence from the active channel (unless no_stop_trim)
+        // Strip stop sequence from the active channel (unless no_stop_trim)
         if !no_stop_trim {
-            Self::strip_matched_stop(
-                &self.parser,
-                matched_stop.as_ref(),
-                &mut analysis,
-                &mut final_text,
-            );
+            Self::strip_stop_sequence(&self.parser, stop_sequences, &mut analysis, &mut final_text);
         }
 
         // Determine finish reason: override to "tool_calls" if commentary has tool calls
@@ -555,6 +553,7 @@ impl HarmonyParserAdapter {
         &mut self,
         finish_reason: String,
         matched_stop: Option<serde_json::Value>,
+        stop_sequences: &[String],
         no_stop_trim: bool,
     ) -> HarmonyChannelOutput {
         // Extract all completed messages
@@ -566,14 +565,9 @@ impl HarmonyParserAdapter {
         // Check for remaining incomplete content
         Self::handle_incomplete_content(&self.parser, &mut analysis, &mut final_text);
 
-        // Strip matched stop sequence from the active channel (unless no_stop_trim)
+        // Strip stop sequence from the active channel (unless no_stop_trim)
         if !no_stop_trim {
-            Self::strip_matched_stop(
-                &self.parser,
-                matched_stop.as_ref(),
-                &mut analysis,
-                &mut final_text,
-            );
+            Self::strip_stop_sequence(&self.parser, stop_sequences, &mut analysis, &mut final_text);
         }
 
         // Determine finish reason: override to "tool_calls" if commentary has tool calls
