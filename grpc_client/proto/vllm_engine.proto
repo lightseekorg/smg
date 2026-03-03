@@ -242,6 +242,12 @@ message GenerateComplete {
   // KV transfer parameters returned by prefill worker (Mooncake PD)
   // Contains prefill's side-channel address for decode to fetch KV cache
   KvTransferParams kv_transfer_params = 9;
+
+  // Matched stop information (for stop sequences)
+  oneof matched_stop {
+    uint32 matched_token_id = 10;
+    string matched_stop_str = 11;
+  }
 }
 
 // =====================

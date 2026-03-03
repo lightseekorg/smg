@@ -7,12 +7,12 @@ use std::collections::HashMap;
 
 use futures_util::StreamExt;
 use smg_grpc_client::{
-    sglang_proto::{self as sglang, generate_complete::MatchedStop},
+    sglang_proto::{self as sglang, generate_complete::MatchedStop as SglangMatchedStop},
     sglang_scheduler::AbortOnDropStream as SglangStream,
-    trtllm_proto as trtllm,
+    trtllm_proto::{self as trtllm, generate_complete::MatchedStop as TrtllmMatchedStop},
     trtllm_service::AbortOnDropStream as TrtllmStream,
     vllm_engine::AbortOnDropStream as VllmStream,
-    vllm_proto as vllm,
+    vllm_proto::{self as vllm, generate_complete::MatchedStop as VllmMatchedStop},
 };
 
 // =====================
@@ -743,28 +743,38 @@ impl ProtoGenerateComplete {
         }
     }
 
-    /// Get matched stop (SGLang only, returns oneof)
-    /// vLLM and TensorRT-LLM don't have matched_stop, returns None
-    pub fn matched_stop(&self) -> Option<&MatchedStop> {
-        match self {
-            Self::Sglang(c) => c.matched_stop.as_ref(),
-            Self::Vllm(_) | Self::Trtllm(_) => None,
-        }
-    }
-
     /// Get matched stop as a JSON value
     ///
-    /// Converts the proto MatchedStop oneof into a serde_json::Value:
+    /// Converts the backend-specific `oneof matched_stop` into a `serde_json::Value`:
     /// - MatchedTokenId → Number
     /// - MatchedStopStr → String
     /// - None → None
     pub fn matched_stop_json(&self) -> Option<serde_json::Value> {
-        self.matched_stop().map(|m| match m {
-            MatchedStop::MatchedTokenId(id) => {
-                serde_json::Value::Number(serde_json::Number::from(*id))
-            }
-            MatchedStop::MatchedStopStr(s) => serde_json::Value::String(s.clone()),
-        })
+        macro_rules! convert {
+            ($oneof:expr, $token_id:path, $stop_str:path) => {
+                $oneof.as_ref().map(|m| match m {
+                    $token_id(id) => serde_json::Value::Number((*id).into()),
+                    $stop_str(s) => serde_json::Value::String(s.clone()),
+                })
+            };
+        }
+        match self {
+            Self::Sglang(c) => convert!(
+                &c.matched_stop,
+                SglangMatchedStop::MatchedTokenId,
+                SglangMatchedStop::MatchedStopStr
+            ),
+            Self::Vllm(c) => convert!(
+                &c.matched_stop,
+                VllmMatchedStop::MatchedTokenId,
+                VllmMatchedStop::MatchedStopStr
+            ),
+            Self::Trtllm(c) => convert!(
+                &c.matched_stop,
+                TrtllmMatchedStop::MatchedTokenId,
+                TrtllmMatchedStop::MatchedStopStr
+            ),
+        }
     }
 
     /// Get output IDs (decode tokens only)

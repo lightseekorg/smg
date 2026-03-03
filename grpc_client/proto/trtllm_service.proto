@@ -386,8 +386,11 @@ message GenerateComplete {
   // Finish reason: "stop", "length", "stop_word"
   string finish_reason = 3;
 
-  // Specific stop reason (stop word/token that triggered stop)
-  optional string stop_reason = 4;
+  // Matched stop information (for stop sequences)
+  oneof matched_stop {
+    string matched_stop_str = 4;     // Stop string that matched (wire-compatible with old stop_reason)
+    uint32 matched_token_id = 13;    // Stop token ID that matched
+  }
 
   // Token counts for usage tracking
   uint32 prompt_tokens = 5;
