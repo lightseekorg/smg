@@ -595,12 +595,11 @@ impl Router {
                     reason: format!("Failed to read schema config file '{path}': {e}"),
                 }
             })?;
-            let schema: config::SchemaConfig =
-                serde_yaml::from_str(&content).map_err(|e| {
-                    config::ConfigError::ValidationFailed {
-                        reason: format!("Failed to parse schema config file '{path}': {e}"),
-                    }
-                })?;
+            let schema: config::SchemaConfig = serde_yaml::from_str(&content).map_err(|e| {
+                config::ConfigError::ValidationFailed {
+                    reason: format!("Failed to parse schema config file '{path}': {e}"),
+                }
+            })?;
             Some(schema)
         } else {
             None

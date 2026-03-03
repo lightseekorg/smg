@@ -799,11 +799,10 @@ impl CliArgs {
     fn load_schema_config(&self) -> ConfigResult<Option<SchemaConfig>> {
         match &self.schema_config {
             Some(path) => {
-                let content = std::fs::read_to_string(path).map_err(|e| {
-                    ConfigError::ValidationFailed {
+                let content =
+                    std::fs::read_to_string(path).map_err(|e| ConfigError::ValidationFailed {
                         reason: format!("Failed to read schema config file '{path}': {e}"),
-                    }
-                })?;
+                    })?;
                 let schema: SchemaConfig =
                     serde_yaml::from_str(&content).map_err(|e| ConfigError::ValidationFailed {
                         reason: format!("Failed to parse schema config file '{path}': {e}"),
