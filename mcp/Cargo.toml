@@ -24,7 +24,7 @@ backoff = { version = "0.4", features = ["tokio", "futures"] }
 dashmap.workspace = true
 lru.workspace = true
 parking_lot.workspace = true
-reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+reqwest = { workspace = true, features = ["rustls", "json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 serde_yaml = "0.9"
@@ -34,7 +34,6 @@ tracing.workspace = true
 url = "2.5"
 rmcp = { version = "0.17.0", features = ["client", "server",
     "transport-child-process",
-    "transport-sse-client-reqwest",
     "transport-streamable-http-client-reqwest",
     "transport-streamable-http-server",
     "transport-streamable-http-server-session",

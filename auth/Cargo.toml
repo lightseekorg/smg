@@ -22,7 +22,7 @@ chrono = { workspace = true, features = ["serde"] }
 http.workspace = true
 lru.workspace = true
 parking_lot.workspace = true
-reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+reqwest = { workspace = true, features = ["rustls", "json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 subtle.workspace = true

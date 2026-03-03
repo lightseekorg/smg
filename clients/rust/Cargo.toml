@@ -15,7 +15,7 @@ categories = ["api-bindings"]
 
 [features]
 default = ["rustls"]
-rustls = ["reqwest/rustls-tls"]
+rustls = ["reqwest/rustls"]
 native-tls = ["reqwest/native-tls"]
 
 [dependencies]

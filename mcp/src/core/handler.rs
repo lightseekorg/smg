@@ -10,7 +10,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use rmcp::{
     model::{
-        CancelledNotificationParam, ClientInfo, CreateElicitationRequestParam,
+        CancelledNotificationParam, ClientInfo, CreateElicitationRequestParams,
         CreateElicitationResult, LoggingLevel, LoggingMessageNotificationParam,
         ProgressNotificationParam, ResourceUpdatedNotificationParam,
     },
@@ -133,7 +133,7 @@ impl SmgClientHandler {
 impl ClientHandler for SmgClientHandler {
     async fn create_elicitation(
         &self,
-        request: CreateElicitationRequestParam,
+        request: CreateElicitationRequestParams,
         context: RequestContext<RoleClient>,
     ) -> Result<CreateElicitationResult, rmcp::ErrorData> {
         use crate::annotations::ToolAnnotations;
@@ -148,8 +148,11 @@ impl ClientHandler for SmgClientHandler {
             rmcp::ErrorData::internal_error("No request context set for elicitation", None)
         })?;
 
-        // Use message as the tool identifier (elicitation doesn't have tool name directly)
-        let message = &request.message;
+        // Extract the message from either variant
+        let message = match &request {
+            CreateElicitationRequestParams::FormElicitationParams { message, .. } => message,
+            CreateElicitationRequestParams::UrlElicitationParams { message, .. } => message,
+        };
 
         // Default annotations (conservative - not read-only, potentially destructive)
         let hints = ToolAnnotations::default();

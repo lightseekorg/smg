@@ -56,7 +56,7 @@ tracing-subscriber.workspace = true
 # Workspace dependencies (with extra features)
 axum = { workspace = true, features = ["macros", "ws", "tracing"] }
 bytemuck = { workspace = true, features = ["derive"] }
-reqwest = { workspace = true, features = ["stream", "blocking", "json", "rustls-tls"] }
+reqwest = { workspace = true, features = ["stream", "blocking", "json", "rustls"] }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true, features = ["serde"] }

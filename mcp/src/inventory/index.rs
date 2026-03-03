@@ -437,6 +437,8 @@ mod tests {
             output_schema: None,
             annotations: None,
             icons: None,
+            execution: None,
+            meta: None,
         }
     }
 
@@ -448,6 +450,7 @@ mod tests {
             description: Some(format!("Test prompt: {name}")),
             arguments: None,
             icons: None,
+            meta: None,
         }
     }
 
@@ -461,6 +464,7 @@ mod tests {
             mime_type: Some("text/plain".to_string()),
             size: None,
             icons: None,
+            meta: None,
         }
     }
 

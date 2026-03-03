@@ -39,7 +39,7 @@ use std::{
 use dashmap::DashMap;
 use openai_protocol::responses::ResponseOutputItem;
 use rmcp::{
-    model::{CallToolRequestParam, CallToolResult},
+    model::{CallToolRequestParams, CallToolResult},
     service::{RunningService, ServiceError},
     RoleClient,
 };
@@ -607,9 +607,8 @@ impl McpOrchestrator {
     ) -> McpResult<McpClientWithHandler> {
         use rmcp::{
             transport::{
-                sse_client::SseClientConfig,
                 streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
-                SseClientTransport, StreamableHttpClientTransport, TokioChildProcess,
+                StreamableHttpClientTransport, TokioChildProcess,
             },
             ServiceExt,
         };
@@ -644,19 +643,13 @@ impl McpOrchestrator {
                 let http_client =
                     build_http_client(proxy_config, token.as_deref(), custom_headers)?;
 
-                let sse_config = SseClientConfig {
-                    sse_endpoint: url.clone().into(),
-                    ..Default::default()
-                };
+                let cfg = StreamableHttpClientTransportConfig::with_uri(url.as_str());
 
-                let transport = SseClientTransport::start_with_client(http_client, sse_config)
-                    .await
-                    .map_err(|e| McpError::Transport(format!("create SSE transport: {e}")))?;
+                let transport = StreamableHttpClientTransport::with_client(http_client, cfg);
 
-                handler
-                    .serve(transport)
-                    .await
-                    .map_err(|e| McpError::ConnectionFailed(format!("initialize SSE client: {e}")))
+                handler.serve(transport).await.map_err(|e| {
+                    McpError::ConnectionFailed(format!("initialize SSE client: {e}"))
+                })
             }
 
             McpTransport::Streamable {
@@ -1429,9 +1422,11 @@ impl McpOrchestrator {
             None
         };
 
-        let request = CallToolRequestParam {
+        let request = CallToolRequestParams {
             name: Cow::Owned(target_tool),
             arguments: args_map,
+            meta: None,
+            task: None,
         };
 
         // Execute on server
@@ -1524,7 +1519,7 @@ impl McpOrchestrator {
     async fn execute_on_server(
         &self,
         server_key: &str,
-        request: CallToolRequestParam,
+        request: CallToolRequestParams,
     ) -> McpResult<CallToolResult> {
         if let Some(entry) = self.static_servers.get(server_key) {
             return entry.client.call_tool(request).await.map_err(|e| match e {
@@ -1665,8 +1660,7 @@ impl McpOrchestrator {
     ) -> McpResult<String> {
         use rmcp::{
             transport::{
-                sse_client::SseClientConfig,
-                streamable_http_client::StreamableHttpClientTransportConfig, SseClientTransport,
+                streamable_http_client::StreamableHttpClientTransportConfig,
                 StreamableHttpClientTransport,
             },
             ServiceExt,
@@ -1717,18 +1711,10 @@ impl McpOrchestrator {
                             super::proxy::resolve_proxy_config(&cfg, global_proxy.as_ref());
                         let http_client =
                             build_http_client(proxy_config, token.as_deref(), custom_headers)?;
-
-                        let sse_config = SseClientConfig {
-                            sse_endpoint: url.clone().into(),
-                            ..Default::default()
-                        };
+                        let cfg_http = StreamableHttpClientTransportConfig::with_uri(url.as_str());
 
                         let transport =
-                            SseClientTransport::start_with_client(http_client, sse_config)
-                                .await
-                                .map_err(|e| {
-                                    McpError::Transport(format!("create SSE transport: {e}"))
-                                })?;
+                            StreamableHttpClientTransport::with_client(http_client, cfg_http);
 
                         ().serve(transport)
                             .await
@@ -2083,9 +2069,11 @@ impl<'a> McpRequestContext<'a> {
             None
         };
 
-        let request = CallToolRequestParam {
+        let request = CallToolRequestParams {
             name: Cow::Owned(entry.tool_name().to_string()),
             arguments: args_map,
+            meta: None,
+            task: None,
         };
 
         let result = client
@@ -2210,6 +2198,8 @@ mod tests {
             output_schema: None,
             annotations: None,
             icons: None,
+            execution: None,
+            meta: None,
         }
     }
     #[tokio::test]
