@@ -445,7 +445,7 @@ impl PositionalIndexer {
 
         if let Some((_, worker_map)) = self.worker_blocks.remove(&worker_id) {
             // worker_map is owned — iterate without holding any DashMap shard lock.
-            for (_, &(position, content_hash, prefix_hash)) in worker_map.iter() {
+            for &(position, content_hash, prefix_hash) in worker_map.values() {
                 if let Entry::Occupied(mut occupied) = self.index.entry((position, content_hash)) {
                     if occupied.get_mut().remove(prefix_hash, worker_id) {
                         occupied.remove();
@@ -526,7 +526,7 @@ impl PositionalIndexer {
     // -----------------------------------------------------------------------
 
     /// Get workers at a position matching content_hash (and prefix_hash for Multi).
-    /// Clones the worker set — used only once at position 0 to initialize `active`.
+    /// Copies worker IDs into a Vec — used only once at position 0 to initialize `active`.
     /// Skips rolling hash computation for Single entries (unambiguous match).
     fn get_workers_lazy(
         index: &DashMap<(usize, ContentHash), SeqEntry, FxBuildHasher>,
@@ -534,14 +534,17 @@ impl PositionalIndexer {
         content_hash: ContentHash,
         seq_hashes: &mut Vec<SequenceHash>,
         sequence: &[ContentHash],
-    ) -> Option<FxHashSet<u32>> {
+    ) -> Option<Vec<u32>> {
         let entry = index.get(&(position, content_hash))?;
         if let Some(workers) = entry.value().workers_if_single() {
-            return Some(workers.clone());
+            return Some(workers.iter().copied().collect());
         }
         // Multi: need rolling hash to disambiguate
         Self::ensure_seq_hash_computed(seq_hashes, position, sequence);
-        entry.value().get(seq_hashes[position]).cloned()
+        entry
+            .value()
+            .get(seq_hashes[position])
+            .map(|workers| workers.iter().copied().collect())
     }
 
     /// Count workers at a position matching the prefix_hash (no set materialization).
@@ -568,15 +571,16 @@ impl PositionalIndexer {
     }
 
     /// Scan positions sequentially, draining workers that stop matching.
-    /// Accesses DashMap entries directly — no FxHashSet cloning.
+    /// Accesses DashMap entries directly — no set cloning.
     /// Skips rolling hash computation for Single entries (unambiguous match).
     /// Uses Dynamo's retain guard: skips retain when workers.len() >= active.len()
     /// (all active workers are still present, no work to do).
+    #[expect(clippy::too_many_arguments)]
     fn linear_scan_drain(
         index: &DashMap<(usize, ContentHash), SeqEntry, FxBuildHasher>,
         sequence: &[ContentHash],
         seq_hashes: &mut Vec<SequenceHash>,
-        active: &mut FxHashSet<u32>,
+        active: &mut Vec<u32>,
         internal_scores: &mut FxHashMap<u32, u32>,
         lo: usize,
         hi: usize,
@@ -589,9 +593,10 @@ impl PositionalIndexer {
             let pos = lo + offset;
 
             let Some(entry) = index.get(&(pos, content_hash)) else {
-                for w in active.drain() {
+                for &w in active.iter() {
                     internal_scores.insert(w, pos as u32);
                 }
+                active.clear();
                 break;
             };
 
@@ -601,14 +606,15 @@ impl PositionalIndexer {
                 // have dropped off. When workers.len() >= active.len(), all active
                 // workers are still present — skip the O(active) iteration.
                 if workers.len() < active.len() {
-                    active.retain(|&w| {
-                        if workers.contains(&w) {
-                            true
+                    let mut i = 0;
+                    while i < active.len() {
+                        if workers.contains(&active[i]) {
+                            i += 1;
                         } else {
-                            internal_scores.insert(w, pos as u32);
-                            false
+                            internal_scores.insert(active[i], pos as u32);
+                            active.swap_remove(i);
                         }
-                    });
+                    }
                 }
                 if early_exit && !active.is_empty() {
                     break;
@@ -621,22 +627,24 @@ impl PositionalIndexer {
             let seq_hash = seq_hashes[pos];
 
             let Some(workers) = entry.get(seq_hash) else {
-                for w in active.drain() {
+                for &w in active.iter() {
                     internal_scores.insert(w, pos as u32);
                 }
+                active.clear();
                 break;
             };
 
             // Retain guard: only iterate when some workers dropped off.
             if workers.len() < active.len() {
-                active.retain(|&w| {
-                    if workers.contains(&w) {
-                        true
+                let mut i = 0;
+                while i < active.len() {
+                    if workers.contains(&active[i]) {
+                        i += 1;
                     } else {
-                        internal_scores.insert(w, pos as u32);
-                        false
+                        internal_scores.insert(active[i], pos as u32);
+                        active.swap_remove(i);
                     }
-                });
+                }
             }
 
             if early_exit && !active.is_empty() {
@@ -678,7 +686,7 @@ impl PositionalIndexer {
 
         // Early exit: just record that workers matched at position 0.
         if early_exit {
-            for w in active {
+            for &w in &active {
                 internal_scores.insert(w, 1);
             }
             scores.scores = internal_scores;
@@ -725,7 +733,7 @@ impl PositionalIndexer {
         }
 
         let final_score = len as u32;
-        for w in active {
+        for &w in &active {
             internal_scores.insert(w, final_score);
         }
 
@@ -746,7 +754,7 @@ impl PositionalIndexer {
 
 impl Default for PositionalIndexer {
     fn default() -> Self {
-        Self::new(64)
+        Self::new(32)
     }
 }
 
