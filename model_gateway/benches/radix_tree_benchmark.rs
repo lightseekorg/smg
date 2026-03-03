@@ -494,7 +494,7 @@ macro_rules! bench_indexer_store {
             b.iter_custom(|iters| {
                 let start = Instant::now();
                 for _ in 0..iters {
-                    let indexer = PositionalIndexer::new(64);
+                    let indexer = PositionalIndexer::new(32);
                     for worker in &workers {
                         let chunks = generate_token_chunks($blocks_per_worker, $block_size);
                         let blocks = chunks_to_stored_blocks(&chunks);
@@ -749,7 +749,7 @@ fn bench_summary(c: &mut Criterion) {
     const BLOCKS_PER_WORKER: [usize; 3] = [64, 256, 1024];
     const QUERY_BLOCK_COUNTS: [usize; 3] = [32, 128, 512];
     const SHARED_PREFIX_BLOCKS: usize = 8;
-    const JUMP_SIZE: usize = 64;
+    const JUMP_SIZE: usize = 32;
 
     for &num_workers in &WORKER_COUNTS {
         let workers = generate_worker_endpoints(num_workers);
