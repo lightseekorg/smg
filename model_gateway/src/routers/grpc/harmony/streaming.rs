@@ -199,6 +199,13 @@ impl HarmonyStreamingProcessor {
         let start_time = Instant::now();
         let mut first_token_time: Option<Instant> = None;
 
+        // Extract stop sequences from the original request for jail-based stripping
+        let stop_sequences: Vec<String> = original_request
+            .stop
+            .as_ref()
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+
         // Per-index state management (for n>1 support)
         let mut parsers: HashMap<u32, HarmonyParserAdapter> = HashMap::new();
         let mut is_firsts: HashMap<u32, bool> = HashMap::new();
@@ -223,7 +230,7 @@ impl HarmonyStreamingProcessor {
                     // Initialize parser for this index if needed
                     if let Vacant(e) = parsers.entry(index) {
                         e.insert(
-                            HarmonyParserAdapter::new()
+                            HarmonyParserAdapter::new_with_stop_sequences(stop_sequences.clone())
                                 .map_err(|e| format!("Failed to create parser: {e}"))?,
                         );
                         is_firsts.insert(index, true);
@@ -283,6 +290,37 @@ impl HarmonyStreamingProcessor {
                     // Finalize parser and emit final chunk
                     if let Some(parser) = parsers.get_mut(&index) {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
+
+                        // Flush any remaining jailed text (strip the stop sequence suffix)
+                        let matched_stop_str = matched_stop
+                            .as_ref()
+                            .and_then(|v| v.as_str());
+                        let (remaining_analysis, remaining_final) =
+                            parser.flush_stop_buffer(matched_stop_str);
+
+                        // Emit remaining buffered text as content deltas before the finish chunk
+                        if remaining_analysis.is_some() || remaining_final.is_some() {
+                            let remaining_delta = HarmonyChannelDelta {
+                                analysis_delta: remaining_analysis,
+                                commentary_delta: None,
+                                final_delta: remaining_final,
+                                is_final: false,
+                            };
+                            let is_first = is_firsts.get(&index).copied().unwrap_or(false);
+                            Self::emit_chunk_delta(
+                                &remaining_delta,
+                                index,
+                                is_first,
+                                &dispatch,
+                                &original_request,
+                                tx,
+                                None,
+                            )?;
+                            if is_first {
+                                is_firsts.insert(index, false);
+                            }
+                        }
+
                         let final_output = parser.finalize(
                             complete_wrapper.finish_reason().to_string(),
                             matched_stop.clone(),
