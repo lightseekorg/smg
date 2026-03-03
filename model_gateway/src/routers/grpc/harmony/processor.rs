@@ -80,6 +80,7 @@ impl HarmonyResponseProcessor {
                     complete.output_ids(),
                     complete.finish_reason().to_string(),
                     matched_stop.clone(),
+                    chat_request.no_stop_trim,
                 )
                 .map_err(|e| {
                     error!(
@@ -226,6 +227,7 @@ impl HarmonyResponseProcessor {
                 complete.output_ids(),
                 complete.finish_reason().to_string(),
                 matched_stop,
+                false, // Responses API: always trim stop sequences
             )
             .map_err(|e| {
                 error!(

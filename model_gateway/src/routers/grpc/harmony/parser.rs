@@ -294,6 +294,7 @@ impl HarmonyParserAdapter {
         output_ids: &[u32],
         finish_reason: String,
         matched_stop: Option<serde_json::Value>,
+        no_stop_trim: bool,
     ) -> Result<HarmonyChannelOutput, String> {
         let mut reasoning_token_count = 0u32;
 
@@ -320,8 +321,15 @@ impl HarmonyParserAdapter {
         // Check for incomplete content in parser state
         Self::handle_incomplete_content(&self.parser, &mut analysis, &mut final_text);
 
-        // Strip matched stop sequence from the active channel
-        Self::strip_matched_stop(&self.parser, matched_stop.as_ref(), &mut analysis, &mut final_text);
+        // Strip matched stop sequence from the active channel (unless no_stop_trim)
+        if !no_stop_trim {
+            Self::strip_matched_stop(
+                &self.parser,
+                matched_stop.as_ref(),
+                &mut analysis,
+                &mut final_text,
+            );
+        }
 
         // Determine finish reason: override to "tool_calls" if commentary has tool calls
         let final_finish_reason = if commentary.is_some() {
@@ -549,6 +557,7 @@ impl HarmonyParserAdapter {
         &mut self,
         finish_reason: String,
         matched_stop: Option<serde_json::Value>,
+        no_stop_trim: bool,
     ) -> HarmonyChannelOutput {
         // Extract all completed messages
         let messages = self.parser.messages();
@@ -559,8 +568,15 @@ impl HarmonyParserAdapter {
         // Check for remaining incomplete content
         Self::handle_incomplete_content(&self.parser, &mut analysis, &mut final_text);
 
-        // Strip matched stop sequence from the active channel
-        Self::strip_matched_stop(&self.parser, matched_stop.as_ref(), &mut analysis, &mut final_text);
+        // Strip matched stop sequence from the active channel (unless no_stop_trim)
+        if !no_stop_trim {
+            Self::strip_matched_stop(
+                &self.parser,
+                matched_stop.as_ref(),
+                &mut analysis,
+                &mut final_text,
+            );
+        }
 
         // Determine finish reason: override to "tool_calls" if commentary has tool calls
         let final_finish_reason = if commentary.is_some() {

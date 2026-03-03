@@ -70,12 +70,22 @@ impl StopSequenceBuffer {
 
     /// Buffer analysis-channel text, returning the safe-to-emit prefix.
     fn buffer_analysis(&mut self, new_text: &str) -> Option<String> {
-        Self::buffer(&mut self.analysis_buffer, new_text, &self.stop_sequences, self.max_stop_len)
+        Self::buffer(
+            &mut self.analysis_buffer,
+            new_text,
+            &self.stop_sequences,
+            self.max_stop_len,
+        )
     }
 
     /// Buffer final-channel text, returning the safe-to-emit prefix.
     fn buffer_final(&mut self, new_text: &str) -> Option<String> {
-        Self::buffer(&mut self.final_buffer, new_text, &self.stop_sequences, self.max_stop_len)
+        Self::buffer(
+            &mut self.final_buffer,
+            new_text,
+            &self.stop_sequences,
+            self.max_stop_len,
+        )
     }
 
     /// Flush both buffers at stream end, stripping the matched stop sequence.
@@ -300,11 +310,17 @@ impl HarmonyStreamingProcessor {
         let mut first_token_time: Option<Instant> = None;
 
         // Stop-sequence buffering (per-index)
-        let stop_sequences: Vec<String> = original_request
-            .stop
-            .as_ref()
-            .map(|s| s.to_vec())
-            .unwrap_or_default();
+        // When no_stop_trim is true, pass empty stop_sequences so buffering is a no-op
+        let no_stop_trim = original_request.no_stop_trim;
+        let stop_sequences: Vec<String> = if no_stop_trim {
+            Vec::new()
+        } else {
+            original_request
+                .stop
+                .as_ref()
+                .map(|s| s.to_vec())
+                .unwrap_or_default()
+        };
 
         // Per-index state management (for n>1 support)
         let mut parsers: HashMap<u32, HarmonyParserAdapter> = HashMap::new();
@@ -361,12 +377,9 @@ impl HarmonyStreamingProcessor {
                     // Filter analysis/final deltas through the stop-sequence buffer
                     let delta = delta_result.and_then(|mut d| {
                         if let Some(buf) = stop_buffers.get_mut(&index) {
-                            d.analysis_delta = d
-                                .analysis_delta
-                                .and_then(|t| buf.buffer_analysis(&t));
-                            d.final_delta = d
-                                .final_delta
-                                .and_then(|t| buf.buffer_final(&t));
+                            d.analysis_delta =
+                                d.analysis_delta.and_then(|t| buf.buffer_analysis(&t));
+                            d.final_delta = d.final_delta.and_then(|t| buf.buffer_final(&t));
                         }
                         if d.analysis_delta.is_some()
                             || d.commentary_delta.is_some()
@@ -414,13 +427,10 @@ impl HarmonyStreamingProcessor {
                         let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
 
                         // Flush any remaining buffered text (strip the stop sequence suffix)
-                        let matched_stop_str = matched_stop
-                            .as_ref()
-                            .and_then(|v| v.as_str());
+                        let matched_stop_str = matched_stop.as_ref().and_then(|v| v.as_str());
 
                         if let Some(buf) = stop_buffers.get_mut(&index) {
-                            let (remaining_analysis, remaining_final) =
-                                buf.flush(matched_stop_str);
+                            let (remaining_analysis, remaining_final) = buf.flush(matched_stop_str);
 
                             // Emit remaining buffered text as content deltas before the finish chunk
                             if remaining_analysis.is_some() || remaining_final.is_some() {
@@ -449,6 +459,7 @@ impl HarmonyStreamingProcessor {
                         let final_output = parser.finalize(
                             complete_wrapper.finish_reason().to_string(),
                             matched_stop.clone(),
+                            no_stop_trim,
                         );
 
                         Self::emit_final_chunk(
@@ -958,7 +969,9 @@ impl HarmonyStreamingProcessor {
                     }
 
                     // Finalize parser and get complete output
-                    let final_output = parser.finalize(finish_reason.clone(), matched_stop.clone());
+                    // Responses API: always trim stop sequences
+                    let final_output =
+                        parser.finalize(finish_reason.clone(), matched_stop.clone(), false);
 
                     // Store finalized tool calls and reasoning token count
                     accumulated_tool_calls.clone_from(&final_output.commentary);
@@ -1176,7 +1189,8 @@ impl HarmonyStreamingProcessor {
                 let analysis_content = if has_analysis {
                     // Get analysis from finalized parser output by calling finalize again
                     // This is safe because finalize can be called multiple times
-                    let output = parser.finalize(finish_reason.clone(), matched_stop.clone());
+                    let output =
+                        parser.finalize(finish_reason.clone(), matched_stop.clone(), false);
                     output.analysis
                 } else {
                     None
