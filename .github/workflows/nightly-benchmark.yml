@@ -63,7 +63,7 @@ jobs:
         run: bash scripts/ci_build_wheel.sh
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: smg-wheel
           path: bindings/python/dist/*.whl
@@ -170,7 +170,7 @@ jobs:
 
       - name: Upload benchmark results
         if: always() && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-${{ matrix.model.slug }}-single-${{ matrix.variant.id }}-${{ github.run_id }}
           path: nightly_*/
@@ -277,7 +277,7 @@ jobs:
 
       - name: Upload benchmark results
         if: always() && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-${{ matrix.model.slug }}-multi-${{ matrix.variant.id }}-${{ github.run_id }}
           path: nightly_*/
@@ -387,7 +387,7 @@ jobs:
 
       - name: Upload benchmark results
         if: always() && steps.filter.outputs.skip != 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-${{ matrix.model.slug }}-single-${{ matrix.variant.id }}-${{ github.run_id }}
           path: nightly_*/
@@ -446,7 +446,7 @@ jobs:
 
       - name: Upload comparison charts
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-comparison-charts-${{ github.run_id }}
           path: nightly_charts/

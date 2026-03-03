@@ -38,7 +38,7 @@ jobs:
       - name: Check package
         run: twine check --strict grpc_client/python/dist/*
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: grpc-proto-dist
           path: grpc_client/python/dist/

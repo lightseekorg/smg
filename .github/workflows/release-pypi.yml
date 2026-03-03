@@ -111,7 +111,7 @@ jobs:
       - name: Check packages
         run: twine check --strict smg-repo/bindings/python/dist/*
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: packages-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.manylinux || 'auto' }}
           path: smg-repo/bindings/python/dist/
@@ -139,7 +139,7 @@ jobs:
           args: --out dist
           rust-toolchain: stable
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: smg-repo/bindings/python/dist/*.tar.gz
