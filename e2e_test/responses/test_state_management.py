@@ -18,13 +18,12 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Cloud Backend Tests (base class — OpenAI only)
+# Cloud Backend Tests (base mixin — no parametrize, subclasses add their own)
 # =============================================================================
 
 
-@pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
-class TestStateManagementCloud:
-    """State management tests against cloud APIs (OpenAI)."""
+class _StateManagementCloudBase:
+    """Base test methods for state management against cloud APIs."""
 
     def test_basic_response_creation(self, setup_backend, smg):
         """Test basic response creation without state."""
@@ -186,12 +185,22 @@ class TestStateManagementCloud:
 
 
 # =============================================================================
+# Cloud Backend Tests (OpenAI)
+# =============================================================================
+
+
+@pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
+class TestStateManagementCloud(_StateManagementCloudBase):
+    """State management tests against OpenAI cloud API."""
+
+
+# =============================================================================
 # Cloud Backend Tests (xAI)
 # =============================================================================
 
 
 @pytest.mark.parametrize("setup_backend", ["xai"], indirect=True)
-class TestStateManagementCloudXai(TestStateManagementCloud):
+class TestStateManagementCloudXai(_StateManagementCloudBase):
     """State management tests against xAI cloud API."""
 
 
@@ -201,10 +210,10 @@ class TestStateManagementCloudXai(TestStateManagementCloud):
 
 
 @pytest.mark.storage("oracle-custom")
-class TestStateManagementOracleCustom(TestStateManagementCloud):
+@pytest.mark.parametrize("setup_backend", ["openai"], indirect=True)
+class TestStateManagementOracleCustom(_StateManagementCloudBase):
     """State management tests against Oracle with Flyway-managed schema (schema-config).
 
-    Inherits all test methods and OpenAI parametrize from TestStateManagementCloud.
     The storage("oracle-custom") marker causes the gateway to launch with
     --schema-config pointing to the Flyway schema, using ATP_FLYWAY_* env vars.
     """
