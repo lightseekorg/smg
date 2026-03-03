@@ -545,7 +545,7 @@ macro_rules! bench_indexer_match {
             b.iter_custom(|iters| {
                 let start = Instant::now();
                 for _ in 0..iters {
-                    let result = indexer.find_matches(black_box(&hashes[idx % hashes.len()]));
+                    let result = indexer.find_matches(black_box(&hashes[idx % hashes.len()]), false);
                     black_box(result);
                     idx += 1;
                 }
@@ -604,7 +604,7 @@ macro_rules! bench_indexer_concurrent {
                                             &query_tokens,
                                             block_size,
                                         );
-                                        black_box(indexer.find_matches(&content_hashes));
+                                        black_box(indexer.find_matches(&content_hashes, false));
                                     } else {
                                         // Write: apply_stored
                                         let new_chunks = generate_token_chunks(4, block_size);

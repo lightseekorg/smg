@@ -559,7 +559,7 @@ impl CacheAwarePolicy {
             return None;
         }
 
-        let overlap = indexer.find_matches(&content_hashes);
+        let overlap = indexer.find_matches(&content_hashes, false);
         if overlap.scores.is_empty() {
             return None;
         }
@@ -569,20 +569,33 @@ impl CacheAwarePolicy {
         let best_idx = healthy_indices
             .iter()
             .copied()
-            .filter(|&idx| overlap.scores.get(workers[idx].url()).copied().unwrap_or(0) > 0)
+            .filter(|&idx| {
+                indexer
+                    .worker_id(workers[idx].url())
+                    .and_then(|id| overlap.scores.get(&id))
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+            })
             .max_by_key(|&idx| {
-                let url = workers[idx].url();
-                let score = overlap.scores.get(url).copied().unwrap_or(0);
+                let wid = indexer.worker_id(workers[idx].url());
+                let score = wid
+                    .and_then(|id| overlap.scores.get(&id))
+                    .copied()
+                    .unwrap_or(0);
                 let load = workers[idx].load();
-                let tree_size = overlap.tree_sizes.get(url).copied().unwrap_or(0);
+                let tree_size = wid
+                    .and_then(|id| overlap.tree_sizes.get(&id))
+                    .copied()
+                    .unwrap_or(0);
                 (score, std::cmp::Reverse(load), std::cmp::Reverse(tree_size))
             })?;
 
         debug!(
             worker = workers[best_idx].url(),
-            score = overlap
-                .scores
-                .get(workers[best_idx].url())
+            score = indexer
+                .worker_id(workers[best_idx].url())
+                .and_then(|id| overlap.scores.get(&id))
                 .copied()
                 .unwrap_or(0),
             "Event-driven routing: overlap match"
