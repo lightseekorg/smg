@@ -208,9 +208,11 @@ flyway_conn.close()
 print("Flyway SQL files executed successfully")
 PYEOF
 
-    echo "ATP_FLYWAY_USER=$FLYWAY_USER" >> "$GITHUB_ENV"
-    echo "ATP_FLYWAY_PASSWORD=$FLYWAY_PASS" >> "$GITHUB_ENV"
-    echo "ATP_FLYWAY_DSN=$oracle_dsn" >> "$GITHUB_ENV"
+    {
+        echo "ATP_FLYWAY_USER=$FLYWAY_USER"
+        echo "ATP_FLYWAY_PASSWORD=$FLYWAY_PASS"
+        echo "ATP_FLYWAY_DSN=$oracle_dsn"
+    } >> "$GITHUB_ENV"
 }
 
 cmd_cleanup_oracle_flyway_user() {

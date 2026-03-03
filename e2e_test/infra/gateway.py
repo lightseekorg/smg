@@ -6,6 +6,7 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -305,10 +306,16 @@ class Gateway:
             ]
 
             if history_backend == "oracle-custom":
+                schema_config_path = (
+                    Path(__file__).resolve().parents[2]
+                    / "scripts"
+                    / "oracle_flyway"
+                    / "schema-config.yaml"
+                )
                 mode_args.extend(
                     [
                         "--schema-config",
-                        "scripts/oracle_flyway/schema-config.yaml",
+                        str(schema_config_path),
                     ]
                 )
 
