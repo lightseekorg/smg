@@ -125,10 +125,75 @@ impl HarmonyStreamingProcessor {
 
     /// Process streaming chunks from a single stream
     async fn process_single_stream(
-        mut grpc_stream: ProtoStream,
+        grpc_stream: ProtoStream,
         dispatch: context::DispatchMetadata,
         original_request: Arc<ChatCompletionRequest>,
         tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    ) -> Result<(), String> {
+        let mut prompt_tokens = HashMap::new();
+        let mut cached_tokens = HashMap::new();
+        Self::process_chat_decode_stream(
+            grpc_stream,
+            &dispatch,
+            &original_request,
+            tx,
+            &mut prompt_tokens,
+            &mut cached_tokens,
+        )
+        .await
+    }
+
+    /// Process streaming chunks from dual streams (prefill + decode)
+    async fn process_dual_stream(
+        mut prefill_stream: ProtoStream,
+        decode_stream: ProtoStream,
+        dispatch: context::DispatchMetadata,
+        original_request: Arc<ChatCompletionRequest>,
+        tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+    ) -> Result<(), String> {
+        // Phase 1: Process prefill stream (collect metadata)
+        let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
+        let mut cached_tokens: HashMap<u32, u32> = HashMap::new();
+
+        while let Some(result) = prefill_stream.next().await {
+            let response = result.map_err(|e| format!("Prefill stream error: {e}"))?;
+
+            if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
+                prompt_tokens.insert(complete_wrapper.index(), complete_wrapper.prompt_tokens());
+                cached_tokens.insert(complete_wrapper.index(), complete_wrapper.cached_tokens());
+            }
+        }
+
+        // Phase 2: Decode (shared helper)
+        Self::process_chat_decode_stream(
+            decode_stream,
+            &dispatch,
+            &original_request,
+            tx,
+            &mut prompt_tokens,
+            &mut cached_tokens,
+        )
+        .await?;
+
+        // Mark prefill stream completed AFTER decode succeeds
+        // This ensures that if client disconnects during decode, BOTH streams send abort
+        prefill_stream.mark_completed();
+        Ok(())
+    }
+
+    /// Process the decode phase of a Chat Completion stream.
+    ///
+    /// Shared between single-stream and dual-stream modes. The `prompt_tokens`
+    /// and `cached_tokens` maps may be pre-populated from a prefill phase
+    /// (dual stream) or empty (single stream). Values from `Complete` messages
+    /// are inserted only if not already present.
+    async fn process_chat_decode_stream(
+        mut decode_stream: ProtoStream,
+        dispatch: &context::DispatchMetadata,
+        original_request: &ChatCompletionRequest,
+        tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
+        prompt_tokens: &mut HashMap<u32, u32>,
+        cached_tokens: &mut HashMap<u32, u32>,
     ) -> Result<(), String> {
         // Timing for metrics
         let start_time = Instant::now();
@@ -139,14 +204,12 @@ impl HarmonyStreamingProcessor {
         let mut is_firsts: HashMap<u32, bool> = HashMap::new();
         let mut finish_reasons: HashMap<u32, Option<String>> = HashMap::new();
         let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
-        let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
         let mut completion_tokens = CompletionTokenTracker::new();
-        let mut cached_tokens: HashMap<u32, u32> = HashMap::new();
 
         let stream_options = &original_request.stream_options;
 
         // Process stream
-        while let Some(result) = grpc_stream.next().await {
+        while let Some(result) = decode_stream.next().await {
             let response = result.map_err(|e| format!("Stream error: {e}"))?;
 
             match response.into_response() {
@@ -194,8 +257,8 @@ impl HarmonyStreamingProcessor {
                             &delta,
                             index,
                             is_first,
-                            &dispatch,
-                            &original_request,
+                            dispatch,
+                            original_request,
                             tx,
                             chunk_logprobs,
                         )?;
@@ -212,9 +275,13 @@ impl HarmonyStreamingProcessor {
                     finish_reasons
                         .insert(index, Some(complete_wrapper.finish_reason().to_string()));
                     matched_stops.insert(index, complete_wrapper.matched_stop_json());
-                    prompt_tokens.insert(index, complete_wrapper.prompt_tokens());
+                    prompt_tokens
+                        .entry(index)
+                        .or_insert_with(|| complete_wrapper.prompt_tokens());
                     completion_tokens.record_complete(&complete_wrapper);
-                    cached_tokens.insert(index, complete_wrapper.cached_tokens());
+                    cached_tokens
+                        .entry(index)
+                        .or_insert_with(|| complete_wrapper.cached_tokens());
 
                     // Finalize parser and emit final chunk
                     if let Some(parser) = parsers.get_mut(&index) {
@@ -228,8 +295,8 @@ impl HarmonyStreamingProcessor {
                             index,
                             &final_output.finish_reason,
                             final_output.matched_stop.as_ref(),
-                            &dispatch,
-                            &original_request,
+                            dispatch,
+                            original_request,
                             tx,
                         )?;
                     }
@@ -239,171 +306,10 @@ impl HarmonyStreamingProcessor {
                 }
                 ProtoResponseVariant::None => {}
             }
-        }
-
-        // Compute totals once for both usage chunk and metrics
-        let total_prompt: u32 = prompt_tokens.values().sum();
-        let total_completion: u32 = completion_tokens.total();
-        let total_cached: u32 = cached_tokens.values().sum();
-
-        // Emit final usage if requested
-        if let Some(true) = stream_options.as_ref().and_then(|so| so.include_usage) {
-            Self::emit_usage_chunk(
-                total_prompt,
-                total_completion,
-                total_cached,
-                &dispatch,
-                &original_request,
-                tx,
-            )?;
         }
 
         // Mark stream as completed successfully to prevent abort on drop
-        grpc_stream.mark_completed();
-
-        // Record streaming metrics
-        Metrics::record_streaming_metrics(StreamingMetricsParams {
-            router_type: metrics_labels::ROUTER_GRPC,
-            backend_type: metrics_labels::BACKEND_HARMONY,
-            model_id: &original_request.model,
-            endpoint: metrics_labels::ENDPOINT_CHAT,
-            ttft: first_token_time.map(|t| t.duration_since(start_time)),
-            generation_duration: start_time.elapsed(),
-            input_tokens: Some(total_prompt as u64),
-            output_tokens: total_completion as u64,
-        });
-
-        Ok(())
-    }
-
-    /// Process streaming chunks from dual streams (prefill + decode)
-    async fn process_dual_stream(
-        mut prefill_stream: ProtoStream,
-        mut decode_stream: ProtoStream,
-        dispatch: context::DispatchMetadata,
-        original_request: Arc<ChatCompletionRequest>,
-        tx: &mpsc::UnboundedSender<Result<Bytes, io::Error>>,
-    ) -> Result<(), String> {
-        // Timing for metrics
-        let start_time = Instant::now();
-        let mut first_token_time: Option<Instant> = None;
-
-        // Phase 1: Process prefill stream (collect metadata)
-        let mut prompt_tokens: HashMap<u32, u32> = HashMap::new();
-        let mut cached_tokens: HashMap<u32, u32> = HashMap::new();
-
-        while let Some(result) = prefill_stream.next().await {
-            let response = result.map_err(|e| format!("Prefill stream error: {e}"))?;
-
-            if let ProtoResponseVariant::Complete(complete_wrapper) = response.into_response() {
-                prompt_tokens.insert(complete_wrapper.index(), complete_wrapper.prompt_tokens());
-                cached_tokens.insert(complete_wrapper.index(), complete_wrapper.cached_tokens());
-            }
-        }
-
-        // Phase 2: Process decode stream (same as single stream)
-        let mut parsers: HashMap<u32, HarmonyParserAdapter> = HashMap::new();
-        let mut is_firsts: HashMap<u32, bool> = HashMap::new();
-        let mut finish_reasons: HashMap<u32, Option<String>> = HashMap::new();
-        let mut matched_stops: HashMap<u32, Option<serde_json::Value>> = HashMap::new();
-        let mut completion_tokens = CompletionTokenTracker::new();
-
-        let stream_options = &original_request.stream_options;
-
-        while let Some(result) = decode_stream.next().await {
-            let response = result.map_err(|e| format!("Decode stream error: {e}"))?;
-
-            match response.into_response() {
-                ProtoResponseVariant::Chunk(chunk_wrapper) => {
-                    let index = chunk_wrapper.index();
-
-                    // Track first token time for TTFT metric
-                    if first_token_time.is_none() {
-                        first_token_time = Some(Instant::now());
-                    }
-
-                    // Initialize parser for this index if needed
-                    if let Vacant(e) = parsers.entry(index) {
-                        e.insert(
-                            HarmonyParserAdapter::new()
-                                .map_err(|e| format!("Failed to create parser: {e}"))?,
-                        );
-                        is_firsts.insert(index, true);
-                    }
-
-                    completion_tokens.record_chunk(&chunk_wrapper);
-
-                    // Convert logprobs if present and requested
-                    let chunk_logprobs = if original_request.logprobs {
-                        chunk_wrapper
-                            .output_logprobs()
-                            .map(|lp| convert_harmony_logprobs(&lp))
-                    } else {
-                        None
-                    };
-
-                    let parser = parsers
-                        .get_mut(&index)
-                        .ok_or("Parser not found for index")?;
-
-                    let delta_result = parser
-                        .parse_chunk(chunk_wrapper.token_ids())
-                        .map_err(|e| format!("Parse error: {e}"))?;
-
-                    if let Some(delta) = delta_result {
-                        let is_first = is_firsts.get(&index).copied().unwrap_or(false);
-                        Self::emit_chunk_delta(
-                            &delta,
-                            index,
-                            is_first,
-                            &dispatch,
-                            &original_request,
-                            tx,
-                            chunk_logprobs,
-                        )?;
-
-                        if is_first {
-                            is_firsts.insert(index, false);
-                        }
-                    }
-                }
-                ProtoResponseVariant::Complete(complete_wrapper) => {
-                    let index = complete_wrapper.index();
-
-                    finish_reasons
-                        .insert(index, Some(complete_wrapper.finish_reason().to_string()));
-                    matched_stops.insert(index, complete_wrapper.matched_stop_json());
-                    completion_tokens.record_complete(&complete_wrapper);
-
-                    if let Some(parser) = parsers.get_mut(&index) {
-                        let matched_stop = matched_stops.get(&index).and_then(|m| m.clone());
-                        let final_output = parser.finalize(
-                            complete_wrapper.finish_reason().to_string(),
-                            matched_stop.clone(),
-                        );
-
-                        Self::emit_final_chunk(
-                            index,
-                            &final_output.finish_reason,
-                            final_output.matched_stop.as_ref(),
-                            &dispatch,
-                            &original_request,
-                            tx,
-                        )?;
-                    }
-                }
-                ProtoResponseVariant::Error(error_wrapper) => {
-                    return Err(format!("Server error: {}", error_wrapper.message()));
-                }
-                ProtoResponseVariant::None => {}
-            }
-        }
-
         decode_stream.mark_completed();
-
-        // Mark prefill stream as completed AFTER decode completes successfully
-        // This ensures that if client disconnects during decode, BOTH streams send abort
-        prefill_stream.mark_completed();
 
         // Compute totals once for both usage chunk and metrics
         let total_prompt: u32 = prompt_tokens.values().sum();
@@ -416,8 +322,8 @@ impl HarmonyStreamingProcessor {
                 total_prompt,
                 total_completion,
                 total_cached,
-                &dispatch,
-                &original_request,
+                dispatch,
+                original_request,
                 tx,
             )?;
         }
