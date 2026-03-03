@@ -647,9 +647,10 @@ impl McpOrchestrator {
 
                 let transport = StreamableHttpClientTransport::with_client(http_client, cfg);
 
-                handler.serve(transport).await.map_err(|e| {
-                    McpError::ConnectionFailed(format!("initialize SSE client: {e}"))
-                })
+                handler
+                    .serve(transport)
+                    .await
+                    .map_err(|e| McpError::ConnectionFailed(format!("initialize SSE client: {e}")))
             }
 
             McpTransport::Streamable {

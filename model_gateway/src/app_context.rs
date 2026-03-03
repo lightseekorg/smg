@@ -310,24 +310,26 @@ impl AppContextBuilder {
         router_config: RouterConfig,
         request_timeout_secs: u64,
     ) -> Result<Self, String> {
-        Ok(Self::new()
-            .with_client(&router_config, request_timeout_secs)?
-            .maybe_rate_limiter(&router_config)
-            .with_tokenizer_registry()
-            .with_reasoning_parser_factory()
-            .with_tool_parser_factory()
-            .with_worker_registry()
-            .with_policy_registry(&router_config)
-            .with_storage(&router_config)
-            .await?
-            .with_load_monitor(&router_config)?
-            .with_worker_job_queue()
-            .with_workflow_engines()
-            .with_mcp_orchestrator(&router_config)
-            .await?
-            .with_wasm_manager(&router_config)
-            .with_kv_event_monitor(&router_config)
-            .router_config(router_config))
+        Ok(Box::pin(
+            Self::new()
+                .with_client(&router_config, request_timeout_secs)?
+                .maybe_rate_limiter(&router_config)
+                .with_tokenizer_registry()
+                .with_reasoning_parser_factory()
+                .with_tool_parser_factory()
+                .with_worker_registry()
+                .with_policy_registry(&router_config)
+                .with_storage(&router_config)
+                .await?
+                .with_load_monitor(&router_config)?
+                .with_worker_job_queue()
+                .with_workflow_engines()
+                .with_mcp_orchestrator(&router_config),
+        )
+        .await?
+        .with_wasm_manager(&router_config)
+        .with_kv_event_monitor(&router_config)
+        .router_config(router_config))
     }
 
     /// Create HTTP client with TLS/mTLS configuration
