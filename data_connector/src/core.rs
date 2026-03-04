@@ -20,6 +20,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value};
 
 // ============================================================================
+// Shared helpers
+// ============================================================================
+
+/// Generate a 50-character hex string from 25 cryptographically random bytes.
+/// Used by both `ConversationId::new()` and `make_item_id()`.
+fn random_hex_id() -> String {
+    let mut rng = rand::rng();
+    let mut bytes = [0u8; 25];
+    rng.fill_bytes(&mut bytes);
+    let mut hex_string = String::with_capacity(50);
+    for b in &bytes {
+        // Writing to a String is infallible; discard the always-Ok result.
+        let _ = write!(hex_string, "{b:02x}");
+    }
+    hex_string
+}
+
+// ============================================================================
 // PART 1: Conversation Storage
 // ============================================================================
 
@@ -28,15 +46,7 @@ pub struct ConversationId(pub String);
 
 impl ConversationId {
     pub fn new() -> Self {
-        let mut rng = rand::rng();
-        let mut bytes = [0u8; 25];
-        rng.fill_bytes(&mut bytes);
-        let mut hex_string = String::with_capacity(50);
-        for b in &bytes {
-            // Writing to a String is infallible; discard the always-Ok result.
-            let _ = write!(hex_string, "{b:02x}");
-        }
-        Self(format!("conv_{hex_string}"))
+        Self(format!("conv_{}", random_hex_id()))
     }
 }
 
@@ -275,15 +285,7 @@ pub trait ConversationItemStorage: Send + Sync + 'static {
 
 /// Helper to build id prefix based on item_type
 pub fn make_item_id(item_type: &str) -> ConversationItemId {
-    // Generate exactly 50 hex characters (25 bytes) for the part after the underscore
-    let mut rng = rand::rng();
-    let mut bytes = [0u8; 25];
-    rng.fill_bytes(&mut bytes);
-    let mut hex_string = String::with_capacity(50);
-    for b in &bytes {
-        // Writing to a String is infallible; discard the always-Ok result.
-        let _ = write!(hex_string, "{b:02x}");
-    }
+    let hex_string = random_hex_id();
 
     let prefix = match item_type {
         "message" => "msg",
