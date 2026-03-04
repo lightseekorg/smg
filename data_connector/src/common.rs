@@ -125,18 +125,19 @@ pub(super) fn parse_conversation_metadata(
     }
 }
 
-pub(super) fn parse_raw_response(raw: Option<String>) -> Result<Value, String> {
+fn parse_json_or(raw: Option<String>, default: Value) -> Result<Value, String> {
     match raw {
         Some(s) if !s.is_empty() => serde_json::from_str(&s).map_err(|e| e.to_string()),
-        _ => Ok(Value::Null),
+        _ => Ok(default),
     }
 }
 
+pub(super) fn parse_raw_response(raw: Option<String>) -> Result<Value, String> {
+    parse_json_or(raw, Value::Null)
+}
+
 pub(super) fn parse_json_value(raw: Option<String>) -> Result<Value, String> {
-    match raw {
-        Some(s) if !s.is_empty() => serde_json::from_str(&s).map_err(|e| e.to_string()),
-        _ => Ok(Value::Array(vec![])),
-    }
+    parse_json_or(raw, Value::Array(vec![]))
 }
 
 #[cfg(test)]
