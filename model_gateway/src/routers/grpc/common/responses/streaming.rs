@@ -352,6 +352,14 @@ impl ResponseStreamEventEmitter {
         })
     }
 
+    /// Convert tool entries to JSON values using the shared `build_mcp_tool_infos` bridge.
+    fn tool_entries_to_json(tools: &[mcp::ToolEntry]) -> Vec<serde_json::Value> {
+        mcp::build_mcp_tool_infos(tools)
+            .into_iter()
+            .filter_map(|info| serde_json::to_value(info).ok())
+            .collect()
+    }
+
     /// Helper to add optional fields to JSON object
     fn add_optional_field<T: serde::Serialize>(
         obj: &mut serde_json::Value,
@@ -380,16 +388,7 @@ impl ResponseStreamEventEmitter {
         output_index: usize,
         tools: &[mcp::ToolEntry],
     ) -> serde_json::Value {
-        let tool_items: Vec<_> = tools
-            .iter()
-            .map(|entry| {
-                json!({
-                    "name": &entry.tool.name,
-                    "description": &entry.tool.description,
-                    "input_schema": serde_json::Value::Object((*entry.tool.input_schema).clone())
-                })
-            })
-            .collect();
+        let tool_items = Self::tool_entries_to_json(tools);
 
         json!({
             "type": McpEvent::LIST_TOOLS_COMPLETED,
@@ -928,16 +927,7 @@ impl ResponseStreamEventEmitter {
         let (output_index, item_id) = self.allocate_output_index(OutputItemType::McpListTools);
 
         // Build per-tool JSON items
-        let tool_items: Vec<_> = tools
-            .iter()
-            .map(|entry| {
-                json!({
-                    "name": entry.tool.name,
-                    "description": entry.tool.description,
-                    "input_schema": serde_json::Value::Object((*entry.tool.input_schema).clone())
-                })
-            })
-            .collect();
+        let tool_items = Self::tool_entries_to_json(tools);
 
         // In-progress item (empty tools)
         let item_in_progress = json!({
