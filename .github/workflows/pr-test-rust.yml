@@ -307,6 +307,7 @@ jobs:
               - 'e2e_test/fixtures/**'
               - 'Cargo.lock'
               - '.github/actions/**'
+              - '.github/workflows/pr-test-rust.yml'
             chat-completions:
               - 'tokenizer/**'
               - 'tool_parser/**'
@@ -403,12 +404,14 @@ jobs:
     name: ${{ matrix.name }}
     needs: [build-wheel, detect-changes]
     if: >-
-      !cancelled()
+      always()
+      && !cancelled()
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          || needs.detect-changes.outputs.common == 'true'
-          || needs.detect-changes.outputs.chat-completions == 'true')
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.chat-completions == 'true')))
     permissions:
       contents: read
     strategy:
@@ -475,12 +478,14 @@ jobs:
     name: ${{ matrix.name }}
     needs: [build-wheel, detect-changes]
     if: >-
-      !cancelled()
+      always()
+      && !cancelled()
       && needs.build-wheel.result == 'success'
       && github.actor != 'dependabot[bot]'
       && (github.event_name != 'pull_request'
-          || needs.detect-changes.outputs.common == 'true'
-          || needs.detect-changes.outputs.agentic == 'true')
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.agentic == 'true')))
     permissions:
       contents: read
     strategy:
