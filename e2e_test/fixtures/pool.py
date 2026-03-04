@@ -220,9 +220,10 @@ def model_client(
         api_key="not-used",
     )
 
-    yield client
-
-    instance.release()
+    try:
+        yield client
+    finally:
+        instance.release()
 
 
 @pytest.fixture
@@ -238,6 +239,7 @@ def model_base_url(
     """
     instance = _get_model_instance(request, model_pool, "model_base_url")
 
-    yield instance.base_url
-
-    instance.release()
+    try:
+        yield instance.base_url
+    finally:
+        instance.release()

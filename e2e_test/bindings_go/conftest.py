@@ -242,19 +242,26 @@ def go_oai_server(
 
     cmd = [str(go_oai_binary)]
 
-    process = subprocess.Popen(
-        cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
     try:
+        process = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
         # Wait for server to start
         try:
             wait_for_health(f"http://localhost:{oai_port}", timeout=30.0, check_interval=0.5)
         except TimeoutError:
-            stdout, stderr = process.communicate(timeout=5)
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                terminate_process(process, timeout=10)
+                pytest.fail(
+                    f"Go OAI server failed to start and did not exit cleanly.\n"
+                    f"Command: {' '.join(cmd)}"
+                )
             pytest.fail(
                 f"Go OAI server failed to start.\n"
                 f"Command: {' '.join(cmd)}\n"
@@ -328,19 +335,26 @@ def go_oai_server_multi(
 
     cmd = [str(go_oai_binary)]
 
-    process = subprocess.Popen(
-        cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
     try:
+        process = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
         # Wait for server to start
         try:
             wait_for_health(f"http://localhost:{oai_port}", timeout=60.0, check_interval=0.5)
         except TimeoutError:
-            stdout, stderr = process.communicate(timeout=5)
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                terminate_process(process, timeout=10)
+                pytest.fail(
+                    f"Go OAI server failed to start and did not exit cleanly.\n"
+                    f"Command: {' '.join(cmd)}"
+                )
             pytest.fail(
                 f"Go OAI server failed to start.\n"
                 f"Command: {' '.join(cmd)}\n"
