@@ -63,7 +63,9 @@ struct Args {
     event_blocks: usize,
 
     /// Number of synthetic conversation sessions.
-    #[arg(long, default_value_t = 1000)]
+    /// Higher values generate more total blocks, needed to saturate the indexer.
+    /// With 200K sessions × 5 turns × (128 + 64) blocks = 192M total blocks.
+    #[arg(long, default_value_t = 200_000)]
     num_sessions: usize,
 
     /// Turns per session (multi-turn conversation depth).
@@ -83,11 +85,11 @@ struct Args {
     no_sweep: bool,
 
     /// Minimum sweep duration in milliseconds.
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 10)]
     sweep_min_ms: u64,
 
     /// Number of sweep steps.
-    #[arg(long, default_value_t = 15)]
+    #[arg(long, default_value_t = 20)]
     sweep_steps: usize,
 
     /// Count event blocks in throughput (for multi-threaded indexers).
@@ -387,28 +389,14 @@ async fn run_sweep(args: &Args, base_traces: &[Vec<TimedEntry>]) {
     let durations_high_to_low: Vec<u64> = durations.into_iter().rev().collect();
 
     let mut results: Vec<(u64, BenchmarkResults)> = Vec::new();
-    let mut consecutive_keeping_up = 0u32;
 
     for &dur_ms in &durations_high_to_low {
         println!("\n--- Sweep: benchmark_duration_ms = {dur_ms} ---");
 
         let traces = rescale_traces(base_traces, dur_ms);
         let result = run_benchmark(args, &traces).await;
-
-        let keeping_up = result.block_throughput >= result.offered_block_throughput * 0.95;
-        if keeping_up {
-            consecutive_keeping_up += 1;
-        } else {
-            consecutive_keeping_up = 0;
-        }
-
         print_results(&result);
         results.push((dur_ms, result));
-
-        if consecutive_keeping_up >= 5 {
-            println!("Early stop: achieved >= 95% offered for 5 consecutive steps");
-            break;
-        }
     }
 
     println!("\n{}", "=".repeat(80));
