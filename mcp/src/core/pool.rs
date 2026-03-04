@@ -113,26 +113,11 @@ impl McpConnectionPool {
 
     /// Create pool with defaults (200 connections, proxy from env).
     pub fn new() -> Self {
-        let cache_cap = std::num::NonZeroUsize::new(Self::DEFAULT_MAX_CONNECTIONS)
-            .unwrap_or(std::num::NonZeroUsize::MIN);
-        Self {
-            connections: Arc::new(Mutex::new(LruCache::new(cache_cap))),
-            max_connections: Self::DEFAULT_MAX_CONNECTIONS,
-            global_proxy: McpProxyConfig::from_env(),
-            eviction_callback: None,
-        }
+        Self::with_full_config(Self::DEFAULT_MAX_CONNECTIONS, McpProxyConfig::from_env())
     }
 
     pub fn with_capacity(max_connections: usize) -> Self {
-        let max_connections = max_connections.max(1);
-        let cache_cap =
-            std::num::NonZeroUsize::new(max_connections).unwrap_or(std::num::NonZeroUsize::MIN);
-        Self {
-            connections: Arc::new(Mutex::new(LruCache::new(cache_cap))),
-            max_connections,
-            global_proxy: McpProxyConfig::from_env(),
-            eviction_callback: None,
-        }
+        Self::with_full_config(max_connections, McpProxyConfig::from_env())
     }
 
     pub fn with_full_config(max_connections: usize, global_proxy: Option<McpProxyConfig>) -> Self {
