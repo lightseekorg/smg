@@ -37,7 +37,7 @@ pub const XXH3_SEED: u64 = 1337;
 /// Default DashMap uses num_cpus * 4 shards (e.g., 512 on 128-core machines),
 /// which wastes memory and pollutes caches when most shards are empty.
 /// Index map is the hot path with many entries; worker maps are small (≤500 entries).
-const INDEX_SHARD_COUNT: usize = 32;
+const INDEX_SHARD_COUNT: usize = 64;
 const WORKER_SHARD_COUNT: usize = 8;
 
 /// Position-independent content hash of tokens within a single block.
@@ -275,10 +275,7 @@ impl PositionalIndexer {
         assert!(jump_size > 0, "jump_size must be greater than 0");
         Self {
             index: DashMap::with_hasher_and_shard_amount(FxBuildHasher, INDEX_SHARD_COUNT),
-            worker_blocks: DashMap::with_hasher_and_shard_amount(
-                FxBuildHasher,
-                WORKER_SHARD_COUNT,
-            ),
+            worker_blocks: DashMap::with_hasher_and_shard_amount(FxBuildHasher, WORKER_SHARD_COUNT),
             tree_sizes: DashMap::with_hasher_and_shard_amount(FxBuildHasher, WORKER_SHARD_COUNT),
             worker_to_id: DashMap::with_hasher_and_shard_amount(FxBuildHasher, WORKER_SHARD_COUNT),
             next_worker_id: AtomicU32::new(0),
