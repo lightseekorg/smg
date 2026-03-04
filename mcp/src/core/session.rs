@@ -24,6 +24,9 @@ use crate::{
     transform::ResponseFormat,
 };
 
+/// Default user-facing label for MCP servers when no explicit label is provided.
+pub const DEFAULT_SERVER_LABEL: &str = "mcp";
+
 /// Named pair of `(label, server_key)` for a connected MCP server.
 ///
 /// Replaces the opaque `(String, String)` tuple that was threaded through
@@ -235,7 +238,7 @@ impl<'a> McpToolSession<'a> {
             .all_mcp_servers
             .first()
             .map(|b| b.label.as_str())
-            .unwrap_or("mcp");
+            .unwrap_or(DEFAULT_SERVER_LABEL);
 
         self.exposed_name_map
             .get(tool_name)
@@ -478,9 +481,9 @@ mod tests {
         let orchestrator = McpOrchestrator::new_test();
         let session = McpToolSession::new(&orchestrator, vec![], "test-request");
 
-        // No servers, should fall back to "mcp"
+        // No servers, should fall back to DEFAULT_SERVER_LABEL
         let label = session.resolve_tool_server_label("nonexistent_tool");
-        assert_eq!(label, "mcp");
+        assert_eq!(label, DEFAULT_SERVER_LABEL);
     }
 
     #[test]
