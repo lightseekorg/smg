@@ -209,7 +209,7 @@ impl<'a> McpToolSession<'a> {
                 .all_mcp_servers
                 .first()
                 .map(|b| b.label.clone())
-                .unwrap_or_else(|| "mcp".to_string());
+                .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
             let err = format!("Tool '{invoked_name}' is not in this session's exposed tool map");
             ToolExecutionOutput {
                 call_id: input.call_id,
