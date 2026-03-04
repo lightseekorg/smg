@@ -33,11 +33,12 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 /// Seed for XXH3 hashing.
 pub const XXH3_SEED: u64 = 1337;
 
-/// Shard counts for DashMaps to balance concurrency vs memory/cache overhead.
+/// Shard count for worker-keyed DashMaps (worker_blocks, tree_sizes, worker_to_id).
 /// Default DashMap uses num_cpus * 4 shards (e.g., 512 on 128-core machines),
-/// which wastes memory and pollutes caches when most shards are empty.
-/// Index map is the hot path with many entries; worker maps are small (≤500 entries).
-const INDEX_SHARD_COUNT: usize = 64;
+/// which wastes memory when most shards are empty. These maps hold at most ~500
+/// entries (one per worker), so 8 shards is sufficient.
+/// The index DashMap keeps the default — it's the hot path with many entries and
+/// benefits from high shard counts to avoid contention under concurrent reads+writes.
 const WORKER_SHARD_COUNT: usize = 8;
 
 /// Position-independent content hash of tokens within a single block.
@@ -274,7 +275,7 @@ impl PositionalIndexer {
     pub fn new(jump_size: usize) -> Self {
         assert!(jump_size > 0, "jump_size must be greater than 0");
         Self {
-            index: DashMap::with_hasher_and_shard_amount(FxBuildHasher, INDEX_SHARD_COUNT),
+            index: DashMap::with_hasher(FxBuildHasher),
             worker_blocks: DashMap::with_hasher_and_shard_amount(FxBuildHasher, WORKER_SHARD_COUNT),
             tree_sizes: DashMap::with_hasher_and_shard_amount(FxBuildHasher, WORKER_SHARD_COUNT),
             worker_to_id: DashMap::with_hasher_and_shard_amount(FxBuildHasher, WORKER_SHARD_COUNT),
