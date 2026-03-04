@@ -19,7 +19,7 @@ mod token_tree;
 pub use common::{MatchResult, TenantId};
 pub use event_tree::{
     compute_content_hash, compute_request_content_hashes, ApplyError, ContentHash, OverlapScores,
-    PositionalIndexer, SequenceHash, StoredBlock, WorkerId,
+    PositionalIndexer, SequenceHash, StoredBlock, WorkerBlockMap, WorkerId,
 };
 // Re-export under names matching old tree.rs API for easier migration
 pub use string_tree::Tree;

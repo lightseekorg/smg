@@ -13,7 +13,9 @@
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use dashmap::DashMap;
-use kv_index::{compute_content_hash, ApplyError, PositionalIndexer, SequenceHash, StoredBlock};
+use kv_index::{
+    compute_content_hash, ApplyError, PositionalIndexer, SequenceHash, StoredBlock, WorkerBlockMap,
+};
 use smg_grpc_client::common_proto::{
     kv_cache_event, KvBlock, KvBlocksRemoved, KvBlocksStored, KvCacheEvent, KvEventBatch,
 };
@@ -239,6 +241,8 @@ impl KvEventMonitor {
         worker_url: String,
         indexer: Arc<PositionalIndexer>,
     ) {
+        let worker_id = indexer.intern_worker(&worker_url);
+        let mut wb = WorkerBlockMap::default();
         let mut last_seq: u64 = 0;
         let mut reconnect_delay_ms = INITIAL_RECONNECT_DELAY_MS;
 
@@ -306,7 +310,7 @@ impl KvEventMonitor {
                 }
             };
 
-            match Self::process_stream(stream, &worker_url, &indexer, &mut last_seq).await {
+            match Self::process_stream(stream, &worker_url, worker_id, &indexer, &mut wb, &mut last_seq).await {
                 StreamResult::Ended => {
                     info!(
                         worker_url = %worker_url,
@@ -351,7 +355,9 @@ impl KvEventMonitor {
     async fn process_stream(
         mut stream: tonic::Streaming<KvEventBatch>,
         worker_url: &str,
+        worker_id: u32,
         indexer: &PositionalIndexer,
+        wb: &mut WorkerBlockMap,
         last_seq: &mut u64,
     ) -> StreamResult {
         use tokio_stream::StreamExt;
@@ -382,7 +388,7 @@ impl KvEventMonitor {
             }
 
             for event in &batch.events {
-                Self::apply_event(event, worker_url, indexer);
+                Self::apply_event(event, worker_url, worker_id, indexer, wb);
             }
 
             *last_seq = batch.sequence_number;
@@ -392,35 +398,47 @@ impl KvEventMonitor {
     }
 
     /// Apply a single KV cache event to the indexer.
-    fn apply_event(event: &KvCacheEvent, worker_url: &str, indexer: &PositionalIndexer) {
+    fn apply_event(
+        event: &KvCacheEvent,
+        worker_url: &str,
+        worker_id: u32,
+        indexer: &PositionalIndexer,
+        wb: &mut WorkerBlockMap,
+    ) {
         let Some(ref data) = event.data else {
             return;
         };
 
         match data {
             kv_cache_event::Data::Stored(stored) => {
-                Self::apply_stored(stored, worker_url, indexer);
+                Self::apply_stored(stored, worker_url, worker_id, indexer, wb);
             }
             kv_cache_event::Data::Removed(removed) => {
-                Self::apply_removed(removed, worker_url, indexer);
+                Self::apply_removed(removed, worker_id, indexer, wb);
             }
             kv_cache_event::Data::Cleared(_) => {
-                indexer.apply_cleared(worker_url);
+                indexer.apply_cleared(wb, worker_id);
             }
         }
     }
 
     /// Convert proto `KvBlocksStored` and apply to the indexer.
-    fn apply_stored(stored: &KvBlocksStored, worker_url: &str, indexer: &PositionalIndexer) {
+    fn apply_stored(
+        stored: &KvBlocksStored,
+        worker_url: &str,
+        worker_id: u32,
+        indexer: &PositionalIndexer,
+        wb: &mut WorkerBlockMap,
+    ) {
         let blocks: Vec<StoredBlock> = stored.blocks.iter().map(convert_kv_block).collect();
 
         let parent_seq_hash = stored.parent_block_hash.map(SequenceHash::from);
 
-        match indexer.apply_stored(worker_url, &blocks, parent_seq_hash) {
+        match indexer.apply_stored(wb, worker_id, &blocks, parent_seq_hash) {
             Ok(()) => {}
             Err(ApplyError::WorkerNotTracked | ApplyError::ParentBlockNotFound) => {
                 // Cold start or parent evicted — retry without parent to start a new chain.
-                if let Err(e) = indexer.apply_stored(worker_url, &blocks, None) {
+                if let Err(e) = indexer.apply_stored(wb, worker_id, &blocks, None) {
                     warn!(
                         worker_url = %worker_url,
                         error = %e,
@@ -432,14 +450,19 @@ impl KvEventMonitor {
     }
 
     /// Convert proto `KvBlocksRemoved` and apply to the indexer.
-    fn apply_removed(removed: &KvBlocksRemoved, worker_url: &str, indexer: &PositionalIndexer) {
+    fn apply_removed(
+        removed: &KvBlocksRemoved,
+        worker_id: u32,
+        indexer: &PositionalIndexer,
+        wb: &mut WorkerBlockMap,
+    ) {
         let seq_hashes: Vec<SequenceHash> = removed
             .block_hashes
             .iter()
             .map(|&h| SequenceHash::from(h))
             .collect();
 
-        indexer.apply_removed(worker_url, &seq_hashes);
+        indexer.apply_removed(wb, worker_id, &seq_hashes);
     }
 }
 
@@ -527,6 +550,8 @@ mod tests {
     #[test]
     fn test_apply_stored_no_parent() {
         let indexer = PositionalIndexer::new(64);
+        let mut wb = WorkerBlockMap::default();
+        let w1 = indexer.intern_worker("http://w1:8000");
         let stored = KvBlocksStored {
             blocks: vec![
                 KvBlock {
@@ -547,13 +572,15 @@ mod tests {
             parent_block_hash: None,
         };
 
-        KvEventMonitor::apply_stored(&stored, "http://w1:8000", &indexer);
+        KvEventMonitor::apply_stored(&stored, "http://w1:8000", w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 2);
     }
 
     #[test]
     fn test_apply_stored_with_parent() {
         let indexer = PositionalIndexer::new(64);
+        let mut wb = WorkerBlockMap::default();
+        let w1 = indexer.intern_worker("http://w1:8000");
 
         let stored1 = KvBlocksStored {
             blocks: vec![KvBlock {
@@ -565,7 +592,7 @@ mod tests {
             }],
             parent_block_hash: None,
         };
-        KvEventMonitor::apply_stored(&stored1, "http://w1:8000", &indexer);
+        KvEventMonitor::apply_stored(&stored1, "http://w1:8000", w1, &indexer, &mut wb);
 
         let stored2 = KvBlocksStored {
             blocks: vec![KvBlock {
@@ -577,13 +604,15 @@ mod tests {
             }],
             parent_block_hash: Some(1),
         };
-        KvEventMonitor::apply_stored(&stored2, "http://w1:8000", &indexer);
+        KvEventMonitor::apply_stored(&stored2, "http://w1:8000", w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 2);
     }
 
     #[test]
     fn test_apply_stored_fallback_on_worker_not_tracked() {
         let indexer = PositionalIndexer::new(64);
+        let mut wb = WorkerBlockMap::default();
+        let w1 = indexer.intern_worker("http://new-worker:8000");
 
         // Pass parent_block_hash for an untracked worker — should fallback to no parent.
         let stored = KvBlocksStored {
@@ -596,13 +625,15 @@ mod tests {
             }],
             parent_block_hash: Some(999),
         };
-        KvEventMonitor::apply_stored(&stored, "http://new-worker:8000", &indexer);
+        KvEventMonitor::apply_stored(&stored, "http://new-worker:8000", w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 1);
     }
 
     #[test]
     fn test_apply_removed() {
         let indexer = PositionalIndexer::new(64);
+        let mut wb = WorkerBlockMap::default();
+        let w1 = indexer.intern_worker("http://w1:8000");
 
         let stored = KvBlocksStored {
             blocks: vec![
@@ -623,19 +654,21 @@ mod tests {
             ],
             parent_block_hash: None,
         };
-        KvEventMonitor::apply_stored(&stored, "http://w1:8000", &indexer);
+        KvEventMonitor::apply_stored(&stored, "http://w1:8000", w1, &indexer, &mut wb);
 
         let removed = KvBlocksRemoved {
             block_hashes: vec![2],
             cache_level: None,
         };
-        KvEventMonitor::apply_removed(&removed, "http://w1:8000", &indexer);
+        KvEventMonitor::apply_removed(&removed, w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 1);
     }
 
     #[test]
     fn test_apply_cleared_event() {
         let indexer = PositionalIndexer::new(64);
+        let mut wb = WorkerBlockMap::default();
+        let w1 = indexer.intern_worker("http://w1:8000");
 
         let stored = KvBlocksStored {
             blocks: vec![KvBlock {
@@ -647,16 +680,18 @@ mod tests {
             }],
             parent_block_hash: None,
         };
-        KvEventMonitor::apply_stored(&stored, "http://w1:8000", &indexer);
+        KvEventMonitor::apply_stored(&stored, "http://w1:8000", w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 1);
 
-        indexer.apply_cleared("http://w1:8000");
+        indexer.apply_cleared(&mut wb, w1);
         assert_eq!(indexer.current_size(), 0);
     }
 
     #[test]
     fn test_apply_event_dispatch_stored() {
         let indexer = PositionalIndexer::new(64);
+        let mut wb = WorkerBlockMap::default();
+        let w1 = indexer.intern_worker("http://w1:8000");
         let event = KvCacheEvent {
             event_id: 1,
             data: Some(kv_cache_event::Data::Stored(KvBlocksStored {
@@ -671,13 +706,15 @@ mod tests {
             })),
         };
 
-        KvEventMonitor::apply_event(&event, "http://w1:8000", &indexer);
+        KvEventMonitor::apply_event(&event, "http://w1:8000", w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 1);
     }
 
     #[test]
     fn test_apply_event_dispatch_removed() {
         let indexer = PositionalIndexer::new(64);
+        let mut wb = WorkerBlockMap::default();
+        let w1 = indexer.intern_worker("http://w1:8000");
 
         // Store first
         let stored_event = KvCacheEvent {
@@ -693,7 +730,7 @@ mod tests {
                 parent_block_hash: None,
             })),
         };
-        KvEventMonitor::apply_event(&stored_event, "http://w1:8000", &indexer);
+        KvEventMonitor::apply_event(&stored_event, "http://w1:8000", w1, &indexer, &mut wb);
 
         // Remove
         let removed_event = KvCacheEvent {
@@ -703,13 +740,15 @@ mod tests {
                 cache_level: None,
             })),
         };
-        KvEventMonitor::apply_event(&removed_event, "http://w1:8000", &indexer);
+        KvEventMonitor::apply_event(&removed_event, "http://w1:8000", w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 0);
     }
 
     #[test]
     fn test_apply_event_dispatch_cleared() {
         let indexer = PositionalIndexer::new(64);
+        let mut wb = WorkerBlockMap::default();
+        let w1 = indexer.intern_worker("http://w1:8000");
 
         // Store first
         KvEventMonitor::apply_event(
@@ -727,7 +766,9 @@ mod tests {
                 })),
             },
             "http://w1:8000",
+            w1,
             &indexer,
+            &mut wb,
         );
 
         // Clear
@@ -739,7 +780,9 @@ mod tests {
                 )),
             },
             "http://w1:8000",
+            w1,
             &indexer,
+            &mut wb,
         );
         assert_eq!(indexer.current_size(), 0);
     }
@@ -747,11 +790,13 @@ mod tests {
     #[test]
     fn test_apply_event_no_data() {
         let indexer = PositionalIndexer::new(64);
+        let mut wb = WorkerBlockMap::default();
+        let w1 = indexer.intern_worker("http://w1:8000");
         let event = KvCacheEvent {
             event_id: 1,
             data: None,
         };
-        KvEventMonitor::apply_event(&event, "http://w1:8000", &indexer);
+        KvEventMonitor::apply_event(&event, "http://w1:8000", w1, &indexer, &mut wb);
         assert_eq!(indexer.current_size(), 0);
     }
 
