@@ -6,6 +6,10 @@ conversations:
   table: CONVERSATIONS
   columns:
     id: CONVERSATION_ID
+  extra_columns:
+    EXPIRES_AT:
+      sql_type: "TIMESTAMP WITH TIME ZONE"
+      default_value: "2099-12-31T23:59:59Z"
 
 responses:
   table: RESPONSES
