@@ -173,11 +173,7 @@ impl<'a> McpToolSession<'a> {
     /// All tools are dispatched at once via `futures::future::join_all`,
     /// which preserves the original input ordering in the returned `Vec`.
     pub async fn execute_tools(&self, inputs: Vec<ToolExecutionInput>) -> Vec<ToolExecutionOutput> {
-        let futures: Vec<_> = inputs
-            .into_iter()
-            .map(|input| self.execute_tool(input))
-            .collect();
-        futures::future::join_all(futures).await
+        futures::future::join_all(inputs.into_iter().map(|input| self.execute_tool(input))).await
     }
 
     /// Execute a single tool using this session's exposed-name mapping.
