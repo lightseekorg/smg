@@ -379,6 +379,7 @@ jobs:
     runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
     timeout-minutes: ${{ matrix.timeout }}
     steps:
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/run-e2e
         with:
           setup_vllm: ${{ matrix.setup_vllm }}
@@ -453,6 +454,7 @@ jobs:
     runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
     timeout-minutes: ${{ matrix.timeout }}
     steps:
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/run-e2e
         with:
           setup_vllm: ${{ matrix.setup_vllm }}
@@ -498,6 +500,7 @@ jobs:
     runs-on: k8s-runner-gpu
     timeout-minutes: ${{ matrix.timeout }}
     steps:
+      - uses: actions/checkout@v6
       - uses: ./.github/actions/run-e2e
         with:
           test_dirs: ${{ matrix.test_dirs }}

@@ -42,9 +42,6 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - name: Checkout code
-      uses: actions/checkout@v6
-
     - name: Check shared services
       if: inputs.setup_agentic_deps == 'true'
       shell: bash
