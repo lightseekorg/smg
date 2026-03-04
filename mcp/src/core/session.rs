@@ -14,6 +14,7 @@ use openai_protocol::responses::ResponseTool;
 use super::orchestrator::{
     McpOrchestrator, McpRequestContext, ToolExecutionInput, ToolExecutionOutput,
 };
+use super::UNKNOWN_SERVER_KEY;
 use crate::{
     approval::ApprovalMode,
     inventory::{QualifiedToolName, ToolEntry},
@@ -220,7 +221,7 @@ impl<'a> McpToolSession<'a> {
                 tool_name: invoked_name.clone(),
                 invoked_tool_name: Some(invoked_name),
                 resolved_tool_name: None,
-                server_key: "unknown".to_string(),
+                server_key: UNKNOWN_SERVER_KEY.to_string(),
                 server_label: fallback_label,
                 arguments_str: input.arguments.to_string(),
                 output: serde_json::json!({ "error": &err }),
