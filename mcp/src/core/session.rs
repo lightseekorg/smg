@@ -205,8 +205,6 @@ impl<'a> McpToolSession<'a> {
                 )
                 .await;
 
-            output.invoked_tool_name = Some(invoked_name.clone());
-            output.resolved_tool_name = Some(resolved_tool_name);
             output.tool_name = invoked_name;
             output
         } else {
@@ -220,8 +218,6 @@ impl<'a> McpToolSession<'a> {
             ToolExecutionOutput {
                 call_id: input.call_id,
                 tool_name: invoked_name.clone(),
-                invoked_tool_name: Some(invoked_name),
-                resolved_tool_name: None,
                 server_key: UNKNOWN_SERVER_KEY.to_string(),
                 server_label: fallback_label,
                 arguments_str: input.arguments.to_string(),

@@ -229,14 +229,6 @@ pub struct ToolExecutionOutput {
     ///
     /// This is the display name used for response transformation/output.
     pub tool_name: String,
-    /// Tool name received from the caller/model before resolution.
-    ///
-    /// When no aliasing is used, this is typically the same as `tool_name`.
-    pub invoked_tool_name: Option<String>,
-    /// Canonical MCP tool name resolved for execution.
-    ///
-    /// When no aliasing is used, this is typically the same as `tool_name`.
-    pub resolved_tool_name: Option<String>,
     /// Server key where the tool was executed (internal identifier, may be URL).
     pub server_key: String,
     /// User-facing server label for API responses.
@@ -967,8 +959,6 @@ impl McpOrchestrator {
         ToolExecutionOutput {
             call_id: input.call_id,
             tool_name: input.tool_name,
-            invoked_tool_name: None,
-            resolved_tool_name: None,
             server_key: server_key.to_string(),
             server_label: server_label.to_string(),
             arguments_str,
