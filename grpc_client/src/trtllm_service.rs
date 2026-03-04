@@ -9,8 +9,11 @@ use std::{
 };
 
 use openai_protocol::{
-    chat::ChatCompletionRequest, common::ResponseFormat, generate::GenerateRequest,
-    responses::ResponsesRequest, sampling_params::SamplingParams as GenerateSamplingParams,
+    chat::ChatCompletionRequest,
+    common::{ResponseFormat, StringOrArray},
+    generate::GenerateRequest,
+    responses::ResponsesRequest,
+    sampling_params::SamplingParams as GenerateSamplingParams,
 };
 use tonic::{transport::Channel, Request, Streaming};
 use tracing::{debug, warn};
@@ -284,9 +287,7 @@ impl TrtllmServiceClient {
         // Build guided decoding params if needed
         let guided_decoding = Self::build_guided_decoding_from_chat(body, tool_call_constraint)?;
 
-        // Stop words are injected by the router after building (via tokenization),
-        // since TRT-LLM requires tokenized stop sequences (Vec<TokenSequence>).
-        let stop_words = vec![];
+        let stop = Self::extract_stop_strings(body);
 
         let max_tokens = body.max_completion_tokens.unwrap_or(2048);
 
@@ -301,10 +302,11 @@ impl TrtllmServiceClient {
             output_config: Some(output_config),
             max_tokens,
             streaming: body.stream,
-            end_id: None,
-            pad_id: None,
-            bad_words: vec![],
-            stop_words,
+            stop,
+            stop_token_ids: vec![],
+            ignore_eos: false,
+            bad: vec![],
+            bad_token_ids: vec![],
             guided_decoding,
             embedding_bias: vec![],
             lora_config: None,
@@ -364,6 +366,13 @@ impl TrtllmServiceClient {
             .and_then(|p| p.max_new_tokens)
             .unwrap_or(2048);
 
+        // Extract stop strings from sampling params
+        let stop = match body.sampling_params.as_ref().and_then(|p| p.stop.as_ref()) {
+            Some(StringOrArray::String(s)) => vec![s.clone()],
+            Some(StringOrArray::Array(arr)) => arr.clone(),
+            None => vec![],
+        };
+
         let grpc_request = proto::GenerateRequest {
             request_id,
             tokenized: Some(proto::TokenizedInput {
@@ -375,10 +384,11 @@ impl TrtllmServiceClient {
             output_config: Some(output_config),
             max_tokens,
             streaming: body.stream,
-            end_id: None,
-            pad_id: None,
-            bad_words: vec![],
-            stop_words: vec![],
+            stop,
+            stop_token_ids: vec![],
+            ignore_eos: false,
+            bad: vec![],
+            bad_token_ids: vec![],
             guided_decoding,
             embedding_bias: vec![],
             lora_config: None,
@@ -434,10 +444,11 @@ impl TrtllmServiceClient {
             output_config: Some(output_config),
             max_tokens,
             streaming: body.stream.unwrap_or(false),
-            end_id: None,
-            pad_id: None,
-            bad_words: vec![],
-            stop_words: vec![],
+            stop: vec![],
+            stop_token_ids: vec![],
+            ignore_eos: false,
+            bad: vec![],
+            bad_token_ids: vec![],
             guided_decoding,
             embedding_bias: vec![],
             lora_config: None,
@@ -451,6 +462,15 @@ impl TrtllmServiceClient {
         };
 
         Ok(grpc_request)
+    }
+
+    /// Extract stop strings from a ChatCompletionRequest
+    fn extract_stop_strings(request: &ChatCompletionRequest) -> Vec<String> {
+        match &request.stop {
+            Some(StringOrArray::String(s)) => vec![s.clone()],
+            Some(StringOrArray::Array(arr)) => arr.clone(),
+            None => vec![],
+        }
     }
 
     /// Build SamplingConfig from ChatCompletionRequest

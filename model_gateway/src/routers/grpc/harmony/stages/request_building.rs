@@ -263,16 +263,10 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                     }
                 }
                 ProtoGenerateRequest::Trtllm(req) => {
-                    // TensorRT-LLM uses stop_words (repeated TokenSequence) instead of stop_token_ids
-                    use smg_grpc_client::trtllm_proto::TokenSequence;
-                    for &token_id in harmony_stops {
-                        req.stop_words.push(TokenSequence {
-                            token_ids: vec![token_id],
-                        });
-                    }
+                    req.stop_token_ids.extend_from_slice(harmony_stops);
                     debug!(
                         stop_token_count = harmony_stops.len(),
-                        "Injected Harmony stop tokens into TensorRT-LLM stop_words"
+                        "Injected Harmony stop tokens into TensorRT-LLM stop_token_ids"
                     );
                 }
             }

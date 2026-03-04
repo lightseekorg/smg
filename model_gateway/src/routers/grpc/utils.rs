@@ -23,7 +23,6 @@ use reasoning_parser::{
     ParserFactory as ReasoningParserFactory, PooledParser as ReasoningPooledParser, ReasoningParser,
 };
 use serde_json::{json, Map, Value};
-use smg_grpc_client::trtllm_proto::{GenerateRequest as TrtllmGenerateRequest, TokenSequence};
 use tokio::sync::mpsc;
 use tool_parser::{
     ParserFactory as ToolParserFactory, PooledParser as ToolPooledParser, ToolParser,
@@ -792,34 +791,6 @@ pub(crate) fn get_reasoning_parser(
     } else {
         // Auto-detect based on model
         reasoning_parser_factory.get_pooled(model)
-    }
-}
-
-/// Inject tokenized stop sequences into a TRT-LLM request.
-///
-/// TRT-LLM requires stop words as tokenized `TokenSequence` entries, unlike
-/// SGLang/vLLM which handle stop strings at the client level.
-pub(crate) fn inject_trtllm_stop_words(
-    req: &mut TrtllmGenerateRequest,
-    tokenizer: &dyn Tokenizer,
-    stop: &StringOrArray,
-) {
-    for stop_str in stop.iter().filter(|s| !s.is_empty()) {
-        match tokenizer.encode(stop_str, false) {
-            Ok(encoding) => {
-                let token_ids = encoding.token_ids().to_vec();
-                if !token_ids.is_empty() {
-                    req.stop_words.push(TokenSequence { token_ids });
-                }
-            }
-            Err(e) => {
-                warn!(
-                    stop_string = %stop_str,
-                    error = %e,
-                    "Failed to tokenize stop sequence, skipping"
-                );
-            }
-        }
     }
 }
 

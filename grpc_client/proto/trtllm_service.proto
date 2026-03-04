@@ -80,17 +80,8 @@ message GenerateRequest {
   // Enable streaming mode
   bool streaming = 6;
 
-  // End-of-sequence token ID (optional, set to -1 to ignore EOS)
-  optional int32 end_id = 7;
-
-  // Padding token ID
-  optional int32 pad_id = 8;
-
-  // Bad word token sequences (generation redirects if these are produced)
-  repeated TokenSequence bad_words = 9;
-
-  // Stop word token sequences (generation stops when these are produced)
-  repeated TokenSequence stop_words = 10;
+  reserved 7, 8;   // Removed: end_id, pad_id (resolved by TRT-LLM's _setup())
+  reserved 9, 10;  // Removed: bad_words, stop_words (replaced by string fields below)
 
   // Guided decoding parameters (JSON schema, regex, grammar)
   optional GuidedDecodingParams guided_decoding = 11;
@@ -121,6 +112,21 @@ message GenerateRequest {
 
   // Request arrival time (unix timestamp for metrics)
   optional double arrival_time = 20;
+
+  // Stop strings (TRT-LLM tokenizes these internally via _setup())
+  repeated string stop = 21;
+
+  // Stop token IDs (generation stops when any of these tokens are produced)
+  repeated uint32 stop_token_ids = 22;
+
+  // Ignore end-of-sequence token (continue generating past EOS)
+  bool ignore_eos = 23;
+
+  // Bad word strings (TRT-LLM tokenizes these internally via _setup())
+  repeated string bad = 24;
+
+  // Bad word token IDs (generation avoids producing these tokens)
+  repeated uint32 bad_token_ids = 25;
 }
 
 // Tokenized input from router
@@ -133,11 +139,6 @@ message TokenizedInput {
 
   // Query token IDs for VLM star attention (optional)
   repeated uint32 query_token_ids = 3;
-}
-
-// Sequence of token IDs (for stop/bad words)
-message TokenSequence {
-  repeated uint32 token_ids = 1;
 }
 
 // ============================================================================
