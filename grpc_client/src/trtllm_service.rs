@@ -287,7 +287,7 @@ impl TrtllmServiceClient {
         // Build guided decoding params if needed
         let guided_decoding = Self::build_guided_decoding_from_chat(body, tool_call_constraint)?;
 
-        let stop = Self::extract_stop_strings(body);
+        let stop = Self::extract_stop_strings(body.stop.as_ref());
 
         let max_tokens = body.max_completion_tokens.unwrap_or(2048);
 
@@ -366,12 +366,8 @@ impl TrtllmServiceClient {
             .and_then(|p| p.max_new_tokens)
             .unwrap_or(2048);
 
-        // Extract stop strings from sampling params
-        let stop = match body.sampling_params.as_ref().and_then(|p| p.stop.as_ref()) {
-            Some(StringOrArray::String(s)) => vec![s.clone()],
-            Some(StringOrArray::Array(arr)) => arr.clone(),
-            None => vec![],
-        };
+        let stop =
+            Self::extract_stop_strings(body.sampling_params.as_ref().and_then(|p| p.stop.as_ref()));
 
         let grpc_request = proto::GenerateRequest {
             request_id,
@@ -386,7 +382,11 @@ impl TrtllmServiceClient {
             streaming: body.stream,
             stop,
             stop_token_ids: vec![],
-            ignore_eos: body.sampling_params.as_ref().and_then(|p| p.ignore_eos).unwrap_or(false),
+            ignore_eos: body
+                .sampling_params
+                .as_ref()
+                .and_then(|p| p.ignore_eos)
+                .unwrap_or(false),
             bad: vec![],
             bad_token_ids: vec![],
             guided_decoding,
@@ -464,9 +464,9 @@ impl TrtllmServiceClient {
         Ok(grpc_request)
     }
 
-    /// Extract stop strings from a ChatCompletionRequest
-    fn extract_stop_strings(request: &ChatCompletionRequest) -> Vec<String> {
-        match &request.stop {
+    /// Extract stop strings from an optional StringOrArray
+    fn extract_stop_strings(stop: Option<&StringOrArray>) -> Vec<String> {
+        match stop {
             Some(StringOrArray::String(s)) => vec![s.clone()],
             Some(StringOrArray::Array(arr)) => arr.clone(),
             None => vec![],
