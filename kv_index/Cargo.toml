@@ -22,8 +22,14 @@ tracing = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
+clap = { version = "4", features = ["derive"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 rand = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
+[[bench]]
+name = "throughput_bench"
+harness = false
 
 [lints]
 workspace = true

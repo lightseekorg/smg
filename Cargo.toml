@@ -149,3 +149,8 @@ codegen-units = 1
 [profile.dev-opt]
 inherits = "dev"
 opt-level = 1
+
+[profile.bench]
+opt-level = 3       # Max speed for benchmarks (release uses "z" for size)
+lto = "thin"        # Good balance of speed and compile time
+codegen-units = 1   # Better optimization
