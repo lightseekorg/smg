@@ -24,19 +24,19 @@ fn resolved_name_for_entry<'a>(
         .unwrap_or_else(|| entry.tool_name())
 }
 
-/// Resolved (name, description, input_schema) triples from MCP tool entries.
+/// Resolved (name, description, &input_schema) triples from MCP tool entries.
 ///
 /// This is the shared extraction logic used by the JSON, Chat, and Responses
-/// builder functions so that name-resolution and schema cloning live in one place.
+/// builder functions so that name-resolution lives in one place.  The schema is
+/// returned by reference; callers clone when they need an owned `Value`.
 fn resolved_tool_fields<'a>(
     entries: &'a [ToolEntry],
     exposed_names: Option<&'a std::collections::HashMap<QualifiedToolName, String>>,
-) -> impl Iterator<Item = (&'a str, Option<&'a str>, Value)> + 'a {
+) -> impl Iterator<Item = (&'a str, Option<&'a str>, &'a serde_json::Map<String, Value>)> + 'a {
     entries.iter().map(move |entry| {
         let name = resolved_name_for_entry(entry, exposed_names);
         let description = entry.tool.description.as_deref();
-        let schema = Value::Object((*entry.tool.input_schema).clone());
-        (name, description, schema)
+        (name, description, &*entry.tool.input_schema)
     })
 }
 
@@ -58,7 +58,7 @@ pub fn build_function_tools_json_with_names(
                 "type": "function",
                 "name": name,
                 "description": description,
-                "parameters": parameters
+                "parameters": Value::Object(parameters.clone())
             })
         })
         .collect()
@@ -80,7 +80,7 @@ pub fn build_chat_function_tools_with_names(
             function: Function {
                 name: name.to_string(),
                 description: description.map(|d| d.to_string()),
-                parameters,
+                parameters: Value::Object(parameters.clone()),
                 strict: None,
             },
         })
@@ -106,7 +106,7 @@ pub fn build_response_tools_with_names(
                 function: Function {
                     name: name.to_string(),
                     description: description.map(|d| d.to_string()),
-                    parameters,
+                    parameters: Value::Object(parameters.clone()),
                     strict: None,
                 },
             })
