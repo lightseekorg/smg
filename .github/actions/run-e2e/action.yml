@@ -1,0 +1,128 @@
+name: 'Run E2E Tests'
+description: 'Shared steps for all gateway E2E test jobs.'
+
+inputs:
+  # Backend selection
+  setup_vllm:
+    default: 'false'
+  setup_trtllm:
+    default: 'false'
+  # Test configuration
+  test_dirs:
+    required: true
+  extra_deps:
+    default: ''
+  env_vars:
+    default: ''
+  reruns:
+    default: ''
+  parallel_opts:
+    default: ''
+  ignore_opts:
+    default: ''
+  test_filter:
+    default: ''
+  # Optional features
+  setup_agentic_deps:
+    default: 'false'
+  upload_benchmarks:
+    default: 'false'
+  genai_bench_image:
+    default: ''
+  # Secrets (must be passed explicitly to composite actions)
+  hf_token:
+    default: ''
+  openai_api_key:
+    default: ''
+  xai_api_key:
+    default: ''
+  anthropic_api_key:
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Check shared services
+      if: inputs.setup_agentic_deps == 'true'
+      shell: bash
+      run: bash scripts/ci_agentic_svc_deps.sh check --oracle oracle-db --brave brave-search-mcp
+
+    - name: Setup vLLM backend
+      if: inputs.setup_vllm == 'true'
+      uses: ./.github/actions/setup-vllm
+
+    - name: Setup TRT-LLM backend
+      if: inputs.setup_trtllm == 'true'
+      uses: ./.github/actions/setup-trtllm
+
+    - name: Setup SGLang backend
+      if: inputs.setup_vllm != 'true' && inputs.setup_trtllm != 'true'
+      uses: ./.github/actions/setup-sglang
+
+    - name: Download wheel artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: smg-wheel
+        path: wheel/
+
+    - name: Download WASM test fixtures
+      uses: actions/download-artifact@v8
+      with:
+        name: wasm-test-fixtures
+        path: wasm/tests/fixtures/
+      continue-on-error: true
+
+    - name: Download Python client types
+      uses: actions/download-artifact@v8
+      with:
+        name: python-client-types
+        path: clients/python/smg_client/types/
+
+    - name: Install wheel and test dependencies
+      shell: bash
+      run: |
+        pip uninstall -y smg || true
+        pip install wheel/*.whl
+        bash scripts/ci_install_e2e_deps.sh ${{ inputs.extra_deps }}
+
+    - name: Pull genai-bench image
+      if: inputs.upload_benchmarks == 'true'
+      shell: bash
+      run: docker pull ${{ inputs.genai_bench_image }}
+
+    - name: Setup Oracle
+      if: inputs.setup_agentic_deps == 'true'
+      shell: bash
+      run: |
+        bash scripts/ci_agentic_svc_deps.sh setup-oracle-client
+        bash scripts/ci_agentic_svc_deps.sh create-oracle-user oracle-db
+        bash scripts/ci_agentic_svc_deps.sh create-oracle-flyway-user oracle-db
+
+    - name: Run E2E tests
+      shell: bash
+      env:
+        HF_TOKEN: ${{ inputs.hf_token }}
+        OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+        XAI_API_KEY: ${{ inputs.xai_api_key }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        BRAVE_MCP_HOST: ${{ inputs.setup_agentic_deps == 'true' && 'brave-search-mcp' || '' }}
+      run: |
+        bash scripts/ci_killall_sglang.sh "nuk_gpus"
+        ${{ inputs.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ inputs.reruns }} ${{ inputs.parallel_opts }} ${{ inputs.ignore_opts }} ${{ inputs.test_dirs }} ${{ inputs.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
+
+    - name: Cleanup Oracle test users
+      if: always() && inputs.setup_agentic_deps == 'true'
+      shell: bash
+      run: |
+        bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-flyway-user oracle-db
+        bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-user oracle-db
+
+    - name: Upload benchmark results
+      if: inputs.upload_benchmarks == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: genai-bench-results-all-policies
+        path: benchmark_**/
