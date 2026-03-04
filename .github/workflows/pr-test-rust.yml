@@ -663,7 +663,7 @@ jobs:
   finish:
     needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, detect-changes, e2e-always, e2e-chat-completions, e2e-agentic, go-unit-tests, go-bindings-e2e]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: k8s-runner-cpu
     permissions: {}
     steps:
       - name: Check CI result
