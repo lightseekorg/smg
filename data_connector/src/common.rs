@@ -126,10 +126,9 @@ pub(super) fn parse_conversation_metadata(
 }
 
 fn parse_json_or(raw: Option<String>, default: Value) -> Result<Value, String> {
-    raw.filter(|s| !s.is_empty())
-        .map_or(Ok(default), |s| {
-            serde_json::from_str(&s).map_err(|e| e.to_string())
-        })
+    raw.filter(|s| !s.is_empty()).map_or(Ok(default), |s| {
+        serde_json::from_str(&s).map_err(|e| e.to_string())
+    })
 }
 
 pub(super) fn parse_raw_response(raw: Option<String>) -> Result<Value, String> {
