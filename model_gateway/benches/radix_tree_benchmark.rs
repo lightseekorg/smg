@@ -577,63 +577,90 @@ macro_rules! bench_indexer_match {
     }};
 }
 
-/// Macro for CONCURRENT benchmarks with PositionalIndexer
+/// Macro for CONCURRENT benchmarks with PositionalIndexer.
+///
+/// All setup (indexer creation, population, worker interning, data generation)
+/// happens OUTSIDE the timing loop. Only actual concurrent DashMap operations
+/// (+ thread spawn/join, amortized over `iters`) are timed.
 macro_rules! bench_indexer_concurrent {
     ($group:expr, $num_workers:expr, $block_size:expr, $num_threads:expr, $ops_per_thread:expr) => {{
         let printed = Arc::new(AtomicBool::new(false));
         let bench_name = format!("indexer_concurrent_{}w", $num_workers);
 
+        // === Pre-compute everything OUTSIDE timing ===
+        let workers = generate_worker_endpoints($num_workers);
+        let (indexer, worker_chunks) = build_populated_indexer(&workers, 64, $block_size, 8, 64);
+
+        // Per-thread data: worker_id, pre-computed query hashes, pre-computed write blocks
+        let thread_data: Arc<Vec<_>> = Arc::new(
+            (0..$num_threads)
+                .map(|t| {
+                    let chunks = &worker_chunks[t % workers.len()];
+                    let worker_id = indexer.intern_worker(&workers[t % workers.len()]);
+
+                    // Read data: pre-computed content hashes
+                    let query_tokens = flatten_tokens(chunks);
+                    let content_hashes = compute_request_content_hashes(&query_tokens, $block_size);
+
+                    // Write data: pool of pre-computed blocks + parent hashes
+                    let mut rng = thread_rng();
+                    let write_pool: Vec<(Vec<StoredBlock>, SequenceHash)> = (0..$ops_per_thread)
+                        .map(|_| {
+                            let new_chunks = generate_token_chunks(4, $block_size);
+                            let blocks = chunks_to_stored_blocks(&new_chunks);
+                            let parent = SequenceHash(rng.random_range(1u64..65));
+                            (blocks, parent)
+                        })
+                        .collect();
+
+                    (worker_id, content_hashes, write_pool)
+                })
+                .collect(),
+        );
+
         $group.bench_function(&bench_name, |b| {
             let printed = printed.clone();
+            let indexer = indexer.clone();
+            let thread_data = thread_data.clone();
 
             b.iter_custom(|iters| {
+                // Only thread spawn/join + actual concurrent ops are timed
                 let start = Instant::now();
-                for _ in 0..iters {
-                    let workers = generate_worker_endpoints($num_workers);
-                    let (indexer, worker_chunks) =
-                        build_populated_indexer(&workers, 64, $block_size, 8, 64);
 
-                    let handles: Vec<_> = (0..$num_threads)
-                        .map(|t| {
-                            let indexer = Arc::clone(&indexer);
-                            let worker = workers[t % workers.len()].clone();
-                            let chunks = worker_chunks[t % workers.len()].clone();
-                            let block_size = $block_size;
+                let handles: Vec<_> = (0..$num_threads)
+                    .map(|t| {
+                        let indexer = Arc::clone(&indexer);
+                        let thread_data = Arc::clone(&thread_data);
 
-                            thread::spawn(move || {
-                                let mut rng = thread_rng();
-                                let worker_id = indexer.intern_worker(&worker);
-                                let mut wb = WorkerBlockMap::default();
+                        thread::spawn(move || {
+                            let (worker_id, ref content_hashes, ref write_pool) = thread_data[t];
+                            let mut wb = WorkerBlockMap::default();
+
+                            for _ in 0..iters {
                                 for i in 0..$ops_per_thread {
                                     if i % 3 == 0 {
-                                        // Read: find_matches
-                                        let query_tokens = flatten_tokens(&chunks);
-                                        let content_hashes = compute_request_content_hashes(
-                                            &query_tokens,
-                                            block_size,
-                                        );
-                                        black_box(indexer.find_matches(&content_hashes, false));
+                                        // Read: find_matches (pure DashMap lookup)
+                                        black_box(indexer.find_matches(content_hashes, false));
                                     } else {
-                                        // Write: apply_stored
-                                        let new_chunks = generate_token_chunks(4, block_size);
-                                        let blocks = chunks_to_stored_blocks(&new_chunks);
-                                        let parent = SequenceHash(rng.random_range(1u64..65));
+                                        // Write: apply_stored (pure DashMap insert)
+                                        let (ref blocks, parent) = write_pool[i % write_pool.len()];
                                         let _ = indexer.apply_stored(
                                             worker_id,
-                                            &blocks,
+                                            blocks,
                                             Some(parent),
                                             &mut wb,
                                         );
                                     }
                                 }
-                            })
+                            }
                         })
-                        .collect();
+                    })
+                    .collect();
 
-                    for h in handles {
-                        h.join().unwrap();
-                    }
+                for h in handles {
+                    h.join().unwrap();
                 }
+
                 let duration = start.elapsed();
 
                 if !printed.swap(true, Ordering::Relaxed) {
