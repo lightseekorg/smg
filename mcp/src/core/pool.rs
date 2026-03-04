@@ -195,7 +195,8 @@ impl McpConnectionPool {
     }
 
     pub fn clear(&self) {
-        self.connections.lock().clear();
+        let mut connections = self.connections.lock();
+        connections.clear();
         self.connection_count.store(0, Ordering::Relaxed);
     }
 
