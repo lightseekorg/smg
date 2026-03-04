@@ -21,7 +21,6 @@
 //! synchronization is needed on the write path.
 
 use std::{
-    cell::RefCell,
     fmt,
     sync::{
         atomic::{AtomicU32, AtomicUsize, Ordering},
@@ -393,31 +392,6 @@ impl SeqEntry {
         match self {
             Self::Single(_, workers) => Some(workers),
             Self::Multi(_) => None,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Query buffers (thread-local, reused across queries)
-// ---------------------------------------------------------------------------
-
-/// Reusable buffers for [`PositionalIndexer::jump_search_matches`].
-///
-/// Stored in a `thread_local!` to avoid per-query heap allocations.
-/// Buffers grow to high-water-mark and stay there — `clear()` resets length
-/// but keeps the backing allocation.
-struct QueryBuffers {
-    seq_hashes: Vec<SequenceHash>,
-    internal_scores: FxHashMap<u32, u32>,
-    active: Vec<u32>,
-}
-
-impl QueryBuffers {
-    const fn new() -> Self {
-        Self {
-            seq_hashes: Vec::new(),
-            internal_scores: FxHashMap::with_hasher(FxBuildHasher),
-            active: Vec::new(),
         }
     }
 }
@@ -839,106 +813,91 @@ impl PositionalIndexer {
         content_hashes: &[ContentHash],
         early_exit: bool,
     ) -> OverlapScores {
-        // Thread-local buffers avoid allocator round-trips on every query.
-        // Each buffer is cleared and reused — the backing allocation persists
-        // across calls, growing to high-water-mark and staying there.
-        thread_local! {
-            static QUERY_BUFS: RefCell<QueryBuffers> = const { RefCell::new(QueryBuffers::new()) };
-        }
-
         let mut scores = OverlapScores::default();
 
         if content_hashes.is_empty() {
             return scores;
         }
 
-        QUERY_BUFS.with(|bufs| {
-            let mut bufs = bufs.borrow_mut();
-            let QueryBuffers {
-                seq_hashes,
-                internal_scores,
-                active,
-            } = &mut *bufs;
-            seq_hashes.clear();
-            internal_scores.clear();
-            active.clear();
+        let mut seq_hashes = Vec::with_capacity(content_hashes.len());
 
-            let Some(initial_workers) = Self::get_workers_lazy(
-                &self.index,
-                0,
-                content_hashes[0],
-                seq_hashes,
-                content_hashes,
-            ) else {
-                return;
-            };
+        let Some(initial_workers) = Self::get_workers_lazy(
+            &self.index,
+            0,
+            content_hashes[0],
+            &mut seq_hashes,
+            content_hashes,
+        ) else {
+            return scores;
+        };
 
-            active.extend(initial_workers);
-            if active.is_empty() {
-                return;
+        let mut active = initial_workers;
+        if active.is_empty() {
+            return scores;
+        }
+
+        let len = content_hashes.len();
+        let mut internal_scores: FxHashMap<u32, u32> = FxHashMap::default();
+
+        // Early exit: just record that workers matched at position 0.
+        if early_exit {
+            for &w in &active {
+                internal_scores.insert(w, 1);
             }
-
-            let len = content_hashes.len();
-
-            // Early exit: just record that workers matched at position 0.
-            if early_exit {
-                for &w in active.iter() {
-                    internal_scores.insert(w, 1);
-                }
-                scores.scores = std::mem::take(internal_scores);
-                for &int_id in scores.scores.keys() {
-                    scores.tree_sizes.insert(
-                        int_id,
-                        self.tree_sizes[int_id as usize].load(Ordering::Relaxed),
-                    );
-                }
-                return;
-            }
-
-            let mut current_pos = 0;
-
-            while current_pos < len - 1 && !active.is_empty() {
-                let next_pos = (current_pos + self.jump_size).min(len - 1);
-
-                let count = Self::count_workers_at(
-                    &self.index,
-                    next_pos,
-                    content_hashes[next_pos],
-                    seq_hashes,
-                    content_hashes,
-                );
-
-                if count == active.len() {
-                    current_pos = next_pos;
-                } else {
-                    Self::linear_scan_drain(
-                        &self.index,
-                        content_hashes,
-                        seq_hashes,
-                        active,
-                        internal_scores,
-                        current_pos + 1,
-                        next_pos + 1,
-                        false,
-                    );
-                    current_pos = next_pos;
-                }
-            }
-
-            let final_score = len as u32;
-            for &w in active.iter() {
-                internal_scores.insert(w, final_score);
-            }
-
-            scores.scores = std::mem::take(internal_scores);
-
+            scores.scores = internal_scores;
             for &int_id in scores.scores.keys() {
                 scores.tree_sizes.insert(
                     int_id,
                     self.tree_sizes[int_id as usize].load(Ordering::Relaxed),
                 );
             }
-        });
+            return scores;
+        }
+
+        let mut current_pos = 0;
+
+        while current_pos < len - 1 && !active.is_empty() {
+            let next_pos = (current_pos + self.jump_size).min(len - 1);
+
+            let count = Self::count_workers_at(
+                &self.index,
+                next_pos,
+                content_hashes[next_pos],
+                &mut seq_hashes,
+                content_hashes,
+            );
+
+            if count == active.len() {
+                current_pos = next_pos;
+            } else {
+                Self::linear_scan_drain(
+                    &self.index,
+                    content_hashes,
+                    &mut seq_hashes,
+                    &mut active,
+                    &mut internal_scores,
+                    current_pos + 1,
+                    next_pos + 1,
+                    false,
+                );
+                current_pos = next_pos;
+            }
+        }
+
+        let final_score = len as u32;
+        for &w in &active {
+            internal_scores.insert(w, final_score);
+        }
+
+        scores.scores = internal_scores;
+
+        // Populate tree_sizes from atomic counters — lock-free array index.
+        for &int_id in scores.scores.keys() {
+            scores.tree_sizes.insert(
+                int_id,
+                self.tree_sizes[int_id as usize].load(Ordering::Relaxed),
+            );
+        }
 
         scores
     }
