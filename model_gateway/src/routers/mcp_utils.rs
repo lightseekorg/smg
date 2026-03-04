@@ -315,6 +315,7 @@ mod tests {
             warmup: Vec::new(),
             inventory: Default::default(),
             policy: Default::default(),
+            rate_limits: None,
         };
 
         // Note: This will fail to connect but still create the orchestrator with config
@@ -330,6 +331,7 @@ mod tests {
             warmup: Vec::new(),
             inventory: Default::default(),
             policy: Default::default(),
+            rate_limits: None,
         };
 
         Arc::new(McpOrchestrator::new(config).await.unwrap())
@@ -469,6 +471,7 @@ mod tests {
             warmup: Vec::new(),
             inventory: Default::default(),
             policy: Default::default(),
+            rate_limits: None,
         };
 
         let orchestrator = Arc::new(McpOrchestrator::new(config).await.unwrap());

@@ -38,6 +38,7 @@ async fn test_mcp_server_initialization() {
         warmup: Vec::new(),
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
 
     // Should succeed but with no connected servers (empty config is allowed)
@@ -74,6 +75,7 @@ async fn test_server_connection_with_mock() {
         warmup: Vec::new(),
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
 
     let result = McpOrchestrator::new(config).await;
@@ -117,6 +119,7 @@ async fn test_tool_availability_checking() {
         warmup: Vec::new(),
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
 
     let manager = McpOrchestrator::new(config).await.unwrap();
@@ -183,6 +186,7 @@ async fn test_multi_server_connection() {
         warmup: Vec::new(),
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
 
     // Note: This will fail to connect to both servers in the current implementation
@@ -223,6 +227,7 @@ async fn test_tool_execution_with_mock() {
         warmup: Vec::new(),
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
 
     let manager = McpOrchestrator::new(config).await.unwrap();
@@ -295,6 +300,7 @@ async fn test_concurrent_tool_execution() {
         warmup: Vec::new(),
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
 
     let manager = McpOrchestrator::new(config).await.unwrap();
@@ -361,6 +367,7 @@ async fn test_tool_execution_errors() {
         warmup: Vec::new(),
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
 
     let manager = McpOrchestrator::new(config).await.unwrap();
@@ -415,6 +422,7 @@ async fn test_connection_without_server() {
         warmup: Vec::new(),
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
 
     let result = McpOrchestrator::new(config).await;
@@ -454,6 +462,7 @@ async fn test_tool_info_structure() {
         warmup: Vec::new(),
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
 
     let manager = McpOrchestrator::new(config).await.unwrap();
@@ -500,6 +509,7 @@ async fn test_sse_connection() {
         warmup: Vec::new(),
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
 
     // Manager succeeds but no servers are connected (errors are logged)
@@ -593,6 +603,7 @@ async fn test_complete_workflow() {
         warmup: Vec::new(),
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
 
     // 2. Connect to server

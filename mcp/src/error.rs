@@ -45,6 +45,9 @@ pub enum McpError {
     #[error("Prompt not found: {0}")]
     PromptNotFound(String),
 
+    #[error("Rate limit exceeded: {0}")]
+    RateLimitExceeded(String),
+
     #[error("Invalid arguments: {0}")]
     InvalidArguments(String),
 

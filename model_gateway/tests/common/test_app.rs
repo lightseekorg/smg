@@ -181,6 +181,7 @@ pub async fn create_test_app_context() -> Arc<AppContext> {
         warmup: vec![],
         inventory: Default::default(),
         policy: Default::default(),
+        rate_limits: None,
     };
     let mcp_orchestrator = McpOrchestrator::new(empty_config)
         .await

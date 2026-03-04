@@ -408,27 +408,27 @@ pub fn create_test_context(
             }
         }
 
-        // Initialize MCP orchestrator with empty config
-        use smg_mcp::{McpConfig, McpOrchestrator};
-        let empty_config = McpConfig {
-            servers: vec![],
-            pool: Default::default(),
-            proxy: None,
-            warmup: vec![],
-            inventory: Default::default(),
-            policy: Default::default(),
-        };
-        let mcp_orchestrator = McpOrchestrator::new(empty_config)
-            .await
-            .expect("Failed to create MCP orchestrator");
-        app_context
-            .mcp_orchestrator
-            .set(Arc::new(mcp_orchestrator))
-            .ok()
-            .expect("McpOrchestrator should only be initialized once");
+    // Initialize MCP orchestrator with empty config
+    use smg_mcp::{McpConfig, McpOrchestrator};
+    let empty_config = McpConfig {
+        servers: vec![],
+        pool: Default::default(),
+        proxy: None,
+        warmup: vec![],
+        inventory: Default::default(),
+        policy: Default::default(),
+        rate_limits: None,
+    };
+    let mcp_orchestrator = McpOrchestrator::new(empty_config)
+        .await
+        .expect("Failed to create MCP orchestrator");
+    app_context
+        .mcp_orchestrator
+        .set(Arc::new(mcp_orchestrator))
+        .ok()
+        .expect("McpOrchestrator should only be initialized once");
 
-        app_context
-    })
+    app_context
 }
 
 /// Helper function to create AppContext for tests with parser factories initialized
@@ -543,27 +543,27 @@ pub fn create_test_context_with_parsers(
             }
         }
 
-        // Initialize MCP orchestrator with empty config
-        use smg_mcp::{McpConfig, McpOrchestrator};
-        let empty_config = McpConfig {
-            servers: vec![],
-            pool: Default::default(),
-            proxy: None,
-            warmup: vec![],
-            inventory: Default::default(),
-            policy: Default::default(),
-        };
-        let mcp_orchestrator = McpOrchestrator::new(empty_config)
-            .await
-            .expect("Failed to create MCP orchestrator");
-        app_context
-            .mcp_orchestrator
-            .set(Arc::new(mcp_orchestrator))
-            .ok()
-            .expect("McpOrchestrator should only be initialized once");
+    // Initialize MCP orchestrator with empty config
+    use smg_mcp::{McpConfig, McpOrchestrator};
+    let empty_config = McpConfig {
+        servers: vec![],
+        pool: Default::default(),
+        proxy: None,
+        warmup: vec![],
+        inventory: Default::default(),
+        policy: Default::default(),
+        rate_limits: None,
+    };
+    let mcp_orchestrator = McpOrchestrator::new(empty_config)
+        .await
+        .expect("Failed to create MCP orchestrator");
+    app_context
+        .mcp_orchestrator
+        .set(Arc::new(mcp_orchestrator))
+        .ok()
+        .expect("McpOrchestrator should only be initialized once");
 
-        app_context
-    })
+    app_context
 }
 
 /// Helper function to create AppContext for tests with MCP config from file
