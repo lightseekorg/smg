@@ -11,7 +11,6 @@ use crate::routers::{
         client::GrpcClient,
         common::stages::{helpers, PipelineStage},
         context::{ClientSelection, RequestContext, RequestType},
-        harmony::builder::get_harmony_encoding,
         proto_wrapper::{ProtoGenerateRequest, ProtoRequest},
     },
 };
@@ -271,23 +270,9 @@ impl PipelineStage for HarmonyRequestBuildingStage {
                             token_ids: vec![token_id],
                         });
                     }
-
-                    // Also tokenize user-provided stop sequences using Harmony tokenizer
-                    if let RequestType::Chat(request) = &ctx.input.request_type {
-                        if let Some(stop) = &request.stop {
-                            let tokenizer = get_harmony_encoding().tokenizer();
-                            for stop_str in stop.iter().filter(|s| !s.is_empty()) {
-                                let token_ids = tokenizer.encode_ordinary(stop_str);
-                                if !token_ids.is_empty() {
-                                    req.stop_words.push(TokenSequence { token_ids });
-                                }
-                            }
-                        }
-                    }
-
                     debug!(
-                        stop_word_count = req.stop_words.len(),
-                        "Injected stop words into TensorRT-LLM stop_words"
+                        stop_token_count = harmony_stops.len(),
+                        "Injected Harmony stop tokens into TensorRT-LLM stop_words"
                     );
                 }
             }
