@@ -346,10 +346,7 @@ jobs:
             extra_deps: ""
             env_vars: ""
             reruns: ""
-            setup_vllm: 'false'
-            setup_trtllm: 'false'
-            setup_agentic_deps: 'false'
-            upload_benchmarks: 'true'
+            upload_benchmarks: true
             parallel_opts: ""  # No parallel for benchmarks (performance measurement)
             ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py --ignore=e2e_test/benchmarks/test_nightly_perf.py"  # Go and nightly benchmarks run in dedicated jobs
             runner: 4-gpu-h100
@@ -360,10 +357,6 @@ jobs:
             extra_deps: "pytest-parallel py sentence-transformers"
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
-            setup_vllm: 'false'
-            setup_trtllm: 'false'
-            setup_agentic_deps: 'false'
-            upload_benchmarks: 'false'
             parallel_opts: "--workers 1 --tests-per-worker 4"  # Thread-based parallelism
             ignore_opts: ""
     runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
@@ -372,20 +365,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Check shared services
-        if: matrix.setup_agentic_deps == 'true'
-        run: bash scripts/ci_agentic_svc_deps.sh check --oracle oracle-db --brave brave-search-mcp
-
       - name: Setup vLLM backend
-        if: matrix.setup_vllm == 'true'
+        if: matrix.setup_vllm
         uses: ./.github/actions/setup-vllm
 
       - name: Setup TRT-LLM backend
-        if: matrix.setup_trtllm == 'true'
+        if: matrix.setup_trtllm
         uses: ./.github/actions/setup-trtllm
 
       - name: Setup SGLang backend
-        if: matrix.setup_vllm != 'true' && matrix.setup_trtllm != 'true'
+        if: ${{ !matrix.setup_vllm && !matrix.setup_trtllm }}
         uses: ./.github/actions/setup-sglang
 
       - name: Download wheel artifact
@@ -414,15 +403,8 @@ jobs:
           bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
 
       - name: Pull genai-bench image
-        if: matrix.upload_benchmarks == 'true'
+        if: matrix.upload_benchmarks
         run: docker pull ${{ env.GENAI_BENCH_IMAGE }}
-
-      - name: Setup Oracle
-        if: matrix.setup_agentic_deps == 'true'
-        run: |
-          bash scripts/ci_agentic_svc_deps.sh setup-oracle-client
-          bash scripts/ci_agentic_svc_deps.sh create-oracle-user oracle-db
-          bash scripts/ci_agentic_svc_deps.sh create-oracle-flyway-user oracle-db
 
       - name: Run E2E tests
         env:
@@ -430,19 +412,12 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
-          BRAVE_MCP_HOST: ${{ matrix.setup_agentic_deps == 'true' && 'brave-search-mcp' || '' }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
 
-      - name: Cleanup Oracle test users
-        if: always() && matrix.setup_agentic_deps == 'true'
-        run: |
-          bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-flyway-user oracle-db
-          bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-user oracle-db
-
       - name: Upload benchmark results
-        if: matrix.upload_benchmarks == 'true'
+        if: matrix.upload_benchmarks && success()
         uses: actions/upload-artifact@v7
         with:
           name: genai-bench-results-all-policies
@@ -474,8 +449,6 @@ jobs:
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"
             test_filter: ""
-            setup_vllm: 'false'
-            setup_trtllm: 'false'
             ignore_opts: ""
           - name: chat-completions-vllm
             timeout: 20
@@ -487,8 +460,7 @@ jobs:
             # TODO: Remove filter when vLLM supports logprobs and n>1 with greedy sampling
             # Excludes: 5-grpc (logprobs=5), 2-None-grpc (n=2 with no logprobs), multiple_choices (n=2 tests)
             test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
-            setup_vllm: 'true'
-            setup_trtllm: 'false'
+            setup_vllm: true
             ignore_opts: ""
           - name: chat-completions-trtllm
             timeout: 60
@@ -498,8 +470,7 @@ jobs:
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"
             test_filter: ""
-            setup_vllm: 'false'
-            setup_trtllm: 'true'
+            setup_trtllm: true
             ignore_opts: ""
             runner: 4-gpu-h100
           - name: vllm-pd
@@ -510,8 +481,7 @@ jobs:
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: ""
             test_filter: ""
-            setup_vllm: 'true'
-            setup_trtllm: 'false'
+            setup_vllm: true
             ignore_opts: ""
     runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
     timeout-minutes: ${{ matrix.timeout }}
@@ -520,15 +490,15 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Setup vLLM backend
-        if: matrix.setup_vllm == 'true'
+        if: matrix.setup_vllm
         uses: ./.github/actions/setup-vllm
 
       - name: Setup TRT-LLM backend
-        if: matrix.setup_trtllm == 'true'
+        if: matrix.setup_trtllm
         uses: ./.github/actions/setup-trtllm
 
       - name: Setup SGLang backend
-        if: matrix.setup_vllm != 'true' && matrix.setup_trtllm != 'true'
+        if: ${{ !matrix.setup_vllm && !matrix.setup_trtllm }}
         uses: ./.github/actions/setup-sglang
 
       - name: Download wheel artifact
@@ -590,7 +560,7 @@ jobs:
             extra_deps: ""
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
-            setup_agentic_deps: 'true'
+            setup_agentic_deps: true
             parallel_opts: ""
             ignore_opts: ""
             test_filter: "-m 'not external'"
@@ -601,7 +571,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Check shared services
-        if: matrix.setup_agentic_deps == 'true'
+        if: matrix.setup_agentic_deps
         run: bash scripts/ci_agentic_svc_deps.sh check --oracle oracle-db --brave brave-search-mcp
 
       - name: Setup SGLang backend
@@ -633,7 +603,7 @@ jobs:
           bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
 
       - name: Setup Oracle
-        if: matrix.setup_agentic_deps == 'true'
+        if: matrix.setup_agentic_deps
         run: |
           bash scripts/ci_agentic_svc_deps.sh setup-oracle-client
           bash scripts/ci_agentic_svc_deps.sh create-oracle-user oracle-db
@@ -645,13 +615,13 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
-          BRAVE_MCP_HOST: ${{ matrix.setup_agentic_deps == 'true' && 'brave-search-mcp' || '' }}
+          BRAVE_MCP_HOST: ${{ matrix.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
           ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
 
       - name: Cleanup Oracle test users
-        if: always() && matrix.setup_agentic_deps == 'true'
+        if: always() && matrix.setup_agentic_deps
         run: |
           bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-flyway-user oracle-db
           bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-user oracle-db
