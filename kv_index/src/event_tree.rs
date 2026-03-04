@@ -36,7 +36,7 @@ pub const XXH3_SEED: u64 = 1337;
 /// Shard count for the main index DashMap.
 /// Tuned iteratively — higher values reduce per-shard contention under concurrent
 /// reads+writes at the cost of more memory for shard locks.
-const INDEX_SHARD_COUNT: usize = 512;
+const INDEX_SHARD_COUNT: usize = 1024;
 
 /// Shard count for worker-keyed DashMaps (worker_blocks, tree_sizes, worker_to_id).
 /// These maps hold at most ~500 entries (one per worker), so 8 shards is sufficient.
