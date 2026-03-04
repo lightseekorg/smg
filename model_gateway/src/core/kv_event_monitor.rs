@@ -310,7 +310,16 @@ impl KvEventMonitor {
                 }
             };
 
-            match Self::process_stream(stream, &worker_url, worker_id, &indexer, &mut wb, &mut last_seq).await {
+            match Self::process_stream(
+                stream,
+                &worker_url,
+                worker_id,
+                &indexer,
+                &mut wb,
+                &mut last_seq,
+            )
+            .await
+            {
                 StreamResult::Ended => {
                     info!(
                         worker_url = %worker_url,

@@ -619,8 +619,12 @@ macro_rules! bench_indexer_concurrent {
                                         let new_chunks = generate_token_chunks(4, block_size);
                                         let blocks = chunks_to_stored_blocks(&new_chunks);
                                         let parent = SequenceHash(rng.random_range(1u64..65));
-                                        let _ =
-                                            indexer.apply_stored(&mut wb, worker_id, &blocks, Some(parent));
+                                        let _ = indexer.apply_stored(
+                                            &mut wb,
+                                            worker_id,
+                                            &blocks,
+                                            Some(parent),
+                                        );
                                     }
                                 }
                             })

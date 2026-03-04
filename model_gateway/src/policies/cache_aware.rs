@@ -1220,9 +1220,7 @@ mod tests {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4]),
         }];
-        indexer
-            .apply_stored(&mut wb1, wid1, &blocks, None)
-            .unwrap();
+        indexer.apply_stored(&mut wb1, wid1, &blocks, None).unwrap();
         let blocks2 = vec![StoredBlock {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4]),
@@ -1264,18 +1262,14 @@ mod tests {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4]),
         }];
-        indexer
-            .apply_stored(&mut wb1, wid1, &block, None)
-            .unwrap();
+        indexer.apply_stored(&mut wb1, wid1, &block, None).unwrap();
 
         // w2 has the same block plus extra blocks → larger tree
         let block2 = vec![StoredBlock {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4]),
         }];
-        indexer
-            .apply_stored(&mut wb2, wid2, &block2, None)
-            .unwrap();
+        indexer.apply_stored(&mut wb2, wid2, &block2, None).unwrap();
         let extra = vec![StoredBlock {
             seq_hash: SequenceHash(2),
             content_hash: compute_content_hash(&[5, 6, 7, 8]),
@@ -1568,9 +1562,7 @@ mod tests {
             seq_hash: SequenceHash(1),
             content_hash: compute_content_hash(&[1, 2, 3, 4, 5, 6, 7, 8]),
         }];
-        indexer
-            .apply_stored(&mut wb, wid, &block, None)
-            .unwrap();
+        indexer.apply_stored(&mut wb, wid, &block, None).unwrap();
         monitor
             .indexers
             .insert("unknown".to_string(), indexer.clone());

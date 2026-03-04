@@ -444,9 +444,8 @@ impl PositionalIndexer {
             return;
         };
 
-        self.index.retain(|_key, entry| {
-            !entry.remove_all_for_worker(worker_id)
-        });
+        self.index
+            .retain(|_key, entry| !entry.remove_all_for_worker(worker_id));
 
         self.tree_sizes.remove(&worker_id);
     }
@@ -866,8 +865,12 @@ mod tests {
         let w2 = indexer.intern_worker("http://w2:8000");
         let blocks_w1 = make_blocks(&[10, 20, 30]);
         let blocks_w2 = make_blocks(&[10, 20]);
-        indexer.apply_stored(&mut wb1, w1, &blocks_w1, None).unwrap();
-        indexer.apply_stored(&mut wb2, w2, &blocks_w2, None).unwrap();
+        indexer
+            .apply_stored(&mut wb1, w1, &blocks_w1, None)
+            .unwrap();
+        indexer
+            .apply_stored(&mut wb2, w2, &blocks_w2, None)
+            .unwrap();
 
         let scores = indexer.find_matches(&hashes(&[10, 20, 30, 40]), false);
         assert_eq!(scores.scores.get(&w1), Some(&3));
@@ -899,8 +902,12 @@ mod tests {
         let w2 = indexer.intern_worker("http://w2:8000");
         let blocks_w1 = make_blocks(&[10, 20, 30]);
         let blocks_w2 = make_blocks(&[10, 20]);
-        indexer.apply_stored(&mut wb1, w1, &blocks_w1, None).unwrap();
-        indexer.apply_stored(&mut wb2, w2, &blocks_w2, None).unwrap();
+        indexer
+            .apply_stored(&mut wb1, w1, &blocks_w1, None)
+            .unwrap();
+        indexer
+            .apply_stored(&mut wb2, w2, &blocks_w2, None)
+            .unwrap();
 
         indexer.apply_cleared(&mut wb1, w1);
 
@@ -918,8 +925,12 @@ mod tests {
         let w2 = indexer.intern_worker("http://w2:8000");
         let blocks_w1 = make_blocks(&[10, 20, 30]);
         let blocks_w2 = make_blocks(&[10, 20]);
-        indexer.apply_stored(&mut wb1, w1, &blocks_w1, None).unwrap();
-        indexer.apply_stored(&mut wb2, w2, &blocks_w2, None).unwrap();
+        indexer
+            .apply_stored(&mut wb1, w1, &blocks_w1, None)
+            .unwrap();
+        indexer
+            .apply_stored(&mut wb2, w2, &blocks_w2, None)
+            .unwrap();
 
         let scores = indexer.find_matches(&hashes(&[10]), false);
         assert_eq!(scores.tree_sizes.get(&w1), Some(&3));
@@ -1188,7 +1199,9 @@ mod tests {
             seq_hash: SequenceHash(100),
             content_hash: ContentHash(10),
         }];
-        indexer.apply_stored(&mut wb1, w1, &blocks_w1, None).unwrap();
+        indexer
+            .apply_stored(&mut wb1, w1, &blocks_w1, None)
+            .unwrap();
 
         // Worker 2: same content_hash but different seq_hash
         // Both start at position 0, so prefix_hash == content_hash.0 for both
@@ -1197,7 +1210,9 @@ mod tests {
             seq_hash: SequenceHash(200),
             content_hash: ContentHash(10),
         }];
-        indexer.apply_stored(&mut wb2, w2, &blocks_w2, None).unwrap();
+        indexer
+            .apply_stored(&mut wb2, w2, &blocks_w2, None)
+            .unwrap();
 
         let scores = indexer.find_matches(&hashes(&[10]), false);
         assert_eq!(scores.scores.get(&w1), Some(&1));
@@ -1215,12 +1230,16 @@ mod tests {
         // Worker 1: position 0 = content 10, position 1 = content 99
         // Prefix at pos 1 = XXH3(10 || 99)
         let blocks_w1 = make_blocks(&[10, 99]);
-        indexer.apply_stored(&mut wb1, w1, &blocks_w1, None).unwrap();
+        indexer
+            .apply_stored(&mut wb1, w1, &blocks_w1, None)
+            .unwrap();
 
         // Worker 2: position 0 = content 20, position 1 = content 99
         // Prefix at pos 1 = XXH3(20 || 99) ← different because position 0 differs
         let blocks_w2 = make_blocks(&[20, 99]);
-        indexer.apply_stored(&mut wb2, w2, &blocks_w2, None).unwrap();
+        indexer
+            .apply_stored(&mut wb2, w2, &blocks_w2, None)
+            .unwrap();
 
         // Query [10, 99] should only match w1
         let scores = indexer.find_matches(&hashes(&[10, 99]), false);
@@ -1435,8 +1454,12 @@ mod tests {
         let w2 = indexer.intern_worker("http://w2:8000");
         let blocks_w1 = make_blocks(&[10, 20, 30]);
         let blocks_w2 = make_blocks(&[99, 88, 77]);
-        indexer.apply_stored(&mut wb1, w1, &blocks_w1, None).unwrap();
-        indexer.apply_stored(&mut wb2, w2, &blocks_w2, None).unwrap();
+        indexer
+            .apply_stored(&mut wb1, w1, &blocks_w1, None)
+            .unwrap();
+        indexer
+            .apply_stored(&mut wb2, w2, &blocks_w2, None)
+            .unwrap();
 
         let scores = indexer.find_matches(&hashes(&[10, 20, 30]), false);
         assert_eq!(scores.scores.get(&w1), Some(&3));
