@@ -5,6 +5,17 @@
 //! - MCP ToolEntry -> chat/common Tool structs
 //! - MCP ToolEntry -> Responses ResponseTool structs
 //! - MCP ToolEntry list -> mcp_list_tools output item payloads
+//!
+//! # Schema cloning
+//!
+//! Each `ToolEntry` stores its JSON Schema as `Arc<serde_json::Map>`, which enables
+//! cheap sharing across the inventory.  The downstream protocol types (`Function`,
+//! `McpToolInfo`, and `serde_json::Value`) all require an *owned* `serde_json::Map`
+//! inside `Value::Object`, so every builder must deep-clone the schema map once per
+//! tool per call.  This is intentional -- the clone happens O(tools) times per
+//! request and schema maps are typically small (a handful of properties).  If
+//! profiling ever shows this to be a bottleneck, consider caching the materialised
+//! `Value::Object` alongside the `Arc<Map>` in `ToolEntry`.
 
 use openai_protocol::{
     common::{Function, Tool},
@@ -13,6 +24,18 @@ use openai_protocol::{
 use serde_json::{json, Value};
 
 use crate::inventory::{QualifiedToolName, ToolEntry};
+
+/// Materialise a `serde_json::Map` reference into an owned `Value::Object`.
+///
+/// This deep-clones the map.  All builder functions in this module need an
+/// owned `Value` because the downstream protocol structs (`Function.parameters`,
+/// `McpToolInfo.input_schema`) are `Value`-typed and will be serialised into the
+/// API response.  See the module-level "Schema cloning" docs for why this is
+/// unavoidable.
+#[inline]
+fn schema_to_value(schema: &serde_json::Map<String, Value>) -> Value {
+    Value::Object(schema.clone())
+}
 
 fn resolved_name_for_entry<'a>(
     entry: &'a ToolEntry,
@@ -58,7 +81,7 @@ pub fn build_function_tools_json_with_names(
                 "type": "function",
                 "name": name,
                 "description": description,
-                "parameters": Value::Object(parameters.clone())
+                "parameters": schema_to_value(parameters)
             })
         })
         .collect()
@@ -80,7 +103,7 @@ pub fn build_chat_function_tools_with_names(
             function: Function {
                 name: name.to_string(),
                 description: description.map(|d| d.to_string()),
-                parameters: Value::Object(parameters.clone()),
+                parameters: schema_to_value(parameters),
                 strict: None,
             },
         })
@@ -106,7 +129,7 @@ pub fn build_response_tools_with_names(
                 function: Function {
                     name: name.to_string(),
                     description: description.map(|d| d.to_string()),
-                    parameters: Value::Object(parameters.clone()),
+                    parameters: schema_to_value(parameters),
                     strict: None,
                 },
             })
@@ -121,7 +144,7 @@ pub fn build_mcp_tool_infos(entries: &[ToolEntry]) -> Vec<McpToolInfo> {
         .map(|entry| McpToolInfo {
             name: entry.tool_name().to_string(),
             description: entry.tool.description.as_ref().map(|d| d.to_string()),
-            input_schema: Value::Object((*entry.tool.input_schema).clone()),
+            input_schema: schema_to_value(&entry.tool.input_schema),
             annotations: entry
                 .tool
                 .annotations
