@@ -3,11 +3,14 @@
 //! Transition: NonStreamRequest → NonStreamRequest (tool loop)
 //!                               | ProcessResponse (no tool calls)
 
-use axum::response::Response;
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 
 use crate::routers::gemini::{
     context::RequestContext,
-    state::{RequestState, StepResult},
+    state::StepResult,
 };
 
 /// POST the payload to the upstream worker and handle the response.
@@ -28,7 +31,7 @@ use crate::routers::gemini::{
 /// - `ctx.processing.payload` — replaced with a resume payload on tool-loop re-entry.
 /// - `ctx.state` → `NonStreamRequest` or `ProcessResponse`.
 pub(crate) async fn non_stream_request_execution(
-    ctx: &mut RequestContext,
+    _ctx: &mut RequestContext,
 ) -> Result<StepResult, Response> {
     // TODO: implement non-streaming request execution
     //
@@ -59,6 +62,9 @@ pub(crate) async fn non_stream_request_execution(
     //    a. Set ctx.state = ProcessResponse.
     //    b. Return Ok(StepResult::Continue).
 
-    ctx.state = RequestState::ProcessResponse;
-    Ok(StepResult::Continue)
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "non-streaming request execution not yet implemented",
+    )
+        .into_response())
 }

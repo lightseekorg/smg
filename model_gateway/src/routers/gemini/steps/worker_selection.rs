@@ -2,11 +2,14 @@
 //!
 //! Transition: SelectWorker → LoadPreviousInteraction
 
-use axum::response::Response;
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 
 use crate::routers::gemini::{
     context::RequestContext,
-    state::{RequestState, StepResult},
+    state::StepResult,
 };
 
 /// Select a healthy upstream worker for the requested model.
@@ -20,7 +23,7 @@ use crate::routers::gemini::{
 /// - `ctx.worker` — the selected `Arc<dyn Worker>`.
 /// - `ctx.upstream_url` — `{worker.url()}/v1/interactions`.
 /// - `ctx.state` → `LoadPreviousInteraction`.
-pub(crate) async fn worker_selection(ctx: &mut RequestContext) -> Result<StepResult, Response> {
+pub(crate) async fn worker_selection(_ctx: &mut RequestContext) -> Result<StepResult, Response> {
     // TODO: implement worker selection
     //
     // 1. Extract auth header from ctx.headers.
@@ -36,6 +39,5 @@ pub(crate) async fn worker_selection(ctx: &mut RequestContext) -> Result<StepRes
     // 7. Set ctx.upstream_url = Some(format!("{}/v1/interactions", worker.url())).
     // 8. Set ctx.state = LoadPreviousInteraction.
 
-    ctx.state = RequestState::LoadPreviousInteraction;
-    Ok(StepResult::Continue)
+    Err((StatusCode::NOT_IMPLEMENTED, "worker selection not yet implemented").into_response())
 }

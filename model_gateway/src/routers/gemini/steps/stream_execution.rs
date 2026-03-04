@@ -2,7 +2,10 @@
 //!
 //! Terminal step: returns `StepResult::Response` when streaming is complete.
 
-use axum::response::Response;
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 
 use crate::routers::gemini::{context::RequestContext, state::StepResult};
 
@@ -41,5 +44,9 @@ pub(crate) async fn stream_request_execution(
     //    b. Send "data: [DONE]\n\n".
     // 8. Return Ok(StepResult::Response(Response::default())).
 
-    Ok(StepResult::Response(Response::default()))
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "streaming request execution not yet implemented",
+    )
+        .into_response())
 }

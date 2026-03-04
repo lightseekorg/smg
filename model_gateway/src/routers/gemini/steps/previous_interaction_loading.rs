@@ -2,7 +2,10 @@
 //!
 //! Transition: LoadPreviousInteraction → BuildRequest
 
-use axum::response::Response;
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 
 use crate::routers::gemini::{
     context::RequestContext,
@@ -35,6 +38,14 @@ pub(crate) async fn previous_interaction_loading(
     //    c. Prepend the loaded turns to the request input so that the upstream
     //       worker receives the complete conversation context.
     //    d. On retrieval error: return Err with a suitable error response.
+
+    if ctx.input.original_request.previous_interaction_id.is_some() {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            "previous interaction loading not yet implemented",
+        )
+            .into_response());
+    }
 
     ctx.state = RequestState::BuildRequest;
     Ok(StepResult::Continue)

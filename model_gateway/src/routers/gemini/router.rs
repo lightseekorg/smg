@@ -78,6 +78,10 @@ impl GeminiRouter {
             let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
             ctx.streaming.sse_tx = Some(tx);
 
+            // The driver's Response is intentionally discarded: for streaming,
+            // the real response flows through `sse_tx` events. The driver returns
+            // a dummy Response only to satisfy the state machine's return type.
+            // We log errors here so failures aren't completely silent.
             tokio::spawn(async move {
                 let response = driver::execute(&mut ctx).await;
                 if !response.status().is_success() {

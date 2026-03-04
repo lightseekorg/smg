@@ -7,7 +7,10 @@
 //! (StreamRequestExecution + StreamToolExecution) with an internal loop that
 //! handles the full tool-call cycle without returning to the driver.
 
-use axum::response::Response;
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 
 use crate::routers::gemini::{context::RequestContext, state::StepResult};
 
@@ -90,5 +93,9 @@ pub(crate) async fn stream_request_execution_with_tool(
     //     // 15. Continue loop (next iteration makes another streaming request).
     // }
 
-    Ok(StepResult::Response(Response::default()))
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        "streaming with tool interception not yet implemented",
+    )
+        .into_response())
 }

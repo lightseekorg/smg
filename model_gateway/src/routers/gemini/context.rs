@@ -94,10 +94,41 @@ pub(crate) struct ProcessingState {
 }
 
 /// State specific to streaming responses.
-#[derive(Default)]
+#[allow(dead_code)]
 pub(crate) struct StreamingState {
     /// SSE sender channel (set before spawning the streaming task).
     pub sse_tx: Option<tokio::sync::mpsc::UnboundedSender<Result<bytes::Bytes, std::io::Error>>>,
+
+    /// Whether this is the first tool-loop iteration.
+    ///
+    /// Controls dedup of lifecycle events (`interaction.start`, `interaction.in_progress`)
+    /// which must only be emitted once across tool-loop iterations.
+    /// Set to `false` after the first iteration completes.
+    pub is_first_iteration: bool,
+
+    /// Monotonically increasing event sequence number.
+    ///
+    /// Incremented for every SSE event sent to the client. Ensures events
+    /// are sequentially numbered across tool-loop iterations.
+    pub sequence_number: u64,
+
+    /// Next output index for sequential output item numbering.
+    ///
+    /// Tracks the output_index across tool-loop iterations so that each
+    /// output item (model response, tool call, tool result) gets a unique
+    /// sequential index.
+    pub next_output_index: u64,
+}
+
+impl Default for StreamingState {
+    fn default() -> Self {
+        Self {
+            sse_tx: None,
+            is_first_iteration: true,
+            sequence_number: 0,
+            next_output_index: 0,
+        }
+    }
 }
 
 impl RequestContext {

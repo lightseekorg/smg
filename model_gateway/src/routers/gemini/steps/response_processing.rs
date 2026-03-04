@@ -36,12 +36,9 @@ pub(crate) async fn response_processing(ctx: &mut RequestContext) -> Result<Step
     // 4. Persist the interaction to ctx.shared.interaction_storage if store is true.
     // 5. Return Ok(StepResult::Response((StatusCode::OK, Json(response_json)).into_response())).
 
-    // Placeholder: return the upstream response as-is (or an empty 200).
-    let response_json = ctx
-        .processing
-        .upstream_response
-        .take()
-        .unwrap_or(serde_json::json!({}));
+    let Some(response_json) = ctx.processing.upstream_response.take() else {
+        return Err((StatusCode::BAD_GATEWAY, "no upstream response received").into_response());
+    };
     Ok(StepResult::Response(
         (StatusCode::OK, Json(response_json)).into_response(),
     ))
