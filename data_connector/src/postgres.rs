@@ -666,51 +666,7 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
 
         let mut out = Vec::new();
         for row in rows {
-            let id: String = row.get(si.col("id"));
-            let resp_id: Option<String> = if si.is_skipped("response_id") {
-                None
-            } else {
-                row.get(si.col("response_id"))
-            };
-            let item_type: String = if si.is_skipped("item_type") {
-                String::new()
-            } else {
-                row.get(si.col("item_type"))
-            };
-            let role: Option<String> = if si.is_skipped("role") {
-                None
-            } else {
-                row.get(si.col("role"))
-            };
-            let content_raw: Option<String> = if si.is_skipped("content") {
-                None
-            } else {
-                row.get(si.col("content"))
-            };
-            let status: Option<String> = if si.is_skipped("status") {
-                None
-            } else {
-                row.get(si.col("status"))
-            };
-            let created_at: DateTime<Utc> = if si.is_skipped("created_at") {
-                Utc::now()
-            } else {
-                row.get(si.col("created_at"))
-            };
-
-            let content = match content_raw {
-                Some(s) => serde_json::from_str(&s).map_err(ConversationItemStorageError::from)?,
-                None => Value::Null,
-            };
-            out.push(ConversationItem {
-                id: ConversationItemId(id),
-                response_id: resp_id,
-                item_type,
-                role,
-                content,
-                status,
-                created_at,
-            });
+            out.push(build_item_from_row(&row, si)?);
         }
         Ok(out)
     }
@@ -755,54 +711,7 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
         if rows.is_empty() {
             Ok(None)
         } else {
-            let row = &rows[0];
-            let id: String = row.get(si.col("id"));
-            let response_id: Option<String> = if si.is_skipped("response_id") {
-                None
-            } else {
-                row.get(si.col("response_id"))
-            };
-            let item_type: String = if si.is_skipped("item_type") {
-                String::new()
-            } else {
-                row.get(si.col("item_type"))
-            };
-            let role: Option<String> = if si.is_skipped("role") {
-                None
-            } else {
-                row.get(si.col("role"))
-            };
-            let content_raw: Option<String> = if si.is_skipped("content") {
-                None
-            } else {
-                row.get(si.col("content"))
-            };
-            let status: Option<String> = if si.is_skipped("status") {
-                None
-            } else {
-                row.get(si.col("status"))
-            };
-            let created_at: DateTime<Utc> = if si.is_skipped("created_at") {
-                Utc::now()
-            } else {
-                row.get(si.col("created_at"))
-            };
-
-            let content = match content_raw {
-                Some(s) => serde_json::from_str(&s)
-                    .map_err(ConversationItemStorageError::SerializationError)?,
-                None => Value::Null,
-            };
-
-            Ok(Some(ConversationItem {
-                id: ConversationItemId(id),
-                response_id,
-                item_type,
-                role,
-                content,
-                status,
-                created_at,
-            }))
+            Ok(Some(build_item_from_row(&rows[0], si)?))
         }
     }
 
@@ -856,6 +765,59 @@ impl ConversationItemStorage for PostgresConversationItemStorage {
             .map_err(|e| ConversationItemStorageError::StorageError(e.to_string()))?;
         Ok(())
     }
+}
+
+/// Parse a single `tokio_postgres::Row` into a `ConversationItem`, respecting
+/// the `is_skipped` guards configured in `TableConfig`.
+fn build_item_from_row(
+    row: &Row,
+    si: &crate::schema::TableConfig,
+) -> Result<ConversationItem, ConversationItemStorageError> {
+    let id: String = row.get(si.col("id"));
+    let response_id: Option<String> = if si.is_skipped("response_id") {
+        None
+    } else {
+        row.get(si.col("response_id"))
+    };
+    let item_type: String = if si.is_skipped("item_type") {
+        String::new()
+    } else {
+        row.get(si.col("item_type"))
+    };
+    let role: Option<String> = if si.is_skipped("role") {
+        None
+    } else {
+        row.get(si.col("role"))
+    };
+    let content: Value = if si.is_skipped("content") {
+        Value::Null
+    } else {
+        let content_raw: Option<String> = row.get(si.col("content"));
+        match content_raw {
+            Some(s) => serde_json::from_str(&s).map_err(ConversationItemStorageError::from)?,
+            None => Value::Null,
+        }
+    };
+    let status: Option<String> = if si.is_skipped("status") {
+        None
+    } else {
+        row.get(si.col("status"))
+    };
+    let created_at: DateTime<Utc> = if si.is_skipped("created_at") {
+        Utc::now()
+    } else {
+        row.get(si.col("created_at"))
+    };
+
+    Ok(ConversationItem {
+        id: ConversationItemId(id),
+        response_id,
+        item_type,
+        role,
+        content,
+        status,
+        created_at,
+    })
 }
 
 pub(super) struct PostgresResponseStorage {

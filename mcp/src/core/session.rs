@@ -213,8 +213,9 @@ impl<'a> McpToolSession<'a> {
             let fallback_label = self
                 .all_mcp_servers
                 .first()
-                .map(|b| b.label.clone())
-                .unwrap_or_else(|| DEFAULT_SERVER_LABEL.to_string());
+                .map(|b| b.label.as_str())
+                .unwrap_or(DEFAULT_SERVER_LABEL)
+                .to_string();
             let err = format!("Tool '{invoked_name}' is not in this session's exposed tool map");
             ToolExecutionOutput {
                 call_id: input.call_id,
@@ -237,7 +238,7 @@ impl<'a> McpToolSession<'a> {
     ///
     /// Uses the orchestrator inventory to find the tool's server key, then maps
     /// it to the request's MCP server label. Falls back to the first server
-    /// label (or "mcp").
+    /// label (or [`DEFAULT_SERVER_LABEL`]).
     pub fn resolve_tool_server_label(&self, tool_name: &str) -> String {
         let fallback_label = self
             .all_mcp_servers

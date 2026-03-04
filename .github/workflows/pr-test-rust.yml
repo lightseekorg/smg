@@ -282,7 +282,55 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  gateway-e2e:
+  detect-changes:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      common: ${{ steps.filter.outputs.common }}
+      chat-completions: ${{ steps.filter.outputs.chat-completions }}
+      agentic: ${{ steps.filter.outputs.agentic }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            common:
+              - 'model_gateway/**'
+              - 'protocols/**'
+              - 'bindings/**'
+              - 'e2e_test/conftest.py'
+              - 'e2e_test/infra/**'
+              - 'e2e_test/fixtures/**'
+              - 'Cargo.lock'
+              - '.github/actions/**'
+              - '.github/workflows/pr-test-rust.yml'
+              - 'scripts/ci_setup_python_venv.sh'
+              - 'scripts/ci_install_sglang.sh'
+              - 'scripts/ci_build_wheel.sh'
+              - 'tokenizer/**'
+              - 'tool_parser/**'
+            chat-completions:
+              - 'reasoning_parser/**'
+              - 'multimodal/**'
+              - 'grpc_client/**'
+              - 'e2e_test/chat_completions/**'
+              - 'e2e_test/router/test_pd_mmlu.py'
+              - 'scripts/ci_install_vllm.sh'
+              - 'scripts/ci_install_trtllm.sh'
+            agentic:
+              - 'mcp/**'
+              - 'data_connector/**'
+              - 'e2e_test/responses/**'
+              - 'e2e_test/messages/**'
+              - 'scripts/ci_agentic_svc_deps.sh'
+
+  # --- E2E jobs split by change scope ---
+
+  e2e-always:
     name: ${{ matrix.name }}
     needs: build-wheel
     if: github.actor != 'dependabot[bot]'
@@ -302,16 +350,6 @@ jobs:
             parallel_opts: ""  # No parallel for benchmarks (performance measurement)
             ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py --ignore=e2e_test/benchmarks/test_nightly_perf.py"  # Go and nightly benchmarks run in dedicated jobs
             runner: 4-gpu-h100
-          - name: agentic-apis
-            timeout: 30
-            test_dirs: "e2e_test/responses e2e_test/messages"
-            extra_deps: ""
-            env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            setup_agentic_deps: true
-            parallel_opts: ""
-            ignore_opts: ""
-            test_filter: "-m 'not external'"
           - name: e2e
             timeout: 20
             test_dirs: "e2e_test/router e2e_test/embeddings"
@@ -321,57 +359,11 @@ jobs:
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"  # Thread-based parallelism
             ignore_opts: ""
-          - name: chat-completions-sglang
-            timeout: 20
-            test_dirs: "e2e_test/chat_completions"
-            extra_deps: "pytest-parallel py"
-            env_vars: "E2E_RUNTIME=sglang SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"
-            test_filter: ""
-            ignore_opts: ""
-          - name: chat-completions-vllm
-            timeout: 20
-            test_dirs: "e2e_test/chat_completions"
-            extra_deps: "pytest-parallel py"
-            env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"
-            # TODO: Remove filter when vLLM supports logprobs and n>1 with greedy sampling
-            # Excludes: 5-grpc (logprobs=5), 2-None-grpc (n=2 with no logprobs), multiple_choices (n=2 tests)
-            test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
-            setup_vllm: true
-            ignore_opts: ""
-          - name: vllm-pd
-            timeout: 15
-            test_dirs: "e2e_test/router/test_pd_mmlu.py"
-            extra_deps: ""
-            env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: ""
-            test_filter: ""
-            setup_vllm: true
-            ignore_opts: ""
-          - name: chat-completions-trtllm
-            timeout: 60
-            test_dirs: "e2e_test/chat_completions"
-            extra_deps: "pytest-parallel py"
-            env_vars: "E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: "--workers 1 --tests-per-worker 4"
-            test_filter: ""
-            setup_trtllm: true
-            ignore_opts: ""
-            runner: 4-gpu-h100
     runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
     timeout-minutes: ${{ matrix.timeout }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
-
-      - name: Check shared services
-        if: matrix.setup_agentic_deps
-        run: bash scripts/ci_agentic_svc_deps.sh check --oracle oracle-db --brave brave-search-mcp
 
       - name: Setup vLLM backend
         if: matrix.setup_vllm
@@ -414,6 +406,202 @@ jobs:
         if: matrix.upload_benchmarks
         run: docker pull ${{ env.GENAI_BENCH_IMAGE }}
 
+      - name: Run E2E tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
+
+      - name: Upload benchmark results
+        if: matrix.upload_benchmarks && success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: genai-bench-results-all-policies
+          path: benchmark_**/
+
+  e2e-chat-completions:
+    name: ${{ matrix.name }}
+    needs: [build-wheel, detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.build-wheel.result == 'success'
+      && github.actor != 'dependabot[bot]'
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.chat-completions == 'true')))
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: chat-completions-sglang
+            timeout: 20
+            test_dirs: "e2e_test/chat_completions"
+            extra_deps: "pytest-parallel py"
+            env_vars: "E2E_RUNTIME=sglang SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
+            reruns: "--reruns 2 --reruns-delay 5"
+            parallel_opts: "--workers 1 --tests-per-worker 4"
+            test_filter: ""
+            ignore_opts: ""
+          - name: chat-completions-vllm
+            timeout: 20
+            test_dirs: "e2e_test/chat_completions"
+            extra_deps: "pytest-parallel py"
+            env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
+            reruns: "--reruns 2 --reruns-delay 5"
+            parallel_opts: "--workers 1 --tests-per-worker 4"
+            # TODO: Remove filter when vLLM supports logprobs and n>1 with greedy sampling
+            # Excludes: 5-grpc (logprobs=5), 2-None-grpc (n=2 with no logprobs), multiple_choices (n=2 tests)
+            test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
+            setup_vllm: true
+            ignore_opts: ""
+          - name: chat-completions-trtllm
+            timeout: 60
+            test_dirs: "e2e_test/chat_completions"
+            extra_deps: "pytest-parallel py"
+            env_vars: "E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1"
+            reruns: "--reruns 2 --reruns-delay 5"
+            parallel_opts: "--workers 1 --tests-per-worker 4"
+            test_filter: ""
+            setup_trtllm: true
+            ignore_opts: ""
+            runner: 4-gpu-h100
+          - name: vllm-pd
+            timeout: 15
+            test_dirs: "e2e_test/router/test_pd_mmlu.py"
+            extra_deps: ""
+            env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
+            reruns: "--reruns 2 --reruns-delay 5"
+            parallel_opts: ""
+            test_filter: ""
+            setup_vllm: true
+            ignore_opts: ""
+    runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
+    timeout-minutes: ${{ matrix.timeout }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup vLLM backend
+        if: matrix.setup_vllm
+        uses: ./.github/actions/setup-vllm
+
+      - name: Setup TRT-LLM backend
+        if: matrix.setup_trtllm
+        uses: ./.github/actions/setup-trtllm
+
+      - name: Setup SGLang backend
+        if: ${{ !matrix.setup_vllm && !matrix.setup_trtllm }}
+        uses: ./.github/actions/setup-sglang
+
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: smg-wheel
+          path: wheel/
+
+      - name: Download WASM test fixtures
+        uses: actions/download-artifact@v8
+        with:
+          name: wasm-test-fixtures
+          path: wasm/tests/fixtures/
+        continue-on-error: true
+
+      - name: Download Python client types
+        uses: actions/download-artifact@v8
+        with:
+          name: python-client-types
+          path: clients/python/smg_client/types/
+
+      - name: Install wheel and test dependencies
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+          bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
+
+      - name: Run E2E tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+        run: |
+          bash scripts/ci_killall_sglang.sh "nuk_gpus"
+          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
+
+  e2e-agentic:
+    name: ${{ matrix.name }}
+    needs: [build-wheel, detect-changes]
+    if: >-
+      always()
+      && !cancelled()
+      && needs.build-wheel.result == 'success'
+      && github.actor != 'dependabot[bot]'
+      && (github.event_name != 'pull_request'
+          || (needs.detect-changes.result == 'success'
+              && (needs.detect-changes.outputs.common == 'true'
+                  || needs.detect-changes.outputs.agentic == 'true')))
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: agentic-apis
+            timeout: 30
+            test_dirs: "e2e_test/responses e2e_test/messages"
+            extra_deps: ""
+            env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
+            reruns: "--reruns 2 --reruns-delay 5"
+            setup_agentic_deps: true
+            parallel_opts: ""
+            ignore_opts: ""
+            test_filter: "-m 'not external'"
+    runs-on: k8s-runner-gpu
+    timeout-minutes: ${{ matrix.timeout }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Check shared services
+        if: matrix.setup_agentic_deps
+        run: bash scripts/ci_agentic_svc_deps.sh check --oracle oracle-db --brave brave-search-mcp
+
+      - name: Setup SGLang backend
+        uses: ./.github/actions/setup-sglang
+
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: smg-wheel
+          path: wheel/
+
+      - name: Download WASM test fixtures
+        uses: actions/download-artifact@v8
+        with:
+          name: wasm-test-fixtures
+          path: wasm/tests/fixtures/
+        continue-on-error: true
+
+      - name: Download Python client types
+        uses: actions/download-artifact@v8
+        with:
+          name: python-client-types
+          path: clients/python/smg_client/types/
+
+      - name: Install wheel and test dependencies
+        run: |
+          pip uninstall -y smg || true
+          pip install wheel/*.whl
+          bash scripts/ci_install_e2e_deps.sh ${{ matrix.extra_deps }}
+
       - name: Setup Oracle
         if: matrix.setup_agentic_deps
         run: |
@@ -437,13 +625,6 @@ jobs:
         run: |
           bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-flyway-user oracle-db
           bash scripts/ci_agentic_svc_deps.sh cleanup-oracle-user oracle-db
-
-      - name: Upload benchmark results
-        if: matrix.upload_benchmarks && success()
-        uses: actions/upload-artifact@v7
-        with:
-          name: genai-bench-results-all-policies
-          path: benchmark_**/
 
   go-unit-tests:
     name: go-unit-tests
@@ -609,7 +790,7 @@ jobs:
           path: benchmark_go_bindings/
 
   finish:
-    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, gateway-e2e, go-unit-tests, go-bindings-e2e]
+    needs: [pre-commit, python-lint, grpc-proto-build-check, build-wheel, python-unit-tests, unit-tests, detect-changes, e2e-always, e2e-chat-completions, e2e-agentic, go-unit-tests, go-bindings-e2e]
     if: always()
     runs-on: k8s-runner-cpu
     permissions: {}
@@ -622,7 +803,10 @@ jobs:
                 "${{ needs.build-wheel.result }}" == "failure" || \
                 "${{ needs.python-unit-tests.result }}" == "failure" || \
                 "${{ needs.unit-tests.result }}" == "failure" || \
-                "${{ needs.gateway-e2e.result }}" == "failure" || \
+                "${{ needs.detect-changes.result }}" == "failure" || \
+                "${{ needs.e2e-always.result }}" == "failure" || \
+                "${{ needs.e2e-chat-completions.result }}" == "failure" || \
+                "${{ needs.e2e-agentic.result }}" == "failure" || \
                 "${{ needs.go-unit-tests.result }}" == "failure" || \
                 "${{ needs.go-bindings-e2e.result }}" == "failure" ]]; then
             echo "One or more jobs failed"
@@ -632,7 +816,7 @@ jobs:
           fi
 
   summarize-benchmarks:
-    needs: [gateway-e2e]
+    needs: [e2e-always]
     runs-on: k8s-runner-cpu
     if: success()
     permissions:

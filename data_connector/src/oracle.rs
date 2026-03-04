@@ -984,52 +984,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
                     let mut items = Vec::new();
                     for row_res in rows_iter {
                         let row = row_res.map_err(map_oracle_error)?;
-                        let id: String = row.get(si_col_id).map_err(map_oracle_error)?;
-                        let response_id: Option<String> = if si.is_skipped("response_id") {
-                            None
-                        } else {
-                            row.get(si.col("response_id")).map_err(map_oracle_error)?
-                        };
-                        let item_type: String = if si.is_skipped("item_type") {
-                            String::new()
-                        } else {
-                            row.get(si.col("item_type")).map_err(map_oracle_error)?
-                        };
-                        let role: Option<String> = if si.is_skipped("role") {
-                            None
-                        } else {
-                            row.get(si.col("role")).map_err(map_oracle_error)?
-                        };
-                        let content: Value = if si.is_skipped("content") {
-                            Value::Null
-                        } else {
-                            let raw: Option<String> =
-                                row.get(si.col("content")).map_err(map_oracle_error)?;
-                            match raw {
-                                Some(s) => serde_json::from_str(&s).map_err(|e| e.to_string())?,
-                                None => Value::Null,
-                            }
-                        };
-                        let status: Option<String> = if si.is_skipped("status") {
-                            None
-                        } else {
-                            row.get(si.col("status")).map_err(map_oracle_error)?
-                        };
-                        let created_at: DateTime<Utc> = if si.is_skipped("created_at") {
-                            Utc::now()
-                        } else {
-                            row.get(si.col("created_at")).map_err(map_oracle_error)?
-                        };
-
-                        items.push(ConversationItem {
-                            id: ConversationItemId(id),
-                            response_id,
-                            item_type,
-                            role,
-                            content,
-                            status,
-                            created_at,
-                        });
+                        items.push(build_item_from_oracle_row(&row, si)?);
                     }
                     Ok(items)
                 }
@@ -1074,52 +1029,7 @@ impl ConversationItemStorage for OracleConversationItemStorage {
 
                 if let Some(row_res) = rows.next() {
                     let row = row_res.map_err(map_oracle_error)?;
-                    let id: String = row.get(col_id).map_err(map_oracle_error)?;
-                    let response_id: Option<String> = if si.is_skipped("response_id") {
-                        None
-                    } else {
-                        row.get(si.col("response_id")).map_err(map_oracle_error)?
-                    };
-                    let item_type: String = if si.is_skipped("item_type") {
-                        String::new()
-                    } else {
-                        row.get(si.col("item_type")).map_err(map_oracle_error)?
-                    };
-                    let role: Option<String> = if si.is_skipped("role") {
-                        None
-                    } else {
-                        row.get(si.col("role")).map_err(map_oracle_error)?
-                    };
-                    let content: Value = if si.is_skipped("content") {
-                        Value::Null
-                    } else {
-                        let raw: Option<String> =
-                            row.get(si.col("content")).map_err(map_oracle_error)?;
-                        match raw {
-                            Some(s) => serde_json::from_str(&s).map_err(|e| e.to_string())?,
-                            None => Value::Null,
-                        }
-                    };
-                    let status: Option<String> = if si.is_skipped("status") {
-                        None
-                    } else {
-                        row.get(si.col("status")).map_err(map_oracle_error)?
-                    };
-                    let created_at: DateTime<Utc> = if si.is_skipped("created_at") {
-                        Utc::now()
-                    } else {
-                        row.get(si.col("created_at")).map_err(map_oracle_error)?
-                    };
-
-                    Ok(Some(ConversationItem {
-                        id: ConversationItemId(id),
-                        response_id,
-                        item_type,
-                        role,
-                        content,
-                        status,
-                        created_at,
-                    }))
+                    Ok(Some(build_item_from_oracle_row(&row, si)?))
                 } else {
                     Ok(None)
                 }
@@ -1186,6 +1096,59 @@ impl ConversationItemStorage for OracleConversationItemStorage {
 // ============================================================================
 // PART 4: OracleResponseStorage
 // ============================================================================
+
+/// Parse a single `oracle::Row` into a `ConversationItem`, respecting
+/// the `is_skipped` guards configured in `TableConfig`.
+fn build_item_from_oracle_row(
+    row: &Row,
+    si: &crate::schema::TableConfig,
+) -> Result<ConversationItem, String> {
+    let id: String = row.get(si.col("id")).map_err(map_oracle_error)?;
+    let response_id: Option<String> = if si.is_skipped("response_id") {
+        None
+    } else {
+        row.get(si.col("response_id")).map_err(map_oracle_error)?
+    };
+    let item_type: String = if si.is_skipped("item_type") {
+        String::new()
+    } else {
+        row.get(si.col("item_type")).map_err(map_oracle_error)?
+    };
+    let role: Option<String> = if si.is_skipped("role") {
+        None
+    } else {
+        row.get(si.col("role")).map_err(map_oracle_error)?
+    };
+    let content: Value = if si.is_skipped("content") {
+        Value::Null
+    } else {
+        let raw: Option<String> = row.get(si.col("content")).map_err(map_oracle_error)?;
+        match raw {
+            Some(s) => serde_json::from_str(&s).map_err(|e| e.to_string())?,
+            None => Value::Null,
+        }
+    };
+    let status: Option<String> = if si.is_skipped("status") {
+        None
+    } else {
+        row.get(si.col("status")).map_err(map_oracle_error)?
+    };
+    let created_at: DateTime<Utc> = if si.is_skipped("created_at") {
+        Utc::now()
+    } else {
+        row.get(si.col("created_at")).map_err(map_oracle_error)?
+    };
+
+    Ok(ConversationItem {
+        id: ConversationItemId(id),
+        response_id,
+        item_type,
+        role,
+        content,
+        status,
+        created_at,
+    })
+}
 
 #[derive(Clone)]
 pub(super) struct OracleResponseStorage {

@@ -431,7 +431,7 @@ impl ResponseStorage for MemoryResponseStorage {
             // Collect responses with their timestamps for sorting
             let mut responses_with_time: Vec<_> = user_response_ids
                 .iter()
-                .filter_map(|id| store.responses.get(id).map(|r| (r.created_at, id)))
+                .filter_map(|id| store.responses.get(id).map(|r| (r.created_at, r)))
                 .collect();
 
             // Sort by creation time (newest first)
@@ -442,7 +442,7 @@ impl ResponseStorage for MemoryResponseStorage {
             let user_responses: Vec<StoredResponse> = responses_with_time
                 .into_iter()
                 .take(limit)
-                .filter_map(|(_, id)| store.responses.get(id).cloned())
+                .map(|(_, r)| r.clone())
                 .collect();
 
             Ok(user_responses)
