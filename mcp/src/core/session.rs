@@ -318,13 +318,13 @@ impl<'a> McpToolSession<'a> {
         output: &mut Vec<openai_protocol::responses::ResponseOutputItem>,
         tool_call_items: Vec<openai_protocol::responses::ResponseOutputItem>,
     ) {
-        // Modify the vector in-place: drain existing items, then rebuild
+        // Modify the vector in-place: take existing items, then rebuild
         // with the correct ordering without allocating a temporary Vec.
-        let existing: Vec<_> = output.drain(..).collect();
+        let existing = std::mem::take(output);
         output.reserve(self.mcp_servers.len() + tool_call_items.len() + existing.len());
 
         // 1. mcp_list_tools items (one per server)
-        for binding in self.mcp_servers.iter() {
+        for binding in &self.mcp_servers {
             output.push(self.build_mcp_list_tools_item(&binding.label, &binding.server_key));
         }
 
