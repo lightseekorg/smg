@@ -114,7 +114,6 @@ async fn test_rate_limit_cluster_consistency() {
                     version: 1,
                     metadata: std::collections::BTreeMap::new(),
                 },
-                name.to_string(),
             );
         }
     }
@@ -133,7 +132,6 @@ async fn test_rate_limit_cluster_consistency() {
                 value: serialized.clone(),
                 version: 1,
             },
-            "node1".to_string(),
         );
     }
 
@@ -380,7 +378,6 @@ async fn test_rate_limit_window_reset() {
             value: serialized,
             version: 1,
         },
-        "node1".to_string(),
     );
 
     // Recreate manager with updated stores

@@ -286,6 +286,30 @@ impl MeshSyncManager {
         debug!("Applied remote rate-limit counter update");
     }
 
+    /// Apply remote rate-limit counter snapshot encoded as raw i64.
+    pub fn apply_remote_rate_limit_counter_value(&self, key: String, counter_value: i64) {
+        self.apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
+            key,
+            "remote".to_string(),
+            counter_value,
+            0,
+        );
+    }
+
+    pub fn apply_remote_rate_limit_counter_value_with_actor(
+        &self,
+        key: String,
+        actor: String,
+        counter_value: i64,
+    ) {
+        self.apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
+            key,
+            actor,
+            counter_value,
+            0,
+        );
+    }
+
     pub fn apply_remote_rate_limit_counter_value_with_actor_and_timestamp(
         &self,
         key: String,

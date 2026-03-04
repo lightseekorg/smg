@@ -383,6 +383,16 @@ impl MeshServer {
     }
 
     pub async fn start_with_listener(self, listener: tokio::net::TcpListener) -> Result<()> {
+        let bound_addr = listener
+            .local_addr()
+            .map_err(|e| anyhow::anyhow!("Failed to read listener local addr: {e}"))?;
+        if bound_addr != self.self_addr {
+            return Err(anyhow::anyhow!(
+                "Listener/self_addr mismatch: listener={}, self_addr={}",
+                bound_addr,
+                self.self_addr
+            ));
+        }
         self.start_inner(Some(listener)).await
     }
 
@@ -635,13 +645,14 @@ macro_rules! mesh_run {
 mod tests {
     use std::sync::Once;
 
-    use tokio::net::TcpListener;
     use tracing as log;
     use tracing_subscriber::{
         filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
     };
 
     use super::*;
+    use crate::tests::test_utils::{bind_node, wait_for};
+
     static INIT: Once = Once::new();
     fn init() {
         INIT.call_once(|| {
@@ -654,26 +665,6 @@ mod tests {
                 )
                 .try_init();
         });
-    }
-
-    async fn bind_node() -> (TcpListener, SocketAddr) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        log::info!("Bound node to {}", addr);
-        (listener, addr)
-    }
-
-    async fn wait_for<F>(condition: F, timeout: Duration, msg: &str)
-    where
-        F: Fn() -> bool,
-    {
-        let start = std::time::Instant::now();
-        while !condition() {
-            if start.elapsed() > timeout {
-                panic!("Timeout after {:?} waiting for: {}", timeout, msg);
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
     }
 
     #[tokio::test]
@@ -730,55 +721,30 @@ mod tests {
         // 4. Gracefully shutdown D
         handler_d.graceful_shutdown().await.unwrap();
 
-        // 5. Wait for D=Leaving and E=Down (not Alive)
-        wait_for(
-            || {
-                let state = handler_a.state.read();
-                let d_leaving = state
-                    .get("D")
-                    .is_some_and(|n| n.status == NodeStatus::Leaving as i32);
-                let e_not_alive = state
-                    .get("E")
-                    .is_some_and(|n| n.status != NodeStatus::Alive as i32);
-                d_leaving && e_not_alive
-            },
-            Duration::from_secs(60),
-            "D=Leaving, E not Alive on node A",
-        )
-        .await;
+        // 5. Wait for D=Leaving and E=Down (not Alive) on all remaining nodes
+        let check_statuses = |handler: &MeshServerHandler| {
+            let state = handler.state.read();
+            let d_leaving = state
+                .get("D")
+                .is_some_and(|n| n.status == NodeStatus::Leaving as i32);
+            let e_not_alive = state
+                .get("E")
+                .is_some_and(|n| n.status != NodeStatus::Alive as i32);
+            d_leaving && e_not_alive
+        };
 
-        // Verify same on B and C
-        wait_for(
-            || {
-                let state = handler_b.state.read();
-                let d_leaving = state
-                    .get("D")
-                    .is_some_and(|n| n.status == NodeStatus::Leaving as i32);
-                let e_not_alive = state
-                    .get("E")
-                    .is_some_and(|n| n.status != NodeStatus::Alive as i32);
-                d_leaving && e_not_alive
-            },
-            Duration::from_secs(60),
-            "D=Leaving, E not Alive on node B",
-        )
-        .await;
-
-        wait_for(
-            || {
-                let state = handler_c.state.read();
-                let d_leaving = state
-                    .get("D")
-                    .is_some_and(|n| n.status == NodeStatus::Leaving as i32);
-                let e_not_alive = state
-                    .get("E")
-                    .is_some_and(|n| n.status != NodeStatus::Alive as i32);
-                d_leaving && e_not_alive
-            },
-            Duration::from_secs(60),
-            "D=Leaving, E not Alive on node C",
-        )
-        .await;
+        for (handler, name) in [
+            (&handler_a, "A"),
+            (&handler_b, "B"),
+            (&handler_c, "C"),
+        ] {
+            wait_for(
+                || check_statuses(handler),
+                Duration::from_secs(60),
+                &format!("D=Leaving, E not Alive on node {name}"),
+            )
+            .await;
+        }
 
         log::info!("All nodes converged to expected state");
     }

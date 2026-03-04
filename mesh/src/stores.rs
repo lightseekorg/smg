@@ -221,12 +221,13 @@ impl StoreType {
 
     /// Convert to proto StoreType (i32)
     pub fn to_proto(self) -> i32 {
+        use super::service::gossip::StoreType as ProtoStoreType;
         match self {
-            StoreType::Membership => 0,
-            StoreType::App => 1,
-            StoreType::Worker => 2,
-            StoreType::Policy => 3,
-            StoreType::RateLimit => 4,
+            StoreType::Membership => ProtoStoreType::Membership as i32,
+            StoreType::App => ProtoStoreType::App as i32,
+            StoreType::Worker => ProtoStoreType::Worker as i32,
+            StoreType::Policy => ProtoStoreType::Policy as i32,
+            StoreType::RateLimit => ProtoStoreType::RateLimit as i32,
         }
     }
 

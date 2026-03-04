@@ -5,4 +5,4 @@
 
 #[cfg(test)]
 mod comprehensive;
-mod test_utils;
+pub(crate) mod test_utils;

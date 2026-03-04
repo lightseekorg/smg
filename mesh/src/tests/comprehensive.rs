@@ -12,26 +12,21 @@
 
 use std::{
     collections::BTreeMap,
-    net::SocketAddr,
     sync::{Arc, Once},
     time::Duration,
 };
 
-use tokio::net::TcpListener;
 use tracing as log;
 use tracing_subscriber::{
     filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter,
 };
 
-use super::test_utils;
+use super::test_utils::{self, bind_node, wait_for};
 // Internal crate imports - now can access private modules
 use crate::{
     node_state_machine::{ConvergenceConfig, NodeReadiness, NodeStateMachine},
     partition::{PartitionConfig, PartitionDetector, PartitionState},
-    service::{
-        gossip::{NodeState as GossipNodeState, NodeStatus},
-        MeshServerHandler,
-    },
+    service::gossip::{NodeState as GossipNodeState, NodeStatus},
     stores::{AppState, StateStores},
     sync::MeshSyncManager,
 };
@@ -58,29 +53,7 @@ fn init_test_logging() {
     });
 }
 
-/// Bind to an ephemeral port and return the listener + address.
-/// The caller must keep the listener alive and pass it to `mesh_run!`
-/// to avoid a TOCTOU port race.
-async fn bind_node() -> (TcpListener, SocketAddr) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    log::debug!("Bound node to {}", addr);
-    (listener, addr)
-}
 
-/// Poll `condition` every 100ms until it returns true or `timeout` expires.
-async fn wait_for<F>(condition: F, timeout: Duration, msg: &str)
-where
-    F: Fn() -> bool,
-{
-    let start = std::time::Instant::now();
-    while !condition() {
-        if start.elapsed() > timeout {
-            panic!("Timeout after {:?} waiting for: {}", timeout, msg);
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
 
 #[test]
 fn test_infrastructure_utilities() {
@@ -372,7 +345,13 @@ async fn test_two_node_data_synchronization() {
 
     // Poll until data syncs to B via incremental sync stream
     wait_for(
-        || handler_b.stores.app.get("shared_key").is_some(),
+        || {
+            handler_b
+                .stores
+                .app
+                .get("shared_key")
+                .is_some_and(|v| v.value == b"shared_value")
+        },
         Duration::from_secs(15),
         "shared_key synced to node B",
     )
