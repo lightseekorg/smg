@@ -348,7 +348,6 @@ jobs:
             reruns: ""
             upload_benchmarks: true
             parallel_opts: ""  # No parallel for benchmarks (performance measurement)
-            capture_opts: "-s"  # Real-time output for sequential jobs
             ignore_opts: "--ignore=e2e_test/benchmarks/test_go_bindings_perf.py --ignore=e2e_test/benchmarks/test_nightly_perf.py"  # Go and nightly benchmarks run in dedicated jobs
             runner: 4-gpu-h100
           - name: e2e
@@ -359,7 +358,6 @@ jobs:
             env_vars: "SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"  # Thread-based parallelism
-            capture_opts: "-rA"  # Grouped output for parallel jobs
             ignore_opts: ""
     runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
     timeout-minutes: ${{ matrix.timeout }}
@@ -416,7 +414,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} ${{ matrix.capture_opts }} -vv
+          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv
 
       - name: Upload benchmark results
         if: matrix.upload_benchmarks && success()
@@ -450,7 +448,6 @@ jobs:
             env_vars: "E2E_RUNTIME=sglang SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"
-            capture_opts: "-rA"
             test_filter: ""
             ignore_opts: ""
           - name: chat-completions-vllm
@@ -460,7 +457,6 @@ jobs:
             env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"
-            capture_opts: "-rA"
             # TODO: Remove filter when vLLM supports logprobs and n>1 with greedy sampling
             # Excludes: 5-grpc (logprobs=5), 2-None-grpc (n=2 with no logprobs), multiple_choices (n=2 tests)
             test_filter: "-k 'not (5-grpc or 2-None-grpc or multiple_choices)'"
@@ -473,7 +469,6 @@ jobs:
             env_vars: "E2E_RUNTIME=trtllm SHOW_WORKER_LOGS=1 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: "--workers 1 --tests-per-worker 4"
-            capture_opts: "-rA"
             test_filter: ""
             setup_trtllm: true
             ignore_opts: ""
@@ -485,7 +480,6 @@ jobs:
             env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
             reruns: "--reruns 2 --reruns-delay 5"
             parallel_opts: ""
-            capture_opts: "-s"
             test_filter: ""
             setup_vllm: true
             ignore_opts: ""
@@ -540,7 +534,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} ${{ matrix.capture_opts }} -vv
+          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv
 
   e2e-agentic:
     name: ${{ matrix.name }}
@@ -568,7 +562,6 @@ jobs:
             reruns: "--reruns 2 --reruns-delay 5"
             setup_agentic_deps: true
             parallel_opts: ""
-            capture_opts: "-s"
             ignore_opts: ""
             test_filter: "-m 'not external'"
     runs-on: k8s-runner-gpu
@@ -625,7 +618,7 @@ jobs:
           BRAVE_MCP_HOST: ${{ matrix.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} ${{ matrix.capture_opts }} -vv
+          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv
 
       - name: Cleanup Oracle test users
         if: always() && matrix.setup_agentic_deps
