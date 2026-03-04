@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - grpc_client/python/smg_grpc_proto/__init__.py  # Triggered when version bumped
+      - grpc_client/python/pyproject.toml  # Triggered when version bumped
   workflow_dispatch:
 
 permissions:
@@ -65,4 +65,4 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN_GRPC_PROTO }}
         run: |
           pip install twine
-          twine upload dist/* --verbose
+          twine upload dist/* --verbose --skip-existing
