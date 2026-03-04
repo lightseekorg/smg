@@ -38,9 +38,13 @@ pub const XXH3_SEED: u64 = 1337;
 /// reads+writes at the cost of more memory for shard locks.
 const INDEX_SHARD_COUNT: usize = 1024;
 
-/// Shard count for worker-keyed DashMaps (worker_blocks, tree_sizes, worker_to_id).
+/// Shard count for worker-keyed DashMaps (worker_blocks, worker_to_id).
 /// These maps hold at most ~500 entries (one per worker), so 8 shards is sufficient.
 const WORKER_SHARD_COUNT: usize = 8;
+
+/// Maximum number of workers supported. tree_sizes is a flat Vec indexed by worker_id,
+/// giving lock-free reads on the query hot path (array index vs DashMap hash+lock+probe).
+const MAX_WORKERS: usize = 2048;
 
 /// Position-independent content hash of tokens within a single block.
 /// Computed via XXH3-64 from token IDs. Same tokens always produce the same hash
@@ -257,8 +261,9 @@ pub struct PositionalIndexer {
     /// No inner RwLock: accessed via DashMap's get()/get_mut() shard locking.
     worker_blocks: DashMap<u32, WorkerBlockMap, FxBuildHasher>,
     /// Per-worker block counts, tracked atomically for O(1) reads during queries.
-    /// Replaces the O(worker_blocks.len()) computation with a single atomic load.
-    tree_sizes: DashMap<u32, AtomicUsize, FxBuildHasher>,
+    /// Flat Vec indexed by worker_id — lock-free reads on the query hot path
+    /// (array index ~1ns vs DashMap hash+lock+probe ~25ns per access).
+    tree_sizes: Vec<AtomicUsize>,
     /// Worker URL → internal u32 ID (fast path: DashMap shard read).
     worker_to_id: DashMap<Arc<str>, u32, FxBuildHasher>,
     /// Monotonic counter for assigning new worker IDs.
@@ -278,7 +283,7 @@ impl PositionalIndexer {
         Self {
             index: DashMap::with_hasher_and_shard_amount(FxBuildHasher, INDEX_SHARD_COUNT),
             worker_blocks: DashMap::with_hasher_and_shard_amount(FxBuildHasher, WORKER_SHARD_COUNT),
-            tree_sizes: DashMap::with_hasher_and_shard_amount(FxBuildHasher, WORKER_SHARD_COUNT),
+            tree_sizes: (0..MAX_WORKERS).map(|_| AtomicUsize::new(0)).collect(),
             worker_to_id: DashMap::with_hasher_and_shard_amount(FxBuildHasher, WORKER_SHARD_COUNT),
             next_worker_id: AtomicU32::new(0),
             jump_size,
@@ -351,14 +356,9 @@ impl PositionalIndexer {
 
         drop(wb_ref);
 
-        // Atomically update tree_sizes.
+        // Atomically update tree_sizes — lock-free array index.
         let num_blocks = blocks.len();
-        self.tree_sizes
-            .entry(worker_id)
-            .and_modify(|size| {
-                size.fetch_add(num_blocks, Ordering::Relaxed);
-            })
-            .or_insert(AtomicUsize::new(num_blocks));
+        self.tree_sizes[worker_id as usize].fetch_add(num_blocks, Ordering::Relaxed);
 
         Ok(())
     }
@@ -402,9 +402,7 @@ impl PositionalIndexer {
         drop(wb_ref);
 
         if num_removed > 0 {
-            if let Some(size) = self.tree_sizes.get(&worker_id) {
-                size.fetch_sub(num_removed, Ordering::Relaxed);
-            }
+            self.tree_sizes[worker_id as usize].fetch_sub(num_removed, Ordering::Relaxed);
         }
     }
 
@@ -420,9 +418,10 @@ impl PositionalIndexer {
 
     /// Get total number of blocks across all workers.
     pub fn current_size(&self) -> usize {
-        self.tree_sizes
+        let n = self.next_worker_id.load(Ordering::Relaxed) as usize;
+        self.tree_sizes[..n]
             .iter()
-            .map(|entry| entry.value().load(Ordering::Relaxed))
+            .map(|size| size.load(Ordering::Relaxed))
             .sum()
     }
 
@@ -465,12 +464,8 @@ impl PositionalIndexer {
 
         if keep_worker {
             self.worker_blocks.insert(worker_id, FxHashMap::default());
-            if let Some(size) = self.tree_sizes.get(&worker_id) {
-                size.store(0, Ordering::Relaxed);
-            }
-        } else {
-            self.tree_sizes.remove(&worker_id);
         }
+        self.tree_sizes[worker_id as usize].store(0, Ordering::Relaxed);
     }
 
     // -----------------------------------------------------------------------
@@ -523,11 +518,16 @@ impl PositionalIndexer {
             return *entry.value();
         }
         // Slow path: DashMap entry API handles the race — or_insert_with runs at most once.
-        *self
+        let id = *self
             .worker_to_id
             .entry(Arc::from(worker))
             .or_insert_with(|| self.next_worker_id.fetch_add(1, Ordering::Relaxed))
-            .value()
+            .value();
+        assert!(
+            (id as usize) < MAX_WORKERS,
+            "worker count {id} exceeds MAX_WORKERS ({MAX_WORKERS})"
+        );
+        id
     }
 
     // -----------------------------------------------------------------------
@@ -700,11 +700,10 @@ impl PositionalIndexer {
             }
             scores.scores = internal_scores;
             for &int_id in scores.scores.keys() {
-                if let Some(size) = self.tree_sizes.get(&int_id) {
-                    scores
-                        .tree_sizes
-                        .insert(int_id, size.load(Ordering::Relaxed));
-                }
+                scores.tree_sizes.insert(
+                    int_id,
+                    self.tree_sizes[int_id as usize].load(Ordering::Relaxed),
+                );
             }
             return scores;
         }
@@ -748,13 +747,12 @@ impl PositionalIndexer {
 
         scores.scores = internal_scores;
 
-        // Populate tree_sizes from atomic counters — O(1) per worker, no locks.
+        // Populate tree_sizes from atomic counters — lock-free array index.
         for &int_id in scores.scores.keys() {
-            if let Some(size) = self.tree_sizes.get(&int_id) {
-                scores
-                    .tree_sizes
-                    .insert(int_id, size.load(Ordering::Relaxed));
-            }
+            scores.tree_sizes.insert(
+                int_id,
+                self.tree_sizes[int_id as usize].load(Ordering::Relaxed),
+            );
         }
 
         scores
