@@ -318,6 +318,7 @@ jobs:
               - 'multimodal/**'
               - 'grpc_client/**'
               - 'e2e_test/chat_completions/**'
+              - 'e2e_test/router/test_pd_mmlu.py'
               - 'scripts/ci_install_vllm.sh'
               - 'scripts/ci_install_trtllm.sh'
             agentic:
@@ -364,19 +365,6 @@ jobs:
             setup_agentic_deps: 'false'
             upload_benchmarks: 'false'
             parallel_opts: "--workers 1 --tests-per-worker 4"  # Thread-based parallelism
-            ignore_opts: ""
-          - name: vllm-pd
-            timeout: 15
-            test_dirs: "e2e_test/router/test_pd_mmlu.py"
-            extra_deps: ""
-            env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
-            reruns: "--reruns 2 --reruns-delay 5"
-            parallel_opts: ""
-            test_filter: ""
-            setup_vllm: 'true'
-            setup_trtllm: 'false'
-            setup_agentic_deps: 'false'
-            upload_benchmarks: 'false'
             ignore_opts: ""
     runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
     timeout-minutes: ${{ matrix.timeout }}
@@ -455,6 +443,17 @@ jobs:
             setup_trtllm: 'true'
             ignore_opts: ""
             runner: 4-gpu-h100
+          - name: vllm-pd
+            timeout: 15
+            test_dirs: "e2e_test/router/test_pd_mmlu.py"
+            extra_deps: ""
+            env_vars: "E2E_RUNTIME=vllm SHOW_WORKER_LOGS=0 SHOW_ROUTER_LOGS=1"
+            reruns: "--reruns 2 --reruns-delay 5"
+            parallel_opts: ""
+            test_filter: ""
+            setup_vllm: 'true'
+            setup_trtllm: 'false'
+            ignore_opts: ""
     runs-on: ${{ matrix.runner || 'k8s-runner-gpu' }}
     timeout-minutes: ${{ matrix.timeout }}
     steps:
