@@ -12,7 +12,7 @@ import logging
 
 import pytest
 from conftest import smg_compare
-from infra import is_trtllm
+from infra import is_sglang, is_trtllm
 
 logger = logging.getLogger(__name__)
 
@@ -607,6 +607,18 @@ class TestChatCompletionGptOss(TestChatCompletion):
     def test_chat_completion_stream(self, setup_backend, smg, logprobs, parallel_sample_num):
         """Test streaming chat completion with logprobs and parallel sampling."""
         super().test_chat_completion_stream(setup_backend, smg, logprobs, parallel_sample_num)
+
+    def test_stop_sequences(self, setup_backend, smg):
+        if is_trtllm():
+            pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
+        super().test_stop_sequences(setup_backend, smg)
+
+    def test_stop_sequences_stream(self, setup_backend, smg):
+        if is_trtllm():
+            pytest.skip("TRT-LLM Harmony stop_word_ids path has known bugs")
+        if is_sglang():
+            self.STOP_SEQUENCE_TRIMMED = True
+        super().test_stop_sequences_stream(setup_backend, smg)
 
     @pytest.mark.skip(reason="OSS models don't support regex constraints")
     def test_regex(self, setup_backend, smg):
