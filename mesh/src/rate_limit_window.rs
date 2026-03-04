@@ -144,7 +144,6 @@ mod tests {
                 value: serialized,
                 version: 1,
             },
-            "node1".to_string(),
         );
 
         // Increment counter
@@ -209,9 +208,7 @@ mod tests {
             version: 1,
             metadata: Default::default(),
         };
-        let _ = stores
-            .membership
-            .insert(membership_key, membership_state, "test_node".to_string());
+        let _ = stores.membership.insert(membership_key, membership_state);
 
         // Update rate limit membership so this node becomes an owner
         sync_manager.update_rate_limit_membership();

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -111,16 +111,6 @@ impl OperationLog {
         &self.operations
     }
 
-    /// Serialize to JSON
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self)
-    }
-
-    /// Deserialize from JSON
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
-    }
-
     /// Serialize to JSON bytes
     pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(self)
@@ -141,8 +131,8 @@ impl OperationLog {
         self.operations.is_empty()
     }
 
-    fn latest_operations_by_key(&self) -> BTreeMap<String, Operation> {
-        let mut latest_by_key: BTreeMap<String, Operation> = BTreeMap::new();
+    fn latest_operations_by_key(&self) -> HashMap<String, Operation> {
+        let mut latest_by_key: HashMap<String, Operation> = HashMap::new();
 
         for operation in &self.operations {
             let key = operation.key().to_string();
@@ -182,7 +172,7 @@ impl OperationLog {
     }
 
     /// Build a latest-state snapshot and clear the operation log.
-    pub fn snapshot_and_truncate(&mut self) -> BTreeMap<String, Operation> {
+    pub fn snapshot_and_truncate(&mut self) -> HashMap<String, Operation> {
         let snapshot = self.latest_operations_by_key();
         self.operations.clear();
         snapshot

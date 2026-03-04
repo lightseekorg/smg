@@ -390,23 +390,7 @@ impl MeshController {
 
                             if !all_updates.is_empty() {
                                 for (store_type, updates) in all_updates {
-                                    let proto_store_type = match store_type {
-                                        LocalStoreType::Membership => {
-                                            super::service::gossip::StoreType::Membership as i32
-                                        }
-                                        LocalStoreType::App => {
-                                            super::service::gossip::StoreType::App as i32
-                                        }
-                                        LocalStoreType::Worker => {
-                                            super::service::gossip::StoreType::Worker as i32
-                                        }
-                                        LocalStoreType::Policy => {
-                                            super::service::gossip::StoreType::Policy as i32
-                                        }
-                                        LocalStoreType::RateLimit => {
-                                            super::service::gossip::StoreType::RateLimit as i32
-                                        }
-                                    };
+                                    let proto_store_type = store_type.to_proto();
 
                                     let incremental_update = StreamMessage {
                                         message_type: StreamMessageType::IncrementalUpdate as i32,
@@ -499,7 +483,6 @@ impl MeshController {
                                                         if let Err(err) = stores.app.insert(
                                                             app_state.key.clone(),
                                                             app_state,
-                                                            state_update.actor.clone(),
                                                         ) {
                                                             log::warn!(error = %err, "Failed to apply app state update");
                                                         }
@@ -515,7 +498,6 @@ impl MeshController {
                                                         if let Err(err) = stores.membership.insert(
                                                             membership_state.name.clone(),
                                                             membership_state,
-                                                            state_update.actor.clone(),
                                                         ) {
                                                             log::warn!(error = %err, "Failed to apply membership state update");
                                                         }
