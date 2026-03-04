@@ -698,6 +698,7 @@ jobs:
                 "${{ needs.build-wheel.result }}" == "failure" || \
                 "${{ needs.python-unit-tests.result }}" == "failure" || \
                 "${{ needs.unit-tests.result }}" == "failure" || \
+                "${{ needs.detect-changes.result }}" == "failure" || \
                 "${{ needs.e2e-always.result }}" == "failure" || \
                 "${{ needs.e2e-chat-completions.result }}" == "failure" || \
                 "${{ needs.e2e-agentic.result }}" == "failure" || \
