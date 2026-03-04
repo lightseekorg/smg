@@ -175,6 +175,7 @@ def _setup_logging() -> None:
 
     for logger_name in ("e2e_test", "infra", "fixtures"):
         log = logging.getLogger(logger_name)
+        log.handlers.clear()  # prevent duplicates after pytest-parallel fork()
         log.setLevel(logging.INFO)
         log.addHandler(handler)
         log.propagate = False
