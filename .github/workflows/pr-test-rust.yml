@@ -308,6 +308,9 @@ jobs:
               - 'Cargo.lock'
               - '.github/actions/**'
               - '.github/workflows/pr-test-rust.yml'
+              - 'scripts/ci_setup_python_venv.sh'
+              - 'scripts/ci_install_sglang.sh'
+              - 'scripts/ci_build_wheel.sh'
             chat-completions:
               - 'tokenizer/**'
               - 'tool_parser/**'
@@ -315,6 +318,8 @@ jobs:
               - 'multimodal/**'
               - 'grpc_client/**'
               - 'e2e_test/chat_completions/**'
+              - 'scripts/ci_install_vllm.sh'
+              - 'scripts/ci_install_trtllm.sh'
             agentic:
               - 'mcp/**'
               - 'workflow/**'
