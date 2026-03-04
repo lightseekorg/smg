@@ -237,7 +237,7 @@ impl<'a> McpToolSession<'a> {
     ///
     /// Uses the orchestrator inventory to find the tool's server key, then maps
     /// it to the request's MCP server label. Falls back to the first server
-    /// label (or "mcp").
+    /// label (or [`DEFAULT_SERVER_LABEL`]).
     pub fn resolve_tool_server_label(&self, tool_name: &str) -> String {
         let fallback_label = self
             .all_mcp_servers
