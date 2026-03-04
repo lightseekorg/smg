@@ -2,7 +2,10 @@
 //!
 //! Transition: BuildRequest → NonStreamRequest | StreamRequestWithTool | StreamRequest
 
-use axum::response::Response;
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 
 use crate::routers::gemini::{
     context::RequestContext,
@@ -49,6 +52,17 @@ pub(crate) async fn request_building(ctx: &mut RequestContext) -> Result<StepRes
     //    - stream && has_mcp_tools: ctx.state = StreamRequestWithTool.
     //    - stream && !has_mcp_tools: ctx.state = StreamRequest.
     //    - !stream:                  ctx.state = NonStreamRequest.
+
+    // Serialize the original request as the upstream payload.
+    // MCP tool rewriting will modify this payload in a later phase.
+    let payload = serde_json::to_value(ctx.input.original_request.as_ref()).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to serialize request: {e}"),
+        )
+            .into_response()
+    })?;
+    ctx.processing.payload = Some(payload);
 
     let has_mcp_tools = false; // TODO: detect from tools list
 

@@ -62,18 +62,19 @@ impl GeminiRouter {
     ///   task (events flow through `sse_tx`), and returns the SSE `Response` immediately.
     pub async fn route_interactions(
         &self,
-        headers: Option<&HeaderMap>,
-        body: &InteractionsRequest,
-        model_id: Option<&str>,
+        headers: Option<HeaderMap>,
+        body: InteractionsRequest,
+        model_id: Option<String>,
     ) -> Response {
+        let stream = body.stream;
         let mut ctx = RequestContext::new(
-            Arc::new(body.clone()),
-            headers.cloned(),
-            model_id.map(String::from),
+            Arc::new(body),
+            headers,
+            model_id,
             self.shared_components.clone(),
         );
 
-        if body.stream {
+        if stream {
             // Streaming: create SSE channel, spawn driver, return SSE response.
             let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, io::Error>>();
             ctx.streaming.sse_tx = Some(tx);
