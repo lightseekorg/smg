@@ -18,6 +18,7 @@ use serde_json::json;
 use smg_mcp::{self as mcp, ResponseFormat};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::routers::grpc::harmony::responses::ToolResult;
@@ -927,7 +928,10 @@ impl ResponseStreamEventEmitter {
         let (output_index, item_id) = self.allocate_output_index(OutputItemType::McpListTools);
 
         // Build per-tool JSON items
-        let tool_items = Self::tool_entries_to_json(tools).unwrap_or_default();
+        let tool_items = Self::tool_entries_to_json(tools).unwrap_or_else(|e| {
+            warn!("Failed to serialize McpToolInfo to JSON: {e}");
+            Vec::new()
+        });
 
         // In-progress item (empty tools)
         let item_in_progress = json!({
