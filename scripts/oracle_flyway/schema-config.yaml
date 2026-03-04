@@ -9,7 +9,7 @@ conversations:
   extra_columns:
     EXPIRES_AT:
       sql_type: "TIMESTAMP WITH TIME ZONE"
-      default_value: "2099-12-31T23:59:59Z"
+      default_value: "31-DEC-99 11.59.59.000000 PM +00:00"
 
 responses:
   table: RESPONSES
