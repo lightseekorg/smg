@@ -59,7 +59,7 @@ use crate::{
             get_mesh_health, get_policy_state, get_policy_states, get_worker_state,
             get_worker_states, set_global_rate_limit, trigger_graceful_shutdown, update_app_config,
         },
-        openai::realtime::rest as realtime_rest,
+        openai::realtime::{rest as realtime_rest, ws as realtime_ws},
         parse,
         router_manager::RouterManager,
         tokenize, RouterTrait,
@@ -563,6 +563,14 @@ pub fn build_app(
     request_id_headers: Vec<String>,
     cors_allowed_origins: Vec<String>,
 ) -> Router {
+    // Pending (upgrade not completed): 30s TTL
+    // Disconnected: 60 min TTL
+    app_state.context.realtime_registry.start_reaper(
+        Duration::from_secs(3600),
+        Duration::from_secs(30),
+        Duration::from_secs(60),
+    );
+
     let protected_routes = Router::new()
         .route("/generate", post(generate))
         .route("/v1/chat/completions", post(v1_chat_completions))
@@ -615,6 +623,7 @@ pub fn build_app(
         ));
 
     let realtime_routes = Router::new()
+        .route("/v1/realtime", get(realtime_ws::ws_handler))
         .route("/v1/realtime/sessions", post(realtime_rest::create_session))
         .route(
             "/v1/realtime/client_secrets",
