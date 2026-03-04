@@ -311,9 +311,9 @@ jobs:
               - 'scripts/ci_setup_python_venv.sh'
               - 'scripts/ci_install_sglang.sh'
               - 'scripts/ci_build_wheel.sh'
-            chat-completions:
               - 'tokenizer/**'
               - 'tool_parser/**'
+            chat-completions:
               - 'reasoning_parser/**'
               - 'multimodal/**'
               - 'grpc_client/**'
@@ -322,11 +322,7 @@ jobs:
               - 'scripts/ci_install_trtllm.sh'
             agentic:
               - 'mcp/**'
-              - 'workflow/**'
               - 'data_connector/**'
-              - 'tool_parser/**'
-              - 'tokenizer/**'
-              - 'auth/**'
               - 'e2e_test/responses/**'
               - 'e2e_test/messages/**'
               - 'scripts/ci_agentic_svc_deps.sh'
