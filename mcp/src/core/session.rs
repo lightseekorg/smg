@@ -318,25 +318,21 @@ impl<'a> McpToolSession<'a> {
         output: &mut Vec<openai_protocol::responses::ResponseOutputItem>,
         tool_call_items: Vec<openai_protocol::responses::ResponseOutputItem>,
     ) {
-        // Build the correctly-ordered vec in one pass instead of
-        // repeated `insert(0, ..)` which is O(n²) due to element shifting.
-        let mut new_output = Vec::with_capacity(
-            self.mcp_servers.len() + tool_call_items.len() + output.len(),
-        );
+        // Modify the vector in-place: drain existing items, then rebuild
+        // with the correct ordering without allocating a temporary Vec.
+        let existing: Vec<_> = output.drain(..).collect();
+        output.reserve(self.mcp_servers.len() + tool_call_items.len() + existing.len());
 
         // 1. mcp_list_tools items (one per server)
         for binding in self.mcp_servers.iter() {
-            new_output.push(self.build_mcp_list_tools_item(&binding.label, &binding.server_key));
+            output.push(self.build_mcp_list_tools_item(&binding.label, &binding.server_key));
         }
 
         // 2. Tool call items (mcp_call / web_search_call / etc.)
-        new_output.extend(tool_call_items);
+        output.extend(tool_call_items);
 
         // 3. Existing items (messages, etc.)
-        new_output.append(output);
-
-        // Replace output contents
-        *output = new_output;
+        output.extend(existing);
     }
 
     fn build_exposed_function_tools(
