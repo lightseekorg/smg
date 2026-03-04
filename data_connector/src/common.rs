@@ -125,18 +125,22 @@ pub(super) fn parse_conversation_metadata(
     }
 }
 
-fn parse_json_or(raw: Option<String>, default: Value) -> Result<Value, String> {
-    raw.filter(|s| !s.is_empty()).map_or(Ok(default), |s| {
-        serde_json::from_str(&s).map_err(|e| e.to_string())
-    })
+fn parse_json_or<F>(raw: Option<String>, default: F) -> Result<Value, String>
+where
+    F: FnOnce() -> Value,
+{
+    raw.filter(|s| !s.is_empty()).map_or_else(
+        || Ok(default()),
+        |s| serde_json::from_str(&s).map_err(|e| e.to_string()),
+    )
 }
 
 pub(super) fn parse_raw_response(raw: Option<String>) -> Result<Value, String> {
-    parse_json_or(raw, Value::Null)
+    parse_json_or(raw, || Value::Null)
 }
 
 pub(super) fn parse_json_value(raw: Option<String>) -> Result<Value, String> {
-    parse_json_or(raw, Value::Array(vec![]))
+    parse_json_or(raw, || Value::Array(Vec::new()))
 }
 
 #[cfg(test)]
