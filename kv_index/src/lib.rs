@@ -13,6 +13,7 @@
 
 mod common;
 mod event_tree;
+mod sharded_indexer;
 mod string_tree;
 mod token_tree;
 
@@ -21,6 +22,7 @@ pub use event_tree::{
     compute_content_hash, compute_request_content_hashes, ApplyError, ContentHash, OverlapScores,
     PositionalIndexer, SequenceHash, StoredBlock, WorkerBlockMap, WorkerId,
 };
+pub use sharded_indexer::ShardedIndexer;
 // Re-export under names matching old tree.rs API for easier migration
 pub use string_tree::Tree;
 pub use string_tree::{
