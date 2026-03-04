@@ -12,7 +12,7 @@ import logging
 
 import pytest
 from conftest import smg_compare
-from infra import is_trtllm, is_vllm
+from infra import is_sglang, is_trtllm, is_vllm
 
 logger = logging.getLogger(__name__)
 
@@ -608,7 +608,7 @@ class TestChatCompletionGptOss(TestChatCompletion):
         super().test_chat_completion_stream(setup_backend, smg, logprobs, parallel_sample_num)
 
     def test_stop_sequences(self, setup_backend, smg):
-        if is_vllm():
+        if is_vllm() or is_sglang():
             self.STOP_SEQUENCE_TRIMMED = False
         super().test_stop_sequences(setup_backend, smg)
 
