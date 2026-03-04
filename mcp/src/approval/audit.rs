@@ -146,14 +146,13 @@ impl AuditLog {
 
     pub fn for_request(&self, request_id: &str, limit: Option<usize>) -> Vec<AuditEntry> {
         let entries = self.entries.read();
-        let iter = entries
+        entries
             .iter()
             .rev()
-            .filter(|e| e.request_id.as_ref() == request_id);
-        match limit {
-            Some(n) => iter.take(n).cloned().collect(),
-            None => iter.cloned().collect(),
-        }
+            .filter(|e| e.request_id.as_ref() == request_id)
+            .take(limit.unwrap_or(usize::MAX))
+            .cloned()
+            .collect()
     }
 
     pub fn len(&self) -> usize {
