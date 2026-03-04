@@ -11,10 +11,10 @@ use std::collections::{HashMap, HashSet};
 use futures::stream::{self, StreamExt};
 use openai_protocol::responses::ResponseTool;
 
-use super::orchestrator::{
-    McpOrchestrator, McpRequestContext, ToolExecutionInput, ToolExecutionOutput,
+use super::{
+    orchestrator::{McpOrchestrator, McpRequestContext, ToolExecutionInput, ToolExecutionOutput},
+    UNKNOWN_SERVER_KEY,
 };
-use super::UNKNOWN_SERVER_KEY;
 use crate::{
     approval::ApprovalMode,
     inventory::{QualifiedToolName, ToolEntry},
