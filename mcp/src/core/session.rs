@@ -168,13 +168,16 @@ impl<'a> McpToolSession<'a> {
 
     // --- Delegation methods ---
 
-    /// Execute multiple tools using this session's exposed-name mapping.
+    /// Execute multiple tools concurrently using this session's exposed-name mapping.
+    ///
+    /// All tools are dispatched at once via `futures::future::join_all`,
+    /// which preserves the original input ordering in the returned `Vec`.
     pub async fn execute_tools(&self, inputs: Vec<ToolExecutionInput>) -> Vec<ToolExecutionOutput> {
-        let mut outputs = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            outputs.push(self.execute_tool(input).await);
-        }
-        outputs
+        let futures: Vec<_> = inputs
+            .into_iter()
+            .map(|input| self.execute_tool(input))
+            .collect();
+        futures::future::join_all(futures).await
     }
 
     /// Execute a single tool using this session's exposed-name mapping.
