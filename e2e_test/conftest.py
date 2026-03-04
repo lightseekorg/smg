@@ -116,7 +116,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import sys
-import threading
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -144,38 +143,23 @@ if not _wheel_installed and str(_SRC) not in sys.path:
 # ---------------------------------------------------------------------------
 
 
-_thread_test_name = threading.local()
-
-
-class _TestNameFormatter(logging.Formatter):
-    """Formatter that includes the current test name from a thread-local.
-
-    In parallel mode, multiple tests run in different threads. Including
-    the test name in every log line makes interleaved output greppable:
-        grep 'test_chat_completion\\[grpc\\]' to follow a single test.
-    """
-
-    def format(self, record):
-        record.test_name = getattr(_thread_test_name, "name", "?")
-        return super().format(record)
-
-
 def _setup_logging() -> None:
-    """Configure clean logging to stdout with timestamps, thread, and test name.
+    """Configure clean logging to stdout with timestamps and thread info.
 
     In parallel mode (--tests-per-worker > 1), logs from different threads
-    are interleaved. Including the test name in each line lets you grep
-    for a specific test to see its logs in order.
+    would be interleaved. Including thread name helps identify which test
+    produced each log line.
     """
-    fmt = "%(asctime)s.%(msecs)03d [%(threadName)s] [%(test_name)s] [%(name)s] %(message)s"
+    # Include thread name for parallel execution readability
+    # MainThread for sequential, Thread-N for parallel workers
+    fmt = "%(asctime)s.%(msecs)03d [%(threadName)s] [%(name)s] %(message)s"
     datefmt = "%H:%M:%S"
 
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(_TestNameFormatter(fmt, datefmt))
+    handler.setFormatter(logging.Formatter(fmt, datefmt))
 
     for logger_name in ("e2e_test", "infra", "fixtures"):
         log = logging.getLogger(logger_name)
-        log.handlers.clear()  # prevent duplicates after pytest-parallel fork()
         log.setLevel(logging.INFO)
         log.addHandler(handler)
         log.propagate = False
@@ -195,11 +179,12 @@ logger = logging.getLogger(__name__)
 
 
 def pytest_runtest_logstart(nodeid: str, location: tuple) -> None:
-    """Print clear test header and set thread-local test name for log prefixing."""
+    """Print clear test header at start of each test."""
+    import threading
+
     from infra import LOG_SEPARATOR_WIDTH
 
     test_name = nodeid.split("::")[-1] if "::" in nodeid else nodeid
-    _thread_test_name.name = test_name
     thread_name = threading.current_thread().name
     print(f"\n{'=' * LOG_SEPARATOR_WIDTH}")
     print(f"[{thread_name}] TEST: {test_name}")

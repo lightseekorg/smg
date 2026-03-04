@@ -414,7 +414,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
+          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -rA -vv
 
       - name: Upload benchmark results
         if: matrix.upload_benchmarks && success()
@@ -534,7 +534,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv -o log_cli=true --log-cli-level=INFO
+          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -rA -vv
 
   e2e-agentic:
     name: ${{ matrix.name }}
@@ -618,7 +618,7 @@ jobs:
           BRAVE_MCP_HOST: ${{ matrix.setup_agentic_deps && 'brave-search-mcp' || '' }}
         run: |
           bash scripts/ci_killall_sglang.sh "nuk_gpus"
-          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -s -vv
+          ${{ matrix.env_vars }} ROUTER_LOCAL_MODEL_PATH="/home/ubuntu/models" pytest ${{ matrix.reruns }} ${{ matrix.parallel_opts }} ${{ matrix.ignore_opts }} ${{ matrix.test_dirs }} ${{ matrix.test_filter }} -rA -vv
 
       - name: Cleanup Oracle test users
         if: always() && matrix.setup_agentic_deps
