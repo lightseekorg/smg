@@ -490,9 +490,6 @@ pub struct BasicWorker {
     /// When not `Wildcard`, overrides metadata.models for routing decisions.
     /// Uses `ArcSwap` for lock-free reads on the hot path (`supports_model`).
     pub models_override: Arc<ArcSwap<WorkerModels>>,
-    /// Per-worker LoRA adapter lifecycle state.
-    /// Present only when `RouterConfig.lora` is configured.
-    pub lora_state: Option<Arc<crate::core::lora::WorkerLoraState>>,
 }
 
 impl fmt::Debug for BasicWorker {
@@ -529,61 +526,6 @@ impl Worker for BasicWorker {
 
     fn connection_mode(&self) -> &ConnectionMode {
         &self.metadata.spec.connection_mode
-    }
-
-    /// Transform the request JSON before forwarding.
-    ///
-    /// Applies, in order:
-    /// 1. DP-aware rank injection (same logic as the trait default).
-    /// 2. LoRA adapter resolution and request rewriting (if `lora_state` is set).
-    async fn prepare_request(
-        &self,
-        mut req: serde_json::Value,
-    ) -> WorkerResult<serde_json::Value> {
-        // 1. DP-aware rank injection (mirrors the trait default implementation).
-        if let Some(rank) = self.metadata.spec.dp_rank {
-            if let Some(map) = req.as_object_mut() {
-                map.insert(
-                    "data_parallel_rank".to_string(),
-                    serde_json::json!(rank),
-                );
-            } else {
-                return Err(crate::core::WorkerError::InvalidConfiguration {
-                    message: "Request must be a JSON object for DP-aware routing".to_string(),
-                });
-            }
-        }
-
-        // 2. LoRA: if `lora_path` is present, resolve it and rewrite JSON fields.
-        if let Some(lora) = &self.lora_state {
-            // Extract the StorageSpec from the JSON value. We support both the
-            // full object form and the backward-compatible plain-string form via
-            // StorageSpec's custom deserializer.
-            if let Some(raw_spec) = req.get("lora_path") {
-                let spec: openai_protocol::lora::StorageSpec =
-                    serde_json::from_value(raw_spec.clone()).map_err(|e| {
-                        crate::core::WorkerError::InvalidConfiguration {
-                            message: format!("invalid lora_path value: {e}"),
-                        }
-                    })?;
-
-                lora.resolve(&spec, &mut req).await.map_err(|e| {
-                    use crate::core::lora::LoraStateError;
-                    match e {
-                        LoraStateError::UnsupportedUri(inner) => {
-                            crate::core::WorkerError::LoraUnsupportedUri {
-                                message: inner.to_string(),
-                            }
-                        }
-                        LoraStateError::Engine(inner) => crate::core::WorkerError::LoraLoadFailed {
-                            message: inner.to_string(),
-                        },
-                    }
-                })?;
-            }
-        }
-
-        Ok(req)
     }
 
     fn is_healthy(&self) -> bool {

@@ -296,10 +296,10 @@ pub struct ChatCompletionRequest {
 
     /// LoRA adapter to use for this request.
     ///
-    /// Accepts either a plain string (local path or pre-loaded name) or a full
-    /// [`StorageSpec`](crate::lora::StorageSpec) object with `path`, `id`, and
-    /// optional `auth` fields.
-    pub lora_path: Option<crate::lora::StorageSpec>,
+    /// Pass the adapter's serving name (the `id` field from the worker's
+    /// `loras` configuration).  The engine must have the adapter pre-loaded
+    /// before the request arrives.
+    pub lora_path: Option<String>,
 
     /// Session parameters for continual prompting
     pub session_params: Option<HashMap<String, Value>>,

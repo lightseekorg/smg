@@ -645,13 +645,6 @@ impl RouterConfigBuilder {
         self
     }
 
-    // ==================== LoRA ====================
-
-    pub fn maybe_lora(mut self, lora: Option<super::types::LoraConfig>) -> Self {
-        self.config.lora = lora;
-        self
-    }
-
     // ==================== Build ====================
 
     pub fn build(self) -> ConfigResult<RouterConfig> {

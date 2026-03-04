@@ -93,10 +93,6 @@ pub struct RouterConfig {
     /// When set, wraps all storage backends with hook-based interceptors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_hook_wasm_path: Option<String>,
-    /// LoRA adapter lifecycle management.
-    /// When absent, `lora_path` is forwarded to the backend without orchestration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lora: Option<LoraConfig>,
 }
 
 /// Tokenizer cache configuration
@@ -161,31 +157,6 @@ fn default_history_backend() -> HistoryBackend {
     HistoryBackend::Memory
 }
 
-// ─────────────────────────── LoRA configuration ───────────────────────────
-
-/// Configuration for LoRA adapter lifecycle management.
-///
-/// When this block is present, SMG automatically loads local LoRA adapters into
-/// the engine on first use, caches them in memory, and rewrites inference
-/// requests to use the engine-side adapter name.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoraConfig {
-    /// Which engine backend is used for load/unload HTTP calls.
-    /// Must match the backend receiving inference requests.
-    #[serde(default)]
-    pub backend: LoraBackend,
-}
-
-/// LLM engine backend for LoRA load/unload API calls.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LoraBackend {
-    /// SGLang: uses `/load_lora_adapter` and `/unload_lora_adapter`.
-    #[default]
-    Sglang,
-    /// vLLM / TRT-LLM: uses `/v1/load_lora_adapter` and `/v1/unload_lora_adapter`.
-    Vllm,
-}
 
 /// Routing mode configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -579,7 +550,6 @@ impl Default for RouterConfig {
             storage_hook_wasm_path: None,
             server_cert: None,
             server_key: None,
-            lora: None,
         }
     }
 }

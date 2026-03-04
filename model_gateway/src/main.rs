@@ -5,7 +5,7 @@ use rand::{distr::Alphanumeric, Rng};
 use smg::{
     config::{
         CircuitBreakerConfig, ConfigError, ConfigResult, DiscoveryConfig, HealthCheckConfig,
-        HistoryBackend, LoraBackend, LoraConfig, ManualAssignmentMode, MetricsConfig, OracleConfig,
+        HistoryBackend, ManualAssignmentMode, MetricsConfig, OracleConfig,
         PolicyConfig, PostgresConfig, RedisConfig, RetryConfig, RouterConfig, RoutingMode, TokenizerCacheConfig,
         TraceConfig,
     },
@@ -592,11 +592,6 @@ struct CliArgs {
     )]
     disable_audit_logging: bool,
 
-    // ==================== LoRA ====================
-    /// Enable LoRA adapter lifecycle management.
-    /// Load/unload endpoints are derived automatically from --backend.
-    #[arg(long, default_value_t = false, help_heading = "LoRA")]
-    enable_lora: bool,
 
     // ==================== Mesh Server ====================
     #[arg(long, default_value_t = false)]
@@ -910,33 +905,6 @@ impl CliArgs {
         Ok(rcf)
     }
 
-    fn build_lora_config(&self) -> ConfigResult<Option<LoraConfig>> {
-        if !self.enable_lora {
-            return Ok(None);
-        }
-        // Derive LoRA engine backend from the inference backend flag.
-        // If --backend is omitted, SMG defaults to SGLang workers.
-        let backend = match self.backend {
-            None | Some(Backend::Sglang) => LoraBackend::Sglang,
-            Some(Backend::Vllm) => LoraBackend::Vllm,
-            Some(Backend::Trtllm) => {
-                return Err(ConfigError::IncompatibleConfig {
-                    reason: "--enable-lora is not supported with --backend trtllm \
-                             (TRT-LLM does not expose a LoRA load/unload API)"
-                        .to_string(),
-                });
-            }
-            Some(Backend::Openai) | Some(Backend::Anthropic) => {
-                return Err(ConfigError::IncompatibleConfig {
-                    reason: "--enable-lora is not supported with passthrough backends \
-                             (openai / anthropic)"
-                        .to_string(),
-                });
-            }
-        };
-        Ok(Some(LoraConfig { backend }))
-    }
-
     fn to_router_config(
         &self,
         prefill_urls: Vec<(String, Option<u16>)>,
@@ -1113,8 +1081,6 @@ impl CliArgs {
             .maybe_storage_hook_wasm_path(self.storage_hook_wasm_path.as_deref())
             .igw(self.enable_igw)
             .maybe_server_cert_and_key(self.tls_cert_path.as_ref(), self.tls_key_path.as_ref())
-            .maybe_lora(self.build_lora_config()?);
-
         builder.build()
     }
 

@@ -16,7 +16,6 @@ pub mod circuit_breaker;
 pub mod error;
 pub mod job_queue;
 pub mod kv_event_monitor;
-pub mod lora;
 pub mod metrics_aggregator;
 pub mod retry;
 pub mod steps;

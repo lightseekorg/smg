@@ -494,7 +494,157 @@ pub struct WorkerSpec {
     /// Falls back to the global `load_monitor_interval_secs` from router config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_monitor_interval_secs: Option<u64>,
+
+    /// LoRA adapters to load into this worker at startup.
+    ///
+    /// Each adapter is loaded once via the engine's HTTP API during the worker
+    /// registration workflow.  Inference requests then reference adapters by
+    /// their `id` in the `lora_path` field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<LoraSpec>,
 }
+
+// ─────────────────────────── LoRA types ──────────────────────────────────────
+
+/// A LoRA adapter to load into a worker at startup.
+///
+/// Adapters declared here are loaded once during the worker registration
+/// workflow via the engine's HTTP API.  Inference requests reference them
+/// by `id` in the `lora_path` field.
+///
+/// ## Wire format examples
+///
+/// ```json
+/// { "id": "finance-v2", "type": "local", "path": "/models/adapters/finance-v2" }
+///
+/// { "id": "legal-lora", "type": "s3",
+///   "bucket": "my-adapters", "key": "legal-lora/v3", "region": "us-east-1",
+///   "auth": { "type": "iam_role" } }
+///
+/// { "id": "medical-lora", "type": "oci",
+///   "namespace": "my-tenancy", "bucket": "adapters", "object": "medical-lora.tar.gz",
+///   "auth": { "type": "instance_principal" } }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LoraSpec {
+    /// Serving name — the name the engine uses to reference this adapter.
+    /// Inference requests pass this in `lora_path`.
+    /// Must be unique within a worker.
+    pub id: String,
+
+    /// Where the adapter weights live and how to fetch them.
+    ///
+    /// `#[serde(flatten)]` means the storage fields are promoted to the top
+    /// level of the JSON object alongside `id` (no nested `"storage": {…}`).
+    #[serde(flatten)]
+    pub storage: LoraStorage,
+}
+
+/// Storage backend for a LoRA adapter.
+///
+/// The `"type"` tag selects the variant.  v1 supports `local`; remote
+/// variants (`s3`, `oci`, `gcs`) are parsed and validated but will return a
+/// clear error during the load step until download support lands.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LoraStorage {
+    /// Adapter weights are already on the local filesystem.
+    Local {
+        /// Absolute path to the adapter directory.
+        path: String,
+    },
+
+    /// Download from AWS S3 or an S3-compatible store (R2, MinIO, Ceph, …).
+    S3 {
+        bucket: String,
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
+        /// Falls back to ambient credentials (IAM role, env vars) when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<S3Auth>,
+    },
+
+    /// Download from OCI Object Storage.
+    Oci {
+        namespace: String,
+        bucket: String,
+        object: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<OciAuth>,
+    },
+
+    /// Download from Google Cloud Storage.
+    Gcs {
+        bucket: String,
+        object: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<GcsAuth>,
+    },
+}
+
+impl LoraStorage {
+    /// Human-readable name of the storage backend (for logs and errors).
+    pub fn backend_name(&self) -> &'static str {
+        match self {
+            LoraStorage::Local { .. } => "local",
+            LoraStorage::S3 { .. } => "s3",
+            LoraStorage::Oci { .. } => "oci",
+            LoraStorage::Gcs { .. } => "gcs",
+        }
+    }
+
+    /// Returns the local path if this is a `Local` variant; `None` otherwise.
+    pub fn local_path(&self) -> Option<&str> {
+        match self {
+            LoraStorage::Local { path } => Some(path.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// AWS S3 authentication.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum S3Auth {
+    /// Static access key / secret.
+    AccessKey {
+        access_key_id: String,
+        secret_access_key: String,
+    },
+    /// Use the IAM role attached to the instance / pod (no explicit creds).
+    IamRole,
+}
+
+/// OCI Object Storage authentication.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OciAuth {
+    InstancePrincipal,
+    ResourcePrincipal,
+    UserPrincipal {
+        tenancy_ocid: String,
+        user_ocid: String,
+        fingerprint: String,
+        private_key_path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<String>,
+    },
+}
+
+/// GCS authentication.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GcsAuth {
+    /// Service account JSON key file path.
+    ServiceAccountFile { path: String },
+    /// Use workload identity / `GOOGLE_APPLICATION_CREDENTIALS` env var.
+    WorkloadIdentity,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 impl WorkerSpec {
     /// Create a new `WorkerSpec` with the given URL and sensible defaults.
@@ -520,6 +670,7 @@ impl WorkerSpec {
             health: HealthCheckUpdate::default(),
             max_connection_attempts: default_max_connection_attempts(),
             load_monitor_interval_secs: None,
+            loras: Vec::new(),
         }
     }
 }

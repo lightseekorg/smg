@@ -1,5 +1,6 @@
 mod create_worker;
 mod detect_backend;
+mod load_lora_adapters;
 mod detect_connection;
 mod discover_dp;
 mod discover_metadata;
@@ -42,6 +43,7 @@ pub(super) fn grpc_base_url(url: &str) -> String {
 
 pub use create_worker::CreateLocalWorkerStep;
 pub use detect_backend::DetectBackendStep;
+pub use load_lora_adapters::LoadLoraAdaptersStep;
 pub use detect_connection::DetectConnectionModeStep;
 pub use discover_dp::{get_dp_info, DiscoverDPInfoStep, DpInfo};
 pub use discover_metadata::DiscoverMetadataStep;
@@ -202,6 +204,20 @@ pub fn create_local_worker_workflow(
             .with_failure_action(FailureAction::ContinueNextStep)
             .depends_on(&["register_workers"]),
         )
+        // Step 4.5: Load declared LoRA adapters into the engine.
+        // Runs after registration so the worker URL is known, before activation
+        // so adapters are ready by the time requests arrive.
+        // Failures are non-fatal — the worker still activates without the adapter.
+        .add_step(
+            StepDefinition::new(
+                "load_lora_adapters",
+                "Load LoRA Adapters",
+                Arc::new(LoadLoraAdaptersStep),
+            )
+            .with_timeout(Duration::from_secs(60))
+            .with_failure_action(FailureAction::ContinueNextStep)
+            .depends_on(&["register_workers"]),
+        )
         // Step 5a: Update policies (parallel with activation)
         .add_step(
             StepDefinition::new(
@@ -211,9 +227,9 @@ pub fn create_local_worker_workflow(
             )
             .with_timeout(Duration::from_secs(5))
             .with_failure_action(FailureAction::ContinueNextStep)
-            .depends_on(&["register_workers"]),
+            .depends_on(&["load_lora_adapters"]),
         )
-        // Step 5b: Activate workers (parallel with policy update)
+        // Step 5b: Activate workers (after LoRA adapters are loaded)
         .add_step(
             StepDefinition::new(
                 "activate_workers",
@@ -222,7 +238,7 @@ pub fn create_local_worker_workflow(
             )
             .with_timeout(Duration::from_secs(5))
             .with_failure_action(FailureAction::FailWorkflow)
-            .depends_on(&["register_workers"]),
+            .depends_on(&["load_lora_adapters"]),
         )
 }
 
