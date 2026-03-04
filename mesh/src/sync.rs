@@ -114,7 +114,7 @@ impl MeshSyncManager {
 
     /// Remove policy state from mesh stores
     pub fn remove_policy_state(&self, model_id: &str) {
-        let key = policy_key(&model_id);
+        let key = policy_key(model_id);
         self.stores.policy.remove(&key);
         debug!("Removed policy state from mesh model={}", model_id);
     }
@@ -131,7 +131,7 @@ impl MeshSyncManager {
 
     /// Get policy state from mesh stores
     pub fn get_policy_state(&self, model_id: &str) -> Option<PolicyState> {
-        let key = policy_key(&model_id);
+        let key = policy_key(model_id);
         self.stores.policy.get(&key)
     }
 

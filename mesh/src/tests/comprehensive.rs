@@ -53,8 +53,6 @@ fn init_test_logging() {
     });
 }
 
-
-
 #[test]
 fn test_infrastructure_utilities() {
     init_test_logging();

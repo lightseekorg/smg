@@ -733,11 +733,7 @@ mod tests {
             d_leaving && e_not_alive
         };
 
-        for (handler, name) in [
-            (&handler_a, "A"),
-            (&handler_b, "B"),
-            (&handler_c, "C"),
-        ] {
+        for (handler, name) in [(&handler_a, "A"), (&handler_b, "B"), (&handler_c, "C")] {
             wait_for(
                 || check_statuses(handler),
                 Duration::from_secs(60),

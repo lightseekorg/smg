@@ -32,9 +32,10 @@ where
 {
     let start = std::time::Instant::now();
     while !condition() {
-        if start.elapsed() > timeout {
-            panic!("Timeout after {:?} waiting for: {}", timeout, msg);
-        }
+        assert!(
+            start.elapsed() <= timeout,
+            "Timeout after {timeout:?} waiting for: {msg}"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }

@@ -366,7 +366,6 @@ impl MeshController {
                 let incremental_sender_handle = {
                     use super::{
                         incremental::IncrementalUpdateCollector, service::gossip::IncrementalUpdate,
-                        stores::StoreType as LocalStoreType,
                     };
 
                     let collector = Arc::new(IncrementalUpdateCollector::new(
