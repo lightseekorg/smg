@@ -25,7 +25,7 @@ import "common.proto";
 // binary communication with external routers (e.g., Shepherd Model Gateway).
 //
 // Key Design Principles:
-// - Token IDs only: No text in requests or responses (router handles tokenization)
+// - Pre-tokenized input: Router tokenizes prompt, server tokenizes stop/bad words
 // - Streaming delta mode: Chunks contain only new tokens since last chunk
 // - Full feature support: All TensorRT-LLM capabilities exposed
 
